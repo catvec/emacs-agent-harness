@@ -95,11 +95,12 @@ That is words, capitalised like a name, and not the tool's own name."
       (harness-test-load-module m))
     ;; Only the tools of the modules, not those other tests made up.
     (clrhash harness-tools)
-    (dolist (m '(session agent tools-fs tools-shell tools-emacs tools-web tools-agent skills perms
+    (dolist (m '(session agent tools-fs tools-shell tools-ssh tools-emacs tools-web tools-agent skills perms
                  tasks tools-sessions merge notifications tools-notify))
       (harness-test-load-module m))
     (let ((names (mapcar (lambda (s) (plist-get s :name)) (harness-call 'tools/list))))
       (should (member "read_file" names))
+      (should (member "ssh" names))
       (should (member "request_directory_access" names))
       (should (member "merge_done" names))
       (should (member "notify" names))

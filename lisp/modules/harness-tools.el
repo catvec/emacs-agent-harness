@@ -24,12 +24,14 @@
 ;; `tools/authorize' gives without running anything.
 ;;
 ;; Corporate mode (`harness-corporate-mode') turns off the tools of kind
-;; net other than web search (`harness-tools--corporate-net-tools').
-;; No session gets them, and a call to one is refused before the
-;; permission chain, whatever the permission mode and the standing
-;; rules say (`harness-tools--corporate-refusal').  web_search stays,
-;; and so does a provider's own search in its place: that is a call of
-;; web_search too, which the permission chain decides as usual.
+;; net other than web search (`harness-tools--corporate-net-tools'),
+;; and ssh, which runs commands on other machines
+;; (`harness-tools--corporate-remote-tools').  No session gets them,
+;; and a call to one is refused before the permission chain, whatever
+;; the permission mode and the standing rules say
+;; (`harness-tools--corporate-refusal').  web_search stays, and so does
+;; a provider's own search in its place: that is a call of web_search
+;; too, which the permission chain decides as usual.
 
 ;;; Code:
 
@@ -315,6 +317,11 @@ runs it in the tool's place (see `tools/builtin'), and either is a call
 of web_search.  Every other tool of kind net, such as web_fetch, which
 reaches any URL, is off with `harness-corporate-mode' on.")
 
+(defconst harness-tools--corporate-remote-tools '("ssh")
+  "Tools of other kinds than net that corporate mode turns off too.
+ssh is of kind exec, since it runs commands, but it runs them on
+another machine, which carries data off this one as web_fetch does.")
+
 (defconst harness-tools-corporate-hint
   "Work with the project and the tools you have; do not try to reach the network another way, such as with curl in the shell. If the task cannot be done without this tool, finish what you can and say so in your answer."
   "What the model is told when corporate mode refuses a network tool.")
@@ -322,10 +329,12 @@ reaches any URL, is off with `harness-corporate-mode' on.")
 (defun harness-tools--corporate-off-p (name kind)
   "Non-nil when corporate mode turns off tool NAME, of KIND.
 With `harness-corporate-mode' on, that is every tool of kind net other
-than those of `harness-tools--corporate-net-tools'."
-  (and (eq kind 'net)
-       (harness-corporate-p)
-       (not (member name harness-tools--corporate-net-tools))))
+than those of `harness-tools--corporate-net-tools', and the tools of
+`harness-tools--corporate-remote-tools'."
+  (and (harness-corporate-p)
+       (or (and (eq kind 'net) (not (member name harness-tools--corporate-net-tools)))
+           (member name harness-tools--corporate-remote-tools))
+       t))
 
 (defun harness-tools--off-p (name)
   "Non-nil when tool NAME is off: corporate mode turns it off."
@@ -335,12 +344,15 @@ than those of `harness-tools--corporate-net-tools'."
 (defun harness-tools--corporate-refusal (name kind)
   "Return the decision refusing a call of tool NAME, of KIND, or nil.
 With `harness-corporate-mode' on, the tools of kind net other than web
-search are off (`harness-tools--corporate-off-p'): a call to one is
-refused without asking the `permission/decide' chain, so no permission
-mode, standing rule or answer lets it run.  A web search is not refused
-here: the chain decides it, as any other call."
+search and ssh are off (`harness-tools--corporate-off-p'): a call to
+one is refused without asking the `permission/decide' chain, so no
+permission mode, standing rule or answer lets it run.  A web search is
+not refused here: the chain decides it, as any other call."
   (when (harness-tools--corporate-off-p name kind)
-    (list :behavior 'deny :reason "corporate mode: network tools other than web search are off"
+    (list :behavior 'deny
+          :reason (if (member name harness-tools--corporate-remote-tools)
+                      "corporate mode: tools that reach other machines are off"
+                    "corporate mode: network tools other than web search are off")
           :hint harness-tools-corporate-hint)))
 
 (defun harness-tools--decide (request)
@@ -358,8 +370,8 @@ never reaches the `permission/decide' chain; any other call does."
 (defun harness-tools--names (session)
   "Return the names of the tools SESSION gets, after `agent/tools'.
 In corporate mode no session gets the tools of kind net other than web
-search (`harness-tools--off-p').  Without SESSION, every registered
-tool: a catalogue, offered to no model."
+search, nor ssh (`harness-tools--off-p').  Without SESSION, every
+registered tool: a catalogue, offered to no model."
   (let ((names (let (n) (maphash (lambda (k _) (push k n)) harness-tools) (sort n #'string<))))
     (if session
         (cl-remove-if #'harness-tools--off-p (harness-run-filter 'agent/tools names session))
@@ -390,8 +402,8 @@ filter `agent/builtin-tools' pick them."
   "Return tool specs available to SESSION-ID (or all), after `agent/tools'.
 The tools SESSION-ID's provider runs itself (see `tools/builtin') are
 left out, and in corporate mode (`harness-corporate-mode') the tools of
-kind net other than web search.  Without SESSION-ID, every registered
-tool is listed."
+kind net other than web search, and ssh.  Without SESSION-ID, every
+registered tool is listed."
   (let* ((session (and session-id (harness-tools--session session-id)))
          (names (harness-tools--names session))
          (builtin (harness-tools--builtin session names))
@@ -428,7 +440,8 @@ call goes through the `permission/decide' chain as `tools/execute'
 sends it, as a call of the harness tool NAME: that tool's kind and paths
 apply when it is registered, else CALL's `:kind', else exec.  In
 corporate mode a call of kind net is denied without asking the chain,
-unless it is a web search (`harness-tools--corporate-refusal').  Emits
+unless it is a web search, and so is one of ssh
+\(`harness-tools--corporate-refusal').  Emits
 `permission/decided'.  Return a promise of the DECISION, whose
 `:behavior' is allow or deny; a denial carries `:message', what the
 model is told."
@@ -493,7 +506,7 @@ model is told."
   "Execute CALL (:id :name :input) for SESSION-ID; return a promise of a RESULT.
 The `permission/decide' chain decides first; in corporate mode a call of
 a tool of kind net is denied without asking it, unless it is a web
-search (`harness-tools--corporate-refusal')."
+search, and so is a call of ssh (`harness-tools--corporate-refusal')."
   (let* ((name (plist-get call :name))
          (call-id (or (plist-get call :id) (harness-short-id)))
          (input (plist-get call :input))

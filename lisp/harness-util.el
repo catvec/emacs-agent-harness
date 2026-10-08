@@ -522,11 +522,14 @@ this many seconds.")
 
 (defun harness--process-children (pid)
   "Return the direct children of PID, from the system process table.
-Empty when the table cannot be read (no /proc, a sandbox, a remote
-host), which leaves the group kill in `harness-process-tree' as the
-only mechanism."
+Empty when the table cannot be read (no /proc, a sandbox), which leaves
+the group kill in `harness-process-tree' as the only mechanism.  PID
+is a process of this machine, a remote command's too (the ssh that
+runs it), so the table is this machine's whatever buffer is current:
+with a remote `default-directory' it would be the remote host's."
   (when (fboundp 'list-system-processes)
-    (let (children)
+    (let ((default-directory "/")
+          children)
       (dolist (candidate (ignore-errors (list-system-processes)))
         (let ((attrs (ignore-errors (process-attributes candidate))))
           (when (eql pid (alist-get 'ppid attrs))
@@ -564,7 +567,19 @@ process that is already gone is not an error."
         (ignore-errors (signal-process (- pid) sig)))
       (ignore-errors (signal-process pid sig)))))
 
-(cl-defun harness-run-command (command &key cwd (timeout 120) stdin on-output name env)
+(defun harness--sentinel-in-plain-buffer (sentinel process event)
+  "Call SENTINEL with PROCESS and EVENT in a buffer that has no process.
+It goes around the sentinel of a remote command whose standard error
+has a buffer.  TRAMP's part of that sentinel deletes the process that
+reads standard error, as `delete-process' of `get-buffer-process'; when
+that reader has exited already, that is `delete-process' of nil, which
+deletes the current buffer's process.  The sentinel runs inside
+whatever is waiting for output then: often a TRAMP call, in the buffer
+of the connection it waits on, which would die under it."
+  (with-temp-buffer (funcall sentinel process event)))
+
+(cl-defun harness-run-command (command &key cwd (timeout 120) stdin on-output name env
+                                       merge-remote-stderr)
   "Run COMMAND (a list of strings) asynchronously and return a promise.
 The promise resolves to (:exit CODE :stdout STRING :stderr STRING).
 CWD defaults to `default-directory'; a remote (TRAMP) CWD runs the
@@ -573,13 +588,22 @@ an alist, is prepended to `process-environment' for the command.
 ON-OUTPUT is called with every chunk of standard output as it arrives.
 After TIMEOUT seconds the process is killed -- its whole process group
 on a local CWD, so children cannot outlive it -- and :exit is
-`timeout'."
+`timeout'.
+
+MERGE-REMOTE-STDERR non-nil leaves the standard error of a command on a
+remote CWD in :stdout, as the command wrote it, and :stderr empty.
+TRAMP keeps standard error apart through a FIFO on the host, read over
+a connection of its own and deleted from the sentinel, so in the middle
+of whatever TRAMP call is running then; a caller that only shows the
+output is better off without all that."
   (harness-with-promise (resolve reject)
     (ignore reject)
     (let* ((default-directory (file-name-as-directory (expand-file-name (or cwd default-directory))))
-           (group (not (file-remote-p default-directory)))
+           (remote (file-remote-p default-directory))
+           (group (not remote))
            (chunks nil)
-           (stderr-buf (generate-new-buffer " *harness-cmd-stderr*" t))
+           (stderr-buf (unless (and remote merge-remote-stderr)
+                         (generate-new-buffer " *harness-cmd-stderr*" t)))
            (done nil) (timer nil) (kill-timer nil) (pid nil) (proc nil) (tree nil)
            (finish (lambda (code)
                      (unless done
@@ -598,22 +622,30 @@ on a local CWD, so children cannot outlive it -- and :exit is
                                                      env)
                                              process-environment)
                                    process-environment)))
-        (setq proc (make-process :name (or name "harness-cmd")
-                                 :command command
-                                 :connection-type 'pipe
-                                 :noquery t
-                                 :file-handler t
-                                 :stderr stderr-buf
-                                 :filter (lambda (_p chunk)
-                                           (push chunk chunks)
-                                           (when on-output (funcall on-output chunk)))
-                                 :sentinel (lambda (p _e)
-                                             (unless (process-live-p p)
-                                               (funcall finish (process-exit-status p))))))
+        (setq proc (condition-case err
+                       (make-process :name (or name "harness-cmd")
+                                     :command command
+                                     :connection-type 'pipe
+                                     :noquery t
+                                     :file-handler t
+                                     :stderr stderr-buf
+                                     :filter (lambda (_p chunk)
+                                               (push chunk chunks)
+                                               (when on-output (funcall on-output chunk)))
+                                     :sentinel (lambda (p _e)
+                                                 (unless (process-live-p p)
+                                                   (funcall finish (process-exit-status p)))))
+                     ;; No process, such as a TRAMP host that cannot be
+                     ;; reached: the promise rejects, and nothing reads
+                     ;; the buffer for its standard error.
+                     (error (when stderr-buf (kill-buffer stderr-buf))
+                            (signal (car err) (cdr err)))))
         (setq pid (process-id proc)))
-      (when-let* ((ep (get-buffer-process stderr-buf)))
+      (when-let* ((ep (and stderr-buf (get-buffer-process stderr-buf))))
         (set-process-query-on-exit-flag ep nil)
         (set-process-sentinel ep #'ignore))
+      (when (and remote stderr-buf)
+        (add-function :around (process-sentinel proc) #'harness--sentinel-in-plain-buffer))
       (setq timer (run-at-time timeout nil
                                (lambda ()
                                  (setq tree (harness-process-tree pid group))

@@ -56,10 +56,11 @@
 
 (defcustom harness-server-forward-variables '(auth-sources exec-path)
   "Variables copied into the harness process besides the `harness-' ones.
-Every `harness-' variable you set is copied anyway.  The harness
-process starts from `emacs -Q', so anything else its modules read from
-your configuration must be listed here or set in
-`harness-server-init-file'."
+Every `harness-' variable you set is copied anyway, and so are the
+TRAMP options that decide how remote hosts are reached, when you set
+them (`harness-server--tramp-variables').  The harness process starts
+from `emacs -Q', so anything else its modules read from your
+configuration must be listed here or set in `harness-server-init-file'."
   :type '(repeat variable) :group 'harness)
 
 (defcustom harness-server-init-file nil
@@ -186,6 +187,22 @@ HARNESS_SERVER_TOKEN and HARNESS_SERVER_PARENT from the environment."
         (equal value (car (read-from-string (prin1-to-string value)))))
     (error nil)))
 
+(defconst harness-server--tramp-variables
+  '(tramp-default-method tramp-default-method-alist
+    tramp-default-user tramp-default-user-alist
+    tramp-default-host tramp-default-host-alist
+    tramp-default-proxies-alist
+    tramp-remote-path tramp-remote-process-environment
+    tramp-connection-timeout tramp-shell-prompt-pattern
+    tramp-use-connection-share)
+  "TRAMP options copied into the harness process when the user set them.
+The harness reaches remote hosts through its own TRAMP -- a remote
+session's, the ssh tool's, a TRAMP path given to any tool -- and the
+process starts from `emacs -Q'.  These options decide how TRAMP
+connects (methods, users, jump hosts, connection sharing) and what a
+remote command finds there (`tramp-remote-path'), so the harness uses
+the user's, as their own Emacs does.")
+
 (defconst harness-server--own-variables
   '(harness-process harness-module-directories harness-compile-subdirectory
     harness-acp-token harness-acp-host harness-acp-port
@@ -211,6 +228,8 @@ HARNESS_SERVER_TOKEN and HARNESS_SERVER_PARENT from the environment."
     (mapatoms (lambda (sym) (when (harness-server--forwardable-p sym) (push sym out))))
     (dolist (sym harness-server-forward-variables)
       (when (boundp sym) (cl-pushnew sym out)))
+    (dolist (sym harness-server--tramp-variables)
+      (when (harness-server--user-set-p sym) (cl-pushnew sym out)))
     (cl-loop for sym in (cons 'harness-state-directory (delq 'harness-state-directory out))
              if (harness-server--readable-p (symbol-value sym))
              collect (cons sym (symbol-value sym))

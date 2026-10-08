@@ -7,9 +7,12 @@
 ;; primitives (`insert-file-contents', `write-region',
 ;; `directory-files-recursively', `file-expand-wildcards'), so a
 ;; session whose cwd carries a TRAMP prefix works on the remote host
-;; without any tool knowing about it.  Only grep spawns a process, and
-;; it does so asynchronously through `harness-run-command' with the
-;; session cwd, which also lands on the remote host.
+;; without any tool knowing about it, and any session reaches a host
+;; through a TRAMP path such as /ssh:host:/etc/hosts (see the ssh tool,
+;; tools-ssh).  Only grep spawns a process, and it does so
+;; asynchronously through `harness-run-command' on the host its path
+;; is on: in the session cwd when that is the same host, else in the
+;; path's own directory there.
 ;;
 ;; Every path is resolved with `harness-tools-resolve-path' against
 ;; the session cwd and host, and every tool declares the paths it
@@ -356,18 +359,22 @@ Used only to give a better error message."
   "Collect entries of DIR down to DEPTH levels into ACC (a cons cell holder).
 PREFIX is the relative path shown for entries; LIMIT caps the total."
   (let ((entries (condition-case nil
-                     (directory-files dir t directory-files-no-dot-files-regexp t)
+                     ;; Names and attributes in one call: one round trip
+                     ;; for a directory on a remote host, not two an entry.
+                     (directory-files-and-attributes dir t directory-files-no-dot-files-regexp t)
                    (error nil))))
-    (dolist (full (sort entries #'string<))
-      (let ((name (file-name-nondirectory full)))
+    (dolist (entry (sort entries (lambda (a b) (string< (car a) (car b)))))
+      (let* ((full (car entry))
+             (name (file-name-nondirectory full)))
         (unless (string= name ".git")
           (when (< (length (car acc)) limit)
-            (let* ((attrs (file-attributes full))
-                   (dirp (and attrs (eq t (file-attribute-type attrs))))
-                   (link (and attrs (stringp (file-attribute-type attrs)))))
-              (push (list :name (concat prefix name (if (file-directory-p full) "/" ""))
+            (let* ((attrs (cdr entry))
+                   (type (and attrs (file-attribute-type attrs)))
+                   (dirp (eq t type))
+                   (link (and (stringp type) type)))
+              (push (list :name (concat prefix name (if (or dirp (and link (file-directory-p full))) "/" ""))
                           :size (and (not dirp) attrs (file-attribute-size attrs))
-                          :link (and link (file-attribute-type attrs)))
+                          :link link)
                     (car acc))
               (when (and dirp (> depth 1))
                 (harness-tools-fs--list-entries full (1- depth) (concat prefix name "/") acc limit)))))))))
@@ -496,8 +503,11 @@ TARGET is a path local to the host CWD lives on."
               (when glob (list (concat "--include=" glob)))
               (list "--exclude-dir=.git" "-e" pattern "--" target)))))
 
-(defun harness-tools-fs--grep-format (stdout cwd max-results)
-  "Format grep STDOUT lines relative to CWD, keeping at most MAX-RESULTS."
+(defun harness-tools-fs--grep-format (stdout cwd max-results &optional host)
+  "Format grep STDOUT lines relative to CWD, keeping at most MAX-RESULTS.
+HOST, the TRAMP prefix of their host (\"\" for this machine), says the
+files are on another host than the session's: then every file name is
+written in full, with HOST before it, as the other tools take it."
   (let* ((lines (split-string stdout "\n" t))
          (total (length lines))
          (kept (seq-take lines max-results))
@@ -506,19 +516,28 @@ TARGET is a path local to the host CWD lives on."
                         (if (string-match "\\`\\(.*?\\):\\([0-9]+\\):\\(.*\\)\\'" l)
                             (let ((file (match-string 1 l)))
                               (format "%s:%s: %s"
-                                      (if (string-prefix-p local-cwd file)
-                                          (substring file (length local-cwd))
-                                        (string-remove-prefix "./" file))
+                                      (cond
+                                       (host (concat host (if (string-prefix-p "/" file)
+                                                              file
+                                                            (concat local-cwd (string-remove-prefix "./" file)))))
+                                       ((string-prefix-p local-cwd file)
+                                        (substring file (length local-cwd)))
+                                       (t (string-remove-prefix "./" file)))
                                       (match-string 2 l) (match-string 3 l)))
                           l))
                       kept)))
     (cons (string-join out "\n") total)))
 
 (defun harness-tools-fs--grep (input ctx)
-  "Handler for grep with INPUT under CTX; returns a promise."
+  "Handler for grep with INPUT under CTX; returns a promise.
+The search runs on the host PATH is on: in the session's cwd when that
+is the same host, else in the directory holding PATH, and then the
+hits are named in full, TRAMP prefix and all."
   (let* ((pattern (plist-get input :pattern))
-         (cwd (file-name-as-directory (or (plist-get ctx :cwd) default-directory)))
+         (session-cwd (file-name-as-directory (or (plist-get ctx :cwd) default-directory)))
          (path (harness-tools-resolve-path (or (plist-get input :path) ".") ctx))
+         (elsewhere (not (equal (file-remote-p path) (file-remote-p session-cwd))))
+         (cwd (if elsewhere (file-name-directory (directory-file-name path)) session-cwd))
          (shown (harness-tools-fs--display path ctx))
          (glob (plist-get input :glob))
          (case-sensitive (harness-json-true-p (plist-get input :case_sensitive)))
@@ -531,20 +550,26 @@ TARGET is a path local to the host CWD lives on."
              (cmd (harness-tools-fs--grep-command pattern target (and (stringp glob) (not (string-empty-p glob)) glob)
                                                   case-sensitive cwd)))
         (harness-then
-         (harness-run-command cmd :cwd cwd :timeout harness-tools-fs--grep-timeout :name "harness-grep")
+         (harness-run-command cmd :cwd cwd :timeout harness-tools-fs--grep-timeout :name "harness-grep"
+                              :merge-remote-stderr t)
          (lambda (r)
            (let ((exit (plist-get r :exit)))
              (cond
               ((eq exit 'timeout)
                (harness-tool-error (format "grep timed out after %ss; narrow the pattern or path" harness-tools-fs--grep-timeout)))
               ((and (integerp exit) (> exit 1))
+               ;; On another host what it said is in the output.
                (harness-tool-error (format "%s failed (exit %d): %s" (car cmd) exit
-                                           (string-trim (plist-get r :stderr)))))
+                                           (string-trim (if (string-blank-p (plist-get r :stderr))
+                                                            (truncate-string-to-width (plist-get r :stdout) 2000 nil nil "…")
+                                                          (plist-get r :stderr))))))
               ((string-empty-p (plist-get r :stdout))
                (harness-tool-ok (format "No matches for %s in %s%s" pattern shown
                                         (if glob (format " (glob %s)" glob) ""))))
               (t
-               (pcase-let ((`(,text . ,total) (harness-tools-fs--grep-format (plist-get r :stdout) cwd max-results)))
+               (pcase-let ((`(,text . ,total) (harness-tools-fs--grep-format
+                                               (plist-get r :stdout) cwd max-results
+                                               (and elsewhere (or (file-remote-p path) "")))))
                  (harness-tool-ok
                   (if (> total max-results)
                       (format "%s\n\n[%d matches, showing the first %d. Narrow the pattern, add a glob, or raise max_results]"

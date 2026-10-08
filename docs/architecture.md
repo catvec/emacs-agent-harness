@@ -17,8 +17,8 @@ module needs something more, add it here first.
                 skills, perms, sandbox, notifications
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
- Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent,
-                tools-sessions, tools-notify, tools-handin, tools-dev
+ Tool calls     tools, tools-fs, tools-shell, tools-ssh, tools-emacs, tools-web,
+                tools-agent, tools-sessions, tools-notify, tools-handin, tools-dev
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE,
@@ -53,7 +53,9 @@ default) the layers above are split across two Emacs processes:
   once init has finished, so settings made later in the init file reach
   it.  Requests made before the child listens are queued by `harness-ui`.
 - The child is configured from a generated file: every `harness-`
-  variable the user set (minus UI ones) plus
+  variable the user set (minus UI ones), the TRAMP options the user set
+  (`harness-server--tramp-variables`: default methods, users and hosts,
+  proxies, `tramp-remote-path`, connection sharing), plus
   `harness-server-forward-variables`; `harness-server-init-file` covers
   anything else (hooks, bus filters).
 - The child announces `HARNESS-ACP-ADDRESS host:port` and its log lines on
@@ -104,8 +106,11 @@ default) the layers above are split across two Emacs processes:
   different commits.
 
 The harness process cannot prompt: TRAMP connections it opens need
-non-interactive authentication (ssh agent), and auth-source secrets
-must decrypt without a minibuffer (gpg-agent pinentry, not loopback).
+non-interactive authentication (ssh agent, a key without a passphrase,
+a known host key), and auth-source secrets must decrypt without a
+minibuffer (gpg-agent pinentry, not loopback).  A TRAMP prompt reads the
+closed stdin and fails at once with `end-of-file`; the ssh tool says so
+(see tools-ssh).
 
 `harness-process` nil keeps everything in one Emacs (tests, debugging);
 the same `client/request` and `emacs/request` paths then run over the
@@ -1312,13 +1317,18 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
   have returned.
 - Corporate mode (`harness-corporate-mode`) turns off the tools of kind
   `net` other than web search (`harness-tools--corporate-net-tools`:
-  web_search).  No session gets them; the list without a session still
-  has them.  `tools/execute` and `tools/authorize` deny a call of kind
-  `net` to any other tool (one the harness lacks included) before the
+  web_search), and ssh, of kind `exec` but run on another machine
+  (`harness-tools--corporate-remote-tools`).  No session gets them; the
+  list without a session still has them.  `tools/execute` and
+  `tools/authorize` deny a call of kind `net` to any other tool (one the
+  harness lacks included), and a call of ssh, before the
   `permission/decide` chain, whatever the mode and the standing rules:
   reason "corporate mode: network tools other than web search are
-  off", a hint to work with the project and the tools the session has,
-  `:denied t`, and `permission/decided` as for any decision.
+  off" (for ssh "corporate mode: tools that reach other machines are
+  off"), a hint to work with the project and the tools the session has,
+  `:denied t`, and `permission/decided` as for any decision.  TRAMP
+  paths stay as they are: a remote session's host, and a host a tool's
+  path names, are reached once the jail lets them be.
   web_search stays, and so does a provider's own search standing in
   for it (`tools/builtin`); their calls go to the chain as in any mode.
 - Context bomb: outputs over `harness-tools-max-output-chars` (30000) are
@@ -1384,7 +1394,8 @@ non-interactive session it stays a denial.
   `/dev/null` and the like, and on this machine not an absolute word
   whose first directory does not exist, so a `/api/v1` in a grep is no
   path (on a remote host nothing is looked up, and `~` words are left
-  out).  The call is about its subject paths
+  out).  The paths are on the host the command runs on, its
+  directory's: the session's for bash, the ssh tool's host for ssh.  The call is about its subject paths
   (`harness-perms--subject-paths`): the ones it names outside the
   session's directories, or, when it names none there, where it runs,
   as before.  The tool prompt shows them, so `ls -la
@@ -2731,7 +2742,7 @@ TITLE is the session's name, else the prompt's first line without its
 leading `#`, at most 80 characters; PROJECT is `project/name` of the
 task's project.
 
-### tools-fs, tools-shell, tools-emacs, tools-web, tools-agent, tools-sessions, tools-notify, tools-handin
+### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-web, tools-agent, tools-sessions, tools-notify, tools-handin
 
 Tool names, labels and inputs (all paths relative to cwd or absolute;
 TRAMP prefixes come from the session host):
@@ -2745,6 +2756,7 @@ TRAMP prefixes come from the session host):
 | `glob` | Find files | pattern, path | read |
 | `grep` | Search files | pattern, path, glob, case_sensitive, max_results | read |
 | `bash` | Bash | command, timeout, cwd | exec |
+| `ssh` | SSH | host, command, cwd, timeout | exec (tools-ssh; its path is the directory it runs in on the host, or the host's root when the host expands it: home, a relative cwd) |
 | `elisp` | Emacs Lisp | code, timeout | exec |
 | `emacs_buffers` | List buffers | filter, all | read (needs no approval: `harness-perms--inspection-tools`) |
 | `emacs_windows` | List windows | — | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -2819,6 +2831,54 @@ to use it.
 Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an
 asynchronous process started with `start-file-process` so TRAMP works.
+Every tool takes a TRAMP path, whatever host the session is on: grep
+runs on the host its path is on (in the session's cwd when that is the
+same host, else in the directory holding the path, and then names its
+hits in full, TRAMP prefix and all), and list_dir reads a directory's
+names and attributes in one call, one round trip on a remote host.  A
+command on a remote host (bash with a remote cwd, ssh) runs through
+`harness-tools-shell-remote-command`: bash, or sh where the host has
+none, with stdin from /dev/null, since TRAMP runs it on a pty that never
+passes the end of input on and a command reading it would wait for its
+timeout.  It is never sandboxed (the sandbox confines this machine).
+Its standard error comes mixed into its output, as written: the tools
+(bash, ssh, grep) ask `harness-run-command` for that with
+`:merge-remote-stderr`.  TRAMP keeps a remote standard error apart
+through a FIFO on the host, read over a connection of its own and
+deleted by the command's sentinel -- a TRAMP call made in the middle of
+whatever TRAMP call is running then, such as another tool's on the same
+host.  A caller that keeps standard error apart (git, which the
+worktree module runs on a remote root) gets its sentinel run in a
+buffer with no process: TRAMP's part of it deletes the current buffer's
+process when the reader of standard error has gone, and in a TRAMP
+call's wait that is the connection the call is using.
+
+`ssh` (`tools-ssh`) runs a shell command on another host through TRAMP:
+`harness-run-command` in the TRAMP directory `/ssh:HOST:/DIR/`, so it
+shares TRAMP's connection and settings with the other tools, which
+reach the host through the same names.  `host` is an ssh destination
+(an alias of `~/.ssh/config`, `[user@]host[:port]`, an `ssh://` URL) or
+a TRAMP prefix (`/ssh:user@host#port:`, `/ssh:jump|ssh:host:` through a
+jump host), which may go on with a directory.
+`harness-tools-ssh-prefix` checks it before TRAMP sees it -- TRAMP
+hands host, user and port to a local shell and to ssh, which reads a
+word starting with a dash as an option -- so only host names, IP
+addresses, user names and ports get through, and only methods that log
+in with ssh (ssh, sshx, scp, scpx, rsync) on every hop.  `cwd` is
+absolute, relative to the home directory, or a TRAMP name on the same
+host; the default is the home directory.  The call's path for the jail
+is worked out without connecting (nothing in the permission chain
+waits on the network): the absolute directory it runs in, else the
+host's root, so the first call to a host asks for it, and a grant of
+`/ssh:HOST:/` opens the whole host to every tool.  A missing directory
+is an error before the command runs.  The result is what the command
+printed, standard error mixed in, then its status and the directory it
+ran in, as a TRAMP path (`exit 0 in /ssh:box:/srv/app/`); `:meta` has
+`:exit :host :cwd :duration`.  A connection that fails is explained by
+`ssh -o BatchMode=yes` run once more (no such host, a refused key, an
+unknown host key, a passphrase prompt), and the error says how to set
+the host up; a connection TRAMP is still using for another call is
+reported as busy, to be retried.
 
 `read_file` returns an image or a video as an `:attachments` entry the
 chat shows the user: the picture of an image (an SVG is read as text

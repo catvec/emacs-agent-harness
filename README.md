@@ -17,13 +17,16 @@ OpenAI-compatible APIs and AWS Bedrock.
   or API key), GitHub Copilot through the `copilot` CLI, DeepSeek,
   OpenAI-compatible endpoints, and AWS Bedrock.
 - **Built-in tools.** Tools for files (read, write, edit, search), the
-  shell, the user's Emacs (buffers, windows, showing and editing a
+  shell, commands on other hosts over ssh, the user's Emacs (buffers, windows, showing and editing a
   buffer, saving it, documentation, `*Messages*`, and debugging its
   Lisp: describing symbols, finding definitions, tracing functions
   and variables), Emacs Lisp
   evaluation in a separate background Emacs, web search and fetch,
   sub-agents and skills, plus tools that let an agent inspect and
   drive other sessions and tasks.
+- **Remote hosts.** Agents work on other machines through TRAMP: a
+  session in a remote directory, the `ssh` tool, and TRAMP paths given
+  to any tool.
 - **Permissions and sandboxing.** Four permission modes (Ask, Accept
   edits, Auto, YOLO), per-session directory access, and a kernel
   sandbox for tool processes (bubblewrap or `systemd-run`).
@@ -727,6 +730,44 @@ anything else the harness shows while the layout lasts.
 - `fullscreen` is a position too, so `C-u C-c h a` and then `fullscreen`
   opens the board in the layout.
 
+### Remote hosts
+
+Agents work on other machines through TRAMP, as you do in Emacs:
+
+- A session started in a TRAMP directory works on that host: press
+  `C-c h n` and choose a directory such as `/ssh:box:/srv/app/`. Every
+  tool of the session runs there.
+- Any session reaches a host with the `ssh` tool, which runs a shell
+  command there. The host is an alias from `~/.ssh/config`,
+  `user@host:port`, or a TRAMP prefix such as `/ssh:user@host#2222:`
+  (`/ssh:jump|ssh:host:` through a jump host). The other tools take
+  TRAMP paths as well: `read_file`, `write_file`, `edit_file`,
+  `list_dir`, `glob`, `grep` and `file_info` work on
+  `/ssh:box:/etc/hosts` as on a local file, and `bash` runs on the host
+  given a directory there.
+
+The harness connects without a terminal, so nothing can answer a
+password, passphrase or host key prompt: the host must accept a key
+from ssh-agent (or one without a passphrase) and be in
+`~/.ssh/known_hosts`. `ssh -o BatchMode=yes HOST true` in a terminal
+shows whether it is. When a connection fails, the agent is told why,
+in ssh's own words, and how the host is set up.
+
+A host is a directory outside the session's like any other. The first
+call that reaches it asks for access: to `/ssh:box:/srv/app/` when the
+call runs there, to the host's root `/ssh:box:/` when it runs in the
+home directory. Granting the root lets the session work anywhere on the
+host, with every tool. A non-interactive session, such as a task's,
+needs the host in `harness-allowed-directories` beforehand. An `ssh`
+call is a command, so the permission mode decides it as it decides a
+`bash` command. Commands on another host run outside the sandbox, which
+confines this machine.
+
+The harness process reaches hosts through a TRAMP of its own, and the
+TRAMP settings you made, such as `tramp-default-method`,
+`tramp-remote-path` and `tramp-default-proxies-alist`, are copied into
+it.
+
 ### Notifications
 
 The harness tells you when a task's work waits for your review and
@@ -1178,6 +1219,8 @@ It turns off:
 - Network tools other than web search. Sessions do not get
   `web_fetch`, which reaches any URL. When a model calls it anyway, the
   call is denied and the model is told why.
+- The `ssh` tool, which runs commands on other machines. Sessions do
+  not get it, and a call to it is denied.
 
 It leaves alone:
 
@@ -1190,6 +1233,9 @@ It leaves alone:
   permission rules decide as usual: if your policy rules out web search
   too, add `(:tool "web_search" :behavior deny)` to
   `harness-perms-rules`.
+- Remote hosts through TRAMP. A session started in a TRAMP directory
+  works on its host, and a tool given a TRAMP path reaches another host
+  once you grant access to it (see [Remote hosts](#remote-hosts)).
 - Shell commands. They follow the permission mode and the sandbox, as
   always, so a command can still reach the network. Use a permission
   mode that asks before commands run (Ask or Accept edits), and set
@@ -1306,7 +1352,7 @@ ACP, so it works the same with a local or a remote harness.
 |---|---|
 | Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `handoff` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `acp` `acp-remote` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
-| Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
+| Tools | `tools` `tools-fs` `tools-shell` `tools-ssh` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
 | User interface | `ui` `ui-chat` `ui-compose` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` |
 
 Further documentation:

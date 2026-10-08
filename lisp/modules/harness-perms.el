@@ -747,9 +747,11 @@ path; on a remote host none is looked up, and words starting with ~
 are left out, since only that host knows its home."
   (when-let* ((command (harness-perms--command request)))
     (condition-case err
-        (let* ((host (plist-get (plist-get request :session) :host))
-               (dir (harness-perms--command-dir request))
-               (remote (or host (file-remote-p dir)))
+        (let* ((dir (harness-perms--command-dir request))
+               ;; The host the command runs on: its directory's, which
+               ;; for the ssh tool is not the session's, else the
+               ;; session's.
+               (remote (or (file-remote-p dir) (plist-get (plist-get request :session) :host)))
                (local-dir (or (file-remote-p dir 'localname) dir))
                paths)
           (pcase-dolist (`(,word . ,program) (harness-perms--shell-words command))
@@ -757,8 +759,7 @@ are left out, since only that host knows its home."
               (when (and value (not (string-match-p "\n" value)))
                 (let ((path (cond ((not remote) (expand-file-name value dir))
                                   ((string-prefix-p "~" value) nil)
-                                  (t (harness-perms--with-host (expand-file-name value local-dir)
-                                                               (or host (file-remote-p dir)))))))
+                                  (t (harness-perms--with-host (expand-file-name value local-dir) remote)))))
                   (when (and path
                              (not (string-match-p harness-perms--pseudo-files (cdr (harness-perms--split path))))
                              (or remote
