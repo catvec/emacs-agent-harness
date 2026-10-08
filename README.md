@@ -51,9 +51,9 @@ OpenAI-compatible APIs and AWS Bedrock.
 - **Modular and reloadable.** Every feature is a module, and the whole
   harness reloads in place without losing running sessions.
 - **A companion pet.** Hatch a small creature of a random species and
-  rarity that keeps you company quietly, its face in the corner of your
-  chats and the task board, and now and then has a word to say about
-  your work. One switch turns it off everywhere.
+  rarity. It sits by the compose box of your chats and of the task
+  board, and now and then has a word to say about your work. One switch
+  turns it off everywhere.
 
 ## Screenshots
 
@@ -939,35 +939,42 @@ species, from common to legendary (one in a hundred), sometimes with a
 hat and, rarely, shiny, with five stats. The cheapest model of your
 provider names it and gives it a personality.
 
-Once it hatched, it shows quietly in a few other places too:
+Once it hatched, it keeps you company in other places too:
 
-- **Chat header lines.** Its face, on one line in its rarity's colour,
-  sits near the end of each chat's header line, as in `(·>`. It blinks
-  now and then while the session works. Hovering names it, and a click
-  opens its buffer. It is the first thing to go when the window is
-  narrow.
-- **Above the compose box.** What it last said about a session shows on
-  a dim line of its own above that chat's compose box, until the
-  session's next turn starts.
-- **The task board.** Its face and name show in the board's header
-  line. Each task that gets done gives it experience.
+- **Chats.** The whole creature sits at the right above the compose
+  box, in its rarity's colour, with its name below it. What it last said
+  about the session shows in a speech bubble beside it, or above it in a
+  narrow window, until the session's next turn starts. Hovering names
+  it, and a click opens its buffer. In a window too small for it, it
+  stays away. Side conversations (BTW) go without it.
+- **The task board.** It sits above the board's compose box in the same
+  way, with the last thing it said about anything. Each task that gets
+  done gives it experience.
+- **Header lines, if you want them.** Its face on one line, as in `(·>`,
+  can end each chat's header line (`chat-header`), where it blinks now
+  and then while the session works. Its face and name can also show in
+  the board's header line (`board-header`). Either is the first thing to
+  go when the window is narrow.
 
-`harness-ui-pet-places` chooses among these places; nil keeps it to its
-buffer.
+`harness-ui-pet-places` chooses among these places: `chat` and `board`
+by default, `chat-header` and `board-header` too if you add them. nil
+keeps the pet to its own buffer.
 
-While it is on screen (its buffer, or a chat whose session it would talk
-about), it now and then says a line. It may comment on the message you
-just sent, on a test run that failed or on a big change. It always
-answers when you call it by name in a message or pet it (`p`). It grows
-a level as you work. `r` renames it, `m` mutes it and `R` lets it go,
-after which the next egg hatches another.
+While it is on screen (its buffer, the task board, or a chat whose
+session it would talk about), it now and then says a line. It may
+comment on the message you just sent, on a test run that failed or on a
+big change. It always answers when you call it by name in a message or
+pet it (`p`). It grows a level as you work. `r` renames it, `m` mutes it
+and `R` lets it go, after which the next egg hatches another.
 
 It costs little. It never asks a model anything about what is not on
 screen, nor while it is muted. It comments unasked at most once a minute
 (`harness-pet-cooldown`), and on your messages only by chance
 (`harness-pet-chance`). It then asks a cheap model (`harness-pet-model`)
 for one short line, with no thinking and no context from your project
-beyond the last few messages. Nothing runs while nothing happens.
+beyond the last few messages. Nothing runs while nothing happens: the
+creature by a compose box is drawn again only when it changes, says
+something else, or has more or less room.
 
 To keep it quiet, set `harness-pet-reactions` to nil. To turn it off
 altogether, press `O` in its buffer, click [Turn off] there, or set

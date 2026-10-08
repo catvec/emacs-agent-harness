@@ -210,6 +210,16 @@ MIN), as `harness-ui-fit-header' takes it, is a segment of its own with
 that priority.  The search shows its [Search] the first way, the
 companion pet its face the second.")
 
+(defvar harness-ui-tasks-tail-functions nil
+  "Functions putting lines of their own above a board's compose box.
+Each is called without arguments in the board's buffer whenever the
+lines between the board and the box are drawn -- with the box, and as a
+window showing the board changes size -- and returns whole lines, a
+string ending in a newline, or nil for none.  They go first, in order,
+above the compose label, and the board fits its cards to the room they
+leave.  `harness-ui-tasks-redraw-tail-lines' draws them again when they
+would say something else.  The companion pet sits there this way.")
+
 (defun harness-ui-tasks--board-p (buffer)
   "Non-nil when BUFFER is a live task board.
 Window hooks and timers hand over whatever buffer a window shows by the
@@ -1526,8 +1536,24 @@ writes it up, with settings of its own, so it counts as not started."
           (plist-get task :session)
         (list harness-ui-tasks--new #'harness-ui-tasks--set-new)))))
 
+(defun harness-ui-tasks--insert-tail-extras ()
+  "Insert the lines `harness-ui-tasks-tail-functions' return, in order.
+Each function's lines are named after it, so a redraw keeps point on
+them (`harness-ui-tasks--anchor')."
+  (run-hook-wrapped 'harness-ui-tasks-tail-functions
+                    (lambda (fn)
+                      (when-let* ((text (ignore-errors (funcall fn))))
+                        (when (and (stringp text) (not (string-empty-p text)))
+                          (let ((start (point)))
+                            (insert text)
+                            (unless (bolp) (insert "\n"))
+                            (put-text-property start (point) 'harness-task-tail
+                                               (if (symbolp fn) fn 'extra)))))
+                      nil)))
+
 (defun harness-ui-tasks--insert-tail-head ()
   "Insert the error line, the compose label, the settings and the attachments.
+Other modules' lines go first (`harness-ui-tasks-tail-functions').
 Each line is fitted to the window, like the board's: the buffer wraps
 for the compose box, so a longer line would take two.  A new task's
 label carries the Submit / Refine toggle, which the label makes room
@@ -1540,6 +1566,7 @@ before a key is pressed."
          (bar (if messaging
                   (harness-compose-bar 'harness-compose-message-accent-face 'harness-compose-message-face)
                 " ")))
+    (harness-ui-tasks--insert-tail-extras)
     (when harness-ui-tasks--error
       (harness-ui-tasks--insert-tail-line
        'error (harness-ui-tasks--fit (propertize (concat "  " harness-ui-tasks--error)
@@ -1611,6 +1638,17 @@ and point on those lines stays there."
       (set-marker harness-ui-tasks--list-end list-end)
       (harness-ui-tasks--restore places)
       (set-buffer-modified-p nil))))
+
+(defun harness-ui-tasks-redraw-tail-lines (&optional buffers)
+  "Draw the lines above the compose box of BUFFERS again, the box left alone.
+BUFFERS are boards, every board by default.  For a module whose
+`harness-ui-tasks-tail-functions' would return something else now: each
+board then fits its cards to the room the lines leave."
+  (dolist (buffer (or buffers (harness-ui-tasks--buffers)))
+    (when (harness-ui-tasks--board-p buffer)
+      (with-current-buffer buffer
+        (harness-ui-tasks--refit-tail)
+        (harness-ui-tasks--schedule-render buffer)))))
 
 (defun harness-ui-tasks--mode-toggle ()
   "The Submit / Refine toggle above the compose box: the current mode.
