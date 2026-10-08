@@ -541,8 +541,21 @@ then is the card's title, so the prompt shows here."
   "The branch TASK merges into."
   (or (plist-get task :base) "main"))
 
-(defun harness-ui-tasks--meta (task column session)
-  "The right-aligned facts of TASK's card."
+(defun harness-ui-tasks--tokens (session)
+  "The token figures of a working task's SESSION: \"12.3k/200k · 3.4k out\".
+The size of its conversation against its context window, and its output
+tokens; both grow while it streams, \"~\" marking an estimate.  Nil
+while there is nothing to count yet."
+  (let ((tokens (harness-ui-session-tokens session)))
+    (when (> (+ (plist-get tokens :context) (plist-get tokens :output)) 0)
+      (let ((output (harness-ui-format-output session)))
+        (concat (harness-ui-format-context session)
+                (if output (concat " " harness-ui-tasks--dot " " output) ""))))))
+
+(defun harness-ui-tasks--meta (task column session &optional lean)
+  "The right-aligned facts of TASK's card.
+A working task's card says what its session's conversation holds and
+has written, unless LEAN, which a narrow card falls back on."
   (let* ((todos (harness-ui-tasks--todos session))
          (started (plist-get task :started))
          (usage (plist-get session :usage))
@@ -574,6 +587,9 @@ then is the card's title, so the prompt shows here."
                         ('done (let ((completed (harness-ui-tasks--completed task)))
                                  (and (> completed 0) (format "done %s" (harness-relative-time completed)))))
                         (_ (and started (harness-ui-tasks--elapsed (- (float-time) started)))))
+                      ;; Its tokens, which grow while it streams.
+                      (and session (not lean) (eq column 'active)
+                           (harness-ui-tasks--tokens session))
                       ;; How fast the session writes, while it is open.
                       (and session (not (equal (plist-get session :status) "inactive"))
                            (harness-ui-format-rate session))
@@ -954,13 +970,16 @@ window."
          (session (harness-ui-tasks--session task))
          (width (harness-ui-tasks--width))
          (narrow (< width harness-ui-tasks--collapse-min-width))
-         (meta (let ((meta (harness-ui-tasks--meta task column session)))
-                 ;; Shown with [Archived] or found by a search: it says so.
-                 (if (harness-ui-tasks--archived-p task)
-                     (concat (propertize "archived" 'face 'harness-dim-face)
-                             (if (string-empty-p meta) "" (propertize " · " 'face 'harness-dim-face))
-                             meta)
-                   meta)))
+         (meta-of (lambda (lean)
+                    (let ((meta (harness-ui-tasks--meta task column session lean)))
+                      ;; Shown with [Archived] or found by a search: it says so.
+                      (if (harness-ui-tasks--archived-p task)
+                          (concat (propertize "archived" 'face 'harness-dim-face)
+                                  (if (string-empty-p meta) "" (propertize " · " 'face 'harness-dim-face))
+                                  meta)
+                        meta))))
+         (meta (funcall meta-of nil))
+         (lean (funcall meta-of t))
          (buttons (harness-ui-tasks--card-buttons task))
          (shown (or (harness-ui-tasks--subtitle-shown-p task) narrow))
          (chevron (if narrow "" (harness-ui-tasks--subtitle-button task shown)))
@@ -986,15 +1005,17 @@ window."
          (subtitle (and shown (harness-ui-tasks--subtitle task column session position
                                                           (- width (string-width buttons) 8))))
          ;; A one-line card carries the buttons beside the facts.  When
-         ;; the facts would squeeze the title, a narrow board keeps the
-         ;; title and the buttons and lets the facts wait for a wider
-         ;; window or for the card to be opened.
-         (right (if subtitle meta (concat meta "  " buttons)))
-         (right (if (and (not subtitle)
-                         (< (- width (string-width right) (string-width left) 3)
-                            harness-ui-tasks--min-title-room))
-                    buttons
-                  right))
+         ;; the facts would squeeze the title, a narrow board leaves out
+         ;; the token figures first; then it keeps the title and the
+         ;; buttons and lets the facts wait for a wider window or for
+         ;; the card to be opened.
+         (fits (lambda (right)
+                 (>= (- width (string-width right) (string-width left) 3)
+                     harness-ui-tasks--min-title-room)))
+         (right (cond (subtitle (if (funcall fits meta) meta lean))
+                      ((funcall fits (concat meta "  " buttons)) (concat meta "  " buttons))
+                      ((funcall fits (concat lean "  " buttons)) (concat lean "  " buttons))
+                      (t buttons)))
          (room (- width (string-width right) (string-width left) 3)))
     (insert left
             (propertize (harness-ui-tasks--fit (harness-ui-tasks--title task) room)
@@ -1292,16 +1313,20 @@ board, so what was skipped is only skipped while both are unchanged."
 
 (defun harness-ui-tasks--board-key ()
   "Return what the board region's drawing depends on.
-The tasks and their sessions (their status, todos, cost and output
-rate feed the cards), the clock, the caps the window allows, and the
-state a card cannot show: which column is folded, which is expanded,
-which tasks are submitting, which cards you folded their recap on, and
-whether finished work waits for your review."
+The tasks and their sessions (their status, todos, cost, output rate
+and token figures feed the cards: a running session's figures as the
+cards read them, which change less often than the figures do), the
+clock, the caps the window allows, and the state a card cannot show:
+which column is folded, which is expanded, which tasks are submitting,
+which cards you folded their recap on, and whether finished work waits
+for your review."
   (list harness-ui-tasks--tasks
         (mapcar (lambda (session)
-                  (list (plist-get session :id) (plist-get session :name) (plist-get session :status)
-                        (plist-get session :todos) (plist-get session :pending) (plist-get session :usage)
-                        (harness-ui-session-rate (plist-get session :id))))
+                  (let ((id (plist-get session :id)))
+                    (list id (plist-get session :name) (plist-get session :status)
+                          (plist-get session :todos) (plist-get session :pending) (plist-get session :usage)
+                          (harness-ui-session-rate id)
+                          (and (harness-ui-session-live id) (harness-ui-tasks--tokens session)))))
                 (harness-ui-sessions))
         (truncate (float-time) 5)
         (harness-ui-tasks--window)
@@ -2002,6 +2027,36 @@ ID nil, after every rate was fetched again, redraws every board."
     (when (cl-some (lambda (task) (or (null id) (equal (plist-get task :session) id)))
                    (buffer-local-value 'harness-ui-tasks--tasks b))
       (harness-ui-tasks--schedule-render b))))
+
+(defconst harness-ui-tasks--live-interval 0.5
+  "Least seconds between two redraws of a board for growing token figures.")
+
+(defvar-local harness-ui-tasks--live-timer nil
+  "Timer of the redraw the board's growing token figures wait for, or nil.")
+
+(defun harness-ui-tasks--live-render (buffer)
+  "Redraw board BUFFER for the token figures that grew.
+The redraw is skipped while its cards read the same."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq harness-ui-tasks--live-timer nil)
+      (when (harness-ui-tasks--board-p buffer)
+        (harness-ui-tasks--render)))))
+
+(defun harness-ui-tasks--on-live (id _live)
+  "Redraw soon the boards with a card of session ID, which shows its token figures.
+They grow a few times a second while it streams; a board redraws for
+them at most every `harness-ui-tasks--live-interval' seconds, and skips
+the redraw while its cards read the same (`harness-ui-tasks--board-key').
+ID nil, after every session's figures were fetched again, redraws every
+board."
+  (dolist (b (harness-ui-tasks--buffers))
+    (unless (timerp (buffer-local-value 'harness-ui-tasks--live-timer b))
+      (when (cl-some (lambda (task) (or (null id) (equal (plist-get task :session) id)))
+                     (buffer-local-value 'harness-ui-tasks--tasks b))
+        (with-current-buffer b
+          (setq harness-ui-tasks--live-timer
+                (run-at-time harness-ui-tasks--live-interval nil #'harness-ui-tasks--live-render b)))))))
 
 (defun harness-ui-tasks--on-redraw ()
   "Reload every board after a reload or reconnect."
@@ -2820,6 +2875,7 @@ BTW over the board; a failure shows on the board too."
   (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-event)
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-tasks--on-sessions-changed)
   (add-hook 'harness-ui-rate-functions #'harness-ui-tasks--on-rate)
+  (add-hook 'harness-ui-live-functions #'harness-ui-tasks--on-live)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-tasks--on-redraw)
   (add-hook 'harness-ui-quota-functions #'harness-ui-tasks--on-quota)
   (when (timerp harness-ui-tasks--timer) (cancel-timer harness-ui-tasks--timer))

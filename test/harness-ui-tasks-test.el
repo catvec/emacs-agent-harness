@@ -39,6 +39,7 @@
 (defvar harness-ui-tasks--target)
 (defvar harness-ui-tasks--list-end)
 (defvar harness-ui-tasks--error)
+(defvar harness-ui-tasks--collapse-min-width)
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-ui-tasks-submit "harness-ui-tasks")
 (declare-function harness-ui-tasks-edit "harness-ui-tasks")
@@ -49,6 +50,10 @@
 (declare-function harness-ui-tasks-tab "harness-ui-tasks")
 (declare-function harness-acp--drop-client "harness-acp")
 (declare-function harness-tasks--set "harness-tasks")
+(declare-function harness-ui-session-live "harness-ui")
+(declare-function harness-ui--store-live "harness-ui")
+(declare-function harness-ui-tasks--board-key "harness-ui-tasks")
+(declare-function harness-ui-tasks--card-buttons "harness-ui-tasks")
 
 (defmacro harness-ui-tasks-test-with (&rest body)
   "Load the state layer, tasks, ACP and the board UI; run BODY with `board' open.
@@ -202,6 +207,73 @@ redraws the board by itself."
               (harness-test-wait (lambda () (string-match-p "Write quickly\\(.\\|\n\\)*42 tok/s"
                                                             (harness-ui-tasks-test--board-text board)))
                                  5 "the rate on the card")))
+        (dolist (task (harness-call 'task/list default-directory))
+          (harness-call 'task/cancel (plist-get task :id)))))))
+
+(ert-deftest harness-ui-tasks-card-shows-the-token-figures ()
+  "A working task's card shows its session's token figures as they grow.
+They come with the harness's `usage/live-updated' events, which redraw
+the board by themselves, at most every half second, and not while the
+cards read the same.  A card short of room leaves them out first,
+keeping its other facts and its buttons."
+  (harness-ui-tasks-test-with
+    ;; A turn that never ends keeps the task in progress.
+    (let ((harness-provider-demo-script-override '((:type text :delta "Working on it."))))
+      (unwind-protect
+          (progn
+            (harness-ui-tasks-test--type-and-submit board "Count the tokens")
+            (harness-ui-tasks-test--wait-text board "In progress  1\\(.\\|\n\\)*Count the tokens")
+            ;; Nothing counted yet: no figures.
+            (should-not (string-match-p " out\\b\\|/[0-9.]+[kM]\\b" (harness-ui-tasks-test--board-text board)))
+            (let ((sid (plist-get (car (harness-call 'task/list default-directory)) :session)))
+              (should sid)
+              (harness-emit 'usage/live-updated sid '(:context 2400 :output 600 :estimated 600))
+              (harness-test-wait (lambda () (harness-ui-session-live sid)) 5 "the live figures")
+              (let ((timer (buffer-local-value 'harness-ui-tasks--live-timer board)))
+                (should (timerp timer))
+                (harness-emit 'usage/live-updated sid '(:context 2440 :output 640 :estimated 640))
+                (harness-test-wait (lambda () (= 640 (plist-get (harness-ui-session-live sid) :output)))
+                                   5 "the grown figures")
+                (should (eq timer (buffer-local-value 'harness-ui-tasks--live-timer board))))
+              (harness-test-wait (lambda () (string-match-p "Count the tokens.* ~2\\.4k/[0-9.]+[kM] · ~640 out"
+                                                            (harness-ui-tasks-test--board-text board)))
+                                 5 "the live figures on the card")
+              ;; Reported: the real numbers.
+              (harness-emit 'usage/live-updated sid '(:context 2600 :output 800 :estimated 0))
+              (harness-test-wait (lambda () (string-match-p "Count the tokens.* 2\\.6k/[0-9.]+[kM] · 800 out"
+                                                            (harness-ui-tasks-test--board-text board)))
+                                 5 "the reported figures on the card")
+              ;; What the cards depend on changes only with what they read.
+              (with-current-buffer board
+                (let ((sessions (nth 1 (harness-ui-tasks--board-key))))
+                  (harness-ui--store-live sid '(:context 2610 :output 800 :estimated 0))
+                  (should (equal sessions (nth 1 (harness-ui-tasks--board-key))))
+                  (harness-ui--store-live sid '(:context 2610 :output 810 :estimated 0))
+                  (should-not (equal sessions (nth 1 (harness-ui-tasks--board-key))))))
+              ;; Short of room, the card leaves the figures out first.
+              (let* ((task (car (buffer-local-value 'harness-ui-tasks--tasks board)))
+                     (buttons (substring-no-properties (harness-ui-tasks--card-buttons task)))
+                     (lines (cl-loop for width from 160 downto harness-ui-tasks--collapse-min-width
+                                     collect (cl-letf (((symbol-function 'harness-ui-tasks--width)
+                                                        (lambda () width)))
+                                               (with-temp-buffer
+                                                 (harness-ui-tasks--insert-card task 'active nil)
+                                                 (goto-char (point-min))
+                                                 (buffer-substring-no-properties (point) (line-end-position))))))
+                     (tokens (lambda (line) (string-search "810 out" line)))
+                     (elapsed (lambda (line) (string-match-p " [0-9]+s\\b" line)))
+                     (buttoned (lambda (line) (string-search buttons line))))
+                (should (string-search "Count the tokens" (car lines)))
+                (should (funcall tokens (car lines)))
+                (should (funcall elapsed (car lines)))
+                (should (funcall buttoned (car lines)))
+                ;; Some widths keep the elapsed time and the buttons alone.
+                (should (cl-some (lambda (line) (and (not (funcall tokens line)) (funcall elapsed line)
+                                                     (funcall buttoned line)))
+                                 lines))
+                ;; The figures never show without the rest of the facts.
+                (should-not (cl-some (lambda (line) (and (funcall tokens line) (not (funcall elapsed line))))
+                                     lines)))))
         (dolist (task (harness-call 'task/list default-directory))
           (harness-call 'task/cancel (plist-get task :id)))))))
 

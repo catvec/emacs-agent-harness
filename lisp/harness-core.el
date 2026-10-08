@@ -129,7 +129,8 @@ commands stay governed by the permission mode and the sandbox
 Set it in your init file, before `harness-start'.  The settings page
 does not offer it and no ACP client can change it.  Changed later with
 `setopt' or Customize, it restarts the harness process so the change
-reaches it."
+reaches it.  An administrator's policy may set it, and then nothing
+else changes it (see harness-policy.el)."
   :type 'boolean :group 'harness
   :set #'harness--set-corporate-mode
   :initialize #'custom-initialize-default)

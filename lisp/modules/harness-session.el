@@ -74,10 +74,13 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-policy)
 
 (defvar harness-state-directory)
 (defvar harness-provider-fallback-context-window)
 (defvar harness-cache-ttl)
+
+(declare-function harness-provider-model-refusal "harness-provider" (model-id))
 
 (defconst harness-session--save-delay 0.3
   "Seconds of quiet before a changed session record is written to disk.")
@@ -209,7 +212,105 @@ cache (see `harness-session--cache')."
           (harness-session-provider-state s) (plist-get pl :provider-state)
           (harness-session-provider-node s) (plist-get pl :provider-node)
           (harness-session-move s) (harness-session--move-value (plist-get pl :move)))
+    ;; A session saved before the policy came keeps no setting it fixes.
+    (harness-session--apply-policy s)
     s))
+
+;;;; Settings a policy fixes
+
+(defconst harness-session--policy-options
+  '((:model . harness-model) (:permission-mode . harness-permission-mode)
+    (:thinking . harness-thinking) (:non-interactive . harness-non-interactive))
+  "Session settings that start from an option, each with that option.
+Every session holds a copy of its own, which it may change.  When the
+policy sets the option (see harness-policy.el), the copy of every
+session -- new, forked, a sub-agent's, a task's, one saved before the
+policy came -- is the policy's value instead, and `session/update'
+refuses to change it.  A BTW session's thinking starts from
+`harness-btw-thinking' when its model offers that level, so it is left
+to `session/create', which reads both options as the policy has them.")
+
+(defun harness-session--policy-option (key kind)
+  "Return the option that fixes setting KEY of a session of KIND, or nil."
+  (unless (and (eq key :thinking) (eq kind 'btw))
+    (alist-get key harness-session--policy-options)))
+
+(defun harness-session--setting-value (key value)
+  "Return VALUE of session setting KEY as a session holds it."
+  (pcase key
+    (:permission-mode (if (stringp value) (intern value) value))
+    (:non-interactive (and (harness-json-true-p value) t))
+    (_ value)))
+
+(defun harness-session--pinned (key kind)
+  "Return (VALUE) when the policy fixes setting KEY of a session of KIND, else nil.
+VALUE is the policy's, as a session holds it."
+  (when-let* ((option (harness-session--policy-option key kind))
+              (entry (harness-policy-entry option)))
+    (list (harness-session--setting-value key (cdr entry)))))
+
+(defun harness-session--setting (s key)
+  "Return setting KEY of session S, one of `harness-session--policy-options'."
+  (pcase key
+    (:model (harness-session-model s))
+    (:permission-mode (harness-session-permission-mode s))
+    (:thinking (harness-session-thinking s))
+    (:non-interactive (harness-session-non-interactive s))))
+
+(defun harness-session--apply-policy (s)
+  "Give session S the policy's value of every setting it fixes.
+Return the changes as a plist of KEY VALUE, nil when there were none.
+A model that changes takes its own context window, as in
+`session/update'."
+  (let ((kind (harness-session-kind s))
+        changes)
+    (dolist (cell harness-session--policy-options)
+      (let ((key (car cell)))
+        (when-let* ((pinned (harness-session--pinned key kind)))
+          (let ((value (car pinned)))
+            (unless (equal value (harness-session--setting s key))
+              (pcase key
+                (:model (setf (harness-session-model s) value
+                              (harness-session-context-window s) nil))
+                (:permission-mode (setf (harness-session-permission-mode s) value))
+                (:thinking (setf (harness-session-thinking s) value))
+                (:non-interactive (setf (harness-session-non-interactive s) value)))
+              (setq changes (plist-put changes key value)))))))
+    changes))
+
+(defun harness-session--without-pinned (plist kind)
+  "Return PLIST without the settings the policy fixes for a session of KIND.
+What `session/create' is asked for gives way to the policy: the session
+gets the policy's values, as it reads them from the configuration."
+  (cl-loop for (k v) on plist by #'cddr
+           unless (harness-session--pinned k kind)
+           append (list k v)))
+
+(defun harness-session-check-policy (settings &optional kind)
+  "Signal an error when SETTINGS would change a setting the policy fixes.
+SETTINGS is a plist of `session/update' keys for a session of KIND
+\(`main' when nil).  A value equal to the policy's passes: it changes
+nothing.  A model `harness-allowed-models' does not allow is refused
+too.  Callers that change sessions for the user, such as the task
+board, check first, so they refuse before they change anything else."
+  (cl-loop for (k v) on settings by #'cddr
+           for pinned = (harness-session--pinned k (or kind 'main))
+           when (and pinned (not (equal (harness-session--setting-value k v) (car pinned))))
+           do (error "%s" (harness-policy-locked-message
+                           (harness-session--policy-option k (or kind 'main)))))
+  (when-let* ((model (plist-get settings :model))
+              ((fboundp 'harness-provider-model-refusal))
+              (refusal (harness-provider-model-refusal model)))
+    (error "%s" refusal)))
+
+(defun harness-session--on-reloaded (&rest _)
+  "Hold every session to the policy as it is after a reload.
+The policy file is read again on reload, and may fix what it did not."
+  (maphash (lambda (id s)
+             (when-let* ((changes (harness-session--apply-policy s)))
+               (harness-emit 'session/updated id changes)
+               (harness-session--touch s)))
+           harness-sessions))
 
 ;;;; Persistence
 
@@ -646,8 +747,11 @@ deleted; symbolic links inside it are removed, never followed."
   "Create a session.  PLIST needs `:cwd'; see docs/architecture.md for the rest.
 A `btw' session without `:thinking' thinks at `harness-btw-thinking'
 when its model offers that level, else at `harness-thinking', as
-configured at `:cwd'."
-  (let* ((cwd (or (plist-get plist :cwd) (error "session/create needs :cwd")))
+configured at `:cwd'.  A setting the policy fixes (see
+`harness-session--policy-options') has the policy's value, whatever
+PLIST asks for."
+  (let* ((plist (harness-session--without-pinned plist (or (plist-get plist :kind) 'main)))
+         (cwd (or (plist-get plist :cwd) (error "session/create needs :cwd")))
          (host (or (plist-get plist :host) (file-remote-p cwd)))
          (cwd (file-name-as-directory (expand-file-name cwd)))
          (kind (or (plist-get plist :kind) 'main))
@@ -687,6 +791,9 @@ configured at `:cwd'."
           (harness-session-budget s) (plist-get plist :budget)
           (harness-session-provider-state s) (plist-get plist :provider-state)
           (harness-session-loaded s) t)
+    ;; Without a config module the defaults are the options' values,
+    ;; which hold the policy's already; this makes sure either way.
+    (harness-session--apply-policy s)
     (puthash (harness-session-id s) s harness-sessions)
     (harness-session--save (harness-session-id s))
     (harness-session--tmp-dir s)
@@ -802,13 +909,18 @@ written to the configuration layer.  With `:silent' no hint is added.
 model's again; a new `:model' brings its own window too, unless PLIST
 also sets one.  `:context-window-limit N' caps its model's window at N
 tokens, nil the model's again; a `:context-window' set for the session
-wins over it."
+wins over it.  A setting the policy fixes (see
+`harness-session--policy-options') cannot change: asking for another
+value signals an error and changes nothing, asking for the policy's
+changes nothing either."
   (let* ((s (harness-session--get id))
          (persist (plist-get plist :persist))
          (silent (plist-get plist :silent))
          changes)
+    (harness-session-check-policy plist (harness-session-kind s))
     (cl-loop for (k v) on plist by #'cddr
-             when (memq k harness-session--settings)
+             when (and (memq k harness-session--settings)
+                       (not (harness-session--pinned k (harness-session-kind s))))
              do (pcase k
                   (:name (setf (harness-session-name s) v))
                   (:model (setf (harness-session-model s) v)
@@ -1566,21 +1678,34 @@ list cost needs pricing.  Records without tokens are returned as is."
                             (t cost))))
       (harness-plist-merge record (list :cost cost :list-cost list-cost)))))
 
+(defun harness-session--last-output (record)
+  "Return the output of the request whose prompt usage RECORD's `:context' sizes.
+That is RECORD's `:last-output', which a record of several requests (a
+hosted loop's turn) gives, else its `:output', else 0."
+  (let ((last (plist-get record :last-output))
+        (output (plist-get record :output)))
+    (cond ((numberp last) last)
+          ((numberp output) output)
+          (t 0))))
+
 (harness-defmethod session/usage-add (id record)
   "Add usage RECORD to session ID.
 RECORD keys: :input :output :cache-read :cache-write :cost :list-cost
-:context :turns, :billing and :plan saying how the call was paid,
-:model the model the request was sent to (the session's when unsaid),
-:cache-at and :cache-ttl, when the request used the prompt cache and
-how long its provider said it keeps it, and :cache-reset, which says
-the conversation starts over (a compaction).  Counters accumulate;
-`:context' replaces, and so do `:billing' and `:plan' when RECORD has
-a billing.  A request that read or wrote the cache stamps the totals'
-`:cache-at', `:cache-model' and `:cache-ttl' (see
-`harness-session--cache-stamp').  A missing `:cost' is priced
-from the model catalogue; a missing `:list-cost', the call at API
-prices, is the cost, or priced when a subscription paid.  Return the
-totals."
+:context :last-output :turns, :billing and :plan saying how the call
+was paid, :model the model the request was sent to (the session's when
+unsaid), :cache-at and :cache-ttl, when the request used the prompt
+cache and how long its provider said it keeps it, and :cache-reset,
+which says the conversation starts over (a compaction).  Counters
+accumulate; `:context' replaces, and so do `:billing' and `:plan' when
+RECORD has a billing.  With `:context', the size of the latest prompt,
+comes the totals' `:last-output': the output of that request, which the
+next one sends back (`harness-session--last-output'), so the
+conversation holds about `:context' plus `:last-output' tokens.  A
+request that read or wrote the cache stamps the totals' `:cache-at',
+`:cache-model' and `:cache-ttl' (see `harness-session--cache-stamp').
+A missing `:cost' is priced from the model catalogue; a missing
+`:list-cost', the call at API prices, is the cost, or priced when a
+subscription paid.  Return the totals."
   (let* ((s (harness-session--get id))
          (u (copy-sequence (harness-session-usage s)))
          (record (harness-session--price-record (harness-session-model s) record)))
@@ -1591,7 +1716,8 @@ totals."
       (when (numberp (plist-get record k))
         (setq u (plist-put u k (+ (or (plist-get u k) 0) (plist-get record k))))))
     (when (numberp (plist-get record :context))
-      (setq u (plist-put u :context (plist-get record :context))))
+      (setq u (plist-put u :context (plist-get record :context)))
+      (setq u (plist-put u :last-output (harness-session--last-output record))))
     (when (harness-billing-of record)
       (setq u (plist-put u :billing (harness-billing-of record)))
       (setq u (plist-put u :plan (plist-get record :plan))))
@@ -1733,8 +1859,11 @@ never made it (`harness-outside-node-p')."
           ('user (user n))
           ('compaction (flush)
                        (add 'user (list :type "text"
-                                        :text (concat "Summary of the conversation so far:\n\n"
-                                                      (plist-get n :content)))))
+                                        :text (if (equal (harness-node-compaction-kind n) "transcript")
+                                                  ;; A note pointing at the file, no summary.
+                                                  (plist-get n :content)
+                                                (concat "Summary of the conversation so far:\n\n"
+                                                        (plist-get n :content))))))
           ('assistant (unless (eq cur-role 'assistant) (flush))
                       (unless (harness-string-blank-p (plist-get n :content))
                         (add 'assistant (list :type "text" :text (plist-get n :content)))))
@@ -1769,6 +1898,64 @@ A user message the user did not write says who sent it."
                           (or (plist-get n :content) "")))
                  (k (format "[%s] %s" k (or (plist-get n :content) "")))))
              (harness-session--path (harness-session--get id)) "\n"))
+
+;;;; The transcript as a file
+
+(defconst harness-session-transcript-directory ".harness/transcripts/"
+  "Where in a session's directory `session/write-transcript' writes by default.")
+
+(defconst harness-session--transcript-legend
+  (concat "This is the conversation so far, oldest first, one entry per message:"
+          " [user] the user (or who sent it), [assistant] the model's replies, [thinking] its reasoning,"
+          " [tool NAME] a tool call and what it was about, [result] that call's result, [hint] notes of the"
+          " harness, [compaction] a summary that stood in for what came before it.")
+  "What a transcript file says of its entries, before them.")
+
+(defun harness-session-directory (session)
+  "Return the directory of SESSION, a session plist, as this Emacs opens it.
+A session on another host has its directory there, through TRAMP."
+  (let ((cwd (plist-get session :cwd))
+        (host (plist-get session :host)))
+    (file-name-as-directory (if (and host (not (file-remote-p cwd))) (concat host cwd) cwd))))
+
+(harness-defmethod session/write-transcript (id &optional opts)
+  "Write the transcript of session ID to a new Markdown file in its directory.
+The file holds a heading, OPTS `:title' (\"Conversation\" by default),
+the session's name and id, OPTS `:about' (a line saying why it was
+written), its working directory, a legend of the entries, and then
+`session/transcript-text'.  It goes in OPTS `:directory', a directory
+relative to the session's, `harness-session-transcript-directory' by
+default, named after the session and the time.  The session's own
+directory is where its tools read without asking, and a provider's
+prompt cache holds what the model reads of it, unlike the state
+directory; a `.gitignore' of `*' written there keeps git out.  Signal
+when the session's directory does not exist.  Return (:file FILE :lines
+N): FILE as this Emacs opens it (through TRAMP for another host's), N
+its number of lines.  The handoff to another provider and compaction
+into a transcript both write theirs here."
+  (let* ((session (harness-session-plist (harness-session--get id)))
+         (root (harness-session-directory session))
+         (dir (expand-file-name (or (plist-get opts :directory) harness-session-transcript-directory) root))
+         (file (expand-file-name (format "%s-%s.md" (substring id 0 (min 8 (length id)))
+                                         (format-time-string "%Y%m%dT%H%M%S"))
+                                 dir))
+         (text (concat
+                (format "# %s\n\n" (or (plist-get opts :title) "Conversation"))
+                (format "- Session: %s (%s)\n" (or (plist-get session :name) "unnamed") id)
+                (if (plist-get opts :about) (format "- %s\n" (plist-get opts :about)) "")
+                (format "- Working directory: %s\n\n" (plist-get session :cwd))
+                harness-session--transcript-legend "\n\n"
+                "---\n\n"
+                (harness-call 'session/transcript-text id)
+                "\n")))
+    (unless (file-directory-p root)
+      (signal 'harness-error (list (format "the session's directory %s does not exist" root))))
+    (harness-ensure-directory dir)
+    (let ((ignore (expand-file-name ".gitignore" dir)))
+      (unless (file-exists-p ignore)
+        (harness-write-file-atomically ignore "*\n")))
+    (harness-write-file-atomically file text)
+    (list :file file :lines (1+ (cl-count ?\n text)))))
 
 ;;;; Init and reload
 
@@ -1883,6 +2070,7 @@ After that, a budget a session has was given to it, and stays."
   (harness-session--load-all)
   (harness-session--drop-budget-copies)
   (harness-on 'provider/models-updated #'harness-session--on-models-updated)
+  (harness-on 'harness/reloaded #'harness-session--on-reloaded)
   ;; A session that asked to move during a turn moves when it ends.
   (harness-on 'agent/turn-ended #'harness-session--apply-pending-move)
   (add-hook 'kill-emacs-hook #'harness-session--on-kill-emacs))
@@ -1890,6 +2078,7 @@ After that, a budget a session has was given to it, and stays."
 ;; A reload does not run `:init' again for a ready module, so the
 ;; subscriptions are made here too.
 (harness-on 'provider/models-updated #'harness-session--on-models-updated)
+(harness-on 'harness/reloaded #'harness-session--on-reloaded)
 (harness-on 'agent/turn-ended #'harness-session--apply-pending-move)
 
 ;; The context-window slot of sessions loaded by an earlier version of

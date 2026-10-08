@@ -402,6 +402,22 @@ model of another provider holds (:mode transcript|compact :file PATH
   (let ((h (plist-get (plist-get node :meta) :handoff)))
     (and (consp h) h)))
 
+(defun harness-node-compaction-kind (node)
+  "Return the kind of compaction NODE is, as a string, or nil for no compaction.
+That is its `:meta' `:compaction': \"summary\", \"brief\" (a summary of
+only the first and last messages) or \"transcript\" (a note pointing at
+the conversation written to the file of its `:meta' `:file').  A
+compaction node from before there were kinds is a \"summary\"; so is
+one a handoff's old model wrote, while the new model's is \"brief\".
+NODE's kind may be the symbol or, as a client hears it, its name."
+  (when (equal (format "%s" (plist-get node :kind)) "compaction")
+    (let* ((meta (plist-get node :meta))
+           (kind (plist-get meta :compaction)))
+      (cond ((and kind (symbolp kind) (not (memq kind '(t :null :false)))) (symbol-name kind))
+            ((and (stringp kind) (not (string-empty-p kind))) kind)
+            ((equal (format "%s" (plist-get meta :context)) "sample") "brief")
+            (t "summary")))))
+
 ;;;; Paths
 
 (defun harness-path-normalize (path)
@@ -755,12 +771,18 @@ overflows the matcher."
 
 ;;;; User options
 
+(declare-function harness-policy-refuse "harness-policy" (option))
+
 (defun harness-save-user-option (symbol value)
   "Set SYMBOL to VALUE here and persist it in the user's custom file.
 The custom file belongs to the Emacs showing the UI, which may not be
 this one (see harness-server.el), so the save is asked of the UI over
 `client/request'; without a UI it is done here when a custom file is
-in use.  Returns nothing useful; failures are logged."
+in use.  Signal an error, changing nothing, when the policy sets SYMBOL
+\(see harness-policy.el).  Returns nothing useful; failures to save are
+logged."
+  (when (fboundp 'harness-policy-refuse)
+    (harness-policy-refuse symbol))
   (customize-set-variable symbol value)
   (if (and (fboundp 'harness-method-exists-p) (harness-method-exists-p 'client/request))
       (harness-catch (harness-call-async 'client/request "_harness/client/customize-save"

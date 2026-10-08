@@ -1722,6 +1722,107 @@ A fetch replaces the whole cache; a deleted session's rate goes."
     (should-not (harness-ui-session-rate "s2"))
     (should (equal '("s2" nil) (car heard)))))
 
+;;;; Token figures
+
+(ert-deftest harness-ui-token-figures-read-the-totals-or-the-live-count ()
+  "A session's token figures are its totals, or its live count while it runs.
+The context in use is the latest prompt plus what that request wrote.
+While the turn streams, the harness's live count stands in, and \"~\"
+marks the figures that are partly estimated."
+  (let ((harness-ui--live (make-hash-table :test 'equal))
+        (session (list :id "s1" :status "running" :context-window 200000
+                       :usage (list :context 1000 :last-output 200 :output 300))))
+    (should (equal '(:context 1200 :output 300 :estimated 0) (harness-ui-session-tokens session)))
+    (should (equal "1.2k/200k" (substring-no-properties (harness-ui-format-context session))))
+    (should (equal "300 out" (substring-no-properties (harness-ui-format-output session))))
+    (should (equal "300" (substring-no-properties (harness-ui-format-output session t))))
+    (should (equal "Context tokens in use: 1.2k of a 200k window; output tokens: 300."
+                   (get-text-property 0 'help-echo (harness-ui-format-context session))))
+    ;; Nothing written: no output figure.  Totals recorded before the
+    ;; output of the last request was count its prompt alone.
+    (let ((old '(:id "s2" :status "idle" :context-window 200000 :usage (:context 500))))
+      (should (equal '(:context 500 :output 0 :estimated 0) (harness-ui-session-tokens old)))
+      (should-not (harness-ui-format-output old))
+      (should (equal "500/200k" (substring-no-properties (harness-ui-format-context old)))))
+    ;; Streaming: the live count, its estimate marked.
+    (puthash "s1" '(:context 1700 :output 800 :estimated 500) harness-ui--live)
+    (should (equal '(:context 1700 :output 800 :estimated 500) (harness-ui-session-tokens session)))
+    (should (equal "~1.7k/200k" (substring-no-properties (harness-ui-format-context session))))
+    (should (equal "~800 out" (substring-no-properties (harness-ui-format-output session))))
+    (should (equal "~800" (substring-no-properties (harness-ui-format-output session t))))
+    (let ((help (get-text-property 0 'help-echo (harness-ui-format-output session))))
+      (should (string-prefix-p "Context tokens in use: 1.7k; output tokens: 800. ~500 of them estimated" help))
+      (should-not (string-match-p "\n" help)))
+    ;; Reported: the real numbers, unmarked.
+    (puthash "s1" '(:context 1760 :output 860 :estimated 0) harness-ui--live)
+    (should (equal "1.8k/200k" (substring-no-properties (harness-ui-format-context session))))
+    (should (equal "860 out" (substring-no-properties (harness-ui-format-output session))))))
+
+(ert-deftest harness-ui-live-token-cache-follows-the-harness ()
+  "Live figures come from `usage/live-updated' events and tell the views.
+The event that ends a turn's count can come before the session's new
+totals: the last figures stay until the cache shows the session no
+longer running, so they never drop in between.  A fetch replaces the
+whole cache; a deleted session's figures go."
+  (let ((harness-ui--live (make-hash-table :test 'equal))
+        (harness-ui--sessions (make-hash-table :test 'equal))
+        (harness-ui--rates (make-hash-table :test 'equal))
+        (harness-ui-live-functions nil)
+        (harness-ui-rate-functions nil)
+        (harness-ui-event-functions nil)
+        (harness-ui-sessions-changed-hook nil)
+        (heard nil)
+        (live '(:context 1700 :output 800 :estimated 500))
+        (event (lambda (id live)
+                 (harness-ui--dispatch-ui "_harness/event"
+                                          (list :event "usage/live-updated" :args (list id live)) nil))))
+    (add-hook 'harness-ui-live-functions (lambda (id live) (push (list id live) heard)))
+    (harness-ui-cache-session (list :id "s1" :status "running" :context-window 200000
+                                    :usage (list :context 1000 :last-output 200 :output 300)))
+    (funcall event "s1" live)
+    (should (equal live (harness-ui-session-live "s1")))
+    (should (equal (list (list "s1" live)) heard))
+    ;; The count ends while the cache still shows the session running.
+    (funcall event "s1" nil)
+    (should-not (harness-ui-session-live "s1"))
+    (should (equal '("s1" nil) (car heard)))
+    (should (equal live (harness-ui-session-tokens (harness-ui-session "s1"))))
+    ;; Its new totals come with it idle: they count from now on.
+    (harness-ui-cache-session (list :id "s1" :status "idle" :context-window 200000
+                                    :usage (list :context 1000 :last-output 820 :output 920)))
+    (should-not (gethash "s1" harness-ui--live))
+    (should (equal '(:context 1820 :output 920 :estimated 0)
+                   (harness-ui-session-tokens (harness-ui-session "s1"))))
+    ;; The count of a session already shown idle ends at once.
+    (funcall event "s1" live)
+    (funcall event "s1" nil)
+    (should-not (gethash "s1" harness-ui--live))
+    ;; Fetching every session again settles an ended count the same way.
+    (harness-ui-cache-session (list :id "s3" :status "running" :usage (list :context 10)))
+    (funcall event "s3" live)
+    (funcall event "s3" nil)
+    (should (gethash "s3" harness-ui--live))
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (method _params callback &rest _)
+                 (should (equal "_harness/session/list" method))
+                 (funcall callback (list (list :id "s3" :status "idle" :usage (list :context 900)))))))
+      (harness-ui-refresh-sessions))
+    (should-not (gethash "s3" harness-ui--live))
+    ;; The fetch on connecting replaces the cache, then tells the views at once.
+    (puthash "gone" live harness-ui--live)
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (method _params callback &rest _)
+                 (should (equal "_harness/usage/live-all" method))
+                 (funcall callback (list (append '(:session "s2") live))))))
+      (harness-ui-refresh-live))
+    (should-not (gethash "gone" harness-ui--live))
+    (should (equal live (harness-ui-session-live "s2")))
+    (should (equal '(nil nil) (car heard)))
+    ;; A deleted session's figures go with it.
+    (harness-ui--forget-session "s2")
+    (should-not (gethash "s2" harness-ui--live))
+    (should (equal '("s2" nil) (car heard)))))
+
 ;;;; Mouse targets
 
 (ert-deftest harness-ui-mouse-keymap-runs-on-ret-too ()
