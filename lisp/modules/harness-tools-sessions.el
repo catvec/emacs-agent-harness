@@ -22,6 +22,10 @@
 ;;   every move, in every permission mode (see session_move below).
 ;; - `session_wait' waits until sessions stop running (or become idle,
 ;;   blocked, start running, or change at all).
+;; - `set_non_interactive' turns non-interactive mode on or off for
+;;   this session, another one, or every current session and task of
+;;   every project, with `session/set-all' and `task/set-all' as the
+;;   UI's `harness-set-non-interactive-all' does.
 ;;
 ;; Tasks (when the `tasks' module is loaded):
 ;; - `task_list', `task_submit', `task_control' (start, message, cancel,
@@ -33,7 +37,13 @@
 ;; the task defaults.  Reading and waiting are `read' tools; anything
 ;; that changes another session is `meta' and goes through the
 ;; permission chain like any other action.  A move changes what a
-;; session may reach, so only the user decides it.
+;; session may reach, so only the user decides it.  Turning
+;; non-interactive mode on takes the user out of the loop, so the
+;; permission chain asks the user about it every time, in every
+;; permission mode, and neither the judge nor a rule can allow it (see
+;; `harness-perms--away-request'); a non-interactive session has nobody
+;; to ask, so its request is denied.  Turning it off needs no one's
+;; leave.
 ;;
 ;; Waits never block: each is an entry in `harness-tools-sessions--waiters'
 ;; re-checked by one subscriber whenever a session or task changes, and
@@ -588,6 +598,86 @@ A line of STDOUT holds a whole node, which can be megabytes long:
   :subject (lambda (input) (string-trim (format "%s %s" (or (plist-get input :action) "")
                                                 (harness-tools-sessions--short (plist-get input :session_id)))))
   :handler #'harness-tools-sessions--control)
+
+;;;; set_non_interactive
+
+(defun harness-tools-sessions--plural (n word)
+  "Return N WORDs, as \"1 session\" or \"2 sessions\"."
+  (format "%d %s%s" n word (if (= n 1) "" "s")))
+
+(defun harness-tools-sessions--set-all-non-interactive (value)
+  "Set non-interactive mode to VALUE (t or :false) on everything current.
+That is every active session and the session of every current task, of
+every project (`session/set-all' with `:active' and `:tasks'), then the
+current tasks' records (`task/set-all'), which a task's next start
+uses; the task sessions already changed are not told twice.  The same
+two calls as `harness-set-non-interactive-all'.  Return (SESSIONS
+. TASKS), the ids that changed."
+  (let ((sessions (harness-call 'session/set-all (list :non-interactive value)
+                                (list :active t :tasks t)))
+        (tasks (and (harness-method-exists-p 'task/set-all)
+                    (harness-call 'task/set-all (list :non-interactive value)))))
+    (cons sessions tasks)))
+
+(defun harness-tools-sessions--set-non-interactive (input ctx)
+  "Handler of set_non_interactive, with the call's INPUT and CTX.
+It runs only once the permission chain allowed the call, which for
+turning the mode on means the user confirmed it: see
+`harness-perms--away-request'.  One session, CTX's own by default, or
+with `all' everything current (see
+`harness-tools-sessions--set-all-non-interactive').  The default for
+new sessions is the user's to change, so it is left alone."
+  (let* ((on (harness-json-true-p (plist-get input :enabled)))
+         (value (if on t :false))
+         (word (if on "on" "off"))
+         (ref (let ((r (plist-get input :session_id)))
+                (and (stringp r) (not (harness-string-blank-p r)) r))))
+    (cond
+     ((and ref (harness-json-true-p (plist-get input :all)))
+      (harness-tool-error "Give session_id or all, not both"))
+     ((harness-json-true-p (plist-get input :all))
+      (pcase-let ((`(,sessions . ,tasks) (harness-tools-sessions--set-all-non-interactive value)))
+        (harness-tool-ok
+         (format "Non-interactive mode is %s for every current session and task of every project: %s and %s changed, the others had it %s already. %s"
+                 word (harness-tools-sessions--plural (length sessions) "session")
+                 (harness-tools-sessions--plural (length tasks) "task") word
+                 (if on "From now on the auto-mode judge decides what would ask the user there, and a denied call is to be worked around rather than waited on."
+                   "The user is asked again what the sessions' permission modes leave open.")))))
+     (t
+      (let* ((sid (if ref (harness-tools-sessions--resolve ref) (plist-get ctx :session-id)))
+             (session (harness-call 'session/get sid))
+             (task (and (harness-method-exists-p 'task/for-session)
+                        (harness-call 'task/for-session sid)))
+             (changed (not (harness-setting-equal-p :non-interactive value
+                                                    (plist-get session :non-interactive)))))
+        (when changed
+          (harness-call 'session/update sid :non-interactive value))
+        ;; Its task's record too, for the task's next start; the session,
+        ;; changed already, is not told twice.
+        (when (and task (harness-method-exists-p 'task/set-all))
+          (harness-call 'task/set-all (list :non-interactive value)
+                        (list :ids (list (plist-get task :id)))))
+        (harness-tool-ok
+         (format "Non-interactive mode %s %s for %s."
+                 (if changed "is now" "was already") word
+                 (if (equal sid (plist-get ctx :session-id)) "this session"
+                   (format "session %s %S" sid (or (plist-get session :name) "(unnamed)"))))))))))
+
+(harness-define-tool "set_non_interactive"
+  :label "Non-interactive mode"
+  :description "Turn non-interactive mode on or off, for this session, another one, or every current session and task of every project (all=true), when the user asks you to: before they leave, say, or once they are back. In a non-interactive session nobody is asked: the auto-mode judge decides what would ask the user, and a denied call is to be worked around rather than waited on. Turning it on always asks the user to confirm, in every permission mode, and the call waits for the answer; a non-interactive session cannot ask, so its request to turn it on is denied at once. Turning it off needs no confirmation. The default for new sessions is left to the user."
+  :schema '(:type "object"
+            :properties (:enabled (:type "boolean" :description "true to turn non-interactive mode on, false to turn it off.")
+                         :session_id (:type "string" :description "The session to change: id, unique id prefix or unique name. Default: this session.")
+                         :all (:type "boolean" :description "Change every current session and task of every project instead (default false).")
+                         :reason (:type "string" :description "Why; shown to the user when they are asked to confirm."))
+            :required ("enabled"))
+  :kind 'meta
+  :subject (lambda (input)
+             (string-trim (format "%s %s" (if (harness-json-true-p (plist-get input :enabled)) "on" "off")
+                                  (if (harness-json-true-p (plist-get input :all)) "all"
+                                    (harness-tools-sessions--short (plist-get input :session_id))))))
+  :handler #'harness-tools-sessions--set-non-interactive)
 
 ;;;; session_move
 ;;

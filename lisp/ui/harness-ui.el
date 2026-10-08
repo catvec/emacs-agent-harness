@@ -2753,7 +2753,8 @@ names who it applies to (\"for new tasks\" without one)."
 (defun harness-ui-choose-model (callback)
   "Prompt for a model from the catalogue and call CALLBACK with (ID LABEL).
 The catalogue is refreshed first, so a provider that just became
-available is offered."
+available is offered.  An empty answer chooses nothing: CALLBACK is
+not called."
   (harness-ui-refresh-models
    (lambda (models)
      (let* ((labels (mapcar (lambda (m) (harness-ui-model-label (plist-get m :id))) models))
@@ -2774,8 +2775,13 @@ available is offered."
                                (if-let* ((p (plist-get m :pricing)))
                                    (format " · $%s/$%s per M" (plist-get p :input) (plist-get p :output))
                                  ""))))))
-            (choice (completing-read "Model: " table nil t)))
-       (funcall callback (plist-get (cdr (assoc choice table)) :id) choice)))))
+            (choice (completing-read "Model: " table nil t))
+            (model (cdr (assoc choice table))))
+       ;; A required match still lets an empty answer through, which
+       ;; names no model: switching to it would clear every model.
+       (if (not model)
+           (message "No model chosen")
+         (funcall callback (plist-get model :id) choice))))))
 
 ;;;; Switching models, and handing conversations over
 
@@ -3068,53 +3074,186 @@ offers to hand it over; see `harness-ui-switch-model'."
            (harness-ui-switch-model target id label)
          (harness-ui--setting-set target :model id (format "Model → %s" label)))))))
 
+;; The commands that change every current session and task at once
+;; (`harness-set-model-all', `harness-set-thinking-all',
+;; `harness-set-non-interactive-all') share what follows.
+
+(defvar harness-ui-set-all-functions nil
+  "Functions called with KEY and VALUE when a command sets KEY everywhere.
+`harness-set-model-all', `harness-set-thinking-all' and
+`harness-set-non-interactive-all' change every current session and
+task, and run these so that what starts later takes the change too:
+KEY is `:model', `:thinking' or `:non-interactive', and VALUE the new
+value, t or nil for `:non-interactive'.  Each function returns the
+directories it changed something for, a list, where the command looks
+for a .dir-locals.el that overrides the new default.  The task board
+sets the new-task settings of every open board.")
+
+(defun harness-ui--set-everywhere (key value)
+  "Run `harness-ui-set-all-functions' with KEY and VALUE.
+Return the directories they changed something for.  A function that
+fails is logged and the others still run."
+  (let ((dirs nil))
+    (run-hook-wrapped 'harness-ui-set-all-functions
+                      (lambda (fn)
+                        (condition-case err
+                            (setq dirs (append dirs (funcall fn key value)))
+                          (error (harness-log 'warn "%s for %s failed: %s" fn key (error-message-string err))))
+                        nil))
+    (delete-dups (cl-remove-if-not #'stringp dirs))))
+
+(defun harness-ui--everything-filter ()
+  "Return the `session/set-all' filter of the commands that change everything.
+Every active session (idle, running or blocked) of every project, and
+the session of every current task whatever its status: a task's session
+may be closed, after a restart say, and still be where the task goes
+on.  Inactive sessions of no current task are history."
+  (list :active t :tasks t))
+
+(defun harness-ui--count (n word)
+  "Return N WORDs, as \"1 session\" or \"2 sessions\"."
+  (format "%d %s%s" n word (if (= n 1) "" "s")))
+
+(defun harness-ui--changed-text (sessions tasks)
+  "Return how many SESSIONS and TASKS, lists of ids, changed."
+  (format "%s and %s" (harness-ui--count (length sessions) "session")
+          (harness-ui--count (length tasks) "task")))
+
+(defun harness-ui--new-work-text (no-default boards)
+  "Return what else an all-sessions command changed, as a clause.
+NO-DEFAULT is non-nil when the default for new sessions stayed as it
+was; BOARDS when the open task boards' next tasks changed."
+  (cond ((and (not no-default) boards) ", and for new sessions and the open boards' new tasks")
+        ((not no-default) ", and for new sessions")
+        (boards ", and for the open boards' new tasks")
+        (t "")))
+
+(defun harness-ui--overrides-text (overrides show)
+  "Return what keeps the new default in OVERRIDES from applying, or nil.
+OVERRIDES is what `config/overrides' returned: the .dir-locals.el files
+of the projects at work that set the key otherwise, and the task
+default that wins over it.  SHOW turns a value into what new sessions
+do with it, such as \"start on Opus\".  Nothing is changed: the user
+decides, in `harness-settings' or in the files."
+  (let* ((key (plist-get overrides :key))
+         (value (lambda (printed)
+                  (funcall show (and (stringp printed)
+                                     (ignore-errors (car (read-from-string printed)))))))
+         (parts (append
+                 (mapcar (lambda (f)
+                           (format "new sessions in %s %s (%s in %s)"
+                                   (if (equal (plist-get f :scope) "directory")
+                                       (abbreviate-file-name (plist-get f :dir))
+                                     (or (plist-get f :project) (abbreviate-file-name (plist-get f :dir))))
+                                   (funcall value (plist-get f :value))
+                                   key (abbreviate-file-name (plist-get f :file))))
+                         (plist-get overrides :files))
+                 (when-let* ((tasks (plist-get overrides :tasks)))
+                   (list (format "new tasks %s (%s)" (funcall value (plist-get tasks :value))
+                                 (plist-get tasks :option)))))))
+    (when parts
+      (format "But %s; M-x harness-settings changes them." (string-join parts ", ")))))
+
+(defun harness-ui--report-all (text key value overrides dirs show)
+  "Say TEXT, followed by what keeps VALUE of KEY from applying to new work.
+KEY is the setting's name and VALUE the value just set everywhere.
+Unless OVERRIDES is nil, TEXT goes on with the projects at work, and
+those of DIRS besides (the open boards'), whose .dir-locals.el has
+new sessions start otherwise, and the task default that has new tasks
+do so (see `config/overrides'); SHOW is as for
+`harness-ui--overrides-text'.  A harness without `config/overrides'
+says TEXT alone."
+  (if (not overrides)
+      (message "%s" text)
+    (harness-ui-call "_harness/config/overrides"
+                     (list :key key :value (prin1-to-string value) :printed t :dirs dirs)
+                     (lambda (found)
+                       (let ((more (harness-ui--overrides-text found show)))
+                         (message "%s%s" text (if more (concat ".  " more) ""))))
+                     (lambda (_err) (message "%s" text) nil))))
+
+(defun harness-ui--apply-everywhere (settings callback)
+  "Apply SETTINGS to every current session and task, then call CALLBACK.
+The sessions first (`session/set-all' with
+`harness-ui--everything-filter'), then the records of the current tasks
+of every project (`task/set-all'), which their next start uses; a task
+session changed already is not changed, nor told, a second time.
+CALLBACK gets the ids of the sessions and of the tasks that changed."
+  (harness-ui-call "_harness/session/set-all"
+                   (list :settings settings :filter (harness-ui--everything-filter))
+                   (lambda (sessions)
+                     (harness-ui-call "_harness/task/set-all" (list :settings settings)
+                                      (lambda (tasks) (funcall callback sessions tasks))
+                                      ;; A harness without task mode has sessions only.
+                                      (lambda (_err) (funcall callback sessions nil) nil)))))
+
 (defun harness-ui--switch-all (model label mode no-default)
-  "Switch every current session to MODEL, shown as LABEL.
+  "Switch every current session and task to MODEL, shown as LABEL.
 MODE is how the sessions that would lose their conversation hand it
-over (see `handoff/switch'); `none' just switches them all.  The model
-becomes the default for new sessions too, unless NO-DEFAULT."
+over (see `handoff/switch'); `none' just switches them all.  The
+sessions switch first, task sessions included (see
+`harness-ui--everything-filter'), so none escapes the handoff; then the
+current tasks' records take MODEL, which their sessions have already.
+The model becomes the default for new sessions too, and of the open
+boards' new tasks, unless NO-DEFAULT; then what still overrides the
+default is said."
   (unless no-default
     (harness-ui-call "_harness/config/set"
                      (list :key "harness-model" :value model :scope "global")
                      (lambda (_) nil)))
-  (let ((done (lambda (ids)
-                (message "Model → %s for %s session%s%s%s"
-                         label (length ids) (if (= 1 (length ids)) "" "s")
-                         (pcase mode
-                           ('compact ", summarising the conversations that need it first")
-                           ('compact-new ", letting the new model summarise a limited context where needed")
-                           ('transcript ", handing the transcripts over where needed")
-                           (_ ""))
-                         (if no-default "" ", and for new sessions")))))
+  (let* ((dirs (unless no-default (harness-ui--set-everywhere :model model)))
+         (done (lambda (sessions)
+                 (harness-ui-call
+                  "_harness/task/set-all" (list :settings (list :model model))
+                  (lambda (tasks)
+                    (harness-ui--report-all
+                     (format "Model → %s for %s%s%s" label (harness-ui--changed-text sessions tasks)
+                             (pcase mode
+                               ('compact ", summarising the conversations that need it first")
+                               ('compact-new ", letting the new model summarise a limited context where needed")
+                               ('transcript ", handing the transcripts over where needed")
+                               (_ ""))
+                             (harness-ui--new-work-text no-default dirs))
+                     "harness-model" model (not no-default) dirs
+                     (lambda (m) (format "start on %s" (harness-ui-model-label m)))))
+                  (lambda (_err) (message "Model → %s for %s" label
+                                          (harness-ui--count (length sessions) "session"))
+                    nil)))))
     (if (eq mode 'none)
         (harness-ui-call "_harness/session/set-all"
-                         (list :settings (list :model model) :filter (list :active t))
+                         (list :settings (list :model model) :filter (harness-ui--everything-filter))
                          done)
       (harness-ui-call "_harness/handoff/switch-all"
-                       (list :model model :filter (list :active t) :mode (symbol-name mode))
+                       (list :model model :filter (harness-ui--everything-filter) :mode (symbol-name mode))
                        done))))
 
 ;;;###autoload
 (defun harness-set-model-all (&optional no-default)
-  "Choose a model and switch every current session to it.
-The choice also becomes the default for new sessions, unless a prefix
-argument says otherwise.  Use this when a plan runs out, a provider
+  "Choose a model and switch every current session and task to it.
+The choice also becomes the default for new sessions, and the model of
+the open task boards' new tasks, unless NO-DEFAULT, the prefix
+argument, says otherwise.  Use this when a plan runs out, a provider
 fails, or a cheaper model should take over work already in flight.
 Idle, running and blocked sessions of every project change, each
-recording it as a hint; inactive ones are history and are left alone,
-and no running turn is cancelled: it takes the new model at its next
-step.  When the switch would lose sessions their conversation (see
+recording it as a hint, and so do the current tasks of every project
+\(running, pending and blocked) and their sessions, even a closed one;
+other inactive sessions are history and are left alone, and no running
+turn is cancelled: it takes the new model at its next step.  When the
+switch would lose sessions their conversation (see
 `harness-ui-switch-model'), it asks once for all of them, and the
 handoff chosen applies to each of them.  A session keeps its provider
 state until another provider runs a step in it, so switching back before
-then resumes its conversation."
+then resumes its conversation.  Once the default changed, it says which
+projects still start otherwise, because their .dir-locals.el sets
+`harness-model', and whether `harness-tasks-model' does for tasks; it
+changes neither."
   (interactive "P")
   ;; The chat the command runs in, for the banner to show in.
   (let ((host (and (derived-mode-p 'harness-chat-mode) (current-buffer))))
     (harness-ui-choose-model
      (lambda (id label)
        (harness-ui-call
-        "_harness/handoff/check-all" (list :model id :filter (list :active t))
+        "_harness/handoff/check-all" (list :model id :filter (harness-ui--everything-filter))
         (lambda (checks)
           (let ((lossy (cl-remove-if-not (lambda (c) (harness-json-true-p (plist-get c :lossy))) checks)))
             (if (null lossy)
@@ -3150,7 +3289,8 @@ offers the common levels."
 (defun harness-ui-choose-thinking (callback &optional model)
   "Prompt for a thinking level and call CALLBACK with (VALUE LABEL).
 VALUE is nil for the model default.  MODEL names the levels offered;
-without one the common levels are."
+without one the common levels are.  An empty answer chooses nothing:
+CALLBACK is not called."
   (let ((choose (lambda (levels)
                   (let* ((levels (cons "default" (harness-ui--thinking-levels-for levels)))
                          (collection (lambda (string pred action)
@@ -3160,7 +3300,11 @@ without one the common levels are."
                                                       (cycle-sort-function . identity))
                                          (complete-with-action action levels string pred))))
                          (choice (completing-read "Thinking: " collection nil t)))
-                    (funcall callback (unless (equal choice "default") choice) choice)))))
+                    ;; A required match still lets an empty answer
+                    ;; through, which is no level.
+                    (if (string-empty-p choice)
+                        (message "No thinking level chosen")
+                      (funcall callback (unless (equal choice "default") choice) choice))))))
     (if (null model)
         (funcall choose nil)
       (harness-ui-call "_harness/provider/model" (list :model-id model)
@@ -3179,10 +3323,16 @@ without one the common levels are."
 
 ;;;###autoload
 (defun harness-set-thinking-all (&optional no-default)
-  "Choose a thinking level and set it on every current session.
-Idle, running and blocked sessions of every project change; inactive
-ones are history and are left alone.  The level also becomes the
-default for new sessions, unless a prefix argument says otherwise."
+  "Choose a thinking level and set it on every current session and task.
+Idle, running and blocked sessions of every project change, and so do
+the current tasks of every project (running, pending and blocked) and
+their sessions, even a closed one; other inactive sessions are history
+and are left alone.  The level also becomes the default for new
+sessions, and the level of the open task boards' new tasks, unless
+NO-DEFAULT, the prefix argument, says otherwise.  Once the default
+changed, it says which projects still start otherwise, because their
+.dir-locals.el sets `harness-thinking', and whether
+`harness-tasks-thinking' does for tasks; it changes neither."
   (interactive "P")
   (harness-ui-choose-thinking
    (lambda (value label)
@@ -3191,12 +3341,69 @@ default for new sessions, unless a prefix argument says otherwise."
                         (list :key "harness-thinking" :value (prin1-to-string value)
                               :printed t :scope "global")
                         (lambda (_) nil)))
-     (harness-ui-call "_harness/session/set-all"
-                      (list :settings (list :thinking value) :filter (list :active t))
-                      (lambda (ids)
-                        (message "Thinking → %s for %s session%s%s"
-                                 label (length ids) (if (= 1 (length ids)) "" "s")
-                                 (if no-default "" ", and for new sessions")))))))
+     (let ((dirs (unless no-default (harness-ui--set-everywhere :thinking value))))
+       (harness-ui--apply-everywhere
+        (list :thinking value)
+        (lambda (sessions tasks)
+          (harness-ui--report-all
+           (format "Thinking → %s for %s%s" label (harness-ui--changed-text sessions tasks)
+                   (harness-ui--new-work-text no-default dirs))
+           "harness-thinking" value (not no-default) dirs
+           (lambda (level) (format "think at %s" (or level "the model's default"))))))))))
+
+;;;###autoload
+(defun harness-set-non-interactive-all (&optional no-default)
+  "Turn non-interactive mode on or off for everything at once.
+It asks which, offering on first, and changes every active session
+\(idle, running or blocked) of every project, every current task of
+every project (running, pending or blocked) and its session, even a
+closed one, and the new-task settings of every open task board.  It
+becomes the default for new sessions too, unless NO-DEFAULT, the
+prefix argument, says otherwise.  It reports how many sessions and
+tasks changed: those that had the mode already are left alone.  When
+it turns the mode off, or changes the default, it also says what still
+has new work start otherwise: a project whose .dir-locals.el sets
+`harness-non-interactive', and `harness-tasks-non-interactive' when it
+still turns new tasks on; it changes neither.
+Use it on leaving, so that no session waits for you, and on coming
+back.  A non-interactive session never waits for the user: the
+auto-mode judge decides what would ask you, prompts already waiting
+included, and after a denial the agent is told to find another way;
+only directories are still yours to grant.  See
+`harness-toggle-non-interactive' for one session."
+  (interactive "P")
+  (let* ((choices '("on" "off"))
+         (choice (completing-read "Non-interactive mode for every session and task: "
+                                  (lambda (string pred action)
+                                    ;; On first, as offered.
+                                    (if (eq action 'metadata)
+                                        '(metadata (display-sort-function . identity)
+                                                   (cycle-sort-function . identity))
+                                      (complete-with-action action choices string pred)))
+                                  nil t nil nil "on"))
+         (on (not (equal choice "off"))))
+    (let ((dirs (harness-ui--set-everywhere :non-interactive on)))
+      (harness-ui--apply-everywhere
+       (list :non-interactive (if on t :false))
+       (lambda (sessions tasks)
+         ;; The default last: a task with no setting of its own follows
+         ;; it, so the tasks are compared with how they would have
+         ;; started, and get the setting for good.
+         (unless no-default
+           (harness-ui-call "_harness/config/set"
+                            (list :key "harness-non-interactive" :value (prin1-to-string on)
+                                  :printed t :scope "global")
+                            (lambda (_) nil)))
+         (harness-ui--report-all
+          (format "Non-interactive %s for %s%s" (if on "on" "off")
+                  (harness-ui--changed-text sessions tasks)
+                  (harness-ui--new-work-text no-default dirs))
+          "harness-non-interactive" on
+          ;; Turning it off says what still turns it on, whatever the
+          ;; default; turning it on, what keeps the new default off.
+          (or (not on) (not no-default))
+          dirs
+          (lambda (v) (if (harness-json-true-p v) "start non-interactive" "start interactive"))))))))
 
 ;;;###autoload
 (defun harness-set-permission-mode (&optional session-id)
@@ -3371,6 +3578,8 @@ worktrees, task sessions and sessions merges are queued into."
 ;; At top level, not in the `defvar', so a reload binds them in a running
 ;; Emacs too.
 (define-key harness-ui-map (kbd "i") #'harness-toggle-non-interactive)
+;; I is i for every session, as M is m.
+(define-key harness-ui-map (kbd "I") #'harness-set-non-interactive-all)
 (define-key harness-ui-map (kbd "F") #'harness-fullscreen)
 (define-key harness-ui-map (kbd "W") #'harness-move-session)
 
@@ -3662,11 +3871,12 @@ leaves the buffer's commands out, never the whole menu."
     ("p" "Permission mode" harness-set-permission-mode)
     ("d" "Directory access" harness-directories :if (lambda () (harness-ui--command-available-p 'harness-directories)))
     ("i" (lambda () (harness-ui--non-interactive-menu-label)) harness-toggle-non-interactive)
+    ("I" "Non-interactive for all sessions" harness-set-non-interactive-all)
     ("r" "Rename" harness-rename-session)
     ("W" "Move to another directory" harness-move-session)]
    ["Tools"
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
-    ("I" "Insights" harness-insights :if (lambda () (harness-ui--command-available-p 'harness-insights)))
+    ("A" "Insights" harness-insights :if (lambda () (harness-ui--command-available-p 'harness-insights)))
     ("B" "Delete budget" harness-delete-budget :if (lambda () (harness-ui--command-available-p 'harness-delete-budget)))
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
     ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))

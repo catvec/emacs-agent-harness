@@ -1411,13 +1411,31 @@ done and archived tasks are history and are left alone.")
 (defconst harness-tasks-pref-keys '(:model :thinking :permission-mode :non-interactive)
   "Session settings a task carries until its next start.")
 
+(defun harness-tasks--non-interactive-p (task)
+  "Non-nil when TASK starts non-interactive.
+Its own setting decides, an explicit false included; without one,
+`harness-tasks-non-interactive', else what its directory configures
+\(see `harness-tasks--work-settings').  A remote directory is not read:
+the global `harness-non-interactive' stands for it."
+  (if (plist-member task :non-interactive)
+      (harness-json-true-p (plist-get task :non-interactive))
+    (or harness-tasks-non-interactive
+        (let ((cwd (plist-get task :cwd)))
+          (harness-json-true-p
+           (if (and cwd (not (file-remote-p cwd)))
+               (harness-tasks--config 'harness-non-interactive cwd)
+             (and (boundp 'harness-non-interactive) (symbol-value 'harness-non-interactive))))))))
+
 (defun harness-tasks--prefs-differ-p (task settings)
-  "Non-nil when SETTINGS would change TASK."
+  "Non-nil when SETTINGS would change TASK.
+Non-interactive is compared with what the task would start with, so
+turning it off reaches a task that has no setting of its own but would
+start non-interactive all the same."
   (cl-some (lambda (k)
              (let ((want (plist-get settings k)) (have (plist-get task k)))
                (if (eq k :non-interactive)
                    (not (eq (and (harness-json-true-p want) t)
-                            (and (harness-json-true-p have) t)))
+                            (and (harness-tasks--non-interactive-p task) t)))
                  (not (equal want have)))))
            (harness-plist-keys settings)))
 
@@ -1426,9 +1444,12 @@ done and archived tasks are history and are left alone.")
 (defun harness-tasks--apply-prefs (task settings)
   "Merge SETTINGS into TASK and, when it has a session, into that session.
 TASK's record carries what a later start would use; a started task's
-session is what its next turn uses, so both change.  A setting the
-policy fixes for every session is refused before anything changes (see
-`harness-session-check-policy').  Return TASK's view."
+session is what its next turn uses, so both change.  The session is
+sent only the settings it does not have yet: each `session/update'
+adds a hint to it, so a session something else already changed (`all'
+commands change sessions and tasks alike) is not told twice.  A
+setting the policy fixes for every session is refused before anything
+changes (see `harness-session-check-policy').  Return TASK's view."
   (let* ((id (plist-get task :id))
          (prefs (cl-loop for k in harness-tasks-pref-keys
                          when (plist-member settings k)
@@ -1437,9 +1458,13 @@ policy fixes for every session is refused before anything changes (see
       (harness-session-check-policy prefs))
     (when prefs
       (apply #'harness-tasks--set id prefs)
-      (let ((session (harness-tasks--session task)))
-        (when (and session (harness-method-exists-p 'session/update))
-          (apply #'harness-call 'session/update (plist-get session :id) prefs))))
+      (let* ((session (harness-tasks--session task))
+             (changes (and session
+                           (cl-loop for (k v) on prefs by #'cddr
+                                    unless (harness-setting-equal-p k v (plist-get session k))
+                                    append (list k v)))))
+        (when (and changes (harness-method-exists-p 'session/update))
+          (apply #'harness-call 'session/update (plist-get session :id) changes))))
     (harness-call 'task/get id)))
 
 (defun harness-tasks--open-session (id cwd worktree)
@@ -2313,27 +2338,45 @@ session gets the change too, so its next turn uses it; a pending task
 keeps it for when it starts.  FILTER: `:columns' (default
 `harness-tasks-bulk-columns', the running, pending and blocked tasks),
 `:ids' to name tasks outright, `:except' ids to leave alone, and `:cwd'
-to stay inside one project.  Review, done and archived tasks are
-history and are never touched.  Return the ids that changed, oldest
-first."
+to stay inside one project; without it the tasks of every project are
+selected.  Review, done and archived tasks are history and are never
+touched.  A task already set so is left alone (non-interactive counts
+as what the task would start with, see `harness-tasks--prefs-differ-p'),
+and a session already holding a value is not sent it again, so a
+session `session/set-all' changed first gets no second hint.  Return
+the ids that changed, oldest first."
+  (let (changed)
+    (dolist (task (harness-tasks--bulk-selected filter))
+      (when (harness-tasks--prefs-differ-p task settings)
+        (harness-tasks--apply-prefs task settings)
+        (push (plist-get task :id) changed)))
+    (nreverse changed)))
+
+(harness-defmethod task/session-ids (&optional filter)
+  "Return the ids of the sessions of the current tasks FILTER selects.
+FILTER is the one of `task/set-all'; by default the running, pending
+and blocked tasks of every project.  A task without a session yet adds
+nothing.  Bulk changes use it to reach these sessions whatever their
+status: a task's session can be inactive, after a restart or once
+closed, and still be the one the task goes on in."
+  (cl-loop for task in (harness-tasks--bulk-selected filter)
+           for session = (harness-tasks--session task)
+           when session collect (plist-get session :id)))
+
+(defun harness-tasks--bulk-selected (filter)
+  "Return the task records FILTER of `task/set-all' selects, oldest first."
   (let* ((columns (mapcar (lambda (c) (if (stringp c) (intern c) c))
                           (or (plist-get filter :columns) harness-tasks-bulk-columns)))
          (project (and (plist-get filter :cwd) (harness-tasks--project (plist-get filter :cwd))))
          (ids (plist-get filter :ids))
-         (except (plist-get filter :except))
-         changed)
-    (dolist (task (harness-tasks--sorted
-                   (lambda (task)
-                     (and (or (null project) (equal project (plist-get task :project)))
-                          (or (null ids) (member (plist-get task :id) ids))))))
-      (let ((id (plist-get task :id)))
-        (when (and (not (member id except))
-                   (not (harness-json-true-p (plist-get task :archived)))
-                   (memq (harness-tasks--column task) columns)
-                   (harness-tasks--prefs-differ-p task settings))
-          (harness-tasks--apply-prefs task settings)
-          (push id changed))))
-    (nreverse changed)))
+         (except (plist-get filter :except)))
+    (harness-tasks--sorted
+     (lambda (task)
+       (and (or (null project) (equal project (plist-get task :project)))
+            (or (null ids) (member (plist-get task :id) ids))
+            (not (member (plist-get task :id) except))
+            (not (harness-json-true-p (plist-get task :archived)))
+            (memq (harness-tasks--column task) columns))))))
 
 (harness-defmethod task/start (id)
   "Start pending task ID now, even when every slot of its project is taken.

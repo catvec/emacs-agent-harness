@@ -212,16 +212,18 @@ and pays for all of it again uncached once it lapsed."
   (harness-handoff--check (harness-call 'session/get session-id) model))
 
 (defun harness-handoff--selected (filter)
-  "Return the session plists FILTER selects, as `session/set-all' does."
-  (let ((except (plist-get filter :except)))
-    (cl-remove-if (lambda (s) (member (plist-get s :id) except))
-                  (harness-call 'session/list (harness-plist-remove filter :except)))))
+  "Return the session plists FILTER selects, as `session/set-all' does.
+That is `session/select', which with `:tasks' takes in the sessions of
+the current tasks, inactive ones too: a switch of every session must
+not leave them to a later `task/set-all', which would switch them
+without a handoff."
+  (harness-call 'session/select filter))
 
 (harness-defmethod handoff/check-all (model &optional filter)
   "Check switching every session FILTER selects to MODEL; see `handoff/check'.
-FILTER is the one of `session/set-all'.  Sessions that already use
-MODEL are left out, as `session/set-all' leaves them alone.  Return the
-checks, newest session first."
+FILTER is the one of `session/set-all' (see `session/select').
+Sessions that already use MODEL are left out, as `session/set-all'
+leaves them alone.  Return the checks, newest session first."
   (cl-loop for s in (harness-handoff--selected filter)
            unless (equal (plist-get s :model) model)
            collect (harness-handoff--check s model)))

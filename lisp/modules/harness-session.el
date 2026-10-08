@@ -952,23 +952,47 @@ changes nothing either."
     (harness-session--touch s)
     (harness-session-plist s)))
 
+(harness-defmethod session/select (&optional filter)
+  "Return the session plists FILTER selects, newest first.
+FILTER is `session/list''s filter (`:project' `:status' `:kind'
+`:parent-id' `:active'), plus `:except', a list of session ids to leave
+out, and `:tasks': non-nil adds the sessions of the current tasks of
+every project (`task/session-ids'), whatever the other keys say, so
+an inactive session a task goes on in is not missed.  Nil selects
+every session.  This is the selection of `session/set-all' and of the
+handoff's `handoff/check-all' and `handoff/switch-all'."
+  (let* ((except (plist-get filter :except))
+         (selected (harness-call 'session/list (harness-plist-remove filter :except :tasks))))
+    (when (and (plist-get filter :tasks) (harness-method-exists-p 'task/session-ids))
+      (let ((have (mapcar (lambda (s) (plist-get s :id)) selected))
+            (more nil))
+        (dolist (id (harness-call 'task/session-ids))
+          (when (and (not (member id have)) (gethash id harness-sessions))
+            (push id have)
+            (push (harness-session-plist (gethash id harness-sessions)) more)))
+        (when more
+          (setq selected (sort (append selected more)
+                               (lambda (a b) (> (plist-get a :updated) (plist-get b :updated))))))))
+    (cl-remove-if (lambda (s) (member (plist-get s :id) except)) selected)))
+
 (harness-defmethod session/set-all (settings &optional filter)
   "Apply SETTINGS to every session FILTER selects; return the ids changed.
 SETTINGS is a plist of keys `session/update' accepts, usually just
-`:model'.  FILTER is `session/list''s filter (`:project' `:status'
-`:kind' `:parent-id' `:active'), plus `:except', a list of session ids
-to leave alone; nil means every session.  A session whose value is
-already the one asked for is left alone, and one that changes is
-changed exactly as `session/update' would (same event, same hint).  The
-return value lists the ids that changed, newest first."
-  (let* ((except (plist-get filter :except))
-         (list-filter (harness-plist-remove filter :except))
-         (keys (cl-intersection (harness-plist-keys settings) harness-session--settings))
-         changed)
-    (dolist (s (harness-call 'session/list list-filter))
+`:model'.  FILTER is the one of `session/select': `session/list''s
+filter (`:project' `:status' `:kind' `:parent-id' `:active'), plus
+`:except', a list of session ids to leave alone, and `:tasks' to add
+the sessions of the current tasks; nil means every session.  A session
+whose value is already the one asked for is left alone (see
+`harness-setting-equal-p': a false non-interactive is off, a mode's
+name is the mode), and one that changes is changed exactly as
+`session/update' would (same event, same hint).  The return value
+lists the ids that changed, newest first."
+  (let ((keys (cl-intersection (harness-plist-keys settings) harness-session--settings))
+        changed)
+    (dolist (s (harness-call 'session/select filter))
       (let ((id (plist-get s :id)))
-        (when (and (not (member id except))
-                   (cl-some (lambda (k) (not (equal (plist-get s k) (plist-get settings k)))) keys))
+        (when (cl-some (lambda (k) (not (harness-setting-equal-p k (plist-get s k) (plist-get settings k))))
+                       keys)
           (apply #'harness-call 'session/update id settings)
           (push id changed))))
     (nreverse changed)))

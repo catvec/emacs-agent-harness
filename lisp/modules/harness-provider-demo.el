@@ -18,6 +18,9 @@
 ;;   "debug"       describes find-file in the user's Emacs, finds its
 ;;                 definition and traces find-file-noselect
 ;;   "status"      looks at the task board with task_list (a BTW over it)
+;;   "away"        asks to turn non-interactive mode on for every session
+;;                 and task (set_non_interactive), which you confirm
+;;   "back"        turns non-interactive mode off for all of them again
 ;;   "stream"      two model calls paced like a real model's: thinking
 ;;                 without text, then with it, text, a tool call's input,
 ;;                 each call's usage -- for the live token count
@@ -263,6 +266,20 @@ user wrote."
         (:type tool-call :id "demo-s1" :name "task_list" :input nil)
         (:type text :delta "Those are the tasks on the board, each with its column and state. Ask about one and I will read its session.")
         (:type usage :input 700 :output 45 :cost 0.0012 :context 900)
+        (:type done :stop-reason end-turn)))
+     ((string-match-p "\\baway\\b" text)
+      `((:type text :delta "I will turn non-interactive mode on for everything, so nothing waits for you.\n")
+        (:type tool-call :id ,(concat "demo-n" (harness-short-id)) :name "set_non_interactive"
+               :input (:enabled t :all t :reason "you said you are going away"))
+        (:type text :delta "That is settled either way; enjoy your time away.")
+        (:type usage :input 600 :output 40 :cost 0.001 :context 700)
+        (:type done :stop-reason end-turn)))
+     ((string-match-p "\\bback\\b" text)
+      `((:type text :delta "Welcome back: I will turn non-interactive mode off for everything.\n")
+        (:type tool-call :id ,(concat "demo-n" (harness-short-id)) :name "set_non_interactive"
+               :input (:enabled :false :all t))
+        (:type text :delta "Everything asks you again.")
+        (:type usage :input 600 :output 30 :cost 0.001 :context 700)
         (:type done :stop-reason end-turn)))
      ((string-match-p "\\bstream\\b" text)
       (harness-provider-demo--stream request))

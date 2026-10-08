@@ -525,8 +525,23 @@ call NEXT with the new value (or return a promise of it, in which case
 NEXT is called for it).  A function may stop the chain by calling NEXT
 with a value whose `:final' property is non-nil.  Return a promise of
 the final value."
-  (let ((chain (gethash name harness--filters))
-        (promise (harness-make-promise)))
+  (harness--run-async-chain name (gethash name harness--filters) value args))
+
+(defun harness-run-filter-async-between (name from to value &rest args)
+  "Run the functions of filter chain NAME whose priority is FROM to TO.
+They run as `harness-run-filter-async' runs the whole chain, from VALUE
+with ARGS, and may stop it the same way.  This is for taking a value
+through part of a chain again: the stages before FROM decided already,
+and those after TO are left out.  Return a promise of the final value."
+  (harness--run-async-chain name
+                            (cl-remove-if-not (lambda (f) (<= from (car f) to))
+                                              (gethash name harness--filters))
+                            value args))
+
+(defun harness--run-async-chain (name chain value args)
+  "Run CHAIN, entries (PRIORITY . FN) of filter NAME, from VALUE with ARGS.
+See `harness-run-filter-async'.  Return a promise of the final value."
+  (let ((promise (harness-make-promise)))
     (cl-labels ((step (value rest)
                   (if (or (null rest)
                           (and (listp value) (plist-get value :final)))
