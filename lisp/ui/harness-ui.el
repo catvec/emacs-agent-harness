@@ -1603,6 +1603,71 @@ warning colour." :group 'harness-ui)
   "Maximum pixel height of inline images in harness views."
   :type 'integer :group 'harness-ui)
 
+(defcustom harness-ui-image-colors '("black" . "white")
+  "Colours images are drawn in: (FOREGROUND . BACKGROUND), or nil.
+BACKGROUND shows through the transparent parts of an image, and an SVG
+draws in FOREGROUND what it gives no colour of its own, such as text
+without a fill: the way a web browser shows an image file, black on
+white, which is what most drawings and mockups are made for.  It holds
+for every image the harness shows: the diagrams of a question's
+options, images in the transcript, a task's report, the image popout
+and the thumbnails of attachments.  Nil draws them in the colours of
+the text around them, where a drawing made for a white page vanishes
+under a dark theme."
+  :type '(choice (const :tag "Black on white, as a browser shows them" ("black" . "white"))
+                 (const :tag "The colours of the text around them" nil)
+                 (cons :tag "Other colours" (color :tag "Foreground") (color :tag "Background")))
+  :group 'harness-ui)
+
+(defun harness-ui-image-color-props ()
+  "Return the `create-image' properties colouring an image, or nil.
+They follow `harness-ui-image-colors'."
+  (let ((colors harness-ui-image-colors))
+    (and (consp colors)
+         (append (and (stringp (car colors)) (list :foreground (car colors)))
+                 (and (stringp (cdr colors)) (list :background (cdr colors)))))))
+
+(defun harness-ui-image-too-large (source &optional frame)
+  "Return (WIDTH . HEIGHT) of the image SOURCE when Emacs will not draw it.
+SOURCE is a file name or (:data BASE64).  Emacs loads no image larger
+than `max-image-size' allows in FRAME, ten times the frame by default,
+however small it would show it: it draws an empty box instead, and
+complains on every redisplay.  Nil when the image is not that large,
+or when its size cannot be told from its header
+\(`harness-image-pixel-size'), as for an SVG."
+  (let* ((data (and (consp source) (plist-get source :data)))
+         (size (cond
+                ;; The header is at the start: a megabyte of it will do.
+                (data (let ((bytes (ignore-errors
+                                     (base64-decode-string (substring data 0 (min (length data) 1398100))))))
+                        (and bytes (harness-image-pixel-size nil bytes))))
+                ((stringp source) (harness-image-pixel-size source))))
+         (frame (or frame (selected-frame)))
+         (limit max-image-size))
+    (when (and size
+               (cond ((integerp limit) (or (> (car size) limit) (> (cdr size) limit)))
+                     ((floatp limit) (or (> (car size) (* limit (frame-pixel-width frame)))
+                                         (> (cdr size) (* limit (frame-pixel-height frame)))))))
+      size)))
+
+(defun harness-ui-image-too-large-label (label size)
+  "Return LABEL, an image's, saying it is SIZE pixels, too large to draw.
+SIZE is (WIDTH . HEIGHT), as `harness-ui-image-too-large' returns it."
+  (format "%s: %d\N{U+00D7}%d pixels, too large to draw here (`max-image-size')]"
+          (string-remove-suffix "]" label) (car size) (cdr size)))
+
+(declare-function harness-ui-popout-open-file "harness-ui-popout" (file))
+
+(defun harness-ui-open-image-outside (file)
+  "Return a command opening the image FILE outside Emacs, which cannot draw it.
+The desktop's opener shows it (`harness-ui-popout-open-file'); without
+the popout module, FILE is visited."
+  (lambda ()
+    (interactive)
+    (if (fboundp 'harness-ui-popout-open-file)
+        (harness-ui-popout-open-file file)
+      (find-file-other-window file))))
+
 (defun harness-ui-add-face (string face)
   "Return STRING with FACE added on top of its faces."
   (let ((s (copy-sequence string)))
@@ -1693,26 +1758,40 @@ position just after the region moves to the end of TEXT."
       (insert text))
     (harness-ui--fix-positions fix pt windows)))
 
-(defun harness-ui-image-string (source &optional mime)
+(defun harness-ui-image-string (source &optional mime &rest props)
   "Return a string displaying SOURCE (a path or a (:data BASE64) plist).
-MIME is a hint for the image type.  The image can be dragged into
-another application (`harness-ui-drag-props').  Without image support,
-and for a path on a remote host, which reading here would block on, a
-button opening the file is returned instead."
+MIME is a hint for the image type.  PROPS may hold `:max-width' and
+`:max-height', the most pixels the image takes; by default it takes at
+most 60% of the width of the window showing the buffer and half its
+height, and never more than `harness-ui-image-max-height', so a short
+window, such as a BTW's, still shows it whole with the lines around
+it.  It is drawn in `harness-ui-image-colors'.  The image can be
+dragged into another application (`harness-ui-drag-props').  Without
+image support, and for a path on a remote host, which reading here
+would block on, a button opening the file is returned instead.  An
+image too large for Emacs to draw (`harness-ui-image-too-large') is a
+line saying so, a button opening it outside Emacs."
   (let* ((path (and (stringp source) source))
          (data (and (consp source) (plist-get source :data)))
          (label (if path (format "[image %s]" (abbreviate-file-name path)) "[image]"))
          (local (and path (not (file-remote-p path))))
          (open (and path (lambda () (interactive) (find-file-other-window path))))
-         (img (and (display-images-p) (or data (and local (file-readable-p path)))
-                   (let* ((w (car (get-buffer-window-list nil nil t)))
-                          (width (floor (* 0.6 (if w (window-body-width w t) 800)))))
+         ;; The window shows the image, so its frame is the one that
+         ;; must draw images, not whichever frame happens to be selected.
+         (w (car (get-buffer-window-list nil nil t)))
+         (frame (and w (window-frame w)))
+         (drawable (and (display-images-p frame) (or data (and local (file-readable-p path)))))
+         (too-large (and drawable (harness-ui-image-too-large source frame)))
+         (img (and drawable (not too-large)
+                   (let ((width (or (plist-get props :max-width)
+                                    (floor (* 0.6 (if w (window-body-width w t) 800)))))
+                         (height (or (plist-get props :max-height)
+                                     (min harness-ui-image-max-height
+                                          (if w (/ (window-body-height w t) 2) harness-ui-image-max-height)))))
                      (condition-case nil
-                         (if data
-                             (create-image (base64-decode-string data) nil t
-                                           :max-width width :max-height harness-ui-image-max-height)
-                           (create-image path nil nil
-                                         :max-width width :max-height harness-ui-image-max-height))
+                         (apply #'create-image (if data (base64-decode-string data) path) nil (and data t)
+                                :max-width (max 1 width) :max-height (max 1 height)
+                                (harness-ui-image-color-props))
                        (error nil))))))
     (cond
      (img (concat (apply #'propertize label 'display img
@@ -1722,6 +1801,12 @@ button opening the file is returned instead."
                                 'keymap (and open (harness-ui-action-map open)))
                           path))
                   "\n"))
+     ((and too-large path)
+      (concat (harness-ui-action-button (harness-ui-image-too-large-label label too-large)
+                                        (harness-ui-open-image-outside path)
+                                        :help (format "Open %s outside Emacs" path))
+              "\n"))
+     (too-large (concat (propertize (harness-ui-image-too-large-label label too-large) 'face 'harness-dim-face) "\n"))
      (open (concat (harness-ui-action-button label open :help (format "Open %s" path)) "\n"))
      (t (concat (propertize label 'face 'harness-dim-face) "\n")))))
 

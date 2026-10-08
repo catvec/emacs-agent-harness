@@ -3399,6 +3399,13 @@ Its `options` are the answers' labels; `diagrams`, present when the
 options have them, holds one per option, `{type: "ascii", text}` or
 `{type: "image", path, mime}`: a path on the harness's machine, never
 the image data, since the pending question is saved with the session.
+A client that cannot read the path, being on another machine (or not
+wanting to block on a remote host), asks for the image:
+`_harness/question/image {sessionId, pid, index}` → `{mime, data}`
+(`question/image SESSION-ID PID INDEX`: the file's bytes in base64,
+read by the harness, for a question still pending; an error when there
+is none, or the file is gone or larger than
+`harness-tools-agent-image-max-bytes`, 16 MiB).
 
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `fallback/`, `worktree/`, `merge/`,
@@ -3741,7 +3748,35 @@ at a time, in an area under the options; its tabs, `n` and `p` on the
 panel, `C-c C-f` and `C-c C-b`, and point moving onto an option switch
 it (all of it in `harness-ui-pending`).  Switching redraws the options
 and that area alone, in place, so point, the windows and the compose box
-stay put.  A permission panel whose one line of input leaves something
+stay put.  An image diagram is drawn in `harness-ui-image-colors` (black
+on white, as a browser shows an image file; the transcript's images,
+a report's, the image popout and attachment thumbnails too, through
+`harness-ui-image-color-props`) and sized to show whole: in a chat at
+most 60% of the window's width and half its height, never over
+`harness-ui-image-max-height`; in a popout, which grows to
+`harness-ui-pending-popout-max-height` for a question with images, the
+room the popout has left beside the panel's text and the box.  Emacs
+loads no image larger than `max-image-size` (ten times the frame by
+default), however small it would show it, and would draw an empty box
+while complaining on every redisplay: an image that large, its size
+read from its header (`harness-image-pixel-size`: PNG, GIF, JPEG, WebP,
+BMP), is a line saying so instead, a button opening it outside Emacs
+(`harness-ui-image-too-large`, for the transcript's images, a report's
+and the image popout too), and ask_user refuses one over
+`harness-tools-agent-image-max-side` (8000) pixels on a side, telling
+the agent to crop it.  The UI reads the file itself when it shares the
+harness's files (the harness in this Emacs, or the process it
+started), and otherwise asks for it with `question/image`, showing
+"loading" until it comes: a harness at a host and port, and a remote
+file of a harness process.  A remote file of an in-Emacs harness is a
+button, as reading it would block.  The images fetched are kept per
+(session, request, option) and forgotten with the request.  Asking
+never signals into the panel being drawn: a connection that cannot be
+made is the error the panel shows, a connection let go of for another
+(`harness-connect-remote`) has the next drawing ask that one, and an
+image the harness could not give is asked for again once the UI
+connects again (`harness-ui-pending--retry-images`, on
+`harness-ui-connected-hook`).  A permission panel whose one line of input leaves something
 out (a value past its width, a further line of one, a line too long)
 ends that line in `[Show all]`, `[Show all N lines]` when values have
 lines it hides, and binds TAB on the panel
