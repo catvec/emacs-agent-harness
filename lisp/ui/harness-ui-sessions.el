@@ -10,6 +10,10 @@
 ;; toggles all projects; `b' shows only the sessions waiting for you;
 ;; `/' filters fuzzily; column headers sort.
 ;;
+;; m moves the session at point to another working directory, and the
+;; list then shows it under that directory's project
+;; (`harness-move-session').
+;;
 ;; RET opens the session at point in its project: the project becomes
 ;; current first, as switching project does (Doom Emacs's workspaces),
 ;; and a session showing there already gets its window selected
@@ -312,6 +316,7 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
     (define-key map (kbd "f") #'harness-ui-sessions-fork)
     (define-key map (kbd "d") #'harness-ui-sessions-delete)
     (define-key map (kbd "r") #'harness-ui-sessions-rename)
+    (define-key map (kbd "m") #'harness-ui-sessions-move)
     (define-key map (kbd "k") #'harness-ui-sessions-cancel)
     (define-key map (kbd "x") #'harness-ui-sessions-deactivate)
     (define-key map (kbd "T") #'harness-ui-sessions-make-task)
@@ -329,6 +334,7 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
 (define-key harness-ui-sessions-mode-map (kbd "q") #'harness-ui-quit-view)
 (define-key harness-ui-sessions-mode-map (kbd "C-c C-z") #'harness-ui-bury)
 (define-key harness-ui-sessions-mode-map (kbd "b") #'harness-ui-sessions-toggle-blocked)
+(define-key harness-ui-sessions-mode-map (kbd "m") #'harness-ui-sessions-move)
 
 (define-derived-mode harness-ui-sessions-mode tabulated-list-mode "Sessions"
   "Major mode listing harness sessions."
@@ -364,6 +370,7 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
         (". o" "Open in position" harness-ui-sessions-open-other)
         (". f" "Fork" harness-ui-sessions-fork)
         (". r" "Rename" harness-ui-sessions-rename)
+        (". m" "Move to another directory" harness-ui-sessions-move)
         (". k" "Cancel turn" harness-ui-sessions-cancel)
         (". x" "Deactivate" harness-ui-sessions-deactivate)
         (". SPC" "View what it waits on" harness-ui-sessions-requests)
@@ -511,10 +518,11 @@ POSITION, as `harness-sessions' has it."
 (defun harness-ui-sessions-open (&optional position)
   "Open the session at point, in its project.
 The session's project becomes the current one first, as switching
-project does (in Doom Emacs, its workspace; see
+project does (in Doom Emacs, its workspace, as you left it; see
 `harness-ui-switch-project-function').  A session shown there already
 gets its window selected; any other opens in POSITION, by default
-replacing the list, or after a switch where sessions open."
+replacing the list, or after a switch where sessions open -- in the
+window of a workspace that shows nothing yet, a new one."
   (interactive (list (and current-prefix-arg (harness-ui-read-position))))
   (harness-ui-visit-session (harness-ui-sessions--id) position))
 
@@ -543,6 +551,15 @@ replacing the list, or after a switch where sessions open."
   "Rename the session at point to NAME."
   (interactive (list (read-string "Name: " (plist-get (harness-ui-session (harness-ui-sessions--id)) :name))))
   (harness-rename-session name (harness-ui-sessions--id)))
+
+(defun harness-ui-sessions-move (directory &optional keep-old)
+  "Move the session at point to the working directory DIRECTORY.
+It is then listed under DIRECTORY's project.  With a prefix argument
+KEEP-OLD its old working directory stays allowed to it.  See
+`harness-move-session'."
+  (interactive (list (harness-ui-read-move-directory (harness-ui-session (harness-ui-sessions--id)))
+                     current-prefix-arg))
+  (harness-move-session directory (harness-ui-sessions--id) keep-old))
 
 (defun harness-ui-sessions-cancel ()
   "Cancel the running turn of the session at point."

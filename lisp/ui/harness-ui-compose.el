@@ -1602,11 +1602,12 @@ another application (`harness-ui-drag-source')."
 (defun harness-compose--image (file height &optional width)
   "Return a string showing the image FILE, or nil.
 It is at most HEIGHT pixels high and WIDTH wide, three times HEIGHT by
-default."
+default, and drawn in `harness-ui-image-colors'."
   (when (and file (file-readable-p file) (ignore-errors (image-supported-file-p file)))
-    (when-let* ((image (ignore-errors (create-image file nil nil :max-height height
-                                                    :max-width (or width (* 3 height))
-                                                    :ascent 'center))))
+    (when-let* ((image (ignore-errors (apply #'create-image file nil nil :max-height height
+                                             :max-width (or width (* 3 height))
+                                             :ascent 'center
+                                             (harness-ui-image-color-props)))))
       (propertize " " 'display image))))
 
 (defun harness-compose--thumbnail (att &optional max-width)

@@ -13,6 +13,8 @@
 ;;                 in a worktree it also writes and commits notes/ID.md
 ;;   "ask"         calls ask_user
 ;;   "diagram"     calls ask_user with an ASCII diagram for each option
+;;   "images"      calls ask_user with an image for each option: SVG
+;;                 mockups written to the session's temporary directory
 ;;   "debug"       describes find-file in the user's Emacs, finds its
 ;;                 definition and traces find-file-noselect
 ;;   "status"      looks at the task board with task_list (a BTW over it)
@@ -75,6 +77,74 @@ answers) gives a function.")
 |               [ Save ]               |
 +--------------------------------------+"))
   "Options of the demo `diagram' question: (LABEL . ASCII-DIAGRAM).")
+
+(defconst harness-provider-demo--layout-images
+  '((left . "layout-sidebar-left.svg") (right . "layout-sidebar-right.svg") (top . "layout-tabs.svg"))
+  "The mockups of the demo `images' question: (LAYOUT . FILE-NAME).
+One per option of `harness-provider-demo--layouts', in the same order.")
+
+(defun harness-provider-demo--layout-svg (layout)
+  "Return an SVG mockup of the settings page laid out as LAYOUT.
+LAYOUT says where its sections go: `left' or `right' in a sidebar,
+`top' in tabs.  It is drawn as the ask_user tool tells a model to draw
+one, 600x400 with large text and a viewBox, and as models write them:
+no background of its own, and text in the default colour."
+  (let* ((nav-x (if (eq layout 'right) 440 0))
+         ;; The form's top left corner.
+         (fx (pcase layout ('left 210) ('right 40) (_ 130)))
+         (fy (if (eq layout 'top) 80 40))
+         (field (lambda (y)
+                  (format "<rect x=\"%d\" y=\"%d\" width=\"250\" height=\"40\" rx=\"4\" fill=\"#ffffff\" stroke=\"#8a8f98\" stroke-width=\"2\"/>\n"
+                          (+ fx 90) (+ fy y))))
+         (nav (if (eq layout 'top)
+                  (concat
+                   "<rect x=\"0\" y=\"0\" width=\"600\" height=\"60\" fill=\"#eef1f6\"/>\n"
+                   "<path d=\"M0 60 H600\" stroke=\"#8a8f98\" stroke-width=\"2\"/>\n"
+                   "<rect x=\"16\" y=\"12\" width=\"150\" height=\"50\" rx=\"6\" fill=\"#ffffff\" stroke=\"#8a8f98\" stroke-width=\"2\"/>\n"
+                   "<rect x=\"17\" y=\"55\" width=\"148\" height=\"10\" fill=\"#ffffff\"/>\n"
+                   "<text x=\"91\" y=\"45\" font-size=\"22\" font-weight=\"bold\" text-anchor=\"middle\">General</text>\n"
+                   "<text x=\"241\" y=\"45\" font-size=\"22\" text-anchor=\"middle\">Account</text>\n"
+                   "<text x=\"391\" y=\"45\" font-size=\"22\" text-anchor=\"middle\">Privacy</text>\n")
+                (concat
+                 (format "<rect x=\"%d\" y=\"0\" width=\"160\" height=\"400\" fill=\"#eef1f6\"/>\n" nav-x)
+                 (format "<path d=\"M%d 0 V400\" stroke=\"#8a8f98\" stroke-width=\"2\"/>\n"
+                         (if (eq layout 'right) nav-x 160))
+                 (format "<text x=\"%d\" y=\"44\" font-size=\"24\" font-weight=\"bold\">Settings</text>\n" (+ nav-x 20))
+                 (format "<rect x=\"%d\" y=\"70\" width=\"140\" height=\"40\" rx=\"6\" fill=\"#d6e2ff\"/>\n" (+ nav-x 10))
+                 (format "<text x=\"%d\" y=\"98\" font-size=\"22\">General</text>\n" (+ nav-x 24))
+                 (format "<text x=\"%d\" y=\"148\" font-size=\"22\">Account</text>\n" (+ nav-x 24))
+                 (format "<text x=\"%d\" y=\"198\" font-size=\"22\">Privacy</text>\n" (+ nav-x 24))))))
+    (concat
+     "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"600\" height=\"400\" viewBox=\"0 0 600 400\" font-family=\"sans-serif\">\n"
+     nav
+     (format "<text x=\"%d\" y=\"%d\" font-size=\"28\" font-weight=\"bold\">General</text>\n" fx (+ fy 20))
+     (format "<text x=\"%d\" y=\"%d\" font-size=\"22\">Name</text>\n" fx (+ fy 88))
+     (funcall field 60)
+     (format "<text x=\"%d\" y=\"%d\" font-size=\"22\">Theme</text>\n" fx (+ fy 148))
+     (funcall field 120)
+     (format "<text x=\"%d\" y=\"%d\" font-size=\"20\">Dark</text>\n" (+ fx 104) (+ fy 147))
+     (format "<path d=\"M%d %d l10 10 l10 -10\" fill=\"none\" stroke=\"#555555\" stroke-width=\"2\"/>\n"
+             (+ fx 310) (+ fy 136))
+     (format "<rect x=\"%d\" y=\"%d\" width=\"120\" height=\"44\" rx=\"6\" fill=\"#2f6fdf\"/>\n" (+ fx 220) (+ fy 220))
+     (format "<text x=\"%d\" y=\"%d\" font-size=\"22\" fill=\"#ffffff\" text-anchor=\"middle\">Save</text>\n"
+             (+ fx 280) (+ fy 249))
+     "<rect x=\"1\" y=\"1\" width=\"598\" height=\"398\" fill=\"none\" stroke=\"#8a8f98\" stroke-width=\"2\"/>\n"
+     "</svg>\n")))
+
+(defun harness-provider-demo--layout-files (request)
+  "Write the mockups of the demo `images' question; return their paths.
+They go to the temporary directory of REQUEST's session, where the
+ask_user tool tells a model to put the images it makes, or to a new
+temporary directory when the session has none."
+  (let* ((sid (plist-get (plist-get request :session) :id))
+         (dir (or (and sid (harness-method-exists-p 'session/tmp-dir)
+                       (ignore-errors (harness-call 'session/tmp-dir sid)))
+                  (make-temp-file "harness-demo-" t))))
+    (mapcar (lambda (image)
+              (let ((path (expand-file-name (cdr image) dir)))
+                (write-region (harness-provider-demo--layout-svg (car image)) nil path nil 'silent)
+                path))
+            harness-provider-demo--layout-images)))
 
 (defun harness-provider-demo--last-user-text (request)
   "Return the text of the last text block of REQUEST's user messages.
@@ -160,6 +230,16 @@ user wrote."
         (:type text :delta "Open a file with `C-x C-f`: each call is recorded in `*trace-output*`, with the functions that led to it.")
         (:type usage :input 1100 :output 90 :cost 0.0021 :context 1400)
         (:type done :stop-reason end-turn)))
+     ((string-match-p "\\bimages?\\b" text)
+      `((:type text :delta "I drew the layouts that would work; have a look at each.\n")
+        (:type tool-call :id "demo-i" :name "ask_user"
+               :input (:question "Which layout should the settings page use?"
+                       :options ,(cl-mapcar (lambda (layout path) (list :label (car layout) :image path))
+                                            harness-provider-demo--layouts
+                                            (harness-provider-demo--layout-files request))))
+        (:type text :delta "Thanks, noted.")
+        (:type usage :input 900 :output 1400 :cost 0.0037 :context 2300)
+        (:type done :stop-reason end-turn)))
      ((string-match-p "\\bdiagrams?\\b" text)
       `((:type text :delta "A few layouts would work; have a look at each.\n")
         (:type tool-call :id "demo-d" :name "ask_user"
@@ -182,7 +262,7 @@ user wrote."
         (:type usage :input 700 :output 45 :cost 0.0012 :context 900)
         (:type done :stop-reason end-turn)))
      (t
-      `((:type text :delta ,(format "You said: *%s*\n\nThis is the demo provider; try `tour`, `tools`, `ask`, `diagram` or `debug`." text))
+      `((:type text :delta ,(format "You said: *%s*\n\nThis is the demo provider; try `tour`, `tools`, `ask`, `diagram`, `images` or `debug`." text))
         (:type usage :input 400 :output 30 :cost 0.0008 :context 450)
         (:type done :stop-reason end-turn))))))
 

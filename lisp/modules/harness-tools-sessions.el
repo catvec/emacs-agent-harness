@@ -17,6 +17,9 @@
 ;;   wait for the reply.
 ;; - `session_control' cancels a turn, resumes, closes or renames a
 ;;   session, or answers a question it asked with ask_user.
+;; - `session_move' moves a session, this one by default, to another
+;;   working directory and that directory's project.  The user confirms
+;;   every move, in every permission mode (see session_move below).
 ;; - `session_wait' waits until sessions stop running (or become idle,
 ;;   blocked, start running, or change at all).
 ;;
@@ -29,7 +32,8 @@
 ;; permission mode are left to the user, and tasks are submitted with
 ;; the task defaults.  Reading and waiting are `read' tools; anything
 ;; that changes another session is `meta' and goes through the
-;; permission chain like any other action.
+;; permission chain like any other action.  A move changes what a
+;; session may reach, so only the user decides it.
 ;;
 ;; Waits never block: each is an entry in `harness-tools-sessions--waiters'
 ;; re-checked by one subscriber whenever a session or task changes, and
@@ -585,6 +589,176 @@ A line of STDOUT holds a whole node, which can be megabytes long:
                                                 (harness-tools-sessions--short (plist-get input :session_id)))))
   :handler #'harness-tools-sessions--control)
 
+;;;; session_move
+;;
+;; A session started in one directory that works on another moves
+;; there, and the session list files it under the other project.  The
+;; user confirms every move, in every permission mode: it changes the
+;; directories the session may reach.  The call's own stage in the
+;; permission chain asks (`harness-tools-sessions--move-gate'), ahead of
+;; the jail, the mode, the standing rules and the judge, and hands the
+;; handler what the user confirmed; the handler moves nothing else.
+
+(declare-function harness-perms-confirm "harness-perms" (request next &rest prompt))
+
+(defvar harness-tools-sessions--confirmed (make-symbol "confirmed")
+  "Marks the input of a session_move call the user confirmed.
+Only the call's permission stage puts it there, and no input a model
+sends can hold it: the handler never moves a session unasked.  A
+`defvar', so a reload keeps it and a prompt answered after one still
+moves the session.")
+
+(defun harness-tools-sessions--move-target (input self)
+  "Return the id of the session a session_move call with INPUT moves.
+That is INPUT's session_id, by default SELF, the calling session."
+  (let ((ref (plist-get input :session_id)))
+    (if (or (null ref) (harness-string-blank-p (format "%s" ref)))
+        self
+      (harness-tools-sessions--resolve ref))))
+
+(defun harness-tools-sessions--move-prompt (check self keep why)
+  "Return (TITLE . REASON), the prompt that has the user confirm CHECK.
+CHECK is what `session/move-check' says of the move; SELF is the
+calling session's id, KEEP whether the old directory stays allowed and
+WHY the reason the agent gave."
+  (let* ((selfp (equal (plist-get check :id) self))
+         (who (if selfp "this session"
+                (format "%s" (or (plist-get check :name)
+                                 (harness-tools-sessions--short (plist-get check :id))))))
+         (old (abbreviate-file-name (plist-get check :old-cwd)))
+         (new (abbreviate-file-name (plist-get check :cwd)))
+         (project (plist-get check :project))
+         (moves (format "%s from %s to %s%s"
+                        (if selfp "This session moves" (format "Session %s moves" who))
+                        old new
+                        (if (and project (not (equal (file-name-as-directory project) (plist-get check :cwd))))
+                            (format " (project %s)" (abbreviate-file-name project))
+                          ""))))
+    ;; The title is the tool's label and the call's subject, as the call
+    ;; shows them: the directory, after the session when it is another.
+    (cons (if selfp (format "Move session: %s" new) (format "Move session: %s → %s" who new))
+          (concat
+           (cond (selfp (concat "When this turn ends, " (downcase (substring moves 0 1)) (substring moves 1)
+                                (format "; %s is allowed for the rest of the turn" new)))
+                 ((plist-get check :defer) (concat moves " when the turn it is running ends"))
+                 (t moves))
+           (if keep (format ", and keeps access to %s." old) (format "; access to %s is not kept." old))
+           " Its next turn starts a new provider conversation there, which gets the transcript."
+           (if (and (stringp why) (not (harness-string-blank-p why)))
+               (format " The agent says: %s" (string-trim why))
+             "")))))
+
+(defun harness-tools-sessions--move-gate (decision next request)
+  "Have the user confirm REQUEST when it calls session_move, then go on with NEXT.
+Other requests go on with DECISION as it is.
+A `permission/decide' stage, at 6, ahead of the jail: a move changes
+the directories a session may reach, so the user decides each one,
+whatever the permission mode, the standing rules or the judge would
+say, and the decision handed to NEXT is final.  The handler gets the
+move the user confirmed (`harness-tools-sessions--confirmed'), the
+directory absolute.  A move that cannot be made asks nobody: its
+handler says why.  Moving a session back to where it works only
+cancels the move it waits to make, and asks nobody either."
+  (if (not (equal (plist-get request :tool) "session_move"))
+      (funcall next decision)
+    (let* ((input (plist-get request :input))
+           (self (plist-get (plist-get request :session) :id))
+           (keep (and (harness-json-true-p (plist-get input :keep_old_directory)) t))
+           (check (condition-case err
+                      (harness-call 'session/move-check (harness-tools-sessions--move-target input self)
+                                    (format "%s" (or (plist-get input :directory) "")))
+                    (error (harness-tools-reason err))))
+           (confirmed (and (consp check)
+                           (list :session_id (plist-get check :id) :directory (plist-get check :cwd)
+                                 :keep_old_directory keep :confirmed harness-tools-sessions--confirmed))))
+      (cond
+       ((stringp check)
+        (funcall next (list :behavior 'allow :final t :input (list :refused check)
+                            :reason "the session cannot move; there is nothing to confirm")))
+       ((plist-get check :cancel)
+        (funcall next (list :behavior 'allow :final t :input confirmed
+                            :reason "the session stays where it works; only the move it waits to make goes")))
+       ((not (fboundp 'harness-perms-confirm))
+        (funcall next (list :behavior 'deny :final t
+                            :reason "moving a session needs the user's confirmation, and nothing can ask for it")))
+       (t
+        (pcase-let ((`(,title . ,reason) (harness-tools-sessions--move-prompt check self keep (plist-get input :reason))))
+          (harness-perms-confirm (plist-put (copy-sequence request) :input (harness-plist-remove input :reason))
+                                 next
+                                 :title title :reason reason
+                                 :paths (list (plist-get check :cwd))
+                                 :input confirmed
+                                 :hint "Do not ask again unless the user wants it; work where the session is.")))))))
+
+(defun harness-tools-sessions--move (input ctx)
+  "Handler of session_move: make the move the user confirmed.
+INPUT comes from the call's permission stage, not from the model; CTX
+is the tool context, which names the calling session.  A move that
+can no longer be made, things having changed while the user was asked,
+fails with the harness's reason."
+  (cond
+   ((plist-get input :refused) (harness-tool-error (plist-get input :refused)))
+   ((not (eq (plist-get input :confirmed) harness-tools-sessions--confirmed))
+    (harness-tool-error "session_move needs the user's confirmation, and none was asked for"))
+   (t
+    (condition-case err
+        (harness-tools-sessions--make-move input ctx)
+      (harness-error (harness-tool-error (harness-tools-reason err)))))))
+
+(defun harness-tools-sessions--make-move (input ctx)
+  "Make the move INPUT names, which the user confirmed, and report it.
+CTX is the tool context, which names the calling session."
+  (let* ((sid (plist-get input :session_id))
+         (self (plist-get ctx :session-id))
+         (selfp (equal sid self))
+         (before (harness-call 'session/get sid))
+         (old (plist-get before :cwd))
+         (result (harness-call 'session/move sid (plist-get input :directory)
+                               :keep-old-dir (plist-get input :keep_old_directory)))
+         (move (plist-get result :move))
+         (new (abbreviate-file-name (or (plist-get move :cwd) (plist-get result :cwd))))
+         (who (if selfp "This session" (format "Session %s" (or (plist-get result :name) (harness-tools-sessions--short sid)))))
+         (project (abbreviate-file-name (or (plist-get move :project) (plist-get result :project) ""))))
+    (cond
+     ((and (null move) (equal (plist-get result :cwd) old))
+      (harness-tool-ok (format "%s stays in %s; the move it was waiting to make is cancelled."
+                               who (abbreviate-file-name old))))
+     ((and move selfp)
+      (when (harness-method-exists-p 'permission/allow-dir)
+        (harness-call 'permission/allow-dir sid (plist-get move :cwd) 'turn))
+      (harness-tool-ok
+       (format "This session moves to %s (project %s) when this turn ends. Until then its working directory stays %s, so give paths in %s as absolute paths; it is allowed for the rest of this turn.%s The next turn starts a new provider conversation there, which gets the transcript."
+               new project (abbreviate-file-name old) new
+               (if (plist-get move :keep-old-dir) (format " %s stays allowed after the move." (abbreviate-file-name old)) ""))))
+     (move
+      (harness-tool-ok (format "%s is running a turn; it moves to %s (project %s) when that turn ends." who new project)))
+     (t
+      (harness-tool-ok
+       (format "%s moved from %s to %s and is listed under project %s.%s Its next turn starts a new provider conversation there, which gets the transcript."
+               who (abbreviate-file-name old) new project
+               (if (plist-get input :keep_old_directory)
+                   (format " %s stays allowed." (abbreviate-file-name old))
+                 "")))))))
+
+(harness-define-tool "session_move"
+  :label "Move session"
+  :description "Move a session to another working directory, and with it to that directory's project: for a session started in one place that works on another. The user is always asked to confirm, in every permission mode, since the session then reaches the new directory instead of the old one (keep_old_directory keeps the old one allowed too). session_id defaults to this session. This session, or another one running a turn, moves when its turn ends; until then its working directory stays the old one, and the new one is allowed for the rest of the turn. A moved session's next turn starts a new provider conversation in the new directory, which gets the transcript. Sessions in worktrees, task sessions and sessions with merges queued cannot move; a non-interactive session cannot ask. Moving a session back to where it works cancels a move it waits to make."
+  :schema '(:type "object"
+            :properties (:directory (:type "string" :description "The new working directory, absolute or relative to the session's current one.")
+                         :session_id (:type "string" :description "Session id, unique id prefix or unique name; default: this session.")
+                         :keep_old_directory (:type "boolean" :description "Keep the old working directory allowed (default false).")
+                         :reason (:type "string" :description "Why the session should move; shown to the user."))
+            :required ("directory"))
+  :kind 'meta
+  :subject (lambda (input)
+             (string-trim (format "%s%s"
+                                  (let ((ref (plist-get input :session_id)))
+                                    (if (and (stringp ref) (not (harness-string-blank-p ref)))
+                                        (concat (harness-tools-sessions--short ref) " → ")
+                                      ""))
+                                  (or (plist-get input :directory) ""))))
+  :handler #'harness-tools-sessions--move)
+
 ;;;; Waiting
 
 (defvar harness-tools-sessions--waiters (make-hash-table :test 'equal)
@@ -808,7 +982,7 @@ the line says \"(this task)\"."
 
 (harness-define-tool "task_submit"
   :label "Submit task"
-  :description "Add a task to the task board. The task runs in its own session (in a git project, in a fresh worktree whose branch is merged back through the merge queue) with the task defaults for permissions; it starts when its project has a free slot (the limit on running tasks applies to each project separately). By default finished work waits in review until the user verifies it (task_control verify) or sends it back (task_control reject). With refine=true it goes to the backlog instead: an agent briefly writes it up, read-only, and it waits in pending until someone starts it (task_control start), which is how to record work for later. With main_tree=true it works in the project's main checkout instead of a worktree: no branch, nothing merges, and its changes take effect in the checkout itself -- for work that has to touch it, such as cleaning up uncommitted changes. Returns the task id; follow it with task_wait or task_list."
+  :description "Add a task to the task board. The task runs in its own session (in a git project, in a fresh worktree whose branch is merged back through the merge queue) with the task defaults for permissions; it starts when its project has a free slot (the limit on running tasks applies to each project separately, and counts only the tasks' own top-level sessions at work: sub-agents, forks and the merge queue never take a slot). By default finished work waits in review until the user verifies it (task_control verify) or sends it back (task_control reject). With refine=true it goes to the backlog instead: an agent briefly writes it up, read-only, and it waits in pending until someone starts it (task_control start), which is how to record work for later. With main_tree=true it works in the project's main checkout instead of a worktree: no branch, nothing merges, and its changes take effect in the checkout itself -- for work that has to touch it, such as cleaning up uncommitted changes. Returns the task id; follow it with task_wait or task_list."
   :schema '(:type "object"
             :properties (:prompt (:type "string" :description "What the task should do; self-contained, the task does not see this conversation.")
                          :cwd (:type "string" :description "Project directory (default: this session's).")
@@ -821,8 +995,13 @@ the line says \"(this task)\"."
   :subject (lambda (input) (harness-first-line (plist-get input :prompt) 60))
   :handler #'harness-tools-sessions--task-submit)
 
-(defun harness-tools-sessions--task-control (input _ctx)
-  "Handler of task_control."
+(defun harness-tools-sessions--task-control (input ctx)
+  "Handler of task_control.
+A message to a task's session is the calling session's, as
+session_send's is: it opens with the header naming that session and
+goes with it as the sender, so a task waiting for review takes it for
+no review of the user's (`harness-tasks--on-message').  Only reject
+sends work back."
   (harness-tools-sessions--tasks-p)
   (let* ((task (harness-tools-sessions--task (plist-get input :task_id)))
          (id (plist-get task :id))
@@ -834,7 +1013,8 @@ the line says \"(this task)\"."
          (when (harness-string-blank-p text) (signal 'harness-error (list "message needs a message")))
          (if (eq (plist-get task :state) 'pending)
              (harness-call 'task/update id (concat (plist-get task :prompt) "\n\n" text) (plist-get task :attachments))
-           (harness-call 'task/prompt id text))))
+           (harness-call 'task/prompt id (concat (harness-tools-sessions--from ctx) text) nil
+                         (list :from (harness-tools-sessions--sender ctx))))))
       ("cancel" (harness-call 'task/cancel id))
       ("merge" (harness-call 'task/merge id))
       ("verify" (harness-call 'task/verify id))
@@ -855,7 +1035,7 @@ the line says \"(this task)\"."
 
 (harness-define-tool "task_control"
   :label "Control task"
-  :description "Act on a task. start runs a pending task now; message sends a follow-up to its session (or, while pending, appends to its prompt; a message to a task in review sends it back with that feedback, as reject does); cancel drops a pending task or stops a working one's turn; merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); reject sends a task in review back to its session with the feedback in message, to work on it again; complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept)."
+  :description "Act on a task. start runs a pending task now; message sends a follow-up to its session, marked as coming from this session (while pending, it appends to the prompt instead; a task in review gets it as a message, not as a review -- only reject sends work back -- and waits for review again once that turn ends); cancel drops a pending task or stops a working one's turn; merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); reject sends a task in review back to its session with the feedback in message, to work on it again; complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept)."
   :schema '(:type "object"
             :properties (:task_id (:type "string" :description "Task id or unique prefix.")
                          :action (:type "string" :enum ("start" "message" "cancel" "merge" "verify" "reject" "complete" "archive" "restore" "delete"))
@@ -937,16 +1117,19 @@ the line says \"(this task)\"."
 ;;;; Registration
 
 (defun harness-tools-sessions--init ()
-  "Subscribe the waits to session and task events (idempotent)."
+  "Subscribe the waits to session and task events (idempotent).
+Install the stage that has the user confirm session_move, too: the tool
+is registered at load time, and must never be offered without it."
   (dolist (ev '(session/status session/changed session/deleted session/pending-changed
                 agent/turn-started task/changed task/deleted))
     (harness-on ev #'harness-tools-sessions--poke 90))
-  (harness-on 'agent/turn-ended #'harness-tools-sessions--on-turn-ended 90))
+  (harness-on 'agent/turn-ended #'harness-tools-sessions--on-turn-ended 90)
+  (harness-add-filter 'permission/decide #'harness-tools-sessions--move-gate 6))
 
 (harness-tools-sessions--init)
 
 (harness-define-module 'tools-sessions
-  :doc "Tools to list, search, read, message, control and wait on sessions and tasks."
+  :doc "Tools to list, search, read, message, control, move and wait on sessions and tasks."
   :requires '(tools session agent)
   :init #'harness-tools-sessions--init)
 
