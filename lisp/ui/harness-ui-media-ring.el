@@ -89,7 +89,9 @@ is what pasting them should give."
 
 (defun harness-media-ring--entry (file &optional mime sha)
   "Return the ring entry, an attachment, for the capture FILE.
-Its name leaves the SHA-1 out: clip-20261002-163000.png."
+Its name leaves the SHA-1 out: clip-20261002-163000.png.
+MIME is its MIME type and SHA the start of its SHA-1; without them,
+they come from the extension and the name of FILE."
   (let ((sha (or sha (harness-media-ring--sha-of-name file)))
         (name (file-name-nondirectory file)))
     (list :path file :size (or (harness-file-size file) 0)

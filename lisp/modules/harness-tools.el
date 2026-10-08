@@ -146,10 +146,19 @@ Claude Code drops every tool of the harness from the turn."
                                     paths coalescable subject timeout)
   "Register tool NAME.  See docs/architecture.md for the keyword arguments.
 LABEL is required: the name people read, such as \"Read file\" for
-read_file, which the UI shows wherever it names the tool.  SUBJECT is
-a function of a call's input returning what the call is about (the
-path it reads, the command it runs) or nil; it follows the label in
-the call's title (see `harness-tool-title')."
+read_file, which the UI shows wherever it names the tool.  DESCRIPTION
+is what the model reads about the tool, and SCHEMA the JSON schema of
+its input, as a plist (by default an object without properties).
+HANDLER, required too, is called with the input and context of a call
+and returns a RESULT plist, a string, or a promise of one.  KIND is the
+permission class of the tool: read, write, exec, net or meta, the
+default.  PATHS is a function of a call's input returning the paths
+the call touches, for the jail, and COALESCABLE non-nil lets the UI
+fold the tool's calls into a summary block.  SUBJECT is a function of
+a call's input returning what the call is about (the path it reads,
+the command it runs) or nil; it follows the label in the call's title,
+see `harness-tool-title'.  TIMEOUT is how many seconds a call may run,
+by default `harness-tools--timeout'."
   (unless (functionp handler) (error "Tool %s needs a handler" name))
   (unless (and (stringp label) (not (harness-string-blank-p label)))
     (error "Tool %s needs a :label, the name people read (such as \"Read file\")" name))
@@ -227,7 +236,7 @@ call is about nothing in particular."
   (append (list :content (if (stringp content) content (format "%S" content)) :is-error nil) props))
 
 (defun harness-tool-error (message &rest props)
-  "Return an error RESULT with MESSAGE."
+  "Return an error RESULT with MESSAGE and extra PROPS."
   (append (list :content message :is-error t) props))
 
 ;;;; The user's Emacs
@@ -274,6 +283,10 @@ unresponsive UI."
      "the user's Emacs")))
 
 (defun harness-tools--normalise-result (value)
+  "Return VALUE, what a tool handler gave, as a RESULT.
+A RESULT plist has its `:is-error' made t or nil; a string becomes the
+content of a successful result, nil an empty one, and anything else its
+printed form."
   (cond ((and (listp value) (plist-member value :content))
          (plist-put (copy-sequence value) :is-error (and (plist-get value :is-error) t)))
         ((stringp value) (harness-tool-ok value))
@@ -281,7 +294,9 @@ unresponsive UI."
         (t (harness-tool-ok (format "%S" value)))))
 
 (defun harness-tools--guard-size (result call-id)
-  "Truncate an oversized RESULT, saving the full text for range reads."
+  "Truncate an oversized RESULT, saving the full text for range reads.
+The text is saved as CALL-ID.txt, or under a fresh id without one, in
+the outputs directory of `harness-state-directory'."
   (let ((content (plist-get result :content)))
     (if (<= (length content) harness-tools-max-output-chars)
         result
@@ -299,6 +314,9 @@ unresponsive UI."
 ;;;; Context
 
 (defun harness-tools--session (session-id)
+  "Return the plist of session SESSION-ID, as `session/get' gives it.
+Without the session, or the session module, return a stand-in that has
+SESSION-ID and `default-directory' as its `:cwd'."
   (or (and session-id (harness-method-exists-p 'session/get)
            (ignore-errors (harness-call 'session/get session-id)))
       (list :id session-id :cwd (file-name-as-directory (expand-file-name default-directory)))))
@@ -313,6 +331,10 @@ unresponsive UI."
       p)))
 
 (defun harness-tools--paths (tool input ctx)
+  "Return the paths a call of TOOL with INPUT touches, absolute under CTX.
+They are what its paths function says, resolved by
+`harness-tools-resolve-path'; nil without that function, or when it
+fails, which is logged."
   (when (harness-tool-paths-fn tool)
     (condition-case err
         (mapcar (lambda (p) (harness-tools-resolve-path p ctx))

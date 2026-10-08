@@ -102,7 +102,7 @@ The chat module sets it; when nil the path is only reported.")
       (file-name-nondirectory (or (plist-get attachment :path) "attachment"))))
 
 (defun harness-ui-media--clickable (string action help)
-  "Return STRING running ACTION (a thunk) on mouse-1, mouse-2 and RET.
+  "Return STRING running ACTION (a thunk) on a left or middle click, or RET.
 HELP is its tooltip; the mouse pointer turns into a hand over it."
   (let ((map (make-sparse-keymap))
         (run (lambda () (interactive) (funcall action))))
@@ -371,11 +371,11 @@ file is never read: that would block."
 ;; terminal shows the caption alone.
 
 (defcustom harness-ui-media-video-player nil
-  "Program playing videos, or nil for the first one installed of mpv,
-the desktop's opener (xdg-open, or open on macOS) and ffplay.
-While a player the harness started plays a video, its poster shows a
-stop button, which stops it; an opener hands the video to the
-desktop's player and is done."
+  "Program playing videos, or nil for the first one installed of several.
+Those are, in that order, mpv, the desktop's opener (xdg-open, or open
+on macOS) and ffplay.  While a player the harness started plays a
+video, its poster shows a stop button, which stops it; an opener hands
+the video to the desktop's player and is done."
   :type '(choice (const :tag "Auto-detect" nil) string)
   :group 'harness-ui-media)
 
@@ -602,7 +602,7 @@ seconds or nil, in the bottom right corner."
 (defun harness-ui-media--render-video (attachment)
   "Return the poster and the caption of the video ATTACHMENT.
 The poster, its thumbnail under a play button, and the Play button of
-the caption both play the video on mouse-1, mouse-2 or RET; while a
+the caption both play the video on a left or middle click or RET; while a
 player the harness started plays it, they stop it.  A terminal shows no
 poster: the caption starts with a video icon.  A remote file is never
 read, which would block: it has no thumbnail and no duration."
