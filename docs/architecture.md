@@ -183,7 +183,9 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
  :parent-id nil|"uuid"  :fork-node nil|"node-id"
  :created FLOAT  :updated FLOAT
  :usage (:input N :output N :cache-read N :cache-write N :cost F :list-cost F :context N :turns N
-         :billing api|subscription|extra-usage :plan "max")    ; billing and plan of the latest call
+         :billing api|subscription|extra-usage :plan "max"     ; billing and plan of the latest call
+         :cache-at FLOAT :cache-ttl N)      ; the last request that used the prompt cache
+ :cache nil|(:at FLOAT :ttl N :expires FLOAT)  ; derived: when the prompt cache lapses
  :context-window N                  ; in effect: the override, else the model's
  :context-window-override nil|N     ; a window set for the session
  :budget nil|(:amount F :hard BOOL)    ; given to the session; the Budget setting is not copied
@@ -206,6 +208,25 @@ incl. cache); the UI colours it against `:context-window`.  `:cost`
 is what the session's calls were billed and `:list-cost` the same calls
 at API prices (they differ when a subscription paid); see "Usage
 record".
+
+`:cache` says when the session's prompt cache lapses.  A provider
+keeps the start of a conversation cached for a while after a request
+read or wrote it (Anthropic five minutes or an hour, OpenAI five to ten
+minutes, DeepSeek hours), and every such request keeps it longer.
+`session/usage-add` stamps `:usage` with when the last request that
+used the cache was made (`:cache-at`, the request's own time when the
+provider says it, else when its usage came) and the lifetime the
+provider reported for it, if any (`:cache-ttl`); a request that used no
+cache drops both, and a record without tokens (`:turns`) leaves them.
+They persist with the session, so a reloaded or resumed session still
+knows.  `:cache` is derived from them each time the session is
+described, like `:context-window`: `:ttl` from `provider/cache-ttl`
+(the reported lifetime, else the configured one) and `:expires` = `:at`
++ `:ttl`.  It is nil for a session without context (a new one never
+warns), before any request used a cache, and after one that did not.
+Past `:expires` the next request sends the whole context again at the
+uncached rate, which the chat warns about above the compose box
+(`ui-cache`, see "Chat buffer").
 
 `:context-window` is looked up in the model catalogue (`provider/model`)
 each time the session is described, so it follows the catalogue; only
@@ -297,7 +318,8 @@ ATTACHMENT = `(:path "/abs" :size N :mime "…" :name "display")`.
 ### Usage record
 
 `(:input N :output N :cache-read N :cache-write N :cost F :list-cost F
-:billing api|subscription|extra-usage|nil :plan ID)`; amounts in USD.
+:billing api|subscription|extra-usage|nil :plan ID :cache-at FLOAT
+:cache-ttl N)`; amounts in USD.
 
 - `:cost` is what the call was billed.  `:list-cost` is the call at
   API list prices.  They are the same unless a subscription paid.
@@ -308,6 +330,14 @@ ATTACHMENT = `(:path "/abs" :size N :mime "…" :name "display")`.
   - `extra-usage`: the plan's extra usage, billed at API prices.
   - nil: the provider did not say; it reads as per-token billing.
 - `:plan` is the subscription's id, such as "max".
+- `:cache-at` and `:cache-ttl` are optional: when the request that read
+  or wrote the prompt cache was made (a float time) and the seconds the
+  provider said it keeps that cache.  Claude Code gives both: the time
+  of the turn's last main-conversation `message_start` that used the
+  cache, and 3600 or 300 by whether the request wrote to the one-hour
+  or the five-minute cache.  Without them the record's own arrival
+  stands for the time, and the configured lifetime for the TTL (see
+  "Session" and `provider/cache-ttl`).
 
 When a provider reports no cost, `session/usage-add` prices one from the
 model catalogue.  A missing list cost is the cost, or priced too when a
@@ -542,7 +572,9 @@ gone.
   `session/pending ID`.  Event `session/pending-changed ID ITEMS`.
   Status becomes `blocked` while anything is pending.
 - `session/usage-add ID USAGE &optional CONTEXT` → accumulated usage.
-  Event `session/usage ID USAGE-TOTAL RECORD`.
+  A record of a request that read or wrote the prompt cache stamps the
+  totals' `:cache-at` and `:cache-ttl`, one that used none clears them
+  (see "Session").  Event `session/usage ID USAGE-TOTAL RECORD`.
 - `session/set-todos ID TODOS`, `session/set-plan ID TEXT`.
 - `session/messages ID` → provider messages (content blocks) built
   from the path, tool calls paired with results.  A steering message
@@ -665,7 +697,20 @@ it is handed over: see "handoff"), `:fork`, `:resume`,
 `:list-cost`), `:pricing dynamic` (pricing comes from the model
 catalogue), `:builtin-tools` (a list of the harness tools the provider
 has a tool of its own for, which it can run in their place: Claude Code
-and Copilot list `"web_search"`; see `tools/builtin`).
+and Copilot list `"web_search"`; see `tools/builtin`), `:cache-ttl N`
+(the seconds the provider keeps a prompt cache after its last use,
+when it is not `harness-cache-ttl`: DeepSeek declares 10800).
+
+Prompt cache lifetime: `provider/cache-ttl MODEL-ID &optional
+REPORTED` (`harness-provider-cache-ttl`) says how many seconds MODEL-ID's
+provider keeps a prompt cache after a request used it.  The first of
+these that gives a positive number wins: REPORTED, the lifetime the
+provider reported for the request (a usage event's `:cache-ttl`; Claude
+Code tells the one-hour cache from the five-minute one); the first
+entry of `harness-cache-ttl-overrides`, `(REGEXP . SECONDS)`, whose
+regexp matches the model id; the model's or its provider's `:cache-ttl`
+capability; `harness-cache-ttl` (300).  The session derives when its
+cache lapses from it (see "Session").
 
 REQUEST = `(:model "ID:NAME" :session SESSION :system "…" :messages (MSG…)
 :tools (TOOL-SPEC…) :thinking LEVEL :max-tokens N :provider-state PLIST
@@ -703,7 +748,8 @@ Events delivered to `:on-event` (one plist each, in order):
 (:type tool-result :id "…" :content "…" :is-error BOOL)  ; hosted loops echo results
 (:type checkpoint :checkpoint PLIST :call-id "…")  ; hosted loops: where the conversation stands
 (:type usage :input N :output N :cache-read N :cache-write N :cost F-OR-NIL :context N
-       :list-cost F-OR-NIL :billing api|subscription|extra-usage|nil :plan ID)  ; see Usage record
+       :list-cost F-OR-NIL :billing api|subscription|extra-usage|nil :plan ID
+       :cache-at FLOAT :cache-ttl N)    ; see Usage record; the last two optional
 (:type call-usage :output N)            ; hosted loops: one model call's output, counted by the turn's usage
 (:type provider-state :state PLIST)     ; persist on the session
 (:type activity :phase PHASE :tool NAME :chars N)  ; what the model is busy with, see below
@@ -824,6 +870,7 @@ across providers), `provider/cached-models PROVIDER-ID` (one provider's
 cached models, at once: a provider not listed yet is asked, and gives
 nil until it answers; no other provider holds it up),
 `provider/model MODEL-ID` → MODEL, `provider/capabilities MODEL-ID`,
+`provider/cache-ttl MODEL-ID &optional REPORTED` → seconds (above),
 `provider/complete REQUEST` → HANDLE, `provider/fork MODEL-ID STATE &optional
 CHECKPOINT` → promise, `provider/quota PROVIDER-ID &optional REFRESH`,
 `provider/warm REQUEST` (ask the provider to prepare what a request like
@@ -3104,6 +3151,21 @@ the toggle through the redraw.  A module hosted by a chat buffer can
 put a read-only panel of its own above the box with
 `harness-chat-panel-functions` and take the box's message with
 `harness-chat-send-function`.
+Prompt cache warning (`harness-ui-cache`, module `ui-cache`): once the
+session's `:cache :expires` has passed while it is idle, closed or
+blocked, a panel above the box says so ("Prompt cache expired at
+14:07, 5 minutes after its last use") and what the next message costs:
+it re-sends ~N tokens (`:usage :context`) uncached, about the
+cache-write (else input) price of those tokens instead of their
+cache-read price, at the model's list prices, when the catalogue
+prices both.  A running session shows none: its request is using the
+cache again.  The panel needs no input and no polling: each chat
+buffer holds one timer, for the moment its cache lapses, which redraws
+the box (`harness-compose-redraw`); a session update (a new request
+stamps a new `:cache-at`) reschedules it, and the panel goes as soon as
+the session runs.  Its text names clock times only, never "idle for",
+so nothing in it goes stale between redraws.  It informs only: it has
+no buttons, and a session without context or cache use never shows it.
 Tools go by their labels everywhere: a tool block's header shows the
 label in `harness-tool-title-face` and what the call is about after it
 in `harness-tool-subject-face` (the faces stand in for the colon of the
@@ -3672,7 +3734,10 @@ banner of a session (`harness-ui-switch`: the chat panel that asks how
 to hand the conversation over when a lossy model switch needs it -- the
 models, the reason, the risks and costs as labelled rows, and a button
 and a key per way to hand over, falling back to the minibuffer question
-when no chat buffer shows; see "Switching model or provider"), and the
+when no chat buffer shows; see "Switching model or provider"), the
+prompt cache warning of a session (`harness-ui-cache`: the chat panel
+that says the cache lapsed and what the next message re-sends, drawn
+by a timer at the moment it lapses; see "Chat buffer"), and the
 handed-in report (`harness-ui-report`: the summary as markdown and the
 evidence -- images as wide as the popout and up to
 `harness-ui-report-image-max-height` of the frame high, the popout

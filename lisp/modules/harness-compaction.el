@@ -269,7 +269,8 @@ summariser was given (see `compaction/compact')."
                   (list :input (plist-get usage :input) :output (plist-get usage :output)
                         :cache-read (plist-get usage :cache-read) :cache-write (plist-get usage :cache-write)
                         :cost (plist-get usage :cost)
-                        :context (harness-estimate-tokens summary)))
+                        :context (harness-estimate-tokens summary)
+                        :cache-at (plist-get usage :cache-at) :cache-ttl (plist-get usage :cache-ttl)))
     (harness-emit 'compaction/done session-id node)
     node))
 

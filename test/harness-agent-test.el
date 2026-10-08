@@ -154,6 +154,20 @@ it could carry on."
       (harness-await (harness-call 'agent/prompt id "back"))
       (should-not (plist-get (car (last harness-agent-test-requests)) :provider-state)))))
 
+(ert-deftest harness-agent-usage-carries-the-prompt-cache-stamp ()
+  "When a provider says when its request used the prompt cache, and the
+lifetime it asked for, the session keeps both: its cache lapses then."
+  (harness-agent-test-with
+    (harness-agent-test-define-hosted
+     (lambda (_prompt) '((:type text :delta "hi")
+                         (:type usage :input 10 :output 5 :cache-read 900 :cache-write 0
+                                :context 915 :cache-at 1000.0 :cache-ttl 3600)
+                         (:type done :stop-reason end-turn))))
+    (let ((id (harness-agent-test-hosted-session)))
+      (harness-await (harness-call 'agent/prompt id "hello"))
+      (should (equal '(:at 1000.0 :ttl 3600 :expires 4600.0)
+                     (plist-get (harness-call 'session/get id) :cache))))))
+
 (ert-deftest harness-agent-step-writes-under-its-own-model ()
   "What a step reports belongs to the model it went to, though the session switched meanwhile.
 A switch applies from the next step: the reply names the model that

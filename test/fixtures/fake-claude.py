@@ -71,6 +71,11 @@ Like the real CLI, each result's total_cost_usd is the running total
 of the process: every turn adds 0.01, and --resume or --fork-session
 starts from 0.05, the spend the session restores.
 
+Every request reads 2000 tokens from the prompt cache and writes 100,
+which usage's cache_creation breaks down by lifetime as the real CLI
+asks for it: the one-hour cache on a subscription, else the
+five-minute one.
+
 The environment picks the account:
   HARNESS_FAKE_CLAUDE_AUTH=subscription  a claude.ai Max login: the
       initialize answer names it, get_usage reports the plan's quota
@@ -120,6 +125,13 @@ WINDOWS = json.loads(os.environ.get("HARNESS_FAKE_CLAUDE_WINDOWS") or "{}")
 GATE_TIMEOUT = 60
 TURN_COST = 0.01
 RESTORED_COST = 0.05
+
+
+def cache_creation():
+    """The 100 tokens a request writes to the cache, by lifetime."""
+    hour = AUTH == "subscription"
+    return {"ephemeral_1h_input_tokens": 100 if hour else 0,
+            "ephemeral_5m_input_tokens": 0 if hour else 100}
 
 
 def emit(obj):
@@ -434,7 +446,8 @@ class Fake:
 
     def usage(self):
         return {"input_tokens": 12, "cache_creation_input_tokens": 100,
-                "cache_read_input_tokens": 2000, "output_tokens": 7}
+                "cache_read_input_tokens": 2000, "output_tokens": 7,
+                "cache_creation": cache_creation()}
 
     def result(self, subtype="success", is_error=False, text="hello",
                stop_reason="end_turn", api_error_status=None):
@@ -613,6 +626,7 @@ class Fake:
                                  "usage": {"input_tokens": 12,
                                            "cache_creation_input_tokens": 100,
                                            "cache_read_input_tokens": 2000,
+                                           "cache_creation": cache_creation(),
                                            "output_tokens": 0}}})
         if "die" in text:
             sys.stderr.write("fake-claude: dying on request\n")

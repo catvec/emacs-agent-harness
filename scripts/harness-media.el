@@ -79,6 +79,7 @@ layout: half the frame keeps the board's cards whole.")
 (defvar harness-chat--order)
 (defvar harness-sessions)
 (defvar harness-ui-tasks--tasks)
+(defvar harness-cache-ttl)
 
 (declare-function harness-start "harness")
 (declare-function harness-call "harness-core")
@@ -2261,6 +2262,10 @@ afterwards."
   (harness-media--harness-origins)
   (require 'harness)
   (unless (harness-start) (error "The harness did not start cleanly"))
+  ;; The scripted turns read and write the prompt cache, and a cache that
+  ;; lapsed puts a panel above the box: however long the run takes, no
+  ;; picture shows one by chance.
+  (setq harness-cache-ttl 86400)
   ;; Chats take half the frame: the code beside them keeps 80 columns.
   (setf (alist-get 'right harness-ui-positions) '((side . right) (slot . 0) (window-width . 0.5)))
   (harness-media--define-providers)

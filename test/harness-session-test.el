@@ -801,6 +801,58 @@ and so does a queued one; the searchable transcript says who sent it."
         (should (= 1500 (plist-get u :context)))
         (should (= 1 (plist-get u :turns)))))))
 
+(defvar harness-cache-ttl)
+(defvar harness-cache-ttl-overrides)
+
+(ert-deftest harness-session-usage-stamps-the-prompt-cache ()
+  "A request that read or wrote the prompt cache stamps when, and the
+lifetime its provider reported; the session's `:cache' says when the
+cache lapses, and survives a restart.  A record without tokens leaves
+the stamp; a request that used no cache drops it."
+  (harness-session-test-with
+    (let* ((harness-cache-ttl 300)
+           (harness-cache-ttl-overrides nil)
+           (id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (cache (lambda () (plist-get (harness-call 'session/get id) :cache))))
+      ;; A new session knows of no cache.
+      (should-not (funcall cache))
+      ;; A request that did not use one stamps nothing.
+      (harness-call 'session/usage-add id '(:input 100 :output 10 :context 110))
+      (should-not (funcall cache))
+      ;; One that read it did so now, as the clock says, and the
+      ;; provider said nothing of a lifetime: the default's.
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 1000.0)))
+        (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 900 :context 920)))
+      (should (equal '(:at 1000.0 :ttl 300 :expires 1300.0) (funcall cache)))
+      ;; The time and lifetime the provider reported win.
+      (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-write 50 :context 980
+                                             :cache-at 2000.0 :cache-ttl 3600))
+      (should (equal '(:at 2000.0 :ttl 3600 :expires 5600.0) (funcall cache)))
+      ;; A turn counted is no request.
+      (harness-call 'session/usage-add id '(:turns 1))
+      (should (equal '(:at 2000.0 :ttl 3600 :expires 5600.0) (funcall cache)))
+      ;; It is kept with the session.
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (equal '(:at 2000.0 :ttl 3600 :expires 5600.0) (funcall cache)))
+      ;; A request without a lifetime of its own has the default's again.
+      (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 990 :context 1000
+                                             :cache-at 3000.0))
+      (should (equal '(:at 3000.0 :ttl 300 :expires 3300.0) (funcall cache)))
+      ;; A request that used no cache: nothing is cached to lose.
+      (harness-call 'session/usage-add id '(:input 1000 :output 10 :context 1010))
+      (should-not (funcall cache))
+      (should-not (plist-member (plist-get (harness-call 'session/get id) :usage) :cache-at)))))
+
+(ert-deftest harness-session-cache-needs-context ()
+  "A session whose usage says no context has nothing cached to lose."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-call 'session/usage-add id '(:input 0 :output 0 :cache-read 10 :cache-at 1000.0))
+      (should (plist-get (plist-get (harness-call 'session/get id) :usage) :cache-at))
+      (should-not (plist-get (harness-call 'session/get id) :cache)))))
+
 (ert-deftest harness-session-messages-merge-rules ()
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))

@@ -177,13 +177,19 @@ DeepSeek host counts even when the endpoint names another flavor."
   (or (eq (harness-openai--flavor endpoint) 'deepseek)
       (harness-openai--deepseek-host-p endpoint)))
 
+(defconst harness-openai-deepseek-cache-ttl 10800
+  "Seconds DeepSeek's context cache is taken to last once unused.
+DeepSeek clears an unused cache \"usually within a few hours to a few
+days\" rather than after a set time; this is the low end, its models'
+`:cache-ttl' capability (see `harness-provider-cache-ttl').")
+
 (defun harness-openai--capabilities (endpoint)
   "Return the static capability plist for ENDPOINT."
   (or (plist-get endpoint :capabilities)
       (pcase (harness-openai--flavor endpoint)
         ('openrouter '(:vision t :thinking t :pricing dynamic :cost-reported t))
         ;; DeepSeek reports vision per model, so the endpoint does not claim it.
-        ('deepseek '(:thinking t))
+        ('deepseek (list :thinking t :cache-ttl harness-openai-deepseek-cache-ttl))
         (_ '(:vision t :thinking t)))))
 
 (defun harness-openai--host (endpoint)
