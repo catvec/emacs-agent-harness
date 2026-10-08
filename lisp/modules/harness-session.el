@@ -281,11 +281,20 @@ reach no provider, and a result added for one would answer nothing."
 (defun harness-session--answer (id calls result)
   "Append a tool result to session ID for each tool-call node in CALLS.
 RESULT, called with a call node, returns the rest of its result node:
-`:output', `:is-error', `:meta'."
+`:output', `:is-error', `:meta'.  The result of a call the harness
+recorded (`harness-outside-node-p') says so too, like the call, and
+names the same `:child-id': the model never sees either."
   (dolist (call calls)
-    (harness-call 'session/append id
-                  (append (list :kind 'tool-result :call-id (plist-get call :call-id))
-                          (funcall result call)))))
+    (let* ((rest (funcall result call))
+           (meta (plist-get call :meta)))
+      (when (harness-outside-node-p call)
+        (setq rest (plist-put (copy-sequence rest) :meta
+                              (append (plist-get rest :meta)
+                                      (list :from (plist-get meta :from))
+                                      (and (plist-get meta :child-id)
+                                           (list :child-id (plist-get meta :child-id)))))))
+      (harness-call 'session/append id
+                    (append (list :kind 'tool-result :call-id (plist-get call :call-id)) rest)))))
 
 (defun harness-session--path (s &optional head)
   "Return the nodes of S from the root to HEAD, oldest first.
@@ -1297,7 +1306,9 @@ starts at the last compaction node when one exists.  A steering message
 stands where the model got it, after its `:delivered-after' node and
 the tool results right after that, not where it was sent mid-step.
 Every tool call is answered in the message after it, by a stand-in
-result when the path has none (see `harness-session--pair-tools')."
+result when the path has none (see `harness-session--pair-tools').
+A call the harness recorded, and its result, are left out: the model
+never made it (`harness-outside-node-p')."
   (let* ((s (harness-session--get id))
          (path (harness-session--from-compaction (harness-session--path s)))
          (delivered (harness-session--delivered path))
@@ -1314,10 +1325,14 @@ result when the path has none (see `harness-session--pair-tools')."
       (dolist (n path)
         ;; Delivered steering goes in before the next node that is not a
         ;; tool result: tool results come first in the user message.
-        (when (and ready (memq (plist-get n :kind) '(user assistant thinking tool-call plan compaction)))
+        (when (and ready (memq (plist-get n :kind) '(user assistant thinking tool-call plan compaction))
+                   (not (harness-outside-node-p n)))
           (mapc #'user ready)
           (setq ready nil))
-        (pcase (and (not (gethash (plist-get n :id) (car delivered))) (plist-get n :kind))
+        (pcase (and (not (gethash (plist-get n :id) (car delivered)))
+                    ;; The model never made a call the harness recorded.
+                    (not (harness-outside-node-p n))
+                    (plist-get n :kind))
           ('user (user n))
           ('compaction (flush)
                        (add 'user (list :type "text"
@@ -1383,14 +1398,26 @@ PENDING is the list of requests it was saved waiting on."
 S was saved running or blocked, with PENDING the requests it waited on.
 Every tool call without a result gets one saying it was interrupted --
 providers that pair calls with results reject a transcript with an
-unanswered call -- and a hint says what the session was doing.  The
-requests themselves are gone: the turn that would read their answers
-ended with the process."
-  (let ((id (harness-session-id s)))
-    (harness-session--answer id (harness-session--unanswered (harness-session--path s))
-                             (lambda (_call)
-                               (list :output harness-session-interrupted-output :is-error t
-                                     :meta (list :interrupted t))))
+unanswered call -- and a hint says what the session was doing.  So does
+a call the harness recorded in S's parent for S (`harness-outside-node-p'
+with S as its `:child-id'), which nothing else would answer: the parent
+need not have been running.  The requests themselves are gone: the turn
+that would read their answers ended with the process."
+  (let* ((id (harness-session-id s))
+         (parent (gethash (harness-session-parent-id s) harness-sessions))
+         (interrupted (lambda (_call)
+                        (list :output harness-session-interrupted-output :is-error t
+                              :meta (list :interrupted t)))))
+    (harness-session--answer id (harness-session--unanswered (harness-session--path s)) interrupted)
+    ;; A call the harness recorded in the parent for S (the merge
+    ;; queue's conflict resolver) waited on S, which stopped with it.
+    (when parent
+      (harness-session--answer
+       (harness-session-id parent)
+       (cl-remove-if-not (lambda (call) (and (harness-outside-node-p call)
+                                             (equal (plist-get (plist-get call :meta) :child-id) id)))
+                         (harness-session--unanswered (harness-session--path parent)))
+       interrupted))
     (harness-call 'session/hint id (harness-session--interrupted-text pending))
     ;; Saved inactive now, so the next start does not settle it again.
     (harness-session--save id)))

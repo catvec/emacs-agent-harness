@@ -839,6 +839,7 @@ during a replay the full content is sent as one chunk."
        (push (list :sessionUpdate (if (eq kind 'thinking) "agent_thought_chunk" "agent_message_chunk")
                    :content (funcall text) :_harness meta)
              out))
+      ;; A call the harness recorded says who did, as a message does.
       ('tool-call
        (push (list :sessionUpdate "tool_call"
                    :toolCallId (plist-get node :call-id)
@@ -846,7 +847,8 @@ during a replay the full content is sent as one chunk."
                    :kind (harness-acp--tool-kind-of (plist-get node :tool))
                    :status "in_progress"
                    :rawInput (plist-get node :input)
-                   :_harness (append meta (list :tool (plist-get node :tool))))
+                   :_harness (append meta (list :tool (plist-get node :tool))
+                                     (and (harness-outside-node-p node) (list :from (harness-node-sender node)))))
              out))
       ('tool-result
        (let ((output (or (plist-get node :output) "")))
@@ -855,7 +857,8 @@ during a replay the full content is sent as one chunk."
                      :status (if (harness-json-true-p (plist-get node :is-error)) "failed" "completed")
                      :content (list (list :type "content" :content (list :type "text" :text output)))
                      :rawOutput output
-                     :_harness (append meta (list :attachments (plist-get node :attachments))))
+                     :_harness (append meta (list :attachments (plist-get node :attachments))
+                                       (and (harness-outside-node-p node) (list :from (harness-node-sender node)))))
                out))))
     (push (list :sessionUpdate "_harness/node" :node node) out)
     (nreverse out)))

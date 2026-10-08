@@ -38,6 +38,14 @@
 ;; merge fails.  With `child', the child session itself is steered to
 ;; resolve them, as before.
 ;;
+;; The fresh session shows in the child's transcript as a spawn_agent
+;; call, as a sub-agent the child started would: the call once its turn
+;; starts, its result -- the resolver's last reply, an error unless
+;; merge_done queued the branch again -- when it stops.  The merge
+;; queue made that call, not the child's model, and both nodes say so
+;; (`harness-outside-node-p'): they never reach the child's model, so
+;; its conversation is the same as without them.
+;;
 ;; The harness locks the worktrees it makes so that `git worktree
 ;; prune' keeps them (see harness-worktree.el).  Once a child's branch
 ;; is merged its work is safe on the parent's branch, so the lock goes
@@ -94,6 +102,13 @@ An entry is (:child ID :parent ID :status queued|merging|conflict
 
 (defvar harness-merge--timers (make-hash-table :test 'equal)
   "Child session id -> safety timer of its unresolved conflict.")
+
+(defvar harness-merge--calls (make-hash-table :test 'equal)
+  "Resolver session id -> its open spawn_agent call in the child's transcript.
+A call is (:session CHILD-ID :name NAME :prompt PROMPT :call-id ID
+:started FLOAT :done BOOL).  `:call-id' and `:started' are set once the
+call shows, when the resolver's turn starts; `:done' once merge_done
+queued the branch again.")
 
 (defconst harness-merge--ff-retries 3
   "Times a merge is computed again when the parent's HEAD moves under it.")
@@ -262,10 +277,12 @@ filter core would adopt a returned promise as the gate value."
 (defun harness-merge--on-turn-ended (session-id reason)
   "Serve the merge queue of SESSION-ID now that it is idle.
 When SESSION-ID resolves a conflict and its turn ended (for REASON)
-without the branch queued again, the merge fails."
+without the branch queued again, the merge fails.  Its spawn_agent
+call in the child's transcript gets its result either way, first."
   (when (and (gethash session-id harness-merge--queues)
              (not (gethash session-id harness-merge--locks)))
     (harness-run-soon #'harness-merge--pump session-id))
+  (harness-merge--close-call session-id (format "the sub-agent stopped (%s) without calling merge_done" reason))
   (let ((entry (harness-merge--entry-of session-id)))
     (when (and entry (equal (plist-get entry :resolver) session-id)
                (eq (plist-get entry :status) 'conflict))
@@ -445,12 +462,9 @@ itself (`harness-merge-conflict-resolver'), and merge_done is called."
                                       (format "\n\nThe branch's merge request said: %s" (plist-get entry :message))
                                     ""))))))
       (if resolver
-          (progn
-            (harness-merge--hint parent-id (format "Merge from %s has conflicts in %s; a fresh session resolves them in its worktree"
-                                                   (harness-merge--label child-id) (string-join files ", ")))
-            (harness-merge--hint child-id (format "Merge into %s has conflicts in %s; session %s resolves them in this worktree"
-                                                  (harness-merge--label parent-id) (string-join files ", ")
-                                                  (harness-merge--label resolver))))
+          ;; The child heard from `harness-merge--start-resolver'.
+          (harness-merge--hint parent-id (format "Merge from %s has conflicts in %s; a fresh session resolves them in its worktree"
+                                                 (harness-merge--label child-id) (string-join files ", ")))
         (harness-merge--hint parent-id (format "Merge from %s has conflicts in %s; it resolves them in its worktree"
                                                (harness-merge--label child-id) (string-join files ", ")))
         (harness-merge--steer
@@ -462,8 +476,9 @@ itself (`harness-merge-conflict-resolver'), and merge_done is called."
 (defun harness-merge--start-resolver (entry child prompt)
   "Start a fresh session resolving ENTRY's conflicts with PROMPT; return its id.
 The session works in the worktree of CHILD (the child's session plist),
-with its settings, as its `subagent' child.  Return nil when it cannot
-start; the child is then steered instead."
+with its settings, as its `subagent' child, and shows in the child's
+transcript as a spawn_agent call (`harness-merge--add-call').  Return
+nil when it cannot start; the child is then steered instead."
   (when (and (harness-method-exists-p 'session/create) (harness-method-exists-p 'agent/prompt))
     (condition-case err
         (let* ((child-id (plist-get child :id))
@@ -479,9 +494,17 @@ start; the child is then steered instead."
                (id (plist-get session :id)))
           (harness-merge--set entry :resolver id)
           (harness-emit 'merge/resolver child-id (plist-get entry :parent) id)
+          (harness-merge--hint child-id (format "Merge into %s has conflicts in %s; session %s resolves them in this worktree"
+                                                (harness-merge--label (plist-get entry :parent))
+                                                (string-join (plist-get entry :files) ", ")
+                                                (harness-merge--label id)))
+          ;; Before the prompt: its turn starting shows the call, and a
+          ;; prompt that fails, even at once, answers it.
+          (harness-merge--add-call child-id id (plist-get session :name) prompt)
           (harness-catch (harness-call-async 'agent/prompt id prompt (list :from (harness-sender-system "merge queue")))
                          (lambda (e)
                            (harness-log 'warn "merge: the conflict resolver %s failed: %s" id (harness-error-message e))
+                           (harness-merge--close-call id (format "the sub-agent failed: %s" (harness-error-message e)))
                            (when (and (equal (plist-get entry :resolver) id) (eq (plist-get entry :status) 'conflict))
                              (harness-merge--finish entry 'failed (format "the session resolving the conflicts failed: %s"
                                                                           (harness-error-message e))))
@@ -489,6 +512,97 @@ start; the child is then steered instead."
           id)
       (error (harness-log 'warn "merge: could not start a conflict resolver: %s" (error-message-string err))
              nil))))
+
+;;;; The resolver's spawn_agent call
+
+(defun harness-merge--add-call (child-id resolver-id name prompt)
+  "Have RESOLVER-ID show in CHILD-ID's transcript as a spawn_agent call.
+The call is the one that would have started a sub-agent named NAME
+with PROMPT.  It shows when the resolver's turn starts
+\(`harness-merge--on-turn-started'): a harness stopped from then on
+finds the resolver running when it starts again, and answers the call
+as it settles the resolver (`harness-session--settle').  It runs until
+the resolver stops, which records its result
+\(`harness-merge--close-call')."
+  (puthash resolver-id (list :session child-id :name name :prompt prompt) harness-merge--calls))
+
+(defun harness-merge--on-turn-started (session-id)
+  "Show the spawn_agent call of SESSION-ID, a resolver whose turn started."
+  (let ((call (gethash session-id harness-merge--calls)))
+    (when (and call (not (plist-get call :call-id)))
+      (harness-merge--open-call session-id call))))
+
+(defun harness-merge--open-call (resolver-id call)
+  "Append CALL, the spawn_agent call of RESOLVER-ID, to the child's transcript.
+Return CALL with its `:call-id' and `:started', or nil when it could not
+be shown.  Its `:meta' says the merge queue made it
+\(`harness-outside-node-p'), so the child's model never sees it and
+nothing waits for its result, and names the resolver as `:child-id'."
+  (let* ((call-id (concat "merge-" (harness-short-id 10)))
+         (input (list :name (plist-get call :name) :prompt (plist-get call :prompt))))
+    (condition-case err
+        (progn
+          (harness-call 'session/append (plist-get call :session)
+                        (list :kind 'tool-call :tool "spawn_agent" :call-id call-id :input input
+                              :title (harness-tool-title "spawn_agent" input)
+                              :meta (list :from (harness-sender-system "merge queue") :child-id resolver-id)))
+          (puthash resolver-id (append (list :call-id call-id :started (float-time)) call)
+                   harness-merge--calls))
+      (error (harness-log 'warn "merge: could not show the resolver %s in %s: %s"
+                          resolver-id (plist-get call :session) (error-message-string err))
+             (remhash resolver-id harness-merge--calls)
+             nil))))
+
+(defun harness-merge--resolver-summary (resolver-id)
+  "Return the result text of RESOLVER-ID's spawn_agent call.
+That is its last reply and a footer with its tool calls and cost, as
+spawn_agent's own result reads."
+  (let* ((session (harness-merge--session resolver-id))
+         (own (and session
+                   (cl-remove-if-not (lambda (n) (equal (plist-get n :session) resolver-id))
+                                     (ignore-errors (harness-call 'session/nodes resolver-id)))))
+         (reply (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'assistant)
+                                             (not (harness-string-blank-p (plist-get n :content)))))
+                            own :from-end t))
+         (calls (cl-count-if (lambda (n) (eq (plist-get n :kind) 'tool-call)) own)))
+    (format "%s\n\n[sub-agent session: %s, %d tool calls, cost %s]"
+            (or (plist-get reply :content) "(the sub-agent produced no answer)")
+            resolver-id calls (harness-format-spend (plist-get session :usage)))))
+
+(defun harness-merge--call-done (resolver-id)
+  "Mark the spawn_agent call of RESOLVER-ID done: merge_done queued the branch."
+  (let ((call (gethash resolver-id harness-merge--calls)))
+    (when call
+      (puthash resolver-id (plist-put call :done t) harness-merge--calls))))
+
+(defun harness-merge--close-call (resolver-id why)
+  "Record the result of RESOLVER-ID's spawn_agent call, if it is still open.
+A call not shown yet, its resolver's turn never having started, shows
+now.  The result is the resolver's last reply
+\(`harness-merge--resolver-summary').  It succeeded when merge_done
+queued the branch again; otherwise it is an error, and WHY says what
+stopped it."
+  (let ((call (gethash resolver-id harness-merge--calls)))
+    (when (and call (not (plist-get call :call-id)))
+      (setq call (harness-merge--open-call resolver-id call)))
+    (when call
+      (remhash resolver-id harness-merge--calls)
+      (let ((done (plist-get call :done))
+            (summary (condition-case err
+                         (harness-merge--resolver-summary resolver-id)
+                       (error (harness-log 'warn "merge: could not sum up the resolver %s: %s"
+                                           resolver-id (error-message-string err))
+                              "(the sub-agent produced no answer)"))))
+        (condition-case err
+            (harness-call 'session/append (plist-get call :session)
+                          (list :kind 'tool-result :call-id (plist-get call :call-id)
+                                :output (format "%s\n\n(%s)" summary
+                                                (if done "merge_done queued the branch to merge again" why))
+                                :is-error (not done)
+                                :meta (list :from (harness-sender-system "merge queue") :child-id resolver-id
+                                            :duration (- (float-time) (plist-get call :started)))))
+          (error (harness-log 'warn "merge: could not record the result of the resolver %s: %s"
+                              resolver-id (error-message-string err))))))))
 
 (defun harness-merge--timeout (entry)
   "Give up on the unresolved conflict of ENTRY after `harness-merge--hold-timeout'."
@@ -517,12 +631,9 @@ A merged child's worktree loses the harness's lock."
   (let* ((child-id (plist-get entry :child))
          (parent-id (plist-get entry :parent))
          (resolver (plist-get entry :resolver))
-         (timer (gethash child-id harness-merge--timers)))
+         (timer (gethash child-id harness-merge--timers))
+         (suffix (if reason (format " (%s)" reason) "")))
     (when (eq status 'merged) (harness-merge--unlock-worktree entry))
-    ;; A resolver given up on stops; one that finished is left to end its turn.
-    (when (and resolver (memq status '(aborted cancelled))
-               (harness-method-exists-p 'agent/cancel))
-      (ignore-errors (harness-call 'agent/cancel resolver)))
     (when timer (cancel-timer timer) (remhash child-id harness-merge--timers))
     (puthash parent-id (cl-remove entry (gethash parent-id harness-merge--queues))
              harness-merge--queues)
@@ -530,11 +641,18 @@ A merged child's worktree loses the harness's lock."
       (remhash parent-id harness-merge--queues))
     (when (equal (gethash parent-id harness-merge--locks) child-id)
       (remhash parent-id harness-merge--locks))
+    ;; Set before the resolver is stopped: a turn that ends at once must
+    ;; not fail the merge again (`harness-merge--on-turn-ended').
     (harness-merge--set entry :status status)
+    ;; A resolver given up on stops, and its call says why; one that
+    ;; finished is left to end its turn, which answers its call.
+    (when (and resolver (memq status '(aborted cancelled)))
+      (harness-merge--close-call resolver (format "the merge was %s%s, so the sub-agent was stopped" status suffix))
+      (when (harness-method-exists-p 'agent/cancel)
+        (ignore-errors (harness-call 'agent/cancel resolver))))
     (harness-emit 'merge/finished child-id parent-id status)
-    (let ((suffix (if reason (format " (%s)" reason) "")))
-      (harness-merge--hint parent-id (format "Merge from %s finished: %s%s" (harness-merge--label child-id) status suffix))
-      (harness-merge--hint child-id (format "Merge into %s finished: %s%s" (harness-merge--label parent-id) status suffix)))
+    (harness-merge--hint parent-id (format "Merge from %s finished: %s%s" (harness-merge--label child-id) status suffix))
+    (harness-merge--hint child-id (format "Merge into %s finished: %s%s" (harness-merge--label parent-id) status suffix))
     (harness-run-soon #'harness-merge--pump parent-id)
     status))
 
@@ -588,6 +706,9 @@ child or the fresh session resolving its conflicts."
                 ((not (eq (plist-get entry :status) 'conflict))
                  (harness-tool-error (format "The merge is %s, not waiting for conflict resolution" (plist-get entry :status))))
                 (t
+                 ;; The resolver's call succeeded, whoever called merge_done.
+                 (when (plist-get entry :resolver)
+                   (harness-merge--call-done (plist-get entry :resolver)))
                  (harness-merge--requeue entry)
                  (harness-tool-ok "The branch is queued to merge again; the merge queue takes it from here."))))))))))))
 
@@ -605,6 +726,7 @@ child or the fresh session resolving its conflicts."
   "Register the module's filters and subscribers (idempotent)."
   (harness-add-filter 'agent/step #'harness-merge--hold 30)
   (harness-add-filter 'agent/before-turn #'harness-merge--hold 30)
+  (harness-on 'agent/turn-started #'harness-merge--on-turn-started)
   (harness-on 'agent/turn-ended #'harness-merge--on-turn-ended))
 
 (harness-merge--init)

@@ -239,6 +239,19 @@ and `harness-sender-kind' (harness-util, both sides of ACP), which
 tolerate a kind that travelled as a string.  The model still gets the
 message as a user message; UIs show the sender instead of "You".
 
+A tool call and its result can be the harness's as well: the merge
+queue shows the session it starts to resolve a child's conflicts as a
+`spawn_agent` call in the child (see merge).  Both nodes carry the
+sender in `:meta` `:from`, which `harness-outside-node-p` checks, and
+the session the call stands for in `:meta` `:child-id`; the result of
+the model's own `spawn_agent` names its sub-agent the same way.  The
+model never made such a call, so `session/messages` leaves the call and
+its result out (a steering message recorded after one goes out with the
+next node the model sees), and so does a handoff: its transcript, its
+check for history and what a hosted loop missed.  The chat shows the
+call as its sender's, not the agent's, with a link to the session,
+running until its result comes.
+
 A node the harness wrote to hand the conversation over to a model of
 another provider (see "handoff") says so in its `:meta` `:handoff`,
 `(:mode "transcript"|"compact" :file PATH :from MODEL :to MODEL)`: the
@@ -421,7 +434,10 @@ come.  Every session loads `inactive` (closed until something resumes
 it).  One saved `running` or `blocked` was interrupted mid-turn by a
 harness that stopped, so loading settles it: each tool call without a
 result gets one (`:is-error t`, `:meta (:interrupted t)`) and a hint
-says what it was doing or which question it waited on.  Only calls
+says what it was doing or which question it waited on.  So does a call
+the harness recorded for it in its parent (`harness-outside-node-p`,
+with its id as `:child-id`: the merge queue's conflict resolver), which
+nothing else would answer; the parent need not have been running.  Only calls
 from the last compaction on count, as for forks: earlier ones reach no
 provider, so a result for one would answer nothing.  Pending
 requests are not restored: the turn that would read their answers is
@@ -2121,7 +2137,19 @@ so switching to either loses nothing.
   sides' commits and what to do: a child that waited long in the queue
   would pay for its whole history on a cold prompt cache.  Its turn
   ending without `merge_done` fails the merge (event `merge/resolver
-  CHILD PARENT RESOLVER`; `merge/queue` items carry `:resolver`).  With
+  CHILD PARENT RESOLVER`; `merge/queue` items carry `:resolver`).  The
+  child gets a hint naming the resolver and, once the resolver's turn
+  starts, a `spawn_agent` call that the merge queue made (`:meta` `:from`
+  the merge queue, `:child-id` the resolver; see Node), so it reads as a
+  sub-agent the child started.  The call's result comes when the
+  resolver stops: its last reply and spawn_agent's footer, a success
+  when `merge_done` queued the branch again, else an error saying why
+  (the turn ended without it, the prompt failed, or the merge was
+  aborted or cancelled, which stops the resolver).  A resolver whose
+  turn never starts gets the call and its result together.  Showing
+  the call only once the turn has started means a harness stopped
+  after that point finds the resolver saved running, and settling it
+  answers the call (see session).  With
   `child`, the child session itself gets that as a steering message.  A merged child's worktree loses
   the harness's lock (`worktree/unlock`; see worktree).
 - `merge/status CHILD-SID`; the `merge_done` tool (called by the child
@@ -2845,7 +2873,9 @@ Wire: JSON-RPC 2.0, one message per line.  Standard ACP methods:
 the extension kinds `_harness/session` (full session plist after any
 change), `_harness/node` (a finalised or updated node), `_harness/hint`,
 `_harness/activity` (`activity`: what the running turn does, as
-`agent/activity` returns it; null once the turn ends).
+`agent/activity` returns it; null once the turn ends).  A message
+someone other than the user sent, and a tool call or result the harness
+recorded (see Node), names its sender in `_harness.from`.
 Requests agent → client: `session/request_permission {sessionId, toolCall,
 options:[{optionId,name,kind}], _harness:{pendingId, tool, paths, cwd, dir,
 pattern, reason}}` (`cwd`: where a shell command runs; `paths`: what
@@ -3208,6 +3238,14 @@ header one dim line sums up the input its title leaves out
 comma-separated, and a list of other objects, such as the items of a
 todo list, as how many there are, never as a Lisp form; a todo_write,
 whose title already counts its items, has no such line.
+A call naming a session in `:meta` `:child-id` (a `spawn_agent` call
+once its result names the sub-agent, or the merge queue's call for its
+conflict resolver from the start) gets a `session:` line, also above
+the fold, whose button opens that session.  A call the harness recorded
+(`harness-outside-node-p`) opens a turn of its own under its sender's
+line, as that sender's message does, rather than joining the agent's
+turn or a run of calls, and shows as running until its result comes,
+whatever its session is doing.
 Auto-scroll follows unless the user scrolled up.  While the session
 runs, an activity line under the last block says what the turn does
 and for how long: waiting for the model, thinking, writing, preparing a

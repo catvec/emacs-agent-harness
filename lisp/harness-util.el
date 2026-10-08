@@ -317,6 +317,20 @@ ID :name NAME) for another session's agent, made by
   (let ((from (plist-get (plist-get node :meta) :from)))
     (and (harness-sender-kind from) from)))
 
+(defun harness-outside-node-p (node)
+  "Non-nil when NODE is a tool call or result the session's model did not make.
+The harness records some of the work it does for a session on its own
+as a tool call and its result in the session's transcript, so that it
+shows like the session's own: the merge queue's conflict resolver shows
+as a spawn_agent call in the session whose branch it merges.  Such a
+node says who recorded it as its `:meta' `:from', a sender (see
+`harness-node-sender').  The model never asked for the call, so it is
+not part of the conversation: `session/messages' and a handoff leave
+it out, and nothing waits for its result."
+  (and (member (plist-get node :kind) '(tool-call tool-result "tool-call" "tool-result"))
+       (harness-node-sender node)
+       t))
+
 (defun harness-sender-description (from)
   "Describe FROM, who sent a message, in a few words, as transcripts read.
 The harness reads \"the harness (SOURCE)\", another session's agent

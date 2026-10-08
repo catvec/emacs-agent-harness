@@ -452,6 +452,8 @@ sub-agent the call started."
               (should-not (plist-get result :is-error))
               (should (string-match-p "Found it" (plist-get result :output)))
               (should (eq 'subagent (plist-get (harness-call 'session/get cid) :kind)))
+              ;; The result names the session it ran, for the chat to link.
+              (should (equal cid (plist-get (plist-get result :meta) :child-id)))
               ;; Parent, sub-agent, parent again: each request a valid one.
               (should (= 3 (length bodies)))
               (should (equal '(nil nil nil)

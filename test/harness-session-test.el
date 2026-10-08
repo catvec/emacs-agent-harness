@@ -746,6 +746,86 @@ compaction, which reach no provider, are left alone."
       (should (equal "Interrupted: the harness stopped while waiting for an answer to: Which colour?"
                      (plist-get (car (last (harness-call 'session/nodes id))) :content))))))
 
+(ert-deftest harness-session-messages-leave-out-calls-the-harness-recorded ()
+  "A tool call and result the harness recorded (`harness-outside-node-p'),
+even in the middle of a turn, never reach the model, answered or not;
+steering delivered right after such a call still stands where the
+model got it."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+          (from (harness-sender-system "merge queue")))
+      (harness-call 'session/append id '(:kind user :content "go"))
+      (harness-call 'session/append id '(:kind tool-call :tool "bash" :call-id "c1" :input (:command "make")))
+      ;; Sent while the call ran; the model got it with the call's result.
+      (let ((steer (harness-call 'session/append id '(:kind user :content "also test")))
+            (outside (harness-call 'session/append id (list :kind 'tool-call :tool "spawn_agent" :call-id "m1"
+                                                            :input '(:name "Merge child" :prompt "resolve")
+                                                            :meta (list :from from :child-id "r1")))))
+        (harness-call 'session/update-node id (plist-get steer :id)
+                      :meta (list :delivered-after (plist-get outside :id))))
+      (harness-call 'session/append id '(:kind tool-result :call-id "c1" :output "built"))
+      (harness-call 'session/append id '(:kind assistant :content "Done."))
+      ;; One the harness never answered, and one it did.
+      (harness-call 'session/append id (list :kind 'tool-call :tool "spawn_agent" :call-id "m2"
+                                             :input '(:name "Other" :prompt "x") :meta (list :from from)))
+      (harness-call 'session/append id (list :kind 'tool-result :call-id "m1" :output "Resolved."
+                                             :meta (list :from from :child-id "r1")))
+      (should (harness-outside-node-p (car (last (harness-call 'session/nodes id)))))
+      (let ((msgs (harness-call 'session/messages id)))
+        (should-not (harness-session-test-unpaired msgs))
+        (should (equal '(user assistant user assistant) (mapcar (lambda (m) (plist-get m :role)) msgs)))
+        (should (equal '("tool_result" "text") (mapcar (lambda (b) (plist-get b :type)) (plist-get (nth 2 msgs) :content))))
+        (should (equal "also test" (plist-get (nth 1 (plist-get (nth 2 msgs) :content)) :text)))
+        (should (equal '("Done.") (mapcar (lambda (b) (plist-get b :text)) (plist-get (nth 3 msgs) :content))))))))
+
+(ert-deftest harness-session-settle-answers-the-call-recorded-for-a-sub-agent ()
+  "A call the harness recorded in a session for its sub-agent (the merge
+queue's conflict resolver, as a spawn_agent call) is answered when that
+sub-agent is settled after a restart: the session holding the call was
+not running, so nothing else would answer it.  The answer is the
+harness's too, so the model never sees either, and comes once."
+  (harness-session-test-with
+    (let* ((parent (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (sub (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :kind 'subagent
+                                         :parent-id parent)
+                           :id))
+           (from (harness-sender-system "merge queue")))
+      (harness-call 'session/append parent '(:kind user :content "work"))
+      (harness-call 'session/append parent '(:kind assistant :content "Done."))
+      (harness-call 'session/append parent (list :kind 'tool-call :tool "spawn_agent" :call-id "m1"
+                                                 :input '(:name "Merge child" :prompt "resolve")
+                                                 :meta (list :from from :child-id sub)))
+      ;; One the harness recorded for another session is not this one's to answer.
+      (harness-call 'session/append parent (list :kind 'tool-call :tool "spawn_agent" :call-id "m2"
+                                                 :input '(:name "Other" :prompt "x")
+                                                 :meta (list :from from :child-id "someone-else")))
+      (harness-call 'session/append sub '(:kind user :content "resolve"))
+      (harness-call 'session/append sub '(:kind tool-call :tool "bash" :call-id "b1" :input (:command "git merge")))
+      (harness-call 'session/set-status sub 'running)
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (let ((answer (harness-session-test-result parent "m1")))
+        (should (plist-get answer :is-error))
+        (should (equal harness-session-interrupted-output (plist-get answer :output)))
+        (should (harness-outside-node-p answer))
+        (should (equal sub (plist-get (plist-get answer :meta) :child-id))))
+      (should-not (harness-session-test-result parent "m2"))
+      (should (harness-session-test-result sub "b1"))
+      ;; The parent was idle: it is not settled itself.
+      (should-not (memq 'hint (harness-session-test-kinds parent)))
+      (harness-call 'session/append parent '(:kind user :content "next"))
+      (let ((msgs (harness-call 'session/messages parent)))
+        (should-not (harness-session-test-unpaired msgs))
+        (should (equal '(user assistant user) (mapcar (lambda (m) (plist-get m :role)) msgs))))
+      ;; Once: the next start leaves both alone.
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (= 1 (cl-count "m1" (harness-call 'session/nodes parent)
+                             :key (lambda (n) (and (eq (plist-get n :kind) 'tool-result) (plist-get n :call-id)))
+                             :test #'equal))))))
+
 (ert-deftest harness-session-queue-and-pending ()
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
