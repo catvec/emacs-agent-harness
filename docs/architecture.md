@@ -2746,7 +2746,25 @@ as it is, all of the conversation uncached, without a decision.
 - `cowboy/asking SESSION-ID` → the id of the question the session waits
   on, or nil.  Events `cowboy/asked SID PID` and `cowboy/decided SID
   CHOICE BY`, BY one of `user`, `always`, `non-interactive`, `default`
-  (asking off) and `unasked` (the question could not be asked).
+  (asking off), `unasked` (the question could not be asked) and
+  `cold-start` (`cowboy/compact`, below).
+- `cowboy/compact SESSION-ID &rest OPTS` → a promise.  What the gate
+  does for a session nobody is asked about, for a caller that made a
+  session whose conversation no warm cache holds, before its first turn
+  (a fork has no `:cache` of its own, so the gate never finds it cold).
+  With `harness-cowboy-min-context` above 0 and a context
+  (`compaction/estimate`) under it, it does nothing and resolves nil,
+  with no hint.  Otherwise it takes `harness-cowboy-default` (never
+  `hold`), emits `cowboy/decided SID CHOICE BY`, adds a hint and, unless
+  the choice is `carry-on`, compacts as the gate does (`:meta (:cowboy
+  (:choice C :by BY))`, the fallbacks included).  It does not mark the
+  session busy: no turn is running.  It resolves with the choice taken,
+  a symbol, and never rejects: an error is logged and resolves nil.
+  OPTS: `:by` SYMBOL, BY, default `cold-start`; `:why` STRING, which
+  opens the hint in place of "Prompt cache cold since HH:MM", a time a
+  session with no cache could not give (for example "No prompt cache on
+  MODEL holds the supervisor's conversation").  The hint ends "the
+  default for a session no warm cache holds (harness-cowboy-default)".
 - Settings (section "Cold cache"): `harness-cowboy-ask`,
   `harness-cowboy-default`, `harness-cowboy-min-context`.
 
@@ -3707,9 +3725,13 @@ starts.  Only the user changes it later.
   `:node` and `:call-id` being the call that submitted it, which every
   fork step forks the supervisor at.  Step: `(:id :title :prompt :tier
   :reason :context :after (ID…) :model :state :session :attempts N
-  :result :error)`: `:tier` mundane|standard|hard, `:context`
-  fork|fresh, `:state` pending|running|done|failed|interrupted|
-  cancelled|superseded, `:session` the worker, `:result` its last reply.
+  :result :error :worker-model :previous)`: `:tier`
+  mundane|standard|hard, `:context` fork|fresh, `:state`
+  pending|running|done|failed|interrupted|cancelled|superseded,
+  `:session` the worker, `:result` its last reply, `:worker-model` the
+  model the worker was made for (`retry_step` may change `:model`
+  afterwards) and `:previous` the attempt before one that started again,
+  `(:attempt N :session SID :model MODEL :error TEXT)`.
   A new plan supersedes the earlier plans' steps that have not started;
   their running steps finish as usual.
 - `submit_plan summary steps &optional title`, `steps` being `{id, title,
@@ -3740,10 +3762,45 @@ starts.  Only the user changes it later.
   non-interactive switch and allowed directories.  The worker gets one
   `agent/prompt`, from the supervisor session: the `:preamble` of
   `seed/fork`, an opening that tells a fork it is a worker now, the step,
-  what the steps before it reported (each cut to 2000 characters) and a
+  the attempt before it when the step starts again (below), what the
+  steps before it reported (each cut to 2000 characters) and a
   closing.  Workers carry no `:supervisor`: they have every tool.  A
   worker's turn ending `end-turn` or `max-tokens` makes the step done;
   any other end, or no worker, makes it failed.
+- A step that starts again (`:attempts` above 1: `retry_step`, perhaps
+  on a higher tier, or an interrupted, failed or cancelled step run
+  again) decides a fork worker's context by the cache.  A fork never
+  shares its parent's cache, a higher tier is a model that never read the
+  plan's conversation, and a new fork has no `:cache`, so the cowboy's
+  gate never finds it cold: forking the supervisor as a first attempt
+  does would send all of it uncached at that model's price.  With
+  `seed/warm-p` holding for (the supervisor, the plan's `:node`, the
+  step's model), a seed whose cache is warm or which a turn is warming,
+  the worker forks through `seed/fork` as above.  Otherwise it is a
+  `session/fork` onto the model, compacted before its first turn:
+  `cowboy/compact` on the fork (`:why` "No prompt cache on MODEL holds the
+  supervisor's conversation", `:by cold-start`; the cowboy's default, a
+  brief summary unless the user chose otherwise); with no cowboy,
+  `compaction/compact` `:kind brief` and a hint on the fork; with no
+  compaction, the whole conversation and a hint.  A compaction that fails
+  fails nothing.  The worker plist that `worker-made` gets then has
+  `:context-cache` `seed`, `compacted` (and `:compaction`, the kind of
+  node the fork wrote) or `whole`, and the supervisor a hint naming the
+  step, attempt, model and which it was ("Step s2 (attempt 2) on M:
+  forked from the warm shared context", "…no warm prompt cache holds the
+  plan's conversation, so its worker starts from a brief summary of it
+  rather than reading it all uncached", "…and it was not compacted, so
+  its worker reads it all uncached").  First attempts and fresh steps
+  are unchanged.
+- The attempt before.  Before it wipes `:session` and `:error`, a step
+  that starts again keeps its worker in `:previous`, when it had one, with
+  the model the worker ran on: its session's, else `:worker-model`.  The
+  worker's message then has a section "## The previous attempt" after the
+  step, naming the attempt, model, session and how it ended, and pointing
+  at `session_read` on that session so as not to repeat what failed; for a
+  compacted fork the opening adds that the conversation before the message
+  was compacted into a summary and `session_history` searches what it
+  replaced.
 - Reports are messages of the harness's `(harness-sender-system
   "supervisor")` through `agent/prompt`: an idle session starts a turn,
   a running one is steered.  A step done is a hint ("Step ID done on
@@ -3822,6 +3879,18 @@ names its own working and temporary directories.
   the ones that would change either, fallback and handoff (10), the
   cold-cache question (cowboy, 15) and compaction (20).  The budgets
   (from 30) still apply.
+- `seed/warm-p SOURCE-ID MODEL &optional NODE` → the id of the seed or
+  nil: whether `seed/fork` for (SOURCE-ID, NODE, MODEL) would find the
+  shared context in a cache that lasts.  Non-nil when a known seed
+  exists for the three, running on MODEL, and either its cache is warm
+  (not gone, and not lapsing within `harness-seed-warm-margin`) or it
+  runs a turn now, being primed or warmed, which a fork waits for.  NODE
+  nil is SOURCE-ID's head and MODEL nil its own model, as for
+  `seed/fork`.  It only reads: no seed is made, primed or warmed, and
+  none forgotten but a stale one that the lookup drops as `seed/fork`
+  would; it never signals, an error being nil.  A caller that can do
+  without a seed asks it to choose between forking through the seed and
+  compacting a fork (the supervisor, for a step that starts again).
 - `seed/list &optional SOURCE-ID` → seeds, newest first, `(:id :source
   :node :model :cache)`, for diagnostics and the UI; kept in memory, so
   one made before a restart is not listed, though its session remains.

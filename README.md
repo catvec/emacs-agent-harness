@@ -931,13 +931,14 @@ call to one anyway, in every permission mode.
 - **Fork or fresh, and `after`.** A step's context is `fork` (the
   default) or `fresh`. A fork worker is a fork of the supervisor at the
   call that submitted the plan, so it sees everything the supervisor
-  learned and nothing has to be found out again. A fresh worker starts
-  empty in the same directory, for a self-contained job that needs none
-  of it, and its prompt holds everything. `after` lists the steps that
-  must be done first, and a worker is given the reports of the steps it
-  follows. Steps with no order between them run at once in the same
-  working tree (a task's worktree, in a task), so the supervisor gives
-  them different files.
+  learned and nothing has to be found out again (a step that starts
+  again may get a summary of it instead, see **Retry and escalation**).
+  A fresh worker starts empty in the same directory, for a
+  self-contained job that needs none of it, and its prompt holds
+  everything. `after` lists the steps that must be done first, and a
+  worker is given the reports of the steps it follows. Steps with no
+  order between them run at once in the same working tree (a task's
+  worktree, in a task), so the supervisor gives them different files.
 - **Cache seeds.** A provider's prompt cache serves only the model that
   wrote it, so every fork onto a cheaper model would pay to write the
   whole conversation into that model's cache, and no two forks share a
@@ -974,7 +975,17 @@ call to one anyway, in every permission mode.
   does not end the turn, so several steps can be retried in one
   message. Or the supervisor submits a new plan, which supersedes the
   steps of the earlier ones that have not started (their running steps
-  finish as usual), or it asks you.
+  finish as usual), or it asks you. A step that starts again, retried or
+  interrupted by a restart, does not make its worker read the whole
+  conversation uncached on a model that never saw it, which a higher tier
+  usually is. With a warm seed on the step's model its fork worker forks
+  through the seed; otherwise it forks the supervisor and is compacted
+  before its first turn, as the cold-cache question would for a session
+  nobody is asked about (a brief summary by default, see
+  `harness-cowboy-default`), and a hint tells the supervisor which. The
+  worker's message also says which session, model and error the attempt
+  before had, so it can read what was tried (`session_read`) and not
+  repeat it.
 - **In tasks.** The session of a task supervises by default, and the
   last step of its plan commits (`git add -A && git commit`). Once the
   plan has finished and the supervisor has checked the result, it calls

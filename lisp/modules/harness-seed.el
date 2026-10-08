@@ -33,6 +33,15 @@
 ;; keyed on `:parent-id' (the merge queue, say) sees the seed as their
 ;; parent.
 ;;
+;; A caller that may do without a seed asks `seed/warm-p' first: it says
+;; whether a seed for (SOURCE, NODE, MODEL) exists whose cache is warm,
+;; or which a turn is priming or warming now, so that `seed/fork' would
+;; read the shared context from a cache rather than write it.  When it
+;; does not, the caller can compact the fork rather than have a seed
+;; read the whole context again at the model's price (the supervisor
+;; does, for a step that starts again).  It only reads: it never makes,
+;; primes or warms a seed.
+;;
 ;; Warm seeds.  A fork reads the shared context from the cache only
 ;; while the cache lasts, so `seed/fork' looks at the seed's `:cache'
 ;; first (see "Session" in docs/architecture.md).  When it is gone, or
@@ -464,6 +473,36 @@ handoff, the cold-cache question, compaction); its budgets still apply."
         (harness-then (harness-seed--ensure key source-id node model plist)
                       (lambda (seed-id) (harness-seed--fork-from seed-id model plist))))
     (error (harness-rejected err))))
+
+(harness-defmethod seed/warm-p (source-id model &optional node)
+  "Return the id of SOURCE-ID's seed on MODEL when it is warm, or nil.
+It says whether `seed/fork' for (SOURCE-ID, NODE, MODEL) would find the
+shared context in a prompt cache that lasts.  A caller that may do
+without the seed asks it to choose between forking through the seed and
+compacting a fork.  NODE nil means SOURCE-ID's head, and MODEL nil its
+own model, as in `seed/fork'.
+
+The answer is non-nil when a known seed exists for the three, running
+on MODEL, and either its cache is warm -- it is not gone and does not
+lapse within `harness-seed-warm-margin' seconds, as `seed/fork' reads
+it -- or it runs a turn now: it is being primed or warmed, and a fork
+made through `seed/fork' waits for that turn.
+
+A seed whose priming turn failed, and which no turn warms since, is
+nil.  It only reads.  Nothing is made, primed or warmed, and no seed
+is forgotten, but for one the module finds is gone or moved to another
+model, as `seed/fork' would.  It never signals: an error is nil."
+  (condition-case nil
+      (let* ((source (harness-call 'session/get source-id))
+             (model (or model (plist-get source :model)))
+             (node (or node (plist-get source :head)))
+             (id (harness-seed--lookup (list source-id node model) model)))
+        (and id
+             (or (not (harness-seed--cold-p id))
+                 (and (harness-method-exists-p 'agent/running)
+                      (harness-call 'agent/running id)))
+             id))
+    (error nil)))
 
 (harness-defmethod seed/list (&optional source-id)
   "Return the seeds that exist, newest first, as plists.
