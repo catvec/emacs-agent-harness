@@ -40,12 +40,61 @@
 ;; The system prompt of a supervising session says how the mode works,
 ;; in place of the Planning section.
 ;;
-;; The plan engine itself -- the `submit_plan' and `retry_step' tools and
-;; the workers on cheaper models -- is not here.  Its tools are named in
-;; `harness-supervisor-tools' and `harness-supervisor-decision-tools'
-;; already, so the gates above apply to them from the day they exist; the
-;; models of its workers come from `harness-supervisor-tiers', and their
-;; context window from `harness-tools-agent-context-limit'.
+;; The plan engine is what the supervisor decides with.  Its tools are named
+;; in `harness-supervisor-tools' and `harness-supervisor-decision-tools',
+;; so the gates above apply to them.  `submit_plan' takes a list of steps,
+;; each a self-contained job with a tier (mundane, standard or hard), a
+;; context (fork or fresh) and the steps it waits for.  It refuses a plan
+;; with problems, naming each, and otherwise records the plan, shows it as
+;; the `plan' tool shows one, starts the steps that are ready and ends the
+;; turn.  A step runs in a worker, a session of its own with the full tool
+;; set, on the model of its tier: `harness-supervisor-tiers', else the one
+;; of the supervisor's provider that ranks alike (`provider/tier-model':
+;; cheap, balanced, frontier), else the supervisor's own, with a hint.  A
+;; fork step forks the supervisor at the call that submitted the plan, a
+;; node every step of the plan shares; when a plan has two or more fork
+;; steps on one model they all fork through one seed (`seed/fork'), so
+;; that the context is written to that model's prompt cache once.  A fresh
+;; step is a new session in the supervisor's directory.  The window of both
+;; is capped as `harness-tools-agent-context-limit' says.  The worker's
+;; reply is the step's result, which the steps that wait for it are given.
+;;
+;; The plans of a session are its `:ext' `:supervisor-plans', so they
+;; survive a restart and the UI shows them: each change of a step is a
+;; `session/ext-changed'.  A plan has `:id :title :summary :node :call-id
+;; :created :steps', a step `:id :title :prompt :tier :reason :context
+;; :after :model :state :session :attempts :result :error'.  A step is
+;; pending, running, done, failed, interrupted, cancelled or superseded: a
+;; new plan supersedes the steps of the earlier ones that have not started,
+;; and their running steps finish as usual.
+;;
+;; What the supervisor hears.  A step that is done is a hint, and starts
+;; the steps that waited for it.  A step that did not get done -- its
+;; worker could not be made or its turn failed, was cancelled or blocked
+;; (it is failed), or its worker session was deleted (cancelled) -- is a
+;; message of its own, from the harness: the step, its tier and
+;; model, why, the steps held on it, and the ways on (`retry_step',
+;; perhaps on a higher tier; a new plan; the user).  When the last step of
+;; a plan is done the message lists each step with its result and asks the
+;; supervisor to check the work and decide.  An idle session starts a turn
+;; on a message and a running turn is steered; one that arrives while the
+;; turn that submitted the plan is ending would be lost with it, so it
+;; waits for the turn's end.  `retry_step' runs a step again on a new
+;; worker, and does not end the turn.
+;;
+;; Work that runs outside the turn is `agent/outstanding' for the tasks
+;; module, which keeps the task of the session working, with a line of what
+;; it waits for, instead of ending it in review: steps running, and pending
+;; steps that can still start.  A step held behind one that did not get
+;; done is not counted: the supervisor was told and has to decide.
+;;
+;; When the harness restarts its workers die.  Once every module is up,
+;; the steps still stored as running are interrupted and reported as a
+;; failure is: to the session of a task as a message, so that the task
+;; carries on, and to any other session queued, to go with the user's next
+;; message rather than start an expensive turn unasked.  Deleting a
+;; supervisor cancels its workers, and turning the mode off lets them
+;; carry on.
 
 ;;; Code:
 
@@ -58,6 +107,7 @@
 (defvar harness-tasks--merge-session-name)
 (defvar harness-tools-agent-planning-section)
 (defvar harness-perms-dir-tool)
+(defvar harness-supervisor--ending)
 
 ;;;; Settings
 
@@ -468,9 +518,15 @@ A call that failed is taken out again: it decided nothing.")
   (remhash session-id harness-supervisor--calls))
 
 (defun harness-supervisor--on-session-deleted (session-id &rest _)
-  "Forget everything about the deleted session SESSION-ID."
+  "Forget everything about the deleted session SESSION-ID.
+A supervisor's running workers are cancelled, and the step of a deleted
+worker is cancelled (see `harness-supervisor--forget-plans')."
   (harness-supervisor--on-turn-started session-id)
-  (remhash session-id harness-supervisor--configured))
+  (remhash session-id harness-supervisor--configured)
+  (condition-case err
+      (progn (harness-supervisor--forget-plans session-id)
+             (harness-supervisor--worker-deleted session-id))
+    (error (harness-log 'warn "supervisor: cleaning up after session %s failed: %S" session-id err))))
 
 (defun harness-supervisor--budget-point-p (n)
   "Non-nil when N tool calls in a turn call for a nudge.
@@ -501,12 +557,19 @@ is a steering message the running turn takes at its next step."
 (defun harness-supervisor--on-tool-finished (session-id call result)
   "Take CALL of SESSION-ID back out of the decisions when RESULT is an error.
 A subscriber of `tools/finished'.  A plan that was refused, or a call
-that was denied, decided nothing, so the turn is still owed one."
+that was denied, decided nothing, so the turn is still owed one.  A
+result that ends the turn (`hand_in') begins the time in which a report
+to the session would be lost with the turn, which the end of the turn
+closes (see `harness-supervisor--send')."
   (when (and (harness-json-true-p (plist-get result :is-error))
              (gethash session-id harness-supervisor--decisions))
     (setf (gethash session-id harness-supervisor--decisions)
           (cl-remove (plist-get call :id) (gethash session-id harness-supervisor--decisions)
-                     :test #'equal))))
+                     :test #'equal)))
+  (when (and (plist-get result :end-turn)
+             (harness-method-exists-p 'agent/running)
+             (harness-call 'agent/running session-id))
+    (puthash session-id t harness-supervisor--ending)))
 
 (defun harness-supervisor--stop-answer (value session)
   "Return what the `agent/stop' chain goes on with for the stop VALUE of SESSION.
@@ -562,6 +625,996 @@ still write its answer."
   :subject (lambda (input) (harness-first-line (plist-get input :reason) 60))
   :handler #'harness-supervisor--no-plan-needed)
 
+;;;; The plan engine: plans and steps
+;;
+;; A session's plans are its `:ext' `:supervisor-plans': a list of plists,
+;; oldest first, that JSON keeps as they are (strings, numbers and lists;
+;; a field with nothing to say is left out).
+;;
+;;   plan  (:id :title :summary :node :call-id :created :steps)
+;;   step  (:id :title :prompt :tier :reason :context :after :model :state
+;;          :session :attempts :result :error)
+;;
+;; `:node' and `:call-id' are the fork point of the plan: the call that
+;; submitted it, which every fork step forks the supervisor at.  A step's
+;; `:state' is "pending", "running", "done", "failed", "interrupted",
+;; "cancelled" or "superseded"; `:session' is the id of its worker, and
+;; `:result' the worker's final reply when it is done.
+
+(declare-function harness-tools-agent-context-limit "harness-tools-agent" (parent-id fork))
+
+(defconst harness-supervisor--plans-key :supervisor-plans
+  "The `:ext' key under which a session keeps its plans.")
+
+(defconst harness-supervisor--tier-names '("mundane" "standard" "hard")
+  "The tiers a step may have, as the tools take them.")
+
+(defconst harness-supervisor--provider-tiers
+  '(("mundane" . cheap) ("standard" . balanced) ("hard" . frontier))
+  "The tier of its provider's models that each tier of a step ranks with.")
+
+(defconst harness-supervisor--context-names '("fork" "fresh")
+  "The contexts a step's worker may start with.")
+
+(defconst harness-supervisor--retryable-states '("failed" "interrupted" "cancelled")
+  "The states of a step that ended without being done, which `retry_step' accepts.")
+
+(defconst harness-supervisor--result-limit 4000
+  "Most characters of a worker's final reply that its step keeps as its result.")
+
+(defconst harness-supervisor--hand-over-limit 2000
+  "Most characters of a step's result that the prompt of a later step repeats.")
+
+(defconst harness-supervisor--report-limit 1500
+  "Most characters of a result, an error or a reply that a report repeats.")
+
+(defvar harness-supervisor--live (make-hash-table :test 'equal)
+  "(SESSION-ID PLAN-ID STEP-ID) -> the worker of a step that runs.
+The value is the worker's session id, or t while the worker is being
+made.  It lives in memory only, which is the point: after a restart no
+worker is alive, and a step stored as running with no entry here is one
+the restart interrupted.")
+
+(defvar harness-supervisor--ending (make-hash-table :test 'equal)
+  "Session id -> t while the turn that submitted a plan is ending.
+`submit_plan' ends its turn, and a message that steers it meanwhile
+would be lost with it, so reports wait (see `harness-supervisor--send').")
+
+(defvar harness-supervisor--held (make-hash-table :test 'equal)
+  "Session id -> the reports held back until its ending turn is over, oldest first.")
+
+(defun harness-supervisor--plans (session-id)
+  "Return the plans of session SESSION-ID, oldest first."
+  (let ((plans (plist-get (plist-get (harness-call 'session/get session-id) :ext)
+                          harness-supervisor--plans-key)))
+    (and (consp plans) (consp (car plans)) plans)))
+
+(defun harness-supervisor--plan (plans plan-id)
+  "Return the plan whose id is PLAN-ID among PLANS, or nil."
+  (cl-find plan-id plans :key (lambda (plan) (plist-get plan :id)) :test #'equal))
+
+(defun harness-supervisor--step (plan step-id)
+  "Return the step whose id is STEP-ID in PLAN, or nil."
+  (cl-find step-id (plist-get plan :steps) :key (lambda (step) (plist-get step :id)) :test #'equal))
+
+(defun harness-supervisor--find-step (plans step-id &optional plan-id)
+  "Return (PLAN . STEP) for STEP-ID among PLANS, or nil.
+With PLAN-ID the step is looked for in that plan only, else in the
+latest plan that has it."
+  (cl-loop for plan in (if plan-id
+                           (let ((plan (harness-supervisor--plan plans plan-id))) (and plan (list plan)))
+                         (reverse plans))
+           for step = (harness-supervisor--step plan step-id)
+           when step return (cons plan step)))
+
+(defun harness-supervisor--with (plist &rest props)
+  "Return a copy of PLIST with PROPS set.  A nil value removes its key."
+  (let ((out (copy-sequence plist)))
+    (cl-loop for (key value) on props by #'cddr
+             do (setq out (if value
+                              (plist-put out key value)
+                            (harness-plist-remove out key))))
+    out))
+
+(defun harness-supervisor--save-plans (session-id plans)
+  "Store PLANS as the plans of session SESSION-ID.
+The session announces the change (`session/ext-changed'), which is how
+the UI sees a step move on."
+  (harness-call 'session/set-ext session-id harness-supervisor--plans-key plans))
+
+(defun harness-supervisor--update-step (session-id plan-id step-id &rest props)
+  "Set PROPS on step STEP-ID of plan PLAN-ID of session SESSION-ID.
+A nil value removes its key.  Return the new step, or nil, storing
+nothing, when the session has no such step."
+  (let* ((plans (harness-supervisor--plans session-id))
+         (plan (harness-supervisor--plan plans plan-id))
+         (step (and plan (harness-supervisor--step plan step-id))))
+    (when step
+      (let ((new (apply #'harness-supervisor--with step props)))
+        (harness-supervisor--save-plans
+         session-id
+         (mapcar (lambda (other)
+                   (if (eq other plan)
+                       (harness-supervisor--with
+                        plan :steps (mapcar (lambda (s) (if (eq s step) new s)) (plist-get plan :steps)))
+                     other))
+                 plans))
+        new))))
+
+(defun harness-supervisor--state-p (step &rest states)
+  "Non-nil when the state of STEP is one of STATES."
+  (and (member (plist-get step :state) states) t))
+
+(defun harness-supervisor--ready-p (plan step)
+  "Non-nil when STEP of PLAN is pending and every step it waits for is done."
+  (and (harness-supervisor--state-p step "pending")
+       (cl-every (lambda (id) (harness-supervisor--state-p (harness-supervisor--step plan id) "done"))
+                 (plist-get step :after))))
+
+(defun harness-supervisor--waiting-p (plan step &optional seen)
+  "Non-nil when pending STEP of PLAN can still start.
+That is when nothing it waits for, directly or not, ended without being
+done: a step held behind a failure is the supervisor's to decide on.
+SEEN holds the steps being looked at, which keeps a damaged plan with a
+cycle from looping."
+  (and (harness-supervisor--state-p step "pending")
+       (not (memq step seen))
+       (cl-every (lambda (id)
+                   (let ((dep (harness-supervisor--step plan id)))
+                     (or (harness-supervisor--state-p dep "done" "running")
+                         (and dep (harness-supervisor--waiting-p plan dep (cons step seen))))))
+                 (plist-get step :after))))
+
+(defun harness-supervisor--dependants (plan step-id)
+  "Return the steps of PLAN that wait for STEP-ID, directly or not, in plan order."
+  (let ((found nil) (frontier (list step-id)))
+    (while frontier
+      (let ((id (pop frontier)))
+        (dolist (step (plist-get plan :steps))
+          (when (and (member id (plist-get step :after)) (not (member (plist-get step :id) found)))
+            (push (plist-get step :id) found)
+            (push (plist-get step :id) frontier)))))
+    (cl-remove-if-not (lambda (step) (member (plist-get step :id) found)) (plist-get plan :steps))))
+
+(defun harness-supervisor--running-steps (plans)
+  "Return the running steps of PLANS."
+  (cl-loop for plan in plans
+           append (cl-remove-if-not (lambda (step) (harness-supervisor--state-p step "running"))
+                                    (plist-get plan :steps))))
+
+(defun harness-supervisor--supersede (plan)
+  "Return PLAN with the steps that are still pending superseded."
+  (if (cl-some (lambda (step) (harness-supervisor--state-p step "pending")) (plist-get plan :steps))
+      (harness-supervisor--with
+       plan :steps (mapcar (lambda (step)
+                             (if (harness-supervisor--state-p step "pending")
+                                 (harness-supervisor--with step :state "superseded")
+                               step))
+                           (plist-get plan :steps)))
+    plan))
+
+;;;; The plan engine: reading a plan
+
+(defun harness-supervisor--text (value)
+  "Return VALUE as trimmed text when it is a string or a number, else nil."
+  (cond ((stringp value) (string-trim value))
+        ((numberp value) (number-to-string value))))
+
+(defun harness-supervisor--text-list (value)
+  "Return VALUE, a list of ids as a model may give it, as a list of texts.
+A text that is not one stays out; one string stands for a list of one."
+  (let ((items (cond ((stringp value) (list value))
+                     ((vectorp value) (append value nil))
+                     ((listp value) value))))
+    (delq nil (mapcar #'harness-supervisor--text items))))
+
+(defun harness-supervisor--read-step (raw index)
+  "Read RAW, the INDEXth step (from 1) of a plan as the model gave it.
+Return (STEP . PROBLEMS): STEP is a plist of the fields the model
+chooses, nil when RAW is no object, and PROBLEMS are texts, one for
+each thing wrong with the step."
+  (if (not (and (consp raw) (keywordp (car raw))))
+      (cons nil (list (format "step %d is not an object" index)))
+    (let* ((id (harness-supervisor--text (plist-get raw :id)))
+           (name (if (harness-string-blank-p id) (format "step %d" index) (format "step %s" id)))
+           (prompt (harness-supervisor--text (plist-get raw :prompt)))
+           (title (harness-supervisor--text (plist-get raw :title)))
+           (tier (downcase (or (harness-supervisor--text (plist-get raw :tier)) "")))
+           (context (let ((c (downcase (or (harness-supervisor--text (plist-get raw :context)) ""))))
+                      (if (string-empty-p c) "fork" c)))
+           (problems nil))
+      (when (harness-string-blank-p id)
+        (push (format "%s has no id: give each step a short unique id" name) problems))
+      (when (harness-string-blank-p prompt)
+        (push (format "%s has a blank prompt: the worker has nothing to do" name) problems))
+      (unless (member tier harness-supervisor--tier-names)
+        (push (format "%s has %s as its tier: it must be mundane, standard or hard"
+                      name (if (string-empty-p tier) "none" (format "%S" tier)))
+              problems))
+      (unless (member context harness-supervisor--context-names)
+        (push (format "%s has %S as its context: it must be fork or fresh" name context) problems))
+      (cons (harness-supervisor--with
+             nil
+             :id id
+             :title (if (harness-string-blank-p title)
+                        (if (harness-string-blank-p prompt) id (harness-first-line prompt 60))
+                      title)
+             :prompt prompt :tier tier
+             :reason (let ((reason (harness-supervisor--text (plist-get raw :reason))))
+                       (and (not (harness-string-blank-p reason)) reason))
+             :context context
+             :after (harness-supervisor--text-list (plist-get raw :after)))
+            (nreverse problems)))))
+
+(defun harness-supervisor--cycle-ids (steps)
+  "Return the ids of the STEPS that wait for themselves, directly or not."
+  (let ((after (mapcar (lambda (step) (cons (plist-get step :id) (plist-get step :after))) steps)))
+    (cl-remove-if-not
+     (lambda (id)
+       (let ((seen nil) (frontier (cdr (assoc id after))) (found nil))
+         (while (and frontier (not found))
+           (let ((next (pop frontier)))
+             (cond ((equal next id) (setq found t))
+                   ((member next seen))
+                   (t (push next seen)
+                      (setq frontier (append (cdr (assoc next after)) frontier))))))
+         found))
+     (delete-dups (delq nil (mapcar #'car after))))))
+
+(defun harness-supervisor--check-steps (steps)
+  "Return the problems STEPS have together: ids used twice, unknown ids, cycles."
+  (let* ((ids (delq nil (mapcar (lambda (step) (plist-get step :id)) steps)))
+         (problems nil))
+    (dolist (id (delete-dups (copy-sequence ids)))
+      (let ((n (cl-count id ids :test #'equal)))
+        (when (> n 1)
+          (push (format "the id %s is used by %d steps: ids must be unique" id n) problems))))
+    (dolist (step steps)
+      (dolist (dep (plist-get step :after))
+        (unless (member dep ids)
+          (push (format "step %s waits for %s, which is no step of this plan" (plist-get step :id) dep)
+                problems))))
+    (let ((cyclic (harness-supervisor--cycle-ids steps)))
+      (when cyclic
+        (push (format "steps %s wait for each other in a cycle, so none of them could start"
+                      (string-join cyclic ", "))
+              problems)))
+    (nreverse problems)))
+
+(defun harness-supervisor--read-plan (input)
+  "Read the plan in INPUT, the arguments of a `submit_plan' call.
+Return (STEPS . PROBLEMS): STEPS are the steps as
+`harness-supervisor--read-step' reads them, PROBLEMS everything wrong
+with the plan, as texts."
+  (let* ((summary (harness-supervisor--text (plist-get input :summary)))
+         (raw (let ((steps (plist-get input :steps)))
+                (cond ((vectorp steps) (append steps nil))
+                      ;; One step given as an object instead of a list of them.
+                      ((and (consp steps) (keywordp (car steps))) (list steps))
+                      (t steps))))
+         (problems nil)
+         (steps nil))
+    (when (harness-string-blank-p summary)
+      (push "the summary is empty: it is the plan in markdown, shown to the user" problems))
+    (if (not (and (consp raw) (proper-list-p raw)))
+        (push "the plan has no steps: it needs at least one" problems)
+      (cl-loop for item in raw for index from 1
+               do (let ((read (harness-supervisor--read-step item index)))
+                    (when (car read) (push (car read) steps))
+                    (dolist (problem (cdr read)) (push problem problems)))))
+    (setq steps (nreverse steps))
+    (dolist (problem (harness-supervisor--check-steps steps)) (push problem problems))
+    (cons steps (nreverse problems))))
+
+(defun harness-supervisor--problems-result (tool problems)
+  "Return the error result of TOOL for PROBLEMS, every one listed.
+It is an error result so that the turn still owes a decision (see
+`harness-supervisor--on-tool-finished')."
+  (harness-tool-error
+   (format "%s was refused, and nothing started. Fix %s and call %s again:\n%s"
+           tool (if (cdr problems) "these problems" "this problem") tool
+           (mapconcat (lambda (problem) (concat "- " problem)) problems "\n"))))
+
+;;;; The plan engine: models
+
+(defun harness-supervisor--provider-tier-model (model tier)
+  "Return the model of the provider of MODEL that ranks with TIER, or nil."
+  (when (and (stringp model) (harness-method-exists-p 'provider/tier-model))
+    (condition-case err
+        (let ((found (harness-call 'provider/tier-model model
+                                   (cdr (assoc tier harness-supervisor--provider-tiers)))))
+          (and (stringp found) (not (string-empty-p found)) found))
+      (error (harness-log 'warn "supervisor: finding the %s model for %s failed: %S" tier model err)
+             nil))))
+
+(defun harness-supervisor--tier-model (session tier)
+  "Return (MODEL . FALLBACK) for the workers of TIER of the supervising SESSION.
+MODEL is the model of `harness-supervisor-tiers' for TIER, else the one
+of SESSION's provider that ranks with TIER (cheap, balanced or
+frontier), else SESSION's own, and FALLBACK is then non-nil."
+  (let ((override (cdr (assoc-string tier harness-supervisor-tiers))))
+    (if (and (stringp override) (not (string-empty-p override)))
+        (cons override nil)
+      (let ((found (harness-supervisor--provider-tier-model (plist-get session :model) tier)))
+        (if found
+            (cons found nil)
+          (cons (plist-get session :model) t))))))
+
+(defun harness-supervisor--fallback-hint (session steps)
+  "Say in SESSION's transcript which STEPS run on its own model.
+They do for want of another."
+  (when steps
+    (harness-call 'session/hint (plist-get session :id)
+                  (format "No model was found for the tier of %s: %s run%s on this session's own model, %s"
+                          (string-join (mapcar (lambda (step) (format "step %s (%s)" (plist-get step :id)
+                                                                      (plist-get step :tier)))
+                                               steps)
+                                       ", ")
+                          (if (cdr steps) "they" "it") (if (cdr steps) "" "s")
+                          (plist-get session :model)))))
+
+;;;; The plan engine: workers
+
+(defun harness-supervisor--worker-name (step)
+  "Return the name of the session of STEP's worker."
+  (harness-truncate-end (format "Step %s: %s" (plist-get step :id) (plist-get step :title)) 80))
+
+(defun harness-supervisor--context-limit (session-id fork)
+  "Return the context window limit of a worker of SESSION-ID, or nil for none.
+FORK is non-nil for a worker that starts with the conversation."
+  (and (fboundp 'harness-tools-agent-context-limit)
+       (harness-tools-agent-context-limit session-id fork)))
+
+(defun harness-supervisor--seeded-p (plan step)
+  "Non-nil when the worker of STEP forks through a seed.
+That is when PLAN has two or more fork steps on STEP's model, all its
+steps counted: they share one seed, whose cache is written once."
+  (and (equal (plist-get step :context) "fork")
+       (harness-method-exists-p 'seed/fork)
+       (>= (cl-count-if (lambda (other) (and (equal (plist-get other :context) "fork")
+                                             (equal (plist-get other :model) (plist-get step :model))))
+                        (plist-get plan :steps))
+           2)))
+
+(defun harness-supervisor--make-worker (session-id plan step)
+  "Return a promise of the session of the worker of STEP of PLAN.
+SESSION-ID is the supervisor.  A fork step forks it at the call that
+submitted the plan -- through a seed when the plan has several fork
+steps on the model -- and a fresh step is a new session in the
+supervisor's directory, with its settings."
+  (let* ((session (harness-call 'session/get session-id))
+         (model (plist-get step :model))
+         (name (harness-supervisor--worker-name step))
+         (fresh (equal (plist-get step :context) "fresh"))
+         (limit (harness-supervisor--context-limit session-id (not fresh)))
+         (options (and limit (list :context-window-limit limit))))
+    (cond
+     (fresh
+      (apply #'harness-call-async 'session/create
+             :cwd (plist-get session :cwd) :worktree (plist-get session :worktree)
+             :kind 'subagent :parent-id session-id :name name :model model
+             :host (plist-get session :host)
+             :permission-mode (plist-get session :permission-mode)
+             :thinking (plist-get session :thinking)
+             ;; Off too, not left to the setting.
+             :non-interactive (if (harness-json-true-p (plist-get session :non-interactive)) t :false)
+             :allowed-dirs (plist-get session :allowed-dirs)
+             options))
+     ((harness-supervisor--seeded-p plan step)
+      (apply #'harness-call-async 'seed/fork session-id model
+             :node (plist-get plan :node) :call-id (plist-get plan :call-id) :name name options))
+     (t
+      (apply #'harness-call-async 'session/fork session-id
+             :node (plist-get plan :node) :call-id (plist-get plan :call-id)
+             :kind 'subagent :model model :name name options)))))
+
+(defconst harness-supervisor--fork-opening
+  "You are now a worker for one step of the supervisor's plan, not the supervisor. You have the full tool set: you can read and change files and run commands. The supervisor's rules and reminders earlier in this conversation (read-only tools, ending every turn on a decision, submit_plan and retry_step) do not apply to you. Do this one step and nothing else; other workers do the other steps."
+  "What a worker that forked the supervisor is told first.")
+
+(defconst harness-supervisor--fresh-opening
+  "You are a worker for one step of a plan that a supervisor made. You have the full tool set: you can read and change files and run commands. You start without the supervisor's conversation, so the step below holds what you need. Do this one step and nothing else; other workers do the other steps."
+  "What a worker that starts fresh is told first.")
+
+(defconst harness-supervisor--worker-closing
+  "Do the step, then verify it. End with a short report of what you changed and how you checked it. Do not commit unless the step says so."
+  "What a worker is told last.")
+
+(defun harness-supervisor--worker-text (plan step preamble)
+  "Return the message that gives the worker of STEP of PLAN its job.
+PREAMBLE is what `seed/fork' asks a fork's first message to open with,
+or nil.  The message is the opening, the step, what the steps it waits
+for reported (cut short), and the closing."
+  (let ((before (delq nil (mapcar (lambda (id) (harness-supervisor--step plan id))
+                                  (plist-get step :after)))))
+    (concat
+     (and (stringp preamble) (not (string-blank-p preamble)) (concat (string-trim preamble) "\n\n"))
+     (if (equal (plist-get step :context) "fresh")
+         harness-supervisor--fresh-opening
+       harness-supervisor--fork-opening)
+     (format "\n\n## Step %s: %s\n\n%s\n" (plist-get step :id) (plist-get step :title)
+             (plist-get step :prompt))
+     (and before
+          (concat "\n## What the steps before this one reported\n\n"
+                  (mapconcat
+                   (lambda (dep)
+                     (format "### %s (%s)\n%s" (plist-get dep :id) (plist-get dep :title)
+                             (let ((result (plist-get dep :result)))
+                               (if (harness-string-blank-p result)
+                                   "(it reported nothing)"
+                                 (harness-truncate-middle result harness-supervisor--hand-over-limit)))))
+                   before "\n\n")
+                  "\n"))
+     "\n" harness-supervisor--worker-closing)))
+
+(defun harness-supervisor--last-reply (worker-id)
+  "Return the last thing the worker WORKER-ID said, or nil."
+  (when (and (stringp worker-id) (harness-call 'session/exists-p worker-id))
+    (condition-case nil
+        (let ((node (cl-find-if (lambda (n)
+                                  (and (eq (plist-get n :kind) 'assistant)
+                                       (equal (plist-get n :session) worker-id)
+                                       (not (harness-string-blank-p (plist-get n :content)))))
+                                (harness-call 'session/nodes worker-id) :from-end t)))
+          (and node (string-trim (plist-get node :content))))
+      (error nil))))
+
+(defun harness-supervisor--step-key (session-id plan-id step-id)
+  "Return the key of a step in `harness-supervisor--live'.
+It is the step STEP-ID of plan PLAN-ID of session SESSION-ID."
+  (list session-id plan-id step-id))
+
+(defun harness-supervisor--start-step (session-id plan-id step-id)
+  "Start a worker for step STEP-ID of plan PLAN-ID of session SESSION-ID.
+The step is running from now on, which is what `agent/outstanding'
+reports; the worker is made, and runs, in the background.  A step that
+is not waiting to start, or to start again, is left alone: promises
+that settled already call back at once, so a step can have been started
+by the time its turn comes."
+  (let* ((plan (harness-supervisor--plan (harness-supervisor--plans session-id) plan-id))
+         (old (and plan (harness-supervisor--step plan step-id))))
+    (when (and old (harness-supervisor--state-p old "pending" "failed" "interrupted" "cancelled"))
+      (puthash (harness-supervisor--step-key session-id plan-id step-id) t harness-supervisor--live)
+      (harness-supervisor--update-step session-id plan-id step-id
+                                       :state "running" :attempts (1+ (or (plist-get old :attempts) 0))
+                                       :session nil :result nil :error nil)
+      (let ((plan (harness-supervisor--plan (harness-supervisor--plans session-id) plan-id)))
+        (harness-then
+         (condition-case err
+             (harness-supervisor--make-worker session-id plan (harness-supervisor--step plan step-id))
+           (error (harness-rejected err)))
+         (lambda (worker)
+           (harness-supervisor--worker-made session-id plan-id step-id worker))
+         (lambda (err)
+           (harness-supervisor--step-ended
+            session-id plan-id step-id "failed"
+            (format "the worker could not be made: %s" (harness-error-message err)))))))))
+
+(defun harness-supervisor--start-ready (session-id plan-id)
+  "Start the steps of plan PLAN-ID of session SESSION-ID that are ready."
+  (let ((plan (harness-supervisor--plan (harness-supervisor--plans session-id) plan-id)))
+    (dolist (step (plist-get plan :steps))
+      (when (harness-supervisor--ready-p plan step)
+        (condition-case err
+            (harness-supervisor--start-step session-id plan-id (plist-get step :id))
+          (error (harness-supervisor--step-ended
+                  session-id plan-id (plist-get step :id) "failed"
+                  (format "the worker could not be started: %s" (harness-error-message err)))))))))
+
+(defun harness-supervisor--worker-made (session-id plan-id step-id worker)
+  "Run the step STEP-ID of plan PLAN-ID of session SESSION-ID on its new WORKER.
+WORKER is the session `seed/fork', `session/fork' or `session/create'
+made.  The worker's turn is the step: when it ends the step is done or
+it failed.  A step that was ended meanwhile, or whose supervisor was
+deleted, does not run."
+  (let ((key (harness-supervisor--step-key session-id plan-id step-id))
+        (wid (plist-get worker :id)))
+    (when (and (gethash key harness-supervisor--live) (harness-call 'session/exists-p session-id))
+      (condition-case err
+          (progn
+            (puthash key wid harness-supervisor--live)
+            (harness-supervisor--update-step session-id plan-id step-id :session wid)
+            (let* ((plan (harness-supervisor--plan (harness-supervisor--plans session-id) plan-id))
+                   (step (harness-supervisor--step plan step-id)))
+              (harness-then
+               (harness-call-async 'agent/prompt wid
+                                   (harness-supervisor--worker-text plan step (plist-get worker :preamble))
+                                   (list :from (harness-sender-session (harness-call 'session/get session-id))))
+               (lambda (result)
+                 (harness-supervisor--turn-ended session-id plan-id step-id wid result))
+               (lambda (err)
+                 (harness-supervisor--turn-ended session-id plan-id step-id wid
+                                                 (list :stop-reason 'error
+                                                       :error (harness-error-message err)))))))
+        ;; A step must not stay running for a worker that never got its job.
+        (error (harness-supervisor--step-ended
+                session-id plan-id step-id "failed"
+                (format "the worker could not be given its step: %s" (harness-error-message err))))))))
+
+(defun harness-supervisor--turn-ended (session-id plan-id step-id worker-id result)
+  "Settle step STEP-ID of plan PLAN-ID of SESSION-ID: the turn of WORKER-ID ended.
+RESULT is what `agent/prompt' answered.  A turn that ended on its own
+or at its output limit did the step; any other end -- an error, a
+cancel, a block -- failed it.  Nothing happens when the step is not
+running on that worker any more."
+  (let ((key (harness-supervisor--step-key session-id plan-id step-id)))
+    (when (equal (gethash key harness-supervisor--live) worker-id)
+      (let ((reason (let ((r (plist-get result :stop-reason))) (if (stringp r) (intern r) r)))
+            (error-text (plist-get result :error)))
+        (cond
+         ((memq reason '(end-turn max-tokens))
+          (harness-supervisor--step-done session-id plan-id step-id worker-id))
+         (t
+          (harness-supervisor--step-ended
+           session-id plan-id step-id "failed"
+           (if (eq reason 'cancelled)
+               "the worker's turn was cancelled, most likely by the user"
+             (format "the worker's turn ended with %s%s" (or reason "no reason")
+                     (if (harness-string-blank-p error-text) "" (format ": %s" error-text)))))))))))
+
+;;;; The plan engine: what the supervisor is told
+
+(defun harness-supervisor--task-p (session-id)
+  "Non-nil when session SESSION-ID is a task's."
+  (and (harness-method-exists-p 'task/for-session)
+       (condition-case nil (and (harness-call 'task/for-session session-id) t) (error nil))))
+
+(defun harness-supervisor--deliver (session-id text &optional queue)
+  "Send TEXT to session SESSION-ID as a message of the harness's supervisor.
+An idle session starts a turn on it and a running turn is steered; with
+QUEUE the message waits for the session's next message instead."
+  (harness-catch
+   (harness-call-async 'agent/prompt session-id text
+                       (append (list :from (harness-supervisor--sender)) (and queue (list :queue t))))
+   (lambda (err)
+     (harness-log 'warn "supervisor: reporting to %s failed: %s" session-id (harness-error-message err)))))
+
+(defun harness-supervisor--send (session-id text)
+  "Report TEXT to the supervising session SESSION-ID.
+It is a message of the harness's: an idle session starts a turn on it,
+a running turn is steered.  While the turn that submitted a plan is
+still ending (`harness-supervisor--ending') the report is held, since
+that turn would not take it, and goes out when the turn is over."
+  (when (harness-call 'session/exists-p session-id)
+    (if (and (gethash session-id harness-supervisor--ending)
+             (harness-method-exists-p 'agent/running)
+             (harness-call 'agent/running session-id))
+        (puthash session-id (append (gethash session-id harness-supervisor--held) (list text))
+                 harness-supervisor--held)
+      (harness-supervisor--deliver session-id text))))
+
+(defun harness-supervisor--hint (session-id text)
+  "Add the hint TEXT to session SESSION-ID's transcript, if it still exists."
+  (when (harness-call 'session/exists-p session-id)
+    (harness-call 'session/hint session-id text)))
+
+(defun harness-supervisor--step-name (step)
+  "Return STEP as a model reads it: its id and its title."
+  (format "%s (%s)" (plist-get step :id) (plist-get step :title)))
+
+(defun harness-supervisor--cut (text limit)
+  "Return TEXT cut to LIMIT characters, or nil when it says nothing."
+  (and (stringp text) (not (string-blank-p text)) (harness-truncate-middle (string-trim text) limit)))
+
+(defun harness-supervisor--failure-text (session-id plan step)
+  "Return the report to SESSION-ID that STEP of PLAN did not get done.
+It names the step, its tier and model, what went wrong, the steps held
+on it, and the ways on."
+  (let* ((id (plist-get step :id))
+         (state (plist-get step :state))
+         (held (cl-remove-if-not (lambda (s) (harness-supervisor--state-p s "pending"))
+                                 (harness-supervisor--dependants plan id)))
+         (running (cl-remove id (mapcar (lambda (s) (plist-get s :id))
+                                        (harness-supervisor--running-steps
+                                         (harness-supervisor--plans session-id)))
+                            :test #'equal))
+         (reply (harness-supervisor--cut (harness-supervisor--last-reply (plist-get step :session))
+                                         harness-supervisor--report-limit)))
+    (concat
+     (format "Supervisor report: step %s %s.\n" (harness-supervisor--step-name step)
+             (pcase state
+               ("interrupted" "was interrupted")
+               ("cancelled" "was cancelled")
+               (_ "failed")))
+     (format "It ran on tier %s, model %s (attempt %d).\n"
+             (plist-get step :tier) (plist-get step :model) (or (plist-get step :attempts) 1))
+     (and (plist-get step :error)
+          (format "Why: %s.\n" (harness-supervisor--cut (plist-get step :error)
+                                                        harness-supervisor--report-limit)))
+     (and reply (format "The worker's last reply:\n%s\n" reply))
+     (and (plist-get step :session)
+          (format "Its worker is session %s: session_read shows what it did.\n" (plist-get step :session)))
+     (if held
+         (format "Held on it, pending until it is done: %s.\n"
+                 (mapconcat #'harness-supervisor--step-name held ", "))
+       "No step waits for it.\n")
+     (and running (format "Still running: %s.\n" (string-join running ", ")))
+     (format "Plan %s. Decide: retry_step %s (on a higher tier if the model was not up to it), a new plan with submit_plan, or ask the user with ask_user."
+             (plist-get plan :id) id))))
+
+(defun harness-supervisor--finished-p (plan)
+  "Non-nil when nothing is left to do in PLAN: every step is done or superseded.
+No step is pending or running, and none failed, was interrupted or
+cancelled.  A step a later plan superseded never runs."
+  (let ((steps (plist-get plan :steps)))
+    (and steps
+         (cl-every (lambda (step) (harness-supervisor--state-p step "done" "superseded")) steps)
+         (cl-some (lambda (step) (harness-supervisor--state-p step "done")) steps))))
+
+(defun harness-supervisor--finished-text (session-id plan)
+  "Return the report to SESSION-ID that PLAN is finished.
+Every step is done, or was superseded by a later plan and never ran."
+  (let* ((steps (plist-get plan :steps))
+         (superseded (cl-remove-if-not (lambda (step) (harness-supervisor--state-p step "superseded")) steps)))
+    (concat
+     (format "Supervisor report: plan %s%s finished. %s\n"
+             (plist-get plan :id)
+             (if (plist-get plan :title) (format " (%s)" (plist-get plan :title)) "")
+             (cond
+              (superseded
+               (format "%d of its %d steps are done; a later plan superseded %s, which never ran."
+                       (- (length steps) (length superseded)) (length steps)
+                       (mapconcat (lambda (step) (plist-get step :id)) superseded ", ")))
+              ((cdr steps) (format "All %d steps are done." (length steps)))
+              (t "Its one step is done.")))
+     (mapconcat
+      (lambda (step)
+        (if (harness-supervisor--state-p step "superseded")
+            (format "- %s: superseded by a later plan, it never ran" (harness-supervisor--step-name step))
+          (format "- %s on %s%s: %s" (harness-supervisor--step-name step) (plist-get step :model)
+                  (if (plist-get step :session) (format ", session %s" (plist-get step :session)) "")
+                  (or (harness-supervisor--cut (plist-get step :result) harness-supervisor--report-limit)
+                      "(it reported nothing)"))))
+      steps "\n")
+     "\n\nCheck the work now, with the read-only tools: read the files the steps changed, and use session_read on a worker when its report is not enough. Then decide: a follow-up plan with submit_plan if something is missing or wrong, "
+     (if (harness-supervisor--task-p session-id)
+         "hand_in once the work is checked and committed, or no_plan_needed with your reply to the user."
+       "or no_plan_needed with your reply to the user."))))
+
+(defun harness-supervisor--step-done (session-id plan-id step-id worker-id)
+  "Record that step STEP-ID of plan PLAN-ID of SESSION-ID is done.
+WORKER-ID's turn is over.  The supervisor gets a hint, and the steps
+that waited for this one start.  When nothing is left to do in its plan
+the supervisor is told the plan finished (`harness-supervisor--finished-p'):
+the steps a later plan superseded count as nothing to do, so that a plan
+the supervisor replaced while one of its steps ran still reports when
+that step ends."
+  (remhash (harness-supervisor--step-key session-id plan-id step-id) harness-supervisor--live)
+  (when (harness-call 'session/exists-p session-id)
+    (let ((step (harness-supervisor--update-step
+                 session-id plan-id step-id
+                 :state "done" :error nil
+                 :result (harness-supervisor--cut (harness-supervisor--last-reply worker-id)
+                                                  harness-supervisor--result-limit))))
+      (when step
+        (harness-supervisor--hint session-id (format "Step %s done on %s" step-id (plist-get step :model)))
+        (harness-supervisor--start-ready session-id plan-id)
+        (let ((plan (harness-supervisor--plan (harness-supervisor--plans session-id) plan-id)))
+          (when (and plan (harness-supervisor--finished-p plan))
+            (harness-supervisor--send session-id (harness-supervisor--finished-text session-id plan))))))))
+
+(defun harness-supervisor--step-ended (session-id plan-id step-id state error)
+  "Record that step STEP-ID of plan PLAN-ID of SESSION-ID ended, for ERROR.
+STATE is \"failed\", \"interrupted\" or \"cancelled\".  The supervisor
+is told in a message of its own, which names the steps now held on it."
+  (remhash (harness-supervisor--step-key session-id plan-id step-id) harness-supervisor--live)
+  (when (harness-call 'session/exists-p session-id)
+    (let ((step (harness-supervisor--update-step session-id plan-id step-id :state state :error error)))
+      (when step
+        (harness-supervisor--send
+         session-id
+         (harness-supervisor--failure-text
+          session-id (harness-supervisor--plan (harness-supervisor--plans session-id) plan-id) step))))))
+
+;;;; The plan engine: submit_plan
+
+(defun harness-supervisor--call-node (session-id call-id)
+  "Return the id of the node of tool call CALL-ID in SESSION-ID's transcript.
+That is the head of the session at the time of the call unless the model
+made more calls in the same message; without the call, the head."
+  (let ((call (and call-id
+                   (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'tool-call)
+                                                (equal (plist-get n :call-id) call-id)))
+                               (harness-call 'session/nodes session-id) :from-end t))))
+    (or (plist-get call :id) (plist-get (harness-call 'session/get session-id) :head))))
+
+(defun harness-supervisor--make-plan (input steps node call-id)
+  "Return the plan that INPUT, a `submit_plan' call, makes of STEPS.
+NODE and CALL-ID are the fork point.  Every step starts out pending."
+  (let ((title (harness-supervisor--text (plist-get input :title))))
+    (harness-supervisor--with
+     (list :id (concat "p-" (harness-short-id 6)))
+     :title (and (not (harness-string-blank-p title)) title)
+     :summary (harness-supervisor--text (plist-get input :summary))
+     :node node :call-id call-id :created (float-time)
+     :steps (mapcar (lambda (step) (harness-supervisor--with step :state "pending" :attempts 0)) steps))))
+
+(defun harness-supervisor--step-line (step)
+  "Return the line of the answer to `submit_plan' that tells where STEP runs."
+  (format "- %s → %s (%s%s%s)" (plist-get step :id) (plist-get step :model) (plist-get step :tier)
+          (if (equal (plist-get step :context) "fresh") ", fresh" "")
+          (if (plist-get step :after) (format ", after %s" (string-join (plist-get step :after) " ")) "")))
+
+(defun harness-supervisor--submit-plan (input ctx)
+  "Handler of the submit_plan tool: record INPUT's plan and start its workers.
+CTX is the call's context.  A plan with problems is refused as a whole,
+every problem named.  Otherwise the plan is recorded on the session --
+the steps of its earlier plans that have not started are superseded --
+shown like the `plan' tool shows one, and its ready steps start.  The
+answer ends the turn: the harness reports back."
+  (let* ((sid (plist-get ctx :session-id))
+         (session (harness-call 'session/get sid))
+         (read (harness-supervisor--read-plan input)))
+    (if (cdr read)
+        (harness-supervisor--problems-result "submit_plan" (cdr read))
+      (let* ((fallback nil)
+             (steps (mapcar (lambda (step)
+                              (let ((model (harness-supervisor--tier-model session (plist-get step :tier))))
+                                (when (cdr model) (push step fallback))
+                                (harness-supervisor--with step :model (car model))))
+                            (car read)))
+             ;; The call's own node, taken before the plan and its hint join the transcript.
+             (plan (harness-supervisor--make-plan input steps
+                                                  (harness-supervisor--call-node sid (plist-get ctx :call-id))
+                                                  (plist-get ctx :call-id)))
+             (n (length steps)))
+        (harness-supervisor--save-plans
+         sid (append (mapcar #'harness-supervisor--supersede (harness-supervisor--plans sid)) (list plan)))
+        (harness-call 'session/set-plan sid (plist-get plan :summary))
+        (harness-call 'session/append sid (list :kind 'plan :content (plist-get plan :summary)
+                                                :title (plist-get plan :title)
+                                                :meta (list :plan-id (plist-get plan :id))))
+        (harness-call 'session/hint sid (format "Plan submitted: %d step%s" n (if (= n 1) "" "s")))
+        (harness-supervisor--fallback-hint session (nreverse fallback))
+        (when (and (harness-method-exists-p 'agent/running) (harness-call 'agent/running sid))
+          (puthash sid t harness-supervisor--ending))
+        (harness-supervisor--start-ready sid (plist-get plan :id))
+        (harness-tool-ok
+         (concat (format "Plan %s submitted: %d step%s, started where they are ready.\n"
+                         (plist-get plan :id) n (if (= n 1) "" "s"))
+                 (mapconcat #'harness-supervisor--step-line steps "\n")
+                 "\nThis ends your turn. The harness reports a failed step, and the finished plan, to you in a new message: do not wait or poll.")
+         :end-turn t)))))
+
+(harness-define-tool "submit_plan"
+  :label "Submit plan"
+  :description "Submit the plan for the work and start its workers. Call it once you know enough to plan; it is your decision for the turn whenever the work changes files, however small. The plan is a list of steps, each a self-contained job for a worker on a cheaper model, which has the full tool set that you lack. summary is the plan in markdown, shown to the user: the approach, the steps, and how the result is verified. Each step has an id (short, unique), a title, a prompt (self-contained: what to do, which files, how to verify, what to report; say when the step must commit), a tier with a one-line reason (mundane for mechanical, well-specified edits; standard for ordinary work; hard for subtle design or debugging), a context (fork, the default: the worker sees this conversation up to now; or fresh: it starts empty, so the prompt must hold everything), and after: the ids of the steps that must be done first. Steps with no order between them run at once in the same working tree, so give them different files. A worker also gets the reports of the steps it follows. The harness starts the steps that are ready, tells you in a new message when a step fails and when the plan has finished, and ends this turn now. A problem with the plan (an id used twice, an after that names no step, a cycle, an unknown tier or context, a blank prompt) is returned as an error and nothing starts: fix it and call again."
+  :schema '(:type "object"
+            :properties (:title (:type "string" :description "Optional short title for the plan.")
+                         :summary (:type "string" :description "The plan in markdown, shown to the user.")
+                         :steps (:type "array"
+                                 :description "The steps, at least one."
+                                 :items (:type "object"
+                                         :properties (:id (:type "string" :description "A short id, unique in the plan.")
+                                                      :title (:type "string" :description "What the step does, in a few words.")
+                                                      :prompt (:type "string" :description "Self-contained instructions for the worker: what to do, which files, how to verify, what to report.")
+                                                      :tier (:type "string" :enum ("mundane" "standard" "hard")
+                                                             :description "How hard the step is, which decides the worker's model.")
+                                                      :reason (:type "string" :description "Why this tier, in one line.")
+                                                      :context (:type "string" :enum ("fork" "fresh")
+                                                                :description "fork (default): the worker sees this conversation. fresh: it starts empty.")
+                                                      :after (:type "array" :items (:type "string")
+                                                              :description "Ids of the steps of this plan that must be done before this one starts."))
+                                         :required ("id" "title" "prompt" "tier" "reason"))))
+            :required ("summary" "steps"))
+  :kind 'meta
+  :subject (lambda (input)
+             (let ((title (plist-get input :title)))
+               (if (harness-string-blank-p title)
+                   (harness-first-line (plist-get input :summary) 60)
+                 (harness-first-line title 60))))
+  :handler #'harness-supervisor--submit-plan)
+
+;;;; The plan engine: retry_step
+
+(defun harness-supervisor--retry-step (input ctx)
+  "Handler of the retry_step tool: run a step of INPUT again on a new worker.
+CTX is the call's context.  Only a step that failed, was interrupted or
+was cancelled can be retried.  A new tier moves the step to that tier's
+model; notes in INPUT are added to its prompt.  The steps held on it
+start once it is done.  The turn goes on: several steps can be retried
+in one message."
+  (let* ((sid (plist-get ctx :session-id))
+         (step-id (harness-supervisor--text (plist-get input :step)))
+         (plan-id (harness-supervisor--text (plist-get input :plan)))
+         (tier (let ((tier (harness-supervisor--text (plist-get input :tier)))) (and tier (downcase tier))))
+         (reason (harness-supervisor--text (plist-get input :reason)))
+         (notes (harness-supervisor--text (plist-get input :prompt)))
+         (plans (harness-supervisor--plans sid))
+         (found (and (not (harness-string-blank-p step-id))
+                     (harness-supervisor--find-step plans step-id (and (not (harness-string-blank-p plan-id)) plan-id))))
+         (plan (car found))
+         (step (cdr found))
+         (problems
+          (delq nil
+                (list (and (harness-string-blank-p step-id) "step is empty: name the step to run again")
+                      (and (harness-string-blank-p reason)
+                           "reason is empty: say in a line why the step runs again")
+                      (and (not (harness-string-blank-p tier))
+                           (not (member tier harness-supervisor--tier-names))
+                           (format "%S is no tier: use mundane, standard or hard" tier))
+                      (and (not (harness-string-blank-p step-id)) (not found)
+                           (if (harness-string-blank-p plan-id)
+                               (format "no step %s in any plan of this session%s" step-id
+                                       (harness-supervisor--known-steps plans))
+                             (format "no step %s in plan %s%s" step-id plan-id
+                                     (harness-supervisor--known-steps plans))))
+                      (and step (not (member (plist-get step :state) harness-supervisor--retryable-states))
+                           (format "step %s is %s%s: only a failed, interrupted or cancelled step can be retried"
+                                   step-id (plist-get step :state)
+                                   (let ((waits (and (harness-supervisor--state-p step "pending")
+                                                     (cl-remove-if
+                                                      (lambda (id) (harness-supervisor--state-p
+                                                                    (harness-supervisor--step plan id) "done"))
+                                                      (plist-get step :after)))))
+                                     (if waits (format ", waiting for %s" (string-join waits ", ")) ""))))))))
+    (if problems
+        (harness-supervisor--problems-result "retry_step" problems)
+      (let* ((plan-id (plist-get plan :id))
+             (session (harness-call 'session/get sid))
+             (attempt (1+ (or (plist-get step :attempts) 0)))
+             (new-tier (and (not (harness-string-blank-p tier)) (not (equal tier (plist-get step :tier))) tier))
+             (model (and new-tier (harness-supervisor--tier-model session new-tier)))
+             (now (apply #'harness-supervisor--update-step
+                         sid plan-id step-id
+                         :prompt (if (harness-string-blank-p notes)
+                                     (plist-get step :prompt)
+                                   (format "%s\n\nNotes for attempt %d: %s" (plist-get step :prompt) attempt notes))
+                         ;; A step that moves to another tier has its reason: why this one.
+                         (and new-tier (list :tier new-tier :model (car model) :reason reason)))))
+        (when (cdr model)
+          (harness-supervisor--fallback-hint session (list now)))
+        (harness-supervisor--hint sid (format "Retrying step %s on %s (attempt %d): %s"
+                                              step-id (plist-get now :model) attempt reason))
+        (harness-supervisor--start-step sid plan-id step-id)
+        (harness-tool-ok
+         (format "Step %s of plan %s runs again on %s (tier %s, attempt %d). The steps held on it start once it is done."
+                 step-id plan-id (plist-get now :model) (plist-get now :tier) attempt))))))
+
+(defun harness-supervisor--known-steps (plans)
+  "Return a text naming the steps of the latest of PLANS, for an error."
+  (let ((plan (car (last plans))))
+    (if plan
+        (format ". The latest plan, %s, has: %s" (plist-get plan :id)
+                (mapconcat (lambda (s) (format "%s (%s)" (plist-get s :id) (plist-get s :state)))
+                           (plist-get plan :steps) ", "))
+      ". This session has no plan")))
+
+(harness-define-tool "retry_step"
+  :label "Retry step"
+  :description "Run a step of a submitted plan again on a new worker: a step that failed, was interrupted by a restart, or was cancelled. step is its id. plan is the id of its plan and defaults to the latest plan that has the step. tier moves the step to another tier, usually a higher one, when its model was not up to it. reason says in a line why. prompt adds notes to the step's prompt for the new worker, such as what went wrong the first time. The steps held on the step start once it is done. It does not end your turn, so you can retry several steps in one message."
+  :schema '(:type "object"
+            :properties (:step (:type "string" :description "Id of the step to run again.")
+                         :plan (:type "string" :description "Id of the plan (default: the latest plan that has the step).")
+                         :tier (:type "string" :enum ("mundane" "standard" "hard")
+                                :description "A new tier for the step, to escalate it.")
+                         :reason (:type "string" :description "Why the step runs again, in one line.")
+                         :prompt (:type "string" :description "Notes added to the step's prompt, such as what went wrong."))
+            :required ("step" "reason"))
+  :kind 'meta
+  :subject (lambda (input)
+             (format "%s%s" (or (harness-supervisor--text (plist-get input :step)) "?")
+                     (if (harness-string-blank-p (plist-get input :tier)) ""
+                       (format " on %s" (plist-get input :tier)))))
+  :handler #'harness-supervisor--retry-step)
+
+;;;; The plan engine: work outside the turn
+
+(defun harness-supervisor--outstanding-line (session-id)
+  "Return what the plans of session SESSION-ID have outstanding, as a line, or nil.
+That is the steps running and the pending steps that can still start.
+A step held behind one that ended without being done does not count:
+the supervisor was told, and has to decide.  Reports waiting for the
+end of a turn do."
+  (let ((running 0) (waiting 0))
+    (dolist (plan (harness-supervisor--plans session-id))
+      (dolist (step (plist-get plan :steps))
+        (cond ((harness-supervisor--state-p step "running") (cl-incf running))
+              ((harness-supervisor--waiting-p plan step) (cl-incf waiting)))))
+    (let ((parts (delq nil (list (and (> running 0)
+                                      (format "%d step%s running" running (if (= running 1) "" "s")))
+                                 (and (> waiting 0)
+                                      (if (> running 0)
+                                          (format "%d waiting" waiting)
+                                        (format "%d step%s waiting" waiting (if (= waiting 1) "" "s"))))
+                                 (and (gethash session-id harness-supervisor--held)
+                                      "a report to deliver")))))
+      (and parts (concat "Supervisor plan: " (string-join parts ", "))))))
+
+(defun harness-supervisor--outstanding (value session-id)
+  "Add what the plans of SESSION-ID have outstanding to VALUE.
+An `agent/outstanding' filter: the tasks module keeps the task of a
+session active, waiting, while this says anything.  VALUE is what the
+handlers before it said; it stays as it is when the session has
+nothing running or waiting."
+  (let ((line (and (harness-call 'session/exists-p session-id)
+                   (harness-supervisor--outstanding-line session-id))))
+    (cond ((null line) value)
+          ((and (stringp value) (not (string-blank-p value))) (concat value "; " line))
+          (t line))))
+
+(defun harness-supervisor--flush (session-id reason)
+  "Send the reports held for SESSION-ID, whose turn ended with REASON.
+They go as one message.  After a turn that ended any other way than
+`end-turn' they are queued instead, for the user's next message: a turn
+the user stopped is not one to start another on."
+  (let ((reports (gethash session-id harness-supervisor--held)))
+    (remhash session-id harness-supervisor--held)
+    (when (and reports (harness-call 'session/exists-p session-id))
+      (harness-supervisor--deliver session-id (string-join reports "\n\n") (not (eq reason 'end-turn))))))
+
+(defun harness-supervisor--on-turn-ended (session-id reason)
+  "Let the reports held for SESSION-ID go out: its turn ended with REASON.
+A subscriber of `agent/turn-ended'.  They go soon, after the other
+subscribers saw the turn end: the tasks module asks for what is
+outstanding, which the held reports are part of."
+  (remhash session-id harness-supervisor--ending)
+  (when (gethash session-id harness-supervisor--held)
+    (harness-run-soon #'harness-supervisor--flush session-id reason)))
+
+(defun harness-supervisor--forget-plans (session-id)
+  "Stop what the plans of the deleted session SESSION-ID started.
+Its running workers are cancelled; nothing is written to the session,
+which is going."
+  (remhash session-id harness-supervisor--ending)
+  (remhash session-id harness-supervisor--held)
+  (let (mine)
+    (maphash (lambda (key worker) (when (equal (car key) session-id) (push (cons key worker) mine)))
+             harness-supervisor--live)
+    (dolist (entry mine)
+      (remhash (car entry) harness-supervisor--live)
+      (when (and (stringp (cdr entry)) (harness-method-exists-p 'agent/cancel)
+                 (harness-call 'session/exists-p (cdr entry)))
+        (condition-case err
+            (harness-call 'agent/cancel (cdr entry))
+          (error (harness-log 'warn "supervisor: cancelling worker %s failed: %S" (cdr entry) err)))))))
+
+(defun harness-supervisor--worker-deleted (worker-id)
+  "Cancel the step that the worker WORKER-ID, a deleted session, was running."
+  (let (key)
+    (maphash (lambda (k worker) (when (equal worker worker-id) (setq key k))) harness-supervisor--live)
+    (when key
+      (harness-supervisor--step-ended (nth 0 key) (nth 1 key) (nth 2 key) "cancelled"
+                                      "the worker's session was deleted"))))
+
+(defun harness-supervisor--recover-session (session-id)
+  "Interrupt the steps of session SESSION-ID that no worker runs any more.
+A step stored as running that this process has no worker for belongs to
+a harness that stopped.  Each is reported as a failure is: to the
+session of a task as a message, so the task carries on, and to any other
+queued, to go with the user's next message instead of starting an
+expensive turn they did not ask for."
+  (let ((interrupted nil))
+    (dolist (plan (harness-supervisor--plans session-id))
+      (dolist (step (plist-get plan :steps))
+        (when (and (harness-supervisor--state-p step "running")
+                   (not (gethash (harness-supervisor--step-key session-id (plist-get plan :id)
+                                                               (plist-get step :id))
+                                 harness-supervisor--live)))
+          (push (cons (plist-get plan :id) (plist-get step :id)) interrupted))))
+    (setq interrupted (nreverse interrupted))
+    (dolist (ids interrupted)
+      (harness-supervisor--update-step session-id (car ids) (cdr ids)
+                                       :state "interrupted"
+                                       :error "the harness stopped while the worker was running"))
+    (let ((task (harness-supervisor--task-p session-id)))
+      (dolist (ids interrupted)
+        (let* ((plan (harness-supervisor--plan (harness-supervisor--plans session-id) (car ids)))
+               (step (harness-supervisor--step plan (cdr ids))))
+          (harness-supervisor--deliver session-id (harness-supervisor--failure-text session-id plan step)
+                                       (not task)))))
+    interrupted))
+
+(defun harness-supervisor--recover ()
+  "Interrupt the steps that a stopped harness left running, in every session.
+It runs once the modules are up (see `harness-supervisor--start')."
+  (dolist (session (harness-call 'session/list))
+    (when (plist-get (plist-get session :ext) harness-supervisor--plans-key)
+      (condition-case err
+          (harness-supervisor--recover-session (plist-get session :id))
+        (error (harness-log 'warn "supervisor: recovering the plans of %s failed: %S"
+                            (plist-get session :id) err))))))
+
 ;;;; The system prompt
 
 (defun harness-supervisor-prompt-section ()
@@ -613,7 +1666,19 @@ appended.  Other sessions keep PROMPT."
   (harness-on 'agent/turn-started #'harness-supervisor--on-turn-started)
   (harness-on 'agent/tool-call #'harness-supervisor--on-tool-call)
   (harness-on 'tools/finished #'harness-supervisor--on-tool-finished)
-  (harness-on 'session/deleted #'harness-supervisor--on-session-deleted))
+  (harness-on 'session/deleted #'harness-supervisor--on-session-deleted)
+  (harness-on 'agent/turn-ended #'harness-supervisor--on-turn-ended)
+  (harness-add-filter 'agent/outstanding #'harness-supervisor--outstanding))
+
+(defun harness-supervisor--start ()
+  "Start the module: hook it into the bus, then recover from a restart.
+Steps stored as running belong to a harness that stopped, unless this
+process runs their workers; once every module is up they are interrupted
+\(`harness-supervisor--recover'), as the tasks module picks up what it
+left once they are (`harness-tasks--pick-up').  A reload hooks in again
+\(`harness-supervisor--init') but starts nothing: its workers run on."
+  (harness-supervisor--init)
+  (harness-run-soon #'harness-supervisor--recover))
 
 (defun harness-supervisor--shutdown ()
   "Take the module off the bus.  Sessions keep their setting."
@@ -627,7 +1692,9 @@ appended.  Other sessions keep PROMPT."
   (harness-off (cons 'agent/turn-started #'harness-supervisor--on-turn-started))
   (harness-off (cons 'agent/tool-call #'harness-supervisor--on-tool-call))
   (harness-off (cons 'tools/finished #'harness-supervisor--on-tool-finished))
-  (harness-off (cons 'session/deleted #'harness-supervisor--on-session-deleted)))
+  (harness-off (cons 'session/deleted #'harness-supervisor--on-session-deleted))
+  (harness-off (cons 'agent/turn-ended #'harness-supervisor--on-turn-ended))
+  (harness-remove-filter 'agent/outstanding #'harness-supervisor--outstanding))
 
 ;; A reload does not initialise a running module again: hook in what
 ;; this version brings now.
@@ -637,7 +1704,7 @@ appended.  Other sessions keep PROMPT."
 (harness-define-module 'supervisor
   :doc "Supervisor mode: sessions that plan and delegate, enforced by the harness."
   :requires '(session agent tools)
-  :init #'harness-supervisor--init
+  :init #'harness-supervisor--start
   :shutdown #'harness-supervisor--shutdown)
 
 (provide 'harness-supervisor)
