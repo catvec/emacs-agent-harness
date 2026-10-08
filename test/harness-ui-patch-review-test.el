@@ -1,12 +1,13 @@
-;;; harness-ui-patch-review-test.el --- Tests for reviewing a task's changes as a patch  -*- lexical-binding: t; -*-
+;;; harness-ui-patch-review-test.el --- Tests for reviewing a task's changes in its report  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
 ;; A task's branch in a repository of its own: what it changes against
-;; its merge base, the list of its files, Ediff file by file with the
-;; review's keys, the reply that quotes the diff with comments inline,
-;; and sending the comments back to the task as its feedback.  The
-;; repositories are throwaway ones, whose commits are never signed.
+;; its merge base, the changes in the task's report, Ediff file by file
+;; from there with the review's keys, the comments quoted from the diff
+;; into the report's feedback box, and sending them back to the task in
+;; one go.  The repositories are throwaway ones, whose commits are never
+;; signed.
 
 ;;; Code:
 
@@ -36,23 +37,17 @@
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
 (defvar harness-ui--sessions)
+(defvar harness-compose-start)
 (defvar harness-compose-end)
-(defvar harness-chat--loading)
 (defvar harness-ui-tasks--tasks)
 (defvar harness-ui-tasks--loading)
-(defvar harness-ui-review-minor-mode-map)
-(defvar harness-ui-review-button-functions)
-(defvar harness-ui-tasks-card-button-functions)
+(defvar harness-ui-report-panel-functions)
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-tasks--set "harness-tasks")
 (declare-function harness-ui-tasks-submit "harness-ui-tasks")
-(declare-function harness-ui-tasks-refresh "harness-ui-tasks")
-(declare-function harness-ui-tasks--render "harness-ui-tasks")
-(declare-function harness-ui-tasks--find-button "harness-ui-tasks")
-(declare-function harness-chat-buffer "harness-ui-chat")
-(declare-function harness-ui-review--redraw "harness-ui-review")
+(declare-function harness-ui-tasks--find "harness-ui-tasks")
+(declare-function harness-ui-report-popout "harness-ui-report")
 (declare-function harness-acp--drop-client "harness-acp")
-(declare-function harness-acp--normalise "harness-acp")
 
 ;;;; A repository with a task's branch
 
@@ -139,6 +134,23 @@ PLIST goes first, so it wins."
   "BUFFER's text, without properties."
   (with-current-buffer buffer (buffer-substring-no-properties (point-min) (point-max))))
 
+(defun harness-ui-patch-review-test--put (review text &rest comments)
+  "Return TEXT, what a feedback box holds, with COMMENTS put in it.
+Each is (PATH WHERE COMMENT), as `harness-ui-patch-review--add-comment'
+takes them, for REVIEW's file at PATH."
+  (with-temp-buffer
+    (insert text)
+    (pcase-dolist (`(,path ,where ,comment) comments)
+      (harness-ui-patch-review--put-comment
+       review (harness-ui-patch-review-test--file review path) where comment))
+    (buffer-string)))
+
+(defun harness-ui-patch-review-test--attribution (repo)
+  "Return the line before the first quote of task/fix of REPO in the feedback."
+  (format "My comments on the diff of your branch task/fix (at %s) against main (merge base %s), each under the lines it is about:"
+          (substring (harness-ui-patch-review-test--git repo "rev-parse" "task/fix") 0 7)
+          (substring (harness-ui-patch-review-test--git repo "merge-base" "main" "task/fix") 0 7)))
+
 (defmacro harness-ui-patch-review-test-with-repo (&rest body)
   "Run BODY with `repo', a repository with a task's branch; clean up after.
 The reviews made go, their buffers too, and the frame has one window."
@@ -170,8 +182,9 @@ main's own commits after it are not the task's."
       (should (equal "main" (plist-get result :base)))
       (should-not (plist-get result :dirty))
       (let ((files (plist-get result :files)))
+        ;; In the diff's order.
         (should (equal '("a.el" "b.el" "d.el" "docs/é.txt" "img.bin" "new.el")
-                       (sort (mapcar #'harness-ui-patch-review--f-path files) #'string<)))
+                       (mapcar #'harness-ui-patch-review--f-path files)))
         (pcase-dolist (`(,path ,status ,old-path ,added ,deleted ,binary)
                        '(("a.el" "M" nil 2 2 nil) ("b.el" "D" nil 0 5 nil) ("d.el" "R" "c.el" 1 1 nil)
                          ("docs/é.txt" "A" nil 1 0 nil) ("new.el" "A" nil 3 0 nil) ("img.bin" "M" nil 0 0 t)))
@@ -209,12 +222,14 @@ main's own commits after it are not the task's."
                      (harness-ui-patch-review-test--git repo "merge-base" "main" "task/fix"))))
     (let ((err (should-error (harness-test-await (harness-ui-patch-review--read-branch repo "task/nope" "main")))))
       (should (string-match-p "There is no branch .task/nope." (error-message-string err))))
-    ;; A review that cannot read its branch shows why, and g tries again.
+    ;; A review that cannot read its branch says why.
     (let ((review (harness-ui-patch-review--review-create
                    :id "t-patch" :task (harness-ui-patch-review-test--task repo :branch "task/nope"))))
       (harness-test-await (harness-ui-patch-review--load review))
       (should (string-match-p "There is no branch" (harness-ui-patch-review--r-error review)))
-      (should-not (harness-ui-patch-review--r-loading review)))))
+      (should-not (harness-ui-patch-review--r-loading review))
+      (should (cl-some (lambda (note) (string-match-p "Could not read the branch: There is no branch" note))
+                       (harness-ui-patch-review--notes review))))))
 
 (ert-deftest harness-ui-patch-review-is-offered-where-the-branch-can-be-read ()
   "Only for a task in review with a branch, in a repository of this machine."
@@ -230,43 +245,42 @@ main's own commits after it are not the task's."
                            (plist-put (copy-sequence task) :branch nil)
                            (plist-put (copy-sequence task) :project "/no/such/dir")))
         (should-not (harness-ui-patch-review--offered-p other))
-        (should (stringp (harness-ui-patch-review--why-not other)))
-        (should-not (harness-ui-patch-review--banner-button other))
-        (should-not (harness-ui-patch-review--card-button other)))
+        (should (stringp (harness-ui-patch-review--why-not other))))
       ;; A harness on another machine: its repositories are not here.
       (let ((harness-ui-connection-address "elsewhere:7777"))
         (should-not (harness-ui-patch-review--offered-p task))
-        (should (string-match-p "elsewhere:7777" (harness-ui-patch-review--why-not task)))
-        (should-error (harness-ui-patch-review task) :type 'user-error))
-      (should (equal (list "[Changes]" #'harness-ui-patch-review harness-ui-patch-review--button-help)
-                     (harness-ui-patch-review--banner-button task))))))
+        (should (string-match-p "elsewhere:7777" (harness-ui-patch-review--why-not task)))))))
 
-;;;; The reply
+;;;; The quote and the comments
 
-(ert-deftest harness-ui-patch-review-quotes-and-parses-the-diff ()
-  "The reply quotes the diff as a mailing list does, and reads back as it."
-  (should (equal "> a\n>\n> b\n" (harness-ui-patch-review--quote "a\n\nb\n")))
-  (should (equal "" (harness-ui-patch-review--quote "")))
+(ert-deftest harness-ui-patch-review-parses-the-quote ()
+  "The feedback quotes the diff as a mailing list does, and reads back as it:
+each line of the quote knows its numbers, across the comments in it."
   (with-temp-buffer
     (insert "General words\n"
-            (harness-ui-patch-review--quote
-             (concat "diff --git a/x b/x\nindex 1..2 100644\n--- a/x\n+++ b/x\n"
-                     "@@ -3,3 +3,4 @@ (defun x ()\n one\n-two\n+deux\n+trois\n three\n"
-                     "@@ -10 +11 @@\n-ten\n+dix\n\\ No newline at end of file\n"))
-            "A comment\n")
+            "> diff --git a/x b/x\n> index 1..2 100644\n> --- a/x\n> +++ b/x\n"
+            "> @@ -3,3 +3,4 @@ (defun x ()\n>  one\n> -two\n> +deux\n\nA comment\n\n> +trois\n>  three\n"
+            "> @@ -10 +11 @@\n> -ten\n> +dix\n> \\ No newline at end of file\n"
+            "Another\n")
     (let ((lines (harness-ui-patch-review--parse)))
-      (should (equal '(comment quote quote quote quote quote quote quote quote quote quote quote quote quote quote comment)
+      (should (equal '(comment quote quote quote quote quote quote quote quote blank comment blank
+                               quote quote quote quote quote quote comment)
                      (mapcar (lambda (l) (plist-get l :type)) lines)))
-      (should (equal '(nil header header header header hunk context removed added added context hunk removed added other nil)
+      (should (equal '(nil file header header header hunk context removed added nil nil nil
+                           added context hunk removed added other nil)
                      (mapcar (lambda (l) (plist-get l :line)) lines)))
-      (should (equal '(nil nil nil nil nil nil 3 4 nil nil 5 nil 10 nil nil nil)
+      (should (equal '(nil nil nil nil nil nil 3 4 nil nil nil nil nil 5 nil 10 nil nil nil)
                      (mapcar (lambda (l) (plist-get l :old)) lines)))
-      (should (equal '(nil nil nil nil nil nil 3 nil 4 5 6 nil nil 11 nil nil)
+      (should (equal '(nil nil nil nil nil nil 3 nil 4 nil nil nil 5 6 nil nil 11 nil nil)
                      (mapcar (lambda (l) (plist-get l :new)) lines)))
-      (should (equal '(nil 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1)
+      ;; A hunk's header says where it starts, under a name no line has.
+      (should (equal '(3 11) (delq nil (mapcar (lambda (l) (plist-get l :new-start)) lines))))
+      (should (equal '(nil 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1)
                      (mapcar (lambda (l) (if (plist-get l :file) (or (plist-get l :hunk) 0) nil)) lines)))
-      (should (equal '("General words" "A comment")
-                     (mapcar (lambda (l) (plist-get l :text)) (harness-ui-patch-review--comment-blocks lines)))))))
+      (should (equal '("General words" "A comment" "Another")
+                     (mapcar (lambda (l) (plist-get l :text)) (harness-ui-patch-review--comment-blocks lines))))
+      (should (equal '(("diff --git a/x b/x" . 2))
+                     (harness-ui-patch-review--counts (buffer-string)))))))
 
 (ert-deftest harness-ui-patch-review-comment-text-is-no-quote ()
   "A comment is trimmed and filled, and none of its lines reads as the quote."
@@ -276,290 +290,135 @@ main's own commits after it are not the task's."
     (should (cl-every (lambda (line) (<= (length line) harness-ui-patch-review-fill-column))
                       (split-string filled "\n")))))
 
-(ert-deftest harness-ui-patch-review-comments-go-under-their-lines ()
-  "A comment goes under the line it is about, after those there before;
-one on a line the quote does not show goes under the nearest, saying which."
+(ert-deftest harness-ui-patch-review-reads-the-hunks ()
+  "A hunk's lines have their numbers on both sides; a comment's excerpt
+is the change it ends, a few lines before it, under a header of its own."
   (harness-ui-patch-review-test-with-repo
     (let* ((review (harness-ui-patch-review-test--review repo))
            (a (harness-ui-patch-review-test--file review "a.el"))
-           (b (harness-ui-patch-review-test--file review "b.el"))
-           (new (harness-ui-patch-review-test--file review "new.el")))
-      (harness-ui-patch-review--add-comment review a '(:new . 18) "Why eighteen?")
-      (harness-ui-patch-review--add-comment review a '(:new . 18) "And the tests?")
-      (harness-ui-patch-review--add-comment review a '(:new . 12) "Too far")
-      (harness-ui-patch-review--add-comment review b '(:old . 3) "Who used b3?")
-      (harness-ui-patch-review--add-comment review new nil "Needs a test")
-      (let ((reply (harness-ui-patch-review--r-reply review)))
-        (should (buffer-live-p reply))
-        (with-current-buffer reply
-          (should (eq major-mode 'harness-ui-patch-review-reply-mode))
-          (let ((text (harness-ui-patch-review-test--text reply)))
-            (should (string-search "> +(setq a18 'eighteen)\n\nWhy eighteen?\n\nAnd the tests?\n\n>  (setq a19 19)\n" text))
-            (should (string-search ">  (setq a15 15)\n\nOn line 12: Too far\n\n>  (setq a16 16)\n" text))
-            (should (string-search "> -(setq b3 3)\n\nWho used b3?\n\n> -(setq b4 4)\n" text))
-            (should (string-search "> +++ b/new.el\n\nNeeds a test\n\n> @@ " text)))
-          ;; The comment on the change as a whole, above the quote: the
-          ;; reply starts with a line for it.
-          (should (string-prefix-p "\n\n> diff --git " (harness-ui-patch-review-test--text reply)))
-          (goto-char (point-min))
-          (insert "Nearly there."))
-        (should (equal '(("diff --git a/a.el b/a.el" . 3) ("diff --git a/b.el b/b.el" . 1)
-                         ("diff --git a/new.el b/new.el" . 1) (nil . 1))
-                       (sort (harness-ui-patch-review--comment-counts review)
-                             (lambda (x y) (string< (or (car x) "~") (or (car y) "~"))))))
-        ;; What goes: the comments, with only the hunks they answer.
-        (let ((out (harness-ui-patch-review--outgoing (with-current-buffer reply (harness-ui-patch-review--parse)))))
-          (should (string-prefix-p "Nearly there.\n\n> diff --git a/a.el b/a.el\n" out))
-          (should (string-search "> +(setq a18 'eighteen)\n\nWhy eighteen?" out))
-          (should-not (string-search "(setq a2 'two)" out))
-          (should (string-search "> diff --git a/b.el b/b.el" out))
-          ;; new.el's header, for the comment on it, but not its lines.
-          (should (string-search "> +++ b/new.el\n\nNeeds a test" out))
-          (should-not (string-search "(setq new1 1)" out))
-          (should-not (string-search "d.el" out))
-          (should-not (string-search "img.bin" out))
-          (should-not (string-match-p "\n\n\n" out))
-          (should (string-search "Who used b3?\n\n> -(setq b4 4)\n> -(setq b5 5)\n> diff --git a/new.el" out))
-          (should (string-suffix-p "> +++ b/new.el\n\nNeeds a test" out)))
-        ;; Without a comment there is nothing to send.
-        (with-temp-buffer
-          (insert (harness-ui-patch-review--quote (harness-ui-patch-review--f-patch a)))
-          (should-not (harness-ui-patch-review--outgoing (harness-ui-patch-review--parse))))))))
+           (new (harness-ui-patch-review-test--file review "new.el"))
+           (hunks (harness-ui-patch-review--hunks a))
+           (locate (lambda (side number)
+                     (let ((found (harness-ui-patch-review--locate hunks side number)))
+                       (list (cl-position (car found) hunks) (nth 1 found) (nth 2 found))))))
+      (should (= 2 (length hunks)))
+      (should (equal '((?\s "(setq a1 1)" 1 1) (?- "(setq a2 2)" 2 2) (?+ "(setq a2 'two)" 3 2)
+                       (?\s "(setq a3 3)" 3 3) (?\s "(setq a4 4)" 4 4) (?\s "(setq a5 5)" 5 5))
+                     (plist-get (car hunks) :lines)))
+      ;; The line, or the nearest the diff has on that side.
+      (should (equal '(1 4 t) (funcall locate :new 18)))
+      (should (equal '(1 3 t) (funcall locate :old 18)))
+      (should (equal '(1 0 nil) (funcall locate :new 12)))
+      (should (equal '(0 5 nil) (funcall locate :new 7)))
+      (let ((excerpt (harness-ui-patch-review--excerpt a :new 18 nil)))
+        (should (equal (concat "> @@ -15,4 +15,4 @@\n>  (setq a15 15)\n>  (setq a16 16)\n>  (setq a17 17)\n"
+                               "> -(setq a18 18)\n> +(setq a18 'eighteen)\n")
+                       (plist-get excerpt :text)))
+        (should (eql 15 (plist-get excerpt :new-start)))
+        (should (plist-get excerpt :exact)))
+      ;; Three lines before the line, but not into the middle of a change.
+      (let ((excerpt (harness-ui-patch-review--excerpt a :new 7 nil)))
+        (should (equal (concat "> @@ -2,4 +2,4 @@\n> -(setq a2 2)\n> +(setq a2 'two)\n"
+                               ">  (setq a3 3)\n>  (setq a4 4)\n>  (setq a5 5)\n")
+                       (plist-get excerpt :text)))
+        (should-not (plist-get excerpt :exact)))
+      ;; A side with no line names the line before, as git does.
+      (should (equal "> @@ -0,0 +1,2 @@\n> +(setq new1 1)\n> +(setq new2 2)\n"
+                     (plist-get (harness-ui-patch-review--excerpt new :new 2 nil) :text)))
+      (should-not (harness-ui-patch-review--excerpt (harness-ui-patch-review-test--file review "img.bin") :new 1 nil)))))
 
-(ert-deftest harness-ui-patch-review-reply-follows-the-branch-until-commented ()
-  "A reply with no comment quotes the branch as it is now; one with comments keeps its quote."
+(ert-deftest harness-ui-patch-review-comments-go-under-their-lines ()
+  "A comment goes into the box under the lines it is about, quoted from the
+diff with a few lines before: after the comments there already, on from
+a quote that stops short of it, the files and their hunks in the diff's
+order.  One on a line the diff does not have goes under the nearest,
+saying which; one on a file as a whole under its first line."
   (harness-ui-patch-review-test-with-repo
     (let* ((review (harness-ui-patch-review-test--review repo))
-           (reply (harness-ui-patch-review--reply-buffer review)))
-      (should (equal (harness-ui-patch-review--r-tip review) (harness-ui-patch-review--r-reply-tip review)))
-      (harness-ui-patch-review-test--git repo "checkout" "-q" "task/fix")
-      (harness-ui-patch-review-test--write repo "new.el" "(setq new1 'one)\n")
-      (harness-ui-patch-review-test--git repo "commit" "-q" "-am" "More")
-      (harness-test-await (harness-ui-patch-review--load review))
-      (should (string-search "> +(setq new1 'one)" (harness-ui-patch-review-test--text reply)))
-      (should (equal (harness-ui-patch-review--r-tip review) (harness-ui-patch-review--r-reply-tip review)))
-      (harness-ui-patch-review--add-comment review (harness-ui-patch-review-test--file review "new.el")
-                                            '(:new . 1) "One what?")
-      (let ((quoted (harness-ui-patch-review--r-tip review)))
-        (harness-ui-patch-review-test--write repo "new.el" "(setq new1 'uno)\n")
-        (harness-ui-patch-review-test--git repo "commit" "-q" "-am" "Again")
-        (harness-test-await (harness-ui-patch-review--load review))
-        (should (string-search "One what?" (harness-ui-patch-review-test--text reply)))
-        (should-not (string-search "'uno" (harness-ui-patch-review-test--text reply)))
-        (should-not (equal (harness-ui-patch-review--r-tip review) (harness-ui-patch-review--r-reply-tip review)))
-        ;; The list says the reply quotes an older branch.
-        (should (cl-some (lambda (note) (string-match-p "The reply quotes the branch at" note))
-                         (harness-ui-patch-review--notes review)))
-        ;; What is sent names the commit it quotes, not the branch's tip.
-        (let ((preface (harness-ui-patch-review--preface review)))
-          (should (string-search (format "task/fix (at %s)" (substring quoted 0 7)) preface))
-          (should-not (string-search (substring (harness-ui-patch-review--r-tip review) 0 7) preface)))))))
+           (text (harness-ui-patch-review-test--put
+                  review ""
+                  '("a.el" (:new . 18) "Why eighteen?")
+                  '("a.el" (:new . 18) "And the tests?")
+                  '("a.el" (:new . 12) "Too far")
+                  '("b.el" (:old . 3) "Who used b3?")
+                  '("new.el" nil "Needs a test")
+                  '("a.el" (:new . 2) "Why two?")
+                  '("a.el" (:new . 20) "And twenty?")
+                  '("d.el" (:new . 6) "Six?")
+                  '("a.el" nil "Split this up"))))
+      (should (equal (concat (harness-ui-patch-review-test--attribution repo) "\n"
+                             "\n"
+                             "> diff --git a/a.el b/a.el\n"
+                             "\n"
+                             "Split this up\n"
+                             "\n"
+                             "> @@ -1,2 +1,2 @@\n"
+                             ">  (setq a1 1)\n"
+                             "> -(setq a2 2)\n"
+                             "> +(setq a2 'two)\n"
+                             "\n"
+                             "Why two?\n"
+                             "\n"
+                             "> @@ -15,4 +15,4 @@\n"
+                             ">  (setq a15 15)\n"
+                             "\n"
+                             "On line 12: Too far\n"
+                             "\n"
+                             ">  (setq a16 16)\n"
+                             ">  (setq a17 17)\n"
+                             "> -(setq a18 18)\n"
+                             "> +(setq a18 'eighteen)\n"
+                             "\n"
+                             "Why eighteen?\n"
+                             "\n"
+                             "And the tests?\n"
+                             "\n"
+                             ">  (setq a19 19)\n"
+                             ">  (setq a20 20)\n"
+                             "\n"
+                             "And twenty?\n"
+                             "\n"
+                             "> diff --git a/b.el b/b.el\n"
+                             "> @@ -1,3 +0,0 @@\n"
+                             "> -(setq b1 1)\n"
+                             "> -(setq b2 2)\n"
+                             "> -(setq b3 3)\n"
+                             "\n"
+                             "Who used b3?\n"
+                             "\n"
+                             "> diff --git a/c.el b/d.el\n"
+                             "> @@ -3,4 +3,4 @@\n"
+                             ">  (setq c3 3)\n"
+                             ">  (setq c4 4)\n"
+                             ">  (setq c5 5)\n"
+                             "> -(setq c6 6)\n"
+                             "> +(setq c6 'six)\n"
+                             "\n"
+                             "Six?\n"
+                             "\n"
+                             "> diff --git a/new.el b/new.el\n"
+                             "\n"
+                             "Needs a test\n")
+                     text))
+      ;; The quote reads back with its numbers, the comments counted per file.
+      (should (equal '(("diff --git a/a.el b/a.el" . 6) ("diff --git a/b.el b/b.el" . 1)
+                       ("diff --git a/c.el b/d.el" . 1) ("diff --git a/new.el b/new.el" . 1))
+                     (harness-ui-patch-review--counts text)))
+      (let ((a20 (cl-find ">  (setq a20 20)" (harness-ui-patch-review--parse-text text)
+                          :key (lambda (l) (plist-get l :text)) :test #'equal)))
+        (should (equal '(20 20) (list (plist-get a20 :old) (plist-get a20 :new)))))
+      ;; Words of one's own first: the quote follows them, said what it is.
+      (should (string-prefix-p (concat "Nearly there.\n\n" (harness-ui-patch-review-test--attribution repo)
+                                       "\n\n> diff --git a/b.el b/b.el\n> @@ -1,5 +0,0 @@\n")
+                               (harness-ui-patch-review-test--put
+                                review "Nearly there." '("b.el" (:old . 5) "Who used these?"))))
+      ;; Under a line quoted already, a line of the merge base too.
+      (should (string-search "> -(setq b3 3)\n\nWho used b3?\n\nAnd b2?\n"
+                             (harness-ui-patch-review-test--put review text '("b.el" (:old . 3) "And b2?"))))
+      (should (string-search ">  (setq a20 20)\n\nAnd twenty?\n\nOn line 30 of the merge base: Past the end\n\n> diff"
+                             (harness-ui-patch-review-test--put review text '("a.el" (:old . 30) "Past the end")))))))
 
-;;;; The list and Ediff
-
-(defun harness-ui-patch-review-test--open (task)
-  "Open the review of TASK's changes; return the review once its branch is read."
-  (harness-ui-patch-review task)
-  (let ((review (gethash (plist-get task :id) harness-ui-patch-review--reviews)))
-    (harness-test-wait (lambda () (and (harness-ui-patch-review--r-tip review)
-                                       (not (harness-ui-patch-review--r-loading review))))
-                       10 "the branch to be read")
-    review))
-
-(defun harness-ui-patch-review-test--control (review index)
-  "Wait for the Ediff of REVIEW's file at INDEX; return its control buffer."
-  (harness-test-wait (lambda ()
-                       (let ((state (harness-ui-patch-review--r-ediff review)))
-                         (and (eql index (plist-get state :index))
-                              (buffer-live-p (plist-get state :control))
-                              (plist-get state :control))))
-                     10 (format "the Ediff of file %d" index)))
-
-(ert-deftest harness-ui-patch-review-list-shows-the-files ()
-  "The list says what is compared and has a row per file, what changed in it."
-  (harness-ui-patch-review-test-with-repo
-    (delete-other-windows)
-    (let* ((review (harness-ui-patch-review-test--open (harness-ui-patch-review-test--task repo)))
-           (list (harness-ui-patch-review--r-list review))
-           (text (harness-ui-patch-review-test--text list))
-           (merge-base (harness-ui-patch-review-test--git repo "merge-base" "main" "task/fix")))
-      (should (eq list (window-buffer (selected-window))))
-      (should (one-window-p))
-      (with-current-buffer list
-        (should (eq major-mode 'harness-ui-patch-review-list-mode))
-        (should (string-match-p "Changes: Fix the flaky test" (format "%s" header-line-format)))
-        (should (eq #'harness-ui-patch-review-ediff (key-binding (kbd "RET"))))
-        (should (eq #'harness-ui-patch-review-send (key-binding (kbd "C-c C-c"))))
-        ;; Point is on the first file.
-        (should (eql 0 (harness-ui-patch-review--index-at-point))))
-      (should (string-search (format "task/fix against main @ %s   6 files  +7 −8" (substring merge-base 0 7)) text))
-      (should (string-match-p "^   M  a\\.el +\\+2 −2$" text))
-      (should (string-match-p "^   D  b\\.el +\\+0 −5$" text))
-      (should (string-match-p "^   R  c\\.el → d\\.el +\\+1 −1$" text))
-      (should (string-match-p "^   M  img\\.bin +binary$" text))
-      (should (string-match-p "^   A  docs/é\\.txt +\\+1 −0$" text))
-      (should-not (string-search "keep.el" text))
-      ;; n and p move between the files.
-      (with-current-buffer list
-        (harness-ui-patch-review-next-file)
-        (should (eql 1 (harness-ui-patch-review--index-at-point)))
-        (harness-ui-patch-review-previous-file)
-        (should-error (harness-ui-patch-review-previous-file) :type 'user-error)
-        ;; A binary file is not for Ediff: RET says so, and it is seen.
-        (goto-char (harness-ui-patch-review--row-start
-                    (cl-position "img.bin" (harness-ui-patch-review--r-files review)
-                                 :key #'harness-ui-patch-review--f-path :test #'equal)))
-        (harness-ui-patch-review-ediff)
-        (should-not (harness-ui-patch-review--r-ediff review))
-        (should (string-match-p "^ ✓ M  img\\.bin" (harness-ui-patch-review-test--text list)))))))
-
-(ert-deftest harness-ui-patch-review-ediff-steps-through-the-files ()
-  "RET compares a file in Ediff with the review's keys: c comments, N goes
-on to the next file, q comes back to the list as it was."
-  (harness-ui-patch-review-test-with-repo
-    (delete-other-windows)
-    (let* ((start (get-buffer-create "*patch review start*"))
-           (_ (switch-to-buffer start))
-           (before (current-window-configuration))
-           (review (harness-ui-patch-review-test--open (harness-ui-patch-review-test--task repo)))
-           (list (harness-ui-patch-review--r-list review))
-           (files (harness-ui-patch-review--r-files review))
-           (ediff-buffers nil))
-      (should (equal "a.el" (harness-ui-patch-review--f-path (nth 0 files))))
-      (should (equal "b.el" (harness-ui-patch-review--f-path (nth 1 files))))
-      (with-current-buffer list
-        (goto-char (harness-ui-patch-review--row-start 0))
-        (harness-ui-patch-review-ediff))
-      (let ((control (harness-ui-patch-review-test--control review 0))
-            prompt)
-        (setq ediff-buffers (append (cl-loop for key in '(:a :b :control)
-                                             collect (plist-get (harness-ui-patch-review--r-ediff review) key))
-                                    ediff-buffers))
-        ;; The two versions, named after where they are from, in the file's mode.
-        (should (string-prefix-p "a.el (merge base " (buffer-name (nth 0 ediff-buffers))))
-        (should (string-prefix-p "a.el (task/fix " (buffer-name (nth 1 ediff-buffers))))
-        (should (eq 'emacs-lisp-mode (buffer-local-value 'major-mode (nth 1 ediff-buffers))))
-        (should (buffer-local-value 'buffer-read-only (nth 1 ediff-buffers)))
-        (with-current-buffer control
-          (should (eq #'harness-ui-patch-review-comment (key-binding "c")))
-          (should (eq #'harness-ui-patch-review-ediff-next-file (key-binding "N")))
-          (should (eq #'harness-ui-patch-review-ediff-previous-file (key-binding "P")))
-          (should (eq #'harness-ui-patch-review-ediff-quit (key-binding "q")))
-          ;; Ediff's own keys are still there.
-          (should (eq 'ediff-next-difference (key-binding "n")))
-          (should (eq ediff-brief-help-message-function #'harness-ui-patch-review--ediff-help))
-          (should (string-search "[Comment] c" (harness-ui-patch-review-test--text control)))
-          ;; On the first difference: line 2 on the branch.
-          (should (= 0 ediff-current-difference))
-          (should (= 2 ediff-number-of-differences))
-          (should (equal '(:new . 2) (harness-ui-patch-review--ediff-position)))
-          (cl-letf (((symbol-function 'read-string) (lambda (p &rest _) (setq prompt p) "Why two?")))
-            (call-interactively #'harness-ui-patch-review-comment))
-          (should (equal "Comment on a.el, line 2: " prompt))
-          (call-interactively #'harness-ui-patch-review-ediff-next-file)))
-      (should (string-search "> +(setq a2 'two)\n\nWhy two?\n\n"
-                             (harness-ui-patch-review-test--text (harness-ui-patch-review--r-reply review))))
-      ;; N: on to b.el, deleted on the branch.
-      (let ((control (harness-ui-patch-review-test--control review 1)))
-        (setq ediff-buffers (append (cl-loop for key in '(:a :b :control)
-                                             collect (plist-get (harness-ui-patch-review--r-ediff review) key))
-                                    ediff-buffers))
-        (with-current-buffer control
-          (should (= 1 ediff-number-of-differences))
-          (should (equal '(:old . 5) (harness-ui-patch-review--ediff-position)))
-          (call-interactively #'harness-ui-patch-review-ediff-quit))
-        (should-not (buffer-live-p control)))
-      ;; q: back to the list as it was, the two files seen, point on the next.
-      (should-not (harness-ui-patch-review--r-ediff review))
-      (should (eq list (window-buffer (selected-window))))
-      (should (one-window-p))
-      ;; The versions and the control panels went with them.
-      (should (= 6 (length ediff-buffers)))
-      (should-not (cl-some #'buffer-live-p ediff-buffers))
-      (with-current-buffer list
-        (should (eql 2 (harness-ui-patch-review--index-at-point)))
-        (let ((text (harness-ui-patch-review-test--text list)))
-          (should (string-match-p "^ ✓ M  a\\.el .*   1 comment$" text))
-          (should (string-match-p "^ ✓ D  b\\.el" text))
-          (should (string-match-p "^   R  c\\.el → d\\.el" text))
-          (should (string-match-p "1 comment$" (car (split-string text "\n"))))))
-      ;; q in the list gives the windows back as they were.
-      (with-current-buffer list (harness-ui-patch-review-quit))
-      (should (eq start (window-buffer (selected-window))))
-      (should (window-configuration-equal-p before (current-window-configuration)))
-      ;; The review stays, comments and all, for [Changes] again.
-      (should (eq review (gethash "t-patch" harness-ui-patch-review--reviews)))
-      (should (buffer-live-p (harness-ui-patch-review--r-reply review)))
-      (kill-buffer start))))
-
-(ert-deftest harness-ui-patch-review-ends-in-ediff ()
-  "A review that ends during Ediff ends the Ediff too: the frame gets its
-windows back when Ediff shows, and keeps them when it is out of sight."
-  (harness-ui-patch-review-test-with-repo
-    (delete-other-windows)
-    (let* ((start (get-buffer-create "*patch review start*"))
-           (_ (switch-to-buffer start))
-           (before (current-window-configuration))
-           (task (harness-ui-patch-review-test--task repo))
-           (review (harness-ui-patch-review-test--open task)))
-      (with-current-buffer (harness-ui-patch-review--r-list review)
-        (harness-ui-patch-review-ediff 0))
-      (harness-ui-patch-review-test--control review 0)
-      (let ((buffers (cons (harness-ui-patch-review--r-list review)
-                           (harness-ui-patch-review--ediff-buffers review))))
-        ;; Deleted while Ediff shows: the review stays, and says so.
-        (harness-ui-patch-review--on-event "task/deleted" (list "t-patch"))
-        (should (equal "deleted" (harness-ui-patch-review--r-gone review)))
-        (should (cl-every #'buffer-live-p buffers))
-        ;; Ending it ends the Ediff, and the frame is as it was.
-        (harness-ui-patch-review--forget review)
-        (should-not (cl-some #'buffer-live-p buffers))
-        (should (eq start (window-buffer (selected-window))))
-        (should (window-configuration-equal-p before (current-window-configuration)))
-        (should-not (gethash "t-patch" harness-ui-patch-review--reviews)))
-      ;; Out of sight, the Ediff ends without touching the windows.
-      (setq review (harness-ui-patch-review-test--open task))
-      (with-current-buffer (harness-ui-patch-review--r-list review)
-        (harness-ui-patch-review-ediff 2))
-      (harness-ui-patch-review-test--control review 2)
-      (let ((buffers (cons (harness-ui-patch-review--r-list review)
-                           (harness-ui-patch-review--ediff-buffers review)))
-            (other (get-buffer-create "*patch review elsewhere*")))
-        (let ((ignore-window-parameters t)) (delete-other-windows))
-        (set-window-dedicated-p (selected-window) nil)
-        (set-window-buffer (selected-window) other)
-        (let ((elsewhere (current-window-configuration)))
-          (harness-ui-patch-review--on-event "task/done" (list (append '(:state "done") task)))
-          (should-not (cl-some #'buffer-live-p buffers))
-          (should (eq other (window-buffer (selected-window))))
-          (should (window-configuration-equal-p elsewhere (current-window-configuration))))
-        (should-not (gethash "t-patch" harness-ui-patch-review--reviews))
-        (kill-buffer other))
-      (kill-buffer start))))
-
-(ert-deftest harness-ui-patch-review-reply-shows-beside-the-list ()
-  "r shows the reply beside the list, C-c C-k hides it again."
-  (harness-ui-patch-review-test-with-repo
-    (delete-other-windows)
-    (let* ((review (harness-ui-patch-review-test--open (harness-ui-patch-review-test--task repo)))
-           (list (harness-ui-patch-review--r-list review)))
-      (with-current-buffer list (harness-ui-patch-review-reply))
-      (let ((reply (harness-ui-patch-review--r-reply review)))
-        (should (eq reply (window-buffer (selected-window))))
-        (should (get-buffer-window list))
-        (should (= 2 (length (window-list))))
-        (with-current-buffer reply
-          (should (eq #'harness-ui-patch-review-send (key-binding (kbd "C-c C-c"))))
-          (should (string-match-p "Reply: Fix the flaky test" (format "%s" header-line-format)))
-          (should (string-match-p "0 comments" (format "%s" header-line-format)))
-          ;; Nothing to send yet.
-          (should-error (harness-ui-patch-review-send) :type 'user-error)
-          (harness-ui-patch-review-hide-reply))
-        (should (eq list (window-buffer (selected-window))))
-        (should (one-window-p))
-        (should (buffer-live-p reply))))))
-
-;;;; With the harness: the banner, the board, and sending
+;;;; With the harness: the report
 
 (defmacro harness-ui-patch-review-test-with-task (&rest body)
   "Run BODY with a task in review in `repo', which has its branch task/fix.
@@ -601,6 +460,8 @@ main checkout, so it has no branch until BODY gives it one."
        (clrhash harness-ui--sessions)
        (let ((repo dir)
              (harness-ui-connection-address nil))
+         (accept-process-output nil 0)
+         (delete-other-windows)
          (let* ((board (harness-tasks dir))
                 (id (progn (harness-test-wait (lambda () (not (buffer-local-value 'harness-ui-tasks--loading board)))
                                                5 "the board to load")
@@ -619,7 +480,7 @@ main checkout, so it has no branch until BODY gives it one."
              (maphash (lambda (_id review) (harness-ui-patch-review--forget review))
                       (copy-hash-table harness-ui-patch-review--reviews))
              (clrhash harness-ui-patch-review--reviews)
-             (delete-other-windows)
+             (let ((ignore-window-parameters t)) (delete-other-windows))
              (dolist (b (buffer-list))
                (when (memq (buffer-local-value 'major-mode b)
                            '(harness-ui-popout-mode harness-chat-mode harness-ui-tasks-mode))
@@ -627,89 +488,279 @@ main checkout, so it has no branch until BODY gives it one."
              (dolist (c (copy-sequence harness-acp--clients))
                (harness-acp--drop-client c))))))))
 
-(defun harness-ui-patch-review-test--open-session (sid)
-  "Open SID's chat buffer in the selected window and wait for it to load."
-  (let ((buffer (harness-chat-buffer sid)))
-    (delete-other-windows)
-    (set-window-buffer (selected-window) buffer)
-    (harness-test-wait (lambda () (not (buffer-local-value 'harness-chat--loading buffer))) 5 "the session to load")
-    buffer))
-
 (defun harness-ui-patch-review-test--wait-text (buffer regexp &optional absent)
   "Wait until BUFFER's text matches REGEXP, or with ABSENT no longer does."
   (harness-test-wait (lambda () (let ((found (string-match-p regexp (harness-ui-patch-review-test--text buffer))))
                                   (if absent (not found) found)))
                      5 (format "the buffer %s %s" (if absent "to lose" "to show") regexp)))
 
-(ert-deftest harness-ui-patch-review-banner-and-card-offer-the-changes ()
-  "[Changes] shows on the banner of a task in review with a branch, C-c C-d
-its key, and on its card; neither once the module is off."
-  (harness-ui-patch-review-test-with-task
-    (let ((chat (harness-ui-patch-review-test--open-session sid)))
-      (harness-ui-patch-review-test--wait-text chat "Ready for review")
-      ;; Worked in the main checkout, the task has no branch to look at.
-      (should-not (string-search "[Changes]" (harness-ui-patch-review-test--text chat)))
-      (harness-tasks--set id :branch "task/fix" :base "main")
-      (harness-ui-patch-review-test--wait-text chat "\\[Changes\\]  C-c C-d")
-      (with-current-buffer chat
-        (should (eq #'harness-ui-patch-review (key-binding (kbd "C-c C-d"))))
-        (should (member '("C-c C-d" "Changes, file by file" harness-ui-patch-review)
-                        (append (nth 1 (get 'harness-ui-review-minor-mode 'harness-menu-group)) nil)))
-        ;; The key opens the list in the session's window; q comes back.
-        (call-interactively (key-binding (kbd "C-c C-d"))))
-      (let ((review (gethash id harness-ui-patch-review--reviews)))
-        (should review)
-        (should (eq (harness-ui-patch-review--r-list review) (window-buffer (selected-window))))
-        (harness-test-wait (lambda () (harness-ui-patch-review--r-files review)) 10 "the branch to be read")
-        (with-current-buffer (harness-ui-patch-review--r-list review) (harness-ui-patch-review-quit))
-        (should (eq chat (window-buffer (selected-window)))))
-      ;; The card has it too.
-      (with-current-buffer board (harness-ui-tasks-refresh))
-      (harness-ui-patch-review-test--wait-text board "\\[Changes\\]")
-      (with-current-buffer board
-        (let ((button (harness-ui-tasks--find-button "[Changes]" (point-min) (point-max))))
-          (should button)
-          (should (equal harness-ui-patch-review--button-help
-                         (get-text-property (nth 1 button) 'help-echo)))))
-      ;; Off, the module takes all of it back.
-      (harness-module-disable 'ui-patch-review)
-      (should-not (memq #'harness-ui-patch-review--banner-button harness-ui-review-button-functions))
-      (should-not (memq #'harness-ui-patch-review--card-button harness-ui-tasks-card-button-functions))
-      (should-not (lookup-key harness-ui-review-minor-mode-map (kbd "C-c C-d")))
-      (should-not (member '("C-c C-d" "Changes, file by file" harness-ui-patch-review)
-                          (append (nth 1 (get 'harness-ui-review-minor-mode 'harness-menu-group)) nil)))
-      (harness-ui-review--redraw sid)
-      (harness-ui-patch-review-test--wait-text chat "\\[Changes\\]" t)
-      (with-current-buffer board (harness-ui-tasks--render t))
-      (harness-ui-patch-review-test--wait-text board "\\[Changes\\]" t))))
+(defun harness-ui-patch-review-test--report (board id)
+  "Pop out the report of task ID as BOARD's [Review] does; return its buffer.
+The board's record is the one the wire gives, as the UI sees it."
+  (harness-ui-report-popout (with-current-buffer board (harness-ui-tasks--find id)))
+  (let ((popout (harness-ui-popout-buffer (list 'report id))))
+    (harness-ui-patch-review-test--wait-text popout "Ready for review")
+    popout))
 
-(ert-deftest harness-ui-patch-review-sends-the-comments-back ()
-  "C-c C-c sends the comments back to the task as its feedback, in one go:
-the commented hunks quoted, a line first that says how to read them."
+(defun harness-ui-patch-review-test--give-branch (board id)
+  "Give task ID its branch, task/fix made from main, and wait for BOARD to hear."
+  (harness-tasks--set id :branch "task/fix" :base "main")
+  (harness-test-wait (lambda () (with-current-buffer board
+                                  (equal "task/fix" (plist-get (harness-ui-tasks--find id) :branch))))
+                     5 "the board to hear of the branch"))
+
+(defun harness-ui-patch-review-test--changes (board id)
+  "Give task ID its branch, pop out its report from BOARD, wait for the changes.
+Return the popout, its window selected."
+  (harness-ui-patch-review-test--give-branch board id)
+  (let ((popout (harness-ui-patch-review-test--report board id)))
+    (harness-ui-patch-review-test--wait-text popout "^    M  a\\.el")
+    popout))
+
+(defun harness-ui-patch-review-test--layout ()
+  "Return the windows of the selected frame, in order: (BUFFER . SIDE) each."
+  (mapcar (lambda (w) (cons (window-buffer w) (window-parameter w 'window-side)))
+          (window-list nil 'nomini (frame-first-window))))
+
+(defun harness-ui-patch-review-test--control (review index)
+  "Wait for the Ediff of REVIEW's file at INDEX; return its control buffer."
+  (harness-test-wait (lambda ()
+                       (let ((state (harness-ui-patch-review--r-ediff review)))
+                         (and (eql index (plist-get state :index))
+                              (buffer-live-p (plist-get state :control))
+                              (plist-get state :control))))
+                     10 (format "the Ediff of file %d" index)))
+
+(ert-deftest harness-ui-patch-review-report-shows-the-changes ()
+  "The report of a task in review with a branch shows its changes after the
+evidence, before the review banner: what is compared, a row per file.
+Nothing else does: the board has no button for them."
   (harness-ui-patch-review-test-with-task
-    (harness-tasks--set id :branch "task/fix" :base "main")
-    (let* ((task (harness-acp--normalise (harness-call 'task/get id)))
-           (review (progn (delete-other-windows)
-                          (harness-ui-patch-review-test--open task)))
+    (let ((popout (harness-ui-patch-review-test--report board id)))
+      ;; Worked in the main checkout, the task has no branch to look at.
+      (should-not (string-search "Changes" (harness-ui-patch-review-test--text popout)))
+      (should-not (gethash id harness-ui-patch-review--reviews))
+      (harness-ui-patch-review-test--give-branch board id)
+      ;; The report hears of it, and reads the branch.
+      (harness-ui-patch-review-test--wait-text popout "^    M  a\\.el")
+      (let ((text (harness-ui-patch-review-test--text popout))
+            (merge-base (harness-ui-patch-review-test--git repo "merge-base" "main" "task/fix")))
+        (should (string-match-p (format "^Changes (6)   task/fix against main @ %s   \\+7 −8$" (substring merge-base 0 7))
+                                text))
+        (should (< (string-match "^Evidence" text) (string-match "^Changes (6)" text)
+                   (string-match "Ready for review" text)))
+        (should (string-match-p "^    M  a\\.el +\\+2 −2$" text))
+        (should (string-match-p "^    D  b\\.el +\\+0 −5$" text))
+        (should (string-match-p "^    R  c\\.el → d\\.el +\\+1 −1$" text))
+        (should (string-match-p "^    A  docs/é\\.txt +\\+1 −0$" text))
+        (should (string-match-p "^    M  img\\.bin +binary$" text))
+        (should (string-match-p "^  RET or a click compares a file in Ediff" text))
+        (should-not (string-search "keep.el" text)))
+      (with-current-buffer popout
+        (goto-char (harness-ui-patch-review--row-start id 0))
+        (should (eq #'harness-ui-patch-review-ediff (key-binding (kbd "RET"))))
+        (should (eq #'harness-ui-patch-review-mouse-ediff
+                    (lookup-key (get-text-property (point) 'keymap) [mouse-1])))
+        ;; n and p move between the files.
+        (call-interactively (key-binding "n"))
+        (should (eql 1 (cdr (harness-ui-patch-review--at-point))))
+        (call-interactively (key-binding "p"))
+        (should (eql 0 (cdr (harness-ui-patch-review--at-point))))
+        (harness-ui-patch-review-previous-file)
+        (should (eql 0 (cdr (harness-ui-patch-review--at-point))))
+        ;; The box is the review's still: it sends the task back.
+        (should (harness-compose-live-p))
+        ;; A binary file is not for Ediff: RET says so, and it is seen.
+        (goto-char (harness-ui-patch-review--row-start id 4))
+        (call-interactively (key-binding (kbd "RET")))
+        (should-not (harness-ui-patch-review--r-ediff (gethash id harness-ui-patch-review--reviews))))
+      (harness-ui-patch-review-test--wait-text popout "^  ✓ M  img\\.bin +binary$")
+      ;; No button on the board.
+      (should-not (string-search "[Changes]" (harness-ui-patch-review-test--text board)))
+      ;; A harness on another machine: the report says why it has no changes.
+      (let ((harness-ui-connection-address "elsewhere:7777"))
+        (harness-ui-popout-refresh (list 'report id))
+        (should (string-match-p "^Changes   The harness runs at elsewhere:7777"
+                                (harness-ui-patch-review-test--text popout))))
+      ;; Off, the module takes its part of the report out.
+      (harness-ui-popout-refresh (list 'report id))
+      (should (string-search "Changes (6)" (harness-ui-patch-review-test--text popout)))
+      (harness-module-disable 'ui-patch-review)
+      (should-not (memq #'harness-ui-patch-review--panel harness-ui-report-panel-functions))
+      (should-not (string-search "Changes" (harness-ui-patch-review-test--text popout)))
+      (should (string-search "Ready for review" (harness-ui-patch-review-test--text popout)))
+      (should (= 0 (hash-table-count harness-ui-patch-review--reviews))))))
+
+(ert-deftest harness-ui-patch-review-ediff-from-the-report ()
+  "RET on a file compares it in Ediff, in the report's frame, with the
+review's keys: c comments into the report's box, N goes on to the next
+file, q gives the frame back, the report there, its files seen, point
+on the next one."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (layout (harness-ui-patch-review-test--layout))
+           (ediff-buffers nil))
+      (should (eq popout (window-buffer (selected-window))))
+      (should (equal '(nil bottom) (mapcar #'cdr layout)))
+      (with-current-buffer popout
+        (goto-char (harness-ui-patch-review--row-start id 0))
+        (call-interactively (key-binding (kbd "RET"))))
+      (let ((control (harness-ui-patch-review-test--control review 0))
+            prompt)
+        (setq ediff-buffers (harness-ui-patch-review--ediff-buffers review))
+        ;; Ediff has the frame; the report waits, out of sight.
+        (should-not (get-buffer-window popout t))
+        (should (get-buffer-window control))
+        ;; The two versions, named after where they are from, in the file's mode.
+        (should (string-prefix-p "a.el (merge base " (buffer-name (nth 1 ediff-buffers))))
+        (should (string-prefix-p "a.el (task/fix " (buffer-name (nth 2 ediff-buffers))))
+        (should (eq 'emacs-lisp-mode (buffer-local-value 'major-mode (nth 2 ediff-buffers))))
+        (should (buffer-local-value 'buffer-read-only (nth 2 ediff-buffers)))
+        (with-current-buffer control
+          (should (eq #'harness-ui-patch-review-comment (key-binding "c")))
+          (should (eq #'harness-ui-patch-review-ediff-next-file (key-binding "N")))
+          (should (eq #'harness-ui-patch-review-ediff-previous-file (key-binding "P")))
+          (should (eq #'harness-ui-patch-review-ediff-quit (key-binding "q")))
+          ;; Ediff's own keys are still there.
+          (should (eq 'ediff-next-difference (key-binding "n")))
+          (should (eq ediff-brief-help-message-function #'harness-ui-patch-review--ediff-help))
+          (should (string-search "[Back to the report] q" (harness-ui-patch-review-test--text control)))
+          ;; On the first difference: line 2 on the branch.
+          (should (= 0 ediff-current-difference))
+          (should (= 2 ediff-number-of-differences))
+          (should (equal '(:new . 2) (harness-ui-patch-review--ediff-position)))
+          (cl-letf (((symbol-function 'read-string) (lambda (p &rest _) (setq prompt p) "Why two?")))
+            (call-interactively #'harness-ui-patch-review-comment))
+          (should (equal "Comment on a.el, line 2: " prompt))
+          (call-interactively #'harness-ui-patch-review-ediff-next-file)))
+      ;; The comment is in the report's box, under its lines.
+      (with-current-buffer popout
+        (should (equal (concat (harness-ui-patch-review-test--attribution repo) "\n\n"
+                               "> diff --git a/a.el b/a.el\n> @@ -1,2 +1,2 @@\n>  (setq a1 1)\n"
+                               "> -(setq a2 2)\n> +(setq a2 'two)\n\nWhy two?\n")
+                       (harness-compose-text))))
+      ;; N: on to b.el, deleted on the branch, without the report between.
+      (let ((control (harness-ui-patch-review-test--control review 1)))
+        (setq ediff-buffers (append (harness-ui-patch-review--ediff-buffers review) ediff-buffers))
+        (should-not (get-buffer-window popout t))
+        (with-current-buffer control
+          (should (= 1 ediff-number-of-differences))
+          (should (equal '(:old . 5) (harness-ui-patch-review--ediff-position)))
+          (let ((answers (list "Who used these?" "And where did they go?"))
+                said)
+            (cl-letf (((symbol-function 'read-string) (lambda (&rest _) (pop answers)))
+                      ((symbol-function 'message) (lambda (&rest args) (setq said (apply #'format args)))))
+              (call-interactively #'harness-ui-patch-review-comment)
+              (call-interactively #'harness-ui-patch-review-comment))
+            (should (equal "In the report's box: 2 comments on b.el; C-c C-c there sends the feedback" said)))
+          (call-interactively #'harness-ui-patch-review-ediff-quit))
+        (should-not (buffer-live-p control)))
+      ;; q: the frame as it was, the report in its window, selected.
+      (should-not (harness-ui-patch-review--r-ediff review))
+      (should (equal layout (harness-ui-patch-review-test--layout)))
+      (should (eq popout (window-buffer (selected-window))))
+      ;; The versions and the control panels went.
+      (should (= 6 (length ediff-buffers)))
+      (should-not (cl-some #'buffer-live-p ediff-buffers))
+      (with-current-buffer popout
+        ;; Point on the next file, the files seen, the comments counted.
+        (should (eql 2 (cdr (harness-ui-patch-review--at-point))))
+        (should (eql (point) (window-point (selected-window))))
+        (let ((text (harness-ui-patch-review-test--text popout)))
+          (should (string-match-p "^  ✓ M  a\\.el .*   1 comment$" text))
+          (should (string-match-p "^  ✓ D  b\\.el .*   2 comments$" text))
+          (should (string-match-p "^    R  c\\.el → d\\.el +\\+1 −1$" text))
+          (should (string-match-p "^Changes (6) .*   3 comments$" text)))
+        (should (string-search "> diff --git a/b.el b/b.el\n> @@ -1,5 +0,0 @@\n" (harness-compose-text)))
+        (should (string-suffix-p "> -(setq b5 5)\n\nWho used these?\n\nAnd where did they go?\n"
+                                 (harness-compose-text))))
+      ;; The review stays, for Ediff again.
+      (should (eq review (gethash id harness-ui-patch-review--reviews))))))
+
+(ert-deftest harness-ui-patch-review-ends-in-ediff ()
+  "A task decided while its Ediff shows keeps the Ediff until q, which gives
+the frame back, without the report that closed; one out of sight ends
+without touching the windows."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
+           (task (with-current-buffer board (harness-ui-tasks--find id))))
+      (harness-ui-patch-review-ediff review 0)
+      (let* ((control (harness-ui-patch-review-test--control review 0))
+             (buffers (harness-ui-patch-review--ediff-buffers review)))
+        ;; Done while Ediff shows: the report closes, the Ediff stays.
+        (with-current-buffer popout (setq-local harness-ui-popout--discard t))
+        (kill-buffer popout)
+        (harness-ui-patch-review--on-event "task/done" (list (append '(:state "done") task)))
+        (should (harness-ui-patch-review--r-gone review))
+        (should (cl-every #'buffer-live-p buffers))
+        ;; q: the windows as they were, but for the report's.
+        (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))
+        (should-not (cl-some #'buffer-live-p buffers))
+        (should (one-window-p))
+        (should (eq board (window-buffer (selected-window))))
+        (should-not (gethash id harness-ui-patch-review--reviews)))
+      ;; Out of sight, the Ediff ends without touching the windows.
+      (setq popout (harness-ui-patch-review-test--report board id))
+      (harness-ui-patch-review-test--wait-text popout "^    M  a\\.el")
+      (setq review (gethash id harness-ui-patch-review--reviews))
+      (harness-ui-patch-review-ediff review 2)
+      (harness-ui-patch-review-test--control review 2)
+      (let ((buffers (harness-ui-patch-review--ediff-buffers review))
+            (other (get-buffer-create "*patch review elsewhere*")))
+        (let ((ignore-window-parameters t)) (delete-other-windows))
+        (set-window-dedicated-p (selected-window) nil)
+        (set-window-buffer (selected-window) other)
+        (harness-ui-patch-review--on-event "task/deleted" (list id))
+        (should-not (cl-some #'buffer-live-p buffers))
+        (should (one-window-p))
+        (should (eq other (window-buffer (selected-window))))
+        (should-not (gethash id harness-ui-patch-review--reviews))
+        (kill-buffer other)))))
+
+(ert-deftest harness-ui-patch-review-sends-the-feedback-in-one-go ()
+  "The box holds the comments with the words typed around them, counted as
+they change; C-c C-c sends it all back to the task as its feedback.  A
+comment made with the report closed opens it again, out of sight."
+  (harness-ui-patch-review-test-with-task
+    (let* ((popout (harness-ui-patch-review-test--changes board id))
+           (review (gethash id harness-ui-patch-review--reviews))
            (a (harness-ui-patch-review-test--file review "a.el")))
+      (with-current-buffer popout
+        (goto-char harness-compose-end)
+        (insert "Nearly there."))
       (harness-ui-patch-review--add-comment review a '(:new . 18) "Why eighteen?")
-      (with-current-buffer (harness-ui-patch-review--r-reply review)
-        (goto-char (point-min))
-        (insert "Nearly there.")
-        (harness-ui-patch-review-send))
+      (harness-ui-patch-review-test--wait-text popout "^    M  a\\.el .*   1 comment$")
+      ;; A comment typed in the box counts too, once the typing stops.
+      (with-current-buffer popout
+        (goto-char harness-compose-end)
+        (insert "\nAnd the tests?\n"))
+      (harness-ui-patch-review-test--wait-text popout "^    M  a\\.el .*   2 comments$")
+      ;; Closed, the report keeps the box as a draft; a comment opens it again.
+      (kill-buffer popout)
+      (let ((windows (window-list)))
+        (harness-ui-patch-review--add-comment review (harness-ui-patch-review-test--file review "new.el")
+                                              nil "Needs a test")
+        (setq popout (harness-ui-popout-buffer (list 'report id)))
+        (should (buffer-live-p popout))
+        (should-not (get-buffer-window popout t))
+        (should (equal windows (window-list))))
+      (setq popout (harness-ui-patch-review-test--report board id))
+      (with-current-buffer popout
+        (should (string-suffix-p "> diff --git a/new.el b/new.el\n\nNeeds a test\n" (harness-compose-text)))
+        (goto-char harness-compose-end)
+        (call-interactively (key-binding (kbd "C-c C-c"))))
       (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :feedback))
                          10 "the feedback to reach the task")
       (let ((feedback (plist-get (car (plist-get (harness-call 'task/get id) :feedback)) :text)))
-        (should (string-prefix-p "My review of your changes follows, as a reply to a patch on a mailing list." feedback))
-        (should (string-search "your branch task/fix" feedback))
-        (should (string-search "\n\nNearly there.\n\n> diff --git a/a.el b/a.el\n" feedback))
-        (should (string-search "> +(setq a18 'eighteen)\n\nWhy eighteen?" feedback))
+        (should (string-prefix-p (concat "Nearly there.\n\n" (harness-ui-patch-review-test--attribution repo)
+                                         "\n\n> diff --git a/a.el b/a.el\n> @@ -15,4 +15,4 @@\n")
+                                 feedback))
+        (should (string-search "> +(setq a18 'eighteen)\n\nWhy eighteen?\n\nAnd the tests?\n\n> diff --git a/new.el" feedback))
+        (should (string-suffix-p "> diff --git a/new.el b/new.el\n\nNeeds a test" feedback))
         (should-not (string-search "(setq a2 'two)" feedback))
-        (should-not (string-search "b.el" feedback)))
-      ;; The review is over: its buffers gone, the windows given back.
-      (harness-test-wait (lambda () (not (gethash id harness-ui-patch-review--reviews))) 5 "the review to end")
-      (should-not (buffer-live-p (harness-ui-patch-review--r-list review)))
-      (should-not (buffer-live-p (harness-ui-patch-review--r-reply review))))))
+        (should-not (string-search "b.el" feedback))))))
 
 ;;;; Self-contained
 

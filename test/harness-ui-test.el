@@ -177,7 +177,6 @@ top, whole, and leaves them as they were."
 (require 'harness-ui-btw)
 (require 'harness-ui-media)
 (require 'harness-ui-review)
-(require 'harness-ui-patch-review)
 (require 'harness-ui-version)
 
 (defvar harness-ui-test-ran nil "Commands the menu ran, newest first: (COMMAND BUFFER POINT).")
@@ -408,8 +407,7 @@ leave free.  None is left out by the menu."
   ;; What every harness buffer offers is checked above; here, that each mode is there.
   (dolist (mode '(harness-chat-mode harness-ui-tasks-mode harness-ui-sessions-mode harness-ui-tree-mode
                   harness-ui-worktree-mode harness-ui-usage-mode harness-ui-dirs-mode
-                  harness-ui-btw-minor-mode harness-ui-media-recording-mode harness-ui-review-minor-mode
-                  harness-ui-patch-review-list-mode harness-ui-patch-review-reply-mode))
+                  harness-ui-btw-minor-mode harness-ui-media-recording-mode harness-ui-review-minor-mode))
     (should (get mode 'harness-menu-group))))
 
 (ert-deftest harness-ui-menu-with-buffer-commands-from-a-side-window ()
