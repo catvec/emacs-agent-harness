@@ -957,7 +957,11 @@ call to one anyway, in every permission mode.
   no cap): a fresh worker's window is that limit, and a fork gets what
   it inherits plus the limit, never more than the supervisor's own
   limit or its model's window. Calls stay cheap, a worker that
-  outgrows its window compacts early, and its report stays short.
+  outgrows its window compacts early, and its report stays short. The
+  worker's transcript says so, in a hint at its start ("Context window
+  capped at 128k tokens, as a sub-agent's is
+  (harness-subagent-context-limit)"), as the transcript of any
+  sub-agent does.
 - **Reports back.** Submitting the plan ends the turn: the supervisor
   does not wait or poll, and the harness reports to it in messages of
   its own (**System · supervisor**). A finished step is a hint in the
@@ -1000,12 +1004,17 @@ call to one anyway, in every permission mode.
   the task carries on, and to any other session queued, to go with your
   next message instead of starting an expensive turn you did not ask
   for. `retry_step` runs an interrupted step again.
-- **Ask mode.** `submit_plan` is not among the calls that never need
-  approval, so in Ask mode you approve each plan, in the permission
-  prompt for `submit_plan`, before any worker starts (a `retry_step`,
-  which starts a worker too, asks the same way). The workers themselves
-  run with the supervisor's permission mode, directory grants and
-  non-interactive switch, so in Ask mode their edits ask too.
+- **Approving plans.** In Ask mode you approve each plan
+  (`submit_plan`), in the permission prompt, before any worker starts,
+  and each retry (`retry_step`, which starts a worker too) the same way.
+  In Accept edits, Auto and YOLO mode, and in any non-interactive
+  session whatever its mode, plans and retries are allowed without
+  asking, and without the auto-mode judge: it never rules on a plan. A
+  plan changes nothing by itself. Every call a worker makes is decided
+  in the worker's own session, by its mode and the judge as usual, and
+  the workers run with the supervisor's permission mode, directory
+  grants and non-interactive switch, so in Ask mode their edits ask too.
+  A standing deny rule for `submit_plan` still denies it.
 - **Removing the plugin.** Supervisor mode is a plugin. Add
   `supervisor` and `ui-supervisor` to `harness-disabled-modules`, and
   `seed` too if nothing should share a cache this way, and everything

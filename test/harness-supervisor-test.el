@@ -39,6 +39,7 @@
 (defvar harness-tasks-non-interactive)
 (defvar harness-tasks-model)
 (defvar harness-naming-auto)
+(defvar harness-perms-auto-model)
 (defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
@@ -47,6 +48,8 @@
 (declare-function harness-supervisor--budget-point-p "harness-supervisor")
 (declare-function harness-supervisor--on-task-changed "harness-supervisor")
 (declare-function harness-supervisor--shutdown "harness-supervisor")
+(declare-function harness-supervisor--init "harness-supervisor")
+(declare-function harness-supervisor--approval "harness-supervisor")
 (declare-function harness-supervisor--on-turn-started "harness-supervisor")
 (declare-function harness-supervisor--note-decision "harness-supervisor")
 (declare-function harness-supervisor--decided-p "harness-supervisor")
@@ -150,6 +153,32 @@ The demo provider plays the model through the script of the test."
    (harness-run-filter-async 'permission/decide (list :behavior 'ask)
                              (list :session (harness-call 'session/get sid) :tool tool
                                    :input nil :kind (or kind 'write) :paths paths :call-id "c1"))))
+
+(defun harness-supervisor-test-approve (sid tool &optional decision)
+  "Return what the approval stage makes of a call of TOOL in session SID.
+DECISION is what the stages before it left, `ask' unless given.  The
+stage goes on at once, so there is nothing to wait for."
+  (let (result)
+    (harness-supervisor--approval (or decision (list :behavior 'ask))
+                                  (lambda (d) (setq result d))
+                                  (list :session (harness-call 'session/get sid) :tool tool
+                                        :input nil :kind 'meta :call-id "c1"))
+    result))
+
+(defun harness-supervisor-test-judge ()
+  "Register the provider `judge', a model that denies every call it is asked about.
+Return a function that gives the requests it got, newest first."
+  (let ((requests nil))
+    (harness-define-provider 'judge
+      :label "Judge"
+      :complete (lambda (req)
+                  (push req requests)
+                  (let ((cb (plist-get req :on-event)))
+                    (dolist (ev '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"too risky\"}")
+                                  (:type done :stop-reason end-turn)))
+                      (let ((ev ev)) (run-at-time 0.01 nil (lambda () (funcall cb ev))))))
+                  (list :cancel #'ignore)))
+    (lambda () requests)))
 
 (defun harness-supervisor-test-run (sid name &optional input)
   "Execute tool NAME with INPUT in session SID and return its result."
@@ -748,6 +777,116 @@ The demo provider plays the model through the script of the test."
     (should (> (car (rassq #'harness-supervisor--system-prompt (gethash 'agent/system-prompt harness--filters)))
                60))))
 
+;; The approval of a plan: the user's in ask mode, nobody's otherwise.
+
+(ert-deftest harness-supervisor-approval-stage-runs-after-the-mode-and-before-the-judge ()
+  "The approval stage is at 28: after the mode and its rules (20) and the write-up gate (25), before the judge (30)."
+  (harness-supervisor-test-with-modules (perms tasks)
+    (let* ((filters (gethash 'permission/decide harness--filters))
+           (priority (lambda (fn) (car (rassq fn filters))))
+           (order (mapcar #'cdr filters)))
+      (should (= 28 (funcall priority #'harness-supervisor--approval)))
+      ;; The neighbours are the stages named in the Commentary of the permission module.
+      (should (= 20 (funcall priority #'harness-perms--mode)))
+      (should (= 25 (funcall priority #'harness-tasks--write-up-gate)))
+      (should (= 30 (funcall priority #'harness-perms--auto)))
+      ;; So the order of the chain is the gate, the jail, the mode, the write-up gate, the approval, the judge.
+      (should (equal '(harness-supervisor--gate harness-perms--jail harness-perms--mode
+                       harness-tasks--write-up-gate harness-supervisor--approval harness-perms--auto
+                       harness-perms--non-interactive harness-perms--ask)
+                     (seq-filter (lambda (fn) (memq fn '(harness-supervisor--gate harness-perms--jail
+                                                         harness-perms--mode harness-tasks--write-up-gate
+                                                         harness-supervisor--approval harness-perms--auto
+                                                         harness-perms--non-interactive harness-perms--ask)))
+                                 order)))
+      ;; Once only: the module hooks in again after a reload.
+      (harness-supervisor--init)
+      (should (= 1 (cl-count #'harness-supervisor--approval (gethash 'permission/decide harness--filters)
+                             :key #'cdr))))))
+
+(ert-deftest harness-supervisor-approval-leaves-a-plan-to-the-user-in-ask-mode-and-allows-it-otherwise ()
+  "Only ask mode with the user there asks: any other mode, and a user who is away, allow a plan."
+  (harness-supervisor-test-with-modules (perms)
+    (dolist (mode '(ask accept-edits auto yolo))
+      (dolist (away '(nil t))
+        (let ((sid (harness-supervisor-test-session :permission-mode mode
+                                                    :non-interactive (if away t :false))))
+          (dolist (tool '("submit_plan" "retry_step"))
+            (ert-info ((format "%s in %s mode, the user %s" tool mode (if away "away" "there")))
+              (let ((decision (harness-supervisor-test-approve sid tool)))
+                (if (and (eq mode 'ask) (not away))
+                    (should (equal '(:behavior ask) decision))
+                  (should (eq 'allow (plist-get decision :behavior)))
+                  (should-not (plist-get decision :final))
+                  (should (string-match-p "approved by the user in ask mode only" (plist-get decision :reason)))
+                  (should (string-match-p "no judge rules on plans" (plist-get decision :reason)))))))
+          ;; It only records a decision: nobody approves that, in any mode.
+          (ert-info ((format "no_plan_needed in %s mode, the user %s" mode (if away "away" "there")))
+            (let ((decision (harness-supervisor-test-approve sid "no_plan_needed")))
+              (should (eq 'allow (plist-get decision :behavior)))
+              (should-not (plist-get decision :final))
+              (should (string-match-p "only records a decision" (plist-get decision :reason))))))))))
+
+(ert-deftest harness-supervisor-approval-touches-only-what-would-ask ()
+  "A decision made before it stands, whatever the mode: a refusal, a rule, an allowance."
+  (harness-supervisor-test-with-modules (perms)
+    (let ((sid (harness-supervisor-test-session :permission-mode 'auto)))
+      (dolist (decision (list '(:behavior deny :final t :reason "supervisor mode: no")
+                              '(:behavior deny :reason "a standing rule denies it")
+                              '(:behavior allow :reason "a standing rule allows it")))
+        (dolist (tool '("submit_plan" "retry_step" "no_plan_needed"))
+          (ert-info ((format "%s after %S" tool decision))
+            (should (equal decision (harness-supervisor-test-approve sid tool decision)))))))))
+
+(ert-deftest harness-supervisor-approval-decides-only-the-supervisors-own-tools-of-a-supervising-session ()
+  "Other tools stay as they were, and so do the calls of a session that does not supervise."
+  (harness-supervisor-test-with-modules (perms)
+    (let ((supervising (harness-supervisor-test-session :permission-mode 'auto))
+          (others (list (harness-supervisor-test-session :permission-mode 'auto :ext '(:supervisor :false))
+                        (harness-supervisor-test-session :permission-mode 'auto :kind 'subagent))))
+      (dolist (tool '("hand_in" "task_submit" "session_send" "read_file" "ask_user" "made_up"))
+        (ert-info (tool)
+          (should (equal '(:behavior ask) (harness-supervisor-test-approve supervising tool)))))
+      (dolist (sid others)
+        (dolist (tool '("submit_plan" "retry_step" "no_plan_needed"))
+          (ert-info (tool)
+            (should (equal '(:behavior ask) (harness-supervisor-test-approve sid tool)))))))))
+
+(ert-deftest harness-supervisor-approval-without-the-permission-module-leaves-a-plan-as-it-is ()
+  "The mode is not known without it: a plan is left to the chain, and only the decision tool is allowed."
+  (harness-supervisor-test-with
+    (let ((sid (harness-supervisor-test-session :permission-mode 'auto)))
+      (cl-letf (((symbol-function 'harness-perms--mode-of) nil)
+                ((symbol-function 'harness-perms--non-interactive-p) nil))
+        (should-not (fboundp 'harness-perms--mode-of))
+        (dolist (tool '("submit_plan" "retry_step"))
+          (should (equal '(:behavior ask) (harness-supervisor-test-approve sid tool))))
+        (should (eq 'allow (plist-get (harness-supervisor-test-approve sid "no_plan_needed") :behavior)))))))
+
+(ert-deftest harness-supervisor-approval-that-fails-passes-the-decision-on ()
+  "A stage that signals is skipped, and refusing is the gate's work: the decision goes on as it was."
+  (harness-supervisor-test-with-modules (perms)
+    (let ((sid (harness-supervisor-test-session :permission-mode 'auto)))
+      (cl-letf (((symbol-function 'harness-perms--mode-of) (lambda (_session) (error "Broken"))))
+        (dolist (tool '("submit_plan" "retry_step"))
+          (should (equal '(:behavior ask) (harness-supervisor-test-approve sid tool)))
+          (should (equal '(:behavior deny :reason "no")
+                         (harness-supervisor-test-approve sid tool '(:behavior deny :reason "no")))))
+        ;; The decision tool needs no mode.
+        (should (eq 'allow (plist-get (harness-supervisor-test-approve sid "no_plan_needed") :behavior)))))))
+
+(ert-deftest harness-supervisor-the-gate-only-refuses ()
+  "The gate at 8 allows nothing: what a later stage decides about a call it lets by is that stage's."
+  (harness-supervisor-test-with
+    (let ((sid (harness-supervisor-test-session)))
+      (dolist (tool '("no_plan_needed" "submit_plan" "retry_step" "read_file"))
+        (ert-info (tool)
+          (let (result)
+            (harness-supervisor--gate '(:behavior ask) (lambda (d) (setq result d))
+                                      (list :session (harness-call 'session/get sid) :tool tool
+                                            :input nil :kind 'meta :call-id "c1"))
+            (should (equal '(:behavior ask) result))))))))
+
 (ert-deftest harness-supervisor-bash-is-denied-where-the-sandbox-cannot-confine-it ()
   "A call to bash is denied when `sandbox/confined-p' says no, fails or is not there."
   (harness-supervisor-test-with
@@ -1261,6 +1400,26 @@ The demo provider plays the model through the script of the test."
       (should-not (harness-call 'session/pending sid))
       (should (eq 'idle (plist-get (harness-call 'session/get sid) :status))))))
 
+(ert-deftest harness-supervisor-no-plan-needed-needs-no-approval-in-any-mode ()
+  "Recording a decision is allowed in every mode and with the user away, and no judge rules on it."
+  (harness-supervisor-test-with-modules (perms)
+    (let ((probe (harness-supervisor-test-judge))
+          (harness-perms-auto-model "judge:x"))
+      (dolist (mode '(ask accept-edits auto yolo))
+        (dolist (away '(nil t))
+          (ert-info ((format "%s mode, the user %s" mode (if away "away" "there")))
+            (let ((sid (harness-supervisor-test-session :permission-mode mode
+                                                        :non-interactive (if away t :false))))
+              (should-not (plist-get (harness-supervisor-test-run sid "no_plan_needed" '(:reason "just reading"))
+                                     :is-error))
+              (should-not (harness-call 'session/pending sid))))))
+      (should-not (funcall probe))
+      ;; The judge is wired up: a session that does not supervise gets its verdict.
+      (let ((sid (harness-supervisor-test-session :permission-mode 'auto :non-interactive t
+                                                  :ext '(:supervisor :false))))
+        (should (eq 'deny (plist-get (harness-supervisor-test-decide sid "no_plan_needed" 'meta) :behavior)))
+        (should (= 1 (length (funcall probe))))))))
+
 ;;;; The settings page
 
 (ert-deftest harness-supervisor-the-settings-are-on-the-settings-page ()
@@ -1297,18 +1456,34 @@ The demo provider plays the model through the script of the test."
       (should (member "plan" names))
       (should-not (member "no_plan_needed" names))
       (should (string-match-p "^## Planning" (harness-agent--system-prompt (harness-call 'session/get sid))))
-      (should (equal '(:behavior ask) (harness-supervisor-test-decide sid "write_file"))))))
+      (should (equal '(:behavior ask) (harness-supervisor-test-decide sid "write_file")))
+      ;; No stage of the module is on the bus, so not even a session that
+      ;; carries the switch is decided: its plans go to the chain as any call.
+      (should-not (rassq #'harness-supervisor--gate (gethash 'permission/decide harness--filters)))
+      (should-not (rassq #'harness-supervisor--approval (gethash 'permission/decide harness--filters)))
+      (let ((marked (harness-supervisor-test-session :ext '(:supervisor t))))
+        (dolist (tool '("write_file" "no_plan_needed" "submit_plan" "retry_step"))
+          (ert-info (tool)
+            (should (equal '(:behavior ask) (harness-supervisor-test-decide marked tool 'meta)))))))))
 
 (ert-deftest harness-supervisor-shutdown-takes-it-off-the-bus ()
   "A stopped module sets nothing, denies nothing and nudges nobody; sessions keep their switch."
   (harness-supervisor-test-with-modules (tools-fs)
     (let ((sid (harness-supervisor-test-session)))
       (should (eq t (harness-supervisor-test-get sid)))
+      (should (rassq #'harness-supervisor--gate (gethash 'permission/decide harness--filters)))
+      (should (rassq #'harness-supervisor--approval (gethash 'permission/decide harness--filters)))
+      (should (eq 'allow (plist-get (harness-supervisor-test-decide sid "no_plan_needed" 'meta) :behavior)))
       (harness-supervisor--shutdown)
       (should (eq t (harness-supervisor-test-get sid)))
       (should-not (harness-supervisor-test-get (harness-supervisor-test-session)))
       (should (member "write_file" (harness-supervisor-test-tool-names sid)))
       (should (equal '(:behavior ask) (harness-supervisor-test-decide sid "write_file")))
+      ;; Neither stage is left, and what the approval allowed is asked about again.
+      (should-not (rassq #'harness-supervisor--gate (gethash 'permission/decide harness--filters)))
+      (should-not (rassq #'harness-supervisor--approval (gethash 'permission/decide harness--filters)))
+      (dolist (tool '("no_plan_needed" "submit_plan" "retry_step"))
+        (should (equal '(:behavior ask) (harness-supervisor-test-decide sid tool 'meta))))
       (should (equal nil (harness-run-filter 'tools/sandbox-options nil sid)))
       (should (string-match-p "^## Planning" (harness-agent--system-prompt (harness-call 'session/get sid))))
       (setq harness-supervisor-test--script (list harness-supervisor-test-stops))

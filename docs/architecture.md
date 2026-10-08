@@ -1557,11 +1557,14 @@ session-move (the session tools: the user confirms every
 a plugin's stage: a session in supervisor mode is denied, for good, a
 call to any tool off its allowlist, in every permission mode; see
 supervisor), 10 jail, 20 mode, 25 write-up (the tasks module: a backlog
-write-up only reads), 30 auto (LLM judge), 40 non-interactive, 90
-ask-user (turns `ask` into a pending request and resolves when
-answered).  A judge denial reaches 90 as an `ask` in an interactive
-session, so the user answers it; in a non-interactive session it stays a
-denial.
+write-up only reads), 28 supervisor approval (the supervisor module,
+also a plugin's stage: a supervising session's `submit_plan` and
+`retry_step` stay `ask` in ask mode with the user present and are
+allowed otherwise, so the judge never rules on a plan; see supervisor),
+30 auto (LLM judge), 40 non-interactive, 90 ask-user (turns `ask` into a
+pending request and resolves when answered).  A judge denial reaches 90
+as an `ask` in an interactive session, so the user answers it; in a
+non-interactive session it stays a denial.
 
 - The away-request stage owns the decision of the `set_non_interactive`
   tool (tools-sessions), as the dir-request stage owns
@@ -3694,10 +3697,32 @@ starts.  Only the user changes it later.
   :hint …)`, the hint pointing to a plan step or to the user switching
   the mode off.  No permission mode, rule or answer lets it through,
   and it holds when the model still has an old tool list.  It fails
-  closed: a call it cannot check is denied.  It allows `no_plan_needed`,
-  which only records a decision, where the call would ask.  Filter
+  closed: a call it cannot check is denied.  It only refuses; stage 28
+  (the next bullet) decides the supervisor's own tools.  Filter
   `tools/sandbox-options` (90) adds `(:read-only t :network nil)` to the
   commands of a supervising session, and the same when it fails.
+- Approving plans.  A plan changes nothing by itself: each call of its
+  workers goes through the whole permission chain in the worker's own
+  session, by that session's mode and judge.  So the user alone approves
+  one, and only in ask mode.  `permission/decide` stage 28
+  (`harness-supervisor--approval`, after the mode and the standing rules
+  at 20 and the tasks module's write-up gate at 25, before the judge at
+  30) acts on a supervising session's call of `no_plan_needed`,
+  `submit_plan` or `retry_step` whose decision is still `ask`.
+  `submit_plan` and `retry_step` stay `ask`, to be answered at 90, when
+  the session's mode is ask and it is not non-interactive; in
+  accept-edits, auto and yolo mode, and in a non-interactive session
+  whatever its mode, they become `(:behavior allow :reason "a plan is
+  approved by the user in ask mode only, and no judge rules on plans:
+  …")`, so no judge sees one.  `no_plan_needed` only records a decision
+  and is allowed in every mode.  The mode and the user's presence are
+  `harness-perms--mode-of` and `harness-perms--non-interactive-p`, which
+  the stage uses when they are defined and never requires: without the
+  permission module the plan tools are left as they are.  A decision made
+  before it stands, as only an `ask` is touched: stage 8's refusals, a
+  standing deny rule (`harness-perms-rules`), the write-up gate.  A stage
+  that signals is skipped, so a failure is logged and the decision goes
+  on unchanged; failing closed is stage 8's.
 - Turns.  The decision tools are `harness-supervisor-decision-tools`
   (`no_plan_needed submit_plan retry_step hand_in task_submit
   task_control session_send session_control`); a call is noted from
@@ -4024,7 +4049,18 @@ that it does not compact at once; neither is above the parent's own
 `:context-window-limit`, when it has one, so sub-agents of sub-agents do
 not grow, nor above the model's window.  `spawn_agent` and the
 supervisor's workers pass the result to `session/create` or
-`session/fork`; without a cap a fork keeps its parent's limit.
+`session/fork`; without a cap a fork keeps its parent's limit.  The cap
+is never silent: `harness-tools-agent-context-limit-hint LIMIT FORK
+&optional INHERITED` → the text of a hint that says it, or nil when
+LIMIT is nil, such as "Context window capped at 128k tokens, as a
+sub-agent's is (harness-subagent-context-limit)", and for a fork "Context
+window capped at 218k tokens: the 90k it starts with plus 128k of its
+own, as a sub-agent's is (harness-subagent-context-limit)" (INHERITED is
+`harness-tools-agent-inherited-context PARENT-ID`; a limit the parent's
+own holds lower adds ", and no higher than the limit of the session that
+started it").  `spawn_agent` adds it to the child's transcript with
+`session/hint`, once the child exists and before its first message; a
+hint that cannot be added is logged and does not fail the sub-agent.
 
 Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an
