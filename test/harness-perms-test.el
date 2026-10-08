@@ -706,6 +706,204 @@ weigh what the call would do, never whether a value looks complete."
       (should (equal "perms: auto judge gave no verdict for bash (end-turn); it replied: I refuse to answer in JSON"
                      (funcall warning))))))
 
+;;;; The rules Claude Code's own auto mode follows
+
+(defun harness-perms-test--call-with-claude-settings (files fn &optional profile)
+  "Call FN with Claude Code's settings made of FILES and nothing else.
+FILES maps names to the JSON text of files under one root: config/ is
+Claude Code's configuration directory ($CLAUDE_CONFIG_DIR), system/
+the system directory of its managed settings files, and project/ a
+project.  PROFILE stands for the settings of the macOS configuration
+profile.  FN is called with the root.  No real settings are read."
+  (let* ((root (harness-test-temp-dir))
+         (process-environment (cons (concat "CLAUDE_CONFIG_DIR=" (expand-file-name "config" root))
+                                    process-environment))
+         (harness-perms-claude-auto-mode t))
+    (dolist (dir '("config/" "system/" "project/"))
+      (make-directory (expand-file-name dir root) t))
+    (pcase-dolist (`(,name . ,text) files)
+      (let ((path (expand-file-name name root)))
+        (make-directory (file-name-directory path) t)
+        (with-temp-file path (insert text))))
+    (cl-letf (((symbol-function 'harness-perms--claude-system-dir)
+               (lambda () (file-name-as-directory (expand-file-name "system" root))))
+              ((symbol-function 'harness-perms--claude-profile-settings)
+               (lambda () profile)))
+      (unwind-protect (funcall fn root)
+        (delete-directory root t)))))
+
+(ert-deftest harness-perms-claude-auto-mode-rules-are-the-ones-claude-code-reads ()
+  "The judge reads the autoMode rules Claude Code's auto mode reads.
+They come from the managed settings Claude Code applies and from the
+user's settings.json, combined list by list as Claude Code combines
+them: the managed entries first, managed-settings.json before the
+files of managed-settings.d in alphabetical order, then the user's,
+without the \"$defaults\" marker, blank entries or duplicates.  A
+project's .claude/settings.json and settings.local.json are never
+read, as Claude Code never reads them: whoever writes the repository
+would be writing the judge's exceptions."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (harness-perms-test--call-with-claude-settings
+   '(("system/managed-settings.json"
+      . "{\"autoMode\": {\"environment\": [\"$defaults\", \"Source control: github.example.com/acme-corp\"],
+                         \"hard_deny\": [\"Never send repository contents to third-party code-review APIs\"]}}")
+     ("system/managed-settings.d/20-security.json" . "{\"autoMode\": {\"soft_deny\": [\"Never run terraform apply\"]}}")
+     ("system/managed-settings.d/10-buckets.json"
+      . "{\"autoMode\": {\"environment\": [\"Trusted cloud buckets: s3://acme-builds\"]}}")
+     ("system/managed-settings.d/.hidden.json" . "{\"autoMode\": {\"allow\": [\"A hidden file\"]}}")
+     ("system/managed-settings.d/notes.txt" . "{\"autoMode\": {\"allow\": [\"No .json file\"]}}")
+     ("config/settings.json"
+      . "{\"model\": \"opus\",
+          \"autoMode\": {\"environment\": [\"Source control: github.example.com/acme-corp\", \"  \", 7,
+                                           \"Trusted internal domains: *.corp.example.com\"],
+                         \"allow\": [\"$defaults\", \"Deploying to the staging namespace is allowed\"],
+                         \"classifyAllShell\": true}}")
+     ("project/.claude/settings.json" . "{\"autoMode\": {\"allow\": [\"Whatever the repository says\"]}}")
+     ("project/.claude/settings.local.json" . "{\"autoMode\": {\"allow\": [\"Anything at all\"]}}"))
+   (lambda (root)
+     (let ((default-directory (expand-file-name "project/" root)))
+       (setq harness-perms-test--session (plist-put harness-perms-test--session :cwd default-directory))
+       (should (equal '(:environment ("Source control: github.example.com/acme-corp"
+                                      "Trusted cloud buckets: s3://acme-builds"
+                                      "Trusted internal domains: *.corp.example.com")
+                        :hard_deny ("Never send repository contents to third-party code-review APIs")
+                        :soft_deny ("Never run terraform apply")
+                        :allow ("Deploying to the staging namespace is allowed"))
+                      (harness-perms-claude-auto-mode-rules))))))
+  ;; Claude Code's configuration directory is $CLAUDE_CONFIG_DIR, else ~/.claude.
+  (let ((process-environment (cons "CLAUDE_CONFIG_DIR=/opt/claude-config" process-environment)))
+    (should (equal "/opt/claude-config/" (harness-perms--claude-config-dir))))
+  (let ((process-environment (cons "CLAUDE_CONFIG_DIR" process-environment)))
+    (should (equal (expand-file-name "~/.claude/") (harness-perms--claude-config-dir)))))
+
+(ert-deftest harness-perms-claude-managed-sources-rank-as-in-claude-code ()
+  "Of the managed sources the judge reads the ones Claude Code applies.
+By default that is the highest-ranked source that delivers a policy
+key: the server-managed settings Claude Code caches, then the macOS
+configuration profile, then the managed settings files.  A source
+with only control keys or metadata delivers none, and a lower
+source's autoMode never counts when a higher one delivers a policy,
+whatever it is.  When the highest-ranked source that says anything
+sets managedSourcesBehavior to \"merge\", every source with a policy
+key adds its entries; a lower source cannot ask for that."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (let ((remote "{\"$checksum\": \"abc\", \"autoMode\": {\"environment\": [\"Remote: acme\"]}}")
+        (file "{\"autoMode\": {\"environment\": [\"File: acme\"]}}")
+        (profile '(:autoMode (:environment ("Profile: acme")))))
+    (cl-flet ((environment (files &optional profile)
+                (let (out)
+                  (harness-perms-test--call-with-claude-settings
+                   files
+                   (lambda (_root) (setq out (plist-get (harness-perms-claude-auto-mode-rules) :environment)))
+                   profile)
+                  out)))
+      ;; The first source with a policy wins.
+      (should (equal '("Remote: acme")
+                     (environment `(("config/remote-settings.json" . ,remote) ("system/managed-settings.json" . ,file))
+                                  profile)))
+      (should (equal '("Profile: acme") (environment `(("system/managed-settings.json" . ,file)) profile)))
+      (should (equal '("File: acme") (environment `(("system/managed-settings.json" . ,file)))))
+      ;; Control keys and metadata are no policy.
+      (should (equal '("File: acme")
+                     (environment `(("config/remote-settings.json"
+                                     . "{\"$schema\": \"x\", \"managedSourcesBehavior\": \"first-wins\", \"model\": null}")
+                                    ("system/managed-settings.json" . ,file)))))
+      ;; A policy without autoMode still wins over a lower one with it.
+      (should-not (environment `(("config/remote-settings.json" . "{\"permissions\": {\"deny\": [\"Bash(curl *)\"]}}")
+                                 ("system/managed-settings.json" . ,file))))
+      ;; Merging, asked for by the highest-ranked source, with or without a policy of its own.
+      (should (equal '("Remote: acme" "Profile: acme" "File: acme")
+                     (environment `(("config/remote-settings.json"
+                                     . "{\"managedSourcesBehavior\": \"merge\", \"autoMode\": {\"environment\": [\"Remote: acme\"]}}")
+                                    ("system/managed-settings.json" . ,file))
+                                  profile)))
+      (should (equal '("Profile: acme" "File: acme")
+                     (environment `(("config/remote-settings.json" . "{\"managedSourcesBehavior\": \"merge\"}")
+                                    ("system/managed-settings.json" . ,file))
+                                  profile)))
+      ;; Asked for by a lower source, it is not done.
+      (should (equal '("Remote: acme")
+                     (environment `(("config/remote-settings.json" . ,remote)
+                                    ("system/managed-settings.json"
+                                     . "{\"managedSourcesBehavior\": \"merge\", \"autoMode\": {\"environment\": [\"File: acme\"]}}"))))))))
+
+(ert-deftest harness-perms-judge-follows-claude-auto-mode-rules ()
+  "The judge is given Claude Code's autoMode rules, after its own.
+Claude Code's auto mode trusts what the organization's environment
+names, so pushing to its repositories or uploading to its buckets is
+routine there.  A judge without those rules takes that for sending
+private data off the machine, which is stricter than Claude Code
+with the same settings.  Each list comes under what it means to
+Claude Code.  The judge's own prompt comes first, word for word, and
+no entry lifts its rules.  Writing such rules counts as the agent
+widening its own permissions."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-perms-test--call-with-claude-settings
+   '(("system/managed-settings.json"
+      . "{\"autoMode\": {\"environment\": [\"$defaults\", \"Source control: github.example.com/acme-corp\"],
+                         \"hard_deny\": [\"Never send repository contents to third-party code-review APIs\"],
+                         \"soft_deny\": [\"Never run terraform apply\"],
+                         \"allow\": [\"Writing to s3://acme-scratch/ is allowed:\\nan ephemeral bucket\"]}}"))
+   (lambda (_root)
+     (let* ((requests (harness-perms-test--scripted-judge
+                       '(((:type text :delta "{\"decision\":\"allow\",\"reason\":\"the organization's own repository\"}")
+                          (:type done :stop-reason end-turn)))))
+            (harness-perms-auto-model "judge:x")
+            (d (harness-perms-test--decide
+                (list :session harness-perms-test--session :tool "bash" :kind 'exec
+                      :input '(:command "git push git@github.example.com:acme-corp/tools.git HEAD")
+                      :call-id "c1")))
+            (system (plist-get (car (funcall requests)) :system)))
+       (should (eq 'allow (plist-get d :behavior)))
+       (should (equal system (harness-perms--judge-system-prompt)))
+       (should (string-prefix-p (concat harness-perms--judge-system "\n\nRules from Claude Code's settings.") system))
+       (should (string-search "lift none\nof them" system))
+       (dolist (part '("\nEnvironment: what counts as the organization's own infrastructure"
+                       "not sending private data off\nthe machine"
+                       "Secrets still go nowhere but the service they belong to"
+                       "do not name is judged by the rules above alone"
+                       "\n- Source control: github.example.com/acme-corp\n"
+                       "\nHard deny: deny every call one of these describes, whatever else applies.\n- Never send repository contents to third-party code-review APIs\n"
+                       "\nSoft deny: deny every call one of these describes, unless an allow entry\ncovers it.\n- Never run terraform apply\n"
+                       "\nAllow: exceptions to the soft deny entries, and to nothing else.\n- Writing to s3://acme-scratch/ is allowed:\n  an ephemeral bucket"))
+         (should (string-search part system)))
+       (should-not (string-search "$defaults" system)))))
+  ;; Its hard rules are all there, and writing the rules widens the agent's permissions.
+  (dolist (rule '("deleting or overwriting existing data outside the allowed roots"
+                  "force pushes, deleting remote branches" "sending secrets or private data off the machine"
+                  "changing system configuration" "widening the agent's own permissions"
+                  "writing autoMode rules into Claude"))
+    (should (string-search rule harness-perms--judge-system))))
+
+(ert-deftest harness-perms-judge-without-claude-auto-mode-rules-keeps-its-prompt ()
+  "Without autoMode rules the judge's prompt is its own, word for word.
+So it is with no settings at all, with lists that are empty or only
+hold \"$defaults\", with settings that cannot be read or are of the
+wrong shape, and with `harness-perms-claude-auto-mode' off."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (let ((unchanged (lambda (files)
+                     (harness-perms-test--call-with-claude-settings
+                      files
+                      (lambda (_root)
+                        (should-not (harness-perms-claude-auto-mode-rules))
+                        (should (equal harness-perms--judge-system (harness-perms--judge-system-prompt))))))))
+    (funcall unchanged nil)
+    (funcall unchanged
+             '(("config/settings.json"
+                . "{\"autoMode\": {\"environment\": [\"$defaults\"], \"allow\": [], \"soft_deny\": \"Never this\",
+                                   \"hard_deny\": {\"a\": \"Never that\"}},
+                    \"permissions\": {\"allow\": [\"Bash(make *)\"]}}")
+               ("config/remote-settings.json" . "[\"not\", \"an\", \"object\"]")
+               ("system/managed-settings.json" . "{\"autoMode\": ")
+               ("system/managed-settings.d/10-x.json" . "{\"autoMode\": \"everything\"}")))
+    (harness-perms-test--call-with-claude-settings
+     '(("config/settings.json" . "{\"autoMode\": {\"environment\": [\"Source control: github.example.com/acme-corp\"]}}"))
+     (lambda (_root)
+       (should (harness-perms-claude-auto-mode-rules))
+       (let ((harness-perms-claude-auto-mode nil))
+         (should-not (harness-perms-claude-auto-mode-rules))
+         (should (equal harness-perms--judge-system (harness-perms--judge-system-prompt))))))))
+
 ;;;; Non-interactive
 
 (defun harness-perms-test--allowing-judge ()

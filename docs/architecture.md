@@ -1589,6 +1589,58 @@ non-interactive session it stays a denial.
   never whether a value looks complete, since a cut input once read as
   the agent's own truncated edit ("the replacement string is
   truncated ... that would corrupt the file").
+- The judge follows what Claude Code's own auto mode follows: the
+  `autoMode` block of Claude Code's settings.  Its `environment`
+  entries name the organization's trusted infrastructure (source
+  control, buckets, internal domains and services) and what it holds
+  sensitive.  Its `allow`, `soft_deny` and `hard_deny` entries are
+  prose rules.  Without them the judge is stricter than Claude Code
+  with the same settings: to it the organization's own infrastructure
+  is "off the machine", so pushes and uploads there that Claude Code
+  allows are denied or put to the user.
+  `harness-perms--judge-system-prompt` is now `:system`: the judge's
+  prompt word for word, then, when there are any entries,
+  `harness-perms--auto-mode-block`.  That block gives each list under
+  what it means to Claude Code:
+  - code and data sent to trusted infrastructure stay inside the
+    organization, and so are not "sending private data off the
+    machine"; secrets still go only to their own service, and a
+    destination no entry names is judged as before;
+  - a hard deny entry denies;
+  - a soft deny entry denies unless an allow entry covers the call;
+  - an allow entry lifts only soft denials.
+
+  No entry lifts the judge's own rules.  In an interactive session, a
+  soft denial that Claude Code would clear for the user's explicit
+  intent reaches the user as any judge denial does.  The judge's hard
+  rules count writing such rules into Claude Code's settings as the
+  agent widening its own permissions.
+
+  `harness-perms-claude-auto-mode-rules` reads the rules where Claude
+  Code does:
+  - the user's `settings.json` in `$CLAUDE_CONFIG_DIR` or `~/.claude`;
+  - the managed sources in Claude Code's rank order: the server-managed
+    cache (`remote-settings.json` there), the macOS configuration
+    profile (domain `com.anthropic.claudecode`, read with `plutil`),
+    then `managed-settings.json` and the `.json` files of
+    `managed-settings.d` in the system directory (`/etc/claude-code`,
+    `/Library/Application Support/ClaudeCode`, or
+    `C:\Program Files\ClaudeCode`), merged in alphabetical order with
+    hidden files left out.
+
+  Of those sources it applies the highest-ranked one that holds a
+  policy key, unless that one sets `managedSourcesBehavior` to
+  `"merge"`, in which case it applies every one.  Each list holds the
+  managed entries, then the user's, without `"$defaults"` (the
+  judge's own rules stand in for Claude Code's built-in ones), blank
+  entries or duplicates.  Project settings (`.claude/settings*.json`)
+  are never read: a repository would be writing its own exceptions.
+  Neither is the Windows registry.  Settings that cannot be read are
+  skipped, and they never keep the judge from judging.
+  `harness-perms-claude-auto-mode` nil leaves the judge its own rules
+  only.  Managed CLAUDE.md files never reach the judge: its Claude CLI
+  process runs with `CLAUDE_CODE_DISABLE_CLAUDE_MDS`, which keeps out
+  every memory file, the managed one and policy `claudeMd` included.
 - A judge denial is a verdict on one call, not on the work, so an
   interactive session puts it to the user instead of enforcing it
   (`harness-perms--judge-decision`): stage 30 hands on an `ask` that

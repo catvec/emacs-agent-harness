@@ -532,6 +532,15 @@ such as CLAUDE.md. It refuses only what risks serious harm that is
 hard to undo, such as wiping data outside the project, force pushes,
 system changes, leaking secrets, or widening its own permissions. It
 never rules on the task or your workflow, and when in doubt it allows.
+It also follows the `autoMode` rules that Claude Code's own auto mode
+follows, taken from the same places: your `~/.claude/settings.json`
+and your organization's managed settings, never a project's. So with
+the same settings it is no stricter than Claude Code. Pushing to the
+repositories, buckets and services your organization lists as trusted
+counts as ordinary work, and the organization's `soft_deny` and
+`hard_deny` rules hold as they do in Claude Code. No entry lifts the
+judge's own rules. Set `harness-perms-claude-auto-mode` to nil to
+leave them out.
 A call it would deny is put to you in an interactive session, with the
 judge's reason, so you can allow it; in a non-interactive session the
 denial stands and the agent is told to find another
