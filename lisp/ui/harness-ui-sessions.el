@@ -7,15 +7,26 @@
 ;; dimmed once the session is idle), cost, age and project.  Child
 ;; sessions (forks, BTW conversations, sub-agents) are indented under
 ;; their parents.  Scoped to the current project by default; `a'
-;; toggles all projects; `/' filters fuzzily; column headers sort.
+;; toggles all projects; `b' shows only the sessions waiting for you;
+;; `/' filters fuzzily; column headers sort.
+;;
+;; RET opens the session at point in its project: the project becomes
+;; current first, as switching project does (Doom Emacs's workspaces),
+;; and a session showing there already gets its window selected
+;; (`harness-ui-visit-session').
 ;;
 ;; F gives the list the fullscreen layout: the list stays on the left
 ;; of the frame and the sessions it opens show beside it, until q on the
 ;; list ends it (`harness-fullscreen').
 ;;
-;; SPC pops out what the session at point waits on -- the permission
-;; prompt or question blocking it -- so it can be read and answered
-;; without opening the session (`harness-ui-popout-at-point').
+;; A blocked session has a line under its row: buttons answering what it
+;; waits on, the task board's (`harness-ui-pending-view-actions') --
+;; [Allow] and [Deny] for a tool call, which y and n push too, [Answer…]
+;; for a question -- and what that is.  SPC pops out what the session
+;; at point waits on, so it can be read whole and answered without
+;; opening the session (`harness-ui-popout-at-point').  Clicking the mode
+;; line's notifier opens the list on the sessions waiting for you, in
+;; every project (`harness-sessions-waiting').
 ;;
 ;; A project includes its linked git worktrees: a session there (a
 ;; task's, a sub-agent's) has the worktree as its `:project', and is
@@ -52,6 +63,11 @@
   "Main checkout the list is scoped to, or nil for all projects.")
 (defvar-local harness-ui-sessions--filter "" "Fuzzy filter text.")
 (defvar-local harness-ui-sessions--show-inactive t)
+(defvar-local harness-ui-sessions--blocked-only nil
+  "Non-nil when the list shows only the sessions waiting for you.
+That is the blocked ones: the mode line's notifier opens the list so.")
+(defvar-local harness-ui-sessions--depths nil
+  "Hash table: session id -> how deep its row is indented under its parents.")
 (defvar-local harness-ui-sessions--main-roots nil
   "Hash table: session project root -> the main checkout it belongs to.
 Which checkout a root belongs to does not change, and the list redraws
@@ -97,6 +113,8 @@ model, status, kind and permission mode."
                   harness-ui-sessions--project))
        (or harness-ui-sessions--show-inactive
            (not (equal (plist-get s :status) "inactive")))
+       (or (not harness-ui-sessions--blocked-only)
+           (equal (plist-get s :status) "blocked"))
        (or (string-empty-p harness-ui-sessions--filter)
            (harness-fuzzy-score harness-ui-sessions--filter
                                 (format "%s %s %s %s %s" (or (harness-ui-sessions--name s) "") (plist-get s :model)
@@ -148,14 +166,123 @@ model, status, kind and permission mode."
            (propertize (file-name-nondirectory (directory-file-name (or (plist-get s :project) ""))) 'face 'harness-dim-face)))))
 
 (defun harness-ui-sessions--refresh ()
-  (setq tabulated-list-entries
-        (mapcar (lambda (cell) (harness-ui-sessions--entry (car cell) (cdr cell)))
-                (harness-ui-sessions--ordered)))
+  (let ((ordered (harness-ui-sessions--ordered)))
+    (setq harness-ui-sessions--depths (make-hash-table :test 'equal))
+    (dolist (cell ordered)
+      (puthash (plist-get (cdr cell) :id) (car cell) harness-ui-sessions--depths))
+    (setq tabulated-list-entries
+          (mapcar (lambda (cell) (harness-ui-sessions--entry (car cell) (cdr cell))) ordered)))
   (setq mode-line-process
-        (format " [%s%s%s]"
+        (format " [%s%s%s%s]"
                 (if harness-ui-sessions--project "project" "all projects")
                 (if (string-empty-p harness-ui-sessions--filter) "" (format " /%s" harness-ui-sessions--filter))
-                (if harness-ui-sessions--show-inactive "" " active"))))
+                (if harness-ui-sessions--show-inactive "" " active")
+                (if harness-ui-sessions--blocked-only " blocked" ""))))
+
+;;;; What a blocked session waits on
+;;
+;; A blocked session's row has a line under it saying what the session
+;; waits on, with the buttons that answer it, the ones the task board
+;; offers on a card too (`harness-ui-pending-view-actions'): [Allow] and
+;; [Deny] for a permission request, [Answer…] for a question, which pops
+;; it out.  On both lines y and n answer a permission request, as on the
+;; board, and SPC pops the request out.  With the blocked filter on (b,
+;; or the notifier's click), a banner above the rows says how many
+;; sessions wait, and its [Show all] turns the filter off.
+
+(defvar harness-ui-sessions-button-map (make-sparse-keymap)
+  "Keys on the buttons of the session list.")
+
+;; Filled at top level, not in the `defvar', so a reload updates the map.
+(set-keymap-parent harness-ui-sessions-button-map (harness-ui-action-map #'harness-ui-action-push))
+;; A double click pushes a button once: the second click would answer the
+;; next request, or open the session.
+(define-key harness-ui-sessions-button-map [double-mouse-1] #'ignore)
+(define-key harness-ui-sessions-button-map [triple-mouse-1] #'ignore)
+
+(defvar harness-ui-sessions-permission-map (make-sparse-keymap)
+  "Keys on the lines of a session waiting on a permission request.")
+
+;; Filled at top level, not in the `defvar', so a reload updates the map.
+(define-key harness-ui-sessions-permission-map (kbd "y") #'harness-ui-sessions-allow)
+(define-key harness-ui-sessions-permission-map (kbd "n") #'harness-ui-sessions-deny)
+
+(defun harness-ui-sessions--button (label action help)
+  "Return a button LABEL of the list running ACTION, with HELP as its tooltip."
+  (propertize (harness-ui-action-button label action :help help)
+              'keymap harness-ui-sessions-button-map))
+
+(defun harness-ui-sessions--request-line (id r)
+  "Return the line under the row of session ID, which waits on request R.
+It has the buttons answering R, then says what R is, under the name."
+  (let ((depth (or (and harness-ui-sessions--depths (gethash id harness-ui-sessions--depths)) 0))
+        (session (harness-ui-session id)))
+    (concat (make-string (+ tabulated-list-padding 3 (* 2 depth) (if (> depth 0) 2 0)) ?\s)
+            (mapconcat (lambda (a) (harness-ui-sessions--button (nth 0 a) (nth 1 a) (nth 2 a)))
+                       (harness-ui-pending-view-actions id) " ")
+            "  "
+            (propertize (or (harness-ui-pending-summary session) "waits for you")
+                        'face 'harness-status-blocked-face)
+            (propertize " · " 'face 'harness-dim-face)
+            (harness-ui-pending-subject r 80)
+            "\n")))
+
+(defun harness-ui-sessions--banner ()
+  "Return the banner of the blocked filter: how many sessions wait for you."
+  (let ((n (length tabulated-list-entries)))
+    (concat " " (harness-ui-status-icon "blocked") " "
+            (propertize (pcase n
+                          (0 "No session waits for you")
+                          (1 "1 session waits for you")
+                          (_ (format "%d sessions wait for you" n)))
+                        'face 'bold)
+            (propertize (concat (if harness-ui-sessions--project " in this project" " in any project")
+                                (if (string-empty-p harness-ui-sessions--filter) ""
+                                  (format " matching /%s" harness-ui-sessions--filter)))
+                        'face 'harness-dim-face)
+            "  "
+            (harness-ui-sessions--button "[Show all]" #'harness-ui-sessions-toggle-blocked
+                                         "Show every session again (b)")
+            " " (harness-ui-kbd "b")
+            "\n")))
+
+(defun harness-ui-sessions--print-entry (id cols)
+  "Print the row of session ID, with the columns COLS, and what it waits on.
+This is the list's `tabulated-list-printer'.  The banner of the blocked
+filter goes above the first row, and a blocked session gets the line
+of what it waits on under its row (`harness-ui-sessions--request-line'),
+which is the session's too: RET opens it, SPC pops its request out."
+  (when (and harness-ui-sessions--blocked-only (bobp))
+    (insert (harness-ui-sessions--banner)))
+  (let ((start (point)))
+    (tabulated-list-print-entry id cols)
+    (when-let* ((r (and (equal (plist-get (harness-ui-session id) :status) "blocked")
+                        (harness-ui-pending-first id))))
+      (let ((line (point)))
+        (insert (harness-ui-sessions--request-line id r))
+        (add-text-properties line (point) (list 'tabulated-list-id id 'tabulated-list-entry cols)))
+      (when (equal (plist-get r :kind) "permission")
+        (harness-ui-add-keymap start (point) harness-ui-sessions-permission-map)))))
+
+(defun harness-ui-sessions--print ()
+  "Print the list, the banner of the blocked filter even with no row to show."
+  (tabulated-list-print t)
+  (when (and harness-ui-sessions--blocked-only (= (point-min) (point-max)))
+    (let ((inhibit-read-only t))
+      (insert (harness-ui-sessions--banner))
+      (set-buffer-modified-p nil))))
+
+(defun harness-ui-sessions--position (id)
+  "Return where the row of session ID starts, else the first row, else `point-min'."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((first nil) (found nil))
+      (while (and (not found) (not (eobp)))
+        (let ((here (tabulated-list-get-id)))
+          (cond ((and id (equal here id)) (setq found (point)))
+                ((and here (not first)) (setq first (point)))))
+        (forward-line 1))
+      (or found first (point-min)))))
 
 (defun harness-ui-sessions--number< (col)
   (lambda (a b)
@@ -199,6 +326,7 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
 (define-key harness-ui-sessions-mode-map (kbd "F") #'harness-fullscreen)
 (define-key harness-ui-sessions-mode-map (kbd "q") #'harness-ui-quit-view)
 (define-key harness-ui-sessions-mode-map (kbd "C-c C-z") #'harness-ui-bury)
+(define-key harness-ui-sessions-mode-map (kbd "b") #'harness-ui-sessions-toggle-blocked)
 
 (define-derived-mode harness-ui-sessions-mode tabulated-list-mode "Sessions"
   "Major mode listing harness sessions."
@@ -215,6 +343,8 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
                 (list "Updated" 9 (harness-ui-sessions--number< '(:updated)))
                 (list "Project" 30 t)))
   (setq tabulated-list-padding 1)
+  ;; Rows, and under a blocked session's what it waits on.
+  (setq tabulated-list-printer #'harness-ui-sessions--print-entry)
   ;; What the session at point waits on: the popout, and any other command
   ;; that acts on "the session at point", read it through this.
   (setq-local harness-ui-session-at-point-function
@@ -228,18 +358,21 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
 (put 'harness-ui-sessions-mode 'harness-menu-group
      '("Session list"
        ["Session at point"
-        (". RET" "Open" harness-ui-sessions-open)
+        (". RET" "Open, in its project" harness-ui-sessions-open)
         (". o" "Open in position" harness-ui-sessions-open-other)
         (". f" "Fork" harness-ui-sessions-fork)
         (". r" "Rename" harness-ui-sessions-rename)
         (". k" "Cancel turn" harness-ui-sessions-cancel)
         (". x" "Deactivate" harness-ui-sessions-deactivate)
         (". SPC" "View what it waits on" harness-ui-sessions-requests)
+        (". y" "Allow tool call" harness-ui-sessions-allow)
+        (". n" "Deny tool call" harness-ui-sessions-deny)
         (". T" "Make it a task" harness-ui-sessions-make-task)
         (". d" "Delete" harness-ui-sessions-delete)]
        ["List"
         (". /" "Filter" harness-ui-sessions-filter)
         (". a" "This project or all" harness-ui-sessions-toggle-scope)
+        (". b" "Only those waiting for you" harness-ui-sessions-toggle-blocked)
         (". i" "Show or hide inactive" harness-ui-sessions-toggle-inactive)
         (". F" "Fullscreen layout" harness-fullscreen)
         (". g" "Reload" harness-ui-sessions-reload)]))
@@ -258,17 +391,20 @@ listed, BTW conversations aside."
               (setq best (car entry) newest updated)))))))
 
 (defun harness-ui-sessions--redraw ()
-  "Redraw the list buffer if it exists, keeping point on the same session."
+  "Redraw the list buffer if it exists, keeping point on the same session.
+Each window showing the list keeps its point on its session too; one
+whose session is gone goes to the first row."
   (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name)))
     (with-current-buffer buf
-      (let ((id (tabulated-list-get-id)))
+      (let ((id (tabulated-list-get-id))
+            (windows (mapcar (lambda (w) (cons w (tabulated-list-get-id (window-point w))))
+                             (get-buffer-window-list buf nil t))))
         (harness-ui-sessions--refresh)
-        (tabulated-list-print t)
-        (when id
-          (goto-char (point-min))
-          (while (and (not (eobp)) (not (equal (tabulated-list-get-id) id)))
-            (forward-line 1))
-          (when (eobp) (goto-char (point-min))))))))
+        (harness-ui-sessions--print)
+        (goto-char (harness-ui-sessions--position id))
+        (pcase-dolist (`(,window . ,at) windows)
+          (unless (eq window (selected-window))
+            (set-window-point window (harness-ui-sessions--position at))))))))
 
 (defun harness-ui-sessions--on-changed ()
   (harness-debounce 'harness-ui-sessions 0.15 #'harness-ui-sessions--redraw))
@@ -322,7 +458,7 @@ A task changes session when it starts, so it is looked up by its id."
     (harness-ui-sessions--on-changed)))
 
 ;;;###autoload
-(defun harness-sessions (&optional all-projects position)
+(defun harness-sessions (&optional all-projects position blocked-only)
   "Show the session list, scoped to the current project unless ALL-PROJECTS.
 The project includes its git worktrees, so its tasks' sessions are
 listed, and from a task's worktree the list shows the whole project.
@@ -331,27 +467,54 @@ A task's session shows its task's title until it is named.
 The list shows in POSITION, by default where it was last
 \(`harness-ui-display-view').  In the `fullscreen' position it stays on
 the left of the frame and the sessions open beside it (see
-`harness-fullscreen'): F on the list starts or ends that layout."
+`harness-fullscreen'): F on the list starts or ends that layout.
+
+With BLOCKED-ONLY it shows only the sessions waiting for you, as
+`harness-sessions-waiting' does; b on the list turns that on or off."
   (interactive "P")
   (let ((project (unless all-projects
                    (harness-files-main-root default-directory)))
         (buf (get-buffer-create harness-ui-sessions--buffer-name)))
     (with-current-buffer buf
       (unless (derived-mode-p 'harness-ui-sessions-mode) (harness-ui-sessions-mode))
-      (setq harness-ui-sessions--project project)
-      (harness-ui-sessions--refresh)
-      (tabulated-list-print t))
+      (setq harness-ui-sessions--project project
+            harness-ui-sessions--blocked-only blocked-only)
+      (let ((id (tabulated-list-get-id)))
+        (harness-ui-sessions--refresh)
+        (harness-ui-sessions--print)
+        (goto-char (harness-ui-sessions--position id))))
     (harness-ui-refresh-sessions (lambda (_) (harness-ui-sessions--redraw)))
     (harness-ui-sessions--fetch-tasks)
     (harness-ui-display-view buf position)))
+
+;;;###autoload
+(defun harness-sessions-waiting (&optional position)
+  "Show the sessions waiting for you, in every project.
+That is the session list (`harness-sessions') with only the blocked
+sessions in it, as clicking the mode line's notifier shows it.  Under
+each, what it waits on, with buttons to answer it right there: [Allow]
+and [Deny] for a tool call, [Answer…] for a question.  RET opens a
+session in its project (`harness-ui-sessions-open'); b, or the banner's
+\[Show all], shows every session again.  The list shows in POSITION, as
+`harness-sessions' has it."
+  (interactive)
+  (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name)))
+    ;; Every waiting session, whatever the list was filtered by before.
+    (with-current-buffer buf (setq harness-ui-sessions--filter "")))
+  (harness-sessions t position t))
 
 (defun harness-ui-sessions--id ()
   (or (tabulated-list-get-id) (user-error "No session on this line")))
 
 (defun harness-ui-sessions-open (&optional position)
-  "Open the session at point in POSITION, by default replacing the list."
+  "Open the session at point, in its project.
+The session's project becomes the current one first, as switching
+project does (in Doom Emacs, its workspace; see
+`harness-ui-switch-project-function').  A session shown there already
+gets its window selected; any other opens in POSITION, by default
+replacing the list, or after a switch where sessions open."
   (interactive (list (and current-prefix-arg (harness-ui-read-position))))
-  (funcall (harness-ui-session-opener position) (harness-ui-sessions--id)))
+  (harness-ui-visit-session (harness-ui-sessions--id) position))
 
 (defun harness-ui-sessions-open-other ()
   "Open the session at point in the other position preset."
@@ -419,6 +582,28 @@ A task's session matches its task's title and the kind task."
   (setq harness-ui-sessions--show-inactive (not harness-ui-sessions--show-inactive))
   (harness-ui-sessions--redraw))
 
+(defun harness-ui-sessions-toggle-blocked ()
+  "Show only the sessions waiting for you, or every session again.
+Those are the blocked sessions, as the mode line's notifier counts
+them; a banner above them says so."
+  (interactive)
+  (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name)))
+    (with-current-buffer buf
+      (setq harness-ui-sessions--blocked-only (not harness-ui-sessions--blocked-only)))
+    (harness-ui-sessions--redraw)))
+
+(defun harness-ui-sessions-allow ()
+  "Allow, once, the tool call the session at point waits on.
+As the task board's y does (`harness-ui-pending-answer-first-permission')."
+  (interactive)
+  (harness-ui-pending-answer-first-permission (harness-ui-sessions--id) "allow-once"))
+
+(defun harness-ui-sessions-deny ()
+  "Deny the tool call the session at point waits on.
+As the task board's n does (`harness-ui-pending-answer-first-permission')."
+  (interactive)
+  (harness-ui-pending-answer-first-permission (harness-ui-sessions--id) "deny-once"))
+
 (defun harness-ui-sessions-reload ()
   "Reload sessions and tasks from the harness and resolve their projects again."
   (interactive)
@@ -430,9 +615,9 @@ A task's session matches its task's title and the kind task."
 (defun harness-ui-sessions--waiting-help (session)
   "Return the tooltip of SESSION's status cell, saying what it waits on."
   (when (equal (plist-get session :status) "blocked")
-    (let ((what (harness-ui-pending-status session)))
-      (format "%s; SPC shows what it waits on"
-              (if (equal what "question") "blocked on a question" "blocked on a permission request")))))
+    (if (equal (harness-ui-pending-status session) "question")
+        "blocked on a question; SPC shows it, to answer it"
+      "blocked on a permission request; y allows it, n denies it, SPC shows it")))
 
 (defun harness-ui-sessions-requests ()
   "Pop out what the session at point waits on.
@@ -445,8 +630,16 @@ this command existed: SPC scrolls the list."
     ;; Without a window (a test run) there is nothing to scroll.
     (ignore-errors (call-interactively #'scroll-up-command))))
 
+(defun harness-ui-sessions--on-pending (_session-id)
+  "Redraw the list, which shows what blocked sessions wait on.
+On `harness-ui-pending-changed-hook': a request answered here leaves
+the list at once, before its session says it is no longer blocked."
+  (when (get-buffer harness-ui-sessions--buffer-name)
+    (harness-ui-sessions--on-changed)))
+
 (defun harness-ui-sessions--init ()
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-sessions--on-changed)
+  (add-hook 'harness-ui-pending-changed-hook #'harness-ui-sessions--on-pending)
   (add-hook 'harness-ui-rate-functions #'harness-ui-sessions--on-rate)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-sessions--redraw)
   ;; After a reload or reconnect the tasks may be another harness's.

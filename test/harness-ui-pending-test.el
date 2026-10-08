@@ -38,6 +38,9 @@
 (defvar harness-ui-tasks--loading)
 
 (declare-function harness-sessions "harness-ui-sessions")
+(declare-function harness-sessions-waiting "harness-ui-sessions")
+(declare-function harness-ui-action-push "harness-ui")
+(declare-function harness-ui-pending-view-actions "harness-ui-pending")
 (declare-function harness-ui-pending-popout "harness-ui-pending")
 (declare-function harness-ui-popout-buffer "harness-ui-popout")
 (declare-function harness-ui-popout--title-text "harness-ui-popout")
@@ -387,7 +390,7 @@ The list says so in the status cell's tooltip, and answers from there."
         (should (equal sid (tabulated-list-get-id)))
         (should (equal sid (harness-ui-session-at-point)))
         (should (equal 'harness-ui-sessions-requests (key-binding (kbd "SPC"))))
-        (should (string-match-p "SPC shows what it waits on"
+        (should (string-match-p "y allows it, n denies it, SPC shows it"
                                 (harness-ui-sessions--waiting-help (harness-ui-session sid))))
         (call-interactively (key-binding (kbd "SPC"))))
       (let ((buf (harness-ui-popout-buffer key)))
@@ -400,6 +403,77 @@ The list says so in the status cell's tooltip, and answers from there."
       (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the permission answered from the list")
       (should (equal (list 'permission sid "p1" "allow-once") (car harness-ui-pending-test-answers)))
       (harness-test-wait (lambda () (null (harness-ui-popout-buffer key))) 5 "the popout to close"))))
+
+(ert-deftest harness-ui-pending-sessions-list-answers-in-place ()
+  "The list of those waiting for you answers them as the task board does.
+The notifier's list shows the blocked sessions, each with the buttons a
+board's card has for what it waits on, from the same code: [Allow]
+answers the tool call, [Answer…] pops the question out."
+  (harness-ui-pending-test-with
+    (let* ((asker (harness-ui-pending-test-session "Asker"))
+           (runner (harness-ui-pending-test-session "Runner"))
+           (idle (harness-ui-pending-test-session "Idle")))
+      (harness-ui-pending-test-record-answers)
+      (harness-ui-pending-test-question asker "q1" "Which colour?")
+      (harness-ui-pending-test-block asker "question" "q1")
+      (harness-ui-pending-test-permission runner "p1" "Bash: ls -la")
+      (harness-ui-pending-test-block runner "permission" "p1")
+      (should (equal '("[Allow]" "[Deny]") (mapcar #'car (harness-ui-pending-view-actions runner))))
+      (should (equal '("[Answer…]") (mapcar #'car (harness-ui-pending-view-actions asker))))
+      (should-not (harness-ui-pending-view-actions idle))
+      ;; The seeded cache is the harness's answer: do not reload over it.
+      (cl-letf (((symbol-function 'harness-ui-refresh-sessions)
+                 (lambda (&optional callback) (when callback (funcall callback nil)))))
+        (harness-sessions-waiting))
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (should (equal (sort (list asker runner) #'string<)
+                       (sort (mapcar #'car tabulated-list-entries) #'string<)))
+        (goto-char (point-min))
+        (search-forward "[Allow")
+        (should (equal runner (tabulated-list-get-id)))
+        (should (string-match-p "needs your permission · Bash: ls -la"
+                                (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
+        (harness-ui-action-push))
+      (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the permission answered from the list")
+      (should (equal (list 'permission runner "p1" "allow-once") (car harness-ui-pending-test-answers)))
+      (should-not (harness-ui-pending-items runner))
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (goto-char (point-min))
+        (search-forward "[Answer")
+        (should (equal asker (tabulated-list-get-id)))
+        (harness-ui-action-push))
+      (let ((buf (harness-ui-popout-buffer (list 'pending asker))))
+        (should (buffer-live-p buf))
+        (with-current-buffer buf
+          (should (string-match-p "Which colour?" (buffer-string)))
+          (goto-char (point-min))
+          (search-forward "green")
+          (harness-chat-push)))
+      (harness-test-wait (lambda () (= 2 (length harness-ui-pending-test-answers))) 5 "the question answered")
+      (should (equal (list 'question asker "q1" "green") (car harness-ui-pending-test-answers))))))
+
+(ert-deftest harness-ui-pending-task-board-answers-in-place ()
+  "A card waiting on a tool call answers it with [Allow], as the list does."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Task session"))
+           (board nil))
+      (harness-ui-pending-test-record-answers)
+      (harness-ui-pending-test-permission sid "p1" "Bash: make release")
+      (cl-letf (((symbol-function 'harness-ui-tasks--fetch) (lambda (&rest _) nil)))
+        (setq board (harness-tasks dir)))
+      (with-current-buffer board
+        (setq harness-ui-tasks--tasks
+              (list (list :id "t-1" :session sid :state "active" :column "needs-input"
+                          :project dir :cwd dir :prompt "Ship the release"))
+              harness-ui-tasks--loading nil)
+        (harness-ui-tasks--render)
+        (goto-char (point-min))
+        (search-forward "[Allow] [Deny]")
+        (search-backward "[Allow")
+        (should (equal "t-1" (plist-get (harness-ui-tasks--task) :id)))
+        (push-button))
+      (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the permission answered from the board")
+      (should (equal (list 'permission sid "p1" "allow-once") (car harness-ui-pending-test-answers))))))
 
 (ert-deftest harness-ui-pending-sessions-list-leaves-spc-alone ()
   "A session that waits on nothing pops nothing out: SPC still scrolls."

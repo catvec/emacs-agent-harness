@@ -23,12 +23,25 @@
 (defvar harness-ui-sessions-test--tasks nil
   "What the harness answers `_harness/task/list' with: the tasks, or `fail'.")
 
-(defun harness-ui-sessions-test--request (method &optional _params)
+(defvar harness-ui-sessions-test--requests nil
+  "The requests the list sent the harness, newest first: (METHOD PARAMS).")
+
+(defun harness-ui-sessions-test--request (method &optional params)
   "Answer METHOD as the harness would: `_harness/task/list' with the tasks.
-Anything else, or the tasks when they are `fail', fails."
-  (if (and (equal method "_harness/task/list") (listp harness-ui-sessions-test--tasks))
-      (harness-resolved harness-ui-sessions-test--tasks)
-    (harness-rejected (list 'harness-error (format "%s: no such method" method)))))
+An answer to what a session waits on is taken.  Anything else, or the
+tasks when they are `fail', fails.  Each request is recorded in
+`harness-ui-sessions-test--requests'."
+  (push (list method params) harness-ui-sessions-test--requests)
+  (cond ((and (equal method "_harness/task/list") (listp harness-ui-sessions-test--tasks))
+         (harness-resolved harness-ui-sessions-test--tasks))
+        ((member method '("_harness/permission/answer" "_harness/question/answer"))
+         (harness-resolved t))
+        (t (harness-rejected (list 'harness-error (format "%s: no such method" method))))))
+
+(defun harness-ui-sessions-test--answers ()
+  "Return the answers the list sent the harness, oldest first: (METHOD PARAMS)."
+  (reverse (cl-remove "_harness/task/list" harness-ui-sessions-test--requests
+                      :key #'car :test #'equal)))
 
 (defun harness-ui-sessions-test--git (dir &rest args)
   "Run git ARGS synchronously in DIR; signal on failure."
@@ -61,9 +74,11 @@ Anything else, or the tasks when they are `fail', fails."
                       (lambda (&optional callback) (when callback (funcall callback nil))))
                      ((symbol-function 'harness-ui-request) #'harness-ui-sessions-test--request)
                      ((symbol-function 'harness-ui-display-view) #'ignore))
-             (let ((harness-ui-sessions-test--tasks nil))
+             (let ((harness-ui-sessions-test--tasks nil)
+                   (harness-ui-sessions-test--requests nil))
                ,@body)))
        (clrhash harness-ui--sessions)
+       (harness-ui-pending--forget-all)
        (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name))) (kill-buffer buf))
        (ignore-errors (delete-directory base t)))))
 
@@ -88,12 +103,49 @@ It is named ID unless PROPS, which go first, say otherwise."
       (list (substring-no-properties (aref columns 1))
             (substring-no-properties (aref columns 3))))))
 
+(defun harness-ui-sessions-test--blocked (id project kind &rest props)
+  "Cache a session ID in PROJECT blocked on a request of KIND, as the wire has it.
+KIND is \"permission\", for a shell command, or \"question\"; the
+request's id is ID-p or ID-q.  PROPS go first."
+  (apply #'harness-ui-sessions-test--add id project
+         (append props
+                 (list :status "blocked"
+                       :pending (list (if (equal kind "question")
+                                          (list :id (concat id "-q") :kind "question"
+                                                :payload (list :question "Which colour?\nThe second line"
+                                                               :options '("red" "green")))
+                                        (list :id (concat id "-p") :kind "permission"
+                                              :payload (list :title "Bash: rm -rf build/" :tool "bash"
+                                                             :options '("allow-once" "allow-session"
+                                                                        "deny-once")))))))))
+
+(defun harness-ui-sessions-test--text ()
+  "Return the text of the list buffer, without properties."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(defun harness-ui-sessions-test--goto (id)
+  "Put point on the row of session ID in the current buffer, the list."
+  (goto-char (harness-ui-sessions--position id))
+  (should (equal id (tabulated-list-get-id))))
+
+(defun harness-ui-sessions-test--line (id)
+  "Return the line under the row of session ID, as plain text, or nil.
+Only a line of the session's own: the one saying what it waits on."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (save-excursion
+      (harness-ui-sessions-test--goto id)
+      (forward-line 1)
+      (when (and (not (eobp)) (equal id (tabulated-list-get-id)))
+        (buffer-substring-no-properties (line-beginning-position) (line-end-position))))))
+
 (defmacro harness-ui-sessions-test--with-init (&rest body)
   "Run BODY with the list's module started, its hooks kept to BODY."
   (declare (indent 0))
   `(let ((harness-ui-event-functions nil)
          (harness-ui-redraw-hook nil)
          (harness-ui-sessions-changed-hook nil)
+         (harness-ui-pending-changed-hook nil)
          (harness-ui-rate-functions nil))
      (harness-ui-sessions--init)
      ,@body))
@@ -304,6 +356,228 @@ harness cannot say, as one without tasks, the list names no task."
       (should (equal '("s-task") (harness-ui-sessions-test--shown)))
       (harness-ui-sessions-filter "")
       (should (equal '("s-guide" "s-task") (harness-ui-sessions-test--shown))))))
+
+;;;; Those waiting for you
+
+(ert-deftest harness-ui-sessions-show-those-waiting-for-you ()
+  "b shows only the blocked sessions, under a banner counting them.
+The banner's [Show all] shows every session again, as b does.  With
+none waiting the banner says so, rows or no rows.  The mode line's
+notifier opens the list so for every project, whatever its filter."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "busy" root :status "running")
+    (harness-ui-sessions-test--blocked "asks" root "permission")
+    (harness-ui-sessions-test--blocked "elsewhere" other "question")
+    (let ((default-directory root)) (harness-sessions))
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (should (equal '("asks" "busy") (harness-ui-sessions-test--shown)))
+      (should-not (string-match-p "waits? for you" (harness-ui-sessions-test--text)))
+      (should (eq 'harness-ui-sessions-toggle-blocked (key-binding (kbd "b"))))
+      (call-interactively #'harness-ui-sessions-toggle-blocked)
+      (should (equal '("asks") (harness-ui-sessions-test--shown)))
+      (should (equal " [project blocked]" mode-line-process))
+      ;; The banner first, which is no session's, then the rows.
+      (should (string-match-p "\\` .+ 1 session waits for you in this project  \\[Show all\\] b\n"
+                              (harness-ui-sessions-test--text)))
+      (should (equal "asks" (tabulated-list-get-id)))
+      (should-not (tabulated-list-get-id (point-min)))
+      ;; Its [Show all] shows every session again.
+      (goto-char (point-min))
+      (search-forward "[Show all")
+      (harness-ui-action-push)
+      (should (equal '("asks" "busy") (harness-ui-sessions-test--shown)))
+      (should (equal " [project]" mode-line-process))
+      (should-not (string-match-p "waits? for you" (harness-ui-sessions-test--text)))
+      ;; None waiting, or none the filter lets through: the banner says so.
+      (harness-ui-sessions-toggle-blocked)
+      (harness-ui-sessions-filter "busy")
+      (should-not (harness-ui-sessions-test--shown))
+      (should (string-match-p
+               "\\` .+ No session waits for you in this project matching /busy  \\[Show all\\] b\n\\'"
+               (harness-ui-sessions-test--text))))
+    ;; The notifier's: every project, whatever the filter was.
+    (harness-sessions-waiting)
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (should (equal '("asks" "elsewhere") (harness-ui-sessions-test--shown)))
+      (should (equal " [all projects blocked]" mode-line-process))
+      (should (string-match-p "\\` .+ 2 sessions wait for you in any project  \\[Show all\\] b\n"
+                              (harness-ui-sessions-test--text))))
+    ;; The list opened as ever shows them all again.
+    (let ((default-directory root)) (harness-sessions))
+    (should (equal '("asks" "busy") (harness-ui-sessions-test--shown)))
+    (should-not (string-match-p "waits? for you" (harness-ui-sessions-test--text)))))
+
+(ert-deftest harness-ui-sessions-answer-what-a-session-waits-on ()
+  "A blocked session's row has a line under it saying what it waits on.
+It has the task board's buttons: [Allow] and [Deny] for a tool call,
+which y and n push from either line too, and [Answer…] for a question,
+which pops it out.  An answer takes the line away at once, before the
+session says it waits no more."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--with-init
+      (let ((popped nil))
+        (harness-ui-sessions-test--add "busy" root :status "running" :updated 400)
+        (harness-ui-sessions-test--blocked "asks" root "permission" :updated 300)
+        (harness-ui-sessions-test--blocked "risky" root "permission" :updated 200)
+        (harness-ui-sessions-test--blocked "child" root "question" :parent-id "busy")
+        (let ((default-directory root)) (harness-sessions))
+        (with-current-buffer harness-ui-sessions--buffer-name
+          ;; Under the name, the buttons, then what it waits on.
+          (should (equal "    [Allow] [Deny]  needs your permission · Bash: rm -rf build/"
+                         (harness-ui-sessions-test--line "asks")))
+          (should (equal "        [Answer…]  has a question for you · Which colour?"
+                         (harness-ui-sessions-test--line "child")))
+          (should-not (harness-ui-sessions-test--line "busy"))
+          (should (string-match-p "y allows it, n denies it"
+                                  (harness-ui-sessions--waiting-help (harness-ui-session "asks"))))
+          ;; [Allow] answers over the bus, and the line goes at once.
+          (harness-ui-sessions-test--goto "asks")
+          (forward-line 1)
+          (search-forward "[Allow")
+          (harness-ui-action-push)
+          (should (equal '(("_harness/permission/answer"
+                            (:session-id "asks" :pending-id "asks-p" :answer "allow-once")))
+                         (harness-ui-sessions-test--answers)))
+          (harness-test-wait (lambda () (not (harness-ui-sessions-test--line "asks")))
+                             5 "the answered request to leave the list")
+          (should (equal "asks" (tabulated-list-get-id)))
+          ;; Still blocked until the session says otherwise, it offers nothing.
+          (should (equal "blocked" (plist-get (harness-ui-session "asks") :status)))
+          (should-error (harness-ui-sessions-allow) :type 'user-error)
+          ;; n on the row itself denies.
+          (harness-ui-sessions-test--goto "risky")
+          (should (eq 'harness-ui-sessions-allow (key-binding (kbd "y"))))
+          (should (eq 'harness-ui-sessions-deny (key-binding (kbd "n"))))
+          (call-interactively (key-binding (kbd "n")))
+          (should (equal '("_harness/permission/answer"
+                           (:session-id "risky" :pending-id "risky-p" :answer "deny-once"))
+                         (car (last (harness-ui-sessions-test--answers)))))
+          ;; A question is not allowed: [Answer…] pops it out to be answered.
+          (harness-ui-sessions-test--goto "child")
+          (should-not (eq 'harness-ui-sessions-allow (key-binding (kbd "y"))))
+          (should-error (harness-ui-sessions-allow) :type 'user-error)
+          (forward-line 1)
+          (search-forward "[Answer")
+          (cl-letf (((symbol-function 'harness-ui-pending-popout) (lambda (sid) (push sid popped) t)))
+            (harness-ui-action-push))
+          (should (equal '("child") popped))
+          (should (= 2 (length (harness-ui-sessions-test--answers)))))))))
+
+(ert-deftest harness-ui-sessions-open-in-its-project ()
+  "RET opens the session at point in its project, from either of its lines.
+The project switched to is the main checkout, a task's worktree's too,
+and the session then opens where sessions open; without a switch it
+replaces the list, as ever.  A session shown already gets its window
+selected.  A remote project, or one gone from disk, is not switched to."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--blocked "task" wt "permission")
+    (harness-ui-sessions-test--add "remote" "/ssh:nobody@example.invalid:/srv/project/")
+    (harness-ui-sessions-test--add "gone" (expand-file-name "gone/" other))
+    (let* ((switched nil) (opened nil) (shown nil) (switch t)
+           (chat (get-buffer-create " *harness-ui-sessions-test chat*"))
+           (window-buffer (window-buffer))
+           (harness-ui-switch-project-function (lambda (dir) (push dir switched) switch))
+           (harness-ui-open-session-function (lambda (id) (push id opened) chat)))
+      (unwind-protect
+          (cl-letf (((symbol-function 'harness-ui-display-buffer)
+                     (lambda (buffer &optional position) (push (list buffer position) shown) buffer)))
+            (let ((default-directory root)) (harness-sessions))
+            (with-current-buffer harness-ui-sessions--buffer-name
+              (setq-local harness-ui-position 'full)
+              ;; The line of what it waits on is the session's too.
+              (harness-ui-sessions-test--goto "task")
+              (forward-line 1)
+              (should (eq 'harness-ui-sessions-open (key-binding (kbd "RET"))))
+              (call-interactively (key-binding (kbd "RET"))))
+            (should (equal (list root) switched))
+            (should (equal '("task") opened))
+            (should (equal (list (list chat nil)) shown))
+            ;; In its project already: the session replaces the list.
+            (setq switched nil shown nil switch nil)
+            (with-current-buffer harness-ui-sessions--buffer-name
+              (harness-ui-sessions-test--goto "task")
+              (harness-ui-sessions-open))
+            (should (equal (list root) switched))
+            (should (equal (list (list chat 'full)) shown))
+            ;; Shown already: its window is selected, it opens no more.
+            (setq switched nil shown nil)
+            (set-window-buffer (selected-window) chat)
+            (with-current-buffer harness-ui-sessions--buffer-name
+              (should (eq chat (harness-ui-visit-session "task"))))
+            (should-not shown)
+            (should (eq chat (window-buffer (selected-window))))
+            ;; Nowhere to switch to.
+            (setq switched nil)
+            (cl-letf (((symbol-function 'harness-files-owning-checkout) (lambda (&rest _) (error "Looked at"))))
+              (should-not (harness-ui-session-project (harness-ui-session "remote"))))
+            (should-not (harness-ui-session-project (harness-ui-session "gone")))
+            (harness-ui-visit-session "remote")
+            (harness-ui-visit-session "gone")
+            (should-not switched)
+            ;; Nor with switching turned off.
+            (let ((harness-ui-switch-project-function nil))
+              (harness-ui-visit-session "task"))
+            (should-not switched))
+        (set-window-buffer (selected-window) window-buffer)
+        (kill-buffer chat)))))
+
+(defvar persp-mode)
+(defvar +workspaces-switch-project-function)
+
+(ert-deftest harness-ui-sessions-switch-doom-workspaces ()
+  "With Doom Emacs's workspaces, a session's project is switched to as
+switching project does, but without asking for a file to open.  A
+project whose workspace is current already is not switched to, nor a
+directory that is no project, and without workspaces nothing is."
+  (let ((switched nil) (current "acme-api"))
+    (cl-letf (((symbol-function '+workspaces-switch-to-project-h)
+               (lambda (&optional dir)
+                 (push (list dir (symbol-value '+workspaces-switch-project-function)) switched)
+                 (setq current (file-name-nondirectory (directory-file-name dir)))))
+              ((symbol-function '+workspace-current-name) (lambda () current))
+              ((symbol-function 'doom-project-name)
+               (lambda (&optional dir) (file-name-nondirectory (directory-file-name dir))))
+              ((symbol-function 'doom-project-p)
+               (lambda (&optional dir) (string-prefix-p "/srv/" dir))))
+      (let ((persp-mode t))
+        (should (harness-ui-switch-project-workspace "/srv/shop/"))
+        (should (equal '(("/srv/shop/" ignore)) switched))
+        (should (equal "shop" current))
+        ;; Its workspace is current already.
+        (should-not (harness-ui-switch-project-workspace "/srv/shop/"))
+        (should (= 1 (length switched)))
+        ;; No project.
+        (should-not (harness-ui-switch-project-workspace "/tmp/scratch/"))
+        (should (= 1 (length switched))))
+      (let ((persp-mode nil))
+        (should-not (harness-ui-switch-project-workspace "/srv/blog/"))
+        (should (= 1 (length switched)))))
+    ;; No Doom at all.
+    (let ((persp-mode t))
+      (should-not (fboundp '+workspaces-switch-to-project-h))
+      (should-not (harness-ui-switch-project-workspace "/srv/blog/")))))
+
+(ert-deftest harness-ui-sessions-notifier-shows-those-waiting ()
+  "A click on the mode line's notifier lists the sessions waiting for you.
+From every project, as `harness-sessions-waiting'.  With none waiting
+it opens the list as ever."
+  (require 'harness-ui-notify)
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "busy" root :status "running")
+    (harness-ui-sessions-test--blocked "elsewhere" other "question")
+    (let* ((segment (harness-ui-notify--segment 1 'harness-icon-blocked 'harness-notify-blocked-face "Waiting"))
+           (click (lookup-key (get-text-property 1 'local-map segment) [mode-line mouse-1]))
+           (default-directory root))
+      (call-interactively click)
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (should (equal '("elsewhere") (harness-ui-sessions-test--shown)))
+        (should (equal " [all projects blocked]" mode-line-process)))
+      ;; Answered: with none waiting, the list as ever.
+      (harness-ui-sessions-test--add "elsewhere" other :status "idle")
+      (call-interactively click)
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (should (equal '("busy") (harness-ui-sessions-test--shown)))
+        (should (equal " [project]" mode-line-process))))))
 
 ;;;; The fullscreen layout
 

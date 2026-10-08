@@ -370,8 +370,11 @@ leave free.  None is left out by the menu."
   (should-not (harness-ui--menu-key-taken-p "."))
   (pcase-dolist (`(,mode ,_title . ,columns) (harness-ui-test-menu-groups))
     (let ((maps (delq nil (list (let ((map (intern (format "%s-map" mode)))) (and (boundp map) (symbol-value map)))
-                                ;; Keys on a view's content, outside its box.
+                                ;; Keys on a view's content, outside its box,
+                                ;; and the session list's on the lines of a
+                                ;; session waiting on a tool call.
                                 (and (eq mode 'harness-ui-tasks-mode) harness-ui-tasks-board-map)
+                                (and (eq mode 'harness-ui-sessions-mode) harness-ui-sessions-permission-map)
                                 (and (eq mode 'harness-ui-popout-mode) harness-ui-popout-content-map))))
           (keys nil))
       (dolist (column columns)
