@@ -1705,7 +1705,7 @@ It is no longer the probe: whoever needs one next starts another."
     (when (eq harness-provider-claude--probe entry)
       (setq harness-provider-claude--probe nil))
     (harness-provider-claude--settle-refresh)
-    (harness-provider-claude--settle-listing-waiters)))
+    (harness-provider-claude--settle-listing-waiters entry)))
 
 (defun harness-provider-claude--handle-init (entry msg)
   "Handle the system/init banner MSG on ENTRY."
@@ -2160,7 +2160,9 @@ read from `harness-provider-claude--listing-file'.")
   "The quota probe whose `initialize' answer has arrived, or nil.")
 
 (defvar harness-provider-claude--listing-waiters nil
-  "Promises to resolve once a CLI next answers `initialize', or gives up.")
+  "Who waits for a CLI to list its models, as (PROBE . PROMISE) pairs.
+PROMISE resolves once a CLI next answers `initialize', or once PROBE,
+the quota probe started to ask, gives up.")
 
 (defvar harness-provider-claude--api-asked nil
   "When the API's models were last asked for, as a float time.")
@@ -2250,11 +2252,18 @@ without any (an older CLI) leaves what was listed before."
     (when (and kept (not (equal kept (plist-get (harness-provider-claude--listing) :cli-models))))
       (harness-provider-claude--learn :cli-models kept :cli-at (float-time)))))
 
-(defun harness-provider-claude--settle-listing-waiters ()
-  "Resolve the promises waiting for a CLI to list its models."
-  (let ((waiters harness-provider-claude--listing-waiters))
-    (setq harness-provider-claude--listing-waiters nil)
-    (dolist (p waiters) (harness-resolve p t))))
+(defun harness-provider-claude--settle-listing-waiters (&optional probe)
+  "Resolve the promises waiting for a CLI to list its models.
+With PROBE, only those waiting on that quota probe, which gave up.  A
+probe let go once it answered exits a moment later, and its end says
+nothing to a listing begun meanwhile, which waits on the next probe:
+settling that one too gave its catalogue without the CLI's models.
+A bare promise, as this file pushed before a reload, waits on any."
+  (let (settled kept)
+    (dolist (w harness-provider-claude--listing-waiters)
+      (if (or (null probe) (not (consp w)) (eq probe (car w))) (push w settled) (push w kept)))
+    (setq harness-provider-claude--listing-waiters (nreverse kept))
+    (dolist (w (nreverse settled)) (harness-resolve (if (consp w) (cdr w) w) t))))
 
 (defun harness-provider-claude--handle-initialized (entry ok payload)
   "Handle the CLI's answer PAYLOAD to ENTRY's `initialize'; OK says it succeeded.
@@ -2356,14 +2365,14 @@ for it, which makes no model call."
                    (eq harness-provider-claude--probe harness-provider-claude--probe-answered)
                    (process-live-p (harness-provider-claude-session-process harness-provider-claude--probe))))
     (let ((promise (harness-make-promise)))
-      (push promise harness-provider-claude--listing-waiters)
       (condition-case err
-          (progn (harness-provider-claude--start-probe)
-                 (run-at-time harness-provider-claude--probe-timeout nil
-                              #'harness-provider-claude--settle-listing-waiters))
+          (let ((probe (harness-provider-claude--start-probe)))
+            (push (cons probe promise) harness-provider-claude--listing-waiters)
+            (run-at-time harness-provider-claude--probe-timeout nil
+                         #'harness-provider-claude--settle-listing-waiters probe))
         (error (harness-log 'warn "provider-claude: cannot ask the CLI for its models: %s"
                             (harness-error-message err))
-               (harness-provider-claude--settle-listing-waiters)))
+               (harness-resolve promise t)))
       promise)))
 
 ;;;;; What the API says

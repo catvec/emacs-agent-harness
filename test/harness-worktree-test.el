@@ -375,6 +375,38 @@ cannot see for deleted."
         (harness-test-await (harness-call 'worktree/remove root gone)))
       (should (= 1 (length (harness-test-await (harness-call 'worktree/list root))))))))
 
+(defun harness-worktree-test--lifting-after-look (path)
+  "Return a stand-in for `harness-worktree--find' that lifts PATH's lock once.
+It lifts it right after git listed the worktree locked, as the merge
+queue may while an archive of the task removes the task's worktree."
+  (let ((find (symbol-function 'harness-worktree--find))
+        (lifted nil))
+    (lambda (root p)
+      (harness-then (funcall find root p)
+                    (lambda (wt)
+                      (unless lifted
+                        (setq lifted t)
+                        (harness-worktree-test--git root "worktree" "unlock" (directory-file-name path)))
+                      wt)))))
+
+(ert-deftest harness-worktree-lock-lifted-meanwhile ()
+  "A harness lock somebody else lifts between the look and the unlock is no failure."
+  (harness-worktree-test-with-repo
+    (let ((raced (harness-worktree-test--create root "task/raced"))
+          (merged (harness-worktree-test--create root "task/merged"))
+          (events nil))
+      (harness-on 'worktree/unlocked (lambda (_r p) (push (cons 'unlocked p) events)))
+      (harness-on 'worktree/removed (lambda (_r p) (push (cons 'removed p) events)))
+      ;; The removal goes on: git's refusal to unlock what is unlocked is no error.
+      (cl-letf (((symbol-function 'harness-worktree--find) (harness-worktree-test--lifting-after-look raced)))
+        (should (equal raced (harness-test-await (harness-call 'worktree/remove root raced)))))
+      (should-not (file-exists-p raced))
+      ;; An unlock has nothing left to do: this call did not unlock it.
+      (cl-letf (((symbol-function 'harness-worktree--find) (harness-worktree-test--lifting-after-look merged)))
+        (should-not (harness-test-await (harness-call 'worktree/unlock root merged))))
+      (should-not (harness-worktree-test--lock-line root merged))
+      (should (equal (list (cons 'removed raced)) (reverse events))))))
+
 (ert-deftest harness-worktree-lock-and-unlock ()
   (harness-worktree-test-with-repo
     (let ((path (file-name-as-directory (expand-file-name "wt-lock" base)))
