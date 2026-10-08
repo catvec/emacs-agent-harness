@@ -1328,7 +1328,9 @@ and the session list shows them under it."
   "Non-nil when TASK takes one of its project's slots.
 It does while it starts, and while it is active with its own session
 running or blocked mid-turn: one waiting on the user keeps its slot, as
-its turn goes on once answered.  Only that session counts, and only
+its turn goes on once answered.  So does one that waits on work its
+session left running (`:waiting', see `agent/outstanding'), such as the
+workers of a supervisor's plan.  Only that session counts, and only
 when it is top-level (`harness-tasks--top-level-p'): the sub-agents,
 forks and conflict resolvers working for a task take no slot of their
 own, and neither does a sub-agent made a task (`task/adopt'), which
@@ -1339,7 +1341,8 @@ the conflicts, and nor does writing a backlog task up (refining)."
       (and (eq (plist-get task :state) 'active)
            (let ((session (harness-tasks--session task)))
              (and (harness-tasks--top-level-p session)
-                  (memq (plist-get session :status) '(running blocked)))))))
+                  (or (plist-get task :waiting)
+                      (memq (plist-get session :status) '(running blocked))))))))
 
 (defun harness-tasks--slot-project (task)
   "Return the project whose slots TASK takes: its `:project', else its `:cwd'.

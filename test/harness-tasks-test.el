@@ -347,6 +347,12 @@ does; nor review, done, refining or pending."
       ;; Idle: it stopped, or waits for a follow-up.
       (harness-call 'session/set-status top 'idle)
       (should-not (harness-tasks--holds-slot-p (harness-tasks-test--record 'active top)))
+      ;; Idle but waiting on work it left running (a supervisor's
+      ;; workers): that work is the task's, so it keeps the slot.
+      (should (harness-tasks--holds-slot-p
+               (append (harness-tasks-test--record 'active top) (list :waiting "2 workers running"))))
+      (should-not (harness-tasks--holds-slot-p
+                   (append (harness-tasks-test--record 'active sub) (list :waiting "2 workers running"))))
       ;; Starting holds one before there is a session at all.
       (let ((starting (harness-tasks-test--record 'active nil)))
         (should-not (harness-tasks--holds-slot-p starting))

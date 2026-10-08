@@ -3053,7 +3053,8 @@ record from before priorities reads `medium` without being rewritten.
   limit holds up only its own tasks.  Only top-level sessions take slots
   (`harness-tasks--holds-slot-p`): a task holds one while it starts,
   and while it is `active` with its own session -- one without a
-  `:parent-id` -- running or blocked mid-turn.  The sessions working for
+  `:parent-id` -- running or blocked mid-turn, or idle with work it
+  left running (`:waiting`, a supervisor's workers say).  The sessions working for
   a task never take one of their own: its sub-agents and forks, and the
   merge queue's conflict resolvers (`subagent` children of its session).
   Nor does the merge queue, which the limit never holds up: a task in it
