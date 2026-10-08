@@ -263,7 +263,7 @@ the menu's Version entry says so.
 | `C-c h l` | `harness-sessions` | Show the session list |
 | `SPC` | `harness-ui-sessions-requests` | Pop out what the session at point waits on |
 | `b` | `harness-ui-sessions-toggle-blocked` | In the session list, show only the sessions waiting for you, or every session again |
-| `y` / `n` | `harness-ui-sessions-allow` / `harness-ui-sessions-deny` | On the lines of a listed session waiting on a tool call, allow or deny it |
+| `y` / `n` | `harness-ui-sessions-allow` / `harness-ui-sessions-deny` | On the lines of a listed session waiting on a permission request, answer it with Allow or Deny, as the request's own `y` and `n` do |
 | `C-c h a` | `harness-tasks` | Show the task board |
 | `C-c h /` | `harness-tasks-search` | Find tasks, or act on them, by saying so in words |
 | `C-c h F` | `harness-fullscreen` | Start or end the fullscreen layout: the task board or session list on the left, a session beside it |
@@ -379,8 +379,9 @@ shows how many sessions need your attention. Clicking it opens the
 session list on just the sessions waiting for you, from every project
 (`M-x harness-sessions-waiting`), under a banner that counts them. A
 line under each says what it waits on, with the task board's buttons
-to settle it there: `[Allow]` and `[Deny]` for a tool call, which `y`
-and `n` press too, and `[Answer…]` for a question, which pops it out.
+to settle it there: `[Allow]` and `[Deny]` for a permission request,
+which `y` and `n` press too, and `[Answer…]` for a question, which pops
+it out.
 `RET` or a click on a session opens it in its project: with Doom
 Emacs's workspaces, the project's workspace becomes current first, as
 switching project does, and a session already showing there gets its
@@ -416,6 +417,18 @@ command. The directory is made with the session, made again if it went
 missing, and deleted with the session. `C-c h d` lists all of these
 directories. Remote sessions have no temporary directory.
 
+Every permission request offers the same five answers, under the same
+names and keys wherever it shows (the chat, BTW, the popout, an ACP
+client): `[Allow]` `y`, `[Allow for session]` `s`, `[Always allow]` `a`,
+`[Deny]` `n` and `[Always deny]` `N`; the session list and the task
+board show the first and the fourth. *Allow* is the narrowest yes and
+records nothing: it lets the call run, or reach the path it asks about,
+this once, and for the agent's own request for a directory
+(`request_directory_access`), which is no call to run, it grants the
+directory until the agent's turn ends, so the agent can do what it
+asked for and has to ask again in a later turn. A button's tooltip, and
+the echo area after it, say what it covers for the request at hand.
+
 A permission request about a path outside the session's directories
 (a tool call reaching there, or the agent asking for a directory) is
 answered for a glob pattern, not for a single file. By default the
@@ -426,7 +439,8 @@ or click `[Edit]` to change it in the minibuffer, either more specific
 (`~/notes/*.org`, a subdirectory, one file) or less (`~/**`). `*`
 matches within a name and `**` across directories, and `M-n` offers
 patterns around the request's own. The answer grants or denies the
-pattern: once, for the session, or always (as an entry of
+pattern: once (for the one call, or until the turn ends for the agent's
+own request), for the session, or always (as an entry of
 `harness-allowed-directories`, or a rule in `harness-perms-rules` for
 *Always deny*). Any other request, such as the permission mode asking
 about a file edit or a command, or the auto-mode judge objecting to

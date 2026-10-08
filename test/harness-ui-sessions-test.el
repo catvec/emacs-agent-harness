@@ -413,10 +413,10 @@ notifier opens the list so for every project, whatever its filter."
 
 (ert-deftest harness-ui-sessions-answer-what-a-session-waits-on ()
   "A blocked session's row has a line under it saying what it waits on.
-It has the task board's buttons: [Allow] and [Deny] for a tool call,
-which y and n push from either line too, and [Answer…] for a question,
-which pops it out.  An answer takes the line away at once, before the
-session says it waits no more."
+It has the task board's buttons: [Allow] and [Deny] for a permission
+request, which y and n push from either line too, and [Answer…] for a
+question, which pops it out.  An answer takes the line away at once,
+before the session says it waits no more."
   (harness-ui-sessions-test-with-repo
     (harness-ui-sessions-test--with-init
       (let ((popped nil))

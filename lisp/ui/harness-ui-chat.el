@@ -1849,12 +1849,15 @@ continues, not the branch left behind."
   (harness-ui-pending-permission-buttons r))
 
 (defun harness-chat-allow-newest ()
-  "Allow the newest pending permission request once."
+  "Answer the permission request at point, else the newest, with Allow.
+That is its panel's [Allow] (y); see `harness-ui-pending-answer-help'
+for what it covers."
   (interactive)
   (harness-ui-pending-allow-newest))
 
 (defun harness-chat-deny-newest ()
-  "Deny the newest pending permission request once."
+  "Answer the permission request at point, else the newest, with Deny.
+That is its panel's [Deny] (n)."
   (interactive)
   (harness-ui-pending-deny-newest))
 

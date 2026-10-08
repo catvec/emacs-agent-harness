@@ -1414,8 +1414,16 @@ non-interactive session it stays a denial.
   for no tool in particular denies (`harness-perms--dir-rule`, what
   deny-always records); no rule grants one.  Otherwise the session
   blocks on a `permission` prompt (`:dir`, `:pattern`, the agent's
-  reason, options allow-session / allow-always / deny-once /
-  deny-always; a generic allow-once answer grants to the session).  The
+  reason, and the five options every request has,
+  `harness-perms-dir-request-options`).  There is no single call to let
+  through, so allow-once grants the pattern until the session's turn
+  ends (`harness-perms--grant-for-turn`): a root of source `turn`,
+  listed and revocable as a session grant is, never stored, and dropped
+  on `agent/turn-ended` and on `agent/turn-started`
+  (`harness-perms--end-turn-grants`, so one made after its turn was
+  cancelled does not reach the next).  allow-session grants it to the
+  session, allow-always to every session, and the denials are the jail
+  prompt's.  The
   decision hands the handler the grant as `:granted` in its `:input`,
   and the handler tells the agent what it can reach, saying so when the
   user granted another pattern than it asked for.  Being a permission
@@ -1427,9 +1435,9 @@ non-interactive session it stays a denial.
 - The roots of a session are its cwd, its worktree, its own temporary
   directory (`session/tmp-dir`, asked for on every look at the roots, so
   it exists whenever the jail lets a call into it), the configured
-  `harness-allowed-directories`, its grants and the tool output
-  directory.  The temporary directory needs no grant and cannot be
-  revoked.
+  `harness-allowed-directories`, its grants (to the session, and until
+  its turn ends) and the tool output directory.  The temporary
+  directory needs no grant and cannot be revoked.
 - Inspecting the harness itself is one of the things that make it
   powerful, so no mode, judge or jail stands in its way.  The harness
   is no root, but a call of kind `read` may read it, in every mode,
@@ -1481,7 +1489,7 @@ non-interactive session it stays a denial.
   mode stage do it, as for the harness.
 - `permission/allow-dir SESSION-ID DIR &optional SCOPE` (SCOPE `always`
   grants every session), `permission/revoke-dir SESSION-ID DIR`,
-  `permission/dirs SESSION-ID` (`(:dir :source cwd|worktree|tmp|config|session|outputs
+  `permission/dirs SESSION-ID` (`(:dir :source cwd|worktree|tmp|config|session|turn|outputs
   :revocable)` plists, for the directory buffer), `permission/allowed-dirs SESSION-ID`
   (the full effective root list), `permission/rules SESSION-ID`
   (`(:mode :non-interactive :auto-allow :session :always :roots :inspect :skills)`:
@@ -1512,7 +1520,17 @@ non-interactive session it stays a denial.
   prompt's `:paths` are its subject paths, and a shell command's prompt
   has `:cwd`, where it runs; UIs offer only the listed `:options`, and
   show a pattern only when there is one),
-  `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`.
+  `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`,
+  `permission/dir-revoked SID DIR` (a grant revoked, or one until the
+  turn ends gone with its turn).
+- Every request is answered with the same five options, whatever it is
+  about: allow-once, allow-session, allow-always, deny-once and
+  deny-always, named Allow, Allow for session, Always allow, Deny and
+  Always deny (`harness-acp-permission-answers`, which both the UI's
+  panels and the options of `session/request_permission` read).  What
+  allow-once covers is the request's: the call, for a tool prompt; one
+  call reaching the pattern, for the jail's prompt; the pattern until
+  the turn ends, for `request_directory_access`.
 - Modes: `ask` (reads inside the jail allowed; everything else asks),
   `accept-edits` (reads/writes inside the jail allowed; exec/net ask),
   `auto` (reads inside the jail allowed; a cheap model,
@@ -1577,9 +1595,9 @@ non-interactive session it stays a denial.
   keeps the judge's reason and `:judge-deny', stage 90 opens the
   permission prompt (`harness-perms--judge-prompt-reason` words it as
   "The permission judge would deny this call: …"), and the user answers
-  it like any other permission request: allow once, for the session, or
-  always.  Switching the session to yolo used to be the only way past a
-  denial the user disagreed with.  A non-interactive session has nobody
+  it like any other permission request: Allow (this once), for the
+  session, or always.  Switching the session to yolo used to be the
+  only way past a denial the user disagreed with.  A non-interactive session has nobody
   to ask: the denial stands and the agent is steered to another
   approach.  A judge that gives no verdict at all leaves the call `ask`
   as before, which the user is asked about in an interactive session.
@@ -3097,8 +3115,10 @@ someone other than the user sent, and a tool call or result the harness
 recorded (see Node), names its sender in `_harness.from`.
 Requests agent → client: `session/request_permission {sessionId, toolCall,
 options:[{optionId,name,kind}], _harness:{pendingId, tool, paths, cwd, dir,
-pattern, reason}}` (`cwd`: where a shell command runs; `paths`: what
-the call is about, see perms) → `{outcome:{outcome:"selected",optionId}}`, plus
+pattern, reason}}` (`options`: the same five for every request, named
+as the UI's buttons are, `harness-acp-permission-answers`; `cwd`: where
+a shell command runs; `paths`: what the call is about, see perms) →
+`{outcome:{outcome:"selected",optionId}}`, plus
 `_harness:{pattern}` when the client answers a request about a path
 outside the allowed directories for another glob pattern than its
 `_harness.pattern` (only such a request has one, see perms),
@@ -3361,6 +3381,20 @@ for a shell command `kind: exec   runs in: ~/proj`, where it runs, and
 below it `paths: ~/.claude/projects/x`, what it is about: the paths it
 names outside the session's directories (left out when that is just
 where it runs).
+Every permission panel has the same buttons, under the same labels and
+keys, whatever the request: `[Allow] y  [Allow for session] s
+[Always allow] a  [Deny] n  [Always deny] N`
+(`harness-ui-pending-permission-buttons`: the labels of
+`harness-acp-permission-answers`, the keys of
+`harness-ui-pending-permission-keys`; a request offering fewer options
+shows only those).  What an answer covers depends on the request, and
+the button's tooltip and the echo area after it say so
+(`harness-ui-pending-answer-help`): "Allow ~/notes/** until this turn
+ends" for an agent's own request, "Let this call reach ~/notes/**, this
+time" for the jail's.  The session list and the task board answer in
+place with the same [Allow] and [Deny], keys and tooltips
+(`harness-ui-pending-view-actions`), and SPC pops the panel out for the
+others.
 
 Connecting again never strands a session.  The connection the UI swaps
 out closes with the reason `replaced`, and the requests still waiting

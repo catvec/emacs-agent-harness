@@ -469,37 +469,51 @@ Once the turn ends the message runs as a turn of its own."
       (should (equal (list sid "p2" '(:behavior deny :scope once)) (car recorded))))))
 
 (ert-deftest harness-acp-local-directory-permission-options ()
-  "A directory prompt is worded for directories and offers only the payload's options."
+  "Every request is offered the same options, under the same names.
+A tool prompt, the jail's prompt about a directory and an agent's own
+request for one alike; a payload listing fewer narrows them."
   (harness-acp-test-with
     (let* ((conn (harness-acp-test-connect))
            (sid (harness-acp-test-new-session conn))
-           (option-ids (lambda (pid)
+           (five '(allow-once allow-session allow-always deny-once deny-always))
+           (message-of (lambda (pid)
                          (harness-test-wait
                           (lambda () (cl-find-if (lambda (m) (and (equal (car m) "session/request_permission")
                                                                   (equal pid (plist-get (plist-get (nth 1 m) :_harness)
                                                                                         :pendingId))))
                                                  harness-acp-test-messages)))
-                         (let ((m (cl-find-if (lambda (m) (equal pid (plist-get (plist-get (nth 1 m) :_harness) :pendingId)))
-                                              harness-acp-test-messages)))
-                           (mapcar (lambda (o) (plist-get o :optionId)) (plist-get (nth 1 m) :options))))))
-      ;; The jail's prompt: every directory option.
+                         (cl-find-if (lambda (m) (equal pid (plist-get (plist-get (nth 1 m) :_harness) :pendingId)))
+                                     harness-acp-test-messages)))
+           (options (lambda (pid)
+                      (mapcar (lambda (o) (list (plist-get o :optionId) (plist-get o :name) (plist-get o :kind)))
+                              (plist-get (nth 1 (funcall message-of pid)) :options)))))
+      (dolist (r (list (list "t1" (list :tool "bash" :kind 'exec :input '(:command "ls")))
+                       (list "j1" (list :tool "read_file" :kind 'read :dir "/srv/data/" :pattern "/srv/data/**"
+                                        :options five))
+                       (list "r1" (list :tool "request_directory_access" :kind 'meta :dir "/srv/data/"
+                                        :pattern "/srv/data/**" :reason "The agent asks for access: read the data"
+                                        :options five))))
+        (harness-emit 'permission/requested sid (list :id (car r) :kind 'permission :payload (cadr r)))
+        (should (equal '(("allow-once" "Allow" "allow_once")
+                         ("allow-session" "Allow for session" "allow_always")
+                         ("allow-always" "Always allow" "allow_always")
+                         ("deny-once" "Deny" "reject_once")
+                         ("deny-always" "Always deny" "reject_always"))
+                       (funcall options (car r)))))
+      ;; The names are the UI's own button labels.
+      (should (equal (mapcar (lambda (a) (nth 1 a)) harness-acp-permission-answers)
+                     (mapcar #'cadr (funcall options "r1"))))
+      ;; A payload offering fewer answers narrows them, names unchanged.
       (harness-emit 'permission/requested sid
-                    (list :id "j1" :kind 'permission
+                    (list :id "n1" :kind 'permission
                           :payload (list :tool "read_file" :kind 'read :dir "/srv/data/"
-                                         :options '(allow-once allow-session allow-always deny-once))))
-      (should (equal '("allow-once" "allow-session" "allow-always" "deny-once") (funcall option-ids "j1")))
-      ;; An agent's own request has no "allow once".
-      (harness-emit 'permission/requested sid
-                    (list :id "r1" :kind 'permission
-                          :payload (list :tool "request_directory_access" :kind 'meta :dir "/srv/data/"
-                                         :reason "The agent asks for access: read the data"
-                                         :options '(allow-session allow-always deny-once))))
-      (should (equal '("allow-session" "allow-always" "deny-once") (funcall option-ids "r1")))
-      (let ((m (cl-find-if (lambda (m) (equal "r1" (plist-get (plist-get (nth 1 m) :_harness) :pendingId)))
-                           harness-acp-test-messages)))
-        (should (equal "Allow directory for this session"
-                       (plist-get (car (plist-get (nth 1 m) :options)) :name)))
+                                         :options '(allow-session deny-once))))
+      (should (equal '(("allow-session" "Allow for session" "allow_always") ("deny-once" "Deny" "reject_once"))
+                     (funcall options "n1")))
+      ;; The request's directory and the agent's reason go along.
+      (let ((m (funcall message-of "r1")))
         (should (equal "/srv/data/" (plist-get (plist-get (nth 1 m) :_harness) :dir)))
+        (should (equal "request_directory_access" (plist-get (plist-get (nth 1 m) :_harness) :tool)))
         (should (string-match-p "read the data" (plist-get (plist-get (nth 1 m) :_harness) :reason)))))))
 
 (ert-deftest harness-acp-local-permission-pattern-round-trip ()
@@ -522,7 +536,7 @@ Once the turn ends the message runs as a turn of its own."
                                (lambda (s pid answer) (push (list s pid answer) recorded) answer))
       (let ((m (funcall request "j1")))
         (should (equal "/srv/data/**" (plist-get (plist-get (nth 1 m) :_harness) :pattern)))
-        (should (equal "Always deny directory" (plist-get (car (last (plist-get (nth 1 m) :options))) :name)))
+        (should (equal "Always deny" (plist-get (car (last (plist-get (nth 1 m) :options))) :name)))
         (funcall (nth 2 m) (list :outcome (list :outcome "selected" :optionId "allow-session")
                                  :_harness (list :pattern "/srv/data/*.csv"))))
       (harness-test-wait (lambda () recorded))

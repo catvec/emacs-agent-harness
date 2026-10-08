@@ -21,12 +21,12 @@
 ;;
 ;; A blocked session has a line under its row: buttons answering what it
 ;; waits on, the task board's (`harness-ui-pending-view-actions') --
-;; [Allow] and [Deny] for a tool call, which y and n push too, [Answer…]
-;; for a question -- and what that is.  SPC pops out what the session
-;; at point waits on, so it can be read whole and answered without
-;; opening the session (`harness-ui-popout-at-point').  Clicking the mode
-;; line's notifier opens the list on the sessions waiting for you, in
-;; every project (`harness-sessions-waiting').
+;; [Allow] and [Deny] for a permission request, which y and n push too,
+;; [Answer…] for a question -- and what that is.  SPC pops out what the
+;; session at point waits on, so it can be read whole and answered
+;; without opening the session (`harness-ui-popout-at-point').  Clicking
+;; the mode line's notifier opens the list on the sessions waiting for
+;; you, in every project (`harness-sessions-waiting').
 ;;
 ;; A project includes its linked git worktrees: a session there (a
 ;; task's, a sub-agent's) has the worktree as its `:project', and is
@@ -367,8 +367,8 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
         (". k" "Cancel turn" harness-ui-sessions-cancel)
         (". x" "Deactivate" harness-ui-sessions-deactivate)
         (". SPC" "View what it waits on" harness-ui-sessions-requests)
-        (". y" "Allow tool call" harness-ui-sessions-allow)
-        (". n" "Deny tool call" harness-ui-sessions-deny)
+        (". y" "Allow request" harness-ui-sessions-allow)
+        (". n" "Deny request" harness-ui-sessions-deny)
         (". T" "Make it a task" harness-ui-sessions-make-task)
         (". d" "Delete" harness-ui-sessions-delete)]
        ["List"
@@ -495,10 +495,10 @@ With BLOCKED-ONLY it shows only the sessions waiting for you, as
 That is the session list (`harness-sessions') with only the blocked
 sessions in it, as clicking the mode line's notifier shows it.  Under
 each, what it waits on, with buttons to answer it right there: [Allow]
-and [Deny] for a tool call, [Answer…] for a question.  RET opens a
-session in its project (`harness-ui-sessions-open'); b, or the banner's
-\[Show all], shows every session again.  The list shows in POSITION, as
-`harness-sessions' has it."
+and [Deny] for a permission request, [Answer…] for a question.  RET
+opens a session in its project (`harness-ui-sessions-open'); b, or the
+banner's \[Show all], shows every session again.  The list shows in
+POSITION, as `harness-sessions' has it."
   (interactive)
   (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name)))
     ;; Every waiting session, whatever the list was filtered by before.
@@ -595,14 +595,17 @@ them; a banner above them says so."
     (harness-ui-sessions--redraw)))
 
 (defun harness-ui-sessions-allow ()
-  "Allow, once, the tool call the session at point waits on.
-As the task board's y does (`harness-ui-pending-answer-first-permission')."
+  "Answer the permission request the session at point waits on with Allow.
+That is the [Allow] of the request's panel and of the task board, and
+their y (`harness-ui-pending-answer-first-permission'); its tooltip says
+what it covers (`harness-ui-pending-answer-help')."
   (interactive)
   (harness-ui-pending-answer-first-permission (harness-ui-sessions--id) "allow-once"))
 
 (defun harness-ui-sessions-deny ()
-  "Deny the tool call the session at point waits on.
-As the task board's n does (`harness-ui-pending-answer-first-permission')."
+  "Answer the permission request the session at point waits on with Deny.
+That is the [Deny] of the request's panel and of the task board, and
+their n (`harness-ui-pending-answer-first-permission')."
   (interactive)
   (harness-ui-pending-answer-first-permission (harness-ui-sessions--id) "deny-once"))
 

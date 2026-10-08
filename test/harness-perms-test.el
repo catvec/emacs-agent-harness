@@ -21,6 +21,7 @@
     (harness-test-load-module m))
   (should (harness-module-ready-p 'perms))
   (clrhash harness-perms--allowed-dirs)
+  (clrhash harness-perms--turn-dirs)
   (clrhash harness-perms--session-rules)
   (clrhash harness-perms--waiting)
   (setq harness-perms--steered nil
@@ -1169,8 +1170,9 @@ for a request without a session record."
     (should (equal "request_directory_access" (plist-get payload :tool)))
     (should (equal (harness-perms-test--real outside) (plist-get payload :dir)))
     (should (string-prefix-p "Access " (plist-get payload :title)))
-    ;; No "allow once": there is no single call to allow.
+    ;; The same answers as any other request, allow-once included.
     (should (equal harness-perms-dir-request-options (plist-get payload :options)))
+    (should (equal harness-perms-options (plist-get payload :options)))
     (should (string-match-p "The agent asks for access: Read the shared API types" (plist-get payload :reason)))
     ;; The reason is shown once: the input keeps only the path.
     (should (equal (list :path outside) (plist-get payload :input)))
@@ -1234,14 +1236,94 @@ for a request without a session record."
         (should (string-match-p "every session" (plist-get (harness-test-await (car s)) :reason))))
       (should (equal (list (harness-perms-test--real a)) harness-allowed-directories))
       (should (eq 'harness-allowed-directories (caar saved)))
-      ;; A generic "Allow" (once) grants the directory to the session.
+      ;; "Allow" (once) grants the directory until the turn ends: to
+      ;; no session, and nothing is saved.
       (let ((s (harness-perms-test--start-request b)))
         (should (string-match-p "The agent asks for access to this directory\\."
                                 (plist-get (plist-get (cdr s) :payload) :reason)))
         (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) '(:behavior allow :scope once))
-        (should (eq 'allow (plist-get (harness-test-await (car s)) :behavior))))
-      (should (member (harness-perms-test--real b) (gethash "s1" harness-perms--allowed-dirs)))
-      (should (equal (list (harness-perms-test--real a)) harness-allowed-directories)))))
+        (let ((d (harness-test-await (car s))))
+          (should (eq 'allow (plist-get d :behavior)))
+          (should (string-match-p "until this turn ends" (plist-get d :reason)))))
+      (should (equal (list (harness-perms-test--real b)) (gethash "s1" harness-perms--turn-dirs)))
+      (should-not (gethash "s1" harness-perms--allowed-dirs))
+      (should (member (harness-perms-test--real b) (harness-call 'permission/allowed-dirs "s1")))
+      (should (equal (list (harness-perms-test--real a)) harness-allowed-directories))
+      (should (= 1 (length saved))))))
+
+(ert-deftest harness-perms-dir-request-allow-once-lasts-the-turn ()
+  "Allow on an agent's own request grants the directory until the turn ends.
+Meanwhile it is a root of the session, listed and revocable; the agent
+is told it has to ask again in a later turn; nothing is kept after."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let* ((outside (harness-perms-test--real (harness-test-temp-dir)))
+         (file (expand-file-name "notes.md" outside))
+         (events nil))
+    (harness-on 'permission/dir-allowed (lambda (sid dir) (push (list 'allowed sid dir) events)))
+    (harness-on 'permission/dir-revoked (lambda (sid dir) (push (list 'revoked sid dir) events)))
+    (should-not (member outside (harness-call 'permission/allowed-dirs "s1")))
+    (let* ((started (harness-perms-test--start-request outside "read the notes"))
+           (d (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "allow-once")))
+      (should (eq 'allow (plist-get d :behavior)))
+      (should (plist-get d :final))
+      (should (string-match-p "to this session until this turn ends" (plist-get d :reason)))
+      ;; The agent is told how long it has.
+      (let ((r (harness-perms--dir-request-result (plist-get (harness-test-await (car started)) :input)
+                                                  (list :session-id "s1"))))
+        (should-not (plist-get r :is-error))
+        (should (string-match-p "is now allowed for the rest of this turn (ask again in a later turn"
+                                (plist-get r :content)))))
+    ;; Meanwhile it is a root: the jail lets its files through, and the
+    ;; directory list shows it, revocable.
+    (should (member outside (harness-call 'permission/allowed-dirs "s1")))
+    (should (eq 'allow (harness-perms-test--behavior "read_file" 'read file)))
+    (let ((e (cl-find outside (harness-call 'permission/dirs "s1")
+                      :key (lambda (e) (plist-get e :dir)) :test #'equal)))
+      (should (eq 'turn (plist-get e :source)))
+      (should (plist-get e :revocable)))
+    (should (equal (list (list 'allowed "s1" outside)) events))
+    ;; Nothing is kept: no session grant, no rule.
+    (should-not (gethash "s1" harness-perms--allowed-dirs))
+    (should-not (gethash "s1" harness-perms--session-rules))
+    ;; Another session's turn ending changes nothing; this one's ends it.
+    (harness-emit 'agent/turn-ended "s2" 'end-turn)
+    (should (member outside (harness-call 'permission/allowed-dirs "s1")))
+    (harness-emit 'agent/turn-ended "s1" 'end-turn)
+    (should-not (member outside (harness-call 'permission/allowed-dirs "s1")))
+    (should-not (gethash "s1" harness-perms--turn-dirs))
+    (should (equal (list 'revoked "s1" outside) (car events)))
+    ;; So asking again asks the user again.
+    (let ((started (harness-perms-test--start-request outside "read the notes again")))
+      (should-not (harness-promise-settled-p (car started)))
+      (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "deny-once")
+      (should (eq 'deny (plist-get (harness-test-await (car started)) :behavior))))))
+
+(ert-deftest harness-perms-turn-grant-ends-and-revokes ()
+  "A grant until the turn ends also goes when the next turn starts, or when revoked."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let ((a (harness-perms-test--real (harness-test-temp-dir)))
+        (b (harness-perms-test--real (harness-test-temp-dir))))
+    (should (equal a (harness-perms--grant-for-turn "s1" a)))
+    (harness-perms--grant-for-turn "s1" b)
+    (harness-perms--grant-for-turn "s1" a)
+    (should (equal (list a b) (gethash "s1" harness-perms--turn-dirs)))
+    ;; Revoked from the directory list, like a session grant.
+    (harness-call 'permission/revoke-dir "s1" a)
+    (should (equal (list b) (gethash "s1" harness-perms--turn-dirs)))
+    (should-not (member a (harness-call 'permission/allowed-dirs "s1")))
+    ;; A grant made while no turn ran (the turn that asked was cancelled
+    ;; before the answer) does not reach the next turn.
+    (harness-emit 'agent/turn-started "s1")
+    (should-not (gethash "s1" harness-perms--turn-dirs))
+    (should-not (member b (harness-call 'permission/allowed-dirs "s1")))
+    ;; Unloading the module stops listening.
+    (harness-perms--grant-for-turn "s1" b)
+    (harness-perms--shutdown)
+    (harness-emit 'agent/turn-ended "s1" 'end-turn)
+    (should (equal (list b) (gethash "s1" harness-perms--turn-dirs)))
+    (clrhash harness-perms--turn-dirs)))
 
 (ert-deftest harness-perms-dir-request-without-a-user ()
   (harness-perms-test--setup :permission-mode 'yolo :non-interactive t)

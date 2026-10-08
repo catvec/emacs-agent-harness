@@ -61,7 +61,9 @@
 ;; tool.  The first stage owns that tool's decision and always makes it
 ;; final, so the call never reaches the mode, the standing rules or the
 ;; auto-mode judge: in every mode, yolo and auto included, a directory is
-;; granted only by a person answering the prompt.
+;; granted only by a person answering the prompt.  Its prompt offers the
+;; answers of every other prompt; allowing it once grants the directory
+;; until the session's turn ends, as there is no single call to allow.
 ;;
 ;; A prompt about a path outside the allowed directories (the jail's,
 ;; or an agent's own request for a directory) is answered for a glob
@@ -261,6 +263,12 @@ weighs what the call would do, never whether an input looks complete.")
 (defvar harness-perms--session-rules (make-hash-table :test 'equal)
   "Session id -> list of rule plists answered with scope `session'.")
 
+(defvar harness-perms--turn-dirs (make-hash-table :test 'equal)
+  "Session id -> directories or patterns granted until its turn ends.
+An agent's own request for a directory answered allow-once grants it
+for the rest of the turn it asked in; they are dropped when a turn of
+the session ends or starts (see `harness-perms--grant-for-turn').")
+
 (defvar harness-perms--waiting (make-hash-table :test 'equal)
   "Pending id -> plist (:session-id :request :next) awaiting an answer.")
 
@@ -284,11 +292,13 @@ that denies it to every tool.")
 (defconst harness-perms-dir-tool "request_directory_access"
   "Tool through which an agent asks the user for access to a directory.")
 
-(defconst harness-perms-dir-request-options '(allow-session allow-always deny-once deny-always)
+(defconst harness-perms-dir-request-options '(allow-once allow-session allow-always deny-once deny-always)
   "Answer options offered when an agent asks for a directory itself.
-They are for the prompt's pattern, as in `harness-perms-dir-options'.
-There is no single call to allow once, so an `allow-once' answer (a
-generic \"Allow\" button) grants the pattern to the session.")
+They are the options of every other prompt, for the prompt's pattern
+as in `harness-perms-dir-options'.  There is no single call to allow,
+so `allow-once' grants the pattern until the session's turn ends: the
+agent can do what it asked for, and nothing is remembered (see
+`harness-perms--turn-dirs').")
 
 ;;;; Small helpers
 
@@ -445,8 +455,9 @@ is none."
   "Return the directories SESSION may touch as (:dir DIR :source SOURCE).
 SOURCE is `cwd', `worktree', `tmp' (the session's own temporary
 directory), `config' (`harness-allowed-directories'), `session'
-\(granted at runtime) or `outputs'.  A grant may be a glob pattern
-rather than a directory (see `harness-perms--within-p')."
+\(granted at runtime), `turn' (granted until its turn ends, see
+`harness-perms--turn-dirs') or `outputs'.  A grant may be a glob
+pattern rather than a directory (see `harness-perms--within-p')."
   (let* ((cwd (or (plist-get session :cwd) default-directory))
          (host (plist-get session :host))
          (expand (lambda (d) (harness-perms--with-host (harness-perms--expand-root d cwd) host)))
@@ -460,6 +471,7 @@ rather than a directory (see `harness-perms--within-p')."
                           (mapcar (funcall entry 'config)
                                   (harness-perms--config 'harness-allowed-directories session))
                           (mapcar (funcall entry 'session) (harness-perms--granted session))
+                          (mapcar (funcall entry 'turn) (gethash (plist-get session :id) harness-perms--turn-dirs))
                           (list (list :dir (file-name-as-directory
                                             (expand-file-name "outputs" harness-state-directory))
                                       :source 'outputs)))))
@@ -468,8 +480,8 @@ rather than a directory (see `harness-perms--within-p')."
 (defun harness-perms-roots (session)
   "Return the directories SESSION may touch.
 That is its cwd, its worktree, its own temporary directory,
-`harness-allowed-directories', the directories granted at runtime and
-the tool output directory."
+`harness-allowed-directories', the directories granted at runtime, for
+the session or until its turn ends, and the tool output directory."
   (mapcar (lambda (e) (plist-get e :dir)) (harness-perms-dirs session)))
 
 (defun harness-perms--outside (paths roots)
@@ -1213,21 +1225,50 @@ grants a directory."
 (defun harness-perms--grant-requested (session-id grant scope input)
   "Grant GRANT to SESSION-ID as the user allowed it; return the decision.
 This is the answer to an agent's own request.  GRANT is a directory or
-a glob pattern.  SCOPE `always' adds it to `harness-allowed-directories';
-any other scope, `once' included, grants it to the session.  The tool
-gets INPUT's path with `:granted' GRANT, so it can tell the agent."
-  (let ((always (eq scope 'always)))
-    (condition-case err
-        (progn
-          (harness-call 'permission/allow-dir session-id grant (and always 'always))
-          (list :behavior 'allow :final t
-                :input (list :path (plist-get input :path) :granted grant)
-                :reason (format "the user granted %s to %s" (abbreviate-file-name grant)
-                                (if always "every session" "this session"))))
-      (error
-       (harness-log 'error "perms: granting %s to %s failed: %S" grant session-id err)
-       (list :behavior 'deny :final t
-             :reason (format "granting %s failed: %s" (abbreviate-file-name grant) (harness-error-message err)))))))
+a glob pattern.  SCOPE `always' adds it to `harness-allowed-directories',
+`session' grants it to the session, and `once' grants it until the
+session's turn ends (`harness-perms--grant-for-turn').  The tool gets
+INPUT's path with `:granted' GRANT, so it can tell the agent."
+  (condition-case err
+      (progn
+        (pcase scope
+          ('always (harness-call 'permission/allow-dir session-id grant 'always))
+          ('session (harness-call 'permission/allow-dir session-id grant))
+          (_ (harness-perms--grant-for-turn session-id grant)))
+        (list :behavior 'allow :final t
+              :input (list :path (plist-get input :path) :granted grant)
+              :reason (format "the user granted %s %s" (abbreviate-file-name grant)
+                              (pcase scope
+                                ('always "to every session")
+                                ('session "to this session")
+                                (_ "to this session until this turn ends")))))
+    (error
+     (harness-log 'error "perms: granting %s to %s failed: %S" grant session-id err)
+     (list :behavior 'deny :final t
+           :reason (format "granting %s failed: %s" (abbreviate-file-name grant) (harness-error-message err))))))
+
+(defun harness-perms--grant-for-turn (session-id grant)
+  "Grant GRANT, a directory or a glob pattern, to SESSION-ID until its turn ends.
+That is what allow-once means for an agent's own request for a
+directory: the agent can do what it asked for in the turn it asked in,
+and nothing is remembered.  The grant joins the session's roots (source
+`turn') until `harness-perms--end-turn-grants' drops it.  Return it."
+  (let* ((dir (harness-perms--expand-dir (harness-perms--session session-id) grant))
+         (dirs (gethash session-id harness-perms--turn-dirs)))
+    (unless (member dir dirs)
+      (puthash session-id (append dirs (list dir)) harness-perms--turn-dirs))
+    (harness-emit 'permission/dir-allowed session-id dir)
+    dir))
+
+(defun harness-perms--end-turn-grants (session-id &rest _)
+  "Drop what SESSION-ID was granted until its turn ends.
+On `agent/turn-ended', and on `agent/turn-started' too: a grant made
+while no turn ran (the turn that asked was cancelled before the answer
+came) must not reach the next turn."
+  (when-let* ((dirs (gethash session-id harness-perms--turn-dirs)))
+    (remhash session-id harness-perms--turn-dirs)
+    (dolist (dir dirs)
+      (harness-emit 'permission/dir-revoked session-id dir))))
 
 (defun harness-perms--source-label (source)
   "Return how the request tool describes directory SOURCE to the agent."
@@ -1237,6 +1278,7 @@ gets INPUT's path with `:granted' GRANT, so it can tell the agent."
     ('tmp "this session's own temporary directory")
     ('config "allowed for every session")
     ('session "granted to this session")
+    ('turn "granted to this session until this turn ends")
     ('outputs "the tool output directory")
     (_ (format "%s" source))))
 
@@ -1268,7 +1310,10 @@ CTX names the session."
         (harness-tool-ok
          (format "The user granted %s instead of %s: it is now allowed for %s. Tools that take paths can use %s%s."
                  (abbreviate-file-name (plist-get grant :dir)) shown
-                 (if (eq (plist-get grant :source) 'config) "every session" "this session")
+                 (pcase (plist-get grant :source)
+                   ('config "every session")
+                   ('turn "the rest of this turn (ask again in a later turn if you need it then)")
+                   (_ "this session"))
                  (if glob "the paths it matches" "what it holds")
                  (if glob "" "; to run bash there, set its cwd inside it")))))
      ((null entry)
@@ -1278,6 +1323,8 @@ CTX names the session."
        (concat
         (pcase (list (plist-get entry :source) (equal (plist-get entry :dir) dir))
           ('(session t) (format "%s is now an allowed directory of this session." shown))
+          ('(turn t) (format "%s is now allowed for the rest of this turn (ask again in a later turn if you need it then)."
+                             shown))
           ('(config t) (format "%s is now an allowed directory of every session." shown))
           (`(,source ,_) (format "%s is already accessible: it lies inside %s (%s)." shown
                                  (abbreviate-file-name (plist-get entry :dir))
@@ -1286,7 +1333,7 @@ CTX names the session."
 
 (harness-define-tool harness-perms-dir-tool
   :label "Request access"
-  :description "Ask the user for access to a directory outside the allowed directories (the working directory and the directories granted so far), for instance another repository you need to read or change. The user is always asked, in every permission mode, and either grants it to this session, grants it to every session, or denies it; the call waits for the answer. The user may grant a narrower or wider path or glob pattern than you asked for; the result says what was granted. Ask for the narrowest directory that does the job and say why. If the user denies it, do not ask again. A non-interactive session cannot ask and is denied at once."
+  :description "Ask the user for access to a directory outside the allowed directories (the working directory and the directories granted so far), for instance another repository you need to read or change. The user is always asked, in every permission mode, and either grants it for the rest of this turn, to this session or to every session, or denies it; the call waits for the answer. The user may grant a narrower or wider path or glob pattern than you asked for; the result says what was granted. Ask for the narrowest directory that does the job and say why. If the user denies it, do not ask again. A non-interactive session cannot ask and is denied at once."
   :schema '(:type "object"
             :properties (:path (:type "string" :description "The directory, absolute or relative to the working directory.")
                          :reason (:type "string" :description "Why you need it; shown to the user."))
@@ -2006,18 +2053,23 @@ session.  Return the session's effective roots."
 
 (harness-defmethod permission/revoke-dir (session-id dir)
   "Withdraw DIR from SESSION-ID.
-Removes a session grant, or else the entry in the global
-`harness-allowed-directories'.  The cwd, the worktree, the session's
-own temporary directory and directories set in a project's
-.dir-locals.el cannot be revoked here.  Return the session's effective
-roots."
+Removes a session grant, or one until the session's turn ends, or else
+the entry in the global `harness-allowed-directories'.  The cwd, the
+worktree, the session's own temporary directory and directories set in
+a project's .dir-locals.el cannot be revoked here.  Return the
+session's effective roots."
   (let* ((session (harness-perms--session session-id))
          (dir (harness-perms--expand-dir session dir))
          (granted (harness-perms--granted session))
+         (turn (gethash session-id harness-perms--turn-dirs))
          (global (default-value 'harness-allowed-directories)))
     (cond
      ((member dir granted)
       (harness-perms--set-granted session-id (remove dir granted)))
+     ((member dir turn)
+      (if (cdr turn)
+          (puthash session-id (remove dir turn) harness-perms--turn-dirs)
+        (remhash session-id harness-perms--turn-dirs)))
      ((member dir (harness-perms--global-dirs session))
       (harness-save-user-option
        'harness-allowed-directories
@@ -2035,12 +2087,13 @@ roots."
 (harness-defmethod permission/dirs (session-id)
   "Return the directories SESSION-ID may touch as (:dir :source :revocable).
 SOURCE is as in `harness-perms-dirs'.  An entry is revocable when it
-is a session grant or comes from the global `harness-allowed-directories'."
+is a grant, for the session or until its turn ends, or comes from the
+global `harness-allowed-directories'."
   (let* ((session (harness-perms--session session-id))
          (global (harness-perms--global-dirs session)))
     (mapcar (lambda (e)
               (append e (list :revocable
-                              (and (or (eq (plist-get e :source) 'session)
+                              (and (or (memq (plist-get e :source) '(session turn))
                                        (and (eq (plist-get e :source) 'config)
                                             (member (plist-get e :dir) global)))
                                    t))))
@@ -2093,13 +2146,14 @@ only reads may read (see `harness-perms-inspection-dirs' and
 (harness-declare-event 'permission/requested
                        "(SESSION-ID PENDING) when a tool call waits for the user's answer.")
 (harness-declare-event 'permission/dir-allowed
-                       "(SESSION-ID DIR) after `permission/allow-dir' widened the jail.")
+                       "(SESSION-ID DIR) after `permission/allow-dir', or a grant until the turn ends, widened the jail.")
 (harness-declare-event 'permission/dir-revoked
-                       "(SESSION-ID DIR) after `permission/revoke-dir' narrowed the jail.")
+                       "(SESSION-ID DIR) after `permission/revoke-dir', or the end of a turn, narrowed the jail.")
 
 (defun harness-perms--init ()
   "Install the `permission/decide' chain and the steering after denials.
-Safe to call again."
+Grants until a turn ends are dropped from here on when it ends.  Safe
+to call again."
   (harness-add-filter 'permission/decide #'harness-perms--dir-request 5)
   (harness-add-filter 'permission/decide #'harness-perms--sandbox-guard 7)
   (harness-add-filter 'permission/decide #'harness-perms--jail 10)
@@ -2108,7 +2162,10 @@ Safe to call again."
   (harness-add-filter 'permission/decide #'harness-perms--non-interactive 40)
   (harness-add-filter 'permission/decide #'harness-perms--ask 90)
   (harness-on 'permission/decided #'harness-perms--on-decided)
-  (harness-on 'session/updated #'harness-perms--on-session-updated))
+  (harness-on 'session/updated #'harness-perms--on-session-updated)
+  ;; What was granted until a turn ends goes when it ends.
+  (harness-on 'agent/turn-started #'harness-perms--end-turn-grants)
+  (harness-on 'agent/turn-ended #'harness-perms--end-turn-grants))
 
 (defun harness-perms--shutdown ()
   "Remove the `permission/decide' chain and the steering after denials."
@@ -2116,7 +2173,9 @@ Safe to call again."
                 harness-perms--auto harness-perms--non-interactive harness-perms--ask))
     (harness-remove-filter 'permission/decide fn))
   (harness-off (cons 'permission/decided #'harness-perms--on-decided))
-  (harness-off (cons 'session/updated #'harness-perms--on-session-updated)))
+  (harness-off (cons 'session/updated #'harness-perms--on-session-updated))
+  (harness-off (cons 'agent/turn-started #'harness-perms--end-turn-grants))
+  (harness-off (cons 'agent/turn-ended #'harness-perms--end-turn-grants)))
 
 ;; A reload does not run `:init' again for a ready module, and the tools
 ;; above are registered at load time, so the chain is installed here too:

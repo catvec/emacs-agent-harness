@@ -1337,6 +1337,7 @@ short command gets no toggle, and TAB keeps the chat's meaning there."
           (should-error (harness-ui-pending-toggle-input) :type 'user-error))))))
 
 (ert-deftest harness-ui-chat-directory-permission-panel ()
+  "A call reaching outside the allowed directories offers the same buttons as any request."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid))
@@ -1344,41 +1345,58 @@ short command gets no toggle, and TAB keeps the chat's meaning there."
            (params (list :sessionId sid
                          :toolCall (list :toolCallId "c1" :title "Access ~/notes/" :kind "read"
                                          :rawInput '(:path "~/notes/todo.org"))
-                         :options harness-acp--dir-permission-options
+                         :options harness-acp--permission-options
                          :_harness (list :pendingId "d1" :tool "read_file" :dir "/home/u/notes/"
                                          :reason "Read file wants ~/notes/todo.org, which is outside the allowed directories"))))
       (should (harness-chat--on-permission params (lambda (r) (push r answers))))
       (with-current-buffer buf
         (should (harness-ui-chat-test-find buf "Access ~/notes/"))
         (should (harness-ui-chat-test-find buf "outside the allowed directories"))
-        (should (harness-ui-chat-test-find buf "[Allow directory for session]"))
-        (should (harness-ui-chat-test-find buf "[Always allow directory]"))
-        (should-not (harness-ui-chat-test-find buf "[Always deny]"))
-        (goto-char (1- (harness-ui-chat-test-find buf "[Allow directory for session]")))
+        (should (harness-ui-chat-test-find buf "[Allow] y  [Allow for session] s  [Always allow] a  [Deny] n  [Always deny] N"))
+        ;; What an answer covers is in its tooltip: here, the directory.
+        (should (equal "Let this call reach /home/u/notes/, this time (y)"
+                       (get-text-property (1- (harness-ui-chat-test-find buf "[Allow]")) 'help-echo)))
+        (should (equal "Allow /home/u/notes/ for this session (s)"
+                       (get-text-property (1- (harness-ui-chat-test-find buf "[Allow for session]")) 'help-echo)))
+        (goto-char (1- (harness-ui-chat-test-find buf "[Allow for session]")))
         (harness-chat-push)
         (should (equal "allow-session" (plist-get (plist-get (car answers) :outcome) :optionId)))
         (should (null harness-chat--pending))))))
 
 (ert-deftest harness-ui-chat-directory-request-panel ()
-  "An agent's own directory request offers no \"Allow once\"."
+  "An agent's own directory request offers the same buttons as any request, Allow included.
+Its Allow grants the directory until the turn ends, and says so."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
            (recorded nil)
-           (labels (lambda (r) (mapcar #'car (harness-chat--permission-buttons r)))))
-      ;; Without options every button of the kind is offered.
-      (should (equal '("Allow" "Allow for session" "Always allow" "Deny" "Always deny")
-                     (funcall labels '(:kind "permission"))))
-      (should (equal '("Allow once" "Allow directory for session" "Always allow directory" "Deny"
-                       "Always deny directory")
-                     (funcall labels '(:dir "/d/"))))
+           (all '("Allow" "Allow for session" "Always allow" "Deny" "Always deny"))
+           ;; What the harness offers with an agent's own request
+           ;; (`harness-perms-dir-request-options'), as with any other.
+           (offered '(allow-once allow-session allow-always deny-once deny-always))
+           (labels (lambda (r) (mapcar #'car (harness-chat--permission-buttons r))))
+           (keys (lambda (r) (mapcar #'cadr (harness-chat--permission-buttons r)))))
+      ;; Every kind of request has the same buttons, with the same keys.
+      (dolist (r (list '(:kind "permission" :tool "bash")
+                       '(:kind "permission" :tool "read_file" :dir "/d/")
+                       '(:kind "permission" :tool "read_file" :dir "/d/" :pattern "/d/**")
+                       '(:kind "permission" :tool "request_directory_access" :dir "/d/" :pattern "/d/**")
+                       (list :kind "permission" :tool "request_directory_access" :dir "/d/"
+                             :options offered)
+                       (list :kind "permission" :tool "request_directory_access" :dir "/d/"
+                             :options (harness-acp--offered-options
+                                       (list :dir "/d/" :options offered)))))
+        (should (equal all (funcall labels r)))
+        (should (equal '("y" "s" "a" "n" "N") (funcall keys r))))
       ;; Option ids as symbols (in process), strings or a vector (from the
-      ;; wire), or ACP option plists all narrow the buttons.
+      ;; wire), or ACP option plists all narrow the buttons, which keep
+      ;; their labels and keys.
       (dolist (options (list '(allow-session allow-always deny-once)
                              '("allow-session" "allow-always" "deny-once")
                              (vector "allow-session" "allow-always" "deny-once")
                              (harness-acp--offered-options '(:dir "/d/" :options (allow-session allow-always deny-once)))))
-        (should (equal '("Allow directory for session" "Always allow directory" "Deny")
-                       (funcall labels (list :dir "/d/" :options options)))))
+        (should (equal '(("Allow for session" "s" "allow-session") ("Always allow" "a" "allow-always")
+                         ("Deny" "n" "deny-once"))
+                       (harness-chat--permission-buttons (list :dir "/d/" :options options)))))
       ;; A pending request on the session renders with those buttons.
       (harness-register-method 'permission/answer
                                (lambda (session-id pending-id answer)
@@ -1389,22 +1407,31 @@ short command gets no toggle, and TAB keeps the chat's meaning there."
                     (list :id "req" :kind 'permission
                           :payload (list :tool "request_directory_access" :kind 'meta
                                          :input '(:path "~/src/other") :dir "/home/u/src/other/"
+                                         :pattern "/home/u/src/other/**"
                                          :title "Access ~/src/other/"
                                          :reason "The agent asks for access: read the API types"
-                                         :options '(allow-session allow-always deny-once))))
+                                         :options offered)))
       (let ((buf (harness-ui-chat-test-open sid)))
         (harness-test-wait (lambda () (with-current-buffer buf harness-chat--pending)) 5 "pending rendered")
         (with-current-buffer buf
           (should (harness-ui-chat-test-find buf "Access ~/src/other/"))
           (should (harness-ui-chat-test-find buf "The agent asks for access: read the API types"))
-          (should (harness-ui-chat-test-find buf "[Allow directory for session]"))
-          (should (harness-ui-chat-test-find buf "[Always allow directory]"))
-          (should (harness-ui-chat-test-find buf "[Deny]"))
-          (should-not (harness-ui-chat-test-find buf "[Allow once]"))
-          (goto-char (1- (harness-ui-chat-test-find buf "[Always allow directory]")))
-          (harness-chat-push))
+          (should (harness-ui-chat-test-find buf "[Allow] y  [Allow for session] s  [Always allow] a  [Deny] n  [Always deny] N"))
+          ;; Allow grants it until the turn ends, which its tooltip says.
+          (should (equal "Allow /home/u/src/other/** until this turn ends (y)"
+                         (get-text-property (1- (harness-ui-chat-test-find buf "[Allow]")) 'help-echo)))
+          (should (equal "Always allow /home/u/src/other/**, in every session (a)"
+                         (get-text-property (1- (harness-ui-chat-test-find buf "[Always allow]")) 'help-echo)))
+          ;; Its y answers allow-once, as on any other request, and the
+          ;; echo area says what that covered.
+          (goto-char (harness-ui-chat-test-find buf "Permission"))
+          (let ((shown nil))
+            (cl-letf (((symbol-function 'message)
+                       (lambda (fmt &rest args) (setq shown (apply #'format fmt args)))))
+              (call-interactively (key-binding (kbd "y"))))
+            (should (equal "Allowed /home/u/src/other/** until this turn ends" shown))))
         (harness-test-wait (lambda () recorded) 5 "answered through the method")
-        (should (equal (list sid "req" "allow-always") (car recorded)))))))
+        (should (equal (list sid "req" "allow-once") (car recorded)))))))
 
 (ert-deftest harness-ui-chat-existing-pending-item-offers-buttons ()
   (harness-ui-chat-test-with
@@ -1436,7 +1463,7 @@ short command gets no toggle, and TAB keeps the chat's meaning there."
                      (list :sessionId sid
                            :toolCall (list :toolCallId pid :title "Access ~/notes/" :kind "read"
                                            :rawInput '(:path "~/notes/todo.org"))
-                           :options harness-acp--dir-permission-options
+                           :options harness-acp--permission-options
                            :_harness (list :pendingId pid :tool "read_file" :dir (expand-file-name "~/notes/")
                                            :pattern (expand-file-name "~/notes/**")
                                            :paths (list (expand-file-name "~/notes/todo.org"))
@@ -1444,8 +1471,11 @@ short command gets no toggle, and TAB keeps the chat's meaning there."
       (should (harness-chat--on-permission (funcall params "d1") respond))
       (with-current-buffer buf
         (should (harness-ui-chat-test-find buf "pattern: ~/notes/**  [Edit] e"))
-        ;; A directory prompt's buttons speak of the pattern, not of a directory.
-        (should (harness-ui-chat-test-find buf "[Allow once] y  [Allow for session] s  [Always allow] a  [Deny] n  [Always deny] N"))
+        ;; A directory prompt has the buttons of any request; their
+        ;; tooltips speak of the pattern.
+        (should (harness-ui-chat-test-find buf "[Allow] y  [Allow for session] s  [Always allow] a  [Deny] n  [Always deny] N"))
+        (should (equal "Always deny ~/notes/**, to every tool (N)"
+                       (get-text-property (1- (harness-ui-chat-test-find buf "[Always deny]")) 'help-echo)))
         ;; e on the panel edits it, from the pattern shown; M-n offers others.
         (goto-char (harness-ui-chat-test-find buf "Permission"))
         (cl-letf (((symbol-function 'read-string)
