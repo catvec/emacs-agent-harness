@@ -124,6 +124,7 @@ See `harness-compose--line-up-undo'.")
   "Function the host redraws the box with, after the attachments change.")
 
 (defun harness-compose--project ()
+  "Return the project root, as `harness-compose-project-function' says."
   (funcall harness-compose-project-function))
 
 ;;;; Setup and drawing

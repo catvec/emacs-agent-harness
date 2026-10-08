@@ -144,7 +144,7 @@ its report popout, while it waits for review."
 
 (defun harness-ui-review-reject ()
   "Send the work of the task this buffer shows back: say what should change.
-Point goes to the compose box, whose C-c C-c sends what you write there
+Point goes to the compose box, whose \\<harness-chat-mode-map>\\[harness-chat-send] sends what you write there
 back to the task.  In a task's session or in its report popout, while
 it waits for review.  Any message sent to the session while its task
 waits for review sends the task back with it as the feedback; this
@@ -248,7 +248,7 @@ REPORT, what TASK handed in drawn in full (`harness-ui-review--report'),
 goes between what verifying does and the buttons: the work is read
 before it is verified or sent back.  IN-REPORT is non-nil when the banner
 is drawn at the end of TASK's report popout
-(`harness-ui-report-panel-functions'): it speaks of the task then, and
+\\(`harness-ui-report-panel-functions'): it speaks of the task then, and
 leaves [Review] out, the report being the window it is drawn in."
   (let* ((in-report (or in-report (and (fboundp 'harness-ui-report-task)
                                        (harness-ui-report-task))))
@@ -402,10 +402,11 @@ On `harness-ui-report-compose-functions'."
 ;;;; Events and setup
 
 (defun harness-ui-review--on-event (event args)
-  "Follow tasks: the banner of an open session follows its task, and a
-session that becomes a task's, or stops being one, is looked up again.
-Only a change the banner shows draws the session's tail again: the
-report it holds is long, and its reader keeps their place."
+  "Follow EVENT with ARGS: keep the review banners in step with the tasks.
+The banner of an open session follows its task, and a session that
+becomes a task's, or stops being one, is looked up again.  Only a
+change the banner shows draws the session's tail again: the report it
+holds is long, and its reader keeps their place."
   (pcase event
     ((or "task/changed" "task/review" "task/done")
      (let ((task (car args)))

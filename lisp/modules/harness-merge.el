@@ -697,12 +697,12 @@ child or the fresh session resolving its conflicts."
                  (harness-tool-error (format "Conflicts remain in %s. Resolve them in your worktree %s, git add them and commit the merge, then call merge_done again."
                                              (string-join files ", ") cwd)))
                 ((eql (plist-get head :exit) 0)
-                 (harness-tool-error "The merge is resolved but not committed. Run `git commit --no-edit` in your worktree, then call merge_done again."))
+                 (harness-tool-error "The merge is resolved but not committed; run `git commit --no-edit` in your worktree, then call merge_done again"))
                 ((not (eql (plist-get ancestor :exit) 0))
                  (harness-tool-error (format "Your branch does not contain the parent's commit %s yet. Run `git merge %s` in your worktree, resolve and commit, then call merge_done again."
                                              base base)))
                 ((not (string-empty-p (string-trim (plist-get status :stdout))))
-                 (harness-tool-error "Your worktree has uncommitted changes. Commit them, then call merge_done again."))
+                 (harness-tool-error "Your worktree has uncommitted changes; commit them, then call merge_done again"))
                 ((not (eq (plist-get entry :status) 'conflict))
                  (harness-tool-error (format "The merge is %s, not waiting for conflict resolution" (plist-get entry :status))))
                 (t

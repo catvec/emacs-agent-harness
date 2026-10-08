@@ -1304,7 +1304,7 @@ CTX names the session."
          (entry (and dir (cl-find-if (lambda (e) (harness-perms--within-p (plist-get e :dir) dir)) entries)))
          (shown (and dir (abbreviate-file-name dir))))
     (cond
-     ((null dir) (harness-tool-error "Give path, the directory you need."))
+     ((null dir) (harness-tool-error "Give path, the directory you need"))
      ;; The user edited the prompt's pattern: say what they granted.
      ((and grant (not (equal (plist-get grant :dir) dir)))
       (let ((glob (harness-perms--glob-p (plist-get grant :dir))))
@@ -2008,7 +2008,7 @@ grants a directory without the user's answer."
                               pid (harness-error-message err))))))))
 
 (defun harness-perms--on-session-updated (session-id changes)
-  "Accept SESSION-ID's waiting prompts when it switches to yolo.
+  "Accept SESSION-ID's waiting prompts when CHANGES switch it to yolo.
 The prompts are answered from the command loop, after the switch
 returns.  See `harness-perms--accept-yolo'."
   (when (eq (harness-perms--sym (plist-get changes :permission-mode)) 'yolo)

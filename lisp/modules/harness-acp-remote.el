@@ -333,7 +333,7 @@ CODE nil when the frame had no status; (error CODE . MESSAGE) a
 protocol violation, CODE the close status to send back, after which
 DECODER gives nothing more."
   (pcase (harness-acp-remote-decoder-state decoder)
-    ('freed (error "harness-acp-remote: the WebSocket decoder was freed"))
+    ('freed (error "The WebSocket decoder of harness-acp-remote was freed"))
     ('failed nil)
     (_
      (with-current-buffer (harness-acp-remote-decoder-buffer decoder)
@@ -706,7 +706,8 @@ For `harness-acp-authenticate-functions'.  The answer waits at most
    "catch(e){document.execCommand('copy')}}</script>"))
 
 (cl-defun harness-acp-remote--respond (proc status body &key headers)
-  "Answer the HTTP request on PROC with STATUS and the HTML BODY, then close."
+  "Answer the HTTP request on PROC with STATUS and the HTML BODY, then close.
+HEADERS is an alist of extra (NAME . VALUE) header fields to send."
   (let ((bytes (encode-coding-string body 'utf-8 t))
         (reason (pcase status (200 "OK") (400 "Bad Request") (403 "Forbidden") (404 "Not Found")
                        (405 "Method Not Allowed") (431 "Request Header Fields Too Large") (_ "Error"))))
@@ -868,7 +869,8 @@ one; neither is a missing header, as native clients send none."
      (t (harness-acp-remote--respond proc 404 (harness-acp-remote--page "Not found" "Nothing here."))))))
 
 (defun harness-acp-remote--head-input (proc chunk)
-  "Read the start of what PROC sends: an HTTP request, or ACP lines."
+  "Read the start of what PROC sends: an HTTP request, or ACP lines.
+CHUNK, the bytes PROC sent last, is added to the bytes it sent before."
   (let* ((bytes (concat (or (process-get proc 'harness-acp-remote-pending) "")
                         (harness-acp-remote--unibyte chunk)))
          (start (string-match-p "[^ \t\r\n]" bytes)))
