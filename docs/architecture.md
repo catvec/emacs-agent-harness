@@ -17,8 +17,9 @@ module needs something more, add it here first.
                 skills, perms, sandbox, notifications
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
- Tool calls     tools, tools-fs, tools-shell, tools-ssh, tools-emacs, tools-web,
-                tools-agent, tools-sessions, tools-notify, tools-handin, tools-dev
+ Tool calls     tools, tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval,
+                tools-web, tools-agent, tools-sessions, tools-notify, tools-handin,
+                tools-dev
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE,
@@ -87,13 +88,19 @@ default) the layers above are split across two Emacs processes:
   `initialize`), and the harness sends that one Emacs the small, fixed
   set of `_harness/emacs/*` requests of lisp/harness-emacs-endpoint.el
   through `emacs/request` (see the tools and acp sections).  The
-  `emacs_*` tools ask it for plain data and a few bounded actions
-  (show a buffer, insert text, save one, trace a function or a
-  variable); none evaluates code.  The
-  `elisp` tool evaluates in a child `emacs --batch'
-  (lisp/harness-elisp.el), never in the lent Emacs: model-written Lisp
-  does not run there at all, since a blocking call would freeze it
-  beyond recovery, and no setting or request changes that.
+  `emacs_*` tools of tools-emacs ask it for plain data and a few
+  bounded actions (show a buffer, insert text, save one, trace a
+  function or a variable); none evaluates code.  The `elisp` tool
+  evaluates in a child `emacs --batch` (lisp/harness-elisp.el), never
+  in the lent Emacs.  Model-written Lisp reaches the lent Emacs only
+  through `emacs_eval` (tools-emacs-eval), which the user can turn off
+  with `harness-emacs-eval` (on by default): the code runs on the UI's
+  only thread, where a blocking call freezes typing and redisplay,
+  so a judge model must expect it to return at once, the permission
+  chain must allow the call as it would a bash command, and the lent
+  Emacs runs it guarded (the user's next key or C-g stops it; it may
+  not prompt; it is stopped once it has waited two seconds).  The lent
+  Emacs checks the setting itself, so it has the last word.
 - Chores of the UI, which any client may do, are asked for with
   `client/request` (below): saving user options to `custom-file`
   (`harness-save-user-option`), reverting buffers after a tool
@@ -191,6 +198,7 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
  :parent-id nil|"uuid"  :fork-node nil|"node-id"
  :created FLOAT  :updated FLOAT
  :usage (:input N :output N :cache-read N :cache-write N :cost F :list-cost F :context N :turns N
+         :last-output N                                         ; the output of the request :context sizes
          :billing api|subscription|extra-usage :plan "max"     ; billing and plan of the latest call
          :cache-at FLOAT :cache-model "ID" :cache-ttl N)  ; the last request that used the prompt cache
  :cache nil|(:at FLOAT :ttl N :expires FLOAT :model "ID")  ; derived: when the prompt cache lapses, whose it is
@@ -213,10 +221,14 @@ that provider's models continue it, and `session/provider-state` says
 whether a given model can.
 
 `:usage :context` is the input size of the last request (prompt tokens
-incl. cache); the UI colours it against `:context-window`.  `:cost`
-is what the session's calls were billed and `:list-cost` the same calls
-at API prices (they differ when a subscription paid); see "Usage
-record".
+incl. cache) and `:last-output` what that request wrote, which the next
+one sends back: the conversation holds about the sum of the two, which
+the UI shows as the context in use and colours against
+`:context-window`.  While a turn runs, the usage module's live count
+stands in for both and for `:output` (see "usage", Live token count).
+`:cost` is what the session's calls were billed and `:list-cost` the
+same calls at API prices (they differ when a subscription paid); see
+"Usage record".
 
 `:cache` says when the session's prompt cache lapses, and whose it is.
 A provider keeps the start of a conversation cached for a while after a
@@ -396,6 +408,12 @@ ATTACHMENT = `(:path "/abs" :size N :mime "…" :name "display")`.
   request used is that model's.  `:cache-reset`, optional, says the
   conversation starts over (a compaction's summary replaces it): the
   record drops the session's cache stamp instead of setting it.
+- `:context`, optional, is the prompt size of the record's last
+  request, which replaces the session's.  With it the session's
+  `:last-output` becomes the output of that request: the record's
+  `:last-output` when it covers several requests (a hosted loop's
+  turn), else its `:output`.  A compaction's record says 0: the summary
+  is all the conversation holds.
 
 When a provider reports no cost, `session/usage-add` prices one from the
 model catalogue.  A missing list cost is the cost, or priced too when a
@@ -885,9 +903,11 @@ Events delivered to `:on-event` (one plist each, in order):
 (:type tool-result :id "…" :content "…" :is-error BOOL)  ; hosted loops echo results
 (:type checkpoint :checkpoint PLIST :call-id "…")  ; hosted loops: where the conversation stands
 (:type usage :input N :output N :cache-read N :cache-write N :cost F-OR-NIL :context N
+       :last-output N                   ; hosted loops: what the turn's last call wrote
        :list-cost F-OR-NIL :billing api|subscription|extra-usage|nil :plan ID
        :cache-at FLOAT :cache-ttl N)    ; see Usage record; the last two optional
-(:type call-usage :output N)            ; hosted loops: one model call's output, counted by the turn's usage
+(:type call-usage :output N :context N) ; hosted loops: one model call's output, counted by the turn's usage;
+                                        ; :context, optional, the size of the call's prompt
 (:type provider-state :state PLIST)     ; persist on the session
 (:type activity :phase PHASE :tool NAME :chars N)  ; what the model is busy with, see below
 (:type quota :windows (…))
@@ -940,7 +960,9 @@ most every quarter second), `compacting`, or `waiting` (for the model
 again).  The Claude provider sends all of them: the CLI streams a
 thinking block without its text and a tool call's input as JSON
 fragments, so without them a turn shows nothing for as long as the model
-thinks or writes a large input.  The OpenAI provider sends `tool-input`.
+thinks or writes a large input.  The OpenAI and Bedrock providers send
+`tool-input`, and the live token count counts its characters (see
+"usage").
 Text deltas that are only whitespace are still text (a `"\n\n"` delta
 separates paragraphs); the agent keeps them from opening a message.
 
@@ -949,12 +971,17 @@ loop's turn as soon as the call ends. A hosted loop sends a single
 `usage` event, for the whole turn, at its end, and that event is the one
 that counts: `call-usage` is not recorded anywhere. The agent passes it
 on as `agent/call-usage`, so the usage module can measure the output
-rate during a long turn.
-- Claude Code sends the output that each `message_delta` adds to its
+rate and keep the live token count during a long turn.  `:context`, when
+the provider knows it, is the size of the prompt the call was sent, the
+conversation so far.  The turn's `usage` says with `:last-output` what
+its last call wrote, so the session's context in use stays as the live
+count left it.
+- Claude Code sends a call's prompt as its `message_start` arrives
+  (`:output 0`), then the output that each `message_delta` adds to its
   message.
-- Copilot sends each main-conversation `assistant.usage`. Sub-agent
-  calls do not count, because their deltas do not stream into the
-  conversation either.
+- Copilot sends each main-conversation `assistant.usage`, with the
+  call's prompt. Sub-agent calls do not count, because their deltas do
+  not stream into the conversation either.
 - Native loops send none: their `usage` event is already per call.
 
 Forking: `provider/fork` returns a new provider state that may be marked
@@ -2225,7 +2252,8 @@ non-interactive session it stays a denial.
     `tool-input`. The wait for the first token, the tools' runs and
     compaction do not count.
   - Calls: a call with no output, or with less than 0.25 s of streaming
-    (output that arrived all at once), is left out.
+    (output that arrived all at once), is left out; so is a
+    `call-usage` that only gives a call's prompt (`:output 0`).
   - The rate: Σoutput / Σseconds over the session's newest calls on its
     current model, counting back until they cover
     `harness-usage-rate-window` seconds of streaming (30). It is kept in
@@ -2235,6 +2263,32 @@ non-interactive session it stays a denial.
     :calls N :at FLOAT :model ID)` or nil. `usage/rates` returns every
     measured session's rate, each with `:session`. Each new rate
     triggers `usage/rate-updated SID RATE`, which ACP forwards.
+- Live token count: a running session's token figures, its context in
+  use and its output, grow while its model streams instead of only
+  when its provider reports usage.  Counted here in the harness process,
+  in memory, for every provider.
+  - From `agent/turn-started` the count starts from the session's
+    totals: `:output`, and `:context` plus `:last-output`.
+  - Between reports it estimates what streamed since the last one: a
+    token for every four characters of text and thinking
+    (`agent/stream`) and of tool-call input (the `tool-input` activity's
+    `:chars`, counted per tool), plus thinking whose text does not
+    stream (Claude Code's) by the clock, at the session's output rate,
+    else 40 tokens a second.
+  - Each report replaces the estimate with real numbers, so nothing
+    counts twice: a hosted loop's `agent/call-usage` adds the call's
+    output and, with `:context`, restarts the context from the call's
+    prompt; a `session/usage` record sets the figures to the new
+    totals.
+  - Interface: `usage/live SID` returns `(:context N :output N
+    :estimated N)` while SID's turn runs, else nil; ESTIMATED is how
+    many of their tokens are the estimate.  `usage/live-all` returns
+    every running session's, each with `:session`.  Changes trigger
+    `usage/live-updated SID LIVE`, which ACP forwards, at most every
+    `harness-usage-live-interval` seconds a session (0.25), the changes
+    in between together; thinking without text announces every
+    interval while it lasts.  `agent/turn-ended` sends the last figures,
+    then `usage/live-updated SID nil`: the session's totals count again.
 
 ### insights
 
@@ -3295,7 +3349,7 @@ TITLE is the session's name, else the prompt's first line without its
 leading `#`, at most 80 characters; PROJECT is `project/name` of the
 task's project.
 
-### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-web, tools-agent, tools-sessions, tools-notify, tools-handin
+### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval, tools-web, tools-agent, tools-sessions, tools-notify, tools-handin
 
 Tool names, labels and inputs (all paths relative to cwd or absolute;
 TRAMP prefixes come from the session host):
@@ -3320,6 +3374,7 @@ TRAMP prefixes come from the session host):
 | `emacs_describe` | Describe symbol | symbol, buffer | read (needs no approval: `harness-perms--inspection-tools`) |
 | `emacs_find_definition` | Find definition | symbol, type (function/variable/face) | read (needs no approval: `harness-perms--inspection-tools`; the file of a definition it shows becomes readable, `permission/reveal-file`) |
 | `emacs_trace` | Trace symbol | action (start/stop/list), symbol, type (function/variable), callers, limit | write |
+| `emacs_eval` | Evaluate in Emacs | code | exec (tools-emacs-eval; offered only while `harness-emacs-eval` is on, as it is by default; a judge model must call the code fast first) |
 | `web_search` | Web search | query, count | net |
 | `web_fetch` | Fetch page | url, max_chars | net |
 | `emacs_messages` | Emacs messages | count | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -3543,12 +3598,50 @@ harness on its `load-path', the working directory as its
 `default-directory', a timeout, and the process tree killed when it
 overruns (lisp/harness-elisp.el); its result comes back as JSON, in the
 shape `harness-elisp-payload` describes (value, output, messages or
-error).  It never runs in the lent Emacs, and no request of
-lisp/harness-emacs-endpoint.el evaluates code: model-written Lisp does
-not run in the user's Emacs at all, whatever anyone configures.  A call
-that asks for the user's Emacs (the old `emacs` input) is refused with
-that explanation; the `emacs_*` tools are the whole of what a model may
-do to the live Emacs.
+error).  It never runs in the lent Emacs.  A call that asks for the
+user's Emacs (the old `emacs` input) is refused with that explanation,
+naming `emacs_eval` unless that is off.
+
+`emacs_eval` (tools-emacs-eval) is the one tool that evaluates
+model-written Lisp in the lent Emacs, so a model can change the Emacs
+the user works in: define or fix a function, set a variable, adjust a
+buffer.  It is on by default, and the user can turn it off with
+`harness-emacs-eval` (in the safety section of the settings page): code
+there runs on the UI's only thread, and code that never waits, such as
+a loop the judge misjudged, holds it until it returns or the user stops
+it.  While it is off the `agent/tools` filter leaves the tool out of every
+session (the catalogue, with no session, still lists it), and a call
+that names it anyway is refused without asking anyone.  A call passes
+three gates before its code runs, in order:
+
+1. The permission chain decides it as any call of kind exec, in every
+   mode (the same approval as bash).
+2. The handler asks a judge model, as the auto-mode permission judge
+   is asked: one `:ephemeral` `provider/complete` on the cheap tier of
+   the session's model (`provider/tier-model MODEL 'cheap`, else the
+   model itself), no tools, no thinking, 200 output tokens and once
+   more with 2048 when those ran out, at most 30 s in all.  It reads
+   the very code that would run, fenced by a tag of the call's own, and
+   rules on performance and blocking only, answering one JSON line
+   `{"verdict": "fast"|"slow"|"blocking"|"unsure", "reason": ...}`.
+   Only `fast` runs the code, and only when every verdict in the reply
+   says so; any other verdict, no verdict, a failed request or a judge
+   that takes too long refuses the call with the judge's reason and
+   points to the `elisp` tool.  Code longer than 12000 characters, code
+   that does not read and a harness with no Emacs lent are refused
+   before the judge is asked.
+3. The harness sends `eval` (below) with a two-second limit and a
+   deadline, and waits five seconds for the answer; an Emacs that has
+   not answered by then is reported as not responding, maybe still
+   running the code, and the model is told to leave it alone.  The lent
+   Emacs evaluates only while its own `harness-emacs-eval` is on, so
+   the Emacs that would freeze has the last word.
+
+The result reads as the `elisp` tool's (`=> VALUE`, then the output and
+the messages), with `:meta` `(:emacs "user" :verdict V :reason R)`;
+code that signals is an error result, and code the lent Emacs stopped
+(its time limit, the user's key, C-g) is an error result that says it
+ran partway.
 
 ### acp
 
@@ -3648,7 +3741,7 @@ claims an Emacs is not asked.  It rejects at once when none is
 attached, with the Emacs's message when it refuses, and when it
 disconnects first.  `emacs/attached` lists the lent Emacsen, the one
 asked first at the head.  Neither is callable over ACP.  Requests, all
-answered with plain data or one bounded action
+but `eval` answered at once with plain data or one bounded action
 (lisp/harness-emacs-endpoint.el):
 `buffers {}` → `{buffers: [{name, mode, modified, size, file}]}`;
 `windows {}` → `{windows: [{frame, selected, name, mode, width, height,
@@ -3665,9 +3758,40 @@ type, name, aliases, kind, advised, loaded, native, autoload, file,
 visiting, modified, line, endLine, lines, truncated, printed, note}`;
 `trace {action, symbol, type, limit, callers}` → `{started: {symbol,
 type, count, limit, callers}, line, stopped: [...], traces: [...],
-buffer, lines}`; `messages {count}` → `{text}`.  There is no `eval`
-request: a lent Emacs never evaluates model-written code, so nothing
-that asks it can freeze it.
+buffer, lines}`; `messages {count}` → `{text}`.
+
+`eval {code, timeout, deadline, host, maxChars}` → `{value, output,
+messages, error, stopped, seconds}` is the one request that evaluates
+model-written code, emacs_eval's, and the lent Emacs refuses it while
+its own `harness-emacs-eval` is off (on by default; the global value
+counts, a buffer-local one does not).  It is answered once the code ran
+(`harness-emacs-endpoint--deferred-methods`), and runs it guarded:
+
+- The code is read whole first, so code that does not read runs not at
+  all; it is evaluated form by form with lexical binding.
+- It never starts while the user is typing or while another evaluation
+  runs (code that waits lets requests in, and evaluations never nest):
+  it looks again every 0.05 s, and fails, having run nothing, once
+  `deadline` is near.  `deadline` is by the harness's clock, so it
+  counts only when `host` names this Emacs's `system-name`; elsewhere
+  `timeout` from the request's arrival stands in for it.
+- It runs under `while-no-input` with quitting allowed: the user's next
+  key stops it (`stopped: "input"`), and so does C-g (`"quit"`), whose
+  `quit-flag` is cleared after so nothing else quits.  Requests arrive
+  in a process filter or a timer, where quitting is inhibited; this is
+  the only place it is allowed.
+- A timer of its own, under a tag of the call's own that no `catch` or
+  `with-timeout` in the code can take, stops it once it has waited
+  `timeout` seconds (default 2, at most 10) or what is left until
+  `deadline` (`"timeout"`).
+- It may not prompt (`inhibit-interaction`) or enter the debugger, and
+  its messages are logged, not shown.  The value, the output and the
+  messages are each cut at `maxChars`.
+
+Code that never waits (a loop that does not yield) can still hold the
+Emacs until it returns or the user stops it: nothing preempts Lisp on
+its thread.  Keeping such code out is the judge's work; a user who
+would rather not take the risk turns `harness-emacs-eval` off.
 
 The server writes its address to `<state>/acp-address` and, when
 `harness-acp-token` is set (always, for the harness process), the token
@@ -4083,8 +4207,9 @@ a notice and the compose box, and the first message sent from it resumes
 it (through `agent/prompt`).  The header line shows the session's
 status, name, model, permission mode, whether it is non-interactive
 ("non-interactive" in `harness-non-interactive-face`, else a dim
-"interactive"), thinking level, context, output rate, cost and [menu]; clicking a
-setting changes it, and the non-interactive one toggles.  The output
+"interactive"), thinking level, context, output tokens, output rate,
+cost and [menu]; clicking a setting changes it, and the non-interactive
+one toggles.  The output
 rate ("48 tok/s", `harness-ui-format-rate`) is the session's rate as the
 usage module measured it. It is dimmed when the session is not running,
 because it is then the last rate measured. The session has no rate
@@ -4093,6 +4218,22 @@ The UI keeps the rates in a cache (`harness-ui-session-rate`). It is
 filled with `_harness/usage/rates` on connect and kept current by
 `usage/rate-updated`. Every change runs `harness-ui-rate-functions`,
 which redraws the chat headers, the session list and the task board.
+The context ("12.3k/200k", `harness-ui-format-context`) and the output
+tokens ("3.4k out", `harness-ui-format-output`, none until the session
+wrote some) read `harness-ui-session-tokens`: the session's totals, or
+while its turn runs the usage module's live count, so both grow as the
+model streams; "~" marks figures partly estimated from what streamed
+since the provider last reported usage.  The UI keeps the live counts
+in a cache too (`harness-ui-session-live`), filled with
+`_harness/usage/live-all` on connect and kept current by
+`usage/live-updated`.  The event that ends a turn's count can come
+before the session's new totals (sessions are pushed after a short
+debounce), so the last figures stand until the cache shows the session
+no longer running and never drop in between.  Every change runs
+`harness-ui-live-functions`: the chat headers redraw (a few times a
+second at most, as the events come), the session list and the task
+boards at most every half second, and only when a figure they show
+reads otherwise.
 Other UI
 modules hook into a chat buffer without owning it:
 `harness-chat-send-functions` sees each message sent
@@ -4433,7 +4574,9 @@ found the harness behind.
 Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in six
 sections -- requires your input, ready for review, merging, in progress,
 pending, completed -- with each card's current todo, progress, elapsed
-time, output rate (while its session is open), cost and merge state, one-click answers to a blocked task's
+time, token figures (a working task's context in use and output, growing
+as its model streams; a card short of room leaves them out first),
+output rate (while its session is open), cost and merge state, one-click answers to a blocked task's
 question or
 permission, and a compose box that submits a task, edits a pending one,
 messages a task's session, answers its question or takes the feedback
@@ -4616,7 +4759,8 @@ budget's refusal says it is deleted there, or the setting's, where it
 is changed.
 
 Other buffers: settings page (`harness-ui-config`, above), sessions list (`tabulated-list-mode`, tree indentation for
-children, filter/sort by any column; a Tok/s column shows each session's
+children, filter/sort by any column; the Context and Output columns show
+each session's token figures, which grow while it streams; a Tok/s column shows each session's
 output rate, dimmed while it is not running; SPC on a session pops out what it
 waits on (a session that waits on nothing leaves SPC scrolling), its
 status cell's tooltip says so (`harness-ui-sessions-requests`);
@@ -4652,7 +4796,7 @@ with it or with other BTWs (`session/btw`), or, over a view that sets
 in the session's own chat buffer with point in its compose box, so the
 question is written and sent like any message; nothing is read in the
 minibuffer.  The buffer is the full chat: its header line (model,
-permission mode, non-interactive, thinking, context, output rate, cost, [menu]),
+permission mode, non-interactive, thinking, context, output tokens, output rate, cost, [menu]),
 keys and menu are a session's, `harness-ui-btw-minor-mode` only adding a BTW segment in
 front of the header through `harness-chat-header-functions` (what it
 is about, [close], [keep]) and `C-c C-k`/`C-c C-o` to close and keep

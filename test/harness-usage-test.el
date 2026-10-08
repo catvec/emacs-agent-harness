@@ -3,6 +3,10 @@
 
 (require 'harness-test-helpers)
 
+(defvar harness-usage--live)
+(defvar harness-usage-live-interval)
+(declare-function harness-usage--live-tick "harness-usage")
+
 (defmacro harness-usage-test-with (&rest body)
   "Load the state layer with the demo provider and the usage module, run BODY."
   (declare (indent 0))
@@ -17,6 +21,9 @@
      (clrhash harness-usage--meters)
      (clrhash harness-usage--calls)
      (clrhash harness-usage--rates)
+     (maphash (lambda (_ state) (when (plist-get state :timer) (cancel-timer (plist-get state :timer))))
+              harness-usage--live)
+     (clrhash harness-usage--live)
      (let ((harness-provider-demo--delay 0.005)
            ;; A budget over everything fetches Anthropic's cost report in
            ;; the background: no key may reach a real one.
@@ -1159,6 +1166,273 @@ month budgets over everything, fetched in the background when due."
       (let ((totals (harness-call 'usage/totals :session id)))
         (should (= 1 (plist-get totals :calls)))
         (should (= 9000 (plist-get totals :output)))))))
+
+(ert-deftest harness-usage-rate-ignores-a-calls-start ()
+  "A call that says its prompt as it starts, with no output, measures nothing.
+Its streaming time goes on counting for the output it reports later."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let ((id (harness-usage-test-session)))
+        (harness-emit 'agent/turn-started id)
+        (harness-usage-test-phase id 'writing)
+        (harness-usage-test-at 1)
+        (harness-emit 'agent/call-usage id '(:output 0 :context 5000))
+        (should-not (harness-call 'usage/rate id))
+        (harness-usage-test-at 2)
+        (harness-emit 'agent/call-usage id '(:output 100))
+        (should (harness-usage-test-near 50.0 (plist-get (harness-call 'usage/rate id) :rate)))))))
+
+;;;; Live usage
+
+(defun harness-usage-test-live-recorder ()
+  "Record `usage/live-updated'; return a function giving (SID . LIVE) in order."
+  (let ((seen nil))
+    (harness-on 'usage/live-updated (lambda (sid live) (push (cons sid live) seen)))
+    (lambda () (reverse seen))))
+
+(defun harness-usage-test-stream (id kind text)
+  "Announce that session ID's model streamed TEXT of KIND."
+  (harness-emit 'agent/stream id "n1" kind text))
+
+(defun harness-usage-test-tool-input (id tool chars)
+  "Announce that session ID's model wrote CHARS characters of TOOL's input."
+  (harness-emit 'agent/activity-changed id (list :phase 'tool-input :tool tool :chars chars)))
+
+(ert-deftest harness-usage-live-grows-with-the-stream ()
+  "Text, thinking and tool input grow the figures until a report replaces them.
+A token is reckoned for every four characters; the report's real numbers
+take the estimate's place, so nothing counts twice."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let* ((id (harness-usage-test-session))
+             (harness-usage-live-interval 0)
+             (seen (harness-usage-test-live-recorder))
+             (live (lambda () (harness-call 'usage/live id))))
+        ;; Before the turn: 1000 tokens of prompt, 50 written after it.
+        (harness-call 'session/usage-add id '(:input 100 :output 50 :context 1000))
+        (should-not (funcall live))
+        (harness-emit 'agent/turn-started id)
+        (should (equal '(:context 1050 :output 50 :estimated 0) (funcall live)))
+        (harness-usage-test-phase id 'writing)
+        (harness-usage-test-stream id 'assistant "Hello, wo")     ; 9 characters: 3 tokens
+        (should (equal '(:context 1053 :output 53 :estimated 3) (funcall live)))
+        (harness-usage-test-stream id 'thinking "abcd")           ; 13: 4
+        (harness-usage-test-stream id 'assistant "")              ; nothing
+        (should (equal '(:context 1054 :output 54 :estimated 4) (funcall live)))
+        ;; A tool call's input counts what each report adds; a count
+        ;; lower than the last is the next call of the same tool.
+        (harness-usage-test-tool-input id "write_file" 0)
+        (harness-usage-test-tool-input id "write_file" 40)        ; 53: 14
+        (harness-usage-test-tool-input id "write_file" 80)        ; 93: 24
+        (harness-usage-test-tool-input id "write_file" 7)         ; 100: 25
+        (should (equal '(:context 1075 :output 75 :estimated 25) (funcall live)))
+        ;; The report: 30 tokens written after a prompt of 1100.
+        (harness-call 'session/usage-add id '(:input 20 :output 30 :context 1100))
+        (should (equal '(:context 1130 :output 80 :estimated 0) (funcall live)))
+        (harness-usage-test-stream id 'assistant "more")
+        (should (equal '(:context 1131 :output 81 :estimated 1) (funcall live)))
+        ;; Each change was announced, in order, each figure once.
+        (let ((figures (mapcar #'cdr (funcall seen))))
+          (should (cl-every (lambda (entry) (equal id (car entry))) (funcall seen)))
+          (should (equal '(50 53 54 64 74 75 80 81) (mapcar (lambda (f) (plist-get f :output)) figures)))
+          (should (equal (length figures) (length (cl-remove-duplicates figures :test #'equal)))))
+        ;; The turn ends: nil says the totals count the same, and nothing
+        ;; is kept.
+        (harness-usage-test-phase id nil)
+        (harness-emit 'agent/turn-ended id 'end-turn)
+        (should (equal (cons id nil) (car (last (funcall seen)))))
+        (should-not (funcall live))
+        (should-not (gethash id harness-usage--live))))))
+
+(ert-deftest harness-usage-live-follows-hosted-calls ()
+  "A hosted loop's calls replace the estimate one by one; the turn's usage agrees.
+A call says its prompt as it starts and its output as it ends; the
+turn's usage, which counts them all, changes nothing, and once the
+turn ended the session's totals say the same."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let* ((id (harness-usage-test-session))
+             (harness-usage-live-interval 0)
+             (live (lambda () (harness-call 'usage/live id))))
+        (harness-emit 'agent/turn-started id)
+        (should (equal '(:context 0 :output 0 :estimated 0) (funcall live)))
+        (harness-emit 'agent/call-usage id '(:output 0 :context 2000))
+        (should (equal '(:context 2000 :output 0 :estimated 0) (funcall live)))
+        (harness-usage-test-phase id 'writing)
+        (harness-usage-test-stream id 'assistant (make-string 40 ?x))
+        (should (equal '(:context 2010 :output 10 :estimated 10) (funcall live)))
+        (harness-emit 'agent/call-usage id '(:output 12))
+        (should (equal '(:context 2012 :output 12 :estimated 0) (funcall live)))
+        ;; The next call's prompt holds the first's output, and more.
+        (harness-usage-test-phase id 'tool)
+        (harness-emit 'agent/call-usage id '(:output 0 :context 2500))
+        (should (equal '(:context 2500 :output 12 :estimated 0) (funcall live)))
+        (harness-usage-test-phase id 'writing)
+        (harness-usage-test-stream id 'assistant "12345678")
+        (should (equal '(:context 2502 :output 14 :estimated 2) (funcall live)))
+        (harness-emit 'agent/call-usage id '(:output 5))
+        (should (equal '(:context 2505 :output 17 :estimated 0) (funcall live)))
+        ;; The turn's usage counts the same calls: nothing changes.
+        (harness-call 'session/usage-add id '(:input 100 :output 17 :context 2500 :last-output 5))
+        (should (equal '(:context 2505 :output 17 :estimated 0) (funcall live)))
+        (harness-usage-test-phase id nil)
+        (harness-emit 'agent/turn-ended id 'end-turn)
+        (should-not (funcall live))
+        (let ((usage (plist-get (harness-call 'session/get id) :usage)))
+          (should (= 2505 (+ (plist-get usage :context) (plist-get usage :last-output))))
+          (should (= 17 (plist-get usage :output))))))))
+
+(defun harness-usage-test-fire (id)
+  "Run the announcement session ID's live count holds back, as its timer would.
+Return non-nil if there was one."
+  (when-let* ((timer (plist-get (gethash id harness-usage--live) :timer)))
+    (cancel-timer timer)
+    (apply (timer--function timer) (timer--args timer))
+    t))
+
+(ert-deftest harness-usage-live-counts-thinking-by-the-clock ()
+  "Thinking without text counts at the session's output rate while it lasts.
+Until the rate is measured, at `harness-usage--thinking-rate'.  Its
+text, once it streams, counts by its characters instead."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let* ((id (harness-usage-test-session))
+             (harness-usage-live-interval 0.25)
+             (seen (harness-usage-test-live-recorder))
+             (output (lambda () (plist-get (harness-call 'usage/live id) :output)))
+             (announced (lambda () (plist-get (cdr (car (last (funcall seen)))) :output))))
+        (harness-emit 'agent/turn-started id)
+        (harness-usage-test-phase id 'thinking)
+        ;; While it thinks the figures grow with time alone: an
+        ;; announcement is due every interval.
+        (harness-usage-test-at 2)
+        (should (= 80 (funcall output)))
+        (should (harness-usage-test-fire id))
+        (should (= 80 (funcall announced)))
+        (harness-usage-test-at 2.25)
+        (should (harness-usage-test-fire id))
+        (should (= 90 (funcall announced)))
+        ;; Its text streams: the clock stops, the characters count.
+        (harness-usage-test-at 2.5)
+        (harness-usage-test-stream id 'thinking "abcd")
+        (should (= 101 (funcall output)))
+        (should (harness-usage-test-fire id))
+        (should (= 101 (funcall announced)))
+        (should-not (plist-get (gethash id harness-usage--live) :timer))
+        (harness-usage-test-at 5)
+        (should (= 101 (funcall output)))
+        ;; Another stretch of thinking without text, which writing ends.
+        (harness-usage-test-phase id 'thinking)
+        (harness-usage-test-at 6)
+        (harness-usage-test-phase id 'writing)
+        (harness-usage-test-at 9)
+        (should (= 141 (funcall output)))
+        ;; A report counts all the thinking so far; what goes on is
+        ;; counted from then, at the rate measured meanwhile.
+        (harness-usage-test-phase id 'thinking)
+        (harness-usage-test-at 10)
+        (harness-emit 'agent/call-usage id '(:output 150))
+        (puthash id '(:rate 100.0) harness-usage--rates)
+        (harness-usage-test-at 10.5)
+        (should (= 200 (funcall output)))
+        (harness-usage-test-phase id nil)
+        (harness-emit 'agent/turn-ended id 'end-turn)
+        (should-not (harness-call 'usage/live id))))))
+
+(ert-deftest harness-usage-live-announcements-are-throttled ()
+  "Changes within `harness-usage-live-interval' go out together, once it is up."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let* ((id (harness-usage-test-session))
+             (harness-usage-live-interval 0.25)
+             (seen (harness-usage-test-live-recorder))
+             (outputs (lambda () (mapcar (lambda (e) (plist-get (cdr e) :output)) (funcall seen)))))
+        (harness-emit 'agent/turn-started id)
+        (should (equal '(0) (funcall outputs)))
+        (harness-usage-test-phase id 'writing)
+        (harness-usage-test-at 0.1)
+        (harness-usage-test-stream id 'assistant "abcd")
+        (harness-usage-test-at 0.2)
+        (harness-usage-test-stream id 'assistant "efgh")
+        ;; Held back until the interval is up...
+        (should (equal '(0) (funcall outputs)))
+        ;; ... then sent at once, with all that came meanwhile.
+        (harness-usage-test-at 0.25)
+        (should (harness-usage-test-fire id))
+        (should (equal '(0 2) (funcall outputs)))
+        (should-not (plist-get (gethash id harness-usage--live) :timer))
+        ;; A change after a quiet interval goes out at once.
+        (harness-usage-test-at 1)
+        (harness-usage-test-stream id 'assistant "ijkl")
+        (should (equal '(0 2 3) (funcall outputs)))
+        (should-not (plist-get (gethash id harness-usage--live) :timer))
+        ;; The end of the turn sends what was held back, then nil.
+        (harness-usage-test-at 1.1)
+        (harness-usage-test-stream id 'assistant "mnop")
+        (should (equal '(0 2 3) (funcall outputs)))
+        (harness-usage-test-phase id nil)
+        (harness-emit 'agent/turn-ended id 'end-turn)
+        (should (equal '(0 2 3 4 nil) (funcall outputs)))
+        (should (equal (cons id nil) (car (last (funcall seen)))))
+        ;; A timer held back for a turn that ended fires harmlessly.
+        (harness-usage--live-tick id)
+        (should (= 5 (length (funcall seen))))))))
+
+(ert-deftest harness-usage-live-lists-running-sessions ()
+  "`usage/live-all' gives every running session's figures; a deleted one is forgotten."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let* ((a (harness-usage-test-session))
+             (b (harness-usage-test-session))
+             (harness-usage-live-interval 0))
+        (harness-emit 'agent/turn-started a)
+        (harness-emit 'agent/turn-started b)
+        (harness-usage-test-stream b 'assistant "12345678")
+        (should (equal `((:session ,a :context 0 :output 0 :estimated 0)
+                         (:session ,b :context 2 :output 2 :estimated 2))
+                       (sort (harness-call 'usage/live-all)
+                             (lambda (x y) (< (plist-get x :output) (plist-get y :output))))))
+        (harness-call 'session/delete b)
+        (should-not (harness-call 'usage/live b))
+        (should (equal (list a) (mapcar (lambda (x) (plist-get x :session)) (harness-call 'usage/live-all))))
+        ;; A session that does not exist starts no count.
+        (harness-emit 'agent/turn-started "no-such-session")
+        (should-not (harness-call 'usage/live "no-such-session"))))))
+
+(ert-deftest harness-usage-live-of-a-streamed-turn ()
+  "A turn the demo provider streams grows its figures a few times a second.
+Its calls replace the estimate, its end announces nil, and its
+figures never shrink while it runs."
+  (harness-usage-test-with
+    (let* ((id (harness-usage-test-session))
+           (seen (harness-usage-test-live-recorder))
+           (harness-usage-live-interval 0.1)
+           (harness-provider-demo--delay 0.01)
+           (words (make-list 6 '(:type text :delta "word ")))
+           (pause '((:type wait :seconds 0.15)))
+           (harness-provider-demo-script-override
+            (append '((:type call-usage :output 0 :context 400))
+                    words pause words pause words
+                    '((:type usage :input 300 :output 40 :cache-read 100 :cost 0.0001 :context 400)
+                      (:type done :stop-reason end-turn))))
+           (started (float-time)))
+      (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "hello")) :stop-reason)))
+      (let* ((elapsed (- (float-time) started))
+             (figures (mapcar #'cdr (funcall seen)))
+             (running (butlast figures)))
+        (should (cl-every (lambda (entry) (equal id (car entry))) (funcall seen)))
+        (should (null (car (last figures))))
+        ;; Grown while it streamed, to the reported figures.
+        (should (< 2 (length running)))
+        (should (cl-some (lambda (f) (> (plist-get f :estimated) 0)) running))
+        (should (equal '(:context 440 :output 40 :estimated 0) (car (last running))))
+        (should (equal (mapcar (lambda (f) (plist-get f :output)) running)
+                       (sort (mapcar (lambda (f) (plist-get f :output)) running) #'<=)))
+        ;; No more often than the interval allows, a start and an end aside.
+        (should (<= (length running) (+ 3 (ceiling elapsed 0.1)))))
+      (should-not (harness-call 'usage/live id))
+      (should (= 440 (let ((u (plist-get (harness-call 'session/get id) :usage)))
+                       (+ (plist-get u :context) (plist-get u :last-output))))))))
 
 (provide 'harness-usage-test)
 ;;; harness-usage-test.el ends here

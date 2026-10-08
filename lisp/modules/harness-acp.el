@@ -143,7 +143,7 @@ it can answer for another one.")
   '(session/created session/deleted session/queue-changed session/pending-changed
     session/status agent/turn-started agent/turn-ended agent/quota
     provider/models-updated provider/quota-updated provider/pricing-warning usage/budget-warning usage/budgets-changed
-    usage/reported-changed usage/rate-updated
+    usage/reported-changed usage/rate-updated usage/live-updated
     fallback/changed fallback/switched
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed worktree/locked worktree/unlocked session/forked session/head-moved
@@ -513,9 +513,10 @@ callable over ACP."
 ;; Every tool runs here, in the harness.  The tools about the user's
 ;; Emacs (its buffers, its windows, its symbols) reach that Emacs as a
 ;; resource, the way the file tools reach a TRAMP host; it is never
-;; where a tool runs, and no request evaluates code in it.  An Emacs
-;; lends itself by advertising `_harness.emacs' among the
-;; `clientCapabilities' of `initialize'
+;; where a tool runs, and the one request that evaluates code in it,
+;; emacs_eval's, is refused there once its user turned that off
+;; (`harness-emacs-eval').  An Emacs lends itself by advertising
+;; `_harness.emacs' among the `clientCapabilities' of `initialize'
 ;; (lisp/harness-emacs-endpoint.el), the way ACP clients offer an agent
 ;; their files with `fs'.  A client that lends nothing, such as a phone,
 ;; is never asked; a harness no Emacs is attached to (headless) runs
@@ -560,8 +561,8 @@ Return a promise of its answer.  Exactly one Emacs is asked, never every
 client: the most recently active of those that lend one, which is where
 the user is.  The promise rejects at once when none is attached, with
 the Emacs's message when it refuses, and when it disconnects first.
-The tools of tools-emacs use it; see lisp/harness-emacs-endpoint.el for
-the methods.  Not callable over ACP."
+The tools of tools-emacs and tools-emacs-eval use it; see
+lisp/harness-emacs-endpoint.el for the methods.  Not callable over ACP."
   (harness-with-promise (resolve reject)
     (let ((client (car (harness-acp--emacs-clients))))
       (if (null client)

@@ -18,6 +18,16 @@
 (defvar harness-acp-token)
 (defvar harness-model)
 (defvar harness-tools-max-output-chars)
+(defvar harness-emacs-eval)
+(defvar harness-emacs-endpoint--methods)
+(defvar harness-emacs-endpoint--evaluating)
+(defvar harness-emacs-endpoint--deferred-methods)
+(defvar harness-emacs-endpoint--eval-retry)
+(declare-function harness-emacs-eval-p "harness-emacs-endpoint" ())
+(declare-function harness-emacs-endpoint--eval "harness-emacs-endpoint" (params answer fail))
+(declare-function harness-emacs-endpoint--seconds "harness-emacs-endpoint" (value default max))
+(declare-function harness-emacs-endpoint-test--defined nil)
+(declare-function harness-tools-reason "harness-tools" (err))
 (declare-function harness-acp-add-client "harness-acp")
 (declare-function harness-acp-client-receive "harness-acp")
 (declare-function harness-acp-drop-client "harness-acp")
@@ -28,6 +38,15 @@
 
 (defvar harness-emacs-endpoint-test--evaluations 0
   "How many times test code evaluated in this Emacs.")
+
+(defvar harness-emacs-endpoint-test--after nil
+  "Set by test code that went on past where it should have been stopped.")
+
+(defvar harness-emacs-endpoint-test--order nil
+  "What test evaluations did, newest first.")
+
+(defvar harness-emacs-endpoint-test--inner nil
+  "The promise of an evaluation that test code asked for.")
 
 (defun harness-emacs-endpoint-test--allow (_decision next &rest _)
   "Permissive permission filter for the tests."
@@ -104,9 +123,9 @@ in the background as always, and the client gets no tool request."
             (let ((r (harness-emacs-endpoint-test--call "elisp" :code "(+ 1 2)")))
               (should (equal "=> 3" (plist-get r :content)))
               (should (equal "background" (plist-get (plist-get r :meta) :emacs))))
-            ;; No Emacs to ask, and no request that evaluates in one
-            ;; even if there were: a call that asks is refused for that
-            ;; reason first.
+            ;; No Emacs to ask, and the elisp tool would not evaluate
+            ;; in one even if there were: a call that asks is refused
+            ;; for that reason first.
             (let ((r (harness-emacs-endpoint-test--call "elisp" :code "(+ 1 2)" :emacs "user")))
               (should (plist-get r :is-error))
               (should (string-search "never evaluates in the user's Emacs" (plist-get r :content)))
@@ -264,10 +283,13 @@ that Emacs."
             (should (integerp (plist-get answer :lines))))
           (should-error (harness-emacs-endpoint-handle "trace" '(:action "eval" :symbol "car")))
           (should-error (harness-emacs-endpoint-handle "shell" nil))
-          ;; No request evaluates code: the vocabulary a lent Emacs
-          ;; answers has no eval, whatever is configured.
+          ;; The one request that evaluates code answers once it has
+          ;; run, through `harness-emacs-endpoint-answer' alone (see
+          ;; the eval tests below), never as data at once.
           (should-not (assoc "eval" harness-emacs-endpoint--methods))
-          (should-error (harness-emacs-endpoint-handle "eval" '(:code "(+ 1 2)"))))
+          (should (assoc "eval" harness-emacs-endpoint--deferred-methods))
+          (let ((harness-emacs-eval t))
+            (should-error (harness-emacs-endpoint-handle "eval" '(:code "(+ 1 2)")))))
       (kill-buffer buffer))))
 
 (ert-deftest harness-emacs-endpoint-reads-are-bounded ()
@@ -306,6 +328,237 @@ ranges, a long line is cut, and a big value is printed only in part."
               (should (< (length c) 800))))
         (kill-buffer buffer)
         (harness-acp-close conn)))))
+
+;;;; Evaluating, when the user lets agents
+
+(defun harness-emacs-endpoint-test--eval (code &rest params)
+  "Have the lent Emacs evaluate CODE with PARAMS, as emacs_eval asks it.
+Return its answer, or (failed MESSAGE) when it refused or ran nothing.
+The request reaches the Emacs as a real one does, from a timer, where
+quitting is inhibited."
+  (condition-case err
+      (harness-test-await (harness-call 'emacs/request "eval" (append (list :code code) params)) 20)
+    (error (list 'failed (harness-tools-reason err)))))
+
+(defmacro harness-emacs-endpoint-test--with-eval (&rest body)
+  "Run BODY with this Emacs lent to the harness, letting agents evaluate in it.
+`harness-emacs-eval' is set globally, as the settings page sets it,
+and put back after."
+  (declare (indent 0))
+  (let ((conn (make-symbol "conn")) (old (make-symbol "old")))
+    `(progn
+       (harness-emacs-endpoint-test--setup)
+       (harness-test-with-temp-state
+         (let ((,conn (harness-test-connect-ui-client))
+               (,old (default-value 'harness-emacs-eval)))
+           (setq harness-emacs-endpoint-test--evaluations 0
+                 harness-emacs-endpoint-test--after nil
+                 harness-emacs-endpoint-test--order nil)
+           (setq-default harness-emacs-eval t)
+           (unwind-protect (progn ,@body)
+             (setq-default harness-emacs-eval ,old)
+             (harness-acp-close ,conn)))))))
+
+(ert-deftest harness-emacs-endpoint-eval-is-refused-unless-the-user-lets-agents ()
+  "On by default; turned off, the lent Emacs evaluates nothing, whatever
+the harness asks.  Only the global value counts: a buffer's own value
+turns it neither on nor off."
+  (require 'harness-emacs-endpoint)
+  (should (eq t (eval (car (get 'harness-emacs-eval 'standard-value)) t)))
+  (harness-emacs-endpoint-test--with-eval
+    (setq-default harness-emacs-eval nil)
+    (let ((r (harness-emacs-endpoint-test--eval "(cl-incf harness-emacs-endpoint-test--evaluations)")))
+      (should (eq 'failed (car r)))
+      (should (string-search "harness-emacs-eval" (cadr r)))
+      (should (string-search "off there" (cadr r))))
+    (with-temp-buffer
+      (setq-local harness-emacs-eval t)
+      (should-not (harness-emacs-eval-p))
+      (should (eq 'failed (car (harness-emacs-endpoint-test--eval "(cl-incf harness-emacs-endpoint-test--evaluations)")))))
+    (should (= 0 harness-emacs-endpoint-test--evaluations))
+    (setq-default harness-emacs-eval t)
+    (with-temp-buffer
+      (setq-local harness-emacs-eval nil)
+      (should (harness-emacs-eval-p)))))
+
+(ert-deftest harness-emacs-endpoint-eval-answers-the-value-output-and-messages ()
+  "The code runs here, form by form with lexical binding, and changes
+this Emacs; the answer holds its printed value, what it printed and
+the messages it logged, each cut at the size the harness names."
+  (harness-emacs-endpoint-test--with-eval
+    (let ((r (harness-emacs-endpoint-test--eval
+              (concat "(cl-incf harness-emacs-endpoint-test--evaluations)\n"
+                      "(princ \"printed\")\n"
+                      "(message \"said %d\" 42)\n"
+                      "(let ((f (let ((x 5)) (lambda () x)))) (list (funcall f) \"two\" 'three))"))))
+      (should (equal "(5 \"two\" three)" (plist-get r :value)))
+      (should (equal "printed" (plist-get r :output)))
+      (should (equal "said 42" (plist-get r :messages)))
+      (should-not (plist-get r :error))
+      (should-not (plist-get r :stopped))
+      (should (numberp (plist-get r :seconds))))
+    (should (= 1 harness-emacs-endpoint-test--evaluations))
+    (unwind-protect
+        (progn
+          (harness-emacs-endpoint-test--eval "(defun harness-emacs-endpoint-test--defined () 'here)")
+          (should (eq 'here (funcall 'harness-emacs-endpoint-test--defined))))
+      (fmakunbound 'harness-emacs-endpoint-test--defined))
+    (let ((r (harness-emacs-endpoint-test--eval "(make-string 5000 ?x)" :maxChars 200)))
+      (should (< (length (plist-get r :value)) 300)))
+    (should-not harness-emacs-endpoint--evaluating)))
+
+(ert-deftest harness-emacs-endpoint-eval-reports-errors-and-refuses-prompts ()
+  "An error is part of the answer; the code may not prompt; code that is
+missing, too long or does not read runs not at all."
+  (harness-emacs-endpoint-test--with-eval
+    (let ((r (harness-emacs-endpoint-test--eval "(message \"before\") (error \"Boom %d\" 7)")))
+      (should (equal "Boom 7" (plist-get r :error)))
+      (should (equal "before" (plist-get r :messages)))
+      (should-not (plist-get r :stopped)))
+    (dolist (code '("(read-string \"Name: \")" "(y-or-n-p \"Sure? \")"))
+      (should (string-search "inhibited" (plist-get (harness-emacs-endpoint-test--eval code) :error))))
+    (let ((r (harness-emacs-endpoint-test--eval "(cl-incf harness-emacs-endpoint-test--evaluations) (+ 1")))
+      (should (eq 'failed (car r)))
+      (should (string-search "does not read" (cadr r))))
+    (should (equal '(failed "Missing code") (harness-emacs-endpoint-test--eval "  ")))
+    (should (string-search "longer than" (cadr (harness-emacs-endpoint-test--eval
+                                                (concat "'" (make-string 100001 ?x))))))
+    (should (= 0 harness-emacs-endpoint-test--evaluations))))
+
+(ert-deftest harness-emacs-endpoint-eval-stops-code-that-waits ()
+  "Code that waits is stopped once it has waited what it may, by a timer
+of the evaluation's own that no `catch' or `with-timeout' in the code
+takes for its own; the harness names the time, within a bound."
+  (harness-emacs-endpoint-test--with-eval
+    (dolist (code '("(sleep-for 5)"
+                    "(accept-process-output nil 5)"
+                    "(catch 'harness-emacs-endpoint-test--tag (sit-for 5))"
+                    "(with-timeout (10 'late) (sleep-for 5))"))
+      (setq harness-emacs-endpoint-test--after nil)
+      (let* ((start (float-time))
+             (r (harness-emacs-endpoint-test--eval
+                 (concat "(cl-incf harness-emacs-endpoint-test--evaluations) " code
+                         " (setq harness-emacs-endpoint-test--after t)")
+                 :timeout 0.3)))
+        (should (equal "timeout" (plist-get r :stopped)))
+        (should-not (plist-get r :error))
+        (should (< (- (float-time) start) 3))
+        (should-not harness-emacs-endpoint-test--after)))
+    (should (= 4 harness-emacs-endpoint-test--evaluations))
+    (should-not harness-emacs-endpoint--evaluating)
+    (should (= 2 (harness-emacs-endpoint--seconds nil 2 10)))
+    (should (= 2 (harness-emacs-endpoint--seconds -1 2 10)))
+    (should (= 0.5 (harness-emacs-endpoint--seconds 0.5 2 10)))
+    (should (= 10 (harness-emacs-endpoint--seconds 100 2 10)))))
+
+(ert-deftest harness-emacs-endpoint-eval-stops-at-the-users-next-key ()
+  "The user's next key stops the code (input under `while-no-input'
+throws to `throw-on-input'), and so does C-g, which quits the code
+alone: `quit-flag' is clear after, so nothing else quits."
+  (harness-emacs-endpoint-test--with-eval
+    (let ((r (harness-emacs-endpoint-test--eval
+              "(cl-incf harness-emacs-endpoint-test--evaluations) (throw throw-on-input t) (setq harness-emacs-endpoint-test--after t)")))
+      (should (equal "input" (plist-get r :stopped)))
+      (should-not harness-emacs-endpoint-test--after))
+    (let ((r (harness-emacs-endpoint-test--eval
+              "(cl-incf harness-emacs-endpoint-test--evaluations) (signal 'quit nil) (setq harness-emacs-endpoint-test--after t)")))
+      (should (equal "quit" (plist-get r :stopped)))
+      (should-not harness-emacs-endpoint-test--after)
+      (should-not quit-flag))
+    ;; C-g can quit the code, though requests arrive where it cannot.
+    (should (equal "nil" (plist-get (harness-emacs-endpoint-test--eval "inhibit-quit") :value)))
+    (should (= 2 harness-emacs-endpoint-test--evaluations))
+    (should-not harness-emacs-endpoint--evaluating)))
+
+(ert-deftest harness-emacs-endpoint-eval-waits-while-the-user-types ()
+  "Code never starts while the user is typing: it waits for a pause, and
+runs nothing when none comes before the harness stops waiting."
+  (harness-emacs-endpoint-test--with-eval
+    (let ((checks 0) (start (float-time)))
+      (cl-letf (((symbol-function 'harness-emacs-endpoint--input-pending-p)
+                 (lambda () (<= (cl-incf checks) 3))))
+        (should (equal "1" (plist-get (harness-emacs-endpoint-test--eval
+                                       "(cl-incf harness-emacs-endpoint-test--evaluations)")
+                                      :value))))
+      (should (= 4 checks))
+      (should (>= (- (float-time) start) (* 3 harness-emacs-endpoint--eval-retry))))
+    (cl-letf (((symbol-function 'harness-emacs-endpoint--input-pending-p) (lambda () t)))
+      (let ((r (harness-emacs-endpoint-test--eval "(cl-incf harness-emacs-endpoint-test--evaluations)"
+                                                  :deadline (+ (float-time) 0.4) :host (system-name))))
+        (should (eq 'failed (car r)))
+        (should (string-search "typing" (cadr r)))))
+    (should (= 1 harness-emacs-endpoint-test--evaluations))))
+
+(ert-deftest harness-emacs-endpoint-eval-never-starts-once-the-harness-gave-up ()
+  "A request read after the harness stopped waiting for it runs nothing.
+The deadline is by the harness's clock, so it counts only on the
+harness's machine; there it also bounds how long the code may wait."
+  (harness-emacs-endpoint-test--with-eval
+    (let ((r (harness-emacs-endpoint-test--eval "(cl-incf harness-emacs-endpoint-test--evaluations)"
+                                                :deadline (- (float-time) 1) :host (system-name))))
+      (should (eq 'failed (car r)))
+      (should (string-search "stopped waiting" (cadr r))))
+    (should (= 0 harness-emacs-endpoint-test--evaluations))
+    (should (equal "1" (plist-get (harness-emacs-endpoint-test--eval
+                                   "(cl-incf harness-emacs-endpoint-test--evaluations)"
+                                   :deadline (- (float-time) 1) :host "elsewhere.invalid")
+                                  :value)))
+    (let* ((start (float-time))
+           (r (harness-emacs-endpoint-test--eval "(sleep-for 5)" :timeout 5
+                                                 :deadline (+ start 0.5) :host (system-name))))
+      (should (equal "timeout" (plist-get r :stopped)))
+      (should (< (- (float-time) start) 2)))))
+
+(ert-deftest harness-emacs-endpoint-eval-never-nests ()
+  "Code that waits lets other requests in, and a second evaluation waits
+for the first to end rather than run inside it; one that waits until
+the harness stops waiting runs nothing."
+  (harness-emacs-endpoint-test--with-eval
+    (setq harness-emacs-endpoint-test--inner nil)
+    (should (equal "(outer)"
+                   (plist-get (harness-emacs-endpoint-test--eval
+                               (concat "(setq harness-emacs-endpoint-test--inner"
+                                       "      (harness-call 'emacs/request \"eval\""
+                                       "                    '(:code \"(push 'inner harness-emacs-endpoint-test--order)\")))"
+                                       "(sleep-for 0.3)"
+                                       "(push 'outer harness-emacs-endpoint-test--order)"))
+                              :value)))
+    (should (harness-promise-p harness-emacs-endpoint-test--inner))
+    (should (equal "(inner outer)" (plist-get (harness-test-await harness-emacs-endpoint-test--inner) :value)))
+    (should (equal '(inner outer) harness-emacs-endpoint-test--order))
+    (let ((harness-emacs-endpoint--evaluating t))
+      (let ((r (harness-emacs-endpoint-test--eval "(push 'late harness-emacs-endpoint-test--order)"
+                                                  :deadline (+ (float-time) 0.3) :host (system-name))))
+        (should (eq 'failed (car r)))
+        (should (string-search "another evaluation" (cadr r)))))
+    (should (equal '(inner outer) harness-emacs-endpoint-test--order))))
+
+(ert-deftest harness-emacs-endpoint-eval-says-when-code-leaves-by-a-non-local-exit ()
+  "Code that throws past the evaluation fails the request, saying so,
+and leaves this Emacs free for the next one."
+  (harness-emacs-endpoint-test--setup)
+  (let ((harness-emacs-eval t) (failed nil) (answered nil))
+    (catch 'harness-emacs-endpoint-test--away
+      (let ((inhibit-quit t))
+        (harness-emacs-endpoint--eval '(:code "(throw 'harness-emacs-endpoint-test--away 1)")
+                                      (lambda (r) (setq answered r))
+                                      (lambda (m) (setq failed m)))))
+    (should-not answered)
+    (should (string-search "non-local exit" failed))
+    (should-not harness-emacs-endpoint--evaluating)))
+
+(ert-deftest harness-emacs-endpoint-a-deferred-request-is-answered-once ()
+  "A request answered later gets one answer, whatever its method does."
+  (harness-emacs-endpoint-test--setup)
+  (let* ((responses nil)
+         (harness-emacs-endpoint--deferred-methods
+          (list (cons "twice" (lambda (_params answer fail)
+                                (funcall answer '(:first t))
+                                (funcall fail "second")
+                                (funcall answer '(:third t)))))))
+    (should (harness-emacs-endpoint-answer "_harness/emacs/twice" nil
+                                           (lambda (r) (push r responses) t)))
+    (should (equal '((:first t)) responses))))
 
 ;;;; Chores of the UI
 

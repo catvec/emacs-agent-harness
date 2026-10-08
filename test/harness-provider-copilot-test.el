@@ -38,6 +38,7 @@
 (declare-function harness-provider-copilot--error-text "harness-provider-copilot")
 (declare-function harness-provider-copilot--drop-stale-entries "harness-provider-copilot")
 (declare-function harness-provider-copilot--effort "harness-provider-copilot")
+(declare-function harness-provider-copilot--usage-event "harness-provider-copilot")
 (declare-function harness-provider-copilot-frame "harness-provider-copilot")
 (declare-function harness-provider-copilot-read-frames "harness-provider-copilot")
 (declare-function harness-provider-copilot-prompt "harness-provider-copilot")
@@ -1369,19 +1370,29 @@ found\"; a new conversation must not replace the old one for that."
     ;; Its 50 input tokens count; the conversation's size is the main agent's.
     (should (= 62 (plist-get u :input)))
     (should (= 2112 (plist-get u :context)))
-    ;; The output rate hears of the main conversation's call alone, before
-    ;; the turn's usage counts both.
-    (should (equal '(7) (mapcar (lambda (e) (plist-get e :output))
-                                (cl-remove 'call-usage events
-                                           :key (lambda (e) (plist-get e :type)) :test-not #'eq))))
+    ;; The output rate and the live token count hear of the main
+    ;; conversation's call alone, with the size of its prompt, before the
+    ;; turn's usage counts both.
+    (let ((calls (cl-remove 'call-usage events :key (lambda (e) (plist-get e :type)) :test-not #'eq)))
+      (should (equal '(7) (mapcar (lambda (e) (plist-get e :output)) calls)))
+      (should (equal '(2112) (mapcar (lambda (e) (plist-get e :context)) calls))))
     (should (< (cl-position 'call-usage events :key (lambda (e) (plist-get e :type)))
-               (cl-position 'usage events :key (lambda (e) (plist-get e :type))))))
+               (cl-position 'usage events :key (lambda (e) (plist-get e :type)))))
+    ;; What that call wrote follows its prompt in the conversation.
+    (should (= 7 (plist-get u :last-output))))
   ;; So is the context size that usage_info reports.
   (let ((turn (harness-provider-copilot--make-turn)))
     (harness-provider-copilot--turn-event turn "session.usage_info" '(:currentTokens 99999) "agent-1")
     (should-not (plist-get (harness-provider-copilot-turn-usage turn) :current))
     (harness-provider-copilot--turn-event turn "session.usage_info" '(:currentTokens 2119) nil)
-    (should (= 2119 (plist-get (harness-provider-copilot-turn-usage turn) :current))))
+    (should (= 2119 (plist-get (harness-provider-copilot-turn-usage turn) :current)))
+    ;; Without a call of the main conversation, that size is the whole
+    ;; conversation's: no output follows it.
+    (harness-provider-copilot--turn-event turn "assistant.usage" '(:inputTokens 50 :outputTokens 5) "agent-1")
+    (let ((usage (harness-provider-copilot--usage-event turn)))
+      (should (= 2119 (plist-get usage :context)))
+      (should (= 0 (plist-get usage :last-output)))
+      (should (= 5 (plist-get usage :output)))))
   (harness-provider-copilot-close "s26"))
 
 (ert-deftest harness-provider-copilot-resume-errors-fail-the-turn ()
