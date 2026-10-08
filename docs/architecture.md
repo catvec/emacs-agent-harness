@@ -4288,3 +4288,58 @@ box, which follows `task/changed` and closes once the review is decided
 -- the task turns verified, or is sent back with a new round of
 `:feedback` -- wherever that was done; the report of a task decided
 before it opened stays).
+
+The review of a task's changes as a patch (`harness-ui-patch-review`,
+module `ui-patch-review`) keeps to itself, so that it could become a
+package of its own: nothing else names it
+(`harness-ui-patch-review-is-unknown-to-the-rest` checks), and its
+module's shutdown takes it out again.  It plugs into two hooks that the
+review and the board keep for other modules' buttons.
+`harness-ui-review-button-functions` is called with the task, in the
+buffer the review banner is drawn in, and returns nil or (LABEL COMMAND
+HELP): a button after [Review], with COMMAND's key in
+`harness-ui-review-minor-mode-map` beside it; a function that fails is
+logged and left out.  It is called as tasks change too, in whatever
+buffer is current, since its buttons are part of what
+`harness-ui-review--shown` compares: what it returns depends on the
+task alone.  `harness-ui-tasks-card-button-functions` is the same for a
+card of the board, COMMAND run with point on the card.  The banner's
+commands find their task with `harness-ui-review-current-task`.  While
+it is on, the module binds `C-c C-d` in
+`harness-ui-review-minor-mode-map` and lists it in that mode's menu
+group -- again whenever harness-ui-review.el loads, which sets both
+anew -- and takes both out on shutdown.
+
+[Changes] is offered for a task in review that has a branch, when its
+project, else its worktree, is a local directory and the harness is
+not remote (`harness-ui-connection-address`): git runs in the Emacs
+that shows the UI, with `GIT_OPTIONAL_LOCKS=0`, so that it takes no
+lock the task's own git could trip on.  `git merge-base` of the branch
+with the task's `:base` (HEAD when that is blank or gone) gives the
+commit compared with; `git diff --raw -z -M --no-abbrev` and the patch
+between the two give the files and their hunks, paired by path, and
+`git status` in the worktree tells the list to say when it has changes
+not committed.  The list saves the frame's window configuration and
+takes the frame, q setting it back; a file is seen by its path and its
+blob on the branch, so one the branch changed again is not.  RET runs
+`ediff-buffers` on the two blobs, laid out by
+`harness-ui-patch-review-ediff-window-setup`.  The control panel's map
+is a child of Ediff's with c, N, P and q (under evil,
+`evil-normalize-keymaps` puts it where evil-collection made Ediff's map
+overriding) and a brief help of its own
+(`ediff-brief-help-message-function`); quitting goes through
+`ediff-really-quit` with `ediff-keep-variants` bound, so it asks
+nothing, and the review kills the two versions itself.  c puts a
+comment in the reply under the last line of the current difference on
+the branch (at the merge base for a difference that only deletes),
+filled to `harness-ui-patch-review-fill-column`.  The reply quotes the
+whole diff, every line after "> ", and reads a paragraph of other lines
+as a comment.  Until it has one, it follows the branch; after, it keeps
+the quote it has and the list says the branch moved on.  `C-c C-c`
+gives `_harness/task/reject` a preface naming the branch, the tip and
+the merge base quoted, then the reply with only the hunks that have a
+comment (and a file's header alone, for a comment on the file).  The
+module follows `task/changed`, `task/review` -- a task back for review
+has its branch read again -- and `task/done` and `task/deleted`, which
+end the review: at once when none of its buffers shows, its Ediff
+ended and the windows given back, else when q leaves the list.

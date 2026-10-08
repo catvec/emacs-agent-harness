@@ -205,6 +205,15 @@ are left out.  The board's search sets it (`harness-ui-tasks-search').")
 Each is called in the board's buffer as the header line is drawn; the
 segments show before [BTW], in order.")
 
+(defvar harness-ui-tasks-card-button-functions nil
+  "Functions adding buttons of their own to a task's card.
+Each is called with the task, in the board's buffer as the card is
+drawn, and returns nil or (LABEL COMMAND HELP): a button LABEL that
+runs COMMAND, a function of no arguments, with point on the task's
+card, HELP its tooltip.  The buttons follow the card's own, in order.
+What lives outside the board -- a look at a task's changes, say --
+plugs in here, so the board never needs to know about it.")
+
 (defun harness-ui-tasks--board-p (buffer)
   "Non-nil when BUFFER is a live task board.
 Window hooks and timers hand over whatever buffer a window shows by the
@@ -739,7 +748,26 @@ last message (`harness-tasks--missing-report')."
        (concat " " (harness-ui-tasks--button
                     "[Open harness]"
                     (lambda () (harness-ui-tasks--with-task id (harness-ui-tasks-open-harness)))
-                    "Open an Emacs running the harness from this task's worktree" "open-harness"))))))
+                    "Open an Emacs running the harness from this task's worktree" "open-harness")))
+     (harness-ui-tasks--more-card-buttons task))))
+
+(defun harness-ui-tasks--more-card-buttons (task)
+  "Return the buttons `harness-ui-tasks-card-button-functions' give TASK, or \"\".
+A function that fails is logged and left out: the card is drawn all the same."
+  (let ((id (plist-get task :id))
+        buttons)
+    (run-hook-wrapped
+     'harness-ui-tasks-card-button-functions
+     (lambda (fn)
+       (pcase (condition-case err (funcall fn task)
+                (error (harness-log 'error "task card: %s failed: %S" fn err) nil))
+         (`(,label ,command ,help)
+          (push (concat " " (harness-ui-tasks--button
+                             label (lambda () (harness-ui-tasks--with-task id (funcall command)))
+                             help))
+                buttons)))
+       nil))
+    (apply #'concat (nreverse buttons))))
 
 (defun harness-ui-tasks--subtitle-button (task shown)
   "The chevron that shows or hides TASK's recap subtitle.
