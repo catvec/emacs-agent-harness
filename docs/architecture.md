@@ -5180,3 +5180,79 @@ box, which follows `task/changed` and closes once the review is decided
 -- the task turns verified, or is sent back with a new round of
 `:feedback` -- wherever that was done; the report of a task decided
 before it opened stays).
+
+The review of a task's changes (`harness-ui-patch-review`, module
+`ui-patch-review`) keeps to itself, so that it could become a package of
+its own: nothing else names it
+(`harness-ui-patch-review-is-unknown-to-the-rest` checks), and its
+module's shutdown takes it out again.  It is a panel of the report: on
+`harness-ui-report-panel-functions` at depth -10, before the review
+banner, it returns the changes of a task in review that has a branch,
+and nothing for any other task.  The panel is drawn in the popout
+buffer, so it knows the report it is in; a report opened anew, a popout
+buffer it has not drawn in yet, reads the branch again.  Its rows carry
+a keymap of their own as a text property, which the popout puts before
+its own keys.  The comments go into the box the review module gives the
+report (`harness-ui-report-compose-functions`), written between the
+box's markers (`harness-compose-start` and `harness-compose-end`) with
+the buffer narrowed to them, and C-c C-c sends the box as the review's
+feedback, as it sends any: the module adds no sending of its own.  A
+hook on the popout's `after-change-functions` counts the comments in the
+box again once the typing stops, and draws the report again when the
+counts changed; while the report draws, the panel reads the box with
+`harness-compose-text`, which gives the text the popout captured before
+it erased the buffer.
+
+The changes show for a task whose project, else its worktree, is a local
+directory, when the harness is not remote
+(`harness-ui-connection-address`); else the panel says why.  Git runs in
+the Emacs that shows the UI, with `GIT_OPTIONAL_LOCKS=0`, so that it
+takes no lock the task's own git could trip on.  `git merge-base` of the
+branch with the task's `:base` (HEAD when that is blank or gone) gives
+the commit compared with; `git diff --raw -z -M --no-abbrev` and the
+patch between the two give the files and their hunks, paired by path,
+and `git status` in the worktree tells the panel to say when it has
+changes not committed.  A file is seen by its path and its blob on the
+branch, so one the branch changed again is not.  RET runs
+`ediff-buffers` on the two blobs, laid out by
+`harness-ui-patch-review-ediff-window-setup`, once it saved the frame's
+window configuration and deleted every other window, the report's side
+window too (`ignore-window-parameters`): Ediff's own setup deletes the
+other windows, which it cannot do from a side window.  q sets the
+configuration back.  The report, drawn again meanwhile, gets its window
+start and point anew, since its markers in the configuration went with
+the text they were in, and a window whose buffer was killed -- the
+report's, when the task was decided while Ediff showed -- goes
+(`window-restore-killed-buffer-windows`).  N and P read the next file's
+blobs, then end the Ediff under way quietly, within
+`save-window-excursion`, and start the next in its place, keeping the
+configuration to give back.  The control panel's map is a child of
+Ediff's with c, N, P and q (under evil, `evil-normalize-keymaps` puts it
+where evil-collection made Ediff's map overriding) and a brief help of
+its own (`ediff-brief-help-message-function`); quitting goes through
+`ediff-really-quit` with `ediff-keep-variants` bound, so it asks
+nothing, and the review kills the two versions itself.
+
+c puts a comment on the last line of the current difference on the
+branch (at the merge base for a difference that only deletes) in the
+box, filled to `harness-ui-patch-review-fill-column`.  The box reads
+back as the quote it holds: a line starting with ">" quotes the diff, a
+`diff --git` line opens a file, a hunk's header sets the line numbers,
+which go on across the comments, and a paragraph of other lines is a
+comment.  A comment goes under the line it is about when the box quotes
+it already, after the comments there.  Else it quotes that line, the
+change it ends and at most `harness-ui-patch-review-context-lines` lines
+before it -- not from the middle of another change -- under a hunk
+header that counts just those lines, with git's heading; when the box
+quotes some of them already, the quote goes on after the last of those
+instead, with no header.  A line the diff does not have gets the nearest
+one, the comment saying which line it means, and a comment with no
+difference current is on the file as a whole, under its `diff --git`
+line.  The files keep the diff's order in the box, and a file's hunks
+the order of their lines; the first quote gets a line before it naming
+the branch, its tip, the base and the merge base.  A report closed
+meanwhile opens again out of sight for its box, its draft restored.  The
+module follows `task/changed`, `task/review` -- a task back for review
+has its branch read again -- and `task/done` and `task/deleted`, which
+drop the review: at once when its Ediff does not show, else when q
+leaves it.

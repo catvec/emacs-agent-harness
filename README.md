@@ -986,6 +986,28 @@ your checkout itself can be submitted to the **main tree** instead (the
   session's banner or from the report's own banner. The board's
   item-at-point key (`SPC`) opens the report too, along with whatever
   else the task has to show.
+- While the task waits for review, its report also shows its changes,
+  under the evidence and above the banner, to go through them the way a
+  patch is reviewed on a mailing list: the files its branch changes
+  against its merge base with the branch it was made from, a row each,
+  with its status, what changed (`+3 −1`), a check mark once you looked
+  at it, and your comments on it. `RET` on a file, or a click, compares
+  it in Ediff, the merge base against the branch, in the report's frame.
+  There `c` comments on the current difference (one line in the
+  minibuffer), `N` and `P` go on to the next or previous file, and `q`
+  comes back to the report as it was, point on the next file. Each
+  comment goes into the report's box for the feedback the way a reply to
+  a patch has it: the lines it is about quoted from the diff with `> `,
+  under their file's `diff --git` line, a few lines of context first
+  (`harness-ui-patch-review-context-lines`), your comment under them.
+  Edit the box as you like and write around the comments; `C-c C-c`
+  sends it all back to the task as its feedback, in one go. Git runs in
+  the Emacs that shows the board, so the changes show where the task's
+  repository is on this machine. Ediff's own settings apply
+  (`ediff-split-window-function` puts the two versions side by side);
+  `harness-ui-patch-review-ediff-window-setup` keeps its control panel
+  in the frame. The module (`ui-patch-review`) is self-contained: add it
+  to `harness-disabled-modules` and the changes leave the report.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
 - `SPC` on a task that needs input pops out what it waits on -- the
