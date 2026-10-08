@@ -31,10 +31,12 @@
 ;;   in a child `emacs --batch' process, never the user's Emacs, where
 ;;   model-written code could block the UI beyond recovery (see
 ;;   harness-elisp.el); a timeout kills the child, its whole process
-;;   group included.  The user's Emacs answers no request that
-;;   evaluates code, whatever anyone configures; it is read and driven
-;;   with the bounded `emacs_*' tools (tools-emacs).  The tool itself
-;;   runs here, in the harness, like every tool.
+;;   group included.  The user's Emacs is read and driven with the
+;;   bounded `emacs_*' tools (tools-emacs); only emacs_eval
+;;   (tools-emacs-eval) evaluates there, when the user turned on
+;;   `harness-emacs-eval' and a judge model expects the code to return
+;;   at once.  The tool itself runs here, in the harness, like every
+;;   tool.
 
 ;;; Code:
 
@@ -45,6 +47,8 @@
 (require 'harness-util)
 (require 'harness-tools)
 (require 'harness-elisp)
+
+(declare-function harness-emacs-eval-p "harness-emacs-endpoint" ())
 
 (defconst harness-tools-shell--program "bash"
   "Shell used by the bash tool.")
@@ -198,9 +202,10 @@ directories it may read."
 ;; The tool runs here, in the harness, like every tool, and always
 ;; evaluates in a fresh background Emacs, apart from the user's, so code
 ;; that blocks cannot freeze theirs.  The Emacs a client lent the
-;; harness answers no evaluation request at all
-;; (lisp/harness-emacs-endpoint.el): the `emacs_*' tools are the whole
-;; of what a model may do to the live Emacs.  The background child
+;; harness evaluates only for emacs_eval (tools-emacs-eval), which is
+;; off unless the user turns on `harness-emacs-eval' and runs only code
+;; a judge expects to return at once; the other `emacs_*' tools read
+;; and drive it without evaluating anything.  The background child
 ;; reports its result with `harness-elisp-payload', which one function
 ;; words.
 
@@ -292,9 +297,9 @@ is killed, tree and all, when it overruns."
 
 (defun harness-tools-shell--elisp (input ctx)
   "Handler for the elisp tool with INPUT under CTX; returns a promise.
-The code always evaluates in a background Emacs; the user's Emacs
-answers no request that evaluates code, so a call that asks for it is
-refused with that explanation."
+The code always evaluates in a background Emacs, so a call that asks
+for the user's Emacs is refused with that explanation, which names
+emacs_eval while the user has that on (`harness-emacs-eval')."
   (let ((code (plist-get input :code))
         (where (plist-get input :emacs)))
     (cond
@@ -304,8 +309,11 @@ refused with that explanation."
            (not (string-empty-p where))
            (not (equal where "background")))
       (harness-tool-error
-       (format "The elisp tool never evaluates in the user's Emacs (%S): it always evaluates in a background Emacs. Read or drive the user's Emacs with the emacs_* tools instead."
-               where)))
+       (format "The elisp tool never evaluates in the user's Emacs (%S): it always evaluates in a background Emacs. Read or drive the user's Emacs with the emacs_* tools instead%s."
+               where
+               (if (and (fboundp 'harness-emacs-eval-p) (harness-emacs-eval-p))
+                   "; emacs_eval evaluates code there that returns at once"
+                 ""))))
      (t (harness-tools-shell--elisp-batch code input ctx)))))
 
 (harness-define-tool "elisp"

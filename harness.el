@@ -108,8 +108,9 @@ every file (see `harness--compiled-fresh-p').")
   "Libraries loaded after the core files and before any module, in order.
 Both sides of the process split use them: the UI requires them all, and
 the harness process's modules require harness-files,
-harness-notifications-desktop and harness-revision (which notes, on
-each side, the commit the harness was loaded from).  They are loaded
+harness-notifications-desktop, harness-revision (which notes, on each
+side, the commit the harness was loaded from) and harness-emacs-endpoint
+\(whose `harness-emacs-eval' each side reads for itself).  They are loaded
 compiled as the core files are and every `harness-reload' loads them
 again, so a reloaded module never calls a library function as it was
 before the update; they define no macros, so a change to one does not

@@ -152,7 +152,7 @@ non-interactive anyway."
      :title "Files and safety"
      :doc "What sessions may reach, and what may run without asking you."
      :keys (harness-allowed-directories harness-sandbox-policy harness-perms-rules
-            harness-perms-auto-model))
+            harness-perms-auto-model harness-emacs-eval))
     (tasks
      :title "Task board"
      :doc "The sessions tasks start with, and when their work counts as done."

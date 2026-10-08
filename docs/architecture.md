@@ -17,8 +17,9 @@ module needs something more, add it here first.
                 skills, perms, sandbox, notifications
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
- Tool calls     tools, tools-fs, tools-shell, tools-ssh, tools-emacs, tools-web,
-                tools-agent, tools-sessions, tools-notify, tools-handin, tools-dev
+ Tool calls     tools, tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval,
+                tools-web, tools-agent, tools-sessions, tools-notify, tools-handin,
+                tools-dev
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE,
@@ -84,13 +85,19 @@ default) the layers above are split across two Emacs processes:
   `initialize`), and the harness sends that one Emacs the small, fixed
   set of `_harness/emacs/*` requests of lisp/harness-emacs-endpoint.el
   through `emacs/request` (see the tools and acp sections).  The
-  `emacs_*` tools ask it for plain data and a few bounded actions
-  (show a buffer, insert text, save one, trace a function or a
-  variable); none evaluates code.  The
-  `elisp` tool evaluates in a child `emacs --batch'
-  (lisp/harness-elisp.el), never in the lent Emacs: model-written Lisp
-  does not run there at all, since a blocking call would freeze it
-  beyond recovery, and no setting or request changes that.
+  `emacs_*` tools of tools-emacs ask it for plain data and a few
+  bounded actions (show a buffer, insert text, save one, trace a
+  function or a variable); none evaluates code.  The `elisp` tool
+  evaluates in a child `emacs --batch` (lisp/harness-elisp.el), never
+  in the lent Emacs.  Model-written Lisp reaches the lent Emacs only
+  through `emacs_eval` (tools-emacs-eval), which is off unless the user
+  turns on `harness-emacs-eval` (off by default): the code runs on the
+  UI's only thread, where a blocking call freezes typing and redisplay,
+  so a judge model must expect it to return at once, the permission
+  chain must allow the call as it would a bash command, and the lent
+  Emacs runs it guarded (the user's next key or C-g stops it; it may
+  not prompt; it is stopped once it has waited two seconds).  The lent
+  Emacs checks the setting itself, so it has the last word.
 - Chores of the UI, which any client may do, are asked for with
   `client/request` (below): saving user options to `custom-file`
   (`harness-save-user-option`), reverting buffers after a tool
@@ -2922,7 +2929,7 @@ TITLE is the session's name, else the prompt's first line without its
 leading `#`, at most 80 characters; PROJECT is `project/name` of the
 task's project.
 
-### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-web, tools-agent, tools-sessions, tools-notify, tools-handin
+### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval, tools-web, tools-agent, tools-sessions, tools-notify, tools-handin
 
 Tool names, labels and inputs (all paths relative to cwd or absolute;
 TRAMP prefixes come from the session host):
@@ -2947,6 +2954,7 @@ TRAMP prefixes come from the session host):
 | `emacs_describe` | Describe symbol | symbol, buffer | read (needs no approval: `harness-perms--inspection-tools`) |
 | `emacs_find_definition` | Find definition | symbol, type (function/variable/face) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `emacs_trace` | Trace symbol | action (start/stop/list), symbol, type (function/variable), callers, limit | write |
+| `emacs_eval` | Evaluate in Emacs | code | exec (tools-emacs-eval; offered only while `harness-emacs-eval` is on, off by default; a judge model must call the code fast first) |
 | `web_search` | Web search | query, count | net |
 | `web_fetch` | Fetch page | url, max_chars | net |
 | `emacs_messages` | Emacs messages | count | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -3166,12 +3174,50 @@ harness on its `load-path', the working directory as its
 `default-directory', a timeout, and the process tree killed when it
 overruns (lisp/harness-elisp.el); its result comes back as JSON, in the
 shape `harness-elisp-payload` describes (value, output, messages or
-error).  It never runs in the lent Emacs, and no request of
-lisp/harness-emacs-endpoint.el evaluates code: model-written Lisp does
-not run in the user's Emacs at all, whatever anyone configures.  A call
-that asks for the user's Emacs (the old `emacs` input) is refused with
-that explanation; the `emacs_*` tools are the whole of what a model may
-do to the live Emacs.
+error).  It never runs in the lent Emacs.  A call that asks for the
+user's Emacs (the old `emacs` input) is refused with that explanation,
+naming `emacs_eval` when that is on.
+
+`emacs_eval` (tools-emacs-eval) is the one tool that evaluates
+model-written Lisp in the lent Emacs, so a model can change the Emacs
+the user works in: define or fix a function, set a variable, adjust a
+buffer.  It is off unless the user turns on `harness-emacs-eval` (off
+by default, in the safety section of the settings page): code there
+runs on the UI's only thread, and code that never waits, such as a loop
+the judge misjudged, holds it until it returns or the user stops it.
+While it is off the `agent/tools` filter leaves the tool out of every
+session (the catalogue, with no session, still lists it), and a call
+that names it anyway is refused without asking anyone.  A call passes
+three gates before its code runs, in order:
+
+1. The permission chain decides it as any call of kind exec, in every
+   mode (the same approval as bash).
+2. The handler asks a judge model, as the auto-mode permission judge
+   is asked: one `:ephemeral` `provider/complete` on the cheap tier of
+   the session's model (`provider/tier-model MODEL 'cheap`, else the
+   model itself), no tools, no thinking, 200 output tokens and once
+   more with 2048 when those ran out, at most 30 s in all.  It reads
+   the very code that would run, fenced by a tag of the call's own, and
+   rules on performance and blocking only, answering one JSON line
+   `{"verdict": "fast"|"slow"|"blocking"|"unsure", "reason": ...}`.
+   Only `fast` runs the code, and only when every verdict in the reply
+   says so; any other verdict, no verdict, a failed request or a judge
+   that takes too long refuses the call with the judge's reason and
+   points to the `elisp` tool.  Code longer than 12000 characters, code
+   that does not read and a harness with no Emacs lent are refused
+   before the judge is asked.
+3. The harness sends `eval` (below) with a two-second limit and a
+   deadline, and waits five seconds for the answer; an Emacs that has
+   not answered by then is reported as not responding, maybe still
+   running the code, and the model is told to leave it alone.  The lent
+   Emacs evaluates only while its own `harness-emacs-eval` is on, so
+   the Emacs that would freeze has the last word.
+
+The result reads as the `elisp` tool's (`=> VALUE`, then the output and
+the messages), with `:meta` `(:emacs "user" :verdict V :reason R)`;
+code that signals is an error result, and code the lent Emacs stopped
+(its time limit, the user's key, C-g) is an error result that says it
+ran partway.
 
 ### acp
 
@@ -3264,7 +3310,7 @@ claims an Emacs is not asked.  It rejects at once when none is
 attached, with the Emacs's message when it refuses, and when it
 disconnects first.  `emacs/attached` lists the lent Emacsen, the one
 asked first at the head.  Neither is callable over ACP.  Requests, all
-answered with plain data or one bounded action
+but `eval` answered at once with plain data or one bounded action
 (lisp/harness-emacs-endpoint.el):
 `buffers {}` → `{buffers: [{name, mode, modified, size, file}]}`;
 `windows {}` → `{windows: [{frame, selected, name, mode, width, height,
@@ -3281,9 +3327,39 @@ type, name, aliases, kind, advised, loaded, native, autoload, file,
 visiting, modified, line, endLine, lines, truncated, printed, note}`;
 `trace {action, symbol, type, limit, callers}` → `{started: {symbol,
 type, count, limit, callers}, line, stopped: [...], traces: [...],
-buffer, lines}`; `messages {count}` → `{text}`.  There is no `eval`
-request: a lent Emacs never evaluates model-written code, so nothing
-that asks it can freeze it.
+buffer, lines}`; `messages {count}` → `{text}`.
+
+`eval {code, timeout, deadline, host, maxChars}` → `{value, output,
+messages, error, stopped, seconds}` is the one request that evaluates
+model-written code, emacs_eval's, and the lent Emacs refuses it unless
+its own `harness-emacs-eval` is on (the global value; a buffer-local
+one does not count).  It is answered once the code ran
+(`harness-emacs-endpoint--deferred-methods`), and runs it guarded:
+
+- The code is read whole first, so code that does not read runs not at
+  all; it is evaluated form by form with lexical binding.
+- It never starts while the user is typing or while another evaluation
+  runs (code that waits lets requests in, and evaluations never nest):
+  it looks again every 0.05 s, and fails, having run nothing, once
+  `deadline` is near.  `deadline` is by the harness's clock, so it
+  counts only when `host` names this Emacs's `system-name`; elsewhere
+  `timeout` from the request's arrival stands in for it.
+- It runs under `while-no-input` with quitting allowed: the user's next
+  key stops it (`stopped: "input"`), and so does C-g (`"quit"`), whose
+  `quit-flag` is cleared after so nothing else quits.  Requests arrive
+  in a process filter or a timer, where quitting is inhibited; this is
+  the only place it is allowed.
+- A timer of its own, under a tag of the call's own that no `catch` or
+  `with-timeout` in the code can take, stops it once it has waited
+  `timeout` seconds (default 2, at most 10) or what is left until
+  `deadline` (`"timeout"`).
+- It may not prompt (`inhibit-interaction`) or enter the debugger, and
+  its messages are logged, not shown.  The value, the output and the
+  messages are each cut at `maxChars`.
+
+Code that never waits (a loop that does not yield) can still hold the
+Emacs until it returns or the user stops it: nothing preempts Lisp on
+its thread.  That is why it is off by default.
 
 The server writes its address to `<state>/acp-address` and, when
 `harness-acp-token` is set (always, for the harness process), the token

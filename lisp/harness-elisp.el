@@ -17,11 +17,16 @@
 ;; 'harness-...)` works as it did when the code ran in the harness's own
 ;; Emacs.
 ;;
-;; There is no other place it can run: the user's Emacs answers no
-;; request that evaluates code (lisp/harness-emacs-endpoint.el), whatever
-;; anyone configures.  `harness-elisp-eval-string' is the background
-;; child's evaluator, and `harness-elisp-payload' the shape it reports
-;; in.
+;; The elisp tool has no other place to run.  Code reaches the user's
+;; Emacs only through the separate emacs_eval tool
+;; (lisp/modules/harness-tools-emacs-eval.el), which the user turns on
+;; with `harness-emacs-eval' (off by default) and which runs only code a
+;; judge model expects to return within a fraction of a second, guarded
+;; there as lisp/harness-emacs-endpoint.el describes.  Both read code
+;; with `harness-elisp-read-forms' and word results with
+;; `harness-elisp-format-result'.  `harness-elisp-eval-string' is the
+;; background child's evaluator, and `harness-elisp-payload' the shape
+;; it reports in.
 
 ;;; Code:
 
@@ -49,10 +54,12 @@ Internal, not an option (see docs/configuration-audit.md).")
 ;;;; Evaluating a string
 
 (defun harness-elisp-read-forms (code)
-  "Return the list of forms read from CODE."
+  "Return the list of forms read from CODE.
+Only Lisp's syntax table is set, not `emacs-lisp-mode': in the user's
+Emacs, where emacs_eval reads code too, a mode would run their hooks."
   (with-temp-buffer
+    (set-syntax-table emacs-lisp-mode-syntax-table)
     (insert code)
-    (emacs-lisp-mode)
     (goto-char (point-min))
     (let (forms)
       ;; Skip whitespace and comments between forms so a clean end of
