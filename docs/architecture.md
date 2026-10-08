@@ -2180,7 +2180,13 @@ verdict.
 
 - `task/submit CWD PROMPT &optional (:attachments :model :permission-mode
   :thinking :non-interactive :refine :main-tree)` → task; it starts when
-  one of `harness-tasks-max-running` slots is free.  Missing options come from
+  one of its project's `harness-tasks-max-running` slots is free.  The
+  limit is per project: every project (a task's `:project`, the main
+  checkout, else its `:cwd`) has that many slots of its own, and the
+  scheduler (`harness-tasks--schedule`) starts each project's queued
+  tasks oldest first while that project has slots left
+  (`harness-tasks--free-slots PROJECT`), so a project at its limit holds
+  up only its own tasks.  Missing options come from
   `harness-tasks-model`, `-permission-mode` (auto), `-thinking` and
   `-non-interactive` (off), else from what the directory configures, so
   a task is interactive unless `harness-tasks-non-interactive` or the
