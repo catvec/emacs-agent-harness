@@ -136,7 +136,7 @@ sandbox module is not loaded, rather than run it unconfined."
                    (plist-get (harness-tools-shell-test--call "bash" :command "echo ok") :content)))))
 
 (ert-deftest harness-tools-shell-bash-runs-inside-bwrap ()
-  "With bwrap available the command sees the sandbox HOME, not the real one."
+  "With bwrap available the command sees $HOME at its path, but emptied."
   (harness-tools-shell-test--setup)
   (skip-unless (executable-find "bwrap"))
   (harness-test-load-module 'project)
@@ -145,17 +145,19 @@ sandbox module is not loaded, rather than run it unconfined."
   (harness-sandbox-detect)
   (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
   (harness-tools-shell-test-in-dir
-    (let* ((harness-sandbox-policy 'required)
-           ;; A distinct sandbox home, so listing the process home stays
-           ;; hidden even when the process is started with HOME under /tmp.
-           (harness-sandbox--home (expand-file-name "sandbox-home" (harness-test-temp-dir)))
-           (r (harness-tools-shell-test--call "bash" :command (format "echo HOME=$HOME; ls %s >/dev/null 2>&1 && echo visible || echo hidden" (getenv "HOME")))))
-      (when (and (plist-get r :is-error) (string-search "bwrap:" (plist-get r :content)))
-        (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
-      (should-not (plist-get r :is-error))
-      (should (string-search (concat "HOME=" harness-sandbox--home) (plist-get r :content)))
-      (should (string-search "hidden" (plist-get r :content)))
-      (should (plist-get (plist-get r :meta) :sandboxed)))))
+    (let* ((home (harness-test-temp-dir))
+           (process-environment (cons (concat "HOME=" (directory-file-name home)) process-environment))
+           (harness-sandbox-policy 'required))
+      (with-temp-file (expand-file-name "private.txt" home) (insert "private\n"))
+      (unwind-protect
+          (let ((r (harness-tools-shell-test--call
+                    "bash" :command "echo HOME=$HOME; cat ~/private.txt >/dev/null 2>&1 && echo visible || echo hidden")))
+            (when (and (plist-get r :is-error) (string-search "bwrap:" (plist-get r :content)))
+              (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
+            (should-not (plist-get r :is-error))
+            (should (equal (format "HOME=%s\nhidden\nexit 0" (directory-file-name home)) (plist-get r :content)))
+            (should (plist-get (plist-get r :meta) :sandboxed)))
+        (delete-directory home t)))))
 
 (ert-deftest harness-tools-shell-bash-lets-the-sandbox-write-the-tmp-dir ()
   "bash asks the sandbox to let the command write the session's own
@@ -238,6 +240,94 @@ only reads may read, and no others; none without the skills module."
           (should (equal (list root) asked)))
         (harness-tools-shell-test--call "bash" :command "true")
         (should-not (plist-get (cdar seen) :readable))))))
+
+(ert-deftest harness-tools-shell-bash-shows-the-session-dirs-to-the-sandbox ()
+  "bash asks the sandbox to show every directory the session may touch:
+read-write those the permission layer lets every tool reach, the
+directories granted to it among them, and read-only the tool output
+directory.  A remote one is left out; without a session nothing is
+asked."
+  (harness-tools-shell-test--setup)
+  (let ((seen nil) (asked nil))
+    (harness-tools-shell-test-with-methods
+        (list (cons 'sandbox/wrap (lambda (cwd command &rest opts) (push (cons cwd opts) seen) command))
+              (cons 'session/tmp-dir (lambda (sid) (and (equal sid "s1") "/tmp/harness-0/s1/")))
+              (cons 'permission/dirs
+                    (lambda (sid)
+                      (push sid asked)
+                      (list (list :dir "/work/proj/" :source 'cwd)
+                            (list :dir "/tmp/harness-0/s1/" :source 'tmp)
+                            (list :dir "/home/u/.emacs.d/" :source 'session)
+                            (list :dir "/home/u/notes/*.org" :source 'session)
+                            (list :dir "/ssh:box:/srv/" :source 'session)
+                            (list :dir "/home/u/shared/" :source 'config)
+                            (list :dir "/home/u/later/" :source 'turn)
+                            (list :dir "/state/outputs/" :source 'outputs)))))
+      (harness-tools-shell-test-in-dir
+        (should (equal "exit 0" (plist-get (harness-await (harness-call 'tools/execute "s1"
+                                                                        (list :id "c1" :name "bash" :input '(:command "true")))
+                                                          20)
+                                           :content)))
+        (should (equal '("s1") asked))
+        (should (equal '("/tmp/harness-0/s1/" "/work/proj/" "/home/u/.emacs.d/" "/home/u/notes/*.org"
+                         "/home/u/shared/" "/home/u/later/")
+                       (plist-get (cdar seen) :writable)))
+        (should (equal '("/state/outputs/") (plist-get (cdar seen) :readable)))
+        (harness-tools-shell-test--call "bash" :command "true")
+        (should (equal '("s1") asked))
+        (should-not (plist-get (cdar seen) :writable))
+        (should-not (plist-get (cdar seen) :readable))))))
+
+(ert-deftest harness-tools-shell-bwrap-shows-what-the-user-granted ()
+  "Under the real bwrap a command sees what the user granted the session:
+at its own path and from ~, wherever the command runs, and writes
+there, while the rest of the home directory stays hidden.  It used to
+see none of it: list_dir read a granted directory, and `ls' of the
+same directory in bash said it did not exist."
+  (harness-tools-shell-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (dolist (m '(store project config provider session sandbox perms)) (harness-test-load-module m))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (harness-tools-shell-test-in-dir
+    (let* ((home (harness-test-temp-dir))
+           (process-environment (cons (concat "HOME=" (directory-file-name home)) process-environment))
+           (granted (file-name-as-directory (expand-file-name ".emacs.d/modules" home)))
+           (harness-sandbox-policy 'required)
+           (sid (plist-get (harness-call 'session/create :cwd root) :id))
+           (run (lambda (command)
+                  (harness-await (harness-call 'tools/execute sid (list :id (harness-short-id) :name "bash"
+                                                                        :input (list :command command)))
+                                 20))))
+      (with-temp-file (expand-file-name "note.txt" (progn (make-directory granted t) granted)) (insert "granted-note\n"))
+      (with-temp-file (expand-file-name ".emacs.d/init.el" home) (insert ";; init\n"))
+      (with-temp-file (expand-file-name "secret.txt" home) (insert "s3cret\n"))
+      (unwind-protect
+          (let ((before (funcall run (format "ls %s 2>/dev/null || echo not-shown" granted))))
+            (when (and (plist-get before :is-error) (string-search "bwrap:" (plist-get before :content)))
+              (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get before :content))))
+            ;; Not granted yet: not there.
+            (should (equal "not-shown\nexit 0" (plist-get before :content)))
+            (harness-call 'permission/allow-dir sid granted)
+            (let ((r (funcall run (mapconcat
+                                   #'identity
+                                   (list (format "cat %snote.txt" granted)
+                                         "cat ~/.emacs.d/modules/note.txt"
+                                         "ls ~/.emacs.d"
+                                         "cat ~/secret.txt 2>/dev/null || echo secret-hidden"
+                                         "cat ~/.emacs.d/init.el 2>/dev/null || echo sibling-hidden"
+                                         "echo made > ~/.emacs.d/modules/made.txt && echo granted-writable")
+                                   "; "))))
+              (should (plist-get (plist-get r :meta) :sandboxed))
+              (should (equal "granted-note\ngranted-note\nmodules\nsecret-hidden\nsibling-hidden\ngranted-writable\nexit 0"
+                             (plist-get r :content)))
+              (should (file-exists-p (expand-file-name "made.txt" granted))))
+            ;; Revoked: gone again.
+            (harness-call 'permission/revoke-dir sid granted)
+            (should (equal "not-shown\nexit 0"
+                           (plist-get (funcall run (format "ls %s 2>/dev/null || echo not-shown" granted)) :content))))
+        (harness-call 'session/delete sid)
+        (delete-directory home t)))))
 
 (ert-deftest harness-tools-shell-bash-reads-skills-in-bwrap ()
   "Under the real bwrap a command reads a skill by the path skill_load

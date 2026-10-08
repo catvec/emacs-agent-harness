@@ -621,6 +621,99 @@ the header follows, and the transcript notes each change."
         (should (equal "thinking" (harness-chat-block-kind (gethash "n-think" harness-chat--blocks))))
         (should (equal '("n-think" "n-live") harness-chat--order))))))
 
+;;;; Bursts of messages
+
+(defun harness-ui-chat-test-connect ()
+  "Connect the UI and wait for the model catalogue.
+The first one over a connection redraws every chat buffer; a test that
+streams into a buffer of its own must not see it rebuilt halfway."
+  (harness-ui-connection)
+  (harness-test-wait (lambda () (eq harness-ui-connection (car harness-ui--models-seen))) 5 "the model catalogue"))
+
+(defun harness-ui-chat-test-push (sid update)
+  "Send UPDATE of session SID to the UI, as the harness does, through its client."
+  (harness-acp--client-send (cl-find harness-ui-connection harness-acp--clients
+                                     :key #'harness-acp-client-connection)
+                            (list :jsonrpc "2.0" :method "session/update"
+                                  :params (list :sessionId sid :update update))))
+
+(defun harness-ui-chat-test-chunk (id text)
+  "Return the update streaming TEXT into node ID."
+  (list :sessionUpdate "agent_message_chunk" :content (list :type "text" :text text)
+        :_harness (list :nodeId id)))
+
+(ert-deftest harness-ui-chat-burst-scrolls-once-a-slice ()
+  "A burst of streamed text scrolls the window following it a few times only.
+Messages that piled up while Emacs was busy were handled in one go, and
+each chunk scrolled the window it streamed into again: with four
+sessions streaming, Emacs froze for seconds at a time (2026-10-07).
+They are handled a slice at a time now (`harness-acp-receive-slice'),
+and a window is scrolled once a slice, to the end of the text still."
+  (harness-ui-chat-test-with
+    (harness-ui-chat-test-connect)
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (w (selected-window))
+           (n 300)
+           (pins 0)
+           (pin (symbol-function 'harness-chat--pin)))
+      (set-window-buffer w buf)
+      (with-current-buffer buf
+        (set-window-point w harness-compose-end)
+        (harness-chat--apply-update (list :sessionUpdate "_harness/node"
+                                          :node (list :id "n-burst" :kind "assistant" :content ""))))
+      (cl-letf (((symbol-function 'harness-chat--pin)
+                 (lambda (window) (cl-incf pins) (funcall pin window))))
+        (dotimes (i n)
+          (harness-ui-chat-test-push sid (harness-ui-chat-test-chunk "n-burst" (format "line %d\n" i))))
+        (harness-test-wait (lambda () (with-current-buffer buf
+                                        (string-suffix-p (format "line %d\n" (1- n))
+                                                         (harness-chat-block-content
+                                                          (gethash "n-burst" harness-chat--blocks)))))
+                           10 "the burst to be handled"))
+      (with-current-buffer buf
+        ;; Every chunk, in order.
+        (should (equal (mapconcat (lambda (i) (format "line %d\n" i)) (number-sequence 0 (1- n)) "")
+                       (harness-chat-block-content (gethash "n-burst" harness-chat--blocks))))
+        ;; The window scrolled a few times, not once a chunk ...
+        (should (< 0 pins 20))
+        ;; ... and shows the end of the buffer.
+        (should (> (window-start w) (harness-chat-block-start (gethash "n-burst" harness-chat--blocks))))
+        (should (<= (count-lines (window-start w) (point-max)) (window-body-height w)))))))
+
+(ert-deftest harness-ui-chat-hidden-chat-renders-once-shown ()
+  "A chat no window shows keeps streamed text as it came, and renders it once shown.
+Rendering the Markdown of a message streaming in, again and again,
+cost the UI as much for chats nobody looked at as for the one it showed."
+  (harness-ui-chat-test-with
+    (harness-ui-chat-test-connect)
+    (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session)))
+           (w (selected-window)))
+      (with-current-buffer buf
+        (should-not (harness-chat--windows))
+        (should-not harness-chat--redraw-pending)
+        (harness-chat--apply-update (list :sessionUpdate "_harness/node"
+                                          :node (list :id "n-hidden" :kind "assistant" :content "")))
+        (harness-chat--apply-update (harness-ui-chat-test-chunk "n-hidden" "Hello **world**")))
+      ;; The re-render came due with no window: the text is as it came.
+      (harness-test-wait (lambda () (buffer-local-value 'harness-chat--stale buf)) 5 "the re-render to be due")
+      (with-current-buffer buf
+        (should (equal '("n-hidden") harness-chat--stale))
+        (should (= 0 (hash-table-count harness-chat--render-timers)))
+        (should (harness-ui-chat-test-find buf "Hello **world**"))
+        ;; Shown, it is rendered.
+        (set-window-buffer w buf)
+        (harness-chat--on-window-buffer-change w)
+        (should-not harness-chat--stale)
+        (should-not (harness-ui-chat-test-find buf "**"))
+        (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "world")) 'bold))
+        ;; Streaming on while shown re-renders as before.
+        (harness-chat--apply-update (harness-ui-chat-test-chunk "n-hidden" " and *more*"))
+        (harness-test-wait (lambda () (with-current-buffer buf (not (harness-ui-chat-test-find buf "*more*"))))
+                           5 "the re-render")
+        (should-not harness-chat--stale)
+        (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "more")) 'italic))))))
+
 ;;;; The activity line
 
 (defun harness-ui-chat-test-activity-line (buf)
@@ -2658,7 +2751,11 @@ split the run of reads around it, so part of the run stayed unfolded."
       (with-current-buffer buf
         (harness-compose-add-attachment (expand-file-name "harness-ui-chat-test.el" (expand-file-name "test" harness-test-root)))
         (should (harness-ui-chat-test-find buf "chat-test.el")))
-      (run-hooks 'harness-ui-redraw-hook)
+      ;; Shown in a window, as a hidden chat is rebuilt once one shows it.
+      (set-window-buffer (selected-window) buf)
+      (let ((generation (buffer-local-value 'harness-chat--generation buf)))
+        (run-hooks 'harness-ui-redraw-hook)
+        (should (> (buffer-local-value 'harness-chat--generation buf) generation)))
       (harness-test-wait (lambda () (with-current-buffer buf (and (not harness-chat--loading) harness-chat--order))) 5 "redrawn")
       (with-current-buffer buf
         (should (equal "a draft in progress" (harness-compose-text)))
@@ -2671,6 +2768,39 @@ split the run of reads around it, so part of the run stayed unfolded."
           (should (string-prefix-p "file://" (plist-get blocks :uri))))
         (harness-compose-remove-attachment (plist-get (car harness-compose-attachments) :path))
         (should (null harness-compose-attachments))))))
+
+(ert-deftest harness-ui-chat-redraw-waits-for-a-window ()
+  "A redraw rebuilds the chats windows show, and each other one once shown.
+Every chat buffer fetched and rendered its whole transcript again at
+once, even when nothing showed it, whenever the model catalogue came."
+  (harness-ui-chat-test-with
+    (harness-ui-chat-test-connect)
+    (let* ((shown (harness-ui-chat-test-open (harness-ui-chat-test-session "Shown")))
+           (hidden (harness-ui-chat-test-open (harness-ui-chat-test-session "Hidden")))
+           (w (selected-window))
+           (loads nil)
+           (load (symbol-function 'harness-chat--load)))
+      (harness-ui-chat-test-prompt hidden "hello there")
+      (set-window-buffer w shown)
+      (cl-letf (((symbol-function 'harness-chat--load)
+                 (lambda (&rest args) (push (current-buffer) loads) (apply load args))))
+        (run-hooks 'harness-ui-redraw-hook)
+        (should (equal loads (list shown)))
+        (should (buffer-local-value 'harness-chat--redraw-pending hidden))
+        (should-not (buffer-local-value 'harness-chat--redraw-pending shown))
+        ;; Shown, the other is rebuilt, from a timer (Emacs is redisplaying).
+        (set-window-buffer w hidden)
+        (with-current-buffer hidden
+          (harness-chat--on-window-buffer-change w)
+          (should-not harness-chat--redraw-pending))
+        (should (equal loads (list shown)))
+        (harness-test-wait (lambda () (memq hidden loads)) 5 "the hidden chat to be rebuilt")
+        (harness-test-wait (lambda () (not (buffer-local-value 'harness-chat--loading hidden))) 5 "its load")
+        ;; Once only.
+        (with-current-buffer hidden (harness-chat--on-window-buffer-change w))
+        (accept-process-output nil 0.05)
+        (should (equal loads (list hidden shown)))
+        (should (harness-ui-chat-test-find hidden "hello there"))))))
 
 (ert-deftest harness-ui-chat-dropped-link-is-sent-as-an-image ()
   ;; A link dropped on a chat downloads behind a chip in the tail; the

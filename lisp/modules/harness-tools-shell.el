@@ -14,10 +14,16 @@
 ;;   (`session/tmp-dir') is writable in there too, at its real path:
 ;;   the sandbox's /tmp is private and empty for every command, so
 ;;   that directory is where commands leave files for later ones and
-;;   for the other tools.  The skills directories (`skills/directories')
-;;   are shown read-only, at their own paths and under the sandbox's
-;;   $HOME as under the real one, so `cat ~/.claude/skills/x/SKILL.md'
-;;   works in there as it does outside.  Remote (TRAMP) directories run
+;;   for the other tools.  So is every other directory the session may
+;;   touch (`permission/dirs'): its working directory and worktree, the
+;;   configured directories and those granted to it, so a directory the
+;;   user granted reaches bash as it reaches the other tools; the tool
+;;   output directory is shown read-only.  The skills directories
+;;   (`skills/directories') are shown read-only too.  Each is shown at
+;;   its own path, and ~ keeps the real home directory's path with only
+;;   those inside it, so `cat ~/.claude/skills/x/SKILL.md' or `ls
+;;   ~/granted' works in there as it does outside while the rest of the
+;;   home directory stays hidden.  Remote (TRAMP) directories run
 ;;   the command on that host, unwrapped, as the ssh tool does
 ;;   (tools-ssh): through `harness-tools-shell-remote-command', with
 ;;   bash, or sh on a host that has none, and standard input from
@@ -113,6 +119,33 @@ another host."
                             (harness-error-message err))
                nil)))))
 
+(defun harness-tools-shell--session-dirs (ctx)
+  "Return the directories CTX's session may touch as (WRITABLE . READABLE).
+They are those the permission layer lets every tool reach
+\(`permission/dirs'): its working directory and worktree, its own
+temporary directory, the configured ones and those granted to it are
+WRITABLE, the tool output directory, which only the harness writes,
+READABLE.  Both are nil without the permissions module or for a
+remote session, whose commands run on another host.  A glob pattern
+among the grants names no directory, and the sandbox leaves it out."
+  (let ((sid (plist-get ctx :session-id))
+        (cwd (plist-get ctx :cwd)))
+    (when (and sid (harness-method-exists-p 'permission/dirs)
+               (not (plist-get ctx :host))
+               (not (and (stringp cwd) (file-remote-p cwd))))
+      (condition-case err
+          (let (writable readable)
+            (dolist (e (harness-call 'permission/dirs sid))
+              (let ((dir (plist-get e :dir)))
+                (when (and (stringp dir) (not (file-remote-p dir)))
+                  (if (eq (plist-get e :source) 'outputs)
+                      (push dir readable)
+                    (push dir writable)))))
+            (cons (nreverse writable) (nreverse readable)))
+        (error (harness-log 'debug "bash: could not list the directories of %s: %s"
+                            sid (harness-error-message err))
+               nil)))))
+
 (defun harness-tools-shell--sandbox-required-p (cwd)
   "Non-nil when `harness-sandbox-policy' is `required' for a command in CWD.
 The config module's value for CWD decides, and the option's when there
@@ -174,9 +207,11 @@ run unconfined, as the sandbox does when it has no backend."
                         ;; environment, and a login profile's side effects (starting
                         ;; an ssh-agent, importing keys) go wrong in a sandbox, whose
                         ;; PID namespace hides the user's processes from it.
-                        (harness-tools-shell--wrap cwd (list harness-tools-shell--program "-c" command)
-                                                   (delq nil (list (harness-tools-shell--tmp-dir ctx)))
-                                                   (harness-tools-shell--skill-dirs ctx)))
+                        (let ((dirs (harness-tools-shell--session-dirs ctx)))
+                          (harness-tools-shell--wrap
+                           cwd (list harness-tools-shell--program "-c" command)
+                           (delete-dups (delq nil (cons (harness-tools-shell--tmp-dir ctx) (car dirs))))
+                           (append (harness-tools-shell--skill-dirs ctx) (cdr dirs)))))
                     (error (list :error (harness-error-message err))))))
         (if (and (consp cmd) (eq (car cmd) :error))
             (harness-tool-error (format "Cannot run command: %s" (plist-get cmd :error)))
@@ -196,7 +231,7 @@ run unconfined, as the sandbox does when it has no backend."
 
 (harness-define-tool "bash"
   :label "Bash"
-  :description "Run a shell command with bash in the working directory (or a subdirectory). Output is stdout, then stderr if any, then the exit status. Long jobs are killed at timeout seconds (default 120). Prefer read_file, grep, glob and edit_file over cat, grep, find and sed."
+  :description "Run a shell command with bash in the working directory (or a subdirectory). Output is stdout, then stderr if any, then the exit status. Long jobs are killed at timeout seconds (default 120). Prefer read_file, grep, glob and edit_file over cat, grep, find and sed. Commands may run in a sandbox that shows the system directories and only the directories the session may use (the working directory, its temporary directory, the directories granted to it), each at its real path; anything else, the rest of the home directory included, looks missing there, so reach it with the file tools, which ask the user."
   :schema '(:type "object"
             :properties (:command (:type "string" :description "The command line to run")
                          :timeout (:type "integer" :description "Seconds before the command is killed. Default 120")

@@ -507,8 +507,12 @@ Every window showing the buffer keeps its own row too."
   (format "*harness tree: %s*" (harness-ui-tree--session-name sid)))
 
 (defun harness-ui-tree--buffers ()
-  "Return every live tree buffer."
-  (cl-remove-if-not (lambda (b) (with-current-buffer b (derived-mode-p 'harness-ui-tree-mode))) (buffer-list)))
+  "Return every live tree buffer.
+Asked on every node a session adds: the buffers' modes are read without
+making each buffer current in turn."
+  (cl-remove-if-not (lambda (b) (provided-mode-derived-p (buffer-local-value 'major-mode b)
+                                                         'harness-ui-tree-mode))
+                    (buffer-list)))
 
 (defun harness-ui-tree--load (buffer)
   "Request the tree for BUFFER's session and render it when it arrives."
