@@ -666,11 +666,34 @@ a button whose label changes, a setting's value say, needs one."
               'harness-task-button (or id label)))
 
 (defun harness-ui-tasks--pending (task)
-  "Return the request TASK's session waits on, or nil.
-The pending module knows it as soon as it arrives; the session cache
-may lag, so it is asked first."
-  (or (car (harness-ui-pending-items (plist-get task :session)))
-      (car (plist-get (harness-ui-tasks--session task) :pending))))
+  "Return the request TASK's session waits on first, as a record, or nil.
+See `harness-ui-pending-first'."
+  (when-let* ((sid (plist-get task :session)))
+    (harness-ui-pending-first sid)))
+
+(defun harness-ui-tasks--action-buttons (task)
+  "Buttons for TASK's two most useful actions besides opening it.
+A task whose session waits on a request gets the buttons every view
+offers for it, the session list too (`harness-ui-pending-view-actions'):
+[Allow] and [Deny], or [Answer…], here followed by the board's own
+\[Reply], an answer typed in the compose box."
+  (let* ((id (plist-get task :id))
+         (sid (plist-get task :session))
+         (button (lambda (a)
+                   (harness-ui-tasks--button
+                    (format "[%s]" (car a))
+                    (lambda () (harness-ui-tasks--with-task id (call-interactively (nth 1 a))))
+                    (car a) (nth 1 a))))
+         (request (and sid (eq (harness-ui-tasks--column task) 'needs-input)
+                       (harness-ui-pending-view-actions
+                        sid (harness-ui-tasks--on-error "Answering the permission request")))))
+    (string-join
+     (if request
+         (append (mapcar (lambda (a) (harness-ui-tasks--button (nth 0 a) (nth 1 a) (nth 2 a))) request)
+                 (and (equal (plist-get (harness-ui-pending-first sid) :kind) "question")
+                      (list (funcall button '("Reply" harness-ui-tasks-reply)))))
+       (mapcar button (take 2 (cl-remove 'harness-ui-tasks-open (harness-ui-tasks--actions task) :key #'cadr))))
+     " ")))
 
 (defun harness-ui-tasks--card-buttons (task)
   "Buttons for TASK's two most useful actions besides opening it.
@@ -682,13 +705,7 @@ last message (`harness-tasks--missing-report')."
   (let ((id (plist-get task :id))
         (missing (harness-json-true-p (plist-get (plist-get task :report) :missing))))
     (concat
-     (mapconcat (lambda (a)
-                  (harness-ui-tasks--button
-                   (format "[%s]" (car a))
-                   (lambda () (harness-ui-tasks--with-task id (call-interactively (nth 1 a))))
-                   (car a) (nth 1 a)))
-                (take 2 (cl-remove 'harness-ui-tasks-open (harness-ui-tasks--actions task) :key #'cadr))
-                " ")
+     (harness-ui-tasks--action-buttons task)
      (when (and (plist-get task :report) (fboundp 'harness-ui-report-popout))
        ;; [Review] rather than [Report], which reads as reporting the
        ;; agent for something bad: the button opens the work it handed
@@ -1342,8 +1359,7 @@ edited."
                             (let ((task (harness-ui-tasks--find id))) (if task (harness-ui-tasks--title task) id))))
     (`(answer . ,id) (format "Answer the session's question “%s”"
                              (harness-first-line
-                              (or (plist-get (plist-get (harness-ui-tasks--pending (harness-ui-tasks--find id)) :payload)
-                                             :question)
+                              (or (plist-get (harness-ui-tasks--pending (harness-ui-tasks--find id)) :question)
                                   "the question")
                               60)))
     (`(refine . ,id) (concat "Refine "
@@ -2192,12 +2208,15 @@ the left of the frame and the sessions open beside it (see
         (and id (harness-ui-tasks--find id)))
       (unless noerror (user-error "No task here"))))
 
+(defun harness-ui-tasks--on-error (what)
+  "Return a handler of a failed request that shows on this board WHAT failed."
+  (let ((buffer (current-buffer)))
+    (lambda (e) (harness-ui-tasks--fail buffer what e))))
+
 (defun harness-ui-tasks--request-then (method params what &optional callback)
   "Call METHOD with PARAMS; failures show in the buffer as WHAT failing."
-  (let ((buffer (current-buffer)))
-    (setq harness-ui-tasks--error nil)
-    (harness-ui-call method params (or callback #'ignore)
-                     (lambda (e) (harness-ui-tasks--fail buffer what e)))))
+  (setq harness-ui-tasks--error nil)
+  (harness-ui-call method params (or callback #'ignore) (harness-ui-tasks--on-error what)))
 
 (defun harness-ui-tasks-open (&optional position)
   "Open the session of the task at point in POSITION.
@@ -2491,25 +2510,23 @@ shows its report instead, through the shared
       (user-error "This task is not waiting on anything"))))
 
 (defun harness-ui-tasks--answer (task answer)
-  "Answer the question TASK's session is waiting on with ANSWER."
-  (let ((pending (harness-ui-tasks--pending task)))
-    (unless (equal (plist-get pending :kind) "question") (user-error "No question is waiting"))
-    (harness-ui-tasks--request-then "_harness/question/answer"
-                                    (list :session-id (plist-get task :session) :pid (plist-get pending :id)
-                                          :answer answer)
-                                    "Answering")
-    (message "Answered: %s" answer)))
+  "Answer the question TASK's session is waiting on with ANSWER.
+As every view answers it (`harness-ui-pending-answer-first-question'),
+but a failure shows on the board."
+  (unless (plist-get task :session) (user-error "No question is waiting"))
+  (setq harness-ui-tasks--error nil)
+  (harness-ui-pending-answer-first-question (plist-get task :session) answer
+                                            (harness-ui-tasks--on-error "Answering")))
 
 (defun harness-ui-tasks--permission (option)
-  "Answer the permission request of the task at point with OPTION."
-  (let* ((task (harness-ui-tasks--task))
-         (pending (harness-ui-tasks--pending task)))
-    (unless (equal (plist-get pending :kind) "permission") (user-error "No permission request is waiting"))
-    (harness-ui-tasks--request-then "_harness/permission/answer"
-                                    (list :session-id (plist-get task :session) :pending-id (plist-get pending :id)
-                                          :answer option)
-                                    "Answering the permission request")
-    (message (if (equal option "allow-once") "Allowed" "Denied"))))
+  "Answer the permission request of the task at point with OPTION.
+As every view answers it (`harness-ui-pending-answer-first-permission'),
+but a failure shows on the board."
+  (let ((task (harness-ui-tasks--task)))
+    (unless (plist-get task :session) (user-error "No permission request is waiting"))
+    (setq harness-ui-tasks--error nil)
+    (harness-ui-pending-answer-first-permission (plist-get task :session) option
+                                                (harness-ui-tasks--on-error "Answering the permission request"))))
 
 (defun harness-ui-tasks-allow ()
   "Allow the tool call the task at point is waiting on."

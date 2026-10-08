@@ -6,8 +6,12 @@
 ;; showing how many sessions need the user, are working, or are idle.
 ;; It is visible from any buffer as long as one session is active
 ;; anywhere in this Emacs, so a user hopping between projects sees
-;; when they are needed.  Clicking it opens the session list, or jumps
-;; straight to a blocked session when there is exactly one.
+;; when they are needed.  Clicking it while sessions wait for you opens
+;; the session list on them, from every project (`harness-sessions-waiting'):
+;; each with buttons answering what it waits on, the task board's, and
+;; RET or a click on one switches to its project and opens it there,
+;; unless it shows there already.  With none waiting the click opens
+;; the session list.
 
 ;;; Code:
 
@@ -15,6 +19,8 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-ui)
+
+(declare-function harness-sessions-waiting "harness-ui-sessions")
 
 (defgroup harness-ui-notify nil
   "Mode line notifier for sessions." :group 'harness-ui)
@@ -49,12 +55,14 @@
         ("idle" (cl-incf idle))))
     (list blocked running idle)))
 
-(defun harness-ui-notify--jump-blocked ()
-  "Open the single blocked session, or the session list."
+(defun harness-ui-notify-show-waiting ()
+  "Show the sessions waiting for you, else the session list.
+Clicking the notifier runs this.  Those waiting show in the session
+list, from every project, each with buttons answering what it waits
+on, and RET opens one in its project (`harness-sessions-waiting')."
   (interactive)
-  (let ((blocked (harness-ui-sessions (lambda (s) (equal (plist-get s :status) "blocked")))))
-    (cond ((and (= 1 (length blocked)) harness-ui-open-session-function)
-           (harness-ui-display-session (plist-get (car blocked) :id)))
+  (let ((blocked (car (harness-ui-notify--counts))))
+    (cond ((and (> blocked 0) (fboundp 'harness-sessions-waiting)) (harness-sessions-waiting))
           ((fboundp 'harness-sessions) (call-interactively 'harness-sessions))
           (t (call-interactively #'harness-switch-session)))))
 
@@ -65,7 +73,7 @@
                           'harness-notify-flash-face face)
                 'help-echo help
                 'mouse-face 'mode-line-highlight
-                'local-map (harness-ui-mouse-keymap #'harness-ui-notify--jump-blocked))))
+                'local-map (harness-ui-mouse-keymap #'harness-ui-notify-show-waiting))))
 
 (defun harness-ui-notify-refresh ()
   "Recompute the notifier text and redraw mode lines."
@@ -78,11 +86,13 @@
               ""
             (concat
              (propertize " harness" 'face 'harness-dim-face
-                         'help-echo "Agent harness sessions: click for the list"
+                         'help-echo (if (> blocked 0)
+                                        "Agent harness sessions: click for those waiting for you"
+                                      "Agent harness sessions: click for the list")
                          'mouse-face 'mode-line-highlight
-                         'local-map (harness-ui-mouse-keymap #'harness-ui-notify--jump-blocked))
+                         'local-map (harness-ui-mouse-keymap #'harness-ui-notify-show-waiting))
              (harness-ui-notify--segment blocked 'harness-icon-blocked 'harness-notify-blocked-face
-                                         "Sessions waiting for you (mouse-1: open)")
+                                         "Sessions waiting for you (mouse-1: list them, to answer them)")
              (harness-ui-notify--segment running 'harness-icon-running 'harness-notify-running-face
                                          "Sessions working")
              (and harness-ui-notify-show-idle

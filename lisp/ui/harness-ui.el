@@ -1942,6 +1942,95 @@ window selected now even when another frame is selected by then."
   "Read a position name with completion."
   (intern (completing-read "Position: " (mapcar (lambda (p) (symbol-name (car p))) harness-ui-positions) nil t)))
 
+;;;; Visiting a session in its project
+;;
+;; A view listing the sessions of every project -- the session list the
+;; mode line's notifier opens on the sessions waiting for you -- opens a
+;; session where it belongs: it switches to the session's project first,
+;; as switching project would (Doom Emacs's workspaces), and then shows
+;; the session, unless it shows there already, in which case its window
+;; is selected.
+
+(defvar +workspaces-switch-project-function)
+(declare-function +workspaces-switch-to-project-h "ext:workspaces")
+(declare-function +workspace-current-name "ext:workspaces")
+(declare-function doom-project-name "ext:doom-projects")
+(declare-function doom-project-p "ext:doom-projects")
+
+(defcustom harness-ui-switch-project-function #'harness-ui-switch-project-workspace
+  "Function switching to a project before a session of it shows, or nil.
+It is called with the project's root directory when a session is
+visited (`harness-ui-visit-session'), from the session list say, and
+returns non-nil when it switched; when that project is current already
+it does nothing and returns nil.  The root is the main checkout of the
+session's project: a task's git worktree belongs to its repository's.
+The default switches workspaces where there are any; nil never
+switches."
+  :type '(choice (const :tag "Never switch" nil)
+                 (function-item harness-ui-switch-project-workspace)
+                 function)
+  :group 'harness-ui)
+
+(defun harness-ui-switch-project-workspace (root)
+  "Switch to the workspace of the project at ROOT, if there are workspaces.
+That is Doom Emacs's workspaces, on with `persp-mode': the project's
+workspace becomes current, made when it has none, as switching project
+makes it, but without asking for a file to open.  Return non-nil when
+the workspace changed.  Without workspaces this does nothing: a buffer
+belongs to no project.  Nor does a ROOT that is no project, a scratch
+directory say, which would only get a workspace of its own."
+  (when (and (bound-and-true-p persp-mode)
+             (fboundp '+workspaces-switch-to-project-h)
+             (fboundp '+workspace-current-name)
+             (fboundp 'doom-project-name)
+             (fboundp 'doom-project-p)
+             (doom-project-p root)
+             (not (equal (+workspace-current-name) (doom-project-name root))))
+    (let ((+workspaces-switch-project-function #'ignore))
+      (+workspaces-switch-to-project-h root))
+    t))
+
+(defun harness-ui-session-project (session)
+  "Return the main checkout of SESSION's project, or nil.
+A task's git worktree belongs to its repository's main checkout (see
+`harness-files-owning-checkout').  A remote project gives nil, and so
+does one missing from this machine, as a remote harness's may be."
+  (let ((root (or (plist-get session :project) (plist-get session :cwd))))
+    (when (and (stringp root) (not (string-empty-p root)) (not (file-remote-p root)))
+      (let ((main (harness-files-owning-checkout root)))
+        (and main (file-directory-p main) main)))))
+
+(defun harness-ui-switch-to-session-project (id)
+  "Switch to the project of session ID; return non-nil when it switched.
+See `harness-ui-switch-project-function'.  A switch that fails is
+logged, and leaves things as they are."
+  (when-let* ((fn harness-ui-switch-project-function)
+              (root (harness-ui-session-project (harness-ui-session id))))
+    (harness-ignore-errors-logged (format "switching to the project %s" root)
+      (funcall fn root))))
+
+(defun harness-ui-visit-session (id &optional position)
+  "Show session ID in its project, and return its buffer.
+First switch to its project (`harness-ui-switch-to-session-project'),
+then show the session: a window of the selected frame -- of the
+project's workspace, after a switch -- that shows it already is
+selected, and otherwise it opens in POSITION.  POSITION defaults to the
+current buffer's own, as `harness-ui-session-opener' has it, and after a
+switch, which leaves the current buffer's window behind, to where
+sessions open (`harness-ui-default-position')."
+  (unless harness-ui-open-session-function
+    (user-error "No chat module loaded"))
+  (let* ((here (or position
+                   (and (harness-ui--fullscreen-layout) 'fullscreen)
+                   harness-ui-position
+                   harness-ui-default-position))
+         (position (if (harness-ui-switch-to-session-project id) position here))
+         (buffer (funcall harness-ui-open-session-function id))
+         (window (get-buffer-window buffer)))
+    (if (window-live-p window)
+        (progn (select-window window) buffer)
+      (harness-ui-display-buffer buffer position))))
+
 ;;;; Fullscreen layout
 ;;
 ;; An overview -- the task board, the session list -- can take the whole

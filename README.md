@@ -256,6 +256,8 @@ the menu's Version entry says so.
 | `C-c h O` | `harness-open-session` | Open a session chosen by name |
 | `C-c h l` | `harness-sessions` | Show the session list |
 | `SPC` | `harness-ui-sessions-requests` | Pop out what the session at point waits on |
+| `b` | `harness-ui-sessions-toggle-blocked` | In the session list, show only the sessions waiting for you, or every session again |
+| `y` / `n` | `harness-ui-sessions-allow` / `harness-ui-sessions-deny` | On the lines of a listed session waiting on a tool call, allow or deny it |
 | `C-c h a` | `harness-tasks` | Show the task board |
 | `C-c h /` | `harness-tasks-search` | Find tasks, or act on them, by saying so in words |
 | `C-c h F` | `harness-fullscreen` | Start or end the fullscreen layout: the task board or session list on the left, a session beside it |
@@ -366,7 +368,18 @@ to fight the banner's key. Set
 Permission requests and questions from the agent appear inline above
 the compose box. An indicator in the mode line, visible from any buffer,
 shows how many sessions need your attention. Clicking it opens the
-session list, or the waiting session itself when only one needs you.
+session list on just the sessions waiting for you, from every project
+(`M-x harness-sessions-waiting`), under a banner that counts them. A
+line under each says what it waits on, with the task board's buttons
+to settle it there: `[Allow]` and `[Deny]` for a tool call, which `y`
+and `n` press too, and `[Answer…]` for a question, which pops it out.
+`RET` or a click on a session opens it in its project: with Doom
+Emacs's workspaces, the project's workspace becomes current first, as
+switching project does, and a session already showing there gets its
+window selected instead of opening again
+(`harness-ui-switch-project-function`, nil to never switch). `b`, or
+the banner's `[Show all]`, shows every session again. With nobody
+waiting, the click opens the session list as usual.
 
 A permission request shows the call's input on one line, cut short to
 fit. When that line leaves something out, such as the rest of a long
@@ -458,6 +471,9 @@ what the session at point waits on, in a small window with the same
 panel -- the permission prompt or the question in full, its options,
 diagrams and keys, and a box for a typed answer. It closes itself once
 the request is settled, and the session's own view stays where it was.
+Both views also answer in place, with the same buttons from the same
+code: a blocked session's row in the session list and a task's card on
+the board carry `[Allow]` and `[Deny]`, or `[Answer…]`.
 
 The header line shows the session's status, name, todo progress while
 it has one, model, permission mode, whether it is `non-interactive` or
