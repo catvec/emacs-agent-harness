@@ -604,6 +604,16 @@ your checkout itself can be submitted to the **main tree** instead (the
   first: a task it already has is refused rather than written up (drop
   it, or write it up anyway), and the write-up names the tasks working
   on the same code, to coordinate with instead of redoing their work.
+- `harness-tasks-max-running` limits how many of a project's tasks work
+  at once (nil, the default, means no limit; the compose box notes it as
+  `N at a time`). Every project has that many slots of its own; a task
+  submitted while they are all taken waits in *Pending* and starts,
+  oldest first, when one frees up, or at once with `s`. Only top-level
+  sessions are limited: a task takes a slot while its own session works
+  on it, running or waiting for your answer mid-turn. The sessions
+  working for it -- its sub-agents and forks, and the sessions resolving
+  its merge conflicts -- never take one, and neither does a task in
+  *Merging*, so the merge queue never holds up the next task.
 - Each card is one line, with a subtitle that recaps the task: what it is
   doing or has done so far, written by a short model call and refreshed
   at the first of so many turns, seconds or tool calls since the last

@@ -2415,7 +2415,16 @@ verdict.
   scheduler (`harness-tasks--schedule`) starts each project's queued
   tasks oldest first while that project has slots left
   (`harness-tasks--free-slots PROJECT`), so a project at its limit holds
-  up only its own tasks.  Missing options come from
+  up only its own tasks.  Only top-level sessions take slots
+  (`harness-tasks--holds-slot-p`): a task holds one while it starts,
+  and while it is `active` with its own session -- one without a
+  `:parent-id` -- running or blocked mid-turn.  The sessions working for
+  a task never take one of their own: its sub-agents and forks, and the
+  merge queue's conflict resolvers (`subagent` children of its session).
+  Nor does the merge queue, which the limit never holds up: a task in it
+  (`merging`) holds no slot, even while its own session commits or
+  resolves the conflicts, so a waiting task starts meanwhile; nor does
+  writing a backlog task up (`refining`).  Missing options come from
   `harness-tasks-model`, `-permission-mode` (auto), `-thinking` and
   `-non-interactive` (off), else from what the directory configures, so
   a task is interactive unless `harness-tasks-non-interactive` or the

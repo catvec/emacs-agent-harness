@@ -86,7 +86,9 @@
 ;;   pending   submitted, waiting for a free slot of its project (only
 ;;             when `harness-tasks-max-running' limits how many of a
 ;;             project's tasks run at once: each project has slots of
-;;             its own), or a backlog task waiting for someone to start it
+;;             its own, and only the tasks' own top-level sessions take
+;;             them, never their sub-agents or the merge queue's work),
+;;             or a backlog task waiting for someone to start it
 ;;   refining  an agent is writing a backlog task up, or stopped part
 ;;             way (`:outcome' says why: error, cancelled, duplicate…)
 ;;   active    its session is working on it, or stopped part way
@@ -159,8 +161,16 @@ The limit is per project: every project has this many slots of its
 own, and its pending tasks wait only for its own working ones, never
 for another project's.  With 2, two projects may run four tasks
 between them.  A task's project is the main checkout it was submitted
-for, also when it works in a worktree.  nil (the default) means no
-limit."
+for, also when it works in a worktree.
+
+Only top-level sessions are limited: a task takes a slot while its own
+session works on it, running or waiting on the user mid-turn.  The
+sessions working for it never take one -- its sub-agents and forks,
+and the merge queue's conflict resolvers -- and neither does the merge
+queue's work: a task whose branch is queued, merging or having its
+conflicts resolved holds no slot, even while its own session commits
+or resolves them.  `task/start' starts a task whatever the limit.
+nil (the default) means no limit."
   :type '(choice (const :tag "No limit" nil) integer) :group 'harness)
 
 (defcustom harness-tasks-require-verification t
@@ -1204,12 +1214,47 @@ listed under it (`session/btw'), so only the board's have no parent."
 ;; `harness-tasks-max-running' limits each project on its own: every
 ;; project has that many slots, and its queued tasks wait only for its
 ;; own working tasks, so a busy board never holds up another project's.
+;;
+;; Only top-level sessions take slots (`harness-tasks--holds-slot-p'): a
+;; task holds one while its own session, which no other session started,
+;; works on the task.  The sessions working for a task never take one of
+;; their own: its sub-agents and forks are part of its work, the merge
+;; queue's conflict resolvers part of the merge.  Nor does the merge
+;; queue, which the limit does not hold up (`task/verify' queues a
+;; branch at once): a task in it (merging) holds no slot, even while
+;; its own session commits or resolves the conflicts.
 
 (defun harness-tasks--working-p (task)
-  "Non-nil when TASK holds a slot: starting, running or blocked mid-turn."
+  "Non-nil when TASK is at work: starting, running or blocked mid-turn.
+That includes its session's turns for the merge queue (state merging),
+which `harness-tasks--holds-slot-p' leaves out: they take no slot."
   (or (gethash (plist-get task :id) harness-tasks--starting)
       (and (memq (plist-get task :state) '(active merging))
            (memq (plist-get (harness-tasks--session task) :status) '(running blocked)))))
+
+(defun harness-tasks--top-level-p (session)
+  "Non-nil when SESSION (a plist) is top-level: no other session started it.
+Sub-agents and forks, BTWs over a session and the merge queue's
+conflict resolvers name the session they work for in `:parent-id',
+and the session list shows them under it."
+  (and session (null (plist-get session :parent-id))))
+
+(defun harness-tasks--holds-slot-p (task)
+  "Non-nil when TASK takes one of its project's slots.
+It does while it starts, and while it is active with its own session
+running or blocked mid-turn: one waiting on the user keeps its slot, as
+its turn goes on once answered.  Only that session counts, and only
+when it is top-level (`harness-tasks--top-level-p'): the sub-agents,
+forks and conflict resolvers working for a task take no slot of their
+own, and neither does a sub-agent made a task (`task/adopt'), which
+works for the session that started it.  A task in the merge queue
+\(merging) holds none, even while its own session commits or resolves
+the conflicts, and nor does writing a backlog task up (refining)."
+  (or (gethash (plist-get task :id) harness-tasks--starting)
+      (and (eq (plist-get task :state) 'active)
+           (let ((session (harness-tasks--session task)))
+             (and (harness-tasks--top-level-p session)
+                  (memq (plist-get session :status) '(running blocked)))))))
 
 (defun harness-tasks--slot-project (task)
   "Return the project whose slots TASK takes: its `:project', else its `:cwd'.
@@ -1221,13 +1266,15 @@ a worktree takes a slot of the project it merges into."
 (defun harness-tasks--free-slots (project)
   "Return how many more tasks of PROJECT may start now.
 Each project has `harness-tasks-max-running' slots of its own, so only
-PROJECT's working tasks count; `most-positive-fixnum' without a limit."
+PROJECT's tasks count, each one that holds a slot
+\(`harness-tasks--holds-slot-p'): its top-level session at work, never a
+sub-agent or the merge queue.  `most-positive-fixnum' without a limit."
   (if (null harness-tasks-max-running)
       most-positive-fixnum
     (- harness-tasks-max-running
        (cl-loop for task being the hash-values of harness-tasks--table
                 count (and (equal (harness-tasks--slot-project task) project)
-                           (harness-tasks--working-p task))))))
+                           (harness-tasks--holds-slot-p task))))))
 
 (defun harness-tasks--queued-p (task)
   "Non-nil when TASK waits for a slot: pending, not in the backlog, not archived."
@@ -2254,6 +2301,8 @@ A task in review merges when the user verifies it (`task/verify')."
       (error "Task %s waits for your review; verifying it merges it" id))
     (harness-tasks--set id :merge-attempts 0)
     (harness-tasks--enqueue-merge id)
+    ;; A task in the merge queue holds no slot, even with its session at work.
+    (harness-run-soon #'harness-tasks--schedule)
     (harness-call 'task/get id)))
 
 (defun harness-tasks--stopped-how (task)
