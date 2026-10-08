@@ -1109,15 +1109,21 @@ them; the next turn is sent on again."
       (should (= 4 steps)))))
 
 (ert-deftest harness-agent-stop-without-a-handler-changes-nothing ()
-  "With no handler a model that stops ends its turn, in one step, as it always did."
+  "With no handler a model that stops ends its turn, in one step, as it always did.
+The filter is not even run."
   (harness-agent-test-with
     (let* ((id (harness-agent-test-session))
            (harness-provider-demo-script-override (harness-agent-test-stopping-script))
            (steps 0)
-           (watch (harness-on 'agent/step-started (lambda (_ n) (setq steps n))))
-           (p (harness-call 'agent/prompt id "go")))
+           (asked nil)
+           (run-filter (symbol-function 'harness-run-filter-async))
+           (watch (harness-on 'agent/step-started (lambda (_ n) (setq steps n)))))
       (ignore watch)
-      (should (eq 'end-turn (plist-get (harness-test-await p) :stop-reason)))
+      (cl-letf (((symbol-function 'harness-run-filter-async)
+                 (lambda (name &rest args) (push name asked) (apply run-filter name args))))
+        (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "go"))
+                                         :stop-reason))))
+      (should-not (memq 'agent/stop asked))
       (should (= 1 steps))
       (should (equal '(user assistant) (harness-agent-test-kinds id)))
       (should-not (harness-agent-test-steering-nodes id))
@@ -1215,7 +1221,10 @@ that did not let go."
       (harness-add-filter 'agent/stop (lambda (_value next _session) (setq hold next) nil))
       (let ((p (harness-call 'agent/prompt id "go")))
         (harness-test-wait (lambda () hold) 5 "the filter")
-        (setf (cl-struct-slot-value 'harness-agent-turn 'cancelled (harness-agent-turn-for id)) t)
+        ;; Flagged cancelled; the grace period before the turn is ended for
+        ;; good has not run out, so the answer is what finds it so.
+        (should (> harness-agent--cancel-grace 2))
+        (should (harness-call 'agent/cancel id))
         (funcall hold (list :stop nil :message "too late"))
         (should (eq 'cancelled (plist-get (harness-test-await p 2) :stop-reason))))
       (should (= 1 steps))

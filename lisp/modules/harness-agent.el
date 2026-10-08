@@ -1247,8 +1247,9 @@ a sender -- marked as steering like a message sent mid-turn, and the
 turn takes one more step (asked of `agent/step', as any step is), which
 delivers it, exactly as when the model stopped with steering waiting.
 This happens at most `harness-agent--max-stop-continues' times a turn,
-and the filters are not asked after that.  Any other answer, and no
-handler, end the turn `end-turn'.
+and the filters are not asked after that.  Any other answer ends the
+turn `end-turn', and with no handler on the filter it ends at once,
+without asking, as it did before the filter existed.
 
 A handler that fails is logged and leaves the answer as it was.  A turn
 cancelled while the filters run ends `cancelled', one that is no longer
@@ -1258,6 +1259,7 @@ turn meanwhile gets its step even when the answer is to stop."
          (count (gethash sid harness-agent--stop-continues 0)))
     (if (or (harness-agent-turn-cancelled turn)
             (>= count harness-agent--max-stop-continues)
+            (not (memq 'agent/stop (harness-filters)))
             (not (harness-call 'session/exists-p sid)))
         (harness-agent--end turn 'end-turn)
       (harness-then
