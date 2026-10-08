@@ -147,6 +147,7 @@ it can answer for another one.")
     fallback/changed fallback/switched
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed worktree/locked worktree/unlocked session/forked session/head-moved
+    session/moved
     question/answered task/changed task/deleted task/review task/done permission/dir-allowed permission/dir-revoked
     config/changed harness/reloaded tools/file-written acp/remote-changed pet/changed pet/said version/checked)
   "Bus events forwarded verbatim as `_harness/event' notifications.")
@@ -1058,7 +1059,9 @@ outcome.  A shell command's request carries where it runs in
 (defun harness-acp--on-question-asked (sid pending)
   "Ask the connected clients to answer PENDING question of session SID.
 `diagrams', when the options have them, holds one per option:
-{type: \"ascii\", text} or {type: \"image\", path, mime}."
+{type: \"ascii\", text} or {type: \"image\", path, mime}.  PATH is a file
+here, on the harness's machine: a client that cannot read it asks for
+the image with `_harness/question/image' (`question/image')."
   (let* ((payload (or (plist-get pending :payload) pending))
          (pid (plist-get pending :id)))
     (harness-acp--request-clients

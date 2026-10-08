@@ -486,6 +486,20 @@ They hold a slot so a burst of submissions never overshoots the limit.")
        (cl-loop for task being the hash-values of harness-tasks--table
                 when (equal (plist-get task :session) session-id) return task)))
 
+(defun harness-tasks--before-move (gate session _dir)
+  "Keep the session of a task in the task's directory.
+A `session/before-move' filter: GATE is (:proceed t) and SESSION the
+plist of the session that is to move.  The board files a task under
+its project and follows its work through its session, and a message to
+that session brings the task back to work, so the session stays."
+  (let ((task (and (plist-get gate :proceed)
+                   (harness-tasks--by-session (plist-get session :id)))))
+    (if task
+        (list :proceed nil
+              :reason (format "it works on task %s, which stays in %s; submit a task in the other directory instead"
+                              (plist-get task :id) (abbreviate-file-name (plist-get task :cwd))))
+      gate)))
+
 (defun harness-tasks--oldest-first (tasks)
   "Return TASKS sorted oldest first (destructively)."
   (sort tasks (lambda (a b) (< (plist-get a :created) (plist-get b :created)))))
@@ -2618,6 +2632,7 @@ up again, merges in flight are queued again and waiting tasks start."
   (harness-add-filter 'naming/auto-p #'harness-tasks--auto-name-p)
   (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25)
   (harness-add-filter 'agent/message #'harness-tasks--on-message)
+  (harness-add-filter 'session/before-move #'harness-tasks--before-move)
   (harness-tasks--pick-up))
 
 (defun harness-tasks--shutdown ()
@@ -2639,11 +2654,13 @@ up again, merges in flight are queued again and waiting tasks start."
 ;; must not go without the stage that keeps it read-only, nor a message
 ;; to a task in review without the filter that tells the user's
 ;; feedback, which sends it back, from another session's word: install
-;; them now.  The session of a task whose title is on its way waits for
+;; them now, with the filter that keeps a task's session in its task's
+;; directory.  The session of a task whose title is on its way waits for
 ;; it, and the tasks of the boards without a title get one.
 (when (harness-module-ready-p 'tasks)
   (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25)
   (harness-add-filter 'agent/message #'harness-tasks--on-message)
+  (harness-add-filter 'session/before-move #'harness-tasks--before-move)
   (harness-add-filter 'naming/auto-p #'harness-tasks--auto-name-p)
   (harness-run-soon #'harness-tasks--name-untitled))
 

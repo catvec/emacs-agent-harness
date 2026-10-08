@@ -1488,6 +1488,93 @@ To be used inside `harness-test-with-temp-state'; the caller clears
             (should (= 1 ran))))
       (clrhash harness-sessions))))
 
+;;;; Confirmations
+
+(defun harness-perms-test--confirming-stage ()
+  "Have every call of the tool t_confirm confirmed, as a tool's stage would."
+  (harness-add-filter 'permission/decide
+                      (lambda (decision next request)
+                        (if (equal (plist-get request :tool) "t_confirm")
+                            (harness-perms-confirm request next
+                                                   :title "Confirm: do it" :reason "It does what only you decide."
+                                                   :paths '("/somewhere/") :input '(:confirmed yes)
+                                                   :hint "Do something else.")
+                          (funcall next decision)))
+                      6))
+
+(ert-deftest harness-perms-confirm-asks-every-time ()
+  "A confirmation offers allow-once and deny-once, survives a switch to
+yolo, hands the call the confirmed input and records no rule, whatever
+the answer names."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (harness-perms-test--confirming-stage)
+  (let ((p (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                     (harness-perms-test--request "t_confirm" 'meta))))
+    (harness-test-wait (lambda () harness-perms-test--pending) 2 "the confirmation")
+    (let ((payload (plist-get (car harness-perms-test--pending) :payload)))
+      (should (equal '(allow-once deny-once) (plist-get payload :options)))
+      (should (equal "Confirm: do it" (plist-get payload :title)))
+      (should (equal "It does what only you decide." (plist-get payload :reason)))
+      (should (equal '("/somewhere/") (plist-get payload :paths)))
+      (should (plist-get payload :confirm)))
+    ;; Listed with its own title and options, too.
+    (let ((listed (plist-get (car (hash-table-values harness-perms--waiting)) :options)))
+      (should (equal '(allow-once deny-once) listed)))
+    ;; Yolo does not answer it: only the user does.
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'yolo))
+    (harness-emit 'session/updated "s1" '(:permission-mode yolo))
+    (accept-process-output nil 0.1)
+    (should-not (harness-promise-settled-p p))
+    (harness-call 'permission/answer "s1" (plist-get (car harness-perms-test--pending) :id) "allow-always")
+    (let ((d (harness-test-await p)))
+      (should (eq 'allow (plist-get d :behavior)))
+      (should (plist-get d :final))
+      (should (equal '(:confirmed yes) (plist-get d :input)))))
+  (should-not harness-perms-rules)
+  (should-not (gethash "s1" harness-perms--session-rules))
+  ;; A no denies this call, with the stage's hint; the next call asks again.
+  (let ((p (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                     (harness-perms-test--request "t_confirm" 'meta))))
+    (harness-test-wait (lambda () harness-perms-test--pending) 2 "the second confirmation")
+    (harness-call 'permission/answer "s1" (plist-get (car harness-perms-test--pending) :id) "deny-session")
+    (let ((d (harness-test-await p)))
+      (should (eq 'deny (plist-get d :behavior)))
+      (should (plist-get d :final))
+      (should (equal "the user said no" (plist-get d :reason)))
+      (should (equal "Do something else." (plist-get d :hint)))))
+  (should-not (gethash "s1" harness-perms--session-rules))
+  (should (= 2 (length harness-perms-test--resolved))))
+
+(ert-deftest harness-perms-confirm-without-a-user ()
+  "A session nobody answers for is denied a confirmation at once."
+  (harness-perms-test--setup :permission-mode 'yolo :non-interactive t)
+  (harness-perms-test--install-pending)
+  (harness-perms-test--confirming-stage)
+  (let ((d (harness-perms-test--decide (harness-perms-test--request "t_confirm" 'meta))))
+    (should (eq 'deny (plist-get d :behavior)))
+    (should (plist-get d :final))
+    (should (string-match-p "needs the user's confirmation, and the session is non-interactive"
+                            (plist-get d :reason))))
+  (should-not harness-perms-test--pending)
+  (should (zerop (hash-table-count harness-perms--waiting))))
+
+(ert-deftest harness-perms-allow-dir-until-the-turn-ends ()
+  "`permission/allow-dir' with scope `turn' grants a directory to the
+session until its turn ends, and nothing is kept."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (let ((dir (harness-perms-test--real (harness-test-temp-dir)))
+        (allowed nil))
+    (harness-on 'permission/dir-allowed (lambda (sid d) (push (cons sid d) allowed)))
+    (harness-call 'permission/allow-dir "s1" dir 'turn)
+    (should (equal (list (cons "s1" dir)) allowed))
+    (should (equal (list dir) (gethash "s1" harness-perms--turn-dirs)))
+    (should (member dir (harness-call 'permission/allowed-dirs "s1")))
+    (should-not (plist-get harness-perms-test--session :allowed-dirs))
+    (should-not (gethash "s1" harness-perms--allowed-dirs))
+    (harness-emit 'agent/turn-ended "s1" 'end-turn)
+    (should-not (member dir (harness-call 'permission/allowed-dirs "s1")))))
+
 (defun harness-perms-test--end-to-end ()
   "Body of `harness-perms-dir-request-end-to-end', with real sessions loaded."
   (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :permission-mode 'auto) :id))

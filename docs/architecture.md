@@ -203,7 +203,8 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
  :todos ((:id :text :status pending|in-progress|done) …)
  :plan nil|"markdown"
  :provider-state PLIST                 ; owned by the provider it names: (:cli-session-id … :provider "claude")
- :provider-node nil|"node-id")         ; the node that provider conversation reached
+ :provider-node nil|"node-id"          ; the node that provider conversation reached
+ :move nil|(:cwd "/abs/new/" :project "/abs/root/" :keep-old-dir BOOL))  ; a move waiting for the turn to end
 ```
 
 `:provider-state` is opaque to everyone but the provider that wrote it,
@@ -572,6 +573,42 @@ gone.
   as `session/update`.  This is what `harness-set-model-all` uses to move
   every session to another model or provider at once, when no session
   would lose its conversation (else `handoff/switch-all`).
+- `session/move ID DIR &rest OPTIONS` — moves ID to the working
+  directory DIR, and with it to DIR's project, which the session list
+  files it under: for a session started in one directory that works on
+  another.  DIR is absolute or relative to the cwd, and on the
+  session's host (a remote session's local names are on its host, where
+  `~` is refused).  OPTIONS: `:keep-old-dir` grants the old cwd to the
+  session (`:allowed-dirs`); `:project` names the root to file it under
+  instead of `project/root`'s (the UI passes the one it sees, as for
+  `session/new`).  Grants written relative to the cwd keep naming what
+  they named.  The provider state goes: the Claude Code CLI keeps its
+  conversations per directory and cannot resume one elsewhere, so the
+  next turn starts a new provider conversation, which gets the
+  transcript; a hint says so.  A session running a turn moves when the
+  turn ends (`agent/turn-ended`): its provider process and system
+  prompt stay in the old directory until then.  The record keeps the
+  move as `:move` meanwhile, so a harness that stops first makes it as
+  it loads the session, and moving the session back to where it works
+  cancels it; a move that cannot be made any more by then is dropped
+  with a hint.  Refused (`harness-error`): a session in a worktree, whose
+  branch merges back through the merge queue; a directory on another
+  host, or that is no directory; the directory it works in, with no
+  move waiting; and whatever a module vetoes through the sync filter
+  `session/before-move` (value `(:proceed t)`, arguments the session
+  plist and the new directory; a veto returns `(:proceed nil :reason
+  WHY)`).  The tasks module vetoes a task's session (the board follows
+  the task's work in its directory), the merge queue a session that
+  queued branches are to merge into or that resolves a merge's
+  conflicts.  → the session, with `:move` while it waits.  Events
+  `session/updated ID (:cwd :host :project :allowed-dirs)` and
+  `session/moved ID OLD-CWD NEW-CWD` when it moves.
+- `session/move-check ID DIR` → how ID would move to DIR, or the error
+  `session/move` would signal; nothing changes.  `(:id :name :cwd NEW
+  :host :project :old-cwd :old-project :defer BOOL :cancel BOOL)`:
+  `:defer` says the move waits for a turn to end, `:cancel` that NEW is
+  where ID works and the move only cancels the one it waits to make.
+  What the `session_move` prompt says (see perms).
 - `session/provider-state ID &optional MODEL` → the provider state of
   ID that MODEL (default the session's model) can continue, or nil.  A
   state belongs to the provider it names (`:provider`); a model of
@@ -1397,7 +1434,8 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
 Async filter `permission/decide`: value is a DECISION
 `(:behavior allow|deny|ask :reason "…" :input UPDATED :final BOOL)`,
 args are the REQUEST `(:session SESSION :tool NAME :input PLIST :kind KIND
-:paths (…))`.  Chain (priority): 5 dir-request, 7 sandbox-guard, 10 jail,
+:paths (…))`.  Chain (priority): 5 dir-request, 6 session-move (the
+session tools: the user confirms every `session_move`), 7 sandbox-guard, 10 jail,
 20 mode, 25 write-up (the tasks module: a backlog write-up only reads),
 30 auto (LLM judge), 40 non-interactive, 90 ask-user (turns `ask` into a
 pending request and resolves when answered).  A judge denial reaches 90
@@ -1505,6 +1543,30 @@ non-interactive session it stays a denial.
   The auto judge is also told to deny calls that widen the agent's own
   permissions some other way (for example `harness-allowed-directories`
   in `.dir-locals.el`, the permission mode, or the sandbox).
+- Confirmations: some calls change what only the user may change,
+  whatever the mode, the standing rules and the judge would say.  The
+  tool's own stage, ahead of the jail, has the user confirm each with
+  `harness-perms-confirm REQUEST NEXT &rest PROMPT` (`:title`, `:reason`,
+  `:paths`, `:input` the handler gets once the call is allowed, `:hint`
+  for the agent after a no): a `permission` prompt whose payload has
+  `:confirm t` and offers allow-once and deny-once only
+  (`harness-perms-confirm-options`).  The answer is final and records no
+  rule, whatever scope it names; switching to yolo does not answer it;
+  a non-interactive session, or one nobody can answer for, is denied at
+  once with a hint to say in the answer what the agent wanted done.
+  `session_move` is such a call (stage 6, `harness-tools-sessions--move-gate`):
+  a move changes the directories a session may reach.  The prompt says
+  what `session/move-check` says of the move (from where to where, the
+  project, whether it waits for a turn to end, whether the old
+  directory stays allowed, the agent's reason), and the stage hands the
+  handler the move the user confirmed, the directory absolute, marked
+  with an uninterned symbol no model input can carry: the handler moves
+  nothing else.  A move that cannot be made asks nobody and fails in the
+  handler with the reason, so it is no denial; nor does moving a session
+  back to where it works, which only cancels the move it waits to make.
+  The calling session moving itself moves when its turn ends, and its
+  new directory is granted until then (`permission/allow-dir` scope
+  `turn`).
 - The roots of a session are its cwd, its worktree, its own temporary
   directory (`session/tmp-dir`, asked for on every look at the roots, so
   it exists whenever the jail lets a call into it), the configured
@@ -1576,7 +1638,8 @@ non-interactive session it stays a denial.
   command there are jailed as before, a standing rule still decides
   first, and the harness's credentials stay out.
 - `permission/allow-dir SESSION-ID DIR &optional SCOPE` (SCOPE `always`
-  grants every session), `permission/revoke-dir SESSION-ID DIR`,
+  grants every session, `turn` the session until its turn ends, as
+  allow-once does for `request_directory_access`), `permission/revoke-dir SESSION-ID DIR`,
   `permission/dirs SESSION-ID` (`(:dir :source cwd|worktree|tmp|config|session|turn|outputs
   :revocable)` plists, for the directory buffer), `permission/allowed-dirs SESSION-ID`
   (the full effective root list), `permission/rules SESSION-ID`
@@ -1607,7 +1670,8 @@ non-interactive session it stays a denial.
   :payload (:tool :input :kind :paths :call-id :title :options))`, plus
   `:dir`, `:pattern` and `:reason` for a directory prompt; a tool
   prompt's `:paths` are its subject paths, and a shell command's prompt
-  has `:cwd`, where it runs; UIs offer only the listed `:options`, and
+  has `:cwd`, where it runs; a confirmation has `:confirm t` and its own
+  `:reason`; UIs offer only the listed `:options`, and
   show a pattern only when there is one),
   `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`,
   `permission/dir-revoked SID DIR` (a grant revoked, or one until the
@@ -1619,7 +1683,8 @@ non-interactive session it stays a denial.
   panels and the options of `session/request_permission` read).  What
   allow-once covers is the request's: the call, for a tool prompt; one
   call reaching the pattern, for the jail's prompt; the pattern until
-  the turn ends, for `request_directory_access`.
+  the turn ends, for `request_directory_access`.  A confirmation is the
+  exception: it offers allow-once and deny-once only, for the call.
 - Modes: `ask` (reads inside the jail allowed; everything else asks),
   `accept-edits` (reads/writes inside the jail allowed; exec/net ask),
   `auto` (reads inside the jail allowed; a cheap model,
@@ -1652,7 +1717,8 @@ non-interactive session it stays a denial.
   allow-once lets the call run, since yolo would have allowed it without
   asking.  Only what the mode stage now allows is answered, so a
   standing deny rule still decides; a directory prompt keeps waiting,
-  because not even yolo grants a directory without the user.
+  because not even yolo grants a directory without the user, and so
+  does a confirmation, which only the user gives.
 - The judge is a safety check, not the agent's manager.  Its prompt
   (`harness-perms--judge-system`) has it decide one thing: whether the
   call risks serious harm that is hard to undo.  That means destroying
@@ -2499,6 +2565,16 @@ so switching to either loses nothing.
 - Events `merge/queued CHILD PARENT POSITION`, `merge/started`,
   `merge/conflict CHILD PARENT FILES`, `merge/finished CHILD PARENT STATUS`
   (merged|failed|aborted|cancelled).
+- Moves (`session/move`): a merge goes into the parent's cwd as it is
+  when the merge starts, so the `session/before-move` filter
+  (`harness-merge--before-move`) keeps a parent with branches queued to
+  merge into it where it is, and a session resolving a merge's
+  conflicts, until those merges are through.  A child (in a worktree)
+  never moves.  A parent that moves before a child queued its branch
+  gets that branch merged into its new cwd, which only works when the
+  new cwd is a checkout of the same repository: `merge/enqueue` refuses
+  a parent outside any git repository, and git cannot merge a branch
+  another repository does not have.
 
 ### tasks
 
@@ -2703,6 +2779,10 @@ verdict.
 - A turn starting in a task's session makes the task active again, so a
   message sent from a done task's chat buffer reopens it; an archived task
   comes back to the board.
+- A task's session does not move to another directory (`session/move`):
+  the `session/before-move` filter `harness-tasks--before-move` refuses,
+  since the board files the task under its project and follows its work
+  in its directory.  A task for the other directory is submitted there.
 - `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`,
   `task/start ID` (ignores the limit; not while a write-up runs),
   `task/update ID PROMPT` (not started only; writes a stopped write-up by
@@ -3097,6 +3177,7 @@ TRAMP prefixes come from the session host):
 | `session_read` | Read session | session_id, limit, before, kinds, max_chars | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
+| `session_move` | Move session | directory, session_id (default: this session), keep_old_directory, reason | meta (the user confirms every call, in every mode; see perms, Confirmations, and `session/move`) |
 | `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_list` | List tasks | column (pending/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout) | meta |
@@ -3373,6 +3454,13 @@ Its `options` are the answers' labels; `diagrams`, present when the
 options have them, holds one per option, `{type: "ascii", text}` or
 `{type: "image", path, mime}`: a path on the harness's machine, never
 the image data, since the pending question is saved with the session.
+A client that cannot read the path, being on another machine (or not
+wanting to block on a remote host), asks for the image:
+`_harness/question/image {sessionId, pid, index}` → `{mime, data}`
+(`question/image SESSION-ID PID INDEX`: the file's bytes in base64,
+read by the harness, for a question still pending; an error when there
+is none, or the file is gone or larger than
+`harness-tools-agent-image-max-bytes`, 16 MiB).
 
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `fallback/`, `worktree/`, `merge/`,
@@ -3638,7 +3726,8 @@ keys, whatever the request: `[Allow] y  [Allow for session] s
 (`harness-ui-pending-permission-buttons`: the labels of
 `harness-acp-permission-answers`, the keys of
 `harness-ui-pending-permission-keys`; a request offering fewer options
-shows only those).  What an answer covers depends on the request, and
+shows only those, as a confirmation does: `session_move`'s shows `[Allow]
+y  [Deny] n` under its reason, what the move does).  What an answer covers depends on the request, and
 the button's tooltip and the echo area after it say so
 (`harness-ui-pending-answer-help`): "Allow ~/notes/** until this turn
 ends" for an agent's own request, "Let this call reach ~/notes/**, this
@@ -3716,7 +3805,35 @@ at a time, in an area under the options; its tabs, `n` and `p` on the
 panel, `C-c C-f` and `C-c C-b`, and point moving onto an option switch
 it (all of it in `harness-ui-pending`).  Switching redraws the options
 and that area alone, in place, so point, the windows and the compose box
-stay put.  A permission panel whose one line of input leaves something
+stay put.  An image diagram is drawn in `harness-ui-image-colors` (black
+on white, as a browser shows an image file; the transcript's images,
+a report's, the image popout and attachment thumbnails too, through
+`harness-ui-image-color-props`) and sized to show whole: in a chat at
+most 60% of the window's width and half its height, never over
+`harness-ui-image-max-height`; in a popout, which grows to
+`harness-ui-pending-popout-max-height` for a question with images, the
+room the popout has left beside the panel's text and the box.  Emacs
+loads no image larger than `max-image-size` (ten times the frame by
+default), however small it would show it, and would draw an empty box
+while complaining on every redisplay: an image that large, its size
+read from its header (`harness-image-pixel-size`: PNG, GIF, JPEG, WebP,
+BMP), is a line saying so instead, a button opening it outside Emacs
+(`harness-ui-image-too-large`, for the transcript's images, a report's
+and the image popout too), and ask_user refuses one over
+`harness-tools-agent-image-max-side` (8000) pixels on a side, telling
+the agent to crop it.  The UI reads the file itself when it shares the
+harness's files (the harness in this Emacs, or the process it
+started), and otherwise asks for it with `question/image`, showing
+"loading" until it comes: a harness at a host and port, and a remote
+file of a harness process.  A remote file of an in-Emacs harness is a
+button, as reading it would block.  The images fetched are kept per
+(session, request, option) and forgotten with the request.  Asking
+never signals into the panel being drawn: a connection that cannot be
+made is the error the panel shows, a connection let go of for another
+(`harness-connect-remote`) has the next drawing ask that one, and an
+image the harness could not give is asked for again once the UI
+connects again (`harness-ui-pending--retry-images`, on
+`harness-ui-connected-hook`).  A permission panel whose one line of input leaves something
 out (a value past its width, a further line of one, a line too long)
 ends that line in `[Show all]`, `[Show all N lines]` when values have
 lines it hides, and binds TAB on the panel

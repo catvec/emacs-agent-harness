@@ -96,5 +96,29 @@ It can be revoked, and its row goes when the turn ends."
       (harness-test-wait (lambda () (not (member "turn" (harness-ui-dirs-test--sources)))) 5 "the row gone")
       (should-not (member extra (harness-call 'permission/allowed-dirs sid))))))
 
+(defun harness-ui-dirs-test--rows (source)
+  "Return the directories of SOURCE the current directory buffer lists."
+  (mapcar (lambda (e) (file-name-as-directory (plist-get e :dir)))
+          (cl-remove-if-not (lambda (e) (equal source (format "%s" (plist-get e :source))))
+                            harness-ui-dirs--entries)))
+
+(ert-deftest harness-ui-dirs-move-the-session ()
+  "m moves the buffer's session to another working directory, and the
+buffer follows; with a prefix argument the old one stays allowed."
+  (harness-ui-dirs-test-with
+    (let ((old (plist-get (harness-call 'session/get sid) :cwd))
+          (new (harness-test-temp-dir)))
+      (harness-directories sid)
+      (harness-test-wait (lambda () harness-ui-dirs--entries) 5 "directory rows")
+      (should (eq 'harness-ui-dirs-move (key-binding (kbd "m"))))
+      ;; The working directory's row says how.
+      (goto-char (point-min))
+      (should (search-forward "m to move" nil t))
+      (should (equal old (file-name-as-directory (tabulated-list-get-id))))
+      (harness-ui-dirs-move new t)
+      (harness-test-wait (lambda () (equal (list new) (harness-ui-dirs-test--rows "cwd"))) 5 "the moved row")
+      (should (equal new (plist-get (harness-call 'session/get sid) :cwd)))
+      (should (equal (list old) (harness-ui-dirs-test--rows "session"))))))
+
 (provide 'harness-ui-dirs-test)
 ;;; harness-ui-dirs-test.el ends here

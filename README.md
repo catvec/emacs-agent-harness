@@ -283,6 +283,8 @@ the menu's Version entry says so.
 | `C-c h p` | `harness-set-permission-mode` | Choose the permission mode |
 | `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
 | `C-c h d` | `harness-directories` | Manage the directories a session may access |
+| `C-c h W` | `harness-move-session` | Move a session to another working directory, and with it to that directory's project (see [Moving a session](#moving-a-session-to-another-directory)) |
+| `m` | `harness-ui-sessions-move` | In the session list, move the session at point to another directory |
 | `C-c h u` | `harness-usage` | Show the usage and cost dashboard |
 | `C-c h I` | `harness-insights` | Show the Insights report: how a period of work with the agents went |
 | `C-c h B` | `harness-delete-budget` | Delete a budget, chosen by name |
@@ -460,6 +462,9 @@ this once, and for the agent's own request for a directory
 directory until the agent's turn ends, so the agent can do what it
 asked for and has to ask again in a later turn. A button's tooltip, and
 the echo area after it, say what it covers for the request at hand.
+The one exception is an agent's request to move a session (see
+[Moving a session](#moving-a-session-to-another-directory)), which you
+answer with `[Allow]` or `[Deny]` only.
 
 A permission request about a path outside the session's directories
 (a tool call reaching there, or the agent asking for a directory) is
@@ -533,12 +538,33 @@ and show one at a time. Switch between them with the tabs above the
 area, `n` and `p` on the panel, `C-c C-f` and `C-c C-b` anywhere in the
 buffer, or by moving point onto an option.
 
+An image is a file the agent made, usually an SVG it wrote or a cropped
+screenshot of a mockup, in its session's temporary directory. Images
+are drawn black on white, as a browser shows them, so a drawing made
+for a white page reads under a dark theme too
+(`harness-ui-image-colors`, also for the transcript's images; nil draws
+them in the colours of the text around them). Each is sized to show
+whole: at most `harness-ui-image-max-height` pixels high and half the
+window's height in a chat, so a short window such as a BTW still shows
+it with the options around it. An image larger than Emacs draws at all
+(`max-image-size`, ten times the frame), such as a whole page's
+screenshot, shows as a line saying so that opens it outside Emacs; the
+agent is told to crop one over 8000 pixels on a side. Only you see the
+images; the model gets your answer. Try one with the demo provider's
+`images` prompt. When the UI reaches the harness at a host and port,
+which may run on another machine, or the image is on a remote host, the
+UI asks the harness for the image (`question/image`) instead of reading
+the file itself.
+
 The same request can be read and answered without opening the session:
 `SPC` in the session list, or on the task board, pops out
 what the session at point waits on, in a small window with the same
 panel -- the permission prompt or the question in full, its options,
 diagrams and keys, and a box for a typed answer. It closes itself once
 the request is settled, and the session's own view stays where it was.
+The popout of a question with images grows taller than others, up to
+`harness-ui-pending-popout-max-height` of the frame, and fits the image
+in beside the options and the box.
 Both views also answer in place, with the same buttons from the same
 code: a blocked session's row in the session list and a task's card on
 the board carry `[Allow]` and `[Deny]`, or `[Answer…]`.
@@ -574,6 +600,42 @@ session has its own switch.
 
 Opening an inactive session shows it without resuming it. Its compose
 box stays available, and the first message you send resumes it.
+
+### Moving a session to another directory
+
+A session works in the directory it was started in, and the session
+list files it under that directory's project. When a session started in
+one place turns out to work on another, move it there: `C-c h W`
+(`M-x harness-move-session`, also called `harness-session-move`) asks
+for the new directory, starting next to the session's own, and `m` does
+the same for the session at point in the session list and for the
+session of the directory access list (`C-c h d`). The session then
+works in the new directory and is listed under its project, also after
+a restart. It no longer reaches the old directory, unless you move it
+with a prefix argument (`C-u C-c h W`), which keeps the old directory
+allowed. The directories you granted it stay granted.
+
+The conversation goes on where it was, but the model's provider starts
+a new conversation in the new directory, which gets the transcript:
+the Claude Code CLI keeps its conversations per directory. A session in
+the middle of a turn moves when the turn ends, and moving it back to
+where it works cancels that. Some sessions cannot move:
+
+- a session working in a worktree, whose branch merges back through the
+  merge queue;
+- a task's session, which stays with its task: submit a task in the
+  other directory instead;
+- a session that branches are queued to merge into, until those merges
+  are through;
+- a session on a remote host, to another host.
+
+Agents can move a session too, their own or another one, with the
+`session_move` tool. You confirm every move, whatever the permission
+mode, yolo included: the request offers only `[Allow]` and `[Deny]`,
+and neither is remembered. An agent moving its own session may use the
+new directory for the rest of its turn, and the session moves when the
+turn ends. A non-interactive session cannot ask, so its agent says in
+its answer where it wanted to move.
 
 ### Forks and side conversations
 
