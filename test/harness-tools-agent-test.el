@@ -627,7 +627,10 @@ sub-agent the call started."
       (harness-call 'session/usage-add sid '(:input 10 :output 60 :context 4000))
       (should (= (+ 128000 4000 60) (harness-tools-agent-context-limit sid t)))
       (let ((harness-subagent-context-limit 1000))
-        (should (= (+ 1000 4000 60) (harness-tools-agent-context-limit sid t)))))))
+        (should (= (+ 1000 4000 60) (harness-tools-agent-context-limit sid t))))
+      ;; A flag that came over JSON counts as the boolean it is.
+      (should (= 128000 (harness-tools-agent-context-limit sid :false)))
+      (should (= (+ 128000 4000 60) (harness-tools-agent-context-limit sid 'yes))))))
 
 (ert-deftest harness-tools-agent-context-limit-never-above-the-parents ()
   "The parent's own limit caps the child's, a fork's included."
@@ -652,7 +655,7 @@ sub-agent the call started."
     (should (= 128000 (harness-tools-agent-context-limit "no-such-session" t)))))
 
 (ert-deftest harness-tools-agent-spawn-fresh-child-has-the-cap ()
-  "spawn_agent gives a fresh child the cap, and never more than the parent has."
+  "A fresh child of spawn_agent gets the cap, and never more than the parent has."
   (harness-tools-agent-test-with
     (let* ((sid (harness-tools-agent-test-session))
            (cid (plist-get (plist-get (harness-test-await

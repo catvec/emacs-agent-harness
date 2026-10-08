@@ -451,20 +451,21 @@ session."
 (defun harness-tools-agent-context-limit (parent-id fork)
   "Return the `:context-window-limit' for a sub-agent of session PARENT-ID.
 It is nil when `harness-subagent-context-limit' is nil: no cap.
-Otherwise a fresh sub-agent (FORK nil) gets the cap itself, and a fork
-the context it inherits plus the cap, so that it does not compact at
-once.  The inherited context is the parent's `:usage' `:context' plus
-its `:last-output' (what the conversation holds about), 0 when the
-parent has not run yet.  Either way the limit is never above the
-parent's own `:context-window-limit', when it has one, so sub-agents
-of sub-agents do not grow.  `spawn_agent' and the supervisor's workers
-pass the result to `session/create' or `session/fork'."
+Otherwise a fresh sub-agent (FORK nil or `:false') gets the cap itself,
+and a fork the context it inherits plus the cap, so that it does not
+compact at once.  The inherited context is the parent's `:usage'
+`:context' plus its `:last-output' (what the conversation holds about),
+0 when the parent has not run yet.  Either way the limit is never above
+the parent's own `:context-window-limit', when it has one, so
+sub-agents of sub-agents do not grow.  `spawn_agent' and the
+supervisor's workers pass the result to `session/create' or
+`session/fork'."
   (let ((cap harness-subagent-context-limit))
     (when (and (integerp cap) (> cap 0))
       (let* ((parent (and parent-id (harness-call 'session/exists-p parent-id)
                           (harness-call 'session/get parent-id)))
              (usage (plist-get parent :usage))
-             (inherited (if fork
+             (inherited (if (harness-json-true-p fork)
                             (+ (let ((n (plist-get usage :context))) (if (numberp n) n 0))
                                (let ((n (plist-get usage :last-output))) (if (numberp n) n 0)))
                           0))

@@ -38,11 +38,14 @@
 ;; is a nudge, never a stop.
 ;;
 ;; The system prompt of a supervising session says how the mode works,
-;; in place of the Planning section.  The plan engine itself -- the
-;; `submit_plan' and `retry_step' tools and the workers on cheaper
-;; models -- is not here: it adds its tools to `harness-supervisor-tools'
-;; and its decisions to `harness-supervisor-decision-tools', and the
-;; gates above then apply to them.
+;; in place of the Planning section.
+;;
+;; The plan engine itself -- the `submit_plan' and `retry_step' tools and
+;; the workers on cheaper models -- is not here.  Its tools are named in
+;; `harness-supervisor-tools' and `harness-supervisor-decision-tools'
+;; already, so the gates above apply to them from the day they exist; the
+;; models of its workers come from `harness-supervisor-tiers', and their
+;; context window from `harness-tools-agent-context-limit'.
 
 ;;; Code:
 
@@ -66,7 +69,7 @@ only read-only, offline shell commands and ends every turn on a
 decision.  The setting is read per project, as the other settings of
 new sessions are, so a .dir-locals.el can override it.  It applies when
 a session is created; from then on each session has its own switch,
-which its header line shows and the supervisor key flips, so changing
+which its header line shows and the V key flips, so changing
 the setting leaves the sessions that exist as they are.  Sub-agents and
 side conversations never supervise, and a fork starts as its parent is.
 It is on the settings page, under Supervisor mode."

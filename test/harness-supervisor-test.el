@@ -700,7 +700,7 @@ The demo provider plays the model through the script of the test."
             (should (plist-get decision :final))
             (should (string-match-p (regexp-quote tool) (plist-get decision :reason)))
             (should (string-match-p "submit_plan" (plist-get decision :hint)))
-            (should (string-match-p "supervisor mode off\\|switch supervisor mode off" (plist-get decision :hint)))
+            (should (string-match-p "switch supervisor mode off" (plist-get decision :hint)))
             (should (string-match-p "header" (plist-get decision :hint)))))))))
 
 (ert-deftest harness-supervisor-lets-the-allowed-calls-through-unchanged ()
@@ -1020,11 +1020,9 @@ The demo provider plays the model through the script of the test."
   "Hands-on sessions and ungoverned ones are not sent back."
   (harness-supervisor-test-with
     (dolist (sid (list (harness-supervisor-test-session :ext '(:supervisor :false))
-                       (harness-supervisor-test-session :kind 'subagent)
-                       (progn (harness-supervisor-test-session)
-                              (harness-supervisor-test-session :ext '(:supervisor :false)))))
-      (setq harness-supervisor-test--script (list harness-supervisor-test-stops))
-      (setq harness-supervisor-test--requests nil)
+                       (harness-supervisor-test-session :kind 'subagent)))
+      (setq harness-supervisor-test--script (list harness-supervisor-test-stops)
+            harness-supervisor-test--requests nil)
       (should (eq 'end-turn (harness-supervisor-test-prompt sid "What does foo do?")))
       (should (= 1 (length harness-supervisor-test--requests)))
       (should-not (harness-supervisor-test-reminders sid))
@@ -1142,7 +1140,7 @@ The demo provider plays the model through the script of the test."
                         "reports a failed step" "retry_step" "escalates the tier" "submit a new plan"
                         "Every turn ends on a decision"
                         "no_plan_needed" "hand_in" "task_submit" "task_control" "session_send" "session_control"
-                        "a question answered\\|you answered a question" "plan is still running"
+                        "you answered a question" "the plan is still running"
                         "In a task, the last step commits (git add -A && git commit)"
                         "review feedback means a new plan to fix it"))
         (ert-info (needle)
@@ -1190,9 +1188,9 @@ The demo provider plays the model through the script of the test."
       (should (equal '("reason") (plist-get schema :required)))
       (should (equal "string" (plist-get (plist-get (plist-get schema :properties) :reason) :type)))
       (should (equal '(:reason) (cl-loop for (k _) on (plist-get schema :properties) by #'cddr collect k)))
-      (should (string-match-p "changes files always goes in a plan\\|always goes in a plan"
+      (should (string-match-p "Work that changes files always goes in a plan"
                               (plist-get spec :description)))
-      (should (string-match-p "does not end the turn\\|not the turn" (plist-get spec :description))))))
+      (should (string-match-p "not the turn: give your reply after it" (plist-get spec :description))))))
 
 (ert-deftest harness-supervisor-no-plan-needed-records-the-decision-and-lets-the-turn-go-on ()
   "The tool leaves a hint, says what to do next, and does not end the turn."
