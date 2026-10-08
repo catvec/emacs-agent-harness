@@ -77,11 +77,17 @@ answers) gives a function.")
   "Options of the demo `diagram' question: (LABEL . ASCII-DIAGRAM).")
 
 (defun harness-provider-demo--last-user-text (request)
+  "Return the text of the last text block of REQUEST's user messages.
+Not an image's token, [image 1], which the agent puts before each
+labelled image (`harness-agent--prepare-content'): that is no text the
+user wrote."
   (let ((msgs (plist-get request :messages)) text)
     (dolist (m msgs)
       (when (equal (plist-get m :role) 'user)
         (dolist (b (plist-get m :content))
-          (when (equal (plist-get b :type) "text") (setq text (plist-get b :text))))))
+          (when (and (equal (plist-get b :type) "text")
+                     (not (string-match-p "\\`\\[image [0-9]+\\]\\'" (or (plist-get b :text) ""))))
+            (setq text (plist-get b :text))))))
     (or text "")))
 
 (defun harness-provider-demo--script (request)

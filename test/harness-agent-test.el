@@ -370,6 +370,82 @@ It is never added to the running turn: no steering node, no
       (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/send-queue id)) :stop-reason)))
       (should (equal "first\n\nsecond" (plist-get (car (harness-call 'session/nodes id)) :content))))))
 
+(defun harness-agent-test-image (dir)
+  "Write a PNG image in DIR and return its file name."
+  (let ((file (expand-file-name "shot.png" dir)))
+    (let ((coding-system-for-write 'binary)) (write-region harness-test-png nil file))
+    file))
+
+(defun harness-agent-test-content (message)
+  "Return MESSAGE's content as (TYPE TEXT-OR-LABEL) pairs."
+  (mapcar (lambda (b) (list (plist-get b :type)
+                            (if (equal (plist-get b :type) "image") (plist-get b :label) (plist-get b :text))))
+          (plist-get message :content)))
+
+(ert-deftest harness-agent-image-labels-reach-the-model ()
+  "An image with a label goes to the model right after its token as text.
+The message's text names it by its token, [image 1], and the model gets
+the same token before the image itself, so it can tell which image a
+sentence means.  The transcript's text keeps the tokens, without an
+image placeholder for each image the text names already."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session))
+          (png (harness-agent-test-image dir))
+          (requests nil))
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (push req requests) (funcall orig req))))
+        (harness-test-await
+         (harness-call 'agent/prompt id
+                       (list (list :type "text" :text "in [image 2] the button is cut off, unlike [image 1]")
+                             (list :type "image" :mime "image/png" :path png :label "image 1")
+                             (list :type "image" :mime "image/png" :data "AAAA" :label "image 2")
+                             (list :type "image" :mime "image/png" :data "AAAA")))))
+      (let ((user (car (plist-get (car (last requests)) :messages))))
+        (should (equal '(("text" "in [image 2] the button is cut off, unlike [image 1]")
+                         ("text" "[image 1]") ("image" "image 1")
+                         ("text" "[image 2]") ("image" "image 2")
+                         ("image" nil))
+                       (harness-agent-test-content user)))
+        ;; The file went as data.
+        (should (equal (base64-encode-string harness-test-png t) (plist-get (nth 2 (plist-get user :content)) :data))))
+      (let ((node (car (harness-call 'session/nodes id))))
+        (should (equal "in [image 2] the button is cut off, unlike [image 1] [image]" (plist-get node :content)))
+        (should (equal '("image 1" "image 2" nil)
+                       (delq 'none (mapcar (lambda (b) (if (equal (plist-get b :type) "image") (plist-get b :label) 'none))
+                                           (plist-get node :blocks)))))))
+    ;; An image the text does not name reads as its token.
+    (should (equal "see [image 1]"
+                   (harness-agent--blocks-text (list (list :type "text" :text "see")
+                                                     (list :type "image" :data "AAAA" :label "image 1")))))))
+
+(ert-deftest harness-agent-send-queue-numbers-images-across-messages ()
+  "Queued messages sent together number their images across the message.
+Each was numbered from 1 in its compose box: the later ones go on from
+the highest number before them, and so do the tokens naming them in
+their text.  Other text that looks like a token is left alone."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (png (harness-agent-test-image dir))
+           (image (lambda (label) (list :path png :mime "image/png" :size 1 :label label))))
+      (harness-call 'session/queue id "first [image 1]" (list (funcall image "image 1")))
+      (harness-call 'session/queue id "no images, [image 1] is text" nil)
+      (harness-call 'session/queue id "then [image 2] beside [image 1], not [image 7]"
+                    (list (funcall image "image 1") (funcall image "image 2")
+                          (list :path png :mime "text/plain" :size 1)))
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/send-queue id)) :stop-reason)))
+      (let ((node (car (harness-call 'session/nodes id))))
+        (should (equal (concat "first [image 1] no images, [image 1] is text\n\n"
+                               "then [image 3] beside [image 2], not [image 7] @shot.png")
+                       (plist-get node :content)))
+        (should (equal '("image 1" "image 2" "image 3")
+                       (delq nil (mapcar (lambda (b) (plist-get b :label)) (plist-get node :blocks))))))
+      ;; An item alone keeps its numbers.
+      (should (equal '(("first [image 1]" nil) (nil "image 1"))
+                     (mapcar (lambda (b) (list (plist-get b :text) (plist-get b :label)))
+                             (harness-agent--queue-blocks
+                              (list (list :text "first [image 1]" :attachments (list (funcall image "image 1")))))))))))
+
 (defun harness-agent-test-user-nodes (id)
   "Return the user messages of session ID, oldest first."
   (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes id)))

@@ -777,12 +777,39 @@ its player, anything else a file button."
      ((plist-get att :data) (harness-chat--image-string (list :data (plist-get att :data)) mime))
      (t ""))))
 
+(defun harness-chat--image-label (block)
+  "Return the label of image BLOCK, image 1, or nil when it has none.
+The compose box labels the images it attaches, and the message's text
+names each by its token, [image 1]."
+  (let ((label (and (equal (harness-chat--str (plist-get block :type)) "image") (plist-get block :label))))
+    (and (stringp label) (not (string-empty-p label)) label)))
+
+(defun harness-chat--mark-image-tokens (text blocks)
+  "Return TEXT with the tokens of the labelled images among BLOCKS styled.
+They look as they did in the compose box, and as the captions over the
+images below the text (`harness-chat--blocks-string')."
+  (let ((labels (delq nil (mapcar #'harness-chat--image-label blocks))))
+    (if (null labels)
+        text
+      (let ((text (copy-sequence text)))
+        (dolist (label labels text)
+          (let ((token (format "[%s]" label)) (start 0))
+            (while (setq start (string-search token text start))
+              (add-face-text-property start (+ start (length token)) 'harness-compose-token-face nil text)
+              (setq start (+ start (length token))))))))))
+
 (defun harness-chat--blocks-string (blocks)
-  "Return the non-text content BLOCKS of a node as a string."
+  "Return the non-text content BLOCKS of a node as a string.
+An image with a label has its token, [image 1], over it, as the text
+above names it."
   (mapconcat (lambda (b)
                (pcase (harness-chat--str (plist-get b :type))
-                 ("image" (harness-chat--image-string (or (plist-get b :path) (list :data (plist-get b :data)))
-                                                      (plist-get b :mime)))
+                 ("image" (concat
+                           (if-let* ((label (harness-chat--image-label b)))
+                               (concat (propertize (format "[%s]" label) 'face 'harness-compose-token-face) "\n")
+                             "")
+                           (harness-chat--image-string (or (plist-get b :path) (list :data (plist-get b :data)))
+                                                       (plist-get b :mime))))
                  ((or "video" "audio")
                   (or (harness-chat--show-media b)
                       (concat (propertize (format "[%s]" (harness-chat--str (plist-get b :type))) 'face 'harness-dim-face)
@@ -913,7 +940,8 @@ transcript it points the new model at."
          (from (harness-node-sender node))
          (handoff (harness-node-handoff node))
          (face (if from 'harness-system-face 'harness-user-face))
-         (text (harness-chat--plain (plist-get node :content)))
+         (text (harness-chat--mark-image-tokens (harness-chat--plain (plist-get node :content))
+                                                (plist-get node :blocks)))
          (body (concat (if from
                            (harness-chat--from-line from)
                          (harness-chat--sender harness-chat-user-label 'harness-user-label-face))

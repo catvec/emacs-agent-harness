@@ -2146,6 +2146,41 @@ the call's text stays folded."
           ;; The call's own output, which the fold hides, is there for search.
           (should (invisible-p (1- (harness-ui-chat-test-find buf "Image shot.png (image/png, 17 B) attached.")))))))))
 
+(ert-deftest harness-ui-chat-sent-images-keep-their-tokens ()
+  "An image attached in the box is sent with its label, and shown under its token.
+The text keeps [image 1] where the image was attached.  The model gets
+the label with the image, and the transcript styles the token in the
+text as the box showed it and puts it over the image too."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (png (expand-file-name "shot.png" (harness-test-temp-dir))))
+      (let ((coding-system-for-write 'binary)) (write-region harness-test-png nil png nil 'silent))
+      (with-current-buffer buf
+        (harness-ui-chat-test-type buf "the button in")
+        (harness-compose-add-attachment png)
+        (should (equal "the button in [image 1] " (harness-compose-text))))
+      (harness-ui-chat-test-prompt buf "is cut off")
+      (let ((node (car (harness-call 'session/nodes sid))))
+        (should (equal "the button in [image 1] is cut off" (plist-get node :content)))
+        (should (equal '(("text" nil) ("image" "image 1"))
+                       (mapcar (lambda (b) (list (plist-get b :type) (plist-get b :label))) (plist-get node :blocks))))
+        (should (equal (base64-encode-string harness-test-png t) (plist-get (cadr (plist-get node :blocks)) :data))))
+      (with-current-buffer buf
+        (let* ((text "the button in [image 1] is cut off")
+               (end (harness-ui-chat-test-find buf text))
+               (token (and end (+ (- end (length text)) (length "the button in ")))))
+          (should end)
+          (should (harness-ui-chat-test-face-at token 'harness-compose-token-face))
+          (should (harness-ui-chat-test-face-at (+ token 8) 'harness-compose-token-face))
+          (should-not (harness-ui-chat-test-face-at (1- token) 'harness-compose-token-face))
+          (should-not (harness-ui-chat-test-face-at (+ token 9) 'harness-compose-token-face))
+          ;; Over the image, its token, on a line of its own.
+          (let ((caption (harness-ui-chat-test-find buf "\n[image 1]\n[image]" end)))
+            (should caption)
+            (should (harness-ui-chat-test-face-at (- caption (length "[image 1]\n[image]"))
+                                                  'harness-compose-token-face))))))))
+
 (ert-deftest harness-ui-chat-media-rerender-keeps-it-visible ()
   "When the media module redraws a video (a thumbnail landing, or a
 player advancing), the chat redraws the block, so the fold never

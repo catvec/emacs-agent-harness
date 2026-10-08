@@ -24,10 +24,12 @@
 (defvar-local harness-ui-compose-test--draws 0 "How many times the test host drew.")
 
 (defun harness-ui-compose-test--draw ()
-  "Draw the test host: a read-only line, the attachment chips and the box."
+  "Draw the test host: a read-only line, the attachment chips and the box.
+With undo off, as the hosts draw."
   (cl-incf harness-ui-compose-test--draws)
   (harness-compose-capture)
   (let ((inhibit-read-only t)
+        (buffer-undo-list t)
         (offset (and (harness-compose-in-p) (- (point) harness-compose-start))))
     (erase-buffer)
     (insert (propertize "The transcript.\n" 'read-only t))
@@ -97,6 +99,8 @@
            (url (harness-test-http-url server "/images/cat.png")))
       (unwind-protect
           (let ((start (float-time)))
+            (harness-compose-set "look")
+            (goto-char harness-compose-start)
             ;; The drop returns at once: curl downloads in the background.
             (should (eq 'private (dnd-handle-multiple-urls (selected-window) (list url) 'private)))
             (should (< (- (float-time) start) 0.5))
@@ -122,7 +126,11 @@
               (should (equal (expand-file-name "downloads/cat.png" harness-state-directory) (plist-get att :path)))
               (should (equal body (harness-ui-compose-test--bytes (plist-get att :path))))
               (should (= (length body) (plist-get att :size)))
-              (should (equal "image" (plist-get (harness-compose-attachment-block att) :type))))
+              (should (equal "image" (plist-get (harness-compose-attachment-block att) :type)))
+              ;; Its token goes at the end of the box, wherever point
+              ;; went while it downloaded.
+              (should (equal "image 1" (plist-get att :label)))
+              (should (equal "look [image 1] " (harness-compose-text))))
             (should-not harness-compose--progress)
             (should-not (directory-files (expand-file-name "downloads/" harness-state-directory) nil "\\`\\.partial"))
             (goto-char (point-min))
@@ -135,7 +143,8 @@
             (harness-test-wait #'harness-ui-compose-test--settled 10 "the second download")
             (should (equal (expand-file-name "downloads/cat-1.png" harness-state-directory)
                            (plist-get (cadr harness-compose-attachments) :path)))
-            (should (equal "cat-1.png" (plist-get (cadr harness-compose-attachments) :name))))
+            (should (equal "cat-1.png" (plist-get (cadr harness-compose-attachments) :name)))
+            (should (equal "look [image 1] [image 2] " (harness-compose-text))))
         (delete-process server)))))
 
 (ert-deftest harness-ui-compose-dropped-link-to-a-page-goes-in-as-text ()
@@ -585,18 +594,24 @@ Point starts after the box, where a command loop's hooks move it from."
           (should (= 1 (length harness-compose-attachments)))
           (should (equal "image/png" (plist-get att :mime)))
           (should (equal harness-test-png (harness-ui-compose-test--bytes (plist-get att :path))))
-          (should (equal (plist-get att :path) (plist-get (car (harness-media-ring-entries)) :path))))
-        (should (equal "" (harness-compose-text)))
-        ;; M-y right after goes back through the ring, and around.
+          (should (equal (plist-get att :path) (plist-get (car (harness-media-ring-entries)) :path)))
+          (should (equal "image 1" (plist-get att :label))))
+        ;; Its token went into the box, for the text to name it by.
+        (should (equal "[image 1] " (harness-compose-text)))
+        ;; M-y right after goes back through the ring, and around: the
+        ;; capture takes the image's place, token and number.
         (harness-ui-compose-test--command 'harness-compose-yank-pop)
         (should (equal (list (plist-get older :path)) (mapcar (lambda (a) (plist-get a :path)) harness-compose-attachments)))
+        (should (equal "image 1" (plist-get (car harness-compose-attachments) :label)))
+        (should (equal "[image 1] " (harness-compose-text)))
         (harness-ui-compose-test--command 'harness-compose-yank-pop)
         (should (equal "image/png" (plist-get (car harness-compose-attachments) :mime)))
         (should (equal harness-test-png (harness-ui-compose-test--bytes (plist-get (car harness-compose-attachments) :path))))
         (should (= 1 (length harness-compose-attachments)))
+        (should (equal "[image 1] " (harness-compose-text)))
         ;; Yanking again, the image attached already, yanks text.
         (harness-ui-compose-test--command 'harness-compose-yank)
-        (should (equal "killed text" (harness-compose-text)))
+        (should (equal "[image 1] killed text" (harness-compose-text)))
         (should (eq 'yank last-command))
         (should (= 1 (length harness-compose-attachments)))
         ;; `kill-ring' never saw the image.
@@ -652,10 +667,13 @@ Point starts after the box, where a command loop's hooks move it from."
         (harness-ui-compose-test--command 'harness-compose-yank)
         (should (equal (list one two) (mapcar (lambda (a) (plist-get a :path)) harness-compose-attachments)))
         (should (equal '("image/png" "text/plain") (mapcar (lambda (a) (plist-get a :mime)) harness-compose-attachments)))
+        ;; The image has a token in the text, the other file none.
+        (should (equal '("image 1" nil) (mapcar (lambda (a) (plist-get a :label)) harness-compose-attachments)))
+        (should (equal "[image 1] " (harness-compose-text)))
         ;; Files copied are no captures: the ring stays empty.
         (should-not (harness-media-ring-entries))
         (harness-ui-compose-test--command 'harness-compose-yank)
-        (should (equal "killed text" (harness-compose-text))))
+        (should (equal "[image 1] killed text" (harness-compose-text))))
       ;; A copied web link is text.
       (harness-compose-set "")
       (setq harness-compose-attachments nil)
@@ -703,6 +721,150 @@ The box leaves C-c C-v unbound, so in a chat the review banner's
     ;; Every key that yanks pastes into the box.
     (should (eq 'harness-compose-yank (key-binding (kbd "C-y"))))
     (should (eq 'harness-compose-yank-pop (key-binding (kbd "M-y"))))))
+
+;;;; Image tokens
+
+(defmacro harness-ui-compose-test--attaching (path &rest body)
+  "Run BODY with the attach command reading PATH, a variable, for its file."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'harness-compose-read-file) (lambda (&rest _) ,path)))
+     ,@body))
+
+(defun harness-ui-compose-test--labels ()
+  "Return the labels of the attachments, nil for one without."
+  (mapcar (lambda (a) (plist-get a :label)) harness-compose-attachments))
+
+(ert-deftest harness-ui-compose-image-tokens-go-where-point-is ()
+  "An image attached puts its token where point is in the box, else at its end.
+The token keeps apart from the words around it and point goes on after
+it.  The image's line in the list leads with the token, its prompt
+block carries its label, and the token shows as a chip.  A file that is
+no image gets no token."
+  (harness-ui-compose-test-with
+    (let ((a (plist-get (harness-media-ring-save harness-test-png "image/png") :path))
+          (b (plist-get (harness-media-ring-save (concat harness-test-png "b") "image/png") :path))
+          (notes (expand-file-name "notes.txt" dir)))
+      (with-temp-file notes (insert "notes"))
+      (harness-compose-set "compare with")
+      (goto-char (+ harness-compose-start (length "compare ")))
+      (harness-compose-add-attachment a)
+      (should (equal "compare [image 1] with" (harness-compose-text)))
+      (should (= (point) (+ harness-compose-start (length "compare [image 1] "))))
+      ;; Point out of the box: the end of the box.
+      (goto-char (point-min))
+      (harness-compose-add-attachment b)
+      (harness-compose-add-attachment notes)
+      (should (equal "compare [image 1] with [image 2] " (harness-compose-text)))
+      (should (equal '("image 1" "image 2" nil) (harness-ui-compose-test--labels)))
+      ;; The list names each image by its token.
+      (save-excursion
+        (goto-char (point-min))
+        (should (search-forward "[image 1] clip-" harness-compose-start t))
+        (should (search-forward "[image 2] clip-" harness-compose-start t))
+        (should-not (search-forward "[image" harness-compose-start t)))
+      ;; The model gets the label with the image.
+      (should (equal '(:label "image 2") (plist-get (harness-compose-attachment-block (nth 1 harness-compose-attachments))
+                                                   :_harness)))
+      (should-not (plist-member (harness-compose-attachment-block (nth 2 harness-compose-attachments)) :_harness))
+      ;; Each token is a chip over its text, which point steps over whole.
+      (let ((ov (car harness-compose--token-overlays)))
+        (should (equal '("image 1" "image 2")
+                       (mapcar (lambda (o) (overlay-get o 'harness-compose-label)) harness-compose--token-overlays)))
+        (should (equal "[image 1]" (buffer-substring-no-properties (overlay-start ov) (overlay-end ov))))
+        (should (equal "[image 1]" (substring-no-properties (overlay-get ov 'display))))
+        (should (string-match-p "mouse-1: open" (overlay-get ov 'help-echo))))
+      ;; The numbers go on from the highest attached.
+      (harness-compose-remove-attachment a)
+      (should (equal "compare with [image 2] " (harness-compose-text)))
+      (should (equal '("image 2" nil) (harness-ui-compose-test--labels)))
+      (harness-compose-add-attachment a)
+      (should (equal '("image 2" nil "image 3") (harness-ui-compose-test--labels)))
+      (should (equal "compare with [image 2] [image 3] " (harness-compose-text)))
+      ;; A new message starts again at 1.
+      (harness-compose-clear)
+      (harness-compose-add-attachment b)
+      (should (equal "[image 1] " (harness-compose-text)))
+      (should (equal '("image 1") (harness-ui-compose-test--labels))))))
+
+(ert-deftest harness-ui-compose-image-tokens-and-attachments-agree ()
+  "After every command the box's tokens and its images agree.
+DEL right after a token deletes it whole and removes its image, and
+undo brings both back; a token killed and yanked, or typed, back brings
+its image back; the × of an image's line takes its token too.  The keys
+go through the command loop."
+  (harness-ui-compose-test-with
+    (let ((a (plist-get (harness-media-ring-save harness-test-png "image/png") :path))
+          (b (plist-get (harness-media-ring-save (concat harness-test-png "b") "image/png") :path))
+          (kill-ring nil) (kill-ring-yank-pointer nil)
+          (interprogram-cut-function nil) (interprogram-paste-function nil))
+      (goto-char harness-compose-end)
+      (execute-kbd-macro "see ")
+      (harness-ui-compose-test--attaching a (execute-kbd-macro (kbd "C-c C-a")))
+      (execute-kbd-macro "and ")
+      (harness-ui-compose-test--attaching b (execute-kbd-macro (kbd "C-c C-a")))
+      (should (equal "see [image 1] and [image 2] " (harness-compose-text)))
+      ;; Point never rests inside a token.
+      (goto-char (+ harness-compose-start (length "see [image 1] and ")))
+      (execute-kbd-macro (kbd "C-f"))
+      (should (= (point) (+ harness-compose-start (length "see [image 1] and [image 2]"))))
+      ;; DEL right after a token deletes the whole of it, and its image.
+      (goto-char (+ harness-compose-start (length "see [image 1]")))
+      (execute-kbd-macro (kbd "DEL"))
+      (should (equal "see  and [image 2] " (harness-compose-text)))
+      (should (equal '("image 2") (harness-ui-compose-test--labels)))
+      (save-excursion (goto-char (point-min)) (should-not (search-forward "[image 1]" harness-compose-start t)))
+      ;; Undo brings both back, the image in its place in the list.
+      (execute-kbd-macro (kbd "C-/"))
+      (should (equal "see [image 1] and [image 2] " (harness-compose-text)))
+      (should (equal (list a b) (mapcar (lambda (x) (plist-get x :path)) harness-compose-attachments)))
+      (should (equal '("image 1" "image 2") (harness-ui-compose-test--labels)))
+      (should (equal "The transcript.\n" (harness-ui-compose-test--transcript)))
+      ;; Killed, the tokens take their images along; yanked, back they come.
+      (goto-char harness-compose-end)
+      (execute-kbd-macro (kbd "C-a C-k"))
+      (should (equal "" (harness-compose-text)))
+      (should-not harness-compose-attachments)
+      (execute-kbd-macro (kbd "C-y"))
+      (should (equal "see [image 1] and [image 2] " (harness-compose-text)))
+      (should (equal '("image 1" "image 2") (harness-ui-compose-test--labels)))
+      ;; The × of an image's line removes its token too, and typing the
+      ;; token back brings the image back.
+      (harness-compose-remove-attachment a)
+      (should (equal "see and [image 2] " (harness-compose-text)))
+      (should (equal '("image 2") (harness-ui-compose-test--labels)))
+      (goto-char harness-compose-end)
+      (execute-kbd-macro "[image 1]")
+      (should (equal '("image 1" "image 2") (harness-ui-compose-test--labels)))
+      ;; What is sent: the text with its tokens, the images with labels.
+      (pcase-let ((`(,text . ,atts) (harness-compose-take)))
+        (should (equal "see and [image 2] [image 1]" text))
+        (should (equal '("image 1" "image 2") (mapcar (lambda (x) (plist-get x :label)) atts))))
+      ;; Images attached without a label (a draft from before) are left alone.
+      (harness-compose-clear)
+      (setq harness-compose-attachments (list (harness-compose--file-attachment a)))
+      (execute-kbd-macro "x")
+      (should (equal (list a) (mapcar (lambda (x) (plist-get x :path)) harness-compose-attachments))))))
+
+(ert-deftest harness-ui-compose-undo-follows-the-box ()
+  "Undo changes the box's text even after the host drew more above it.
+The host draws with undo off, so what it draws above the box moves the
+box's text but not the undo entries: they move with the box, and undo
+never reaches the read-only text."
+  (harness-ui-compose-test-with
+    (let ((notes (expand-file-name "notes.txt" dir)))
+      (with-temp-file notes (insert "notes"))
+      (goto-char harness-compose-end)
+      (execute-kbd-macro "hello")
+      ;; A line drawn above the box, as attaching a file draws one.
+      (harness-compose-add-attachment notes)
+      (goto-char harness-compose-end)
+      ;; C-e first, so the typing is an undo step of its own.
+      (execute-kbd-macro (kbd "C-e SPC t h e r e"))
+      (should (equal "hello there" (harness-compose-text)))
+      (harness-compose-remove-attachment notes)
+      (execute-kbd-macro (kbd "C-/"))
+      (should (equal "hello" (harness-compose-text)))
+      (should (equal "The transcript.\n" (harness-ui-compose-test--transcript))))))
 
 ;;;; Finding files
 

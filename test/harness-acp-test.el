@@ -402,6 +402,26 @@ Once the turn ends the message runs as a turn of its own."
         (should (equal "a hint" (plist-get node :content)))
         (should (equal sid (plist-get node :session)))))))
 
+(ert-deftest harness-acp-local-prompt-image-keeps-its-label ()
+  "An image block's `_harness.label', its token in the text, reaches the transcript.
+The compose box sends it, [image 1] in the text naming the image
+labelled image 1; an image without one, from any other client, has none."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn))
+           (data (base64-encode-string harness-test-png t)))
+      (harness-acp-test-request conn "session/prompt"
+                                (list :sessionId sid
+                                      :prompt (list (list :type "text" :text "look at [image 1]")
+                                                    (list :type "image" :mimeType "image/png" :data data
+                                                          :_harness (list :label "image 1"))
+                                                    (list :type "image" :mimeType "image/png" :data data))))
+      (let ((node (car (harness-call 'session/nodes sid))))
+        (should (equal "look at [image 1] [image]" (plist-get node :content)))
+        (should (equal '(("text" nil) ("image" "image 1") ("image" nil))
+                       (mapcar (lambda (b) (list (plist-get b :type) (plist-get b :label)))
+                               (plist-get node :blocks))))))))
+
 (ert-deftest harness-acp-local-errors ()
   (harness-acp-test-with
     (let* ((conn (harness-acp-test-connect))

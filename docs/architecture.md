@@ -3594,6 +3594,48 @@ attaches them too (`harness-compose-yank-media`).  The box binds no
 `C-c C-v`: in a chat that is the review banner's [Verify], so the two
 never fight, and other MIME types are chosen from with
 `M-x harness-compose-attach-clipboard`.
+Image tokens: an image attached however (`harness-compose--attach`) gets
+a `:label`, "image 1", and its token, `[image 1]`, goes into the text
+where point is in the box, else at its end (a download's always at the
+end, as it lands later), kept apart from the words around it.  The
+token is plain text, so it survives redraws, drafts, queueing and
+editing a queued item like the rest of the message; an overlay per
+token (`harness-compose--show-tokens`) shows it as a chip: a thumbnail
+a line high in its `before-string` (an image inside a `display` string
+would not draw) and the token as a link in its `display`, which the
+command loop's point adjustment makes point step over whole.  After
+every command `harness-compose--sync-tokens` makes text and attachments
+agree: what is left of a token cut short goes too, an image whose
+tokens are all gone is detached and kept in `harness-compose--detached`,
+and one kept there whose token is back (undo, yank, typing) comes back
+in label order; × deletes an image's tokens with it.  New text
+(`harness-compose-set`, `harness-compose-insert` with TEXT) forgets the
+kept images.  Numbers never change once given, since a sentence names
+them: a new image takes one more than the highest attached, so deleting
+the last frees its number and one in the middle leaves a gap, and each
+message starts at 1.  Unlabelled images (a draft from before) and other
+files take no part.  The attachment lines stay, each image's led by its
+token, since they also show files that are no images, downloads in
+flight, size, the larger thumbnail and ×.  `harness-compose-attachment-block`
+puts the label in the ACP image block's `_harness.label`;
+`harness-acp--block-from-acp` makes it the block's `:label`, which
+`harness-agent-attachments-to-blocks` keeps for queued messages and
+tasks.  `harness-agent--prepare-content` puts a text block of the token
+right before each labelled image of a user message for every provider
+(Copilot also names the image's blob after it), and
+`harness-agent--blocks-text` leaves out the image placeholder of a
+labelled image the text names already.  Queued items sent as one
+message number their images on across it (`harness-agent--queue-blocks`,
+tokens rewritten with them).  The chat styles the tokens of a user
+message's labelled images in its text and puts each image's token over
+it (`harness-chat--mark-image-tokens`, `harness-chat--blocks-string`).
+Undo in the box: hosts draw with undo off, so what they draw above the
+box moves its text but not the positions its undo entries record, and
+undoing right after attaching (its line drawn above the box) would
+change the read-only text.  `harness-compose--line-up-undo`, on
+`pre-command-hook` and `before-change-functions`, moves every position
+in `buffer-undo-list` (in place, so `pending-undo-list` follows) by as
+much as the box's start moved since the last time.
 Completion reads the project's files and the skills when it is asked,
 so a token typed before they arrived is offered them once they have.
 Popups that show as you type (corfu's `corfu-auto`, company) give up

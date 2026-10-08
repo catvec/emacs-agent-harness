@@ -373,6 +373,21 @@ that key is the review banner's `[Verify]`, so a screenshot never has
 to fight the banner's key. Set
 `harness-compose-yank-media` to nil to leave `C-y` and `M-y` alone.
 
+Each image you attach, paste or drop also puts a token into the message
+where point is (or at its end): `[image 1]`, `[image 2]`, and so on. It
+shows as a small chip with the image's thumbnail, so you can write
+"in [image 2] the button is cut off" and the model knows which
+screenshot you mean: it gets the same `[image 2]` right before that
+image. Delete a token (`DEL` right after it takes it whole) and its
+image goes with it; undo or yank the token back and the image returns.
+The `×` on an image's line removes its tokens too. Numbers never shift
+under a sentence you already wrote: a new image takes the number after
+the highest one attached, and every message starts again at 1. The
+attachment lines above the box stay, each image's leading with its
+token, since they also hold files that are not images, downloads still
+on their way, and the larger thumbnail, size and `×`. In the transcript
+the tokens keep their look, and each image has its token over it.
+
 Permission requests and questions from the agent appear inline above
 the compose box. An indicator in the mode line, visible from any buffer,
 shows how many sessions need your attention. Clicking it opens the
