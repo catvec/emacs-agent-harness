@@ -673,12 +673,18 @@ overflows the matcher."
 
 ;;;; User options
 
+(declare-function harness-policy-refuse "harness-policy" (option))
+
 (defun harness-save-user-option (symbol value)
   "Set SYMBOL to VALUE here and persist it in the user's custom file.
 The custom file belongs to the Emacs showing the UI, which may not be
 this one (see harness-server.el), so the save is asked of the UI over
 `client/request'; without a UI it is done here when a custom file is
-in use.  Returns nothing useful; failures are logged."
+in use.  Signal an error, changing nothing, when the policy sets SYMBOL
+\(see harness-policy.el).  Returns nothing useful; failures to save are
+logged."
+  (when (fboundp 'harness-policy-refuse)
+    (harness-policy-refuse symbol))
   (customize-set-variable symbol value)
   (if (and (fboundp 'harness-method-exists-p) (harness-method-exists-p 'client/request))
       (harness-catch (harness-call-async 'client/request "_harness/client/customize-save"

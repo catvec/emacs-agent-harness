@@ -118,6 +118,23 @@ overwrote the user's saved agent details with a dead one."
             (should (equal "ok\nexit 0" (plist-get (harness-tools-shell-test--call "bash" :command "echo ok") :content)))))
       (harness-sandbox-detect))))
 
+(ert-deftest harness-tools-shell-bash-sandbox-required-without-the-module ()
+  "A required sandbox, as a policy sets it, refuses a command when the
+sandbox module is not loaded, rather than run it unconfined."
+  (harness-test-reset-bus)
+  (harness-tools-shell-test--setup)
+  (harness-test-load-module 'project)
+  (harness-test-load-module 'config)
+  (should-not (harness-method-exists-p 'sandbox/wrap))
+  (harness-tools-shell-test-in-dir
+    (harness-test-with-policy '((harness-sandbox-policy . required))
+      (let ((r (harness-tools-shell-test--call "bash" :command "echo leaked")))
+        (should (plist-get r :is-error))
+        (should (string-search "the sandbox module is not loaded" (plist-get r :content)))
+        (should-not (string-search "leaked" (plist-get r :content)))))
+    (should (equal "ok\nexit 0"
+                   (plist-get (harness-tools-shell-test--call "bash" :command "echo ok") :content)))))
+
 (ert-deftest harness-tools-shell-bash-runs-inside-bwrap ()
   "With bwrap available the command sees the sandbox HOME, not the real one."
   (harness-tools-shell-test--setup)

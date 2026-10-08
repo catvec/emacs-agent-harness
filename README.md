@@ -1316,7 +1316,42 @@ It leaves alone:
 
 The settings page does not list the option, and no ACP client can
 change it. If you change it later with `setopt` or Customize, the
-harness process restarts so that the change reaches it.
+harness process restarts so that the change reaches it. An
+administrator can force it on with a policy (below).
+
+## Policy
+
+An administrator can fix settings so that the user cannot change them,
+as Claude Code's managed settings do. The policy is a file only root
+can write, `/etc/harness/policy.el` on Linux and macOS, holding one
+alist of options and values. It is read as data and never evaluated:
+
+```elisp
+;; /etc/harness/policy.el
+((harness-corporate-mode . t)
+ (harness-disabled-modules . nil)
+ (harness-permission-mode . ask)
+ (harness-sandbox-policy . required)
+ (harness-allowed-models . ("claude:*")))
+```
+
+Each setting is then unset (its default), set by you or your project,
+or set by policy. A policy value wins over the others, and nothing
+changes it: not the settings page, `setopt`, Customize, `setq`,
+`.dir-locals.el`, an ACP client or an agent. The settings page shows
+such settings locked, and says where the policy is.
+
+Sessions keep the model, permission mode and thinking level a policy
+fixes. A policy on the permission rules or the allowed directories
+removes the "Always" answers from prompts. `harness-allowed-models`,
+which anyone can set, keeps the harness to some models and refuses
+requests for others.
+
+A policy file that cannot be read, or that does not hold a valid
+policy, stops the harness from starting rather than being ignored. The
+file is read again by `harness-reload`. [docs/policy.md](docs/policy.md)
+has the whole design: why that path, what each setting means under a
+policy, and what a policy does not protect against.
 
 ## Persistence
 
