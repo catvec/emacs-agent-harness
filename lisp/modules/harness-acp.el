@@ -758,10 +758,14 @@ shared secret when `harness-acp-token' is set."
     :empty))
 
 (defun harness-acp--block-from-acp (block)
-  "Turn an ACP prompt content BLOCK into a harness content block."
+  "Turn an ACP prompt content BLOCK into a harness content block.
+An image's `_harness.label', the token naming it in the message's text
+\(image 1 for [image 1]), becomes its `:label'."
   (pcase (plist-get block :type)
     ("text" (list :type "text" :text (or (plist-get block :text) "")))
-    ("image" (list :type "image" :mime (plist-get block :mimeType) :data (plist-get block :data)))
+    ("image" (let ((label (plist-get (plist-get block :_harness) :label)))
+               (append (list :type "image" :mime (plist-get block :mimeType) :data (plist-get block :data))
+                       (and (stringp label) (not (string-empty-p label)) (list :label label)))))
     ("audio" (list :type "audio" :mime (plist-get block :mimeType) :data (plist-get block :data)))
     ("resource_link"
      (let ((uri (or (plist-get block :uri) "")))
