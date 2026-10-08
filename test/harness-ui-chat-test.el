@@ -258,6 +258,70 @@ summary made for a handoff says so."
             (funcall action))
           (should (equal file visited)))))))
 
+(ert-deftest harness-ui-chat-call-the-harness-recorded ()
+  "A tool call the harness recorded (the merge queue's conflict resolver,
+as a spawn_agent call) renders and folds like the agent's own, but is
+no part of the agent's turn: it names who made it where the agent's
+header would stand, runs until its result comes whatever the session
+does, and links the session it started.  The agent's next block opens
+a turn of its own, and a redraw renders the same."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Fixer"))
+           (rid (harness-ui-chat-test-session "Merge child"))
+           (from (harness-sender-system "merge queue"))
+           (opened nil))
+      (harness-call 'session/append sid '(:kind user :content "fix the parser"))
+      (harness-call 'session/append sid '(:kind assistant :content "Fixed it."))
+      (harness-call 'session/hint sid "Merge into main has conflicts in README; session Merge child resolves them")
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "spawn_agent" :call-id "m1"
+                                              :title "Sub-agent: Merge child"
+                                              :input (list :name "Merge child" :prompt "Resolve the conflicts in README.")
+                                              :meta (list :from from :child-id rid)))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (cl-flet ((check (done)
+                    (with-current-buffer buf
+                      (let* ((case-fold-search nil)
+                             (block (car (harness-ui-chat-test-blocks buf "tool-call")))
+                             (sender (harness-ui-chat-test-find buf "System · merge queue"))
+                             (title (harness-ui-chat-test-find buf "Sub-agent"))
+                             (link (harness-ui-chat-test-find buf "session: Merge child" title)))
+                        ;; The harness's, not the agent's: the one Agent header is the reply's.
+                        (should (= 1 (how-many "^System · merge queue$" (point-min) (point-max))))
+                        (should (< (harness-ui-chat-test-find buf "Fixed it.") sender title))
+                        (should (= (if done 2 1) (how-many "^Agent$" (point-min) (point-max))))
+                        ;; Folded like any call, the link to its session in sight.
+                        (should (= 1 (length (harness-ui-chat-test-blocks buf "tool-call"))))
+                        (should-not (harness-ui-chat-test-blocks buf "tool-result"))
+                        (should (harness-chat-block-collapsed block))
+                        (should link)
+                        (should-not (invisible-p (1- link)))
+                        (should (invisible-p (1- (harness-ui-chat-test-find buf "Resolve the conflicts in README." link))))
+                        (setq opened nil)
+                        (cl-letf (((symbol-function 'harness-open-session) (lambda (id &rest _) (setq opened id))))
+                          (funcall (get-text-property (1- link) 'harness-chat-action)))
+                        (should (equal rid opened))
+                        ;; Running while the session idles, until its result comes.
+                        (let ((status (save-excursion (goto-char title)
+                                                      (buffer-substring (line-beginning-position) (line-end-position)))))
+                          (if done
+                              (should (string-match-p (regexp-quote (harness-ui-icon 'harness-icon-success)) status))
+                            (should (string-match-p "running" status))))))))
+          (check nil)
+          ;; The result joins the call's block.
+          (harness-call 'session/append sid (list :kind 'tool-result :call-id "m1" :output "Resolved."
+                                                  :meta (list :from from :child-id rid)))
+          ;; The agent's next reply opens a turn of its own.
+          (harness-call 'session/append sid '(:kind assistant :content "Back to work."))
+          (harness-test-wait (lambda () (harness-ui-chat-test-find buf "Back to work.")) 5 "the reply")
+          (check t)
+          (with-current-buffer buf
+            (should (< (harness-ui-chat-test-find buf "Sub-agent")
+                       (harness-ui-chat-test-find buf "Agent" (harness-ui-chat-test-find buf "Sub-agent"))
+                       (harness-ui-chat-test-find buf "Back to work.")))
+            (harness-chat-redraw)
+            (harness-test-wait (lambda () (not harness-chat--loading)) 5 "redrawn"))
+          (check t))))))
+
 (ert-deftest harness-ui-chat-messages-the-user-did-not-write ()
   "A message the harness or another session sent names its sender, not \"You\",
 on a background and bar of its own; the user's own messages are as before."

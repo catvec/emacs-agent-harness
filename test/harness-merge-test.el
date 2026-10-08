@@ -7,7 +7,10 @@
 (defvar harness-merge--queues)
 (defvar harness-merge--locks)
 (defvar harness-merge--holds)
+(defvar harness-merge--calls)
+(defvar harness-merge--timers)
 (defvar harness-merge--hold-timeout)
+(defvar harness-session-interrupted-output)
 (defvar harness-merge-conflict-resolver)
 (defvar harness-provider-demo-script-override)
 
@@ -61,6 +64,7 @@ Binds `base', `root' (a git repo), `parent' (a session at ROOT) and
      (clrhash harness-merge--queues)
      (clrhash harness-merge--locks)
      (clrhash harness-merge--holds)
+     (clrhash harness-merge--calls)
      (harness-define-tool "list_dir" :label "List directory" :description "list" :kind 'read
                           :handler (lambda (input _ctx) (format "listing of %s" (plist-get input :path))))
      (harness-add-filter 'permission/decide
@@ -87,6 +91,28 @@ Binds `base', `root' (a git repo), `parent' (a session at ROOT) and
 (defun harness-merge-test--merge-done (sid)
   "Run the merge_done tool in SID and return its result."
   (harness-test-await (harness-call 'tools/execute sid (list :id (harness-short-id) :name "merge_done" :input nil))))
+
+(defun harness-merge-test--outside (sid kind)
+  "Return the nodes of KIND (tool-call, tool-result) the harness recorded in SID."
+  (cl-remove-if-not (lambda (n) (and (eq (plist-get n :kind) kind) (harness-outside-node-p n)))
+                    (harness-call 'session/nodes sid)))
+
+(defun harness-merge-test--position (sid pred)
+  "Return the position in SID's transcript of the first node PRED accepts."
+  (cl-position-if pred (harness-call 'session/nodes sid)))
+
+(defun harness-merge-test--hint-p (regexp)
+  "Return a predicate accepting a hint node whose text matches REGEXP."
+  (lambda (n) (and (eq (plist-get n :kind) 'hint) (string-match-p regexp (plist-get n :content)))))
+
+(defun harness-merge-test--tool-blocks (messages)
+  "Return the blocks of provider MESSAGES about tool calls.
+Those are tool uses, tool results and the text a stray result becomes."
+  (cl-loop for m in messages
+           append (cl-remove-if-not
+                   (lambda (b) (or (member (plist-get b :type) '("tool_use" "tool_result"))
+                                   (string-prefix-p "[Result of tool call" (or (plist-get b :text) ""))))
+                   (plist-get m :content))))
 
 (ert-deftest harness-merge-enqueue-validates ()
   (harness-merge-test-with
@@ -277,7 +303,208 @@ Binds `base', `root' (a git repo), `parent' (a session at ROOT) and
       (should (equal "parent version\n"
                      (with-temp-buffer (insert-file-contents (expand-file-name "README" root)) (buffer-string))))
       (should (null (harness-call 'merge/queue parent)))
-      (should (null (gethash parent harness-merge--locks))))))
+      (should (null (gethash parent harness-merge--locks)))
+      ;; Its spawn_agent call in the child failed: the reply and why,
+      ;; recorded before the news that the merge failed.
+      (let ((result (car (harness-merge-test--outside child 'tool-result))))
+        (should (= 1 (length (harness-merge-test--outside child 'tool-call))))
+        (should (equal (plist-get (car (harness-merge-test--outside child 'tool-call)) :call-id)
+                       (plist-get result :call-id)))
+        (should (plist-get result :is-error))
+        (should (string-match-p "I cannot resolve this\\." (plist-get result :output)))
+        (should (string-match-p "stopped (end-turn) without calling merge_done" (plist-get result :output)))
+        (should (< (harness-merge-test--position child (lambda (n) (equal (plist-get n :id) (plist-get result :id))))
+                   (harness-merge-test--position child (harness-merge-test--hint-p "finished: failed"))))))))
+
+(ert-deftest harness-merge-fresh-resolver-shows-as-a-spawn-agent-call ()
+  "The fresh resolver shows in the child's transcript as a spawn_agent
+call: the call when it starts, after the hint saying why, and its
+result -- the resolver's last reply -- when it stops.  The merge queue
+made both, so the child's model never gets them: its next request is
+the same as without them, with no call left unpaired."
+  (harness-merge-test-with
+    (harness-merge-test--conflict-setup wt root)
+    (let* ((finished nil) (resolvers nil) (child-requests nil)
+           (parent-head (string-trim (harness-merge-test--git root "rev-parse" "HEAD")))
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (cond
+               ((equal child (plist-get (plist-get request :session) :id))
+                (push (plist-get request :messages) child-requests)
+                '((:type text :delta "Hello.") (:type done :stop-reason end-turn)))
+               ((harness-provider-demo--has-tool-results-p request)
+                '((:type text :delta "Resolved: kept both sides.") (:type done :stop-reason end-turn)))
+               (t
+                (ignore-errors (harness-merge-test--git wt "merge" "-q" parent-head))
+                (harness-merge-test--write wt "README" "resolved version\n")
+                (harness-merge-test--git wt "add" "README")
+                (harness-merge-test--git wt "commit" "-q" "--no-edit")
+                '((:type tool-call :id "md-1" :name "merge_done" :input nil)))))))
+      (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
+      (harness-on 'merge/resolver (lambda (_c _p r) (push r resolvers)))
+      (harness-call 'merge/enqueue child parent)
+      (harness-test-wait (lambda () (and finished (harness-merge-test--outside child 'tool-result)))
+                         15 "the merge and the call's result")
+      (should (equal (list child parent 'merged) (car finished)))
+      (let* ((rid (car resolvers))
+             (calls (harness-merge-test--outside child 'tool-call))
+             (call (car calls))
+             (result (car (harness-merge-test--outside child 'tool-result)))
+             (prompt (plist-get (cl-find-if (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes rid))
+                                :content)))
+        ;; One call, as the child's own spawn_agent call would be, naming the resolver.
+        (should (= 1 (length calls)))
+        (should (equal "spawn_agent" (plist-get call :tool)))
+        (should (equal "Merge child" (plist-get (plist-get call :input) :name)))
+        (should (equal prompt (plist-get (plist-get call :input) :prompt)))
+        (should (equal (harness-sender-system "merge queue") (harness-node-sender call)))
+        (should (equal rid (plist-get (plist-get call :meta) :child-id)))
+        ;; After the hint that says why.
+        (should (< (harness-merge-test--position child (harness-merge-test--hint-p "session Merge child resolves them"))
+                   (harness-merge-test--position child (lambda (n) (equal (plist-get n :id) (plist-get call :id))))))
+        ;; Its result: the resolver's last reply and footer, a success.
+        (should (equal (plist-get call :call-id) (plist-get result :call-id)))
+        (should-not (plist-get result :is-error))
+        (should (string-match-p "\\`Resolved: kept both sides\\." (plist-get result :output)))
+        (should (string-match-p (regexp-quote (format "[sub-agent session: %s, 1 tool calls, cost " rid))
+                                (plist-get result :output)))
+        (should (string-match-p "merge_done queued the branch to merge again" (plist-get result :output)))
+        (should (equal (harness-sender-system "merge queue") (harness-node-sender result)))
+        (should (equal rid (plist-get (plist-get result :meta) :child-id)))
+        (should (numberp (plist-get (plist-get result :meta) :duration))))
+      ;; The child was never prompted, and its model sees none of it.
+      (should-not (cl-find-if (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes child)))
+      (should (null (harness-call 'session/messages child)))
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt child "hello")) :stop-reason)))
+      (should (= 1 (length child-requests)))
+      (should (equal '(user) (mapcar (lambda (m) (plist-get m :role)) (car child-requests))))
+      (should-not (harness-merge-test--tool-blocks (car child-requests)))
+      ;; Answered once.
+      (should (= 1 (length (harness-merge-test--outside child 'tool-result)))))))
+
+(ert-deftest harness-merge-fresh-resolver-timeout-answers-its-call ()
+  "A resolver still at work when its conflict times out is stopped, and
+its call in the child gets its result then: once, before the news that
+the merge was aborted, which happens once."
+  (harness-merge-test-with
+    (harness-merge-test--conflict-setup wt root)
+    (harness-define-tool "stall" :label "Stall" :description "never returns" :kind 'read
+                         :handler (lambda (_input _ctx) (harness-with-promise (resolve reject) (ignore resolve reject))))
+    (let ((harness-merge--hold-timeout 0.5) (finished nil) (resolvers nil)
+          (harness-provider-demo-script-override '((:type tool-call :id "w-1" :name "stall" :input nil))))
+      (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
+      (harness-on 'merge/resolver (lambda (_c _p r) (push r resolvers)))
+      (harness-call 'merge/enqueue child parent)
+      (harness-test-wait (lambda () finished) 10 "aborted")
+      (should (equal (list (list child parent 'aborted)) finished))
+      (let ((result (car (harness-merge-test--outside child 'tool-result))))
+        (should (plist-get result :is-error))
+        (should (string-match-p "the merge was aborted (not resolved within " (plist-get result :output)))
+        (should (string-match-p "so the sub-agent was stopped" (plist-get result :output)))
+        (should (< (harness-merge-test--position child (lambda (n) (equal (plist-get n :id) (plist-get result :id))))
+                   (harness-merge-test--position child (harness-merge-test--hint-p "finished: aborted")))))
+      ;; The resolver stops; that answers nothing again and finishes nothing again.
+      (harness-test-wait (lambda () (not (harness-call 'agent/running (car resolvers)))) 10 "the resolver stopped")
+      (accept-process-output nil 0.1)
+      (should (= 1 (length (harness-merge-test--outside child 'tool-result))))
+      (should (= 1 (length finished))))))
+
+(ert-deftest harness-merge-resolver-that-cannot-start-answers-its-call ()
+  "A resolver whose prompt fails at once still gets its call answered,
+before the news that the merge failed."
+  (harness-merge-test-with
+    (harness-merge-test--conflict-setup wt root)
+    (let ((finished nil)
+          (call-async (symbol-function 'harness-call-async)))
+      (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
+      (cl-letf (((symbol-function 'harness-call-async)
+                 (lambda (name &rest args)
+                   (if (and (eq name 'agent/prompt) (not (member (car args) (list child parent))))
+                       (harness-rejected (list 'harness-error "no model for you"))
+                     (apply call-async name args)))))
+        (harness-call 'merge/enqueue child parent)
+        (harness-test-wait (lambda () finished) 10 "failed"))
+      (should (equal (list (list child parent 'failed)) finished))
+      (let ((result (car (harness-merge-test--outside child 'tool-result))))
+        (should (= 1 (length (harness-merge-test--outside child 'tool-call))))
+        (should (= 1 (length (harness-merge-test--outside child 'tool-result))))
+        (should (plist-get result :is-error))
+        (should (string-match-p "(the sub-agent failed: .*no model for you" (plist-get result :output)))
+        (should (< (harness-merge-test--position child (lambda (n) (equal (plist-get n :id) (plist-get result :id))))
+                   (harness-merge-test--position child (harness-merge-test--hint-p "finished: failed"))))))))
+
+(ert-deftest harness-merge-resolver-refused-a-turn-answers-its-call ()
+  "A resolver whose turn never starts, refused at its gate, shows its
+call and the call's result at once, before the news that the merge failed."
+  (harness-merge-test-with
+    (harness-merge-test--conflict-setup wt root)
+    (let ((finished nil))
+      (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
+      (harness-add-filter 'agent/before-turn
+                          (lambda (value next session)
+                            (funcall next (if (eq (plist-get session :kind) 'subagent)
+                                              (list :proceed nil :reason "over budget" :final t)
+                                            value))
+                            nil)
+                          10)
+      (harness-call 'merge/enqueue child parent)
+      (harness-test-wait (lambda () finished) 10 "failed")
+      (should (equal (list (list child parent 'failed)) finished))
+      (let ((calls (harness-merge-test--outside child 'tool-call))
+            (results (harness-merge-test--outside child 'tool-result)))
+        (should (= 1 (length calls)))
+        (should (= 1 (length results)))
+        (should (equal (plist-get (car calls) :call-id) (plist-get (car results) :call-id)))
+        (should (plist-get (car results) :is-error))
+        (should (string-match-p "stopped (blocked) without calling merge_done" (plist-get (car results) :output)))
+        (should (< (harness-merge-test--position child (lambda (n) (equal (plist-get n :id) (plist-get (car calls) :id))))
+                   (harness-merge-test--position child (lambda (n) (equal (plist-get n :id) (plist-get (car results) :id))))
+                   (harness-merge-test--position child (harness-merge-test--hint-p "finished: failed"))))))))
+
+(ert-deftest harness-merge-resolver-call-is-answered-after-a-restart ()
+  "The resolver's call shows once its turn starts, the resolver running:
+a harness stopped from then on answers the call when it starts again,
+as it settles the resolver, though the child itself was not running."
+  (harness-merge-test-with
+    (harness-merge-test--conflict-setup wt root)
+    (harness-define-tool "stall" :label "Stall" :description "never returns" :kind 'read
+                         :handler (lambda (_input _ctx) (harness-with-promise (resolve reject) (ignore resolve reject))))
+    (let ((resolvers nil) (gate nil)
+          (harness-provider-demo-script-override '((:type tool-call :id "w-1" :name "stall" :input nil))))
+      (harness-on 'merge/resolver (lambda (_c _p r) (push r resolvers)))
+      ;; The resolver's turn waits at its gate.
+      (harness-add-filter 'agent/before-turn
+                          (lambda (value next session)
+                            (if (eq (plist-get session :kind) 'subagent)
+                                (setq gate (lambda () (funcall next value)))
+                              (funcall next value))
+                            nil)
+                          10)
+      (harness-call 'merge/enqueue child parent)
+      (harness-test-wait (lambda () gate) 10 "the resolver's turn at its gate")
+      ;; Not started, not running: no call yet.
+      (should-not (harness-merge-test--outside child 'tool-call))
+      (should-not (eq 'running (plist-get (harness-call 'session/get (car resolvers)) :status)))
+      (funcall gate)
+      (harness-test-wait (lambda () (harness-merge-test--outside child 'tool-call)) 10 "the call")
+      (should (eq 'running (plist-get (harness-call 'session/get (car resolvers)) :status)))
+      (should-not (harness-merge-test--outside child 'tool-result))
+      ;; The harness stops; the next one starts from what was saved.
+      (maphash (lambda (_child timer) (cancel-timer timer)) harness-merge--timers)
+      (clrhash harness-merge--timers)
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (clrhash harness-agent--turns)
+      (clrhash harness-merge--calls)
+      (harness-session--load-all)
+      (let ((call (car (harness-merge-test--outside child 'tool-call)))
+            (results (harness-merge-test--outside child 'tool-result)))
+        (should (= 1 (length results)))
+        (should (equal (plist-get call :call-id) (plist-get (car results) :call-id)))
+        (should (plist-get (car results) :is-error))
+        (should (equal harness-session-interrupted-output (plist-get (car results) :output)))
+        (should (equal (car resolvers) (plist-get (plist-get (car results) :meta) :child-id))))
+      (should (null (harness-call 'session/messages child))))))
 
 (ert-deftest harness-merge-keeps-local-work-in-the-parent ()
   "Uncommitted work in the parent's checkout in the merge's way is never touched."

@@ -393,8 +393,9 @@ Messages sent together stay apart as paragraphs."
 
 (defun harness-agent--handoff-item (node)
   "Return NODE as one item of a handoff, or nil for a node left out.
-Thinking is another model's own working and hints are the harness's."
-  (pcase (plist-get node :kind)
+Thinking is another model's own working and hints are the harness's,
+as are the tool calls it recorded (`harness-outside-node-p')."
+  (pcase (and (not (harness-outside-node-p node)) (plist-get node :kind))
     ('user
      (let ((from (harness-node-sender node)))
        (format "%s: %s" (if from (concat "Message from " (harness-sender-description from)) "User")
@@ -455,9 +456,12 @@ Otherwise MESSAGES is returned as it is."
          ;; and a note in the trailing messages already brings the provider
          ;; up to date, so the catch-up would only repeat it.
          (trailing (cl-loop for n in (reverse path)
-                            while (memq (plist-get n :kind) '(user hint tool-result compaction))
+                            while (or (memq (plist-get n :kind) '(user hint tool-result compaction))
+                                      (harness-outside-node-p n))
                             thereis (harness-node-handoff n)))
-         (missed (cl-remove-if #'harness-node-handoff (if own (nthcdr (1+ own) path) path)))
+         ;; Nor is a call the harness recorded, which no model made.
+         (missed (cl-remove-if (lambda (n) (or (harness-node-handoff n) (harness-outside-node-p n)))
+                               (if own (nthcdr (1+ own) path) path)))
          (models (delete-dups
                   (delq nil (mapcar (lambda (n)
                                       (let ((p (harness-agent--node-provider n)))
@@ -871,9 +875,13 @@ loop reads it in the content, a native one with its next request."
                                                :output (plist-get result :content)
                                                :is-error (plist-get result :is-error)
                                                :attachments (plist-get result :attachments)
-                                               :meta (list :duration (- (float-time) started)
-                                                           :denied (plist-get result :denied)
-                                                           :truncated (plist-get result :truncated)))))
+                                               :meta (append
+                                                      (list :duration (- (float-time) started)
+                                                            :denied (plist-get result :denied)
+                                                            :truncated (plist-get result :truncated))
+                                                      ;; The session a spawn_agent call ran.
+                                                      (let ((child (plist-get (plist-get result :meta) :child-id)))
+                                                        (and child (list :child-id child)))))))
                     (content (harness-agent--with-steering turn (plist-get result :content))))
                (harness-emit 'agent/tool-result sid rnode)
                (when respond

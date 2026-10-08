@@ -96,16 +96,19 @@ once it runs.")
 (defun harness-handoff--history-p (path)
   "Non-nil when PATH holds history a hosted loop would not be sent.
 That is anything a model or a tool wrote since the last compaction,
-whose summary opens what is sent."
+whose summary opens what is sent.  A tool call the harness recorded
+\(`harness-outside-node-p') is no model's history."
   (let ((start (cl-position 'compaction path :key (lambda (n) (plist-get n :kind)) :from-end t)))
-    (cl-some (lambda (n) (memq (plist-get n :kind) harness-handoff--history-kinds))
+    (cl-some (lambda (n) (and (memq (plist-get n :kind) harness-handoff--history-kinds)
+                              (not (harness-outside-node-p n))))
              (if start (nthcdr start path) path))))
 
 (defun harness-handoff--waiting-p (path)
   "Non-nil when a handoff waits in PATH's trailing user messages.
 Those come after the model's last reply, so a hosted loop is sent them."
   (cl-loop for n in (reverse path)
-           while (memq (plist-get n :kind) '(user hint tool-result compaction))
+           while (or (memq (plist-get n :kind) '(user hint tool-result compaction))
+                     (harness-outside-node-p n))
            thereis (harness-node-handoff n)))
 
 (defun harness-handoff--running-p (session-id)

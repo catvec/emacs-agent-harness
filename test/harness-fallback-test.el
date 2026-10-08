@@ -489,11 +489,22 @@ scoping the used-up window to one model narrows a whole-provider mark."
                 (harness-fallback-test-say "The project has three files.")
               (list (list :type 'tool-call :id "t1" :name "list_dir" :input (list :path "src"))
                     '(:type done :stop-reason tool-use)))))
-    (let ((sid (harness-fallback-test-session "hosted:h-one")))
+    (let ((sid (harness-fallback-test-session "hosted:h-one"))
+          (outside (lambda (sid call-id)
+                     ;; Work the harness ran and recorded on its own (the
+                     ;; merge queue's resolver): no model's, never handed over.
+                     (let ((from (harness-sender-system "merge queue")))
+                       (harness-call 'session/append sid (list :kind 'tool-call :tool "spawn_agent" :call-id call-id
+                                                               :input '(:name "Merge child" :prompt "resolve it")
+                                                               :meta (list :from from :child-id "r1")))
+                       (harness-call 'session/append sid (list :kind 'tool-result :call-id call-id
+                                                               :output "Resolved the merge."
+                                                               :meta (list :from from :child-id "r1")))))))
       (harness-fallback-test-prompt sid "first, on hosted")
       ;; By hand to alpha, then back to hosted.
       (harness-call 'session/update sid :model "alpha:a-mid")
       (harness-fallback-test-prompt sid "look at src")
+      (funcall outside sid "m1")
       (harness-call 'session/update sid :model "hosted:h-one")
       (setq harness-fallback-test-requests nil)
       (harness-fallback-test-prompt sid "what did you find?")
@@ -509,8 +520,11 @@ scoping the used-up window to one model narrows a whole-provider mark."
         (should (string-match-p "The newest message follows" text))
         ;; Its own earlier turn is not repeated; the new message comes as it is.
         (should-not (string-match-p "first, on hosted" text))
+        (should-not (string-match-p "spawn_agent\\|Resolved the merge" text))
         (should (equal "what did you find?" (plist-get (cadr blocks) :text))))
-      ;; Caught up: the next request carries the new message only.
+      ;; Caught up: the next request carries the new message only, even
+      ;; after more of the harness's own work.
+      (funcall outside sid "m2")
       (setq harness-fallback-test-requests nil)
       (harness-fallback-test-prompt sid "thanks")
       (let ((messages (plist-get (car harness-fallback-test-requests) :messages)))

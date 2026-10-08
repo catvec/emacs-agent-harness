@@ -682,9 +682,29 @@ transcript it points the new model at."
   "Block kinds the agent produces; a run of them is one agent turn.")
 
 (defun harness-chat--head-p (kind previous)
-  "Non-nil when a KIND block after a PREVIOUS-kind block starts an agent turn."
+  "Non-nil when a KIND block after a PREVIOUS-kind block starts an agent turn.
+Pass the kinds `harness-chat--turn-kind' gives."
   (and (member kind harness-chat--agent-kinds)
        (not (member previous harness-chat--agent-kinds))))
+
+(defun harness-chat--turn-kind (block)
+  "Return the kind of BLOCK as far as agent turns go.
+A tool call the harness recorded (`harness-outside-node-p'), such as
+the merge queue's conflict resolver, is no part of an agent turn: it
+reads \"outside\", which opens none, and the agent's block after it
+opens one again."
+  (and block
+       (if (harness-outside-node-p (harness-chat-block-node block))
+           "outside"
+         (harness-chat-block-kind block))))
+
+(defun harness-chat--outside-header (block)
+  "Return the sender line of BLOCK when the harness recorded its call, or nil.
+It names who did, as a message the user did not write does, where the
+agent's header would stand."
+  (let ((node (harness-chat-block-node block)))
+    (and (harness-outside-node-p node)
+         (harness-chat--margin (harness-chat--from-line (harness-node-sender node))))))
 
 (defun harness-chat--agent-header ()
   "Return the sender line that opens an agent turn."
@@ -732,16 +752,34 @@ group summary does."
                         (if (eq outcome 'denied) "The permission system refused this call, so it never ran"
                           "The tool ran and reported an error")))
 
-(defun harness-chat--tool-status (result)
+(defun harness-chat--tool-status (result &optional call)
   "Return the status string for a tool call with RESULT (a node or nil).
 A green circle when it ran, a yellow one while it runs or when it was
-refused, a red triangle when it ran and failed."
+refused, a red triangle when it ran and failed.  CALL is the call's
+node: one the harness recorded (`harness-outside-node-p') runs whatever
+the session does, until the harness records its result."
   (let ((outcome (harness-ui-tool-outcome result)))
-    (cond ((and (null result) (member (plist-get (harness-chat--session) :status) '("running" "blocked")))
+    (cond ((and (null result) (or (harness-outside-node-p call)
+                                  (member (plist-get (harness-chat--session) :status) '("running" "blocked"))))
            (harness-chat--status 'caution "running" "The call has not finished yet"))
           ((null result) (propertize "– no result" 'face 'harness-dim-face))
           ((memq outcome '(failed denied)) (harness-chat--outcome-status outcome))
           (t (harness-chat--status 'success nil "The tool ran and reported no error")))))
+
+(defun harness-chat--child-line (call result)
+  "Return the line linking the session a tool call started, or \"\".
+That is the sub-agent of a spawn_agent call, the `:child-id' in the
+`:meta' of CALL or of RESULT: the merge queue's call names its conflict
+resolver from the start, a model's spawn_agent call once it returns."
+  (let ((id (or (plist-get (plist-get call :meta) :child-id)
+                (plist-get (plist-get result :meta) :child-id))))
+    (if (and (stringp id) (not (string-empty-p id)))
+        (let ((name (harness-chat--session-name id (plist-get (plist-get call :input) :name))))
+          (concat (propertize "  session: " 'face 'harness-dim-face)
+                  (harness-chat--button name (lambda () (harness-open-session id))
+                                        :help (format "Open the session %s" name))
+                  "\n"))
+      "")))
 
 (defun harness-chat--render-tool (block)
   "Return the body of tool-call BLOCK (its result rendered with it)."
@@ -769,9 +807,10 @@ refused, a red triangle when it ran and failed."
                          (if call-only
                              (harness-ui-tool-title-string (plist-get node :tool) (plist-get node :title) 120)
                            (propertize title 'face 'harness-tool-title-face))
-                         "  " (harness-chat--tool-status result) "\n"))
+                         "  " (harness-chat--tool-status result (and call-only node)) "\n"))
          (line (and input (harness-chat--input-summary input title)))
-         (summary (if line (concat (propertize (concat "  " line) 'face 'harness-dim-face) "\n") ""))
+         (summary (concat (if line (concat (propertize (concat "  " line) 'face 'harness-dim-face) "\n") "")
+                          (harness-chat--child-line node result)))
          ;; What the user is shown of the result -- an image, a video
          ;; poster, an audio player -- stays above the fold: a folded
          ;; tool call still shows the picture it read.
@@ -957,9 +996,10 @@ It counts the calls by label, then the thinking folded between them."
                           (harness-chat--plain (or (plist-get (harness-chat-block-node block) :content)
                                                    (format "[%s]" kind))))))
                   (error (harness-chat--render-failed block err)))))
-         (text (concat (if (and (harness-chat-block-head block) (not (harness-chat-block-group block)))
-                           (harness-chat--agent-header)
-                         "")
+         (text (concat (cond ((harness-chat-block-group block) "")
+                             ((harness-chat--outside-header block))
+                             ((harness-chat-block-head block) (harness-chat--agent-header))
+                             (t ""))
                        body "\n")))
     (add-text-properties 0 (length text)
                          (list 'harness-chat-node (harness-chat-block-id block) 'read-only t 'rear-nonsticky t)
@@ -1065,8 +1105,7 @@ draws it, so carrying that over would keep drawing the old image."
   (let ((first (null harness-chat--order))
         (previous (and harness-chat--order (gethash (car harness-chat--order) harness-chat--blocks))))
     (setf (harness-chat-block-head block)
-          (harness-chat--head-p (harness-chat-block-kind block)
-                                (and previous (harness-chat-block-kind previous))))
+          (harness-chat--head-p (harness-chat--turn-kind block) (harness-chat--turn-kind previous)))
     (harness-chat--insert-block block (marker-position harness-chat--transcript-end))
     (set-marker harness-chat--transcript-end (marker-position (harness-chat-block-end block)))
     (push (harness-chat-block-id block) harness-chat--order)
@@ -1115,7 +1154,7 @@ it.  BLOCK must not be folded into a group."
     (setq harness-chat--order (delete id harness-chat--order)
           harness-chat--unfinished (delete id harness-chat--unfinished))
     (when newer
-      (let ((head (harness-chat--head-p (harness-chat-block-kind newer) (and older (harness-chat-block-kind older)))))
+      (let ((head (harness-chat--head-p (harness-chat--turn-kind newer) (harness-chat--turn-kind older))))
         (unless (eq (not head) (not (harness-chat-block-head newer)))
           (setf (harness-chat-block-head newer) head)
           (harness-chat--rerender newer))))))
@@ -1183,11 +1222,12 @@ session is blocked on it, and a group would hide it."
 (defun harness-chat--coalescable-block-p (id)
   "Non-nil when block ID is a tool call of a coalescable tool.
 A block whose result shows media is not coalescable, nor a call waiting
-on the user."
+on the user, nor one the harness recorded: it is no agent's."
   (when-let* ((b (gethash id harness-chat--blocks)))
     (and (equal (harness-chat-block-kind b) "tool-call")
          (not (harness-chat--block-shows-media-p b))
          (not (harness-chat--waiting-p b))
+         (not (harness-outside-node-p (harness-chat-block-node b)))
          (member (plist-get (harness-chat-block-node b) :tool) harness-chat--coalescable))))
 
 (defun harness-chat--thinking-block-p (id)
@@ -2041,7 +2081,7 @@ page from its top, and land near the top again."
         (setq harness-chat--order (butlast harness-chat--order drop)
               harness-chat--has-more t)
         ;; The new first block opens a turn, as it would at open.
-        (let ((head (harness-chat--head-p (harness-chat-block-kind keep) nil)))
+        (let ((head (harness-chat--head-p (harness-chat--turn-kind keep) nil)))
           (unless (eq (not head) (not (harness-chat-block-head keep)))
             (setf (harness-chat-block-head keep) head)
             (harness-chat--rerender keep)))
@@ -2064,14 +2104,14 @@ page from its top, and land near the top again."
                      (gethash (plist-get node :call-id) harness-chat--calls))
                 (push node results)
               (let ((block (harness-chat--new-block node)))
-                (setf (harness-chat-block-head block) (harness-chat--head-p (harness-chat-block-kind block) previous))
+                (setf (harness-chat-block-head block) (harness-chat--head-p (harness-chat--turn-kind block) previous))
                 (harness-chat--insert-block block pos)
                 (setq pos (marker-position (harness-chat-block-end block))
-                      previous (harness-chat-block-kind block))
+                      previous (harness-chat--turn-kind block))
                 (push (harness-chat-block-id block) ids))))
           (set-marker anchor pos)
           ;; The old first block may no longer open a turn.
-          (let ((head (harness-chat--head-p (harness-chat-block-kind first) previous)))
+          (let ((head (harness-chat--head-p (harness-chat--turn-kind first) previous)))
             (unless (eq (not head) (not (harness-chat-block-head first)))
               (setf (harness-chat-block-head first) head)
               (harness-chat--rerender first)))))

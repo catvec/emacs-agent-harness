@@ -128,6 +128,16 @@
       ;; Nothing the new model would miss.
       (harness-call 'session/append bare '(:kind user :content "an unanswered question"))
       (should-not (plist-get (harness-call 'handoff/check bare "hosted:m") :lossy))
+      ;; Nor in what the harness ran and recorded on its own (the merge
+      ;; queue's resolver, as a spawn_agent call): no model's history.
+      (let ((from (harness-sender-system "merge queue")))
+        (harness-call 'session/append bare (list :kind 'tool-call :tool "spawn_agent" :call-id "m1"
+                                                 :input '(:name "Merge child" :prompt "resolve")
+                                                 :meta (list :from from :child-id "r1")))
+        (harness-call 'session/append bare (list :kind 'tool-result :call-id "m1" :output "Resolved."
+                                                 :meta (list :from from :child-id "r1"))))
+      (should-not (plist-get (harness-call 'handoff/check bare "hosted:m") :history))
+      (should-not (plist-get (harness-call 'handoff/check bare "hosted:m") :lossy))
       ;; The new model's provider still holds the conversation: it resumes it.
       (harness-call 'session/set-provider-state sid '(:conv "c0" :provider "hosted"))
       (let ((check (harness-call 'handoff/check sid "hosted:m")))
