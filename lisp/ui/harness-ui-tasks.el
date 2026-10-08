@@ -222,7 +222,34 @@ are left out.  The board's search sets it (`harness-ui-tasks-search').")
 (defvar harness-ui-tasks-header-functions nil
   "Functions returning a segment of a board's header line, or nil.
 Each is called in the board's buffer as the header line is drawn; the
-segments show before [BTW], in order.")
+segments show before [BTW], in order, the board putting the separator
+in front.  A string joins the others into one segment, which makes room
+in a narrow window after the counts and before [BTW]; (TEXT PRIORITY
+MIN), as `harness-ui-fit-header' takes it, is a segment of its own with
+that priority.  The search shows its [Search] the first way, the
+companion pet its face the second.")
+
+(defvar harness-ui-tasks-corner-functions nil
+  "Functions drawing something at the right of the lines above the compose box.
+The lines between the board and the box -- the error, the compose
+label, the bulk banner and the settings -- narrow for it, as Claude
+Code's prompt narrows for its companion, rather than the board giving
+it lines of its own.  Each function is called in the board's buffer
+whenever those lines are drawn -- with the box, and as a window showing
+the board changes size -- with ROOM, the columns the lines have, and
+WIDTHS, the columns each of them takes whole, top first; the first to
+return non-nil draws, and it returns a plist:
+
+- `:beside', the strings ending the first lines, top first, each
+  starting with the space that aligns it to the window's edge;
+- `:reserve', the columns the lines `:beside' ends leave free for it;
+- `:above', whole lines, a string ending in a newline, going above all
+  the lines: what does not fit beside them.
+
+The lines stay together, above the box they are about.  The board fits
+its cards to the room they leave, and
+`harness-ui-tasks-redraw-tail-lines' draws them again when a function
+would draw something else.  The companion pet sits there this way.")
 
 (defun harness-ui-tasks--board-p (buffer)
   "Non-nil when BUFFER is a live task board.
@@ -1750,6 +1777,78 @@ writes it up, with settings of its own, so it counts as not started."
           (plist-get task :session)
         (list harness-ui-tasks--new #'harness-ui-tasks--set-new)))))
 
+(defun harness-ui-tasks--label-line (room messaging bar)
+  "The compose label, fitted to ROOM columns: what the box does, and the
+Submit / Refine toggle or [cancel].  MESSAGING is non-nil when the box
+sends to a session, BAR what starts the line."
+  (let* ((cancel (if harness-ui-tasks--target
+                     (concat "  " (harness-ui-tasks--button
+                                   "[cancel]" #'harness-ui-tasks-compose-reset
+                                   (if (eq (car harness-ui-tasks--target) 'answer)
+                                       "Back to a new task (C-g); the question stays waiting"
+                                     "Back to a new task (C-g)")
+                                   'harness-ui-tasks-compose-reset))
+                   ""))
+         (toggle (if harness-ui-tasks--target ""
+                   (concat "   " (harness-ui-tasks--mode-toggle)
+                           ;; Bulk editing has the current tasks' priority
+                           ;; on its settings line instead.
+                           (if (harness-ui-tasks--bulk-priority-p) ""
+                             (concat "   " (harness-ui-tasks--priority-toggle))))))
+         (icon (if messaging (concat (harness-ui-icon 'harness-icon-message) " ") ""))
+         (body (concat icon (harness-ui-tasks--compose-label)))
+         (label (harness-ui-tasks--fit (concat bar body)
+                                       (- room (string-width cancel) (string-width toggle)))))
+    ;; The bar, the icon and the label each keep their own look: the
+    ;; band behind them all, the accent on bar and icon, the label face
+    ;; on the text.
+    (let ((head (if messaging (+ (length bar) (length icon)) 0)))
+      (add-face-text-property head (length label) 'harness-label-face t label)
+      (when messaging
+        (add-face-text-property (length bar) (length label) 'harness-compose-message-accent-face t label)))
+    ;; Fitted again as a whole: the label shrinks to a minimum, the toggle not.
+    (harness-ui-tasks--fit (concat label toggle cancel) room)))
+
+(defun harness-ui-tasks--tail-lines (messaging band bar)
+  "The lines between the board and the compose box: (KEY FIT BAND) each.
+Top first: the error, the compose label, the bulk banner and the
+settings, those there are.  KEY names the line for redraws, FIT returns
+it fitted to the columns it is called with, BAND is the face behind it
+or nil.  MESSAGING and BAR are as `harness-ui-tasks--label-line' takes
+them."
+  (let ((lines nil))
+    (when harness-ui-tasks--error
+      (let ((text (propertize (concat "  " harness-ui-tasks--error) 'face 'harness-tool-error-face)))
+        (push (list 'error (lambda (room) (harness-ui-tasks--fit text room)) band) lines)))
+    (push (list 'label (lambda (room) (harness-ui-tasks--label-line room messaging bar)) band) lines)
+    (unless harness-ui-tasks--target
+      (when harness-ui-tasks--bulk
+        (let ((text (harness-ui-tasks--bulk-banner)))
+          (push (list 'bulk (lambda (room) (harness-ui-tasks--fit text room)) nil) lines)))
+      (let ((text (harness-ui-tasks--new-settings-line)))
+        (unless (string-empty-p text)
+          (push (list 'settings (lambda (room) (harness-ui-tasks--fit text room)) nil) lines))))
+    (nreverse lines)))
+
+(defun harness-ui-tasks--corner (room lines)
+  "What `harness-ui-tasks-corner-functions' draw beside LINES, or nil.
+LINES are as `harness-ui-tasks--tail-lines' returns them, ROOM the
+columns they have.  The functions cannot move point, where the lines
+go: they may measure text in a window, which takes the window's point."
+  (let ((widths (mapcar (lambda (line) (string-width (funcall (nth 1 line) most-positive-fixnum)))
+                        lines)))
+    (run-hook-wrapped 'harness-ui-tasks-corner-functions
+                      (lambda (fn) (ignore-errors (save-excursion (funcall fn room widths)))))))
+
+(defun harness-ui-tasks--insert-corner (text)
+  "Insert TEXT, whole lines of `harness-ui-tasks-corner-functions'.
+They are named for redraws, as the lines below them are."
+  (when (and (stringp text) (not (string-empty-p text)))
+    (let ((start (point)))
+      (insert text)
+      (unless (bolp) (insert "\n"))
+      (put-text-property start (point) 'harness-task-tail 'corner))))
+
 (defun harness-ui-tasks--insert-tail-head ()
   "Insert the error line, the compose label, the settings and the attachments.
 Each line is fitted to the window, like the board's: the buffer wraps
@@ -1757,54 +1856,25 @@ for the compose box, so a longer line would take two.  A new task's
 label carries the Submit / Refine toggle, which the label makes room
 for.  A box that sends to a session wears its message colours here too,
 the label, bar and band around it, so what submitting will do is plain
-before a key is pressed."
+before a key is pressed.  What `harness-ui-tasks-corner-functions'
+draw sits at the right of the lines, which narrow for it, and above
+them."
   (let* ((room (1- (harness-ui-tasks--width)))
          (messaging (harness-ui-tasks--messaging-p))
          (band (and messaging 'harness-compose-message-face))
          (bar (if messaging
                   (harness-compose-bar 'harness-compose-message-accent-face 'harness-compose-message-face)
-                " ")))
-    (when harness-ui-tasks--error
-      (harness-ui-tasks--insert-tail-line
-       'error (harness-ui-tasks--fit (propertize (concat "  " harness-ui-tasks--error)
-                                                 'face 'harness-tool-error-face)
-                                     room)
-       band))
-    (let* ((cancel (if harness-ui-tasks--target
-                       (concat "  " (harness-ui-tasks--button
-                                     "[cancel]" #'harness-ui-tasks-compose-reset
-                                     (if (eq (car harness-ui-tasks--target) 'answer)
-                                         "Back to a new task (C-g); the question stays waiting"
-                                       "Back to a new task (C-g)")
-                                     'harness-ui-tasks-compose-reset))
-                     ""))
-           (toggle (if harness-ui-tasks--target ""
-                     (concat "   " (harness-ui-tasks--mode-toggle)
-                             ;; Bulk editing has the current tasks' priority
-                             ;; on its settings line instead.
-                             (if (harness-ui-tasks--bulk-priority-p) ""
-                               (concat "   " (harness-ui-tasks--priority-toggle))))))
-           (icon (if messaging (concat (harness-ui-icon 'harness-icon-message) " ") ""))
-           (body (concat icon (harness-ui-tasks--compose-label)))
-           (label (harness-ui-tasks--fit (concat bar body)
-                                         (- room (string-width cancel) (string-width toggle)))))
-      ;; The bar, the icon and the label each keep their own look: the
-      ;; band behind them all, the accent on bar and icon, the label face
-      ;; on the text.
-      (let ((head (if messaging (+ (length bar) (length icon)) 0)))
-        (add-face-text-property head (length label) 'harness-label-face t label)
-        (when messaging
-          (add-face-text-property (length bar) (length label) 'harness-compose-message-accent-face t label)))
-      ;; Fitted again as a whole: the label shrinks to a minimum, the toggle not.
-      (harness-ui-tasks--insert-tail-line 'label (harness-ui-tasks--fit (concat label toggle cancel) room)
-                                          band))
-    (unless harness-ui-tasks--target
-      (when harness-ui-tasks--bulk
-        (harness-ui-tasks--insert-tail-line
-         'bulk (harness-ui-tasks--fit (harness-ui-tasks--bulk-banner) room)))
-      (let ((line (harness-ui-tasks--new-settings-line)))
-        (unless (string-empty-p line)
-          (harness-ui-tasks--insert-tail-line 'settings (harness-ui-tasks--fit line room)))))
+                " "))
+         (lines (harness-ui-tasks--tail-lines messaging band bar))
+         (corner (harness-ui-tasks--corner room lines))
+         (beside (plist-get corner :beside))
+         (reserve (or (plist-get corner :reserve) 0)))
+    (harness-ui-tasks--insert-corner (plist-get corner :above))
+    (cl-loop for (key fit band) in lines
+             for i from 0
+             for right = (nth i beside)
+             do (harness-ui-tasks--insert-tail-line
+                 key (if right (concat (funcall fit (- room reserve)) right) (funcall fit room)) band))
     (let ((start (point)))
       ;; The bar down every attachment's line.
       (harness-compose-insert-attachments (and messaging bar))
@@ -1840,6 +1910,17 @@ and point on those lines stays there."
       (set-marker harness-ui-tasks--list-end list-end)
       (harness-ui-tasks--restore places)
       (set-buffer-modified-p nil))))
+
+(defun harness-ui-tasks-redraw-tail-lines (&optional buffers)
+  "Draw the lines above the compose box of BUFFERS again, the box left alone.
+BUFFERS are boards, every board by default.  For a module whose
+`harness-ui-tasks-corner-functions' would draw something else now: each
+board then fits its cards to the room the lines leave."
+  (dolist (buffer (or buffers (harness-ui-tasks--buffers)))
+    (when (harness-ui-tasks--board-p buffer)
+      (with-current-buffer buffer
+        (harness-ui-tasks--refit-tail)
+        (harness-ui-tasks--schedule-render buffer)))))
 
 (defun harness-ui-tasks--mode-toggle ()
   "The Submit / Refine toggle above the compose box: the current mode.
@@ -2045,6 +2126,8 @@ the counts of completed, merging, pending and working tasks and the
 bulk-edit segment; the project's name shortens after those, then the
 other modules' segments (`harness-ui-tasks-header-functions', the
 search's [Search]) and [BTW] and [Archived], then the Review switch.
+Another module's segment with a priority of its own goes when that
+says: the companion pet's face before anything else.
 What the tasks cost and the plan's quota stay longer, the budget going
 first (`harness-ui-tasks--spend-segment'); what needs you, what waits
 for your review, [Refresh] and a board still loading stay longest.
@@ -2053,6 +2136,12 @@ WIDTH is as `harness-ui-fit-header' takes it."
          (counts (mapcar (lambda (g) (cons (car g) (length (cdr g)))) groups))
          (needs (alist-get 'needs-input counts))
          (review (alist-get 'review counts))
+         ;; Other modules' segments: strings join into one, lists stand
+         ;; on their own.
+         (extra (delq nil (mapcar (lambda (fn) (ignore-errors (funcall fn)))
+                                  harness-ui-tasks-header-functions)))
+         (joined (cl-remove-if-not #'stringp extra))
+         (own (cl-remove-if-not #'consp extra))
          (name (if harness-ui-tasks--project
                    (file-name-nondirectory (directory-file-name harness-ui-tasks--project))
                  (abbreviate-file-name (or harness-ui-tasks--dir ""))))
@@ -2066,48 +2155,54 @@ WIDTH is as `harness-ui-fit-header' takes it."
          (sep "   ")
          (gap (lambda () (prog1 sep (setq sep "  ")))))
     (harness-ui-fit-header
-     (list
-      (concat " " (propertize "Tasks" 'face 'bold))
-      (list (concat " " (propertize name 'face 'harness-dim-face))
-            50 (concat " " (propertize (harness-truncate-end name 6) 'face 'harness-dim-face)))
-      (and (> needs 0)
-           (list (concat (funcall gap)
-                         (propertize (format "%s %d need you" (harness-ui-icon 'harness-icon-blocked) needs)
-                                     'face 'harness-status-blocked-face))
-                 90))
-      (and (> review 0)
-           (list (concat (funcall gap)
-                         (propertize (format "%s %d to review" (harness-ui-icon 'harness-icon-task-review) review)
-                                     'face 'harness-task-review-face))
-                 88))
-      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-running) (alist-get 'active counts)) 45)
-      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-merging) (alist-get 'merging counts))
-            42)
-      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-pending) (alist-get 'pending counts))
-            40)
-      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-done) (alist-get 'done counts)) 25)
-      (harness-ui-tasks--spend-segment groups (funcall gap))
-      (list (concat (funcall gap)
-                    (if harness-ui-tasks--bulk (propertize bulk 'face 'harness-task-attention-face) bulk))
-            (if harness-ui-tasks--bulk 82 30))
-      ;; Shown once the harness said how it is, so it never shows the wrong way.
-      (and harness-ui-tasks--settings (list (concat (funcall gap) (harness-ui-tasks--review-segment)) 70))
-      ;; Other modules' segments, the search's say.
-      (let ((segments (delq nil (mapcar (lambda (fn) (ignore-errors (funcall fn)))
-                                        harness-ui-tasks-header-functions))))
-        (and segments (list (concat (funcall gap) (mapconcat #'identity segments " ")) 65)))
-      (list (concat (funcall gap) (harness-ui-tasks--segment "[BTW]" #'harness-ui-tasks-btw
-                                                              "Ask about the tasks in a side conversation"))
-            60)
-      (list (concat " " (harness-ui-tasks--segment "[Add session]" #'harness-ui-tasks-adopt
-                                                   "Make an ongoing session of this project a task"))
-            20)
-      ;; Showing archived tasks is not the usual board: that stays longer.
-      (list (concat " " (harness-ui-tasks--segment (if harness-ui-tasks--show-archived "[Hide archived]" "[Archived]")
-                                                   #'harness-ui-tasks-toggle-archived "Show or hide archived tasks"))
-            (if harness-ui-tasks--show-archived 75 55))
-      (list (concat " " (harness-ui-tasks--segment "[Refresh]" #'harness-ui-tasks-refresh "Reload the board")) 80)
-      (and harness-ui-tasks--loading (list (propertize "  loading…" 'face 'harness-dim-face) 85)))
+     (append
+      (list
+       (concat " " (propertize "Tasks" 'face 'bold))
+       (list (concat " " (propertize name 'face 'harness-dim-face))
+             50 (concat " " (propertize (harness-truncate-end name 6) 'face 'harness-dim-face)))
+       (and (> needs 0)
+            (list (concat (funcall gap)
+                          (propertize (format "%s %d need you" (harness-ui-icon 'harness-icon-blocked) needs)
+                                      'face 'harness-status-blocked-face))
+                  90))
+       (and (> review 0)
+            (list (concat (funcall gap)
+                          (propertize (format "%s %d to review" (harness-ui-icon 'harness-icon-task-review) review)
+                                      'face 'harness-task-review-face))
+                  88))
+       (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-running) (alist-get 'active counts)) 45)
+       (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-merging) (alist-get 'merging counts))
+             42)
+       (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-pending) (alist-get 'pending counts))
+             40)
+       (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-done) (alist-get 'done counts)) 25)
+       (harness-ui-tasks--spend-segment groups (funcall gap))
+       (list (concat (funcall gap)
+                     (if harness-ui-tasks--bulk (propertize bulk 'face 'harness-task-attention-face) bulk))
+             (if harness-ui-tasks--bulk 82 30))
+       ;; Shown once the harness said how it is, so it never shows the wrong way.
+       (and harness-ui-tasks--settings (list (concat (funcall gap) (harness-ui-tasks--review-segment)) 70))
+       ;; Other modules' segments, the search's say.
+       (and joined (list (concat (funcall gap) (mapconcat #'identity joined " ")) 65)))
+      ;; Those with a priority of their own, the companion pet's say.
+      (mapcar (lambda (segment)
+                (let ((sep (funcall gap)))
+                  (list (concat sep (car segment)) (nth 1 segment)
+                        (and (nth 2 segment) (concat sep (nth 2 segment))))))
+              own)
+      (list
+       (list (concat (funcall gap) (harness-ui-tasks--segment "[BTW]" #'harness-ui-tasks-btw
+                                                               "Ask about the tasks in a side conversation"))
+             60)
+       (list (concat " " (harness-ui-tasks--segment "[Add session]" #'harness-ui-tasks-adopt
+                                                    "Make an ongoing session of this project a task"))
+             20)
+       ;; Showing archived tasks is not the usual board: that stays longer.
+       (list (concat " " (harness-ui-tasks--segment (if harness-ui-tasks--show-archived "[Hide archived]" "[Archived]")
+                                                    #'harness-ui-tasks-toggle-archived "Show or hide archived tasks"))
+             (if harness-ui-tasks--show-archived 75 55))
+       (list (concat " " (harness-ui-tasks--segment "[Refresh]" #'harness-ui-tasks-refresh "Reload the board")) 80)
+       (and harness-ui-tasks--loading (list (propertize "  loading…" 'face 'harness-dim-face) 85))))
      width)))
 
 ;;;; Data

@@ -55,8 +55,9 @@ OpenAI-compatible APIs and AWS Bedrock.
 - **Modular and reloadable.** Every feature is a module, and the whole
   harness reloads in place without losing running sessions.
 - **A companion pet.** Hatch a small creature of a random species and
-  rarity that keeps you company in a buffer of its own and now and
-  then has a word to say about your work.
+  rarity. It sits by the compose box of your chats and of the task
+  board, and now and then has a word to say about your work. One switch
+  turns it off everywhere.
 
 ## Screenshots
 
@@ -1239,27 +1240,64 @@ first ran a harness with Insights. Set
 
 ### Companion pet
 
-`C-c h z` (`M-x harness-pet`) opens the pet's buffer, the only place it
-shows. The first time there is an egg: press `h` to hatch it. It hatches
-into one of 18 species, from common to legendary (one in a hundred),
-sometimes with a hat and, rarely, shiny, with five stats. The cheapest
-model of your provider names it and gives it a personality.
+`C-c h z` (`M-x harness-pet`) opens the pet's buffer. The first time
+there is an egg: press `h` to hatch it. It hatches into one of 18
+species, from common to legendary (one in a hundred), sometimes with a
+hat and, rarely, shiny, with five stats. The cheapest model of your
+provider names it and gives it a personality.
 
-While its buffer is on screen, it now and then says a line about the
-message you just sent, a test run that failed or a big change, and it
-always answers when you call it by name in a message or pet it (`p`).
-It grows a level as you work. `r` renames it, `m` mutes it and `R` lets
-it go, after which the next egg hatches another.
+Once it hatched, it keeps you company in other places too:
 
-It costs little: it never asks a model anything while its buffer is
-hidden or while it is muted, comments unasked at most once a minute
-(`harness-pet-cooldown`), on your messages only by chance
-(`harness-pet-chance`), and then asks for one short line from a cheap
-model (`harness-pet-model`) with no thinking and none of your project's
-context but the last few messages. Nothing runs while nothing happens.
-To keep it quiet, set
-`harness-pet-reactions` to nil; to remove it, add `pet` and `ui-pet` to
-`harness-disabled-modules`.
+- **Chats.** The whole creature sits in the bottom right corner, right
+  above the compose box, as Claude Code's companion sits beside its
+  prompt. It is drawn in its rarity's colour, with its name beside its
+  eyes, and takes only as many lines as it is tall. What it last said
+  about the session shows in a speech bubble on its left, joined to it,
+  until the session's next turn starts. The bubble widens rather than
+  grow taller than the creature. Hovering names the pet, and a click
+  opens its buffer. Side conversations (BTW) go without it.
+- **The task board.** It sits in the board's bottom right corner in the
+  same way, with the last thing it said about anything. The compose
+  label and settings lines narrow to make room for its bottom rows, so
+  it adds only a few lines of its own. Each task that gets done gives it
+  experience.
+- **Small windows.** A window narrower than 40 columns or shorter than
+  20 lines shows its face on one line instead, as in `(·>`. The face
+  comes with its name or the first few of its words. Set
+  `harness-ui-pet-figure` to `face` to get that everywhere.
+- **Header lines, if you want them.** Its face on one line, as in `(·>`,
+  can end each chat's header line (`chat-header`), where it blinks now
+  and then while the session works. Its face and name can also show in
+  the board's header line (`board-header`). Either is the first thing to
+  go when the window is narrow.
+
+`harness-ui-pet-places` chooses among these places: `chat` and `board`
+by default, `chat-header` and `board-header` too if you add them. nil
+keeps the pet to its own buffer. `harness-ui-pet-figure` chooses how it
+shows by the compose boxes: `whole` (the default) or `face`.
+
+While it is on screen (its buffer, the task board, or a chat whose
+session it would talk about), it now and then says a line. It may
+comment on the message you just sent, on a test run that failed or on a
+big change. It always answers when you call it by name in a message or
+pet it (`p`). It grows a level as you work. `r` renames it, `m` mutes it
+and `R` lets it go, after which the next egg hatches another.
+
+It costs little. It never asks a model anything about what is not on
+screen, nor while it is muted. It comments unasked at most once a minute
+(`harness-pet-cooldown`), and on your messages only by chance
+(`harness-pet-chance`). It then asks a cheap model (`harness-pet-model`)
+for one short line, with no thinking and no context from your project
+beyond the last few messages. Nothing runs while nothing happens: the
+creature by a compose box is drawn again only when it changes, says
+something else, or has more or less room.
+
+To keep it quiet, set `harness-pet-reactions` to nil. To turn it off
+altogether, press `O` in its buffer, click [Turn off] there, or set
+`harness-pet-enabled` to nil (also on the settings page). It then shows
+nowhere else, grows no more and asks no model anything. Its buffer only
+says it is asleep and offers to turn it on again, as it was. To remove
+the code itself, add `pet` and `ui-pet` to `harness-disabled-modules`.
 
 ## Configuration
 
