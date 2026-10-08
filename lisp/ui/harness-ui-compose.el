@@ -29,6 +29,10 @@
 ;;     image or copied files go on the media ring; M-x
 ;;     harness-compose-attach-clipboard for other MIME types), files
 ;;     dropped on the window attach;
+;;   - image tokens: an image attached puts its token, [image 1], into
+;;     the text where point is, shown as a chip with its thumbnail, so
+;;     a sentence can name it; deleting the token removes the image (see
+;;     the Image tokens section);
 ;;   - the text and attachments, kept across redraws of the host;
 ;;   - long lines that wrap under the text, never scrolling sideways;
 ;;   - the attachments above the box, which a host draws with
@@ -99,6 +103,15 @@ See `harness-compose--outside-tick'.")
 A host sets it through `harness-compose-insert' to mark a box that does
 something else than compose: sending a message to an existing session,
 say.")
+(defvar-local harness-compose--detached nil
+  "Images whose tokens were deleted from the box: an alist label -> attachment.
+A token yanked, typed or undone back brings its image back (see
+`harness-compose--sync-tokens').")
+(defvar-local harness-compose--token-overlays nil
+  "Overlays showing the image tokens of the box as chips.")
+(defvar-local harness-compose--undo-start nil
+  "Where the box started when its undo entries were last lined up with it.
+See `harness-compose--line-up-undo'.")
 
 (defvar-local harness-compose-project-function (lambda () default-directory)
   "Function returning the project root files are completed and attached from.")
@@ -165,9 +178,13 @@ window the ones that must stay on one line."
     (yank-media-handler "image/.*" #'harness-compose--yank-media-image))
   (add-hook 'kill-buffer-hook #'harness-compose--drop-pending nil t)
   (add-hook 'completion-at-point-functions #'harness-compose-completion-at-point nil t)
+  (add-hook 'before-change-functions #'harness-compose--line-up-undo nil t)
+  (add-hook 'pre-command-hook #'harness-compose--line-up-undo nil t)
   (add-hook 'pre-command-hook #'harness-compose--pre-command nil t)
   (add-hook 'post-command-hook #'harness-compose-update-placeholder nil t)
-  (add-hook 'post-command-hook #'harness-compose--after-command nil t))
+  (add-hook 'post-command-hook #'harness-compose--after-command nil t)
+  ;; Last, so it runs first: it may change the text the others look at.
+  (add-hook 'post-command-hook #'harness-compose--keep-tokens nil t))
 
 (defun harness-compose-live-p ()
   "Non-nil when the compose markers point into this buffer."
@@ -341,10 +358,16 @@ HELP is the prompt's tooltip.  FACE is the background to draw the box
 in, `harness-compose-face' by default.  ACCENT, when given, is the face
 of the box's prompt and the bar down its left edge, which marks a box
 that does something else than compose -- sending a message to a session,
-say.  Point ends after the box's final newline."
-  (dolist (ov (list harness-compose-overlay harness-compose--placeholder harness-compose--indent))
+say.  Point ends after the box's final newline.  The tokens of its
+images show as chips (`harness-compose--show-tokens')."
+  (dolist (ov (append (list harness-compose-overlay harness-compose--placeholder harness-compose--indent)
+                      harness-compose--token-overlays))
     (when ov (delete-overlay ov)))
-  (when text (setq harness-compose--text text))
+  (setq harness-compose--token-overlays nil)
+  (when text
+    ;; New text: the images its tokens were deleted from go for good.
+    (setq harness-compose--text text
+          harness-compose--detached nil))
   (let* ((background (or face 'harness-compose-face))
          (accent (and accent (list accent background)))
          (prompt (if accent (concat (harness-compose-bar (car accent) background) "❯ ") "❯ "))
@@ -381,7 +404,8 @@ say.  Point ends after the box's final newline."
       (overlay-put harness-compose--indent 'line-prefix indent)
       (overlay-put harness-compose--indent 'wrap-prefix indent))
     (setq harness-compose--placeholder (make-overlay (1- (point)) (point)))
-    (harness-compose-update-placeholder)))
+    (harness-compose-update-placeholder)
+    (harness-compose--show-tokens)))
 
 (defun harness-compose-update-placeholder ()
   "Show the placeholder while the box is empty."
@@ -665,13 +689,16 @@ commands, rather than scroll."
 ;;;; Editing and reading
 
 (defun harness-compose-set (text)
-  "Replace the box's contents with TEXT."
-  (setq harness-compose--text text)
+  "Replace the box's contents with TEXT.
+The images whose tokens were deleted from the old text cannot come back."
+  (setq harness-compose--text text
+        harness-compose--detached nil)
   (when (harness-compose-live-p)
     (let ((inhibit-read-only t))
       (delete-region harness-compose-start harness-compose-end)
       (save-excursion (goto-char harness-compose-start) (insert text)))
-    (harness-compose-update-placeholder)))
+    (harness-compose-update-placeholder)
+    (harness-compose--show-tokens)))
 
 (defun harness-compose-clear ()
   "Empty the box and drop the attachments, then redraw."
@@ -685,7 +712,9 @@ commands, rather than scroll."
 The files that @ references typed out in TEXT name are attached too,
 after the box's own attachments (`harness-compose--references'); the
 references stay in TEXT.  A link still downloading signals too: the
-message waits for it."
+message waits for it.  The images are those whose tokens TEXT holds
+\(`harness-compose--sync-tokens'), each with its label."
+  (when (harness-compose--sync-tokens) (harness-compose-redraw))
   (let ((text (string-trim (harness-compose-text)))
         (atts harness-compose-attachments))
     (when (and (string-empty-p text) (null atts)) (user-error "Nothing to send"))
@@ -721,15 +750,19 @@ Jumping drops the region, which would reach outside the box."
     (funcall callback text)))
 
 (defun harness-compose-attachment-block (att)
-  "Return the ACP prompt block for attachment ATT."
+  "Return the ACP prompt block for attachment ATT.
+An image's label goes along as `_harness.label', so the model reads its
+token, [image 1], right before it (see `harness-compose--label')."
   (let* ((path (plist-get att :path))
-         (mime (or (plist-get att :mime) "application/octet-stream")))
+         (mime (or (plist-get att :mime) "application/octet-stream"))
+         (label (plist-get att :label)))
     (if (and (string-prefix-p "image/" mime) (file-readable-p path))
-        (list :type "image" :mimeType mime
-              :data (with-temp-buffer
-                      (set-buffer-multibyte nil)
-                      (insert-file-contents-literally path)
-                      (base64-encode-string (buffer-string) t)))
+        (append (list :type "image" :mimeType mime
+                      :data (with-temp-buffer
+                              (set-buffer-multibyte nil)
+                              (insert-file-contents-literally path)
+                              (base64-encode-string (buffer-string) t)))
+                (and label (list :_harness (list :label label))))
       (list :type "resource_link" :uri (concat "file://" path)
             :name (or (plist-get att :name) (file-name-nondirectory path))
             :size (plist-get att :size) :mimeType mime))))
@@ -901,13 +934,296 @@ argument, the file system is browsed instead (see
     (message "Attached %s" (abbreviate-file-name path))))
 
 (defun harness-compose-remove-attachment (path)
-  "Remove the attachment PATH."
+  "Remove the attachment PATH.
+An image's tokens go from the text too, as deleting them would have
+removed it: undoing brings both back (`harness-compose--sync-tokens')."
   (interactive (list (completing-read "Remove attachment: "
                                       (delq nil (mapcar (lambda (a) (plist-get a :path)) harness-compose-attachments))
                                       nil t)))
+  (dolist (att harness-compose-attachments)
+    (when (and (equal (plist-get att :path) path) (plist-get att :label))
+      (harness-compose--keep-aside att)
+      (harness-compose--delete-tokens (plist-get att :label))))
   (setq harness-compose-attachments
         (cl-remove path harness-compose-attachments :key (lambda (a) (plist-get a :path)) :test #'equal))
   (funcall harness-compose-redraw-function))
+
+;;;; Image tokens
+
+;; An image attached to the box gets a label, "image 1", "image 2"...,
+;; and its token, [image 1], goes into the text: where point is when it
+;; is in the box -- where the image was pasted, dropped or completed --
+;; else at the end.  A sentence can then say which screenshot it means,
+;; and the model reads the same [image 1] right before the image itself,
+;; whose prompt block carries the label (`harness-compose-attachment-block').
+;; The token is text, so it lives through redraws, drafts and queueing
+;; like the rest of the message.  An overlay shows it as a chip: the
+;; image's thumbnail, then the token as a link a click opens, which point
+;; steps over as a whole.
+;;
+;; After every command the text and the attachments are made to agree
+;; (`harness-compose--sync-tokens'): what is left of a token cut short
+;; (DEL right after it) goes too; an image whose tokens are all gone is
+;; detached, and kept aside, so that its token yanked, typed or undone
+;; back brings it back; the × of its line in the list deletes its tokens.
+;; Only labelled images take part: other files, and images attached
+;; without a label (a draft from before labels), are left alone.
+;;
+;; A number never changes once given, since a sentence written about
+;; [image 2] must keep meaning that image.  A new image takes the number
+;; after the highest one attached: deleting the last image frees its
+;; number, deleting one in the middle leaves a gap, and every message
+;; starts again at 1.
+
+(defvar harness-compose-thumbnail-lines)
+
+(defface harness-compose-token-face '((t :inherit link))
+  "An image's token, [image 1], in the compose box and the transcript."
+  :group 'harness-compose)
+
+(defconst harness-compose--token-regexp "\\[\\(image [1-9][0-9]*\\)\\]"
+  "An image's token in the text, [image 1]; group 1 is its label.")
+
+(defun harness-compose--image-token (label)
+  "Return the token of the image LABEL, as the text holds it."
+  (concat "[" label "]"))
+
+(defun harness-compose--image-attachment-p (att)
+  "Non-nil when ATT is an image, which the model gets as one."
+  (and (not (plist-get att :pending))
+       (string-prefix-p "image/" (or (plist-get att :mime) ""))))
+
+(defun harness-compose--label-number (label)
+  "Return the number of the image LABEL (3 for \"image 3\"), or nil."
+  (and (stringp label) (string-match "\\`image \\([0-9]+\\)\\'" label)
+       (string-to-number (match-string 1 label))))
+
+(defun harness-compose--labelled (label)
+  "Return the attached image of LABEL, or nil."
+  (and label (cl-find label harness-compose-attachments
+                      :key (lambda (a) (plist-get a :label)) :test #'equal)))
+
+(defun harness-compose--next-label ()
+  "Return the label of the next image: the one after the highest attached."
+  (format "image %d"
+          (1+ (apply #'max 0 (delq nil (mapcar (lambda (a) (harness-compose--label-number (plist-get a :label)))
+                                               harness-compose-attachments))))))
+
+(defun harness-compose--label (att &optional at-end)
+  "Return ATT labelled when it is an image, its token put into the box.
+The token goes where point is, or with AT-END at the end of the box
+\(`harness-compose--insert-token').  Anything else, and an image
+labelled already, is returned as it is."
+  (if (or (plist-get att :label) (not (harness-compose--image-attachment-p att)))
+      att
+    (let ((label (harness-compose--next-label)))
+      ;; An image deleted under that number cannot come back now.
+      (setq harness-compose--detached (cl-remove label harness-compose--detached :key #'car :test #'equal))
+      (harness-compose--insert-token label at-end)
+      (append att (list :label label)))))
+
+(defun harness-compose--insert-token (label &optional at-end)
+  "Put the token of the image LABEL into the box.
+At point when point is in the box, else, or with AT-END, at the end of
+the box, point staying where it was.  A space keeps it apart from the
+words on either side, and follows it at the end of the box, so typing
+goes on after it.  A box not drawn gets it at the end of its text."
+  (let ((token (harness-compose--image-token label)))
+    (if (not (harness-compose-live-p))
+        (setq harness-compose--text
+              (concat harness-compose--text
+                      (and (string-match-p "[^ \t\n]\\'" harness-compose--text) " ")
+                      token " "))
+      (if (and (not at-end) (harness-compose-in-p))
+          (harness-compose--insert-spaced token)
+        (save-excursion
+          (goto-char harness-compose-end)
+          (harness-compose--insert-spaced token)))
+      (harness-compose-update-placeholder))))
+
+(defun harness-compose--insert-spaced (token)
+  "Insert TOKEN at point, in the box, apart from the words around it."
+  (unless (or (= (point) harness-compose-start) (memq (char-before) '(?\s ?\t ?\n)))
+    (insert " "))
+  (insert token)
+  (when (or (= (point) harness-compose-end) (not (memq (char-after) '(?\s ?\t ?\n))))
+    (insert " ")))
+
+(defun harness-compose--delete-tokens (label)
+  "Delete the tokens of the image LABEL from the box, a space after each too."
+  (let ((token (harness-compose--image-token label)))
+    (if (not (harness-compose-live-p))
+        (setq harness-compose--text
+              (replace-regexp-in-string (concat (regexp-quote token) " ?") "" harness-compose--text t t))
+      (save-excursion
+        (goto-char harness-compose-start)
+        (while (search-forward token harness-compose-end t)
+          (delete-region (match-beginning 0)
+                         (if (and (< (point) harness-compose-end) (eq (char-after) ?\s)) (1+ (point)) (point)))))
+      (harness-compose-update-placeholder))))
+
+(defun harness-compose--keep-aside (att)
+  "Keep ATT, an image whose tokens were deleted, for them to bring back."
+  (setf (alist-get (plist-get att :label) harness-compose--detached nil nil #'equal) att))
+
+(defun harness-compose--reattach (att)
+  "Attach ATT, an image kept aside, again, among the others in label order."
+  (let* ((n (harness-compose--label-number (plist-get att :label)))
+         (at (cl-position-if (lambda (a) (let ((m (harness-compose--label-number (plist-get a :label))))
+                                           (and m n (> m n))))
+                             harness-compose-attachments)))
+    (setq harness-compose-attachments
+          (if at
+              (append (seq-take harness-compose-attachments at) (list att) (seq-drop harness-compose-attachments at))
+            (append harness-compose-attachments (list att))))))
+
+(defun harness-compose--labels-in-box ()
+  "Return the labels whose tokens the box holds."
+  (let ((labels nil))
+    (save-excursion
+      (goto-char harness-compose-start)
+      (while (re-search-forward harness-compose--token-regexp harness-compose-end t)
+        (cl-pushnew (match-string-no-properties 1) labels :test #'equal)))
+    labels))
+
+(defun harness-compose--finish-cut-tokens ()
+  "Delete what is left of a token that a command cut short.
+Deleting the character before point right after a token deletes its
+last character, the one after point before it its first: the rest goes
+too, rather than staying as text naming no image."
+  (dolist (ov harness-compose--token-overlays)
+    (when (overlay-buffer ov)
+      (let* ((beg (overlay-start ov))
+             (end (overlay-end ov))
+             (token (harness-compose--image-token (overlay-get ov 'harness-compose-label)))
+             (text (buffer-substring-no-properties beg end)))
+        (when (and (< 0 (length text) (length token)) (string-search text token)
+                   (harness-compose-in-p beg) (harness-compose-in-p end))
+          (delete-region beg end))))))
+
+(defun harness-compose--sync-tokens ()
+  "Make the image tokens of the box and its attachments agree; show the tokens.
+What is left of a token a command cut short is deleted.  An image none
+of whose tokens is left is detached and kept aside; one kept aside whose
+token is back is attached again.  Return non-nil when the attachments
+changed, for the caller to redraw them."
+  (when (and (harness-compose-live-p)
+             (or harness-compose--detached harness-compose--token-overlays
+                 (cl-some (lambda (a) (plist-get a :label)) harness-compose-attachments)))
+    (harness-compose--finish-cut-tokens)
+    (let* ((present (harness-compose--labels-in-box))
+           (gone (cl-remove-if-not (lambda (a) (let ((label (plist-get a :label)))
+                                                 (and label (not (member label present)))))
+                                   harness-compose-attachments))
+           (changed (and gone t)))
+      (dolist (att gone) (harness-compose--keep-aside att))
+      (setq harness-compose-attachments (cl-remove-if (lambda (a) (memq a gone)) harness-compose-attachments))
+      (dolist (label present)
+        (when-let* ((att (and (not (harness-compose--labelled label))
+                              (cdr (assoc label harness-compose--detached)))))
+          (setq harness-compose--detached (cl-remove label harness-compose--detached :key #'car :test #'equal))
+          ;; Unless its file was attached again since, under another number.
+          (unless (harness-compose--attached-p (plist-get att :path))
+            (harness-compose--reattach att)
+            (setq changed t))))
+      (harness-compose--show-tokens)
+      changed)))
+
+(defun harness-compose--keep-tokens ()
+  "Keep the image tokens and the attachments in step after a command.
+Runs from `post-command-hook'; see `harness-compose--sync-tokens'."
+  (condition-case err
+      (when (harness-compose--sync-tokens)
+        (harness-compose-redraw))
+    (error (harness-log 'warn "compose: keeping the image tokens failed: %S" err))))
+
+(defun harness-compose--show-tokens ()
+  "Show the token of each attached image in the box as a chip.
+The chips are made again only when the tokens moved or changed."
+  (when (harness-compose-live-p)
+    (let ((want nil))
+      (save-excursion
+        (goto-char harness-compose-start)
+        (while (re-search-forward harness-compose--token-regexp harness-compose-end t)
+          (when-let* ((att (harness-compose--labelled (match-string-no-properties 1))))
+            (push (list (match-beginning 0) (match-end 0) att) want))))
+      (setq want (nreverse want))
+      (unless (equal want (mapcar (lambda (ov) (list (overlay-start ov) (overlay-end ov)
+                                                     (overlay-get ov 'harness-compose-attachment)))
+                                  harness-compose--token-overlays))
+        (mapc #'delete-overlay harness-compose--token-overlays)
+        (setq harness-compose--token-overlays
+              (mapcar (lambda (w) (apply #'harness-compose--token-overlay w)) want))))))
+
+(defun harness-compose--token-overlay (beg end att)
+  "Return the overlay showing the token from BEG to END of the image ATT.
+Its thumbnail, a line high, comes before the token (the cursor shows on
+it when point is before the token), and the token shows as a link a
+click opens.  The token's display is a string, so point never rests
+inside it: the command loop moves it to an edge."
+  (let* ((label (plist-get att :label))
+         (ov (make-overlay beg end nil t nil))
+         (help (format "%s: %s · mouse-1: open · deleting the token removes the image"
+                       label (abbreviate-file-name (plist-get att :path))))
+         (open (lambda (event) (interactive "e") (ignore event) (harness-compose-open-attachment att)))
+         (map (let ((m (make-sparse-keymap))) (define-key m [mouse-1] open) (define-key m [mouse-2] open) m))
+         (props (list 'help-echo help 'mouse-face 'highlight 'keymap map 'pointer 'hand))
+         (thumb (and (display-images-p) (> harness-compose-thumbnail-lines 0)
+                     (harness-compose--image (plist-get att :path) (frame-char-height)))))
+    (overlay-put ov 'harness-compose-label label)
+    (overlay-put ov 'harness-compose-attachment att)
+    (overlay-put ov 'evaporate t)
+    (when thumb
+      (overlay-put ov 'before-string
+                   (concat (apply #'propertize thumb 'cursor t 'face harness-compose--face props)
+                           (propertize " " 'face harness-compose--face 'display '(space :width (3))))))
+    (overlay-put ov 'display (apply #'propertize (harness-compose--image-token label)
+                                    'face (list 'harness-compose-token-face harness-compose--face)
+                                    props))
+    (dolist (p (seq-partition props 2)) (overlay-put ov (car p) (cadr p)))
+    ov))
+
+;;;; Undo
+
+;; Hosts draw around the box with undo off, so what they draw above it
+;; moves the box's text but not the positions its undo entries record:
+;; undoing would change the wrong text, or signal that it is read-only.
+;; Attaching an image draws its line above the box, so undoing right
+;; after a paste would.  Before every command, and every change, the
+;; entries move by as much as the box moved since the last time.
+
+(defun harness-compose--line-up-undo (&rest _)
+  "Move the undo entries by as much as the box moved since the last time.
+Runs from `pre-command-hook' and `before-change-functions'.  Not while
+undo is off, as a host redraws: the box is in pieces then, and moved
+when it is whole again."
+  (when (and (listp buffer-undo-list) (harness-compose-live-p))
+    (let ((start (marker-position harness-compose-start)))
+      (when (and harness-compose--undo-start (/= start harness-compose--undo-start))
+        (harness-compose--shift-undo buffer-undo-list (- start harness-compose--undo-start)))
+      (setq harness-compose--undo-start start))))
+
+(defun harness-compose--shift-undo (entries delta)
+  "Move the positions the undo list ENTRIES record by DELTA, in place.
+`pending-undo-list', a tail of `buffer-undo-list' while undoing goes on,
+moves with them."
+  (while (consp entries)
+    (let ((entry (car entries)))
+      (pcase entry
+        ((pred integerp) (setcar entries (+ entry delta)))
+        (`(,(and beg (pred integerp)) . ,(and end (pred integerp)))
+         (setcar entry (+ beg delta))
+         (setcdr entry (+ end delta)))
+        (`(,(pred stringp) . ,(and pos (pred integerp)))
+         ;; Negative: point was at the end of the deleted text.
+         (setcdr entry (if (< pos 0) (- pos delta) (+ pos delta))))
+        (`(nil ,_ ,_ ,(and beg (pred integerp)) . ,(and end (pred integerp)))
+         (setcar (nthcdr 3 entry) (+ beg delta))
+         (setcdr (nthcdr 3 entry) (+ end delta)))
+        (`(apply ,(pred integerp) ,(and beg (pred integerp)) ,(and end (pred integerp)) . ,_)
+         (setcar (nthcdr 2 entry) (+ beg delta))
+         (setcar (nthcdr 3 entry) (+ end delta)))))
+    (setq entries (cdr entries))))
 
 ;;;; Downloads
 
@@ -1134,9 +1450,17 @@ another application (`harness-ui-drag-source')."
                            " ")
                  ""))
          (remove (concat " " (propertize (buttonize "×" (lambda (_) (harness-compose-remove-attachment path)) nil
-                                                    "Remove this attachment")
+                                                    (if (plist-get att :label)
+                                                        "Remove this image, and its token from the text"
+                                                      "Remove this attachment"))
                                          'face 'harness-dim-face)))
-         (label (lambda (name) (buttonize (format "%s (%s)" name size) open nil help)))
+         ;; An image leads with its token, as the text shows it.
+         (token (if (plist-get att :label)
+                    (concat (propertize (harness-compose--image-token (plist-get att :label))
+                                        'face 'harness-compose-token-face)
+                            " ")
+                  ""))
+         (label (lambda (name) (buttonize (concat token (format "%s (%s)" name size)) open nil help)))
          ;; One line each, whatever a file is called.
          (name (replace-regexp-in-string "[\n\r\t]" " " (harness-compose--chip-name att))))
     (concat head
@@ -1289,9 +1613,10 @@ while the download goes on."
 
 (defun harness-compose--attach (att)
   "Add the attachment ATT, unless its file is attached already; no redraw.
-Return non-nil when it was added."
+An image gets a label, its token going into the box where point is
+\(`harness-compose--label').  Return non-nil when it was added."
   (unless (harness-compose--attached-p (plist-get att :path))
-    (setq harness-compose-attachments (append harness-compose-attachments (list att)))
+    (setq harness-compose-attachments (append harness-compose-attachments (list (harness-compose--label att))))
     t))
 
 (defun harness-compose--downloads-directory ()
@@ -1414,9 +1739,12 @@ A web page is not downloaded: the link goes into the box instead."
                (path (harness-compose--unique-file (harness-compose--downloads-directory)
                                                    (harness-compose--name-for-mime (plist-get att :name) mime))))
           (rename-file file path)
+          ;; An image's token goes at the end of the box: point has
+          ;; moved on since the link was dropped.
           (harness-compose--settle-pending
-           id (list :path path :size (or (harness-file-size path) 0) :mime mime
-                    :name (file-name-nondirectory path) :url (plist-get att :url)))
+           id (harness-compose--label (list :path path :size (or (harness-file-size path) 0) :mime mime
+                                            :name (file-name-nondirectory path) :url (plist-get att :url))
+                                      t))
           (message "Attached %s (%s)" (file-name-nondirectory path)
                    (harness-format-bytes (harness-file-size path)))))))))
 
@@ -1809,11 +2137,24 @@ a yank of media, run `yank-pop' as it runs without the box."
       (unless entries (user-error "The media ring is empty"))
       (let* ((index (mod (+ (plist-get harness-compose--yanked :index) (or n 1)) (length entries)))
              (entry (nth index entries))
-             (gone (plist-get harness-compose--yanked :paths)))
-        (setq harness-compose-attachments
-              (cl-remove-if (lambda (a) (member (plist-get a :path) gone)) harness-compose-attachments))
-        (setq harness-compose--yanked (list :paths (harness-compose--attach-captures (list entry) t) :index index)
+             (paths (plist-get harness-compose--yanked :paths))
+             (gone (cl-remove-if-not (lambda (a) (member (plist-get a :path) paths)) harness-compose-attachments))
+             ;; The capture takes the place of the first image yanked,
+             ;; token and number; the others' tokens go.
+             (label (cl-some (lambda (a) (plist-get a :label)) gone)))
+        (setq harness-compose-attachments (cl-remove-if (lambda (a) (memq a gone)) harness-compose-attachments))
+        (dolist (a gone)
+          (when (and (plist-get a :label) (not (equal (plist-get a :label) label)))
+            (harness-compose--delete-tokens (plist-get a :label))))
+        (setq harness-compose--yanked (list :paths (harness-compose--attach-captures
+                                                    (list (if label (append entry (list :label label)) entry))
+                                                    t)
+                                            :index index)
               this-command 'harness-compose-yank)
+        ;; A capture attached already has a token of its own.
+        (when (and label (not (harness-compose--labelled label)))
+          (harness-compose--delete-tokens label)
+          (harness-compose-redraw))
         (message "Media ring %d/%d: %s%s" (1+ index) (length entries) (plist-get entry :name)
                  (if (= 1 (length entries)) " (the only capture)" ""))))))
 
@@ -1910,12 +2251,16 @@ Runs from `post-command-hook'."
     (error (harness-log 'warn "compose: following the token failed: %S" err))))
 
 ;; Boxes set up before a reload follow their tokens and fit their
-;; attachments to their windows too, and those kept at the bottom count
-;; their changes.
+;; attachments to their windows too, keep their image tokens and
+;; attachments in step and their undo entries lined up, and those kept
+;; at the bottom count their changes.
 (dolist (buf (buffer-list))
   (with-current-buffer buf
     (when (memq #'harness-compose-completion-at-point completion-at-point-functions)
       (add-hook 'post-command-hook #'harness-compose--after-command nil t)
+      (add-hook 'post-command-hook #'harness-compose--keep-tokens nil t)
+      (add-hook 'before-change-functions #'harness-compose--line-up-undo nil t)
+      (add-hook 'pre-command-hook #'harness-compose--line-up-undo nil t)
       (add-hook 'window-size-change-functions #'harness-compose--on-resize nil t))
     (when (memq #'harness-compose-pad-window pre-redisplay-functions)
       (add-hook 'before-change-functions #'harness-compose--before-change nil t)

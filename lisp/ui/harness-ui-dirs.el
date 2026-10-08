@@ -5,10 +5,11 @@
 ;; A `tabulated-list-mode' buffer of the directories a session may
 ;; touch (see `permission/dirs'): its cwd and worktree, its own
 ;; temporary directory, the configured `harness-allowed-directories',
-;; the directories granted at runtime and the tool output directory.  `a' grants another directory to the
-;; session (with a prefix argument: to every session), `k' revokes the
-;; grant at point, `g' refreshes.  The list follows grants made from
-;; permission prompts elsewhere.
+;; the directories granted at runtime (to the session, or until its turn
+;; ends) and the tool output directory.  `a' grants another directory
+;; to the session (with a prefix argument: to every session), `k'
+;; revokes the grant at point, `g' refreshes.  The list follows grants
+;; made from permission prompts elsewhere.
 
 ;;; Code:
 
@@ -35,6 +36,7 @@
     ("tmp" "temporary directory")
     ("config" "configured")
     ("session" "granted to session")
+    ("turn" "granted for this turn")
     ("outputs" "tool outputs")
     (s s)))
 
@@ -95,7 +97,7 @@ BUFFER defaults to the current buffer."
 \\{harness-ui-dirs-mode-map}"
   (setq tabulated-list-format
         (vector (list "Directory" harness-ui-dirs--min-width t)
-                (list "Source" 20 t)
+                (list "Source" 22 t)
                 (list "" 12 nil)))
   (setq tabulated-list-padding 1)
   (tabulated-list-init-header))

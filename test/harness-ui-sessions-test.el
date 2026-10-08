@@ -275,24 +275,28 @@ An idle session's figure is its last, dimmed; a new one redraws the list."
 ;;;; Tasks
 
 (ert-deftest harness-ui-sessions-task-sessions-show-their-task ()
-  "A task's session is of kind task.  Until it is named, which happens
-after its first turn, where the task does its work, it shows its
-task's title, the prompt's first line, as on the board."
+  "A task's session is of kind task.  Until it is named it shows its
+task's title, as on the board: the task's own name, which it gets as
+soon as it is submitted, else its prompt's first line."
   (harness-ui-sessions-test-with-repo
     (harness-ui-sessions-test--add "plain" root)
     (harness-ui-sessions-test--add "working" wt :name nil :status "running")
     (harness-ui-sessions-test--add "named" wt :name "Fix login redirect loop")
+    (harness-ui-sessions-test--add "titled" wt :name nil :status "running")
     (setq harness-ui-sessions-test--tasks
           (list (list :id "t-1" :session "working" :state "active" :column "active"
                       :prompt "make btw open up with a lower effort level\n\nunless the config says otherwise")
                 (list :id "t-2" :session "named" :state "review" :column "review"
                       :prompt "the login page loops")
-                (list :id "t-3" :state "pending" :column "pending" :prompt "not started, so no session")))
+                (list :id "t-3" :state "pending" :column "pending" :prompt "not started, so no session")
+                (list :id "t-4" :session "titled" :state "active" :column "active"
+                      :name "Export orders as CSV" :prompt "finance wants the orders as a CSV file")))
     (let ((default-directory root)) (harness-sessions))
-    (should (equal '("named" "plain" "working") (harness-ui-sessions-test--shown)))
+    (should (equal '("named" "plain" "titled" "working") (harness-ui-sessions-test--shown)))
     (should (equal '("make btw open up with a lower effort level" "task")
                    (harness-ui-sessions-test--row "working")))
     (should (equal '("Fix login redirect loop" "task") (harness-ui-sessions-test--row "named")))
+    (should (equal '("Export orders as CSV" "task") (harness-ui-sessions-test--row "titled")))
     (should (equal '("plain" "") (harness-ui-sessions-test--row "plain")))
     ;; Named by the model after its turn: the name wins over the title.
     (harness-ui-sessions-test--add "working" wt :name "Lower BTW effort level" :status "idle")
@@ -409,10 +413,10 @@ notifier opens the list so for every project, whatever its filter."
 
 (ert-deftest harness-ui-sessions-answer-what-a-session-waits-on ()
   "A blocked session's row has a line under it saying what it waits on.
-It has the task board's buttons: [Allow] and [Deny] for a tool call,
-which y and n push from either line too, and [Answer…] for a question,
-which pops it out.  An answer takes the line away at once, before the
-session says it waits no more."
+It has the task board's buttons: [Allow] and [Deny] for a permission
+request, which y and n push from either line too, and [Answer…] for a
+question, which pops it out.  An answer takes the line away at once,
+before the session says it waits no more."
   (harness-ui-sessions-test-with-repo
     (harness-ui-sessions-test--with-init
       (let ((popped nil))

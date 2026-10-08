@@ -23,7 +23,11 @@
 ;; read-write.  HOME is *not* mounted (credentials such as ~/.npmrc or
 ;; ~/.aws stay out of reach) and $HOME points at an empty directory on
 ;; the tmpfs; the only exception is a HOME that lies inside the working
-;; directory, which is then visible anyway.  Network access stays on by
+;; directory, which is then visible anyway.  A caller may show more
+;; directories read-only (`:readable'): the bash tool shows the skills
+;; directories, where they are named, where their symbolic links lead
+;; and at the same place under the sandbox's $HOME, so ~/.claude/skills
+;; reads the same inside as outside.  Network access stays on by
 ;; default because hosted providers and most build tools need it; pass
 ;; `:network nil' to cut it, which is only correct for local models.
 ;;
@@ -38,7 +42,8 @@
 ;; `sandbox/check-command' finds those in a shell command line so the
 ;; permission layer can refuse them (see "Git worktree commands" below).
 ;;
-;; Methods: `sandbox/wrap', `sandbox/status', `sandbox/check-command'.
+;; Methods: `sandbox/wrap', `sandbox/status', `sandbox/confined-p',
+;; `sandbox/check-command'.
 
 ;;; Code:
 
@@ -143,6 +148,53 @@ Return the chosen backend symbol.  Safe to call again: it refreshes
   (let ((home (getenv "HOME")))
     (and home (harness-path-within-p cwd home))))
 
+(defun harness-sandbox--readable-mounts (readable cwd home)
+  "Return the read-only mounts showing READABLE as (SOURCE . DESTINATION).
+READABLE lists directories.  Each one that exists is shown where it
+is named and where its symbolic links lead, and, when it lies under
+the real home directory, at the same place under HOME, the sandbox's
+$HOME (nil when the real one stays), so that ~/... names it inside as
+well.  A directory inside CWD is left out, since CWD is shown
+read-write anyway, and so is one that is or holds the real home
+directory, which the sandbox hides.
+
+A destination below another one is left out too: it shows through
+that one as it is, a symbolic link included, and bwrap refuses to
+mount on a link (a skill linked into ~/.claude/skills is one).  So is
+a destination holding CWD when symbolic links lead CWD elsewhere,
+since the working directory is mounted where it is named, after these."
+  (let* ((real-home (file-name-as-directory (expand-file-name "~")))
+         (cwd-dir (file-name-as-directory (expand-file-name cwd)))
+         (cwd-linked (not (equal cwd-dir (file-name-as-directory (file-truename cwd-dir)))))
+         (below (lambda (dir parent)
+                  (let ((dir (file-name-as-directory dir)) (parent (file-name-as-directory parent)))
+                    (and (not (equal dir parent)) (string-prefix-p parent dir)))))
+         (alias (lambda (dir)
+                  (and home (string-prefix-p real-home dir)
+                       (expand-file-name (substring dir (length real-home)) home))))
+         mounts)
+    (dolist (d readable)
+      (let* ((named (and (stringp d) (not (file-remote-p d)) (file-name-as-directory (expand-file-name d))))
+             (real (and named (file-directory-p named) (file-name-as-directory (file-truename named)))))
+        (cond
+         ((or (null real) (harness-path-within-p cwd real)) nil)
+         ((harness-path-within-p real real-home)
+          (harness-log 'warn "sandbox: not showing %s, which holds the home directory" d))
+         (t
+          (dolist (dest (delq nil (list named real (funcall alias named) (funcall alias real))))
+            (let ((dest (directory-file-name dest)))
+              (unless (or (rassoc dest mounts) (and cwd-linked (funcall below cwd-dir dest)))
+                (push (cons (directory-file-name real) dest) mounts))))))))
+    (setq mounts (nreverse mounts))
+    (cl-remove-if (lambda (m) (cl-some (lambda (o) (funcall below (cdr m) (cdr o))) mounts))
+                  mounts)))
+
+(defun harness-sandbox--systemd-path-p (path)
+  "Non-nil when PATH can be written in a systemd mount setting as it is.
+Whitespace, colons, quotes and backslashes are separators or escapes
+there."
+  (not (string-match-p "[[:space:]:\"'\\]" path)))
+
 ;;;; Git worktrees
 
 ;; A linked worktree's .git is a file pointing into the main repository's
@@ -221,8 +273,10 @@ Return (:common DIR :protected (PATH…)) or nil."
 (cl-defun harness-sandbox--bwrap-command (program cwd command &key (network t) writable readable)
   "Build the bwrap command line running COMMAND in CWD.
 PROGRAM is the bwrap executable.  NETWORK nil unshares the network
-namespace; WRITABLE and READABLE list extra directories to expose."
-  (let ((cwd (directory-file-name (expand-file-name cwd))))
+namespace; WRITABLE and READABLE list extra directories to expose (see
+`harness-sandbox--readable-mounts' for how READABLE ones are shown)."
+  (let ((cwd (directory-file-name (expand-file-name cwd)))
+        (home (unless (harness-sandbox--home-inside-p cwd) harness-sandbox--home)))
     (append
      (list program
            "--ro-bind" "/usr" "/usr"
@@ -235,10 +289,13 @@ namespace; WRITABLE and READABLE list extra directories to expose."
            "--tmpfs" "/tmp"
            "--dir" harness-sandbox--home)
      ;; Binds come after the tmpfs so a working directory under /tmp
-     ;; is not hidden by it.
+     ;; is not hidden by it, and the read-only ones before the others: a
+     ;; later mount covers what an earlier one shows below it, so the
+     ;; working directory stays writable inside a read-only directory.
+     (cl-loop for (source . dest) in (harness-sandbox--readable-mounts readable cwd home)
+              append (list "--ro-bind" source dest))
      (list "--bind" cwd cwd)
      (cl-loop for d in writable append (harness-sandbox--dir-args d 'rw))
-     (cl-loop for d in readable append (harness-sandbox--dir-args d 'ro))
      (harness-sandbox--bwrap-git-args cwd)
      (list "--unshare-pid" "--unshare-ipc" "--unshare-uts"
            "--die-with-parent" "--new-session"
@@ -269,9 +326,13 @@ unreachable (systemd-run fails with status 200)."
      (cl-loop for d in writable
               when (file-directory-p d)
               append (list "-p" (concat "BindPaths=" (directory-file-name (expand-file-name d)))))
-     (cl-loop for d in readable
-              when (file-directory-p d)
-              append (list "-p" (concat "BindReadOnlyPaths=" (directory-file-name (expand-file-name d)))))
+     ;; systemd orders the mounts itself, a directory before what lies
+     ;; in it.  A path its setting cannot hold as written is not shown.
+     (cl-loop for (source . dest) in (harness-sandbox--readable-mounts
+                                      readable cwd (unless (harness-sandbox--home-inside-p cwd) "/tmp"))
+              if (and (harness-sandbox--systemd-path-p source) (harness-sandbox--systemd-path-p dest))
+              append (list "-p" (concat "BindReadOnlyPaths=" source (if (equal source dest) "" (concat ":" dest))))
+              else do (harness-log 'debug "sandbox: systemd cannot show %s at %s" source dest))
      (harness-sandbox--systemd-git-args cwd)
      (unless network (list "-p" "PrivateNetwork=yes"))
      (unless (harness-sandbox--home-inside-p cwd)
@@ -284,10 +345,13 @@ unreachable (systemd-run fails with status 200)."
 (harness-defmethod sandbox/wrap (cwd command &rest opts)
   "Return COMMAND (a list of strings) wrapped to run confined in CWD.
 OPTS: `:network' (default t; nil cuts network access), `:writable'
-(extra directories mounted read-write) and `:readable' (extra
-read-only directories).  A remote CWD or the `off' policy return
-COMMAND unchanged.  Signals `harness-sandbox-unavailable' when the
-policy is `required' and no backend exists."
+\(extra directories mounted read-write) and `:readable' (extra
+read-only directories, shown where they are named, where their
+symbolic links lead and, under the sandbox's $HOME, where they are
+under the real one; see `harness-sandbox--readable-mounts').  A remote
+CWD or the `off' policy return COMMAND unchanged.  Signals
+`harness-sandbox-unavailable' when the policy is `required' and no
+backend exists."
   (let ((policy (harness-sandbox--policy cwd))
         (network (if (plist-member opts :network) (plist-get opts :network) t))
         (writable (plist-get opts :writable))
@@ -317,6 +381,12 @@ policy is `required' and no backend exists."
   (list :backend (or harness-sandbox--backend 'none)
         :available harness-sandbox--available
         :policy (harness-sandbox--policy nil)))
+
+(harness-defmethod sandbox/confined-p (cwd)
+  "Non-nil when commands run in CWD are confined by a sandbox backend.
+They are not when no backend exists, the policy is `off' or CWD is
+remote: such a command sees what the user sees."
+  (harness-sandbox--confined-p cwd))
 
 ;;;; Git worktree commands the sandbox makes destructive
 

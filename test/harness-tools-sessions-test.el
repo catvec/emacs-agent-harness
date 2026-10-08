@@ -358,6 +358,23 @@ tell it from the user's messages."
       (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "delete"))
       (should-not (harness-call 'task/list)))))
 
+(ert-deftest harness-tools-sessions-task-list-titles-waiting-tasks ()
+  "A task waiting for a slot is listed with its title: it is named as it is submitted."
+  (harness-tools-sessions-test-with
+    (harness-test-load-module 'naming)
+    (let* ((harness-tasks-max-running 0)
+           (harness-naming-auto t)
+           (harness-provider-demo-script-override
+            '((:type text :delta "Lexer fix") (:type done :stop-reason end-turn)))
+           (me (harness-tools-sessions-test-session :name "Me"))
+           (submitted (harness-tools-sessions-test-run me "task_submit" '(:prompt "Fix the lexer")))
+           (id (plist-get (plist-get submitted :meta) :task-id)))
+      (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :name)) 5 "the task's name")
+      (should (eq 'pending (plist-get (harness-call 'task/get id) :state)))
+      (should-not (plist-get (harness-call 'task/get id) :session))
+      (should (string-match-p (concat (regexp-quote id) " +pending +\"Lexer fix\": Fix the lexer")
+                              (harness-tools-sessions-test-ok me "task_list" nil))))))
+
 (ert-deftest harness-tools-sessions-task-list-marks-this-task ()
   "task_list marks the task of the calling session, its times, and keeps the most recent with limit."
   (harness-tools-sessions-test-with

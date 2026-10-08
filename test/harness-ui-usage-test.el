@@ -603,9 +603,13 @@ there are, and d on it says where to change it."
         (should (string-match-p "This week, Fable" text))
         (should (string-match-p "Extra usage: off (out of credits), \\$0 used of \\$50\\.00" text))
         (should (string-match-p "budgets count billed cost" text))
-        ;; The table: the plan's row first, by its value at API prices.
+        ;; The table: the project's row, its cost beside its value at API
+        ;; prices the plan covered.  The label is the path cut in the middle,
+        ;; which may cut "harness-test" too when the temp directory is long.
         (should (string-match-p "Cost +Plan +Share" text))
-        (should (< (string-match "harness-tmp\\|harness-test" text) (length text))))
+        (should (string-match-p (concat (regexp-quote (harness-truncate-middle (abbreviate-file-name project) 40))
+                                        " +\\$1\\.00 +\\$3\\.25 ")
+                                text)))
       ;; Grouped by billing.
       (harness-ui-usage-set-group 'billing)
       (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5)

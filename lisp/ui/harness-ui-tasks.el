@@ -307,8 +307,10 @@ in the order its tasks start.  With FILTERED, only the tasks
   (and (plist-get task :session) (harness-ui-session (plist-get task :session))))
 
 (defun harness-ui-tasks--title (task)
-  "The session's name once it has one, else the prompt's first line.
-The session list names a task's session the same way."
+  "TASK's name, its session's or its own, else its prompt's first line.
+A task is named as soon as it is submitted, so a task waiting for a slot
+shows its title too.  The session list names a task's session the same
+way."
   (harness-ui-task-title task))
 
 (defun harness-ui-tasks--todos (session)
@@ -367,9 +369,11 @@ marks on the same centre."
          (harness-ui-status-icon "idle")))))
 
 (defun harness-ui-tasks--detail (task column session position)
-  "The second line of TASK's card."
+  "The second line of TASK's card.
+Once the task has a name, which is then the card's title, the line says
+what its prompt asks."
   (let ((todos (harness-ui-tasks--todos session))
-        (named (not (harness-string-blank-p (plist-get session :name)))))
+        (named (and (harness-ui-task-name task session) t)))
     (pcase column
       ('needs-input
        (propertize (or (harness-ui-tasks--request session)
@@ -399,7 +403,7 @@ marks on the same centre."
                                      ((equal (plist-get session :status) "running") "working…")
                                      (t "starting…")))
                            'face 'harness-dim-face))
-      ('pending (propertize (harness-ui-tasks--pending-detail task position todos)
+      ('pending (propertize (harness-ui-tasks--pending-detail task position todos named)
                             'face 'harness-dim-face))
       ('review (propertize (harness-ui-tasks--review-detail task named) 'face 'harness-dim-face))
       ('done (propertize (let ((took (and (plist-get task :started) (plist-get task :finished)
@@ -491,9 +495,12 @@ by default, a merging card when you show it."
        room))
      (t (harness-ui-tasks--fit (propertize recap 'face 'harness-dim-face) room)))))
 
-(defun harness-ui-tasks--pending-detail (task position todos)
+(defun harness-ui-tasks--pending-detail (task position todos &optional named)
   "The second line of pending TASK's card: what it waits for.
-POSITION is its place in line among queued tasks; TODOS its session's."
+POSITION is its place in line among queued tasks; TODOS its session's.
+A queued task NAMED (its name is the card's title) has the first line of
+its prompt after its place in line, else the line after it, as a backlog
+task's write-up has, its first line being a title."
   (let ((body (harness-ui-tasks--body-line task))
         (sep (concat " " harness-ui-tasks--dot " ")))
     (cond
@@ -502,7 +509,8 @@ POSITION is its place in line among queued tasks; TODOS its session's."
      ((harness-ui-tasks--backlog-p task)
       (concat (if (plist-get task :refined) "refined, start it when ready" "on hold")
               (if body (concat sep body) "")))
-     (t (format "#%d in line%s" (or position 1) (if body (concat sep body) ""))))))
+     (t (let ((line (if named (harness-first-line (plist-get task :prompt) 70) body)))
+          (format "#%d in line%s" (or position 1) (if line (concat sep line) "")))))))
 
 (defun harness-ui-tasks--took (task)
   "How long TASK worked until it finished, as \"took 12m\"; nil if unknown."
@@ -516,8 +524,8 @@ POSITION is its place in line among queued tasks; TODOS its session's."
 
 (defun harness-ui-tasks--review-detail (task named)
   "The second line of TASK's card in review: what verifying it does.
-NAMED is non-nil when its session has a name, which then is the
-card's title, so the prompt shows here."
+NAMED is non-nil when it has a name, its session's or its own, which
+then is the card's title, so the prompt shows here."
   (let ((rounds (length (plist-get task :feedback))))
     (string-join
      (delq nil (list (and named (harness-first-line (plist-get task :prompt) 70))
@@ -2110,8 +2118,8 @@ task's key typed off a card.
         (". m" "Message session" harness-ui-tasks-reply)
         (". SPC" "View what point needs" harness-ui-tasks-requests)
         (". r" "Refine" harness-ui-tasks-refine)
-        (". y" "Allow tool call" harness-ui-tasks-allow)
-        (". n" "Deny tool call" harness-ui-tasks-deny)]
+        (". y" "Allow request" harness-ui-tasks-allow)
+        (". n" "Deny request" harness-ui-tasks-deny)]
        ["Finish"
         (". k" "Stop or drop" harness-ui-tasks-cancel)
         (". v" "Verify (accept)" harness-ui-tasks-verify)
@@ -2539,12 +2547,16 @@ but a failure shows on the board."
                                                 (harness-ui-tasks--on-error "Answering the permission request"))))
 
 (defun harness-ui-tasks-allow ()
-  "Allow the tool call the task at point is waiting on."
+  "Answer the permission request the task at point waits on with Allow.
+That is the [Allow] of the request's panel and of the session list, and
+their y; its tooltip says what it covers (`harness-ui-pending-answer-help')."
   (interactive)
   (harness-ui-tasks--permission "allow-once"))
 
 (defun harness-ui-tasks-deny ()
-  "Deny the tool call the task at point is waiting on."
+  "Answer the permission request the task at point waits on with Deny.
+That is the [Deny] of the request's panel and of the session list, and
+their n."
   (interactive)
   (harness-ui-tasks--permission "deny-once"))
 

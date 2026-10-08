@@ -14,12 +14,16 @@
 ;;   (`session/tmp-dir') is writable in there too, at its real path:
 ;;   the sandbox's /tmp is private and empty for every command, so
 ;;   that directory is where commands leave files for later ones and
-;;   for the other tools.  Remote (TRAMP) directories run the command
-;;   on that host, unwrapped, as the ssh tool does (tools-ssh): through
-;;   `harness-tools-shell-remote-command', with bash, or sh on a host
-;;   that has none, and standard input from /dev/null.  TRAMP runs a
-;;   remote process on a pty that never passes the end of input on, so
-;;   a command reading its input would wait for its timeout.
+;;   for the other tools.  The skills directories (`skills/directories')
+;;   are shown read-only, at their own paths and under the sandbox's
+;;   $HOME as under the real one, so `cat ~/.claude/skills/x/SKILL.md'
+;;   works in there as it does outside.  Remote (TRAMP) directories run
+;;   the command on that host, unwrapped, as the ssh tool does
+;;   (tools-ssh): through `harness-tools-shell-remote-command', with
+;;   bash, or sh on a host that has none, and standard input from
+;;   /dev/null.  TRAMP runs a remote process on a pty that never passes
+;;   the end of input on, so a command reading its input would wait for
+;;   its timeout.
 ;;
 ;; - `elisp' evaluates Emacs Lisp, the Emacs-native alternative to a
 ;;   shell: the value of the last form, anything printed to
@@ -93,11 +97,28 @@ run remote commands so."
                                sid (harness-error-message err))
                   nil)))))
 
-(defun harness-tools-shell--wrap (cwd command &optional writable)
+(defun harness-tools-shell--skill-dirs (ctx)
+  "Return the skills directories a command of CTX's session may read, or nil.
+They are those of `skills/directories' that hold skills and nothing
+else, the ones every call that only reads may read too; nil without
+the skills module or for a remote session, whose commands run on
+another host."
+  (let ((cwd (plist-get ctx :cwd)))
+    (when (and (harness-method-exists-p 'skills/directories)
+               (stringp cwd) (not (file-remote-p cwd)))
+      (condition-case err
+          (delq nil (mapcar (lambda (e) (and (plist-get e :contained) (plist-get e :dir)))
+                            (harness-call 'skills/directories cwd)))
+        (error (harness-log 'debug "bash: could not list the skills directories: %s"
+                            (harness-error-message err))
+               nil)))))
+
+(defun harness-tools-shell--wrap (cwd command &optional writable readable)
   "Return COMMAND wrapped by the sandbox for CWD when the sandbox module is loaded.
-WRITABLE lists other directories the command may write to."
+WRITABLE lists other directories the command may write to, READABLE
+directories it may read."
   (if (and (harness-method-exists-p 'sandbox/wrap) (not (file-remote-p cwd)))
-      (harness-call 'sandbox/wrap cwd command :writable writable)
+      (harness-call 'sandbox/wrap cwd command :writable writable :readable readable)
     command))
 
 (defun harness-tools-shell--format-output (r timeout)
@@ -139,7 +160,8 @@ WRITABLE lists other directories the command may write to."
                         ;; an ssh-agent, importing keys) go wrong in a sandbox, whose
                         ;; PID namespace hides the user's processes from it.
                         (harness-tools-shell--wrap cwd (list harness-tools-shell--program "-c" command)
-                                                   (delq nil (list (harness-tools-shell--tmp-dir ctx)))))
+                                                   (delq nil (list (harness-tools-shell--tmp-dir ctx)))
+                                                   (harness-tools-shell--skill-dirs ctx)))
                     (error (list :error (harness-error-message err))))))
         (if (and (consp cmd) (eq (car cmd) :error))
             (harness-tool-error (format "Cannot run command: %s" (plist-get cmd :error)))

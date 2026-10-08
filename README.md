@@ -96,7 +96,8 @@ Optional dependencies:
 | An AWS profile or `AWS_BEARER_TOKEN_BEDROCK` | Models on AWS Bedrock |
 | `BRAVE_API_KEY` | Web search with any model; until it is set, Claude Code and Copilot sessions use the CLI's own web search (`harness-websearch-builtin`) |
 | `ffmpeg`, `mpv` | Audio recording and playback, video posters (playing videos, and the thumbnails and durations shown; `ffprobe` comes with `ffmpeg`) |
-| `notify-send` (libnotify), or Emacs with D-Bus support | Desktop notifications on GNU/Linux; macOS uses `osascript` |
+| `notify-send` (libnotify), or Emacs with D-Bus support | Desktop notifications on GNU/Linux |
+| `terminal-notifier` 3 or later (`brew install terminal-notifier`) | Desktop notifications on macOS that open what they are about when clicked ([Notifications](#notifications)) |
 | A [Gotify](https://gotify.net) server | Notifications on your phone |
 
 ## Installation
@@ -266,7 +267,7 @@ the menu's Version entry says so.
 | `C-c h l` | `harness-sessions` | Show the session list |
 | `SPC` | `harness-ui-sessions-requests` | Pop out what the session at point waits on |
 | `b` | `harness-ui-sessions-toggle-blocked` | In the session list, show only the sessions waiting for you, or every session again |
-| `y` / `n` | `harness-ui-sessions-allow` / `harness-ui-sessions-deny` | On the lines of a listed session waiting on a tool call, allow or deny it |
+| `y` / `n` | `harness-ui-sessions-allow` / `harness-ui-sessions-deny` | On the lines of a listed session waiting on a permission request, answer it with Allow or Deny, as the request's own `y` and `n` do |
 | `C-c h a` | `harness-tasks` | Show the task board |
 | `C-c h /` | `harness-tasks-search` | Find tasks, or act on them, by saying so in words |
 | `C-c h F` | `harness-fullscreen` | Start or end the fullscreen layout: the task board or session list on the left, a session beside it |
@@ -299,7 +300,8 @@ the menu's Version entry says so.
 The menu (`C-c h ?`) also renames the session (`r`). A session you
 have not named gets a short title from a cheap model as soon as you
 send its first message, while the agent works on it (see
-`harness-naming-auto` and `harness-naming-model`).
+`harness-naming-auto` and `harness-naming-model`). A task gets its
+title as soon as you submit it (see [Task board](#task-board)).
 
 With a prefix argument (`C-u`), the commands that open a session ask
 where to show it: `right` (the default, see
@@ -375,14 +377,30 @@ that key is the review banner's `[Verify]`, so a screenshot never has
 to fight the banner's key. Set
 `harness-compose-yank-media` to nil to leave `C-y` and `M-y` alone.
 
+Each image you attach, paste or drop also puts a token into the message
+where point is (or at its end): `[image 1]`, `[image 2]`, and so on. It
+shows as a small chip with the image's thumbnail, so you can write
+"in [image 2] the button is cut off" and the model knows which
+screenshot you mean: it gets the same `[image 2]` right before that
+image. Delete a token (`DEL` right after it takes it whole) and its
+image goes with it; undo or yank the token back and the image returns.
+The `×` on an image's line removes its tokens too. Numbers never shift
+under a sentence you already wrote: a new image takes the number after
+the highest one attached, and every message starts again at 1. The
+attachment lines above the box stay, each image's leading with its
+token, since they also hold files that are not images, downloads still
+on their way, and the larger thumbnail, size and `×`. In the transcript
+the tokens keep their look, and each image has its token over it.
+
 Permission requests and questions from the agent appear inline above
 the compose box. An indicator in the mode line, visible from any buffer,
 shows how many sessions need your attention. Clicking it opens the
 session list on just the sessions waiting for you, from every project
 (`M-x harness-sessions-waiting`), under a banner that counts them. A
 line under each says what it waits on, with the task board's buttons
-to settle it there: `[Allow]` and `[Deny]` for a tool call, which `y`
-and `n` press too, and `[Answer…]` for a question, which pops it out.
+to settle it there: `[Allow]` and `[Deny]` for a permission request,
+which `y` and `n` press too, and `[Answer…]` for a question, which pops
+it out.
 `RET` or a click on a session opens it in its project: with Doom
 Emacs's workspaces, the project's workspace becomes current first, as
 switching project does, and a session already showing there gets its
@@ -418,6 +436,18 @@ command. The directory is made with the session, made again if it went
 missing, and deleted with the session. `C-c h d` lists all of these
 directories. Remote sessions have no temporary directory.
 
+Every permission request offers the same five answers, under the same
+names and keys wherever it shows (the chat, BTW, the popout, an ACP
+client): `[Allow]` `y`, `[Allow for session]` `s`, `[Always allow]` `a`,
+`[Deny]` `n` and `[Always deny]` `N`; the session list and the task
+board show the first and the fourth. *Allow* is the narrowest yes and
+records nothing: it lets the call run, or reach the path it asks about,
+this once, and for the agent's own request for a directory
+(`request_directory_access`), which is no call to run, it grants the
+directory until the agent's turn ends, so the agent can do what it
+asked for and has to ask again in a later turn. A button's tooltip, and
+the echo area after it, say what it covers for the request at hand.
+
 A permission request about a path outside the session's directories
 (a tool call reaching there, or the agent asking for a directory) is
 answered for a glob pattern, not for a single file. By default the
@@ -428,7 +458,8 @@ or click `[Edit]` to change it in the minibuffer, either more specific
 (`~/notes/*.org`, a subdirectory, one file) or less (`~/**`). `*`
 matches within a name and `**` across directories, and `M-n` offers
 patterns around the request's own. The answer grants or denies the
-pattern: once, for the session, or always (as an entry of
+pattern: once (for the one call, or until the turn ends for the agent's
+own request), for the session, or always (as an entry of
 `harness-allowed-directories`, or a rule in `harness-perms-rules` for
 *Always deny*). Any other request, such as the permission mode asking
 about a file edit or a command, or the auto-mode judge objecting to
@@ -698,10 +729,15 @@ your checkout itself can be submitted to the **main tree** instead (the
   letter that is not one of the board's keys, and a key for the task at
   point (`s`, `e`, `m`, `v`, ...) typed off a card, which has no task to
   act on.
-- A task's session shows in the session list (`C-c h l`) under the
-  task's title, of kind task. A cheap model titles it like a ticket as
-  soon as the task starts, so the board shows that title, not the raw
-  prompt, while the task works.
+- A cheap model titles a task like a ticket as soon as you submit it,
+  from its prompt, so the board and `task_list` show that title, not the
+  raw prompt, even while the task waits for a slot; the card's second
+  line then shows the prompt. A refined task is titled from what you
+  wrote, the same way. When the task starts, its session takes the
+  title rather than being named again, and shows in the session list
+  (`C-c h l`) under it, of kind task. Nothing waits for the title: a
+  task whose naming fails starts all the same, and its session is named
+  from its first message.
 
 Press `?` on the board, or `C-c h ?` in its compose box, to see all of
 the board's commands.
@@ -775,8 +811,8 @@ when a task is done, so you can leave it working:
 
 - A desktop notification, shown by your Emacs. Clicking it opens the
   task board on that task. It uses `notify-send` on GNU/Linux (or
-  Emacs's D-Bus support) and `osascript` on macOS; set
-  `harness-notifications-desktop-backend` to choose.
+  Emacs's D-Bus support) and `terminal-notifier` on macOS (see below);
+  set `harness-notifications-desktop-backend` to choose.
 - A push through [Gotify](https://gotify.net), for your phone, once it
   is set up. Create an application in Gotify and give the harness its
   address and token:
@@ -801,6 +837,34 @@ test notification and says what each provider did with it.
 - Agents can notify you with the `notify` tool, for example when long
   work you asked for has finished. Clicking such a notification opens
   the session.
+
+On macOS, a click opens what the notification is about when two things
+are in place:
+
+- [terminal-notifier](https://github.com/julienXX/terminal-notifier):
+  `brew install terminal-notifier`. The first notification asks whether
+  terminal-notifier may show notifications; allow it (System Settings >
+  Notifications > terminal-notifier).
+- The Emacs server, which the click reaches through `emacsclient`:
+  `(server-start)` in your init file, or `M-x server-start`. Doom Emacs
+  starts it already.
+
+A click then brings Emacs to the front and opens the session, or the
+task board on the task. A notification clicked after Emacs restarted,
+from the Notification Center, lists the sessions waiting for you, as
+clicking the mode line's notifier does. Without the server a click only
+brings Emacs to the front; Emacs says so once, in the echo area and in
+the log (`M-x harness-show-log`).
+
+Without terminal-notifier, a graphical Emacs shows the notification as
+its own, through AppleScript: a click brings Emacs to the front, but
+cannot tell which notification it was. Only a terminal Emacs falls back
+to `osascript`, whose notifications macOS gives to Script Editor, so a
+click opens Script Editor. A click brings forward the Emacs
+application, or for Emacs in a terminal, the terminal. Set
+`harness-notifications-desktop-macos-app` to a bundle id
+(`"org.gnu.Emacs"`, `"com.googlecode.iterm2"`) when that finds the
+wrong one.
 
 ### Insights
 

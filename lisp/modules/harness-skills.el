@@ -11,8 +11,8 @@
 ;; project-relative ones resolved against a session's cwd), caches each
 ;; directory by modification time, and exposes:
 ;;
-;; - the bus methods `skills/list', `skills/search', `skills/load' and
-;;   `skills/refresh';
+;; - the bus methods `skills/list', `skills/search', `skills/load',
+;;   `skills/refresh' and `skills/directories';
 ;; - the tools `skill_search' and `skill_load' for the model;
 ;; - a filter on `agent/system-prompt' that appends a compact index so
 ;;   the model knows which skills exist and loads one before relying
@@ -20,6 +20,27 @@
 ;; - `harness-skills-expand-references' for the compose UI, which turns
 ;;   explicit "/name" and "@skill:name" references in a message into
 ;;   the skill's content.
+;;
+;; Where skills live is a convention each agent keeps, so the defaults
+;; cover the documented ones: Claude Code's ~/.claude/skills and
+;; .claude/skills, the harness's own ~/.config/harness/skills and
+;; .harness/skills, the open Agent Skills convention's ~/.agents/skills
+;; and .agents/skills (which Codex and GitHub Copilot CLI read too),
+;; Copilot CLI's ~/.copilot/skills and .github/skills, and the skills of
+;; the plugins Claude Code installed (`harness-skills-plugin-directories').
+;; Locations added later come after the earlier ones, so a skill that
+;; was found before keeps winning.
+;;
+;; Agents read a skill's files directly too, with read_file, grep or
+;; bash, and those directories mostly lie outside a session's allowed
+;; directories.  `skills/directories' tells the permission layer and the
+;; bash tool which directories discovery reads: every call that only
+;; reads may read them without a prompt, and the sandbox shows them to
+;; bash read-only.  A directory a project or a plugin provides counts
+;; only while it stays inside that project or plugin once symbolic links
+;; are resolved, so a link committed to a repository cannot open the
+;; rest of the disk; neither does a directory that would hold the home
+;; directory itself.
 
 ;;; Code:
 
@@ -32,14 +53,32 @@
 ;;;; Customisation
 
 (defcustom harness-skills-directories
-  '("~/.claude/skills" "~/.config/harness/skills" harness-skills-project-directories)
+  '("~/.claude/skills" "~/.config/harness/skills" "~/.agents/skills" "~/.copilot/skills"
+    harness-skills-project-directories harness-skills-plugin-directories)
   "Where skills are looked for.
 Each entry is either a directory name or a function called with the
 session's cwd (possibly nil) that returns a directory or a list of
 directories.  Directories from functions are `project' skills, plain
 directory entries are `global' skills; a project skill shadows a
-global one with the same name."
+global one with the same name.
+
+A function may also describe its directories itself, with plists
+\(:dir DIR :source SOURCE :within BASE), as
+`harness-skills-plugin-directories' does: SOURCE `plugin' marks the
+skills of a Claude Code plugin, which come after the global ones, and
+BASE is the directory DIR belongs to.  A directory from a function
+counts for the permission layer and the sandbox only while it stays
+inside its BASE, by default the session's project, once symbolic
+links are resolved (see `skills/directories')."
   :type '(repeat (choice directory function))
+  :group 'harness)
+
+(defcustom harness-skills-plugins-directory nil
+  "The root of Claude Code's plugins, or nil for its default.
+nil means $CLAUDE_CODE_PLUGIN_CACHE_DIR when that is set, else
+~/.claude/plugins, as Claude Code itself decides.  See
+`harness-skills-plugin-directories'."
+  :type '(choice (const :tag "Claude Code's default" nil) directory)
   :group 'harness)
 
 (defconst harness-skills--prompt-limit 40
@@ -60,37 +99,111 @@ global one with the same name."
              (ignore-errors (harness-call 'project/root cwd)))
         cwd)))
 
+(defconst harness-skills-project-subdirectories
+  '(".claude/skills" ".harness/skills" ".agents/skills" ".github/skills")
+  "Where a project keeps its skills, relative to its directory.
+Claude Code's, the harness's own, the Agent Skills convention's (read
+by Codex and Copilot CLI too) and Copilot CLI's.")
+
 (defun harness-skills-project-directories (cwd)
   "Return the project-relative skill directories for CWD.
-Looks for .claude/skills and .harness/skills under CWD and under its
-project root.  Return nil when CWD is nil."
+Looks for `harness-skills-project-subdirectories' under CWD and under
+its project root.  Return nil when CWD is nil."
   (when cwd
     (let ((bases (delete-dups (list (file-name-as-directory (expand-file-name cwd))
                                     (harness-skills--project-root cwd))))
           out)
       (dolist (base bases (nreverse out))
-        (dolist (rel '(".claude/skills" ".harness/skills"))
+        (dolist (rel harness-skills-project-subdirectories)
           (push (expand-file-name rel base) out))))))
 
-(defun harness-skills--directories (cwd)
-  "Return ((DIR . SOURCE) ...) for CWD, project directories first.
-DIR is an absolute directory name; SOURCE is `project' or `global'.
-Missing directories are left out."
-  (let (project global)
+(defun harness-skills--plugins-root ()
+  "Return the root of Claude Code's plugins as a directory name.
+See `harness-skills-plugins-directory'."
+  (let ((env (getenv "CLAUDE_CODE_PLUGIN_CACHE_DIR")))
+    (file-name-as-directory
+     (expand-file-name (cond (harness-skills-plugins-directory)
+                             ((not (harness-string-blank-p env)) env)
+                             (t "~/.claude/plugins"))))))
+
+(defun harness-skills--subdirs (dir)
+  "Return the subdirectories of DIR whose names do not start with a dot, sorted."
+  (cl-remove-if-not #'file-directory-p (directory-files dir t "\\`[^.]")))
+
+(defun harness-skills-plugin-directories (_cwd)
+  "Return the skills directories of the plugins Claude Code installed.
+Claude Code copies each installed version of a marketplace plugin to
+cache/MARKETPLACE/PLUGIN/VERSION/ under its plugins root (see
+`harness-skills-plugins-directory'); the plugin's skills are in its
+skills/ directory there.  A version it replaced or uninstalled carries
+an .orphaned_at marker until it is deleted, and is left out; of the
+other versions of a plugin the newest comes first.  Each directory is
+\(:dir DIR :source plugin :within MARKETPLACE-DIR): like Claude Code,
+which loads no component that leads out of its plugin, other than to
+another plugin of the same marketplace, the permission layer and the
+sandbox take a plugin's skills only while they stay in its
+marketplace's directory."
+  (let ((cache (expand-file-name "cache" (harness-skills--plugins-root)))
+        out)
+    (when (file-directory-p cache)
+      (dolist (market (harness-skills--subdirs cache))
+        (dolist (plugin (harness-skills--subdirs market))
+          (dolist (version (sort (harness-skills--subdirs plugin)
+                                 (lambda (a b) (> (or (harness-skills--mtime a) 0)
+                                                  (or (harness-skills--mtime b) 0)))))
+            (let ((skills (expand-file-name "skills" version)))
+              (when (and (file-directory-p skills)
+                         (not (file-exists-p (expand-file-name ".orphaned_at" version))))
+                (push (list :dir skills :source 'plugin :within (file-name-as-directory market))
+                      out)))))))
+    (nreverse out)))
+
+(defconst harness-skills--source-rank '((project . 0) (global . 1) (plugin . 2))
+  "Order in which the directories of each source are searched.
+A skill shadows the skills of the same name found after it.  A source
+missing here ranks with `global'.")
+
+(defun harness-skills--entries (cwd)
+  "Return the skills directories for CWD as (:dir DIR :source SOURCE :within BASE).
+They come in search order: project directories, then global ones,
+then those of plugins, each in the order of `harness-skills-directories'.
+DIR is an absolute directory name; BASE, for a directory from a
+function, is the directory it belongs to (the session's project unless
+the function says otherwise), and nil for a plain entry.  Missing
+directories are left out."
+  (let ((project-root nil) entries)
     (dolist (entry harness-skills-directories)
       (cond
        ((functionp entry)
         (let ((dirs (ignore-errors (funcall entry cwd))))
-          (dolist (d (if (listp dirs) dirs (list dirs)))
-            (when (stringp d) (push (cons d 'project) project)))))
-       ((stringp entry) (push (cons entry 'global) global))))
-    (let (out seen)
-      (dolist (cell (append (nreverse project) (nreverse global)))
-        (let ((dir (file-name-as-directory (expand-file-name (car cell)))))
+          (dolist (d (if (or (stringp dirs) (keywordp (car-safe dirs))) (list dirs) dirs))
+            (cond
+             ((stringp d)
+              (push (list :dir d :source 'project
+                          :within (or project-root
+                                      (setq project-root
+                                            (harness-skills--project-root (or cwd default-directory)))))
+                    entries))
+             ((and (consp d) (stringp (plist-get d :dir)))
+              (push (list :dir (plist-get d :dir) :source (or (plist-get d :source) 'project)
+                          :within (plist-get d :within))
+                    entries))))))
+       ((stringp entry) (push (list :dir entry :source 'global :within nil) entries))))
+    (let ((rank (lambda (e) (alist-get (plist-get e :source) harness-skills--source-rank 1)))
+          out seen)
+      (dolist (e (sort (nreverse entries) (lambda (a b) (< (funcall rank a) (funcall rank b)))))
+        (let ((dir (file-name-as-directory (expand-file-name (plist-get e :dir)))))
           (when (and (not (member dir seen)) (file-directory-p dir))
             (push dir seen)
-            (push (cons dir (cdr cell)) out))))
+            (push (plist-put (copy-sequence e) :dir dir) out))))
       (nreverse out))))
+
+(defun harness-skills--directories (cwd)
+  "Return ((DIR . SOURCE) ...) for CWD, project directories first.
+DIR is an absolute directory name; SOURCE is `project', `global' or
+`plugin'.  Missing directories are left out."
+  (mapcar (lambda (e) (cons (plist-get e :dir) (plist-get e :source)))
+          (harness-skills--entries cwd)))
 
 ;;;; Parsing SKILL.md
 
@@ -281,6 +394,74 @@ when no such skill exists."
   (clrhash harness-skills--cache)
   t)
 
+(defun harness-skills--contained-p (entry dir)
+  "Non-nil when DIR, found through ENTRY, holds skills and nothing else.
+ENTRY is one of `harness-skills--entries'.  DIR does unless it leads
+out of ENTRY's `:within' once symbolic links are resolved, or it is or
+holds the home directory."
+  (let ((within (plist-get entry :within)))
+    (and (not (harness-path-within-p dir (expand-file-name "~")))
+         (or (null within) (harness-path-within-p within dir))
+         t)))
+
+(harness-defmethod skills/directories (&optional cwd)
+  "Return the directories skill discovery reads for a session at CWD.
+Each is (:dir DIR :source SOURCE :contained BOOL), in search order:
+every skills directory that exists (see `harness-skills-directories'),
+each followed by the skill directories in it that lead elsewhere
+through a symbolic link, such as a skill linked in from a dotfiles
+repository.  `:contained' is non-nil for the directories that hold
+skills and nothing else, which the permission layer lets every call
+that only reads read without a prompt and the bash tool's sandbox
+shows read-only.  It is nil for a directory from a function that
+leads out of where it belongs (its `:within', see
+`harness-skills-directories') once symbolic links are resolved, so a
+link committed to a repository cannot open the rest of the disk, and
+for one that is or holds the home directory."
+  (let (out)
+    (dolist (entry (harness-skills--entries cwd))
+      (let ((dir (plist-get entry :dir))
+            (source (plist-get entry :source)))
+        (push (list :dir dir :source source :contained (harness-skills--contained-p entry dir)) out)
+        (dolist (skill (harness-skills--skill-dirs dir))
+          (unless (harness-path-within-p dir skill)
+            (push (list :dir skill :source source :contained (harness-skills--contained-p entry skill))
+                  out)))))
+    (nreverse out)))
+
+(defun harness-skills--readable-p (path cwd)
+  "Non-nil when PATH lies in a skills directory that may be read from CWD.
+That is one of the `:contained' directories of `skills/directories',
+symbolic links resolved."
+  (cl-some (lambda (e) (and (plist-get e :contained) (harness-path-within-p (plist-get e :dir) path)))
+           (harness-call 'skills/directories cwd)))
+
+(defun harness-skills--file (skill file &optional cwd)
+  "Return the text of FILE, one of SKILL's supporting files, and its absolute name.
+FILE is relative to the skill's directory and must stay inside it once
+symbolic links are resolved, and inside a skills directory that may be
+read from CWD (`harness-skills--readable-p'): skill_load reads nothing
+the file tools could not read without approval.  Return (PATH . TEXT);
+signal `harness-error' when FILE is no readable text file there."
+  (let* ((dir (plist-get skill :path))
+         (path (expand-file-name file dir))
+         (inside (harness-path-within-p dir path))
+         (readable (and inside (harness-skills--readable-p path cwd)))
+         (text (and readable (file-regular-p path) (harness-read-file path))))
+    (cond
+     ((not inside)
+      (signal 'harness-error (list (format "%s is not inside the directory of the skill %s"
+                                           file (plist-get skill :name)))))
+     ((not readable)
+      (signal 'harness-error (list (format "The files of the skill %s are not served: its directory leads out of the project or plugin that provides it"
+                                           (plist-get skill :name)))))
+     ((null text)
+      (signal 'harness-error (list (format "The skill %s has no readable file %s"
+                                           (plist-get skill :name) file))))
+     ((string-search "\0" text)
+      (signal 'harness-error (list (format "%s of the skill %s is a binary file" file (plist-get skill :name)))))
+     (t (cons path text)))))
+
 ;;;; Formatting
 
 (defun harness-skills--format-line (skill)
@@ -297,7 +478,7 @@ when no such skill exists."
     (concat (format "# Skill: %s\nPath: %s\n\n" (plist-get skill :name) (plist-get skill :path))
             (string-trim-right (or (plist-get skill :content) ""))
             (if files
-                (format "\n\nSupporting files in %s:\n%s"
+                (format "\n\nSupporting files in %s (skill_load with file set to one returns it):\n%s"
                         (plist-get skill :path)
                         (mapconcat (lambda (f) (concat "- " f)) files "\n"))
               "")
@@ -323,22 +504,41 @@ when no such skill exists."
                                                 (plist-get s :source)))
                             found "\n")))))))
 
+(defun harness-skills--tool-file (skill file cwd)
+  "Return the skill_load result for FILE, one of SKILL's supporting files.
+CWD is the session's, as for `harness-skills--file'."
+  (condition-case err
+      (let ((found (harness-skills--file skill file cwd)))
+        (harness-tool-ok (format "# Skill: %s, file %s\nPath: %s\n\n%s"
+                                 (plist-get skill :name) file (car found) (cdr found))))
+    (harness-error
+     (let ((files (plist-get skill :files)))
+       (harness-tool-error
+        (concat (harness-error-message err) "."
+                (if files
+                    (format " Its supporting files: %s." (string-join files ", "))
+                  " It has no supporting files.")))))))
+
 (defun harness-skills--tool-load (input ctx)
   "Handler for the skill_load tool with INPUT and CTX."
   (let* ((name (or (plist-get input :name) ""))
+         (file (plist-get input :file))
          (cwd (plist-get ctx :cwd)))
     (if (harness-string-blank-p name)
         (harness-tool-error "The skill_load tool needs a skill name")
-      (condition-case nil
-          (harness-tool-ok (harness-skills--format-loaded (harness-call 'skills/load name cwd)))
-        (harness-error
-         (let ((close (seq-take (harness-call 'skills/search name cwd) 5)))
-           (harness-tool-error
-            (concat (format "No skill named %S." name)
-                    (if close
-                        (format " Did you mean: %s?"
-                                (mapconcat (lambda (s) (plist-get s :name)) close ", "))
-                      " Use skill_search to list the available skills.")))))))))
+      (let ((skill (condition-case nil (harness-call 'skills/load name cwd) (harness-error nil))))
+        (cond
+         ((null skill)
+          (let ((close (seq-take (harness-call 'skills/search name cwd) 5)))
+            (harness-tool-error
+             (concat (format "No skill named %S." name)
+                     (if close
+                         (format " Did you mean: %s?"
+                                 (mapconcat (lambda (s) (plist-get s :name)) close ", "))
+                       " Use skill_search to list the available skills.")))))
+         ((and (stringp file) (not (harness-string-blank-p file)))
+          (harness-skills--tool-file skill (string-trim file) cwd))
+         (t (harness-tool-ok (harness-skills--format-loaded skill))))))))
 
 (harness-define-tool "skill_search"
   :label "Search skills"
@@ -354,13 +554,18 @@ when no such skill exists."
 
 (harness-define-tool "skill_load"
   :label "Load skill"
-  :description "Load a skill by name and return its full instructions and the list of its supporting files. Always load a skill before relying on it."
+  :description "Load a skill by name and return its full instructions and the list of its supporting files; with file, return one of those files instead. Always load a skill before relying on it."
   :schema '(:type "object"
-            :properties (:name (:type "string" :description "The skill name as listed by skill_search."))
+            :properties (:name (:type "string" :description "The skill name as listed by skill_search.")
+                         :file (:type "string" :description "Optional: one of the skill's supporting files, relative to its directory as skill_load lists them, to return instead of its instructions."))
             :required ("name"))
   :kind 'read
   :coalescable t
-  :subject (lambda (input) (plist-get input :name))
+  :subject (lambda (input)
+             (let ((file (plist-get input :file)))
+               (if (harness-string-blank-p file)
+                   (plist-get input :name)
+                 (format "%s: %s" (plist-get input :name) file))))
   :handler #'harness-skills--tool-load)
 
 ;;;; System prompt

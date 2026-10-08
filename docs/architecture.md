@@ -1438,8 +1438,16 @@ non-interactive session it stays a denial.
   for no tool in particular denies (`harness-perms--dir-rule`, what
   deny-always records); no rule grants one.  Otherwise the session
   blocks on a `permission` prompt (`:dir`, `:pattern`, the agent's
-  reason, options allow-session / allow-always / deny-once /
-  deny-always; a generic allow-once answer grants to the session).  The
+  reason, and the five options every request has,
+  `harness-perms-dir-request-options`).  There is no single call to let
+  through, so allow-once grants the pattern until the session's turn
+  ends (`harness-perms--grant-for-turn`): a root of source `turn`,
+  listed and revocable as a session grant is, never stored, and dropped
+  on `agent/turn-ended` and on `agent/turn-started`
+  (`harness-perms--end-turn-grants`, so one made after its turn was
+  cancelled does not reach the next).  allow-session grants it to the
+  session, allow-always to every session, and the denials are the jail
+  prompt's.  The
   decision hands the handler the grant as `:granted` in its `:input`,
   and the handler tells the agent what it can reach, saying so when the
   user granted another pattern than it asked for.  Being a permission
@@ -1451,9 +1459,9 @@ non-interactive session it stays a denial.
 - The roots of a session are its cwd, its worktree, its own temporary
   directory (`session/tmp-dir`, asked for on every look at the roots, so
   it exists whenever the jail lets a call into it), the configured
-  `harness-allowed-directories`, its grants and the tool output
-  directory.  The temporary directory needs no grant and cannot be
-  revoked.
+  `harness-allowed-directories`, its grants (to the session, and until
+  its turn ends) and the tool output directory.  The temporary
+  directory needs no grant and cannot be revoked.
 - Inspecting the harness itself is one of the things that make it
   powerful, so no mode, judge or jail stands in its way.  The harness
   is no root, but a call of kind `read` may read it, in every mode,
@@ -1475,14 +1483,43 @@ non-interactive session it stays a denial.
   names (`harness-perms--listing-tools`: list_dir, glob, file_info) may
   still look at.  Symbolic links are resolved first, out of the harness
   as much as into it.
+- Skills are read the same way.  Agents read a skill's files directly
+  (a SKILL.md whose place they know, the files `skill_load` lists), and
+  a prompt about `~/.claude/skills` used to stop an unattended task in
+  needs-input.  `harness-perms-skill-dirs` asks the skills module
+  (`skills/directories`) which directories discovery reads for the
+  session's cwd; a call of kind `read` may read the `:contained` ones
+  in every mode, with the user there or away.  The jail lets such a
+  read through (`harness-perms--skill-readable-p`) and the mode stage
+  allows it with no judge asked ("reading skills never needs
+  approval"); a standing rule still decides first, and the harness's
+  credentials stay out.  Writes, commands, sub-agents and directory
+  grants there are jailed as anywhere outside the roots, and their
+  denial says reading needs no grant.  Where reading does not fit, the
+  jail refuses at once, final in every mode and with the user there
+  too, and nobody is asked (`harness-perms--skills-refusal`): a path in
+  a skills directory as written that symbolic links lead out of what
+  may be read (a link to a file elsewhere, a project's `.claude/skills`
+  linked out of the project), a path in a remote session's skills
+  directories (its host's, not the skills the harness serves; the same
+  path as a local one, or the same place under a home directory there,
+  `~/`, `/home/USER/`, `/Users/USER/` or `/root/`), and a path in one
+  that a shell command run in the sandbox (`sandbox/confined-p`) names
+  but the sandbox does not show.  The refusal's hint
+  (`harness-perms-skills-hint`) points to `skill_search` and
+  `skill_load` (with `file` for a supporting file), which never need
+  approval, and to `request_directory_access` should the task need the
+  target directory itself.  No mode stage was added: the jail and the
+  mode stage do it, as for the harness.
 - `permission/allow-dir SESSION-ID DIR &optional SCOPE` (SCOPE `always`
   grants every session), `permission/revoke-dir SESSION-ID DIR`,
-  `permission/dirs SESSION-ID` (`(:dir :source cwd|worktree|tmp|config|session|outputs
+  `permission/dirs SESSION-ID` (`(:dir :source cwd|worktree|tmp|config|session|turn|outputs
   :revocable)` plists, for the directory buffer), `permission/allowed-dirs SESSION-ID`
   (the full effective root list), `permission/rules SESSION-ID`
-  (`(:mode :non-interactive :auto-allow :session :always :roots :inspect)`:
-  `:auto-allow` holds the inspection tools too, and `:inspect` the
-  directories of the harness itself),
+  (`(:mode :non-interactive :auto-allow :session :always :roots :inspect :skills)`:
+  `:auto-allow` holds the inspection tools too, `:inspect` the
+  directories of the harness itself and `:skills` the skills
+  directories every call that only reads may read),
   `permission/pending SESSION-ID`.
 - Session directory grants are stored on the session record
   (`:allowed-dirs`), so they survive restarts and forks inherit them.
@@ -1507,7 +1544,17 @@ non-interactive session it stays a denial.
   prompt's `:paths` are its subject paths, and a shell command's prompt
   has `:cwd`, where it runs; UIs offer only the listed `:options`, and
   show a pattern only when there is one),
-  `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`.
+  `permission/decided SID REQUEST DECISION`, `permission/dir-allowed SID DIR`,
+  `permission/dir-revoked SID DIR` (a grant revoked, or one until the
+  turn ends gone with its turn).
+- Every request is answered with the same five options, whatever it is
+  about: allow-once, allow-session, allow-always, deny-once and
+  deny-always, named Allow, Allow for session, Always allow, Deny and
+  Always deny (`harness-acp-permission-answers`, which both the UI's
+  panels and the options of `session/request_permission` read).  What
+  allow-once covers is the request's: the call, for a tool prompt; one
+  call reaching the pattern, for the jail's prompt; the pattern until
+  the turn ends, for `request_directory_access`.
 - Modes: `ask` (reads inside the jail allowed; everything else asks),
   `accept-edits` (reads/writes inside the jail allowed; exec/net ask),
   `auto` (reads inside the jail allowed; a cheap model,
@@ -1572,9 +1619,9 @@ non-interactive session it stays a denial.
   keeps the judge's reason and `:judge-deny', stage 90 opens the
   permission prompt (`harness-perms--judge-prompt-reason` words it as
   "The permission judge would deny this call: …"), and the user answers
-  it like any other permission request: allow once, for the session, or
-  always.  Switching the session to yolo used to be the only way past a
-  denial the user disagreed with.  A non-interactive session has nobody
+  it like any other permission request: Allow (this once), for the
+  session, or always.  Switching the session to yolo used to be the
+  only way past a denial the user disagreed with.  A non-interactive session has nobody
   to ask: the denial stands and the agent is steered to another
   approach.  A judge that gives no verdict at all leaves the call `ask`
   as before, which the user is asked about in an interactive session.
@@ -1585,7 +1632,8 @@ non-interactive session it stays a denial.
   scratch files go without stopping the session.  A path in the harness
   itself (and the agent's own request for one) adds that reading it
   needs no grant, and a read refused for reaching the credentials names
-  them (`harness-perms--inspection-hint`).
+  them (`harness-perms--inspection-hint`); a path in a skills directory
+  adds that reading it needs no grant (`harness-perms--skills-hint`).
 - Non-interactive (the user is away) is no permission policy of its
   own and refuses nothing for being unattended: the auto judge
   (stage 30, `harness-perms--judge-p`) decides what would ask the user,
@@ -1628,6 +1676,27 @@ non-interactive session it stays a denial.
   after the private tmpfs on /tmp, so a command can leave files there
   for the next command and the other tools, while the rest of /tmp
   stays private to each command.
+- The bash tool passes the skills directories every read may read (the
+  `:contained` ones of `skills/directories`) as `:readable`, so `cat
+  ~/.claude/skills/x/SKILL.md` works in the sandbox as outside it.
+  `harness-sandbox--readable-mounts` shows each one read-only where it
+  is named, where its symbolic links lead, and, for one under the real
+  home directory, at the same place under the sandbox's `$HOME`
+  (`/tmp/harness-home`, or `/tmp` for systemd-run).  Left out: one
+  inside CWD (shown read-write anyway), one that is or holds the home
+  directory, a destination below another one (it shows through that one,
+  and bwrap refuses to mount on the symbolic link it may be there: a
+  skill linked into `~/.claude/skills`), and one holding a CWD named
+  through a link.  bwrap gets the read-only binds before CWD's, since a
+  later bind covers what an earlier one shows below it, so a CWD inside
+  a skills directory stays writable; systemd-run orders its mounts
+  itself (`BindReadOnlyPaths=SRC[:DEST]`) and leaves out a path its
+  setting cannot hold as written (whitespace, colons, quotes).  Only the
+  skills directories become visible: the rest of the home directory
+  stays hidden.  `sandbox/confined-p CWD` says whether commands run in
+  CWD are confined (a backend, a policy other than `off`, a local CWD);
+  the perms module refuses a command naming a skills path the sandbox
+  does not show.
 - A CWD inside a linked git worktree also gets the repository's common
   git directory read-write (its `hooks/` and `config` stay read-only, so
   nothing planted there runs when the harness uses git unconfined; the
@@ -2147,30 +2216,75 @@ so switching to either loses nothing.
   `:no-thinking t`, a 40-token budget and no provider state, so the
   hosted providers answer it apart from the session's conversation (a
   CLI process of its own for Claude Code, a throwaway session for
-  Copilot) and the question never lands in it.  A session still nameless
-  when a later turn starts (its naming failed) is named then; btw and
-  subagent sessions never are.  Without `:opening` the whole
+  Copilot) and the question never lands in it.  It fails after
+  `harness-naming--timeout` (60) seconds, cancelled, so a provider that
+  never answers does not keep a session nameless.  A session still
+  nameless when a later turn starts (its naming failed) is named then,
+  and so is a nameless session whose turn runs when the harness reloads
+  (`harness-naming--name-running`); btw and subagent sessions never are.
+  Without `:opening` the whole
   conversation is titled on the session's model, on a fork of its
   provider state when possible so the cached prefix is reused.  Hints
   "Naming session…" then the result; a session renamed while the model
   was asked keeps its new name.  Events `naming/done SID NAME`,
   `naming/failed SID MESSAGE`.
-- Sync filter `naming/system-prompt` (value string, args session) lets
-  modules add to `harness-naming--base-system-prompt` per session (tasks ask
-  for ticket titles).
+- `naming/title TEXT &optional OPTS` → promise of a title for TEXT, a
+  first message no session holds yet: the same request as `:opening`
+  naming, to `harness-naming-model` for OPTS' `:model`, under a pseudo
+  session id `naming-…` of its own (`:cwd`, `:host` from OPTS) that is
+  `provider/close`d once it settles.  Nothing is stored and no session
+  hears of it; it rejects with a message (blank TEXT, no model, provider
+  error, no usable title, timeout) and never signals.  Task mode names a
+  task from its prompt this way as it is submitted.
+- Sync filter `naming/system-prompt` (value string, args the session, or
+  `naming/title`'s OPTS) lets modules add to
+  `harness-naming--base-system-prompt` per session (tasks ask for ticket
+  titles, for a session of a task and for OPTS with `:task`).
+- Sync filter `naming/auto-p` (value the verdict, args session) can hold
+  the automatic naming of a session off: tasks do while the title of the
+  session's task is on its way, which then names the session.
 
 ### skills
 
-- Scans `harness-skills-directories` (defaults: `~/.claude/skills`,
-  `./.claude/skills`, `~/.config/harness/skills`, `./.harness/skills`)
-  for `NAME/SKILL.md` with front matter.
+- Scans `harness-skills-directories` for `NAME/SKILL.md` with front
+  matter.  The defaults are the documented locations: Claude Code's
+  `~/.claude/skills` and `.claude/skills`, the harness's
+  `~/.config/harness/skills` and `.harness/skills`, the open Agent
+  Skills convention's `~/.agents/skills` and `.agents/skills` (which
+  Codex and GitHub Copilot CLI read too), Copilot CLI's
+  `~/.copilot/skills` and `.github/skills`
+  (`harness-skills-project-subdirectories`, under the cwd and its
+  project root), and the skills of Claude Code's plugins
+  (`harness-skills-plugin-directories`: `cache/MARKETPLACE/PLUGIN/VERSION/skills`
+  under `harness-skills-plugins-directory`, else
+  `$CLAUDE_CODE_PLUGIN_CACHE_DIR`, else `~/.claude/plugins`; newest
+  version first, none Claude Code orphaned with `.orphaned_at`).
+  Codex's deprecated `~/.codex/skills` and its admin `/etc/codex/skills`
+  are left out.  Project skills come first, then global ones, then
+  plugins' (`harness-skills--source-rank`); the first skill of a name
+  wins.  A function in the list may return `(:dir :source :within)`
+  plists instead of directories.
 - `skills/list &optional CWD`, `skills/search QUERY &optional CWD`,
   `skills/load NAME &optional CWD` → `(:name :description :content :path :source :files)`,
   `skills/refresh`, `skills/expand TEXT CWD` → `(:text EXPANDED :skills (…))`
   (explicit `/name` or `@skill:name` references get the skill content
   attached; the compose UI calls this over ACP).
-- Tools `skill_search`, `skill_load`.  Adds a short skills index to the
-  system prompt via `agent/system-prompt`.
+- `skills/directories &optional CWD` → `(:dir :source :contained)` for
+  every directory discovery reads, each followed by the skill
+  directories in it that lead elsewhere through a symbolic link (a
+  skill linked in from dotfiles).  `:contained` says it holds skills and
+  nothing else: a directory a project or a plugin provides counts only
+  while it stays inside its `:within` once links are resolved (the
+  project root; a plugin's marketplace directory, as Claude Code allows
+  links between plugins of one marketplace), and none that is or holds
+  the home directory does.  So a link committed to a repository, or
+  shipped in a plugin, opens nothing.  The perms module lets every read
+  read the contained ones, and the bash tool's sandbox shows them.
+- Tools `skill_search`, `skill_load` (`name`, and `file` for one of the
+  skill's supporting files, which must stay inside the skill's
+  directory and a contained directory once links are resolved, and be
+  text; a failure lists the files there are).  Adds a short skills index
+  to the system prompt via `agent/system-prompt`.
 
 ### worktree
 
@@ -2278,7 +2392,7 @@ so switching to either loses nothing.
 ### tasks
 
 Task mode: one session per task.  TASK =
-`(:id "t-…" :project ROOT :cwd DIR :prompt "…" :attachments (…)
+`(:id "t-…" :project ROOT :cwd DIR :prompt "…" :attachments (…) :name "title or nil"
 :state pending|refining|active|merging|review|done
 :column pending|needs-input|active|review|merging|done
 :backlog BOOL :note "the words a backlog task was written up from" :refined F
@@ -2388,10 +2502,28 @@ verdict.
   there, with no branch to make and nothing to merge.  The worktree
   stays locked until its branch is merged; a follow-up to a merged task
   locks it again (see worktree).
-- The session's name is the task's title: `naming/system-prompt` adds
-  `harness-tasks--naming-instructions` (nil for none) so the model titles task
-  sessions like tickets, as soon as the task's first turn starts (see
-  naming), so the board shows the ticket title while the task works.
+- Titles: a task is named as soon as it is submitted, while it may wait
+  for a slot: `task/submit` sends its prompt (a backlog task's `:note`)
+  to `naming/title` with `:task ID` and the model its session will have,
+  and `naming/system-prompt` adds `harness-tasks--naming-instructions`
+  (nil for none), so the model titles it like a ticket.  The title
+  becomes the task's `:name`; the board, `task_list`, the session list,
+  search, notifications and insights show the session's name, else the
+  task's `:name`, else the prompt's first line.  The task's session is
+  created with `:name` (a backlog task's session, made at once, as it
+  starts its work when it has none), so it is not named again.  While
+  the request is out, the `naming/auto-p` filter keeps a session of the
+  task from being named as its turn starts, and the title names it when
+  it comes.  Nothing waits for a title: a failed request (or one that
+  times out) leaves the task untitled, and a nameless session of it
+  whose turn runs is then named from its first message (`naming/name`
+  with `:opening`).  At most `harness-tasks--naming-concurrency` (2)
+  requests are out at once, the rest queued; a queued request whose task
+  started meanwhile is dropped, as the start of its turn names its
+  session.  `task/update` clears `:name` and asks again when the text
+  named from changed; a title of an older prompt is dropped.  Tasks
+  found without a title (from before, or whose naming failed) are named
+  at start-up (`harness-tasks--pick-up`) and on reload.
 - With nothing to review (below), a turn ending `end-turn` queues
   `merge/enqueue SID TARGET`, TARGET being the project's root session
   named `harness-tasks--merge-session-name`
@@ -2443,7 +2575,7 @@ verdict.
 - `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`,
   `task/start ID` (ignores the limit; not while a write-up runs),
   `task/update ID PROMPT` (not started only; writes a stopped write-up by
-  hand), `task/set-all SETTINGS &optional FILTER` (apply `:model',
+  hand; a task named from its prompt is named again), `task/set-all SETTINGS &optional FILTER` (apply `:model',
   `:thinking', `:permission-mode' and `:non-interactive' to every task
   FILTER selects and, when started, its session; FILTER is `:columns'
   (default `harness-tasks-bulk-columns': running, pending and blocked),
@@ -2708,8 +2840,9 @@ fills in `:id` and `:ts`.
   both sides): `harness-notifications-desktop-notify &rest (:title :body
   :urgency :on-action)` -> promise of `(:backend NAME :id ID)`.
   `harness-notifications-desktop-backend` is `auto` (the first that
-  works of `notify-send`, `dbus`, `osascript`, `w32`), one of those, or
-  a function of that plist.  notify-send runs as an asynchronous process
+  works of `notify-send`, `dbus`, `terminal-notifier`, `applescript`,
+  `osascript`, `w32`; on macOS the three macOS ones first), one of
+  those, or a function of that plist.  notify-send runs as an asynchronous process
   with `--print-id` (an id says the server took it) and, with
   `:on-action`, `--action=default=Open`: the process then waits and
   prints `default` when the notification is clicked (at most
@@ -2719,7 +2852,41 @@ fills in `:id` and `:ts`.
   ActionInvoked in an interactive Emacs; a batch Emacs, which reads no
   D-Bus events, calls it synchronously with a 2 s timeout and hears no
   clicks.  The body is escaped for markup (`&`, `<`, `>`); the title is
-  never markup.
+  never markup.  terminal-notifier (macOS; looked for on `exec-path`,
+  then in `/opt/homebrew/bin`, `/usr/local/bin` and `/opt/local/bin`)
+  gets `-title`, `-message` (required: a lone title is the message,
+  under the harness's name), `-activate BUNDLE-ID` and, with
+  `:on-action`, `-execute COMMAND`, every value behind a backslash
+  (terminal-notifier reads options through NSUserDefaults, which takes
+  a value starting with `[`, `(`, `{` or `"` for a property list and one
+  starting with `-` for an option, and drops one leading backslash).
+  It exits once the notification shows; on a click macOS starts it
+  again, and it activates the application and runs the command with
+  /bin/sh.  The bundle id is `harness-notifications-desktop-macos-app`,
+  else that of the application this Emacs's program is in (read from
+  its Info.plist, `org.gnu.Emacs` when that cannot be read) for a
+  graphical Emacs or the harness process, else the terminal's
+  (`__CFBundleIdentifier`).  The command is
+  `emacsclient --socket-name=SOCKET` (or `--server-file=FILE` for a TCP
+  server) `--alternate-editor=false --eval "(and (fboundp
+  'harness-notifications-desktop-clicked)
+  (harness-notifications-desktop-clicked KEY))"`, each word quoted for
+  /bin/sh, with emacsclient's full name (found beside this Emacs's
+  program, in Emacs.app's `Contents/MacOS/bin[-ARCH]/`, in the `bin/`
+  beside the application, then on the path).  The `:on-action` is kept
+  under KEY (at most `harness-notifications-desktop-max-actions`, the
+  oldest dropped) and runs once, from the command loop; an unknown KEY
+  (clicked after a restart, from the Notification Center) runs
+  `harness-notifications-desktop-unknown-click-function`.  Without a
+  running server (`server-process`) or an emacsclient there is no
+  `-execute`, and the log (and the echo area, interactively) says so
+  once.  `applescript` runs `display notification` inside a graphical
+  Emacs on macOS (`ns-do-applescript`, or the Mac port's
+  `mac-osa-script`), from the command loop: the notification is Emacs's
+  own, so a click activates Emacs, but no click is heard.  `osascript`
+  runs the same in the osascript program, whose notifications macOS
+  gives to Script Editor (a click opens Script Editor): the last resort
+  on macOS, for a terminal Emacs or the harness process.
 - `gotify`: `POST URL/message` through harness-http, the application
   token in `X-Gotify-Key` (so never on a command line), with `title`,
   `message` (the title when there is no body), `priority` (from
@@ -2789,7 +2956,7 @@ TRAMP prefixes come from the session host):
 | `plan` | Plan | plan | meta |
 | `todo_write` | Todo list | todos | meta |
 | `spawn_agent` | Sub-agent | prompt, fork, model, name, cwd, worktree | meta (the jail checks `cwd`, as it checks bash's) |
-| `skill_search` / `skill_load` | Search skills / Load skill | query / name | read |
+| `skill_search` / `skill_load` | Search skills / Load skill | query / name, file (one of the skill's supporting files) | read (needs no approval: `harness-perms--auto-allow-tools`) |
 | `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_read` | Read session | session_id, limit, before, kinds, max_chars | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -2809,7 +2976,8 @@ TRAMP prefixes come from the session host):
 The tools of kind read that take a path (`read_file`, `list_dir`,
 `glob`, `grep`, `file_info`, `emacs_open`) may read the harness itself
 as well as the session's roots: its code and its state directory, its
-credentials aside (see perms).
+credentials aside (see perms).  They may read the skills directories
+too, and bash reads them in the sandbox (see perms and sandbox).
 
 `hand_in` (tools-handin) is how a task's session finishes: the tool
 records the summary and evidence on the task (`task/hand-in'`) and asks
@@ -3055,8 +3223,10 @@ someone other than the user sent, and a tool call or result the harness
 recorded (see Node), names its sender in `_harness.from`.
 Requests agent → client: `session/request_permission {sessionId, toolCall,
 options:[{optionId,name,kind}], _harness:{pendingId, tool, paths, cwd, dir,
-pattern, reason}}` (`cwd`: where a shell command runs; `paths`: what
-the call is about, see perms) → `{outcome:{outcome:"selected",optionId}}`, plus
+pattern, reason}}` (`options`: the same five for every request, named
+as the UI's buttons are, `harness-acp-permission-answers`; `cwd`: where
+a shell command runs; `paths`: what the call is about, see perms) →
+`{outcome:{outcome:"selected",optionId}}`, plus
 `_harness:{pattern}` when the client answers a request about a path
 outside the allowed directories for another glob pattern than its
 `_harness.pattern` (only such a request has one, see perms),
@@ -3319,6 +3489,20 @@ for a shell command `kind: exec   runs in: ~/proj`, where it runs, and
 below it `paths: ~/.claude/projects/x`, what it is about: the paths it
 names outside the session's directories (left out when that is just
 where it runs).
+Every permission panel has the same buttons, under the same labels and
+keys, whatever the request: `[Allow] y  [Allow for session] s
+[Always allow] a  [Deny] n  [Always deny] N`
+(`harness-ui-pending-permission-buttons`: the labels of
+`harness-acp-permission-answers`, the keys of
+`harness-ui-pending-permission-keys`; a request offering fewer options
+shows only those).  What an answer covers depends on the request, and
+the button's tooltip and the echo area after it say so
+(`harness-ui-pending-answer-help`): "Allow ~/notes/** until this turn
+ends" for an agent's own request, "Let this call reach ~/notes/**, this
+time" for the jail's.  The session list and the task board answer in
+place with the same [Allow] and [Deny], keys and tooltips
+(`harness-ui-pending-view-actions`), and SPC pops the panel out for the
+others.
 
 Connecting again never strands a session.  The connection the UI swaps
 out closes with the reason `replaced`, and the requests still waiting
@@ -3552,6 +3736,48 @@ attaches them too (`harness-compose-yank-media`).  The box binds no
 `C-c C-v`: in a chat that is the review banner's [Verify], so the two
 never fight, and other MIME types are chosen from with
 `M-x harness-compose-attach-clipboard`.
+Image tokens: an image attached however (`harness-compose--attach`) gets
+a `:label`, "image 1", and its token, `[image 1]`, goes into the text
+where point is in the box, else at its end (a download's always at the
+end, as it lands later), kept apart from the words around it.  The
+token is plain text, so it survives redraws, drafts, queueing and
+editing a queued item like the rest of the message; an overlay per
+token (`harness-compose--show-tokens`) shows it as a chip: a thumbnail
+a line high in its `before-string` (an image inside a `display` string
+would not draw) and the token as a link in its `display`, which the
+command loop's point adjustment makes point step over whole.  After
+every command `harness-compose--sync-tokens` makes text and attachments
+agree: what is left of a token cut short goes too, an image whose
+tokens are all gone is detached and kept in `harness-compose--detached`,
+and one kept there whose token is back (undo, yank, typing) comes back
+in label order; × deletes an image's tokens with it.  New text
+(`harness-compose-set`, `harness-compose-insert` with TEXT) forgets the
+kept images.  Numbers never change once given, since a sentence names
+them: a new image takes one more than the highest attached, so deleting
+the last frees its number and one in the middle leaves a gap, and each
+message starts at 1.  Unlabelled images (a draft from before) and other
+files take no part.  The attachment lines stay, each image's led by its
+token, since they also show files that are no images, downloads in
+flight, size, the larger thumbnail and ×.  `harness-compose-attachment-block`
+puts the label in the ACP image block's `_harness.label`;
+`harness-acp--block-from-acp` makes it the block's `:label`, which
+`harness-agent-attachments-to-blocks` keeps for queued messages and
+tasks.  `harness-agent--prepare-content` puts a text block of the token
+right before each labelled image of a user message for every provider
+(Copilot also names the image's blob after it), and
+`harness-agent--blocks-text` leaves out the image placeholder of a
+labelled image the text names already.  Queued items sent as one
+message number their images on across it (`harness-agent--queue-blocks`,
+tokens rewritten with them).  The chat styles the tokens of a user
+message's labelled images in its text and puts each image's token over
+it (`harness-chat--mark-image-tokens`, `harness-chat--blocks-string`).
+Undo in the box: hosts draw with undo off, so what they draw above the
+box moves its text but not the positions its undo entries record, and
+undoing right after attaching (its line drawn above the box) would
+change the read-only text.  `harness-compose--line-up-undo`, on
+`pre-command-hook` and `before-change-functions`, moves every position
+in `buffer-undo-list` (in place, so `pending-undo-list` follows) by as
+much as the box's start moved since the last time.
 Completion reads the project's files and the skills when it is asked,
 so a token typed before they arrived is offered them once they have.
 Popups that show as you type (corfu's `corfu-auto`, company) give up
@@ -3705,7 +3931,12 @@ a graphical frame of this Emacs to the front and runs
 returns non-nil has shown what it is about), else opens its session.
 The task board's function opens the board of the notification's
 `:project` with point on the task's card, once the board shows it
-(within 10 s).  `harness-test-notifications` (menu `N`) sends a test
+(within 10 s).  A click on a terminal-notifier notification this Emacs
+no longer knows (`harness-notifications-desktop-unknown-click-function`,
+set by `harness-ui--init` unless already set) brings a graphical frame
+to the front and lists the sessions waiting for the user
+(`harness-ui-notify-show-waiting`), else the session list.
+`harness-test-notifications` (menu `N`) sends a test
 notification through `_harness/notification/send` and says in the
 echo area what each provider did with it.
 

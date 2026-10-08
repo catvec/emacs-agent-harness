@@ -145,8 +145,11 @@ It never changes, so a model process started ahead for a search
          (ignore-errors (harness-call 'session/get sid)))))
 
 (defun harness-tasks-search--title (task &optional session)
-  "TASK's title on the board: its SESSION's name, else its prompt's first line."
+  "TASK's title on the board: its SESSION's name, else its own, else its prompt's.
+A task gets its own `:name' as soon as it is submitted; without one the
+title is its prompt's first line."
   (let ((name (plist-get (or session (harness-tasks-search--session task)) :name)))
+    (when (harness-string-blank-p name) (setq name (plist-get task :name)))
     (if (harness-string-blank-p name)
         (let ((line (harness-first-line (or (plist-get task :prompt) ""))))
           (string-trim (if (string-match "\\`#+[ \t]+" line) (substring line (match-end 0)) line)))

@@ -36,6 +36,7 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-acp)                  ; `harness-acp-permission-answers'
 (require 'harness-ui)
 (require 'harness-ui-compose)
 
@@ -233,22 +234,85 @@ non-nil when the store changed."
           (setq changed t))))
     changed))
 
+;;;; The answers, the same for every request
+;;
+;; Every permission request -- a tool call, a call reaching outside the
+;; allowed directories, an agent asking for a directory -- is answered
+;; with the same five options, under the same labels
+;; (`harness-acp-permission-answers', the option names ACP clients get
+;; too) and, wherever a request is answered from the keyboard, the same
+;; keys (`harness-ui-pending-permission-keys').  What an answer covers
+;; depends on the request, and its tooltip and the echo area after it
+;; say so (`harness-ui-pending-answer-help'): Allow lets a call run, lets
+;; one call reach the pattern of a request about a path outside, and
+;; grants the directory an agent asked for until its turn ends -- the
+;; narrowest allow, which records nothing.
+
+(defconst harness-ui-pending-permission-keys
+  '(("allow-once" . "y") ("allow-session" . "s") ("allow-always" . "a")
+    ("deny-once" . "n") ("deny-always" . "N"))
+  "The key of each permission answer, by option id.
+Every panel binds them all (`harness-ui-pending-permission-map'); a view
+answering a request in place (the session list, the task board) binds
+those of its buttons, y and n.")
+
+(defconst harness-ui-pending--dir-request-tool "request_directory_access"
+  "The tool an agent asks for a directory with.
+That is `harness-perms-dir-tool', which the UI does not load when the
+harness runs in a process of its own.")
+
+(defun harness-ui-pending-answer-label (option)
+  "Return the label of permission answer OPTION, an id such as \"allow-once\"."
+  (or (nth 1 (assoc option harness-acp-permission-answers)) option))
+
+(defun harness-ui-pending-answer-key (option)
+  "Return the key answering a permission request with OPTION, or nil."
+  (cdr (assoc option harness-ui-pending-permission-keys)))
+
+(defun harness-ui-pending--dir-request-p (r)
+  "Non-nil when permission record R is an agent's own request for a directory."
+  (equal (plist-get r :tool) harness-ui-pending--dir-request-tool))
+
+(defun harness-ui-pending-answer-help (r option)
+  "Say what answering permission record R with OPTION does, in a few words.
+The answers are the same for every request, but not what they cover:
+the call itself, whose tool a lasting answer holds for; the pattern of
+a call reaching outside the allowed directories, which allow-once lets
+that call reach; or the directory an agent asked for, which allow-once
+grants until the session's turn ends."
+  (let ((pattern (or (harness-ui-pending--permission-pattern r)
+                     (and (plist-get r :dir) (abbreviate-file-name (format "%s" (plist-get r :dir))))))
+        (tool (or (plist-get r :tool) "this tool"))
+        (request (harness-ui-pending--dir-request-p r)))
+    (pcase option
+      ("allow-once" (cond ((and request pattern) (format "Allow %s until this turn ends" pattern))
+                          (pattern (format "Let this call reach %s, this time" pattern))
+                          (t "Allow this call, this time")))
+      ("allow-session" (if pattern (format "Allow %s for this session" pattern)
+                         (format "Allow every %s call for this session" tool)))
+      ("allow-always" (if pattern (format "Always allow %s, in every session" pattern)
+                        (format "Always allow every %s call, in every session" tool)))
+      ("deny-once" (if request "Deny the request" "Deny this call"))
+      ("deny-always" (if pattern (format "Always deny %s, to every tool" pattern)
+                       (format "Always deny every %s call" tool)))
+      (_ (harness-ui-pending-answer-label option)))))
+
 ;;;; Answering
 
-(defun harness-ui-pending--message-for (option dir shown)
-  "Return the echo-area message for permission OPTION.
-DIR is the prompt's directory when it has one, SHOWN the pattern the
-answer holds for (nil for a prompt about the call itself, which has none)."
-  (pcase option
-    ("allow-once" "Allowed")
-    ("allow-session" (cond (shown (format "Allowed %s for this session" shown))
-                           (dir "Directory allowed for this session")
-                           (t "Allowed for this session")))
-    ("allow-always" (cond (shown (format "Always allowed %s" shown))
-                          (dir "Directory always allowed")
-                          (t "Always allowed")))
-    ("deny-always" (if shown (format "Always denied %s" shown) "Always denied"))
-    (_ "Denied")))
+(defun harness-ui-pending--message-for (r option)
+  "Return the echo-area message after answering permission record R with OPTION.
+It says what the answer covered, as its button's tooltip did."
+  (let ((shown (or (harness-ui-pending--permission-pattern r)
+                   (and (plist-get r :dir) (abbreviate-file-name (format "%s" (plist-get r :dir)))))))
+    (pcase option
+      ("allow-once" (cond ((and shown (harness-ui-pending--dir-request-p r))
+                           (format "Allowed %s until this turn ends" shown))
+                          (shown (format "Allowed this call to reach %s" shown))
+                          (t "Allowed this call")))
+      ("allow-session" (if shown (format "Allowed %s for this session" shown) "Allowed for this session"))
+      ("allow-always" (if shown (format "Always allowed %s" shown) "Always allowed"))
+      ("deny-always" (if shown (format "Always denied %s" shown) "Always denied"))
+      (_ "Denied"))))
 
 (defun harness-ui-pending-answer-permission (session-id pid option &optional on-error)
   "Answer permission request PID of SESSION-ID with OPTION.
@@ -257,10 +321,13 @@ edited goes with the answer (see `harness-ui-pending-edit-pattern').
 An ACP request is answered through the function that holds it; one only
 known from the session's pending list goes over
 `_harness/permission/answer', and ON-ERROR, when given, is called with
-the error should that fail (else the echo area says so)."
+the error should that fail (else the echo area says so).  An answer the
+request does not offer is refused: its key does nothing else instead."
   (when-let* ((r (harness-ui-pending-record session-id pid)))
     (let ((edited (plist-get r :edited-pattern))
-          (shown (harness-ui-pending--permission-pattern r)))
+          (offered (harness-ui-pending--offered-options r)))
+      (when (and offered (not (member option offered)))
+        (user-error "This request does not offer %s" (harness-ui-pending-answer-label option)))
       (unless (harness-ui-pending--respond
                r (append (list :outcome (list :outcome "selected" :optionId option))
                          (and edited (list :_harness (list :pattern edited)))))
@@ -269,7 +336,7 @@ the error should that fail (else the echo area says so)."
                                :answer (if edited (list :option option :pattern edited) option))
                          #'ignore on-error))
       (harness-ui-pending-remove session-id pid)
-      (message "%s" (harness-ui-pending--message-for option (plist-get r :dir) shown)))))
+      (message "%s" (harness-ui-pending--message-for r option)))))
 
 (defun harness-ui-pending-answer-question (session-id pid answer &optional on-error)
   "Answer question PID of SESSION-ID with ANSWER.
@@ -406,12 +473,11 @@ the request's own; an empty answer goes back to it."
 (defvar harness-ui-pending-permission-map (make-sparse-keymap)
   "Keys active while point is on a permission panel.")
 
-;; Filled at top level, not in the `defvar', so a reload updates the map.
-(define-key harness-ui-pending-permission-map (kbd "y") (harness-ui-pending--permission-command "allow-once"))
-(define-key harness-ui-pending-permission-map (kbd "s") (harness-ui-pending--permission-command "allow-session"))
-(define-key harness-ui-pending-permission-map (kbd "a") (harness-ui-pending--permission-command "allow-always"))
-(define-key harness-ui-pending-permission-map (kbd "n") (harness-ui-pending--permission-command "deny-once"))
-(define-key harness-ui-pending-permission-map (kbd "N") (harness-ui-pending--permission-command "deny-always"))
+;; Filled at top level, not in the `defvar', so a reload updates the map:
+;; an answer's key from `harness-ui-pending-permission-keys', the same on
+;; every panel.
+(pcase-dolist (`(,option . ,key) harness-ui-pending-permission-keys)
+  (define-key harness-ui-pending-permission-map (kbd key) (harness-ui-pending--permission-command option)))
 (define-key harness-ui-pending-permission-map (kbd "e") #'harness-ui-pending-edit-pattern)
 
 (defun harness-ui-pending--pattern-here-p ()
@@ -505,12 +571,15 @@ With prefix argument N, move N options back."
   (harness-ui-pending-next-diagram (- (or n 1))))
 
 (defun harness-ui-pending-allow-newest ()
-  "Allow the newest pending permission request once."
+  "Answer the permission request at point, else the newest, with Allow.
+That is its panel's [Allow] (y): see `harness-ui-pending-answer-help'
+for what it covers."
   (interactive)
   (funcall (harness-ui-pending--permission-command "allow-once")))
 
 (defun harness-ui-pending-deny-newest ()
-  "Deny the newest pending permission request once."
+  "Answer the permission request at point, else the newest, with Deny.
+That is its panel's [Deny] (n)."
   (interactive)
   (funcall (harness-ui-pending--permission-command "deny-once")))
 
@@ -543,20 +612,14 @@ strings) or from an ACP request (plists with `:optionId')."
 
 (defun harness-ui-pending-permission-buttons (r)
   "Return the (LABEL KEY OPTION) buttons for permission record R.
-A directory prompt answered for a pattern says so on its pattern line,
-one without speaks of the directory; only the options R offers are
-shown, so an agent's own directory request has no \"Allow once\"."
-  (let ((all (cond
-              ((and (plist-get r :dir) (not (plist-get r :pattern)))
-               '(("Allow once" "y" "allow-once") ("Allow directory for session" "s" "allow-session")
-                 ("Always allow directory" "a" "allow-always") ("Deny" "n" "deny-once")
-                 ("Always deny directory" "N" "deny-always")))
-              ((plist-get r :dir)
-               '(("Allow once" "y" "allow-once") ("Allow for session" "s" "allow-session")
-                 ("Always allow" "a" "allow-always") ("Deny" "n" "deny-once") ("Always deny" "N" "deny-always")))
-              (t
-               '(("Allow" "y" "allow-once") ("Allow for session" "s" "allow-session")
-                 ("Always allow" "a" "allow-always") ("Deny" "n" "deny-once") ("Always deny" "N" "deny-always")))))
+They are the same for every request, in the same order, under the same
+labels and keys (`harness-acp-permission-answers',
+`harness-ui-pending-permission-keys'); what each covers is in its
+tooltip (`harness-ui-pending-answer-help').  Should R offer only some
+answers, only those show."
+  (let ((all (mapcar (lambda (a)
+                       (list (nth 1 a) (harness-ui-pending-answer-key (nth 0 a)) (nth 0 a)))
+                     harness-acp-permission-answers))
         (offered (harness-ui-pending--offered-options r)))
     (or (and offered (cl-remove-if-not (lambda (o) (member (nth 2 o) offered)) all))
         all)))
@@ -623,7 +686,7 @@ out when they are just where it runs."
       (let ((option (nth 2 o)))
         (insert (harness-ui-action-button (format "[%s]" (nth 0 o))
                                           (lambda () (harness-ui-pending-answer-permission session-id pid option))
-                                          :help (format "Answer %s (%s)" (nth 0 o) (nth 1 o)))
+                                          :help (format "%s (%s)" (harness-ui-pending-answer-help r option) (nth 1 o)))
                 " " (harness-ui-kbd (nth 1 o)) "  ")))
     (insert "\n")
     (harness-ui-pending--decorate start (point) pid (harness-ui-pending--permission-map r))))
@@ -1140,29 +1203,38 @@ a user error when it waits on no question."
     (harness-ui-pending-answer-question session-id (plist-get r :id) answer on-error)
     (message "Answered: %s" answer)))
 
+(defconst harness-ui-pending-view-answers '("allow-once" "deny-once")
+  "The permission answers a view offers beside a blocked session.
+They are the panel's [Allow] and [Deny], under the same labels and keys
+\(y and n); the lasting answers are on the request's panel, which SPC
+pops out.")
+
 (defun harness-ui-pending-view-actions (session-id &optional on-error)
   "Return what a view offers for the request SESSION-ID waits on first.
 That is nil when it waits on nothing, else a list of (LABEL ACTION
 HELP), ACTION a function of no arguments, which the view draws as
-buttons in its own style: [Allow] and [Deny] for a permission request,
-answering it once, and [Answer…] for a question, which pops it out to
-be read and answered whole (`harness-ui-pending-popout').  ON-ERROR is
-as for `harness-ui-pending-answer-first-permission'.  The views bind
-the same keys: y and n answer, SPC pops the request out."
-  (pcase (plist-get (harness-ui-pending-first session-id) :kind)
-    ("permission"
-     (list (list "[Allow]"
-                 (lambda () (harness-ui-pending-answer-first-permission session-id "allow-once" on-error))
-                 "Allow the tool call it waits on, once (y)")
-           (list "[Deny]"
-                 (lambda () (harness-ui-pending-answer-first-permission session-id "deny-once" on-error))
-                 "Deny the tool call it waits on (n)")))
-    ("question"
-     (list (list "[Answer…]"
-                 (lambda ()
-                   (unless (harness-ui-pending-popout session-id)
-                     (user-error "No question is waiting")))
-                 "Read the question and answer it (SPC)")))))
+buttons in its own style: for a permission request the panel's own
+\[Allow] and [Deny] (`harness-ui-pending-view-answers'), whose HELP
+says what they cover as their tooltips on the panel do, and [Answer…]
+for a question, which pops it out to be read and answered whole
+\(`harness-ui-pending-popout').  ON-ERROR is as for
+`harness-ui-pending-answer-first-permission'.  The views bind the same
+keys: y and n answer, SPC pops the request out."
+  (let ((r (harness-ui-pending-first session-id)))
+    (pcase (plist-get r :kind)
+      ("permission"
+       (mapcar (lambda (option)
+                 (list (format "[%s]" (harness-ui-pending-answer-label option))
+                       (lambda () (harness-ui-pending-answer-first-permission session-id option on-error))
+                       (format "%s (%s)" (harness-ui-pending-answer-help r option)
+                               (harness-ui-pending-answer-key option))))
+               harness-ui-pending-view-answers))
+      ("question"
+       (list (list "[Answer…]"
+                   (lambda ()
+                     (unless (harness-ui-pending-popout session-id)
+                       (user-error "No question is waiting")))
+                   "Read the question and answer it (SPC)"))))))
 
 (defun harness-ui-pending-subject (r &optional max)
   "Return what request record R is about, on one line of at most MAX characters.

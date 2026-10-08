@@ -47,6 +47,7 @@
 (declare-function harness-reload "harness")
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-sessions "harness-ui-sessions")
+(declare-function harness-ui-notify-show-waiting "harness-ui-notify")
 
 (defgroup harness-ui nil
   "Presentation layer of the Emacs agent harness."
@@ -674,20 +675,36 @@ or a task opens it when clicked (`harness-ui--notification-clicked')."
    (lambda (shown)
      (list :backend (format "%s" (plist-get shown :backend))))))
 
-(defun harness-ui--notification-clicked (params)
-  "Show what the clicked notification PARAMS is about.
-`harness-ui-notification-functions' come first (the task board opens
-on a task); otherwise the notification's session opens.  The frame it
-opens in comes to the front, as the user just asked for it."
+(defun harness-ui--raise-for-notification ()
+  "Bring a graphical frame of this Emacs to the front, for a notification click.
+The user just asked to see what the notification is about."
   (let ((frame (if (display-graphic-p (selected-frame))
                    (selected-frame)
                  (cl-find-if #'display-graphic-p (frame-list)))))
     (when (and frame (frame-live-p frame))
       (harness-ignore-errors-logged "showing the frame for a notification"
-        (select-frame-set-input-focus frame))))
+        (select-frame-set-input-focus frame)))))
+
+(defun harness-ui--notification-clicked (params)
+  "Show what the clicked notification PARAMS is about.
+`harness-ui-notification-functions' come first (the task board opens
+on a task); otherwise the notification's session opens.  The frame it
+opens in comes to the front, as the user just asked for it."
+  (harness-ui--raise-for-notification)
   (unless (run-hook-with-args-until-success 'harness-ui-notification-functions params)
     (when-let* ((sid (plist-get params :session)))
       (harness-ui-display-session sid))))
+
+(defun harness-ui--unknown-notification-clicked ()
+  "Show the sessions waiting for you, for a click on a forgotten notification.
+macOS keeps notifications in its Notification Center after the Emacs
+that showed them restarted, so a click can name one this Emacs never
+showed (`harness-notifications-desktop-unknown-click-function').  The
+sessions waiting for you show as the mode line's notifier shows them
+\(`harness-ui-notify-show-waiting'), else the session list."
+  (harness-ui--raise-for-notification)
+  (cond ((fboundp 'harness-ui-notify-show-waiting) (harness-ui-notify-show-waiting))
+        ((fboundp 'harness-sessions) (call-interactively 'harness-sessions))))
 
 (defun harness-ui--notification-summary (result)
   "Describe RESULT, what `notification/send' returned, in one line."
@@ -818,18 +835,26 @@ yet: it starts after the init file, with the value set there."
             (or (and name (not (string-empty-p name)) name)
                 (format "unnamed (%s)" (substring (or (plist-get session :id) "????") 0 4))))))
 
-(defun harness-ui-task-title (task &optional session)
-  "Return TASK's title, as the task board shows it.
+(defun harness-ui-task-name (task &optional session)
+  "Return TASK's name, or nil while it has none and its title is its prompt.
 That is the name of its SESSION, by default the cached session it works
-in, once it has one, else the first line of its prompt.  A session is
-named after its first turn, and a task works in that turn, so a task at
-work has no name yet."
+in, else the task's own `:name': the title a cheap model gave it as it
+was submitted, which it has while it waits for a slot, before it has a
+session to name."
   (let ((name (plist-get (or session
                              (and (plist-get task :session) (harness-ui-session (plist-get task :session))))
                          :name)))
-    (if (harness-string-blank-p name)
-        (harness-first-line (plist-get task :prompt) 72)
-      name)))
+    (cond ((not (harness-string-blank-p name)) name)
+          ((not (harness-string-blank-p (plist-get task :name))) (plist-get task :name)))))
+
+(defun harness-ui-task-title (task &optional session)
+  "Return TASK's title, as the task board shows it.
+That is its name (`harness-ui-task-name', SESSION's or its own) once it
+has one, else the first line of its prompt: a task is named as soon as
+it is submitted, and its title shows its prompt only until the name
+comes, or when naming it failed."
+  (or (harness-ui-task-name task session)
+      (harness-first-line (plist-get task :prompt) 72)))
 
 ;;;; Model catalogue cache
 
@@ -3289,6 +3314,11 @@ leaves the buffer's commands out, never the whole menu."
 (defun harness-ui--init ()
   (add-hook 'kill-emacs-hook #'harness-ui--stop-server)
   (add-hook 'harness-corporate-mode-change-hook #'harness-ui--corporate-mode-changed)
+  ;; A click on a macOS notification this Emacs no longer knows (one it
+  ;; showed before a restart) lists the sessions waiting for you.
+  (unless harness-notifications-desktop-unknown-click-function
+    (setq harness-notifications-desktop-unknown-click-function
+          #'harness-ui--unknown-notification-clicked))
   (harness-ui-connect harness-ui-connection-address)
   ;; A reload reaches the UI as the forwarded `harness/reloaded' event, for
   ;; local and remote harnesses alike, so no bus subscription is needed.

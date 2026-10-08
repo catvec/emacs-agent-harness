@@ -253,6 +253,30 @@ too, with an estimated window; the models known before stay."
     (harness-test-load-module 'provider-claude)
     (should (equal "claude-opus-5-6" (plist-get (harness-call 'provider/model "claude:opus") :resolves-to)))))
 
+(ert-deftest harness-provider-claude-listing-waits-for-its-own-probe ()
+  "A listing waits for the probe started for it, not for the end of an earlier one.
+A probe let go once it answered exits a moment later.  When a listing
+began meanwhile, as the next one does on a busy machine, that end
+settled it before its own probe answered: the catalogue came without
+the CLI's models."
+  (harness-provider-claude-test--setup)
+  (let* ((process-environment
+          (cons (concat "HARNESS_FAKE_CLAUDE_MODELS="
+                        (harness-json-encode-text harness-provider-claude-test--cli-models))
+                process-environment))
+         ;; The earlier probe: it answered and was let go, but has not exited yet.
+         (earlier nil)
+         (proc (make-process :name "harness-test-earlier-probe" :command '("sleep" "60") :noquery t
+                             :sentinel (lambda (p _e) (harness-provider-claude--probe-sentinel earlier p)))))
+    (setq earlier (harness-provider-claude--make-session :id "quota-probe" :probe t :process proc))
+    (let ((models (harness-call 'provider/models t)))
+      ;; It exits while the new probe is on its way.
+      (delete-process proc)
+      (should (equal "claude:default"
+                     (plist-get (cl-find 'claude (harness-test-await models 15)
+                                         :key (lambda (m) (plist-get m :provider)))
+                                :id))))))
+
 (ert-deftest harness-provider-claude-learns-the-window-a-model-runs-with ()
   "A result's `modelUsage' says the window the CLI ran its model with.
 The name the session asked for and the model the CLI ran both learn
