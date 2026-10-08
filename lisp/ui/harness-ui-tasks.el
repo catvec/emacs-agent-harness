@@ -203,7 +203,12 @@ are left out.  The board's search sets it (`harness-ui-tasks-search').")
 (defvar harness-ui-tasks-header-functions nil
   "Functions returning a segment of a board's header line, or nil.
 Each is called in the board's buffer as the header line is drawn; the
-segments show before [BTW], in order.")
+segments show before [BTW], in order, the board putting the separator
+in front.  A string joins the others into one segment, which makes room
+in a narrow window after the counts and before [BTW]; (TEXT PRIORITY
+MIN), as `harness-ui-fit-header' takes it, is a segment of its own with
+that priority.  The search shows its [Search] the first way, the
+companion pet its face the second.")
 
 (defun harness-ui-tasks--board-p (buffer)
   "Non-nil when BUFFER is a live task board.
@@ -1775,6 +1780,8 @@ the counts of completed, merging, pending and working tasks and the
 bulk-edit segment; the project's name shortens after those, then the
 other modules' segments (`harness-ui-tasks-header-functions', the
 search's [Search]) and [BTW] and [Archived], then the Review switch.
+Another module's segment with a priority of its own goes when that
+says: the companion pet's face before anything else.
 What the tasks cost and the plan's quota stay longer, the budget going
 first (`harness-ui-tasks--spend-segment'); what needs you, what waits
 for your review, [Refresh] and a board still loading stay longest.
@@ -1783,6 +1790,12 @@ WIDTH is as `harness-ui-fit-header' takes it."
          (counts (mapcar (lambda (g) (cons (car g) (length (cdr g)))) groups))
          (needs (alist-get 'needs-input counts))
          (review (alist-get 'review counts))
+         ;; Other modules' segments: strings join into one, lists stand
+         ;; on their own.
+         (extra (delq nil (mapcar (lambda (fn) (ignore-errors (funcall fn)))
+                                  harness-ui-tasks-header-functions)))
+         (joined (cl-remove-if-not #'stringp extra))
+         (own (cl-remove-if-not #'consp extra))
          (name (if harness-ui-tasks--project
                    (file-name-nondirectory (directory-file-name harness-ui-tasks--project))
                  (abbreviate-file-name (or harness-ui-tasks--dir ""))))
@@ -1796,48 +1809,54 @@ WIDTH is as `harness-ui-fit-header' takes it."
          (sep "   ")
          (gap (lambda () (prog1 sep (setq sep "  ")))))
     (harness-ui-fit-header
-     (list
-      (concat " " (propertize "Tasks" 'face 'bold))
-      (list (concat " " (propertize name 'face 'harness-dim-face))
-            50 (concat " " (propertize (harness-truncate-end name 6) 'face 'harness-dim-face)))
-      (and (> needs 0)
-           (list (concat (funcall gap)
-                         (propertize (format "%s %d need you" (harness-ui-icon 'harness-icon-blocked) needs)
-                                     'face 'harness-status-blocked-face))
-                 90))
-      (and (> review 0)
-           (list (concat (funcall gap)
-                         (propertize (format "%s %d to review" (harness-ui-icon 'harness-icon-task-review) review)
-                                     'face 'harness-task-review-face))
-                 88))
-      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-running) (alist-get 'active counts)) 45)
-      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-merging) (alist-get 'merging counts))
-            42)
-      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-pending) (alist-get 'pending counts))
-            40)
-      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-done) (alist-get 'done counts)) 25)
-      (harness-ui-tasks--spend-segment groups (funcall gap))
-      (list (concat (funcall gap)
-                    (if harness-ui-tasks--bulk (propertize bulk 'face 'harness-task-attention-face) bulk))
-            (if harness-ui-tasks--bulk 82 30))
-      ;; Shown once the harness said how it is, so it never shows the wrong way.
-      (and harness-ui-tasks--settings (list (concat (funcall gap) (harness-ui-tasks--review-segment)) 70))
-      ;; Other modules' segments, the search's say.
-      (let ((segments (delq nil (mapcar (lambda (fn) (ignore-errors (funcall fn)))
-                                        harness-ui-tasks-header-functions))))
-        (and segments (list (concat (funcall gap) (mapconcat #'identity segments " ")) 65)))
-      (list (concat (funcall gap) (harness-ui-tasks--segment "[BTW]" #'harness-ui-tasks-btw
-                                                              "Ask about the tasks in a side conversation"))
-            60)
-      (list (concat " " (harness-ui-tasks--segment "[Add session]" #'harness-ui-tasks-adopt
-                                                   "Make an ongoing session of this project a task"))
-            20)
-      ;; Showing archived tasks is not the usual board: that stays longer.
-      (list (concat " " (harness-ui-tasks--segment (if harness-ui-tasks--show-archived "[Hide archived]" "[Archived]")
-                                                   #'harness-ui-tasks-toggle-archived "Show or hide archived tasks"))
-            (if harness-ui-tasks--show-archived 75 55))
-      (list (concat " " (harness-ui-tasks--segment "[Refresh]" #'harness-ui-tasks-refresh "Reload the board")) 80)
-      (and harness-ui-tasks--loading (list (propertize "  loading…" 'face 'harness-dim-face) 85)))
+     (append
+      (list
+       (concat " " (propertize "Tasks" 'face 'bold))
+       (list (concat " " (propertize name 'face 'harness-dim-face))
+             50 (concat " " (propertize (harness-truncate-end name 6) 'face 'harness-dim-face)))
+       (and (> needs 0)
+            (list (concat (funcall gap)
+                          (propertize (format "%s %d need you" (harness-ui-icon 'harness-icon-blocked) needs)
+                                      'face 'harness-status-blocked-face))
+                  90))
+       (and (> review 0)
+            (list (concat (funcall gap)
+                          (propertize (format "%s %d to review" (harness-ui-icon 'harness-icon-task-review) review)
+                                      'face 'harness-task-review-face))
+                  88))
+       (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-running) (alist-get 'active counts)) 45)
+       (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-merging) (alist-get 'merging counts))
+             42)
+       (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-pending) (alist-get 'pending counts))
+             40)
+       (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-done) (alist-get 'done counts)) 25)
+       (harness-ui-tasks--spend-segment groups (funcall gap))
+       (list (concat (funcall gap)
+                     (if harness-ui-tasks--bulk (propertize bulk 'face 'harness-task-attention-face) bulk))
+             (if harness-ui-tasks--bulk 82 30))
+       ;; Shown once the harness said how it is, so it never shows the wrong way.
+       (and harness-ui-tasks--settings (list (concat (funcall gap) (harness-ui-tasks--review-segment)) 70))
+       ;; Other modules' segments, the search's say.
+       (and joined (list (concat (funcall gap) (mapconcat #'identity joined " ")) 65)))
+      ;; Those with a priority of their own, the companion pet's say.
+      (mapcar (lambda (segment)
+                (let ((sep (funcall gap)))
+                  (list (concat sep (car segment)) (nth 1 segment)
+                        (and (nth 2 segment) (concat sep (nth 2 segment))))))
+              own)
+      (list
+       (list (concat (funcall gap) (harness-ui-tasks--segment "[BTW]" #'harness-ui-tasks-btw
+                                                               "Ask about the tasks in a side conversation"))
+             60)
+       (list (concat " " (harness-ui-tasks--segment "[Add session]" #'harness-ui-tasks-adopt
+                                                    "Make an ongoing session of this project a task"))
+             20)
+       ;; Showing archived tasks is not the usual board: that stays longer.
+       (list (concat " " (harness-ui-tasks--segment (if harness-ui-tasks--show-archived "[Hide archived]" "[Archived]")
+                                                    #'harness-ui-tasks-toggle-archived "Show or hide archived tasks"))
+             (if harness-ui-tasks--show-archived 75 55))
+       (list (concat " " (harness-ui-tasks--segment "[Refresh]" #'harness-ui-tasks-refresh "Reload the board")) 80)
+       (and harness-ui-tasks--loading (list (propertize "  loading…" 'face 'harness-dim-face) 85))))
      width)))
 
 ;;;; Data

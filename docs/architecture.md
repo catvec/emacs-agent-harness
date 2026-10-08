@@ -2725,6 +2725,11 @@ A companion pet, after the ones Claude Code hatched for April Fools'
 Day 2026 (`/buddy`): an egg hatches into a creature with random bones,
 a cheap model names it and gives it a personality, and later, now and
 then, lends it a line about the user's work.  One pet per harness.
+`harness-pet-enabled` nil turns it off altogether: it reacts to
+nothing, grows no more, asks no model anything, and every method but
+`pet/get` and `pet/watch` refuses (`harness-error`); a line asked for
+before is dropped when it comes.  Its record stays, so turning it on
+again brings it back as it was.
 
 - Bones are rolled, never stored: Mulberry32 seeded with the 32-bit
   FNV-1a of the seed and `harness-pet--salt` draws, in order, the rarity
@@ -2742,8 +2747,9 @@ then, lends it a line about the user's work.  One pet per harness.
   `harness-pet--memory` sayings.  A change it makes while growing is
   saved `harness-pet--save-delay` seconds later (`harness-pet-flush` at
   shutdown and on `kill-emacs-hook`); other changes at once.
-- `pet/get` → the VIEW: `(:hatched :hatching :reactions :watching
-  :model)`, and once hatched also `:seed :name :personality :hatched-at
+- `pet/get` → the VIEW: `(:hatched :enabled :hatching :reactions
+  :watching :model)`, `:enabled` false while it is turned off, and once
+  hatched also `:seed :name :personality :hatched-at
   :rarity :stars :species :eye :hat :shiny :stats :level :xp :level-xp
   :next-xp :pets :muted :thinking :said`.  Booleans are t or `:false`;
   `:thinking` is t while it waits for a line; LEVEL is
@@ -2759,9 +2765,14 @@ then, lends it a line about the user's work.  One pet per harness.
 - `pet/pet` (counts, +1 xp at most once a minute, and it answers),
   `pet/rename NAME` (one line, at most `harness-pet--max-name`
   characters), `pet/set-muted BOOL`, `pet/release` (forgets it; the next
-  egg brings a new seed) → the VIEW.  `pet/watch CLIENT ON` → the VIEW:
-  CLIENT, an id the UI makes up, shows the pet now or not.
-- It speaks only while some client watches it, it is not muted and
+  egg brings a new seed) → the VIEW.  `pet/watch CLIENT ON [SESSIONS]`
+  → the VIEW: CLIENT, an id the UI makes up, shows the pet now or not;
+  with SESSIONS, a list of session ids, it shows the pet only beside
+  those sessions (what it says above their chats), not the pet itself.
+- It speaks only where it would be seen: about a session while some
+  client shows the pet itself or shows it beside that session, about
+  nothing in particular (a petting, hatching) only while some client
+  shows the pet itself; and only while it is on, not muted, and
   `harness-pet-reactions` is on; never two lines within
   `harness-pet--min-gap` seconds, never two at once.  Asked -- a message
   of the user's that names it, a petting, hatching, a level gained --
@@ -2787,7 +2798,8 @@ then, lends it a line about the user's work.  One pet per harness.
   for a hatching or a petting; nil that model itself; a string forces
   one.
 - Growing: +2 xp for every message the user writes, +1 for every turn
-  of theirs that ends well.  Event `pet/changed VIEW` after any change
+  of theirs that ends well, +3 for every task that gets done
+  (`task/done`).  Event `pet/changed VIEW` after any change
   (growing only while watched or when it gains a level), `pet/said
   SAYING` with `(:text :ts :reason :session :session-name)`.  Both are
   forwarded to clients; the methods are `_harness/pet/...` over ACP.
@@ -3668,7 +3680,11 @@ modules hook into a chat buffer without owning it:
 `harness-chat-send-functions` sees each message sent
 or queued from its box (the text as typed, and the attachments),
 `harness-chat-header-functions` (buffer-local) puts segments in front of
-its header line, leaving the session's own segments as they are, and the
+its header line, leaving the session's own segments as they are,
+`harness-chat-header-end-functions` adds segments after the session's
+own, before [menu], each a string or `(TEXT PRIORITY MIN)` as
+`harness-ui-fit-header` takes it (the companion pet's face, priority 2,
+goes first in a narrow window), and the
 buffer-local `harness-chat-placeholder` replaces the empty box's usual
 hint.
 
@@ -4071,6 +4087,12 @@ question its session waits on, a task's report -- through the shared
 `harness-ui-popout-at-point`, which runs whichever view of the item
 registered for it.  The board reads what a session waits on through
 `harness-ui-pending`, its shared notion of it.
+Other modules add to the board's header line through
+`harness-ui-tasks-header-functions`, before [BTW].  The plain strings
+they return join into one segment ([Search]).  A `(TEXT PRIORITY MIN)`
+becomes a segment of its own, which the board separates from the rest
+and which makes room as PRIORITY says (the companion pet's face and
+name, at 15, before [Add session]).
 Boards reload after any
 task, merge, turn, status, worktree, budget or reload event.  New tasks show at
 the top of in progress (latest started first), review lists the latest
@@ -4103,7 +4125,7 @@ typed; the model's name shows while it answers.  The best match gets
 point once the board shows it (`harness-ui-tasks--focus`).
 
 Companion pet (`harness-ui-pet`, `C-c h z`, `harness-pet`, menu `z`):
-the buffer `*harness pet*`, the only place the pet shows.  Before it
+the buffer `*harness pet*`, and quietly a few places besides.  Before it
 hatches: the egg, [Hatch it] (`h`) and what hatching does.  After: a
 card with its stars, rarity and species, the creature in its rarity's
 colour (`harness-ui-pet-art SPECIES EYE HAT FRAME`, five lines, three
@@ -4115,13 +4137,41 @@ the action between asterisks in `harness-pet-action-face`), then the
 two before it and a footer saying whether and through which model it
 speaks.  Prose is filled to the window and drawn again when its width
 changes.  The header line has [Pet] (`p`, `SPC`), [Rename] (`r`),
-[Mute]/[Unmute] (`m`) and [Release] (`R`, asks first), or [Hatch], and
-`g`, `q`.  The buffer tells the harness whether it is on screen
-(`_harness/pet/watch`, client `HOST:PID`) from
-`window-buffer-change-functions` while it lives, as it is killed and
-after every connect, so the pet only speaks while someone can see it.
-It follows `pet/changed` and `pet/said`, and `config/changed` of a
-`harness-pet-` option.  Animations -- the egg wobbling then cracking
+[Mute]/[Unmute] (`m`), [Release] (`R`, asks first) and [Turn off]
+(`O`), or [Hatch] and [Turn off], and `g`, `q`.  Turned off (the VIEW's
+`:enabled` false), the buffer shows the pet asleep, its eyes shut, and
+[Turn it on] (`O` too); both set `harness-pet-enabled` through
+`_harness/config/set` with the global scope, as the settings page does.
+The places besides, those `harness-ui-pet-places` names, show only while
+the pet is on and hatched, and their hooks are set only then
+(`harness-ui-pet--wire`):
+
+- `chat-header`: its face on one line (`harness-ui-pet-face SPECIES EYE
+  BLINK`, after Claude Code's, `(·>` for a duck) in its rarity's colour,
+  from `harness-chat-header-end-functions` at priority 2, so it goes
+  before anything else in a narrow window.  While the session runs it
+  blinks once in fifteen half seconds, drawn by the chat's own spinner
+  redraws, so it needs no timer.  It names the pet on hover, and a
+  click shows the buffer.
+- `chat-saying`: what it last said about a session, on a dim line of
+  its own (`harness-pet-saying-face`) above that chat's compose box
+  (`harness-chat-panel-functions`).  It shows until the session's next
+  `agent/turn-started` or for `harness-ui-pet--saying-lifetime` (15
+  minutes), and not while the pet is muted.
+- `board`: its face and name in the board's header line, from
+  `harness-ui-tasks-header-functions` as `(TEXT 15 FACE)`, so the name
+  goes first, then the face.
+
+They draw from the pet as this Emacs last heard of it
+(`harness-ui-pet--current`), asked for as the module starts and on every
+connect, then followed through `pet/changed`, and `config/changed` of a
+`harness-pet-` option.  This Emacs tells the harness where the pet is on
+screen (`_harness/pet/watch`, client `HOST:PID`) whenever that changes.
+It is t while the buffer is on screen.  With `chat-saying`, it is
+otherwise the ids of the sessions whose chats are on screen, so the pet
+speaks about those sessions only.  It is sent from
+`window-buffer-change-functions` while the buffer lives or `chat-saying`
+shows, as the buffer is killed, and after every connect.  Animations -- the egg wobbling then cracking
 and sparkles as it hatches, hearts as it is petted, a fidget as it
 speaks (after the sparkles, when its first words come while it
 hatches) -- are a few frames each on one timer that stops with the

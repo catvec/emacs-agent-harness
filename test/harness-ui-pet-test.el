@@ -51,7 +51,40 @@
 (defvar harness-ui-pet--queued)
 (defvar harness-ui-pet--timer)
 (defvar harness-ui-pet--error)
+(defvar harness-ui-pet--faces)
+(defvar harness-ui-pet--current)
+(defvar harness-ui-pet--saying-lifetime)
+(defvar harness-ui-pet-places)
+(defvar harness-pet-species)
+(defvar harness-pet-enabled)
+(defvar harness-chat-header-end-functions)
+(defvar harness-chat-panel-functions)
+(defvar harness-chat--loading)
+(defvar harness-compose-start)
+(defvar harness-compose-end)
+(defvar harness-ui-tasks-header-functions)
+(defvar harness-ui-tasks--loading)
+(defvar harness-tasks--table)
+(defvar harness-tasks--starting)
+(defvar harness-tasks--loaded)
+(defvar harness-tasks-worktrees)
 (declare-function harness-pet "harness-ui-pet")
+(declare-function harness-ui-pet-face "harness-ui-pet")
+(declare-function harness-ui-pet--blink-p "harness-ui-pet")
+(declare-function harness-ui-pet--active-p "harness-ui-pet")
+(declare-function harness-ui-pet--fetch "harness-ui-pet")
+(declare-function harness-ui-pet--client-id "harness-ui-pet")
+(declare-function harness-ui-pet--chat-header "harness-ui-pet")
+(declare-function harness-ui-pet--board-header "harness-ui-pet")
+(declare-function harness-ui-pet--saying-for "harness-ui-pet")
+(declare-function harness-ui-pet--seen "harness-ui-pet")
+(declare-function harness-ui-pet--init "harness-ui-pet")
+(declare-function harness-ui-pet-toggle-enabled "harness-ui-pet")
+(declare-function harness-ui-pet-turn-on "harness-ui-pet")
+(declare-function harness-chat-buffer "harness-ui-chat")
+(declare-function harness-chat--header "harness-ui-chat")
+(declare-function harness-ui-tasks--header "harness-ui-tasks")
+(declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-ui-pet-art "harness-ui-pet")
 (declare-function harness-ui-pet--header "harness-ui-pet")
 (declare-function harness-ui-pet--render "harness-ui-pet")
@@ -205,6 +238,27 @@ the whole frame."
   ;; An unknown species is drawn as a blob, not an error.
   (should (equal (harness-ui-pet-art 'blob "o" 'none 0) (harness-ui-pet-art 'gryphon "o" 'none 0))))
 
+(ert-deftest harness-ui-pet-face-on-one-line ()
+  "Every species has a face on one line, as header lines show it; it blinks
+once in the fifteen half seconds of its idle loop."
+  (require 'harness-pet)
+  (require 'harness-ui-pet)
+  (should (equal (sort (mapcar #'car harness-ui-pet--faces) #'string<)
+                 (sort (copy-sequence harness-pet-species) #'string<)))
+  (dolist (species harness-pet-species)
+    (let ((face (harness-ui-pet-face species "o"))
+          (shut (harness-ui-pet-face (symbol-name species) "o" t)))
+      (should-not (string-search "\n" face))
+      (should-not (string-search "{E}" face))
+      (should (string-search "o" face))
+      (should (<= (string-width face) 10))
+      (should (string-search "-" shut))
+      (should (= (length face) (length shut)))))
+  ;; An unknown species is a blob; no eye shows as o.
+  (should (equal (harness-ui-pet-face 'blob "o") (harness-ui-pet-face 'gryphon nil)))
+  (should (equal "(oo)" (harness-ui-pet-face 'blob "")))
+  (should (= 1 (cl-count-if #'harness-ui-pet--blink-p (number-sequence 0 7 0.5)))))
+
 ;;;; The buffer
 
 (ert-deftest harness-ui-pet-egg-hatches-into-a-card ()
@@ -337,6 +391,219 @@ and the prose is filled to the window."
       (should (equal "just now, about Renaming things"
                      (harness-ui-pet--when (list :ts now :session "s2" :session-name nil))))
       (should (equal "just now" (harness-ui-pet--when (list :ts now :session nil :session-name "  ")))))))
+
+;;;; Elsewhere
+
+(defun harness-ui-pet-test--know-the-pet ()
+  "Have this Emacs ask for the pet, and wait until it knows it."
+  (harness-ui-pet--fetch)
+  (harness-test-wait (lambda () harness-ui-pet--current) 5 "the pet"))
+
+(defun harness-ui-pet-test--hatch-elsewhere ()
+  "Hatch the pet from the harness, not its buffer; wait until this Emacs knows."
+  (harness-test-await (harness-call 'pet/hatch))
+  (harness-test-wait #'harness-ui-pet--active-p 5 "the pet to hatch"))
+
+(defun harness-ui-pet-test--own-hooks (hook)
+  "The pet's functions on HOOK."
+  (and (boundp hook)
+       (cl-remove-if-not (lambda (fn) (string-prefix-p "harness-ui-pet-" (format "%s" fn)))
+                         (symbol-value hook))))
+
+(defun harness-ui-pet-test--watching ()
+  "Where this Emacs told the harness it shows the pet: t, session ids, or nil."
+  (gethash (harness-ui-pet--client-id) harness-pet--watchers))
+
+(ert-deftest harness-ui-pet-shows-in-a-chat ()
+  "Hatched, the pet's face ends a chat's header line, the first thing to go
+when it is narrow, and blinks while the session works.  What it says about
+the session shows above the compose box until the session's next turn."
+  (harness-ui-pet-test-with
+    (harness-test-load-module 'ui-chat)
+    (let* ((sid (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted" :name "Parser work") :id))
+           (buf (harness-chat-buffer sid))
+           (other (get-buffer-create "*harness-ui-pet-test other*")))
+      (unwind-protect
+          (progn
+            (harness-test-wait (lambda () (with-current-buffer buf (and (not harness-chat--loading) harness-compose-end)))
+                               5 "the chat to load")
+            (switch-to-buffer buf)
+            ;; An egg shows nowhere: nothing is even wired for it.
+            (harness-ui-pet-test--know-the-pet)
+            (should-not (harness-ui-pet-test--own-hooks 'harness-chat-header-end-functions))
+            (should-not (harness-ui-pet-test--own-hooks 'harness-chat-panel-functions))
+            (should-not (harness-ui-pet-test--watching))
+            (harness-ui-pet-test--hatch-elsewhere)
+            (let* ((view harness-ui-pet--current)
+                   (face (harness-ui-pet-face (plist-get view :species) (plist-get view :eye)))
+                   (header (with-current-buffer buf (harness-chat--header most-positive-fixnum)))
+                   (at (string-search face header)))
+              ;; At the end, before [menu]: hovering names it, a click shows it.
+              (should at)
+              (should (< (string-search "Parser work" header) at (string-search "[menu]" header)))
+              (should (string-search (plist-get view :name)
+                                     (funcall (get-text-property at 'help-echo header))))
+              (should (keymapp (get-text-property at 'local-map header)))
+              ;; A window narrower by a column: it goes first.
+              (let ((narrower (with-current-buffer buf
+                                (harness-chat--header (1- (harness-ui-header-string-width header))))))
+                (should-not (string-search face narrower))
+                (should (string-search "Parser work" narrower)))
+              ;; Its eyes shut now and then while the session works, never while it idles.
+              (cl-letf (((symbol-function 'harness-ui-pet--blink-p) (lambda (&optional _) t)))
+                (should (string-search face (with-current-buffer buf (car (harness-ui-pet--chat-header)))))
+                (puthash sid (plist-put (copy-sequence (harness-ui-session sid)) :status "running")
+                         harness-ui--sessions)
+                (should (string-search (harness-ui-pet-face (plist-get view :species) nil t)
+                                       (with-current-buffer buf (car (harness-ui-pet--chat-header)))))
+                (puthash sid (plist-put (copy-sequence (harness-ui-session sid)) :status "idle")
+                         harness-ui--sessions)))
+            ;; The chat on screen lets it speak about its session, and only that.
+            (harness-test-wait (lambda () (equal (list sid) (harness-ui-pet-test--watching)))
+                               5 "the harness told the chat is on screen")
+            (let ((harness-ui-pet-places '(chat-header board)))
+              (should-not (harness-ui-pet--seen)))
+            (harness-call 'session/append sid (list :kind 'user :content "rewrite the tokenizer"))
+            (harness-test-wait (lambda () (with-current-buffer buf (string-search "Tokenizer? Bold" (buffer-string))))
+                               5 "its words above the compose box")
+            (with-current-buffer buf
+              (save-excursion
+                (goto-char (point-min))
+                (search-forward "Tokenizer? Bold")
+                (should (< (point) harness-compose-start))
+                (should (memq 'harness-pet-saying-face
+                              (flatten-tree (get-text-property (match-beginning 0) 'face))))
+                ;; Its name says whose words they are.
+                (should (string-search (plist-get harness-ui-pet--current :name)
+                                       (buffer-substring (line-beginning-position) (line-end-position))))))
+            ;; The session's next turn takes them away.
+            (harness-ui-pet--on-event "agent/turn-started" (list sid))
+            (should-not (with-current-buffer buf (string-search "Tokenizer? Bold" (buffer-string))))
+            ;; Nor do they last, nor show while it is muted or out of the places.
+            (let* ((now (float-time))
+                   (harness-ui-pet--current
+                    (plist-put (copy-sequence harness-ui-pet--current) :said
+                               (list (list :text "Hm." :ts now :session "s9")))))
+              (should (harness-ui-pet--saying-for "s9" now))
+              (should-not (harness-ui-pet--saying-for "s8" now))
+              (should-not (harness-ui-pet--saying-for "s9" (+ now harness-ui-pet--saying-lifetime 1)))
+              (let ((harness-ui-pet--current (plist-put (copy-sequence harness-ui-pet--current) :muted t)))
+                (should-not (harness-ui-pet--saying-for "s9" now)))
+              (let ((harness-ui-pet-places '(chat-header)))
+                (should-not (harness-ui-pet--saying-for "s9" now))))
+            ;; The chat off screen: it is quiet again.
+            (switch-to-buffer other)
+            (harness-ui-pet--update-watch (selected-frame))
+            (harness-test-wait (lambda () (null (harness-ui-pet-test--watching))) 5 "the watch to end"))
+        (kill-buffer buf)
+        (kill-buffer other)))))
+
+(ert-deftest harness-ui-pet-shows-on-the-board ()
+  "Hatched, the pet's face and name show in the board's header line; a
+narrower board loses its name first, then its face."
+  (harness-ui-pet-test-with
+    (let ((harness-acp--server-enabled nil))
+      (harness-test-load-module 'tasks))
+    (clrhash harness-tasks--table)
+    (clrhash harness-tasks--starting)
+    (setq harness-tasks--loaded t)
+    (harness-test-load-module 'ui-tasks)
+    (let ((harness-tasks-worktrees nil)
+          (board (harness-tasks dir)))
+      (unwind-protect
+          (progn
+            (harness-test-wait (lambda () (not (buffer-local-value 'harness-ui-tasks--loading board)))
+                               5 "the board to load")
+            (harness-ui-pet-test--know-the-pet)
+            (should-not (harness-ui-pet-test--own-hooks 'harness-ui-tasks-header-functions))
+            (harness-ui-pet-test--hatch-elsewhere)
+            (let* ((view harness-ui-pet--current)
+                   (face (harness-ui-pet-face (plist-get view :species) (plist-get view :eye)))
+                   (name (plist-get view :name))
+                   (header (with-current-buffer board (harness-ui-tasks--header most-positive-fixnum)))
+                   (width (harness-ui-header-string-width header)))
+              (should (string-search (concat face " " name) header))
+              (should (< (string-search face header) (string-search "[BTW]" header)))
+              (let ((narrower (with-current-buffer board
+                                (harness-ui-tasks--header (- width (length name) 1)))))
+                (should (string-search face narrower))
+                (should-not (string-search name narrower)))
+              (let ((narrower (with-current-buffer board
+                                (harness-ui-tasks--header (- width (length name) (length face) 4)))))
+                (should-not (string-search face narrower)))))
+        (kill-buffer board)))))
+
+(ert-deftest harness-ui-pet-places-are-optional ()
+  "`harness-ui-pet-places' says where the pet shows; nothing is wired for the rest."
+  (harness-ui-pet-test-with
+    (harness-ui-pet-test--know-the-pet)
+    (harness-ui-pet-test--hatch-elsewhere)
+    (should (harness-ui-pet-test--own-hooks 'harness-chat-header-end-functions))
+    (should (harness-ui-pet-test--own-hooks 'harness-chat-panel-functions))
+    (should (harness-ui-pet-test--own-hooks 'harness-ui-tasks-header-functions))
+    (let ((places harness-ui-pet-places))
+      (unwind-protect
+          (progn
+            (customize-set-variable 'harness-ui-pet-places '(board))
+            (should-not (harness-ui-pet-test--own-hooks 'harness-chat-header-end-functions))
+            (should-not (harness-ui-pet-test--own-hooks 'harness-chat-panel-functions))
+            (should (harness-ui-pet-test--own-hooks 'harness-ui-tasks-header-functions))
+            (should-not (harness-ui-pet--chat-header))
+            (should (harness-ui-pet--board-header)))
+        (customize-set-variable 'harness-ui-pet-places places)))
+    (should (harness-ui-pet-test--own-hooks 'harness-chat-header-end-functions))
+    ;; The module stopped, the pet leaves every place.
+    (harness-ui-pet--shutdown)
+    (dolist (hook '(harness-chat-header-end-functions harness-chat-panel-functions
+                    harness-ui-tasks-header-functions window-buffer-change-functions))
+      (should-not (harness-ui-pet-test--own-hooks hook)))
+    (should-not (harness-ui-pet--board-header))))
+
+(ert-deftest harness-ui-pet-turned-off-shows-nowhere ()
+  "Turned off, the pet leaves every place and its buffer says so, offering
+only to turn it on; that is saved, and turned on it is back as it was."
+  (harness-ui-pet-test-with
+    (let* ((harness-pet-enabled t)
+           ;; Like a normal session: customize refuses to save under "emacs -q".
+           (init-file-user "")
+           (user-init-file (expand-file-name "init.el" dir))
+           (custom-file (expand-file-name "custom.el" dir))
+           (buf (harness-ui-pet-test--open)))
+      (harness-ui-pet-test--hatch)
+      (let ((name (plist-get harness-ui-pet--current :name)))
+        (should (harness-ui-pet-test--own-hooks 'harness-chat-header-end-functions))
+        (with-current-buffer buf (harness-ui-pet-toggle-enabled))
+        (harness-ui-pet-test--wait-text (regexp-quote (format "%s is asleep" name)))
+        (should-not harness-pet-enabled)
+        (should (eq :false (plist-get harness-ui-pet--current :enabled)))
+        ;; Nowhere else, and nothing wired for it but the buffer's watch.
+        (dolist (hook '(harness-chat-header-end-functions harness-chat-panel-functions
+                        harness-ui-tasks-header-functions))
+          (should-not (harness-ui-pet-test--own-hooks hook)))
+        (should-not (harness-ui-pet--chat-header))
+        (should-not (harness-ui-pet--board-header))
+        ;; Its buffer offers to turn it on, and nothing else.
+        (let ((header (format "%s" (with-current-buffer buf (harness-ui-pet--header)))))
+          (should (string-match-p "Turn on" header))
+          (dolist (label '("Pet" "Rename" "Mute" "Release" "Hatch"))
+            (should-not (string-match-p (format "\\_<%s\\_>" label) header))))
+        (should (string-match-p "Turn it on" (harness-ui-pet-test--text)))
+        (with-current-buffer buf
+          (should-error (harness-ui-pet-pet) :type 'user-error)
+          (should-error (harness-ui-pet-toggle-mute) :type 'user-error)
+          (should-error (harness-ui-pet-release t) :type 'user-error))
+        ;; Kept so, as the Settings page keeps a setting.
+        (harness-test-wait (lambda () (and (file-exists-p custom-file)
+                                           (string-match-p "harness-pet-enabled" (harness-read-file custom-file))))
+                           5 "the custom file")
+        ;; On again: as it was.
+        (with-current-buffer buf (harness-ui-pet-turn-on))
+        (harness-test-wait #'harness-ui-pet--active-p 5 "the pet back")
+        (should harness-pet-enabled)
+        (harness-ui-pet-test--wait-text "Level 1")
+        (should (equal name (plist-get harness-ui-pet--current :name)))
+        (should (harness-ui-pet-test--own-hooks 'harness-chat-header-end-functions))
+        (should (string-match-p "Turn off" (format "%s" (with-current-buffer buf (harness-ui-pet--header)))))))))
 
 ;;;; Animations
 

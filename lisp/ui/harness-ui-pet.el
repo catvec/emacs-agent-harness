@@ -1,12 +1,12 @@
-;;; harness-ui-pet.el --- The companion pet's buffer  -*- lexical-binding: t; -*-
+;;; harness-ui-pet.el --- The companion pet's buffer, and where else it shows  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
 ;; One buffer, "*harness pet*", opened with `harness-pet' (C-c h z, or
 ;; z in the harness menu), shows the companion pet of the pet module:
 ;;
-;;   header line   [Pet] [Rename] [Mute] [Release], g and q; [Hatch]
-;;                 while there is only an egg
+;;   header line   [Pet] [Rename] [Mute] [Release] [Turn off], g and q;
+;;                 [Hatch] while there is only an egg
 ;;   card          its stars, rarity and species, then the creature
 ;;                 itself in its rarity's colour beside its five stats,
 ;;                 its name (gold when it is shiny) and personality,
@@ -15,10 +15,33 @@
 ;;   footer        the model it speaks with, and whether it may
 ;;
 ;; Before it hatches, the buffer shows the egg and a [Hatch] button.
+;; While it is turned off (the pet module's `harness-pet-enabled'), it
+;; says so and offers [Turn it on].
 ;;
-;; The pet only speaks while this buffer is on screen: the buffer tells
-;; the harness (`pet/watch') whenever it comes into view or leaves it,
-;; through `window-buffer-change-functions' while the buffer lives.
+;; Once it hatched, the pet shows quietly in a few places besides, those
+;; `harness-ui-pet-places' names:
+;;
+;;   chat header   its face, on one line in its rarity's colour, near
+;;                 the end of a chat's header line, the first thing to
+;;                 go when the window is narrow.  It blinks now and then
+;;                 while the session works, drawn by the chat's own
+;;                 spinner; hovering names it, a click shows its buffer.
+;;   chat saying   what it last said about a session, on a line of its
+;;                 own above that session's compose box, until the
+;;                 session's next turn starts.
+;;   board         its face and name in the task board's header line.
+;;
+;; None of them shows while the pet is turned off or still an egg, nor
+;; one left out of `harness-ui-pet-places': their hooks are not even
+;; set then (`harness-ui-pet--wire').  They draw from the pet as the
+;; harness last told this Emacs (`harness-ui-pet--current'), asked for
+;; when the UI connects and followed through `pet/changed'.
+;;
+;; The pet only speaks where it would be seen.  This Emacs tells the
+;; harness (`pet/watch') whenever that changes, through
+;; `window-buffer-change-functions' while it matters: the pet's buffer
+;; on screen lets it speak about anything, a chat on screen about that
+;; chat's session, when what it says shows above chats.
 ;;
 ;; Nothing here runs while nothing happens.  Three short animations
 ;; play when something does -- the egg wobbles and cracks as it hatches,
@@ -47,8 +70,44 @@ petted, and it fidgets as it speaks: each a few frames that stop on
 their own.  nil shows it still."
   :type 'boolean :group 'harness-ui-pet)
 
+(defcustom harness-ui-pet-places '(chat-header chat-saying board)
+  "Where the companion pet shows besides its own buffer, once it hatched.
+A list of:
+
+- `chat-header': its face, on one line in its rarity's colour, near the
+  end of a chat's header line, the first thing to go in a narrow window.
+  It blinks now and then while the session works; hovering names it, a
+  click shows it.
+- `chat-saying': what it last said about a session, on a line of its own
+  above that session's compose box, until the session's next turn
+  starts.  A chat on screen then lets it speak about that session, as
+  its own buffer on screen lets it speak about anything.
+- `board': its face and name in the task board's header line.
+
+nil shows it in its buffer only (`harness-pet').  The pet module's
+`harness-pet-enabled' turns it off everywhere, its buffer included."
+  :type '(set (const :tag "Its face in chat header lines" chat-header)
+              (const :tag "What it said about a session, above that chat's compose box" chat-saying)
+              (const :tag "Its face and name in the task board's header line" board))
+  :initialize #'custom-initialize-default
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         (when (fboundp 'harness-ui-pet--sync) (harness-ui-pet--sync)))
+  :group 'harness-ui-pet)
+
 (defconst harness-ui-pet--buffer-name "*harness pet*"
   "Name of the pet's buffer.")
+
+(defconst harness-ui-pet--saying-lifetime (* 15 60)
+  "Seconds at most a saying shows above a compose box.
+Its session's next turn takes it away before, as a redraw finds.")
+
+(defconst harness-ui-pet--header-priority 2
+  "Priority of the pet's face in a chat's header line: it goes first.")
+
+(defconst harness-ui-pet--board-priority 15
+  "Priority of the pet's face and name in the board's header line.
+Below [Add session]'s, so it goes first.")
 
 (defconst harness-ui-pet--tick 0.18
   "Seconds between two frames of an animation.")
@@ -97,6 +156,10 @@ their own.  nil shows it still."
 (defface harness-pet-heart-face
   '((((background dark)) :foreground "#f472b6") (t :foreground "#db2777"))
   "The hearts that rise when the pet is petted." :group 'harness-ui-pet)
+(defface harness-pet-saying-face '((t :inherit (harness-pet-speech-face shadow)))
+  "What the pet said about a session, on its line above that chat's compose box.
+Quieter than the band of its own buffer: dim on the same background."
+  :group 'harness-ui-pet)
 
 (defun harness-ui-pet--rarity-face (rarity)
   "The face of RARITY, a string."
@@ -280,6 +343,58 @@ five lines, the first the hat's."
                          hat-line
                        (string-replace "{E}" eye line)))))
 
+;;;; The face, on one line
+
+(defconst harness-ui-pet--faces
+  '((duck . "({E}>") (goose . "({E}>") (blob . "({E}{E})") (cat . "={E}ω{E}=")
+    (dragon . "<{E}~{E}>") (octopus . "~({E}{E})~") (owl . "({E})({E})") (penguin . "({E}>)")
+    (turtle . "[{E}_{E}]") (snail . "{E}(@)") (ghost . "/{E}{E}\\") (axolotl . "}{E}.{E}{")
+    (capybara . "({E}oo{E})") (cactus . "|{E}  {E}|") (robot . "[{E}{E}]") (rabbit . "({E}..{E})")
+    (mushroom . "|{E}  {E}|") (chonk . "({E}.{E})"))
+  "Each species's face on one line, {E} for its eyes: the pet in a header line.
+As Claude Code's companions showed theirs beside the prompt.")
+
+(defconst harness-ui-pet--face-fallbacks
+  '((?· . ".") (?✦ . "*") (?× . "x") (?◉ . "o") (?° . "o") (?ω . "w"))
+  "Characters of a face to draw instead of those the frame cannot show.")
+
+(defconst harness-ui-pet--blinks [0 0 0 0 0 0 0 0 1 0 0 0 0 0 0]
+  "Half seconds of a pet watching a session work, 1 where it blinks.
+Fifteen of them, as Claude Code's companions idled: once in a while.")
+
+(defvar harness-ui-pet--displayable (make-hash-table :test 'equal)
+  "(CHAR . GRAPHIC) -> whether CHAR shows, as `char-displayable-p' said.
+GRAPHIC is whether the frame was graphic: a terminal shows fewer.")
+
+(defun harness-ui-pet--displayable-p (char)
+  "Non-nil when the selected frame shows CHAR; asked once a kind of frame."
+  (let* ((key (cons char (and (display-graphic-p) t)))
+         (known (gethash key harness-ui-pet--displayable 'unknown)))
+    (if (eq known 'unknown)
+        (puthash key (and (char-displayable-p char) t) harness-ui-pet--displayable)
+      known)))
+
+(defun harness-ui-pet-face (species eye &optional blink)
+  "Return the face of a SPECIES pet with EYE, on one line; eyes shut if BLINK.
+SPECIES is a name, as a string or a symbol, EYE a string.  A character
+the selected frame cannot show is drawn as an ASCII one instead."
+  (let ((face (string-replace
+               "{E}" (cond (blink "-")
+                           ((and (stringp eye) (not (string-empty-p eye))) eye)
+                           (t "o"))
+               (or (alist-get (intern (format "%s" species)) harness-ui-pet--faces)
+                   (alist-get 'blob harness-ui-pet--faces)))))
+    (mapconcat (lambda (char)
+                 (if (or (< char 128) (harness-ui-pet--displayable-p char))
+                     (string char)
+                   (or (alist-get char harness-ui-pet--face-fallbacks) "o")))
+               face "")))
+
+(defun harness-ui-pet--blink-p (&optional time)
+  "Non-nil when a pet watching a session work has its eyes shut at TIME (now)."
+  (= 1 (aref harness-ui-pet--blinks
+             (mod (floor (or time (float-time)) 0.5) (length harness-ui-pet--blinks)))))
+
 ;;;; State
 
 (defvar-local harness-ui-pet--view nil "The pet as `pet/get' returned it last.")
@@ -292,9 +407,24 @@ KIND is `egg', `crack', `sparkle', `hearts' or `fidget'.")
   "The animation to play once the egg has hatched, or nil: `fidget'.")
 
 (defvar harness-ui-pet--timer nil "The timer of the animation playing, or nil.")
-(defvar harness-ui-pet--watching nil "Whether this Emacs last told the harness it shows the pet.")
+(defvar harness-ui-pet--watching nil
+  "Where this Emacs last told the harness it shows the pet.
+As `harness-ui-pet--seen' returns it: t, a list of session ids, or nil.")
 (defvar harness-ui-pet--bars (make-hash-table :test 'equal)
   "Stat bar images by (FRACTION WIDTH COLOR), so a redraw reuses them.")
+
+(defvar harness-ui-pet--live nil
+  "Non-nil while the module is on: the places besides the buffer may show.")
+(defvar harness-ui-pet--current nil
+  "The pet as the harness last told this Emacs, as `pet/get' returns it.
+The places besides its buffer draw from it; nil before it is known.")
+(defvar harness-ui-pet--drawn nil
+  "What the header lines showed of the pet when they were last redrawn.")
+(defvar harness-ui-pet--turns (make-hash-table :test 'equal)
+  "Session id -> when its last turn started, as this Emacs heard.
+What the pet said about a session before then shows no more.")
+(defvar-local harness-ui-pet--panel-shown nil
+  "The saying a chat buffer's tail shows above its compose box, or nil.")
 
 (defun harness-ui-pet--buffer ()
   "The pet's buffer, or nil."
@@ -307,6 +437,31 @@ KIND is `egg', `crack', `sparkle', `hearts' or `fidget'.")
 (defun harness-ui-pet--hatched-p (&optional view)
   "Non-nil when VIEW (default the buffer's) is of a pet that hatched."
   (harness-ui-pet--true-p (plist-get (or view harness-ui-pet--view) :hatched)))
+
+(defun harness-ui-pet--enabled-p (view)
+  "Non-nil unless VIEW says the pet is turned off.
+A view without `:enabled', from a harness older than the switch, is on."
+  (not (eq (plist-get view :enabled) :false)))
+
+(defun harness-ui-pet--active-p ()
+  "Non-nil when the pet may show in places: it is on, and it hatched."
+  (let ((view harness-ui-pet--current))
+    (and harness-ui-pet--live view
+         (harness-ui-pet--enabled-p view)
+         (harness-ui-pet--hatched-p view))))
+
+(defun harness-ui-pet--place-p (place)
+  "Non-nil when the pet shows in PLACE now, one of `harness-ui-pet-places'."
+  (and (memq place harness-ui-pet-places) (harness-ui-pet--active-p)))
+
+(defun harness-ui-pet--chat-buffer-p (buffer)
+  "Non-nil when BUFFER is a live chat buffer."
+  (and (buffer-live-p buffer)
+       (provided-mode-derived-p (buffer-local-value 'major-mode buffer) 'harness-chat-mode)))
+
+(defun harness-ui-pet--chat-buffers ()
+  "The live chat buffers."
+  (cl-remove-if-not #'harness-ui-pet--chat-buffer-p (buffer-list)))
 
 ;;;; Visibility
 
@@ -323,21 +478,45 @@ a frame of another terminal selected, as in a daemon."
                   (get-buffer-window-list buf 'nomini t))
          t)))
 
-(defun harness-ui-pet--send-watch (shown)
-  "Tell the harness this Emacs SHOWN the pet or not; draw the pet it answers with."
-  (setq harness-ui-pet--watching shown)
+(defun harness-ui-pet--seen (&optional without-buffer)
+  "Where this Emacs shows the pet now, as `pet/watch' takes it.
+t while the pet's buffer is on screen, where anything it says is seen;
+else, when what it says shows above chats (`chat-saying'), the sorted
+ids of the sessions whose chats are on screen, or nil.  WITHOUT-BUFFER
+leaves the buffer out, as it goes."
+  (cond ((and (not without-buffer) (harness-ui-pet--shown-p)) t)
+        ((harness-ui-pet--place-p 'chat-saying)
+         (let ((ids nil))
+           (dolist (frame (frame-list))
+             (when (eq t (frame-visible-p frame))
+               (dolist (window (window-list frame 'nomini))
+                 (let ((buffer (window-buffer window)))
+                   (when (harness-ui-pet--chat-buffer-p buffer)
+                     (when-let* ((id (buffer-local-value 'harness-ui-session-id buffer)))
+                       (cl-pushnew id ids :test #'equal)))))))
+           (sort ids #'string<)))))
+
+(defun harness-ui-pet--send-watch (seen)
+  "Tell the harness where this Emacs shows the pet: SEEN.
+SEEN is as `harness-ui-pet--seen' returns it.  Draw the pet the harness
+answers with, unless SEEN is nil: it shows nowhere then."
+  (setq harness-ui-pet--watching seen)
   (harness-ui-call "_harness/pet/watch"
-                   (list :client (harness-ui-pet--client-id) :on (if shown t :false))
-                   (lambda (view) (when shown (harness-ui-pet--receive view)) nil)
-                   #'harness-ui-pet--failed))
+                   (append (list :client (harness-ui-pet--client-id) :on (if seen t :false))
+                           (and (consp seen) (list :sessions seen)))
+                   (lambda (view) (when seen (harness-ui-pet--receive view)) nil)
+                   ;; Only the buffer says what went wrong; the places stay quiet.
+                   (if (eq seen t) #'harness-ui-pet--failed #'ignore)))
 
 (defun harness-ui-pet--update-watch (&rest _)
-  "Tell the harness whether the pet is on screen, when that changed.
-In `window-buffer-change-functions' while the pet's buffer lives."
-  (let ((shown (harness-ui-pet--shown-p)))
-    (unless (eq shown harness-ui-pet--watching)
-      (harness-ui-pet--send-watch shown))
-    (unless shown (harness-ui-pet--stop))))
+  "Tell the harness where the pet is on screen, when that changed.
+In `window-buffer-change-functions' while the pet's buffer lives or what
+it says shows above chats.  Its animation stops once the buffer is off
+screen."
+  (let ((seen (harness-ui-pet--seen)))
+    (unless (equal seen harness-ui-pet--watching)
+      (harness-ui-pet--send-watch seen)))
+  (unless (harness-ui-pet--shown-p) (harness-ui-pet--stop)))
 
 (defun harness-ui-pet--on-resize (window)
   "Draw the pet's buffer again when WINDOW, which shows it, changed width.
@@ -348,11 +527,12 @@ only when a window showing it changed size."
       (harness-ui-pet--render))))
 
 (defun harness-ui-pet--on-kill ()
-  "The pet's buffer goes: the pet is not on screen any more."
-  (remove-hook 'window-buffer-change-functions #'harness-ui-pet--update-watch)
+  "The pet's buffer goes: it is not on screen any more, though chats may be."
   (harness-ui-pet--stop)
-  (when harness-ui-pet--watching
-    (harness-ui-pet--send-watch nil)))
+  (harness-ui-pet--wire t)
+  (let ((seen (harness-ui-pet--seen t)))
+    (unless (equal seen harness-ui-pet--watching)
+      (harness-ui-pet--send-watch seen))))
 
 ;;;; Talking to the harness
 
@@ -372,53 +552,66 @@ only when a window showing it changed size."
   nil)
 
 (defun harness-ui-pet--receive (view)
-  "Show VIEW, the pet as `pet/get' returns it."
-  (when-let* ((buf (harness-ui-pet--buffer)))
-    (with-current-buffer buf
-      (let ((was harness-ui-pet--view))
-        (setq harness-ui-pet--view view harness-ui-pet--error nil)
-        (cond
-         ;; Hatching, here or in another Emacs: the egg wobbles.
-         ((and (harness-ui-pet--true-p (plist-get view :hatching))
-               (not (memq (plist-get harness-ui-pet--anim :kind) '(egg crack))))
-          (harness-ui-pet--animate 'egg))
-         ;; Hatched with nobody watching the egg: sparkles all the same.
-         ((and was (not (harness-ui-pet--hatched-p was)) (harness-ui-pet--hatched-p view)
-               (not harness-ui-pet--anim))
-          (harness-ui-pet--animate 'sparkle)))
-        (harness-ui-pet--render))))
+  "Show VIEW, the pet as `pet/get' returns it, wherever the pet shows."
+  (when (keywordp (car-safe view))
+    (setq harness-ui-pet--current view)
+    (when-let* ((buf (harness-ui-pet--buffer)))
+      (with-current-buffer buf
+        (let ((was harness-ui-pet--view))
+          (setq harness-ui-pet--view view harness-ui-pet--error nil)
+          (cond
+           ;; Hatching, here or in another Emacs: the egg wobbles.
+           ((and (harness-ui-pet--true-p (plist-get view :hatching))
+                 (not (memq (plist-get harness-ui-pet--anim :kind) '(egg crack))))
+            (harness-ui-pet--animate 'egg))
+           ;; Hatched with nobody watching the egg: sparkles all the same.
+           ((and was (not (harness-ui-pet--hatched-p was)) (harness-ui-pet--hatched-p view)
+                 (not harness-ui-pet--anim))
+            (harness-ui-pet--animate 'sparkle)))
+          (harness-ui-pet--render))))
+    (harness-ui-pet--sync))
   nil)
 
 (defun harness-ui-pet--request (method &optional params)
   "Send METHOD with PARAMS about the pet; show the pet it answers with."
   (harness-ui-call method params #'harness-ui-pet--receive #'harness-ui-pet--failed))
 
+(defun harness-ui-pet--fetch ()
+  "Ask the harness for the pet, for wherever it shows.
+A failure shows in the pet's buffer, if open; the places stay quiet."
+  (harness-ui-call "_harness/pet/get" nil #'harness-ui-pet--receive
+                   (lambda (err) (when (harness-ui-pet--buffer) (harness-ui-pet--failed err)) nil)))
+
 (defun harness-ui-pet--on-event (event args)
   "Follow the pet through EVENT with ARGS."
-  (when (harness-ui-pet--buffer)
-    (pcase event
-      ("pet/changed" (harness-ui-pet--receive (car args)))
-      ("pet/said" (with-current-buffer (harness-ui-pet--buffer)
-                    ;; Its first words come as it hatches: it fidgets after.
-                    (if (memq (plist-get harness-ui-pet--anim :kind) '(egg crack sparkle))
-                        (setq harness-ui-pet--queued 'fidget)
-                      (harness-ui-pet--animate 'fidget))))
-      ("config/changed"
-       (when (string-prefix-p "harness-pet-" (format "%s" (car args)))
-         (harness-ui-pet--request "_harness/pet/get"))))))
+  (pcase event
+    ("pet/changed" (harness-ui-pet--receive (car args)))
+    ("pet/said"
+     (when-let* ((buf (harness-ui-pet--buffer)))
+       (with-current-buffer buf
+         ;; Its first words come as it hatches: it fidgets after.
+         (if (memq (plist-get harness-ui-pet--anim :kind) '(egg crack sparkle))
+             (setq harness-ui-pet--queued 'fidget)
+           (harness-ui-pet--animate 'fidget)))))
+    ("agent/turn-started" (harness-ui-pet--on-turn-started (car args)))
+    ("config/changed"
+     (when (string-prefix-p "harness-pet-" (format "%s" (car args)))
+       (harness-ui-pet--fetch)))))
 
 (defun harness-ui-pet--on-connected ()
-  "The harness may have restarted: tell it again whether the pet is on screen."
-  (when (harness-ui-pet--buffer)
-    (setq harness-ui-pet--watching nil)
-    (if (harness-ui-pet--shown-p)
-        (harness-ui-pet--send-watch t)
-      (harness-ui-pet--request "_harness/pet/get"))))
+  "The harness may have restarted: ask for the pet, say again where it shows."
+  (setq harness-ui-pet--watching nil)
+  (let ((seen (harness-ui-pet--seen)))
+    (if seen
+        (harness-ui-pet--send-watch seen)
+      (harness-ui-pet--fetch))))
 
 (defun harness-ui-pet--redraw ()
-  "Redraw the pet's buffer, as every view redraws after a reload."
+  "Redraw the pet's buffer and its places, as every view redraws after a reload."
   (when-let* ((buf (harness-ui-pet--buffer)))
-    (with-current-buffer buf (harness-ui-pet--render))))
+    (with-current-buffer buf (harness-ui-pet--render)))
+  (setq harness-ui-pet--drawn nil)
+  (harness-ui-pet--sync))
 
 ;;;; Animation
 
@@ -471,6 +664,170 @@ only when a window showing it changed size."
           (when (timerp harness-ui-pet--timer) (cancel-timer harness-ui-pet--timer))
           (setq harness-ui-pet--timer nil))
         (harness-ui-pet--render)))))
+
+;;;; Places besides its buffer
+
+(defvar harness-ui-pet--face-map nil "Keymap of the pet's face: a click shows it.")
+
+(defun harness-ui-pet--face-map ()
+  "The keymap of the pet's face wherever it shows: a click opens its buffer."
+  (or harness-ui-pet--face-map
+      (setq harness-ui-pet--face-map (harness-ui-mouse-keymap #'harness-pet))))
+
+(defun harness-ui-pet--about (view)
+  "Who the pet of VIEW is, in a few words: \"Fennel, your rare cat, level 3\"."
+  (format "%s, your %s%s %s, level %d"
+          (or (plist-get view :name) "Your pet")
+          (if (harness-ui-pet--true-p (plist-get view :shiny)) "shiny " "")
+          (or (plist-get view :rarity) "common")
+          (or (plist-get view :species) "pet")
+          (or (plist-get view :level) 1)))
+
+(defun harness-ui-pet--face-help (&rest _)
+  "The tooltip of the pet's face: who it is, what it said last, what a click does.
+A `help-echo' function, so it is worked out on hover only."
+  (let* ((view harness-ui-pet--current)
+         (last (car (last (plist-get view :said)))))
+    (concat (harness-ui-pet--about view)
+            (if last
+                (format "\n%s\n(%s)" (harness-ui-one-line (plist-get last :text)) (harness-ui-pet--when last))
+              "")
+            "\nmouse-1: show it")))
+
+(defun harness-ui-pet--face-segment (view &optional blink)
+  "The face of the pet of VIEW for a header line, eyes shut when BLINK.
+In its rarity's colour; hovering says who it is, a click shows it."
+  (propertize (harness-ui-pet-face (plist-get view :species) (plist-get view :eye) blink)
+              'face (harness-ui-pet--rarity-face (plist-get view :rarity))
+              'help-echo #'harness-ui-pet--face-help
+              'mouse-face 'mode-line-highlight
+              'local-map (harness-ui-pet--face-map)))
+
+(defun harness-ui-pet--chat-header ()
+  "The pet's face for a chat's header line, or nil.
+On `harness-chat-header-end-functions' while the pet shows there.  It
+blinks now and then while the session runs: the chat's spinner redraws
+the header line meanwhile, so the pet needs no timer of its own."
+  (when (harness-ui-pet--place-p 'chat-header)
+    (let ((running (equal (plist-get (harness-ui-session harness-ui-session-id) :status) "running")))
+      (list (concat "  " (harness-ui-pet--face-segment harness-ui-pet--current
+                                                       (and running (harness-ui-pet--blink-p))))
+            harness-ui-pet--header-priority))))
+
+(defun harness-ui-pet--board-header ()
+  "The pet's face and name for the task board's header line, or nil.
+On `harness-ui-tasks-header-functions' while the pet shows there; in a
+narrow window the name goes first, then the face."
+  (when (harness-ui-pet--place-p 'board)
+    (let* ((view harness-ui-pet--current)
+           (face (harness-ui-pet--face-segment view)))
+      (list (concat face " " (propertize (or (plist-get view :name) "")
+                                         'face 'harness-dim-face
+                                         'help-echo #'harness-ui-pet--face-help
+                                         'mouse-face 'mode-line-highlight
+                                         'local-map (harness-ui-pet--face-map)))
+            harness-ui-pet--board-priority
+            face))))
+
+(defun harness-ui-pet--saying-for (session-id &optional now)
+  "What the pet said about SESSION-ID to show above its compose box, or nil.
+Its last saying about it, while what it says shows above chats, it is
+not muted, the session's turn has not started again since, and it is
+not older than `harness-ui-pet--saying-lifetime' at NOW."
+  (when (and session-id (harness-ui-pet--place-p 'chat-saying)
+             (not (harness-ui-pet--true-p (plist-get harness-ui-pet--current :muted))))
+    (let* ((now (or now (float-time)))
+           (since (gethash session-id harness-ui-pet--turns 0))
+           (saying (cl-find session-id (plist-get harness-ui-pet--current :said)
+                            :key (lambda (s) (plist-get s :session)) :test #'equal :from-end t))
+           (ts (plist-get saying :ts)))
+      (and saying (numberp ts) (> ts since)
+           (< (- now ts) harness-ui-pet--saying-lifetime)
+           saying))))
+
+(defun harness-ui-pet--saying-line (view saying)
+  "SAYING of the pet of VIEW, as its line above a compose box.
+Its face and name in its rarity's colour, a click on them shows it,
+then what it said, dim, its actions set apart."
+  (let* ((head (propertize (concat (harness-ui-pet-face (plist-get view :species) (plist-get view :eye))
+                                   " " (or (plist-get view :name) ""))
+                           'face (harness-ui-pet--rarity-face (plist-get view :rarity))
+                           'mouse-face 'highlight
+                           'keymap (harness-ui-pet--face-map)
+                           'help-echo (format "%s, %s (mouse-1: show it)"
+                                              (harness-ui-pet--about view) (harness-ui-pet--when saying))))
+         (line (concat " " head "  " (harness-ui-pet--speech (plist-get saying :text)) "\n")))
+    (add-text-properties 0 (length line) (list 'wrap-prefix "   " 'harness-ui-pet-saying t) line)
+    (harness-ui-add-face line 'harness-pet-saying-face)))
+
+(defun harness-ui-pet--panel ()
+  "What the pet said about this chat's session, for above its compose box, or nil.
+On `harness-chat-panel-functions' while it shows there."
+  (let ((saying (harness-ui-pet--saying-for harness-ui-session-id)))
+    (setq harness-ui-pet--panel-shown saying)
+    (and saying (harness-ui-pet--saying-line harness-ui-pet--current saying))))
+
+(defvar harness-compose-redraw-function)
+
+(defun harness-ui-pet--redraw-tail ()
+  "Draw this chat buffer's tail again, so the pet's line there follows."
+  (setq harness-ui-pet--panel-shown nil)
+  (when (and (boundp 'harness-compose-redraw-function) (functionp harness-compose-redraw-function))
+    (funcall harness-compose-redraw-function)))
+
+(defun harness-ui-pet--sync-panels ()
+  "Draw again the tails of the chats whose line from the pet changed."
+  (dolist (buffer (harness-ui-pet--chat-buffers))
+    (with-current-buffer buffer
+      (unless (equal (harness-ui-pet--saying-for harness-ui-session-id) harness-ui-pet--panel-shown)
+        (harness-ui-pet--redraw-tail)))))
+
+(defun harness-ui-pet--on-turn-started (session-id)
+  "SESSION-ID's turn started: what the pet said about it before goes.
+Noted while the module is on, even with nothing above chats, so a
+saying from before does not come back when they show it again."
+  (when (and (stringp session-id) harness-ui-pet--live)
+    (puthash session-id (float-time) harness-ui-pet--turns)
+    (when-let* ((buffer (cl-find session-id (harness-ui-pet--chat-buffers)
+                                 :key (lambda (b) (buffer-local-value 'harness-ui-session-id b))
+                                 :test #'equal)))
+      (with-current-buffer buffer
+        (when harness-ui-pet--panel-shown (harness-ui-pet--redraw-tail))))))
+
+(defun harness-ui-pet--wire (&optional dying)
+  "Set the hooks the pet's places need now, and only those.
+The window hook while its buffer lives (unless DYING, as it goes) or
+what it says shows above chats; each place's own while it shows there."
+  (cl-flet ((set-hook (on hook fn)
+              (if on (add-hook hook fn t) (remove-hook hook fn))))
+    (set-hook (or (and (not dying) (harness-ui-pet--buffer)) (harness-ui-pet--place-p 'chat-saying))
+              'window-buffer-change-functions #'harness-ui-pet--update-watch)
+    (set-hook (harness-ui-pet--place-p 'chat-header)
+              'harness-chat-header-end-functions #'harness-ui-pet--chat-header)
+    (set-hook (harness-ui-pet--place-p 'chat-saying)
+              'harness-chat-panel-functions #'harness-ui-pet--panel)
+    (set-hook (harness-ui-pet--place-p 'board)
+              'harness-ui-tasks-header-functions #'harness-ui-pet--board-header)))
+
+(defun harness-ui-pet--places-key ()
+  "What the header lines show of the pet: redrawn when it changes."
+  (let ((view harness-ui-pet--current))
+    (and (harness-ui-pet--active-p)
+         (list harness-ui-pet-places (plist-get view :species) (plist-get view :eye)
+               (plist-get view :rarity) (plist-get view :name)))))
+
+(defun harness-ui-pet--sync ()
+  "Bring every place the pet shows in up to date with it.
+Set the hooks it needs, redraw the header lines and the chats' lines
+that changed, and tell the harness where it is on screen."
+  (harness-ui-pet--wire)
+  (let ((key (harness-ui-pet--places-key)))
+    (unless (equal key harness-ui-pet--drawn)
+      (setq harness-ui-pet--drawn key)
+      (force-mode-line-update t)))
+  (harness-ui-pet--sync-panels)
+  (when harness-ui-pet--live
+    (harness-ui-pet--update-watch)))
 
 ;;;; Drawing
 
@@ -585,9 +942,33 @@ FACE goes under the faces TEXT has, and covers the indentation too."
       (harness-ui-button "Hatch it" #'harness-ui-pet-hatch :help "Hatch the egg (h)")
       (insert "\n\n")
       (harness-ui-pet--insert-filled
-       (format "It hatches into one of 18 species, common to legendary, with five stats and a personality%s. Then it keeps you company: now and then, while this buffer is open, it has something to say about your work."
+       (format "It hatches into one of 18 species, common to legendary, with five stats and a personality%s. Then it keeps you company, quietly: its face at the end of a chat's header line, and now and then a word about your work. Not for you? O turns it off."
                (if (stringp model) (format " that %s gives it" (harness-ui-model-label model)) ""))
        'harness-dim-face))))
+
+(defun harness-ui-pet--insert-off ()
+  "Insert what the buffer shows while the pet is turned off.
+A pet that hatched sleeps, eyes shut: turned on, it wakes as it was."
+  (let* ((view harness-ui-pet--view)
+         (hatched (harness-ui-pet--hatched-p)))
+    (insert "  ")
+    (when hatched
+      (insert (propertize (harness-ui-pet-face (plist-get view :species) (plist-get view :eye) t)
+                          'face (list (harness-ui-pet--rarity-face (plist-get view :rarity))
+                                      'harness-pet-art-face))
+              "  "))
+    (insert (propertize (if hatched
+                            (format "%s is asleep" (or (plist-get view :name) "Your pet"))
+                          "The companion pet is turned off")
+                        'face 'harness-pet-name-face)
+            "\n\n")
+    (harness-ui-pet--insert-filled
+     (concat "Turned off, it shows nowhere else, grows no more and asks no model anything."
+             (if hatched " Turned on again, it wakes up as it was." ""))
+     'harness-dim-face)
+    (insert "\n  ")
+    (harness-ui-button "Turn it on" #'harness-ui-pet-turn-on :help "Turn the companion pet on again (O)")
+    (insert "\n")))
 
 (defconst harness-ui-pet--stat-names '(debugging patience chaos wisdom snark)
   "The stats, in the order the card shows them.")
@@ -697,8 +1078,11 @@ FACE goes under the faces TEXT has, and covers the indentation too."
                       "Quiet: harness-pet-reactions is off, so it asks no model anything.")
                      ((harness-ui-pet--true-p (plist-get view :muted))
                       "Muted: it asks no model anything until you unmute it (m).")
-                     (t (format "While this buffer is on screen it now and then has a word to say%s. m mutes it."
-                                (if (stringp model) (format ", through %s" (harness-ui-model-label model)) ""))))))
+                     (t (format "It now and then has a word to say%s, while %s. m mutes it, O turns it off."
+                                (if (stringp model) (format ", through %s" (harness-ui-model-label model)) "")
+                                (if (memq 'chat-saying harness-ui-pet-places)
+                                    "it is on screen: here, or above the compose box of the chat it is about"
+                                  "this buffer is on screen"))))))
     (when text
       (insert "\n")
       (harness-ui-pet--insert-filled text 'harness-dim-face))))
@@ -716,6 +1100,8 @@ FACE goes under the faces TEXT has, and covers the indentation too."
       (insert "  " (propertize harness-ui-pet--error 'face 'harness-failure-face) "\n"))
      ((null harness-ui-pet--view)
       (insert "  " (propertize "Looking for your pet…" 'face 'harness-dim-face) "\n"))
+     ((not (harness-ui-pet--enabled-p harness-ui-pet--view))
+      (harness-ui-pet--insert-off))
      ((and (harness-ui-pet--hatched-p) (not (memq (plist-get harness-ui-pet--anim :kind) '(egg crack))))
       (harness-ui-pet--insert-pet)
       (harness-ui-pet--footer))
@@ -738,23 +1124,31 @@ FACE goes under the faces TEXT has, and covers the indentation too."
 (defun harness-ui-pet--header ()
   "The header line: what can be done with the pet."
   (let* ((view harness-ui-pet--view)
+         (off (and view (not (harness-ui-pet--enabled-p view))))
          ;; As drawn: the egg until it has finished cracking.
          (egg (memq (plist-get harness-ui-pet--anim :kind) '(egg crack)))
-         (hatched (and (harness-ui-pet--hatched-p) (not egg)))
-         (muted (harness-ui-pet--true-p (plist-get view :muted))))
+         (hatched (and (not off) (harness-ui-pet--hatched-p) (not egg)))
+         (muted (harness-ui-pet--true-p (plist-get view :muted)))
+         (turn-off (list (harness-ui-pet--segment "Turn off" #'harness-ui-pet-turn-off
+                                                  "Turn it off everywhere: no more of it, no model calls (O)")
+                         30)))
     (harness-ui-fit-header
      (append
       (list (propertize " Companion " 'face '(bold harness-label-face)))
-      (if hatched
-          (list (list (harness-ui-pet--segment "Pet" #'harness-ui-pet-pet "Pet it (p)") 90)
-                (list (harness-ui-pet--segment "Rename" #'harness-ui-pet-rename "Give it another name (r)") 60)
-                (list (harness-ui-pet--segment (if muted "Unmute" "Mute") #'harness-ui-pet-toggle-mute
-                                               (if muted "Let it speak again (m)" "Keep it quiet: no more model calls (m)"))
-                      70)
-                (list (harness-ui-pet--segment "Release" #'harness-ui-pet-release "Let it go for good (R)") 40))
-        (when (and view (not egg) (not (harness-ui-pet--hatched-p))
-                   (not (harness-ui-pet--true-p (plist-get view :hatching))))
-          (list (list (harness-ui-pet--segment "Hatch" #'harness-ui-pet-hatch "Hatch the egg (h)") 90))))
+      (cond
+       (off (list (list (harness-ui-pet--segment "Turn on" #'harness-ui-pet-turn-on "Turn it on again (O)") 90)))
+       (hatched
+        (list (list (harness-ui-pet--segment "Pet" #'harness-ui-pet-pet "Pet it (p)") 90)
+              (list (harness-ui-pet--segment "Rename" #'harness-ui-pet-rename "Give it another name (r)") 60)
+              (list (harness-ui-pet--segment (if muted "Unmute" "Mute") #'harness-ui-pet-toggle-mute
+                                             (if muted "Let it speak again (m)" "Keep it quiet: no more model calls (m)"))
+                    70)
+              (list (harness-ui-pet--segment "Release" #'harness-ui-pet-release "Let it go for good (R)") 40)
+              turn-off))
+       ((and view (not egg) (not (harness-ui-pet--hatched-p))
+             (not (harness-ui-pet--true-p (plist-get view :hatching))))
+        (list (list (harness-ui-pet--segment "Hatch" #'harness-ui-pet-hatch "Hatch the egg (h)") 90)
+              turn-off)))
       (list (list (concat "  " (harness-ui-pet--segment "g" #'harness-ui-pet-refresh "Refresh")) 50)
             (list (harness-ui-pet--segment "q" #'quit-window "Quit") 55))))))
 
@@ -769,6 +1163,7 @@ FACE goes under the faces TEXT has, and covers the indentation too."
     (define-key map (kbd "r") #'harness-ui-pet-rename)
     (define-key map (kbd "m") #'harness-ui-pet-toggle-mute)
     (define-key map (kbd "R") #'harness-ui-pet-release)
+    (define-key map (kbd "O") #'harness-ui-pet-toggle-enabled)
     (define-key map (kbd "g") #'harness-ui-pet-refresh)
     (define-key map (kbd "?") #'harness-menu)
     map)
@@ -791,13 +1186,17 @@ FACE goes under the faces TEXT has, and covers the indentation too."
         (". r" "Rename" harness-ui-pet-rename)
         (". m" "Mute or unmute" harness-ui-pet-toggle-mute)
         (". R" "Release" harness-ui-pet-release)
+        (". O" "Turn off or on" harness-ui-pet-toggle-enabled)
         (". g" "Refresh" harness-ui-pet-refresh)]))
 
-(defun harness-ui-pet--in-buffer ()
-  "Make the pet's buffer current, or complain that it is not open."
+(defun harness-ui-pet--in-buffer (&optional while-off)
+  "Make the pet's buffer current, or complain that it is not open.
+Complain too while the pet is turned off, unless WHILE-OFF."
   (let ((buf (harness-ui-pet--buffer)))
     (unless buf (user-error "The pet's buffer is not open: M-x harness-pet"))
-    (set-buffer buf)))
+    (set-buffer buf)
+    (unless (or while-off (harness-ui-pet--enabled-p harness-ui-pet--view))
+      (user-error "The companion pet is turned off: O turns it on"))))
 
 ;;;###autoload
 (defun harness-pet ()
@@ -806,16 +1205,52 @@ FACE goes under the faces TEXT has, and covers the indentation too."
   (let ((buf (get-buffer-create harness-ui-pet--buffer-name)))
     (with-current-buffer buf
       (unless (derived-mode-p 'harness-ui-pet-mode)
-        (harness-ui-pet-mode)))
-    (add-hook 'window-buffer-change-functions #'harness-ui-pet--update-watch)
+        (harness-ui-pet-mode))
+      ;; What this Emacs knows shows at once; the answer follows.
+      (unless harness-ui-pet--view (setq harness-ui-pet--view harness-ui-pet--current)))
+    (harness-ui-pet--wire)
     (harness-ui-display-view buf)
     ;; Drawn once it has its window, to the window's width.
     (with-current-buffer buf (harness-ui-pet--render))
     ;; On screen now, so this asks for the pet as well.
     (setq harness-ui-pet--watching nil)
-    (harness-ui-pet--send-watch (harness-ui-pet--shown-p))
+    (harness-ui-pet--send-watch (harness-ui-pet--seen))
     (unless harness-ui-pet--watching
       (harness-ui-pet--request "_harness/pet/get"))))
+
+(defun harness-ui-pet--set-enabled (on)
+  "Turn the companion pet on, or off when ON is nil, and keep it so.
+As the Settings page would set `harness-pet-enabled': saved in your
+custom file, and every Emacs showing the harness follows, through
+`config/changed'."
+  (harness-ui-call "_harness/config/set"
+                   (list :key "harness-pet-enabled" :value (if on "t" "nil")
+                         :printed t :scope "global")
+                   #'ignore #'harness-ui-pet--failed))
+
+(defun harness-ui-pet-turn-off ()
+  "Turn the companion pet off everywhere.
+It shows nowhere but in its buffer, which says it is off, grows no more
+and asks no model anything.  Its record stays: `harness-ui-pet-turn-on'
+wakes it as it was.  Saved as `harness-pet-enabled'."
+  (interactive)
+  (harness-ui-pet--set-enabled nil)
+  (unless (eq (current-buffer) (harness-ui-pet--buffer))
+    (message "The companion pet is off; M-x harness-ui-pet-turn-on brings it back")))
+
+(defun harness-ui-pet-turn-on ()
+  "Turn the companion pet on again, as it was when turned off."
+  (interactive)
+  (harness-ui-pet--set-enabled t))
+
+(defun harness-ui-pet-toggle-enabled ()
+  "Turn the companion pet off, or on again."
+  (interactive)
+  (unless harness-ui-pet--current
+    (user-error "Whether there is a pet is not known yet: g asks again"))
+  (if (harness-ui-pet--enabled-p harness-ui-pet--current)
+      (harness-ui-pet-turn-off)
+    (harness-ui-pet-turn-on)))
 
 (defun harness-ui-pet-pet ()
   "Pet the companion."
@@ -867,28 +1302,41 @@ Asks first, unless FORCE."
 (defun harness-ui-pet-refresh ()
   "Ask the harness for the pet again."
   (interactive)
-  (harness-ui-pet--in-buffer)
+  (harness-ui-pet--in-buffer t)
   (harness-ui-pet--request "_harness/pet/get"))
 
 ;;;; Module
 
 (defun harness-ui-pet--init ()
-  "Wire the pet's buffer into the UI."
+  "Wire the pet's buffer into the UI; the places follow once the pet is known."
   (add-hook 'harness-ui-event-functions #'harness-ui-pet--on-event)
   (add-hook 'harness-ui-connected-hook #'harness-ui-pet--on-connected)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-pet--redraw)
-  (define-key harness-ui-map (kbd "z") #'harness-pet))
+  (define-key harness-ui-map (kbd "z") #'harness-pet)
+  (setq harness-ui-pet--live t)
+  ;; Started again while connected, as a reload does: no connection
+  ;; opens to ask for the pet.
+  (when (harness-ui-connected-p) (harness-ui-pet--fetch)))
 
 (defun harness-ui-pet--shutdown ()
-  "Unwire the pet's buffer."
+  "Unwire the pet's buffer, and take the pet away from every place."
   (remove-hook 'harness-ui-event-functions #'harness-ui-pet--on-event)
   (remove-hook 'harness-ui-connected-hook #'harness-ui-pet--on-connected)
   (remove-hook 'harness-ui-redraw-hook #'harness-ui-pet--redraw)
-  (remove-hook 'window-buffer-change-functions #'harness-ui-pet--update-watch)
-  (harness-ui-pet--stop))
+  (harness-ui-pet--stop)
+  (setq harness-ui-pet--live nil)
+  (harness-ui-pet--wire t)
+  (harness-ui-pet--sync-panels)
+  (setq harness-ui-pet--current nil harness-ui-pet--drawn nil)
+  (clrhash harness-ui-pet--turns)
+  (force-mode-line-update t)
+  (when harness-ui-pet--watching
+    (if (harness-ui-connected-p)
+        (ignore-errors (harness-ui-pet--send-watch nil))
+      (setq harness-ui-pet--watching nil))))
 
 (harness-define-module 'ui-pet
-  :doc "The companion pet's buffer: its card, its sayings, petting it."
+  :doc "The companion pet: its buffer, and its face and words in chats and on the board."
   :requires '(ui)
   :init #'harness-ui-pet--init
   :shutdown #'harness-ui-pet--shutdown)
