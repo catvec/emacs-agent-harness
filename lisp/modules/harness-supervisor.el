@@ -1602,7 +1602,13 @@ expensive turn they did not ask for."
         (let* ((plan (harness-supervisor--plan (harness-supervisor--plans session-id) (car ids)))
                (step (harness-supervisor--step plan (cdr ids))))
           (harness-supervisor--deliver session-id (harness-supervisor--failure-text session-id plan step)
-                                       (not task)))))
+                                       (not task))))
+      ;; A task carries on by itself, so a step whose turn came just as
+      ;; the harness stopped starts now; `agent/outstanding' counts it as
+      ;; waiting, and the task would wait for it forever otherwise.
+      (when task
+        (dolist (plan (harness-supervisor--plans session-id))
+          (harness-supervisor--start-ready session-id (plist-get plan :id)))))
     interrupted))
 
 (defun harness-supervisor--recover ()

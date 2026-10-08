@@ -1470,6 +1470,28 @@ Step s2 follows it, and s3 follows s2.  Return the worker of s1."
       (should-not (plist-get (harness-call 'session/get sid) :queue))
       (harness-supervisor-plan-test-wait-idle sid))))
 
+(ert-deftest harness-supervisor-plan-a-restart-starts-the-ready-steps-of-a-task ()
+  "A task's step whose turn came just as the harness stopped starts on recovery.
+`agent/outstanding' counts such a step as waiting, so the task would
+otherwise wait for it for good.  Another session's step waits for the
+supervisor."
+  (dolist (task '(nil t))
+    (harness-supervisor-plan-test-with
+      (let ((sid (harness-supervisor-plan-test-session)))
+        (harness-supervisor-plan-test-running-plan sid)
+        ;; The harness stopped once s1 was done, before s2 started.
+        (harness-supervisor--update-step sid (plist-get (harness-supervisor-plan-test-plan sid) :id) "s1"
+                                         :state "done" :result "s1 is done")
+        (harness-supervisor-plan-test-restart sid)
+        (when task
+          (harness-register-method 'task/for-session
+                                   (lambda (id) (and (equal id sid) (list :id "t-1" :session sid)))))
+        (harness-supervisor--recover)
+        (if task
+            (harness-supervisor-plan-test-wait-state sid "s3" "done")
+          (should (equal "pending" (harness-supervisor-plan-test-state sid "s2"))))
+        (harness-supervisor-plan-test-wait-idle sid)))))
+
 (ert-deftest harness-supervisor-plan-every-interrupted-step-gets-a-report-of-its-own ()
   "Two steps running at the restart are two interrupted steps and two reports."
   (harness-supervisor-plan-test-with
