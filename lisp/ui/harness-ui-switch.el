@@ -132,20 +132,6 @@ See `harness-ui-switch-function'."
                   (harness-ui-switch--command buffer prompt (nth 2 choice))))
     map))
 
-(defun harness-ui-switch--with-keymap (string map)
-  "Return STRING with MAP answering under the keymaps it already carries.
-A button's own keymap stays in front, so a click still answers with it."
-  (let ((pos 0)
-        (len (length string)))
-    (while (< pos len)
-      (let* ((next (or (next-single-property-change pos 'keymap string len) len))
-             (existing (get-text-property pos 'keymap string)))
-        (put-text-property pos next 'keymap
-                           (if existing (make-composed-keymap (list existing map)) map)
-                           string)
-        (setq pos next))))
-  string)
-
 ;;;; The banner
 
 (defun harness-ui-switch--heading (prompt)
@@ -240,7 +226,7 @@ the cache panel draws it again the moment the cache lapses."
                   "\n"
                   (harness-ui-switch--options buffer prompt))))
     (add-text-properties 0 (length string) (list 'harness-ui-switch-panel t) string)
-    (harness-ui-switch--with-keymap string (harness-ui-switch--keymap buffer prompt))
+    (harness-ui-with-keymap string (harness-ui-switch--keymap buffer prompt))
     (harness-chat--face string 'harness-chat-switch-face)))
 
 (defun harness-ui-switch--panel ()

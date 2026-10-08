@@ -345,5 +345,77 @@ widget library ignore the property."
       (funcall call "_harness/config/unset" (list :key "harness-permission-mode" :scope "project" :cwd sub))
       (should (eq 'none (harness-config-test--read root))))))
 
+;;;; A policy
+
+(defvar harness-corporate-mode)
+
+(ert-deftest harness-config-policy-wins-over-every-layer ()
+  "A value the policy sets is the one in effect, whatever the project's
+and the directory's .dir-locals.el say, and the page is told so."
+  (skip-unless (executable-find "git"))
+  (harness-config-test-with
+    (harness-config-test--write root '((nil . ((harness-permission-mode . yolo)))))
+    (harness-config-test--write sub '((nil . ((harness-permission-mode . auto)))))
+    (should (eq 'auto (harness-call 'config/get 'harness-permission-mode sub)))
+    (harness-test-with-policy '((harness-permission-mode . ask) (harness-corporate-mode . t)
+                                (harness-config-test-api-key . "sk-managed"))
+      (should (eq 'ask (harness-call 'config/get 'harness-permission-mode sub)))
+      (should (eq 'ask (harness-call 'config/get "harness-permission-mode" root)))
+      (let ((layers (harness-call 'config/layers sub)))
+        (should (equal '(harness-permission-mode ask) (cdr (assq 'policy layers))))
+        ;; The other layers still say what their files hold.
+        (should (eq 'auto (plist-get (cdr (assq 'directory layers)) 'harness-permission-mode))))
+      (let* ((d (harness-call 'config/describe sub))
+             (mode (harness-config-test--setting d "harness-permission-mode"))
+             (model (harness-config-test--setting d "harness-model"))
+             (secret (harness-config-test--setting d "harness-config-test-api-key"))
+             (policy (plist-get d :policy)))
+        (should (eq t (plist-get mode :locked)))
+        (should (equal "policy" (plist-get mode :source)))
+        (should (equal "ask" (plist-get mode :value)))
+        (should (eq :false (plist-get mode :editable)))
+        (should (equal "auto" (plist-get mode :directory)))
+        (should (eq :false (plist-get model :locked)))
+        (should (eq t (plist-get model :editable)))
+        ;; A secret the policy sets is locked, and still never shown.
+        (should (eq t (plist-get secret :locked)))
+        (should (eq :false (plist-get secret :editable)))
+        (should (eq t (plist-get secret :has-value)))
+        (should-not (string-search "sk-managed" (prin1-to-string d)))
+        ;; The policy is described whole, corporate mode, hidden from the page, included.
+        (should (equal policy-file (plist-get policy :file)))
+        (should (equal '("harness-permission-mode" "harness-corporate-mode" "harness-config-test-api-key")
+                       (mapcar (lambda (e) (plist-get e :key)) (plist-get policy :settings))))
+        (let ((corporate (cadr (plist-get policy :settings))))
+          (should (equal "t" (plist-get corporate :value)))
+          (should (eq :false (plist-get corporate :listed)))
+          (should (eq t (plist-get corporate :defined))))
+        (should-not (plist-get (caddr (plist-get policy :settings)) :value))))
+    ;; No policy, no description of one.
+    (should-not (plist-get (harness-call 'config/describe sub) :policy))
+    (should (eq 'auto (harness-call 'config/get 'harness-permission-mode sub)))))
+
+(ert-deftest harness-config-policy-refuses-changes-at-every-scope ()
+  "Neither `config/set' nor `config/unset' changes what the policy sets,
+in any scope, and nothing is written."
+  (skip-unless (executable-find "git"))
+  (harness-config-test-with
+    (harness-test-with-policy '((harness-permission-mode . ask) (harness-allowed-directories "/srv/"))
+      (dolist (call (list (lambda () (harness-call 'config/set 'harness-permission-mode 'yolo :scope 'project :cwd sub))
+                          (lambda () (harness-call 'config/set "harness-permission-mode" "yolo" :printed t
+                                                   :scope 'directory :cwd sub))
+                          (lambda () (harness-call 'config/set 'harness-permission-mode 'yolo :scope 'global :cwd sub))
+                          (lambda () (harness-call 'config/set 'harness-permission-mode 'ask :scope 'project :cwd sub))
+                          (lambda () (harness-call 'config/unset 'harness-permission-mode :scope 'global :cwd sub))
+                          (lambda () (harness-call 'config/unset "harness-allowed-directories" :scope 'project :cwd sub))))
+        (let ((err (should-error (funcall call))))
+          (should (string-match-p "is set by policy (.*) and cannot be changed" (cadr err)))))
+      (should (eq 'none (harness-config-test--read root)))
+      (should (eq 'none (harness-config-test--read sub)))
+      (should-not saved)
+      ;; The rest still changes.
+      (harness-call 'config/set 'harness-model "claude:opus" :scope 'project :cwd sub)
+      (should (equal "claude:opus" (harness-call 'config/get 'harness-model sub))))))
+
 (provide 'harness-config-test)
 ;;; harness-config-test.el ends here

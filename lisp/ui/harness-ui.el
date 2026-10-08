@@ -1674,6 +1674,22 @@ the popout module, FILE is visited."
     (add-face-text-property 0 (length s) face t s)
     s))
 
+(defun harness-ui-with-keymap (string map)
+  "Return STRING with MAP answering under the keymaps it already carries.
+STRING is changed.  A button's own keymap stays in front, so a click
+still runs the button.  A panel's keys work this way while point is on
+it: the switch banner's, the cache panel's."
+  (let ((pos 0)
+        (len (length string)))
+    (while (< pos len)
+      (let* ((next (or (next-single-property-change pos 'keymap string len) len))
+             (existing (get-text-property pos 'keymap string)))
+        (put-text-property pos next 'keymap
+                           (if existing (make-composed-keymap (list existing map)) map)
+                           string)
+        (setq pos next))))
+  string)
+
 (defun harness-ui-ensure-newline (string)
   "Return STRING ending in exactly one newline."
   (concat (string-trim-right (or string "") "\n+") "\n"))

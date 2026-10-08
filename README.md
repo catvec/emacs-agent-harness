@@ -38,8 +38,9 @@ OpenAI-compatible APIs and AWS Bedrock.
   through Gotify once you set it up, when a task waits for your review
   or is done. Agents can notify you too.
 - **Conversation management.** Fork sessions, ask side questions in
-  BTW conversations, browse the conversation tree, and let long
-  conversations compact automatically.
+  BTW conversations, browse the conversation tree, and compact long
+  conversations, automatically or by hand: into a summary, a cheap
+  brief one, or a transcript file the model reads from.
 - **Cost tracking.** Cost per turn, subscription quotas, budgets and a
   usage dashboard.
 - **Insights.** A report on how a day, a week or a month of work with
@@ -276,6 +277,7 @@ the menu's Version entry says so.
 | `C-c h f` | `harness-fork-session` | Fork the current session |
 | `C-c h b` | `harness-btw` | Open a BTW side conversation |
 | `C-c h k` | `harness-cancel-turn` | Cancel the running turn |
+| `C-c h C` | `harness-compact` | Compact the conversation: choose a summary, a brief summary or a transcript file, each with what it costs |
 | `C-c h D` | `harness-delete-session` | Delete the current session |
 | `C-c h m` | `harness-set-model` | Choose the model |
 | `C-c h M` | `harness-set-model-all` | Choose a model and switch every current session to it |
@@ -328,7 +330,7 @@ number of options, and a permission's `y`, `s`, `a`, `n` and `N`, and
 | `C-c C-q` | Queue the message for the next turn |
 | `RET` | Insert a newline |
 | `@` | Complete a file to attach: part of a name finds a project file in any subdirectory, a path (`/`, `~/`, `./`, `../`) any file. An `@path` typed out in full attaches its file when the message is sent, and stays in the text |
-| `/` | Complete a skill |
+| `/` | Complete a skill, or `/compact` |
 | `C-c C-a` | Attach a file found the same way, by part of a name or by path (`C-u C-c C-a` browses the file system) |
 | `C-y` | Attach the image on the clipboard (or the files a file manager copied), keeping `kill-ring` out of it; text yanks as usual |
 | `M-y` | Right after a media yank, swap it for an earlier capture; otherwise the usual `yank-pop` |
@@ -589,6 +591,15 @@ such as CLAUDE.md. It refuses only what risks serious harm that is
 hard to undo, such as wiping data outside the project, force pushes,
 system changes, leaking secrets, or widening its own permissions. It
 never rules on the task or your workflow, and when in doubt it allows.
+It also follows the `autoMode` rules that Claude Code's own auto mode
+follows, taken from the same places: your `~/.claude/settings.json`
+and your organization's managed settings, never a project's. So with
+the same settings it is no stricter than Claude Code. Pushing to the
+repositories, buckets and services your organization lists as trusted
+counts as ordinary work, and the organization's `soft_deny` and
+`hard_deny` rules hold as they do in Claude Code. No entry lifts the
+judge's own rules. Set `harness-perms-claude-auto-mode` to nil to
+leave them out.
 A call it would deny is put to you in an interactive session, with the
 judge's reason, so you can allow it; in a non-interactive session the
 denial stands and the agent is told to find another
@@ -637,6 +648,59 @@ and neither is remembered. An agent moving its own session may use the
 new directory for the rest of its turn, and the session moves when the
 turn ends. A non-interactive session cannot ask, so its agent says in
 its answer where it wanted to move.
+
+### Compacting a conversation
+
+A conversation that nears its model's context window is compacted
+before the next turn, unless its provider compacts on its own side, as
+Claude Code does: something much smaller stands in for it from then on,
+and the earlier messages stay in the conversation tree. There are three
+kinds:
+
+- **Summary**: the session's model summarises the whole conversation.
+  It reads all of it again, from the prompt cache while that lasts.
+- **Brief summary**: a cheap model (the cheap tier of the session's
+  provider, such as Claude Haiku or DeepSeek Flash; see
+  `harness-compaction-brief-model`) summarises only the first and last
+  messages. It costs cents however long the conversation, but most of
+  the middle is left out, and the summary says so.
+- **Transcript file**: the whole conversation goes to a file in
+  `.harness/transcripts/` in the session's directory (git ignores it),
+  and the model is told to read what it needs of it. No model is asked
+  anything, so it costs nothing.
+
+These are the ways a switch to another provider can hand the
+conversation over (see [Switching model or provider](#switching-model-or-provider)),
+here on the session's own model. Automatic compaction makes the kind
+`harness-compaction-kind` says, a summary by default; the settings page
+has both under **Compaction**.
+
+`C-c h C` (`M-x harness-compact`, or Compact context in the menu)
+compacts the current session by hand, between turns: it asks which kind,
+naming what each costs, beside a table of who writes each, what it
+costs and what it does, and of what carrying on without compacting
+costs. Typing `/compact` in the message box asks the same;
+`/compact brief`, `/compact summary` or `/compact transcript` (or just
+`b`, `s` or `t`) compacts that way at once. The chat then shows the
+compaction where the conversation now starts, with `[open the
+transcript]` for a transcript file.
+
+A provider's prompt cache lasts only a while after its last use: five
+minutes or an hour for Claude, hours for DeepSeek (see
+`harness-cache-ttl`). Once it expires, the next message re-sends the
+whole conversation uncached, at the full input price. A panel above
+the message box says when the cache expired and what the next message
+will cost instead of what it would have cost cached. Its last line offers
+to compact the conversation first, a button and a key per kind with
+what each costs:
+
+```
+Compact it first   b  Brief summary (~$0.011)   s  Summary (~$0.463)   t  Transcript file (free)
+```
+
+Press the key with point on that line, or click a button, and the
+conversation compacts that way. The panel goes once the compaction is
+done: the next message sends only what stands in for the conversation.
 
 ### Forks and side conversations
 
@@ -1085,7 +1149,9 @@ shows where its effective value comes from.
 The page leads with the settings most people change, grouped by what
 they are for: **New sessions** (model, thinking, permission mode,
 non-interactive), **Spending** (the budget, one for all sessions
-together), **Files and safety** (directory access,
+together), **Compaction** (what stands in for a conversation that grew
+too long, and which model writes a brief summary), **Files and safety**
+(directory access,
 sandbox policy, standing permission rules), **Task board** (what task
 sessions start with, and when their work counts as done),
 **Notifications** (which task events notify you, and through which
@@ -1440,7 +1506,42 @@ It leaves alone:
 
 The settings page does not list the option, and no ACP client can
 change it. If you change it later with `setopt` or Customize, the
-harness process restarts so that the change reaches it.
+harness process restarts so that the change reaches it. An
+administrator can force it on with a policy (below).
+
+## Policy
+
+An administrator can fix settings so that the user cannot change them,
+as Claude Code's managed settings do. The policy is a file only root
+can write, `/etc/harness/policy.el` on Linux and macOS, holding one
+alist of options and values. It is read as data and never evaluated:
+
+```elisp
+;; /etc/harness/policy.el
+((harness-corporate-mode . t)
+ (harness-disabled-modules . nil)
+ (harness-permission-mode . ask)
+ (harness-sandbox-policy . required)
+ (harness-allowed-models . ("claude:*")))
+```
+
+Each setting is then unset (its default), set by you or your project,
+or set by policy. A policy value wins over the others, and nothing
+changes it: not the settings page, `setopt`, Customize, `setq`,
+`.dir-locals.el`, an ACP client or an agent. The settings page shows
+such settings locked, and says where the policy is.
+
+Sessions keep the model, permission mode and thinking level a policy
+fixes. A policy on the permission rules or the allowed directories
+removes the "Always" answers from prompts. `harness-allowed-models`,
+which anyone can set, keeps the harness to some models and refuses
+requests for others.
+
+A policy file that cannot be read, or that does not hold a valid
+policy, stops the harness from starting rather than being ignored. The
+file is read again by `harness-reload`. [docs/policy.md](docs/policy.md)
+has the whole design: why that path, what each setting means under a
+policy, and what a policy does not protect against.
 
 ## Persistence
 
@@ -1549,7 +1650,7 @@ ACP, so it works the same with a local or a remote harness.
 | Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `handoff` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `acp` `acp-remote` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-ssh` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` |
 
 Further documentation:
 

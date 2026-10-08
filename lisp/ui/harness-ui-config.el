@@ -51,6 +51,13 @@
 ;; taken as typed, so a model no provider lists can still be named, and
 ;; the page then warns that the harness does not know it.
 ;;
+;; A setting an administrator's policy sets (see docs/policy.md) is
+;; locked: it shows the policy's value with a lock and where the policy
+;; is, and offers nothing to change it, in either scope.  A banner under
+;; the scope toggle lists everything the policy sets, settings the page
+;; does not show (such as corporate mode) included.  The harness refuses
+;; to change them anyway; the page only says so first.
+;;
 ;; The page computes nothing itself.  It asks the harness with
 ;; `_harness/config/describe', saves with `_harness/config/set' and
 ;; `_harness/config/unset' (values travel printed, so JSON keeps their
@@ -94,6 +101,9 @@
   "A setting edited but not saved." :group 'harness-ui-config)
 (defface harness-settings-selected-face '((t :inherit (bold highlight)))
   "The scope shown, in the header line." :group 'harness-ui-config)
+(defface harness-settings-policy-face '((t :inherit (font-lock-builtin-face bold)))
+  "A value an administrator's policy sets, which cannot be changed."
+  :group 'harness-ui-config)
 
 (defconst harness-ui-config--module-titles
   '(("config" . "Session defaults") ("agent" . "Agent") ("compaction" . "Compaction")
@@ -986,6 +996,8 @@ looks wrong while the providers' models are not known."
   (let ((providers (harness-ui-config--catalogue-providers)))
     (cond
      ((null providers) nil)
+     ;; A glob, as `harness-allowed-models' takes, names no one model.
+     ((string-match-p "[*?[]" value) nil)
      (provider
       (when-let* ((label (cdr (assoc (format "%s" provider) providers))))
         (format "%s lists no model by this name" label)))
@@ -1347,8 +1359,16 @@ BUTTONS are (LABEL HELP FUNCTION)."
                                 (harness-ui-config--dir-label (plist-get harness-ui-config--data :cwd))
                                 (funcall show (harness-ui-config--read directory)))
                         'face 'harness-settings-directory-face)))
+         (locked (harness-ui-config--locked-p setting))
          parts buttons)
     (cond
+     (locked
+      (push (propertize (format "set by policy in %s" (harness-ui-config--policy-file))
+                        'face 'harness-settings-policy-face)
+            parts)
+      (push (propertize "an administrator fixed it everywhere, so it cannot be changed here"
+                        'face 'harness-settings-doc-face)
+            parts))
      ((harness-ui-config--true (plist-get setting :secret))
       (push (propertize "a secret: saved globally, never shown here" 'face 'harness-settings-doc-face) parts))
      ((eq harness-ui-config--scope 'project)
@@ -1377,7 +1397,7 @@ BUTTONS are (LABEL HELP FUNCTION)."
                                   (funcall show (harness-ui-config--read project)))
                           'face 'harness-settings-project-face)
               parts))))
-    (when dir-note (push dir-note parts))
+    (when (and dir-note (not locked)) (push dir-note parts))
     (cons (string-join (nreverse parts) (propertize " \u00b7 " 'face 'harness-settings-doc-face))
           (nreverse buttons))))
 
@@ -1417,6 +1437,75 @@ Then the blank line that ends the setting, where its edit state shows."
       (insert " ")
       (harness-ui-config--button "Clear" "Remove the value"
                                  (lambda () (harness-ui-config--unset key))))
+    (insert "\n")))
+
+(defun harness-ui-config--locked-p (setting)
+  "Non-nil when the policy sets SETTING, so the page may not change it."
+  (harness-ui-config--true (plist-get setting :locked)))
+
+(defun harness-ui-config--policy-file ()
+  "Return the policy file of the page's harness, abbreviated, or nil."
+  (when-let* ((file (plist-get (plist-get harness-ui-config--data :policy) :file)))
+    (abbreviate-file-name file)))
+
+(defun harness-ui-config--lock ()
+  "Return the lock a setting the policy sets is marked with, and a space.
+Empty when no font of this frame shows a lock."
+  (if (char-displayable-p ?\U0001F512) "\U0001F512 " ""))
+
+(defun harness-ui-config--locked-value (setting)
+  "Return how the page writes the value the policy gives SETTING."
+  (if (harness-ui-config--true (plist-get setting :secret))
+      (if (harness-ui-config--true (plist-get setting :has-value))
+          "\u25cf\u25cf\u25cf\u25cf\u25cf\u25cf\u25cf\u25cf"
+        "not set")
+    (harness-ui-config--show (harness-ui-config--read (plist-get setting :value)) setting)))
+
+(defun harness-ui-config--insert-locked (setting label)
+  "Insert SETTING named LABEL, which the policy sets: its value, locked."
+  (harness-ui-config--insert-label label)
+  (insert (propertize (harness-ui-config--locked-value setting) 'face 'default)
+          "  "
+          (propertize (concat (harness-ui-config--lock) "Locked")
+                      'face 'harness-settings-policy-face
+                      'help-echo (format "Set by policy in %s; it cannot be changed here"
+                                         (or (harness-ui-config--policy-file) "a policy file")))
+          "\n"))
+
+(defun harness-ui-config--insert-policy ()
+  "Insert what an administrator's policy sets, when the harness has one.
+Every setting it sets is listed, those the page does not show included."
+  (when-let* ((policy (plist-get harness-ui-config--data :policy))
+              (entries (append (plist-get policy :settings) nil)))
+    (insert " " (propertize (concat (harness-ui-config--lock) "Set by policy")
+                            'face 'harness-settings-policy-face)
+            "  "
+            (propertize (format "An administrator's policy, %s, sets %s everywhere: %s"
+                                (harness-ui-config--policy-file)
+                                (if (cdr entries) (format "these %d settings" (length entries))
+                                  "this setting")
+                                (if (cdr entries) "they cannot be changed here."
+                                  "it cannot be changed here."))
+                        'face 'harness-settings-doc-face)
+            "\n")
+    (dolist (e entries)
+      (let* ((key (plist-get e :key))
+             (setting (or (harness-ui-config--setting key) (list :key key)))
+             (value (harness-ui-config--read (plist-get e :value))))
+        (insert "   " (propertize (harness-ui-config--label setting) 'face 'harness-settings-label-face)
+                (propertize (format " (%s)" key) 'face 'harness-settings-doc-face)
+                ": "
+                (cond ((null (plist-get e :value)) "a secret")
+                      ;; A switch the page does not show, corporate mode say.
+                      ((and (memq value '(t nil)) (null (plist-get setting :type)))
+                       (if value "on" "off"))
+                      (t (harness-ui-config--show value setting)))
+                (cond ((not (harness-ui-config--true (plist-get e :defined)))
+                       (propertize "  not a setting of this harness, so it does nothing" 'face 'warning))
+                      ((not (harness-ui-config--true (plist-get e :listed)))
+                       (propertize "  not on this page" 'face 'harness-settings-doc-face))
+                      (t ""))
+                "\n")))
     (insert "\n")))
 
 (defun harness-ui-config--insert-text (setting label value)
@@ -1461,6 +1550,8 @@ ORIGINAL is the value saved in the page's scope."
          (label (harness-ui-config--label setting)))
     (insert " ")
     (cond
+     ((harness-ui-config--locked-p setting)
+      (harness-ui-config--insert-locked setting label))
      ((harness-ui-config--true (plist-get setting :secret))
       (harness-ui-config--insert-secret setting label))
      ((not (harness-ui-config--true (plist-get setting :editable)))
@@ -1521,7 +1612,8 @@ ORIGINAL is the value saved in the page's scope."
                                                      (with-current-buffer buf (harness-ui-config-set-scope scope)))))))
                    `(item :tag "Global" :format "%t     " :value global)
                    `(item :tag ,(harness-ui-config--scope-label 'project) :format "%t" :value project))
-    (insert "\n " (propertize (harness-ui-config--scope-help) 'face 'harness-settings-doc-face) "\n\n")))
+    (insert "\n " (propertize (harness-ui-config--scope-help) 'face 'harness-settings-doc-face) "\n\n")
+    (harness-ui-config--insert-policy)))
 
 (defconst harness-ui-config--fallback-section
   '(:name "sessions" :title "Session defaults"
@@ -1547,10 +1639,12 @@ ORIGINAL is the value saved in the page's scope."
   (null (harness-ui-config--section-of setting)))
 
 (defun harness-ui-config--customized-p (setting)
-  "Non-nil when the global value of SETTING is not its default."
-  (if (harness-ui-config--true (plist-get setting :secret))
-      (harness-ui-config--true (plist-get setting :has-value))
-    (not (equal (plist-get setting :global) (plist-get setting :standard)))))
+  "Non-nil when the global value of SETTING is not its default.
+One the policy sets counts as not: it was not changed here."
+  (cond ((harness-ui-config--locked-p setting) nil)
+        ((harness-ui-config--true (plist-get setting :secret))
+         (harness-ui-config--true (plist-get setting :has-value)))
+        (t (not (equal (plist-get setting :global) (plist-get setting :standard))))))
 
 (defun harness-ui-config--insert-sections (settings)
   "Insert the sections of SETTINGS that the page's scope shows."
@@ -1890,9 +1984,10 @@ with save and revert, and a load in progress or an error stay longest."
   "Save the setting at point in the scope shown."
   (interactive)
   (let ((key (harness-ui-config--require-key)))
-    (if (harness-ui-config--widget key)
-        (harness-ui-config--save key)
-      (user-error "Use the buttons of this setting to change it"))))
+    (cond ((harness-ui-config--widget key) (harness-ui-config--save key))
+          ((harness-ui-config--locked-p (harness-ui-config--setting key))
+           (harness-ui-config--refuse-locked key))
+          (t (user-error "Use the buttons of this setting to change it")))))
 
 (defun harness-ui-config-save-all ()
   "Save every edit of the scope shown."
@@ -1902,6 +1997,12 @@ with save and revert, and a load in progress or an error stay longest."
     (if (null keys)
         (message "No edits to save")
       (dolist (key keys) (harness-ui-config--save key)))))
+
+(defun harness-ui-config--refuse-locked (key)
+  "Signal that the policy sets KEY, so the page cannot change it."
+  (user-error "%s is set by policy (%s) and cannot be changed"
+              (harness-ui-config--label (harness-ui-config--setting key))
+              (or (harness-ui-config--policy-file) "an administrator's file")))
 
 (defun harness-ui-config-revert-setting ()
   "Drop the edit of the setting at point."
@@ -1925,6 +2026,7 @@ with save and revert, and a load in progress or an error stay longest."
   (let* ((key (harness-ui-config--require-key))
          (setting (harness-ui-config--setting key)))
     (cond
+     ((harness-ui-config--locked-p setting) (harness-ui-config--refuse-locked key))
      ((and (eq harness-ui-config--scope 'project) (not (plist-get setting :project)))
       (user-error "%s does not override it" (capitalize (harness-ui-config--place))))
      ((and (eq harness-ui-config--scope 'global)

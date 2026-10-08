@@ -1050,7 +1050,42 @@ one; one that holds it carries it on, uncached for its model."
         (should (= 1 (length msgs)))
         (should (string-prefix-p "Summary of the conversation so far"
                                  (plist-get (car (plist-get (car msgs) :content)) :text)))
-        (should (= 2 (length (plist-get (car msgs) :content))))))))
+        (should (= 2 (length (plist-get (car msgs) :content)))))
+      ;; One that points at a transcript file is sent as it is: no summary.
+      (harness-call 'session/append id '(:kind compaction :content "Read /x/t.md first."
+                                         :meta (:compaction "transcript" :file "/x/t.md")))
+      (should (equal "Read /x/t.md first."
+                     (plist-get (car (plist-get (car (harness-call 'session/messages id)) :content)) :text))))))
+
+(ert-deftest harness-session-write-transcript ()
+  "The transcript goes to a new file in the session's directory, which git ignores."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (id (plist-get (harness-call 'session/create :cwd cwd :name "parser work") :id)))
+      (harness-call 'session/append id '(:kind user :content "fix the parser"))
+      (harness-call 'session/append id '(:kind assistant :content "Fixed."))
+      (let* ((written (harness-call 'session/write-transcript id))
+             (file (plist-get written :file))
+             (text (harness-read-file file)))
+        (should (equal (expand-file-name ".harness/transcripts/" cwd) (file-name-directory file)))
+        (should (string-prefix-p (substring id 0 8) (file-name-nondirectory file)))
+        (should (equal "*\n" (harness-read-file (expand-file-name ".harness/transcripts/.gitignore" cwd))))
+        (should (string-prefix-p (format "# Conversation\n\n- Session: parser work (%s)\n- Working directory: %s\n" id cwd)
+                                 text))
+        (should (string-match-p "oldest first, one entry per message" text))
+        (should (string-match-p "^\\[user\\] fix the parser\n\\[assistant\\] Fixed\\.\n\\'" text))
+        (should (= (plist-get written :lines) (1+ (cl-count ?\n text)))))
+      ;; Another directory, a title and a line about it.
+      (let* ((written (harness-call 'session/write-transcript id '(:directory "elsewhere/" :title "Handed over"
+                                                                    :about "Handed over from A to B")))
+             (text (harness-read-file (plist-get written :file))))
+        (should (file-in-directory-p (plist-get written :file) (expand-file-name "elsewhere/" cwd)))
+        (should (string-prefix-p "# Handed over\n\n- Session: parser work" text))
+        (should (string-match-p "^- Handed over from A to B$" text)))
+      ;; Without its directory, nothing is written.
+      (delete-directory cwd t)
+      (should-error (harness-call 'session/write-transcript id) :type 'harness-error)
+      (should-not (file-exists-p cwd)))))
 
 (ert-deftest harness-session-messages-place-delivered-steering ()
   "A steering message reaches the model where it was delivered, not where it was sent."
@@ -1648,6 +1683,75 @@ as the session loads again."
       (should (equal id deleted))
       (should-not (harness-call 'session/exists-p id))
       (should-not (file-exists-p (harness-store-path (format "sessions/%s.nodes.jsonl" id)))))))
+
+;;;; A policy
+
+(defvar harness-model)
+(defvar harness-permission-mode)
+(defvar harness-thinking)
+(defvar harness-allowed-models)
+
+(ert-deftest harness-session-policy-fixes-the-settings-of-every-session ()
+  "A model, permission mode or non-interactive switch the policy sets is
+every session's: one created asking for another, one saved before the
+policy came, one running when it came.  Another value is refused."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (old (plist-get (harness-call 'session/create :cwd cwd :permission-mode 'yolo
+                                         :model "deepseek:deepseek-flash")
+                           :id))
+           (saved (plist-get (harness-call 'session/create :cwd cwd :permission-mode 'yolo) :id))
+           (events nil))
+      (harness-session-flush)
+      (harness-on 'session/updated (lambda (id changes) (push (cons id changes) events)))
+      (harness-test-with-policy '((harness-permission-mode . ask) (harness-model . "claude:opus")
+                                  (harness-non-interactive . t))
+        (let* ((s (harness-call 'session/create :cwd cwd :permission-mode 'yolo
+                                :model "deepseek:deepseek-flash" :non-interactive nil))
+               (id (plist-get s :id)))
+          (should (eq 'ask (plist-get s :permission-mode)))
+          (should (equal "claude:opus" (plist-get s :model)))
+          (should (eq t (plist-get s :non-interactive)))
+          ;; Another value is refused, and nothing else of the update happens.
+          (let ((err (should-error (harness-call 'session/update id :name "Renamed" :permission-mode 'yolo))))
+            (should (string-match-p "harness-permission-mode is set by policy" (cadr err))))
+          (should-not (equal "Renamed" (plist-get (harness-call 'session/get id) :name)))
+          (should-error (harness-call 'session/update id :model "deepseek:deepseek-flash"))
+          (should-error (harness-call 'session/update id :non-interactive nil))
+          (should-error (harness-call 'session/set-all (list :permission-mode 'yolo)))
+          ;; The policy's own value changes nothing, and the rest goes through.
+          (harness-call 'session/update id :name "Renamed" :permission-mode "ask")
+          (should (equal "Renamed" (plist-get (harness-call 'session/get id) :name)))
+          ;; Thinking is not fixed: the policy does not set it.
+          (harness-call 'session/update id :thinking "high")
+          (should (equal "high" (plist-get (harness-call 'session/get id) :thinking))))
+        ;; A session running when the policy came takes it at the reload
+        ;; that reads it, and says so.
+        (harness-emit 'harness/reloaded)
+        (let ((s (harness-call 'session/get old)))
+          (should (eq 'ask (plist-get s :permission-mode)))
+          (should (equal "claude:opus" (plist-get s :model)))
+          (should (eq t (plist-get s :non-interactive))))
+        (should (assoc old events))
+        ;; One saved before takes it as it is read.
+        (clrhash harness-sessions)
+        (harness-session--load-all)
+        (let ((s (harness-call 'session/get saved)))
+          (should (eq 'ask (plist-get s :permission-mode)))
+          (should (equal "claude:opus" (plist-get s :model))))))))
+
+(ert-deftest harness-session-policy-refuses-a-model-it-does-not-allow ()
+  "A model `harness-allowed-models' leaves out is refused to a session."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                       :model "claude:opus")
+                         :id)))
+      (harness-test-with-policy '((harness-allowed-models "claude"))
+        (harness-call 'session/update id :model "claude:sonnet")
+        (let ((err (should-error (harness-call 'session/update id :model "deepseek:deepseek-flash"))))
+          (should (string-match-p "deepseek:deepseek-flash is not allowed" (cadr err)))
+          (should (string-match-p "set by policy" (cadr err))))
+        (should (equal "claude:sonnet" (plist-get (harness-call 'session/get id) :model)))))))
 
 (provide 'harness-session-test)
 ;;; harness-session-test.el ends here

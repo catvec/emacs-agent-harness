@@ -1475,18 +1475,23 @@ A `:priority' of nil is no priority given: it changes nothing."
                  (_ (not (equal want have))))))
            (harness-plist-keys settings)))
 
+(declare-function harness-session-check-policy "harness-session" (settings &optional kind))
+
 (defun harness-tasks--apply-prefs (task settings)
   "Merge SETTINGS into TASK and, when it has a session, into that session.
 TASK's record carries what a later start would use; a started task's
-session is what its next turn uses, so both change.  A `:priority' is
-the task's own, never its session's: it orders the queue.  Return
-TASK's view."
+session is what its next turn uses, so both change.  A setting the
+policy fixes for every session is refused before anything changes (see
+`harness-session-check-policy').  A `:priority' is the task's own,
+never its session's: it orders the queue.  Return TASK's view."
   (let* ((id (plist-get task :id))
          (prefs (cl-loop for k in harness-tasks-pref-keys
                          when (plist-member settings k)
                          append (list k (plist-get settings k))))
          (priority (and (plist-get settings :priority)
                         (list :priority (harness-tasks--read-priority (plist-get settings :priority))))))
+    (when (and prefs (fboundp 'harness-session-check-policy))
+      (harness-session-check-policy prefs))
     (when (or prefs priority)
       (apply #'harness-tasks--set id (append prefs priority)))
     (when prefs
