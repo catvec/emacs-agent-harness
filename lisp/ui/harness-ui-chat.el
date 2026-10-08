@@ -2150,7 +2150,8 @@ override, as the pending panel's do."
         (when (and harness-chat--inactive (not harness-chat--dead))
           (insert (propertize " This session is inactive. Sending a message resumes it.\n" 'face 'harness-hint-face)))
         (put-text-property start (point) 'read-only t)
-        (harness-compose-insert nil "C-c C-c sends, RET newline, C-c C-q queues, C-c C-k cancels, C-c C-a attaches")))
+        (harness-compose-insert nil (concat "C-c C-c sends, RET newline, C-c C-q queues, C-c C-k cancels, "
+                                            "C-c C-a attaches, C-c > quotes"))))
     (cond (offset (goto-char (min (+ harness-compose-start offset) harness-compose-end)))
           (in-tail (goto-char harness-compose-end)))
     (dolist (w windows)
@@ -3009,6 +3010,30 @@ keeps it only while it is visible."
     (kill-new (or (harness-chat-block-content (gethash id harness-chat--blocks)) ""))
     (message "Copied the last response")))
 
+(defun harness-chat--block-markdown (block)
+  "Return the Markdown BLOCK shows, as it was written, or nil for none."
+  (let ((text (if (equal (harness-chat-block-kind block) "plan")
+                  (plist-get (harness-chat-block-node block) :content)
+                (harness-chat-block-content block))))
+    (and (stringp text) (not (string-blank-p text)) text)))
+
+(defun harness-chat--quote-at-point ()
+  "Return the Markdown of the agent's message to quote from point, or nil.
+That is the response, plan or thinking point is on; anywhere else -- a
+tool call, the user's message, the compose box -- the response or plan
+nearest above point, so the agent's last one from the box.  The chat's
+`harness-compose-quote-function', for \\[harness-compose-quote-reply]."
+  (let* ((id (get-text-property (point) 'harness-chat-node))
+         (here (and id (gethash id harness-chat--blocks))))
+    (or (and here (member (harness-chat-block-kind here) '("assistant" "plan" "thinking"))
+             (harness-chat--block-markdown here))
+        (cl-loop for id in harness-chat--order
+                 for block = (gethash id harness-chat--blocks)
+                 for start = (and block (harness-chat-block-start block))
+                 thereis (and start (marker-position start) (< start (point))
+                              (member (harness-chat-block-kind block) '("assistant" "plan"))
+                              (harness-chat--block-markdown block))))))
+
 (defun harness-chat-tab ()
   "Complete in the compose box; elsewhere expand or collapse the block at point."
   (interactive)
@@ -3090,6 +3115,9 @@ a request's panel its own keys answer it instead: a question's digits,
 up to its number of options, and a permission's y, s, a, n and N, and
 e when it has a pattern to edit.
 
+\\[harness-compose-quote-reply] quotes the region, or the agent's message at point, in
+the box, to reply to it; from the box, the agent's last message.
+
 \\{harness-chat-mode-map}"
   (setq buffer-read-only nil)
   (setq-local truncate-lines nil
@@ -3102,6 +3130,7 @@ e when it has a pattern to edit.
                          :placeholder #'harness-chat--placeholder
                          :redraw #'harness-chat--render-tail
                          :bottom t)
+  (setq-local harness-compose-quote-function #'harness-chat--quote-at-point)
   (add-hook 'post-command-hook #'harness-chat--post-command nil t)
   (add-hook 'window-buffer-change-functions #'harness-chat--on-window-buffer-change nil t)
   (add-hook 'window-scroll-functions #'harness-chat--schedule-history nil t)
@@ -3118,7 +3147,8 @@ e when it has a pattern to edit.
         ("C-c C-c" "Send" harness-chat-send)
         ("C-c C-q" "Queue for next turn" harness-chat-queue)
         ("C-c C-a" "Attach file" harness-compose-add-attachment)
-        ("C-y" "Paste; an image attaches" harness-compose-yank)]
+        ("C-y" "Paste; an image attaches" harness-compose-yank)
+        ("C-c >" "Quote reply: region or message" harness-compose-quote-reply)]
        ["Agent"
         ("C-c C-y" "Allow request" harness-chat-allow-newest)
         ("C-c C-n" "Deny request" harness-chat-deny-newest)

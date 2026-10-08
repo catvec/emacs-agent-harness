@@ -365,6 +365,33 @@ shows it in full, expanded, between its heading and its buttons."
           (should (memq 'harness-chat-review-face (ensure-list (get-text-property 0 'face prefix))))
           (should (memq 'harness-chat-review-face (ensure-list (get-text-property pos 'face)))))))))
 
+(ert-deftest harness-ui-review-quotes-the-summary-for-the-feedback ()
+  "C-c > on the report's summary quotes it in the box, whole, as written.
+In the session the banner's summary is quoted from point on it; in the
+report popout from anywhere, its box included, the feedback going under
+the quote."
+  (harness-ui-review-test-with
+    (let ((chat (harness-ui-review-test--open-session sid))
+          (quoted "> # Done\n>\n> The flaky test is fixed.\n\n"))
+      (harness-ui-review-test--wait-report chat)
+      (with-current-buffer chat
+        (goto-char harness-chat--transcript-end)
+        ;; The summary's, not the banner's "Fix the flaky test".
+        (let ((case-fold-search nil)) (search-forward "The flaky test"))
+        (should (eq 'harness-compose-quote-reply (key-binding (kbd "C-c >"))))
+        (execute-kbd-macro (kbd "C-c >"))
+        (should (equal quoted (harness-compose-text)))
+        (should (= (point) harness-compose-end))
+        (harness-compose-set ""))
+      (let ((popout (harness-ui-review-test--report board id)))
+        (should (with-current-buffer popout (harness-compose-live-p)))
+        (with-selected-window (get-buffer-window popout)
+          (goto-char harness-compose-end)
+          (should (eq 'harness-compose-quote-reply (key-binding (kbd "C-c >"))))
+          (execute-kbd-macro (kbd "C-c >"))
+          (should (equal quoted (harness-compose-text)))
+          (should (= (point) harness-compose-end)))))))
+
 (ert-deftest harness-ui-review-report-opens-the-call-in-the-transcript ()
   "[Open in the session] of a referenced call takes point to the call in
 the transcript, from the banner's report and from the popout alike:

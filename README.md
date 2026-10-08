@@ -333,6 +333,7 @@ number of options, and a permission's `y`, `s`, `a`, `n` and `N`, and
 | `C-c C-s` | Search the transcript |
 | `C-c C-t` | Show or hide the session's todo list |
 | `C-c C-w` | Copy the last reply |
+| `C-c >` | Quote, to reply: the selected text, or the agent's reply or plan at point (elsewhere the one above it, from the box the last), goes in the compose box as a Markdown quote, point under it. A selection keeps its code blocks, inline code and links as Markdown, and leaves out what a fold hides |
 | `C-c C-e` | Jump to the bottom |
 | `C-c C-r` | Redraw the buffer |
 | `C-c C-z` | Bury the session: its window shows the buffer it showed before (a side window closes) |
@@ -559,6 +560,9 @@ extra controls appear at the front of its header line:
   asked is deleted.
 - `[keep]` (`C-c C-o`) keeps it as a normal session.
 
+The rest of its keys are the chat's: `C-c >`, for one, quotes its
+answer, or the part of it you select, in the box to follow up on it.
+
 So that quick questions get quick answers, a BTW starts at the `low`
 thinking level, whatever the session's level is. Set
 `harness-btw-thinking` to choose another level, or to nil to start
@@ -660,7 +664,9 @@ your checkout itself can be submitted to the **main tree** instead (the
   in the box, `C-c C-c` sends it) and `[Review]`, which pops it out, so
   you can read the work and accept it without going back to the board.
   The two keys work only while the banner shows; otherwise `C-c C-v`
-  is nothing there, the box pasting with `C-y`.
+  is nothing there, the box pasting with `C-y`. `C-c >` on the summary
+  quotes it in the box, as it does a part of it you select, so the
+  feedback can answer it point by point.
 - `[Review]` on a card that has a report, or on the banner, pops the
   handed-in summary and evidence out beside the board: images large, as
   wide as the popout, videos as thumbnails, files as buttons, and each
@@ -670,11 +676,13 @@ your checkout itself can be submitted to the **main tree** instead (the
   While the task waits for review, the report ends with the same banner
   as its session: `[Verify]` (`C-c C-v`) and `[Send back]` (`C-c C-x`),
   and a box under it for the feedback (`C-c C-c` sends it), so you can
-  read the work and accept it in one place. Once the review is decided
-  -- the task verified, or sent back with feedback -- the report closes,
-  wherever that was done: from the board, from the session's banner or
-  from the report's own banner. The board's item-at-point key (`SPC`)
-  opens the report too, along with whatever else the task has to show.
+  read the work and accept it in one place; `C-c >` quotes the summary
+  in that box, or the part of the report you select. Once the review
+  is decided -- the task verified, or sent back with feedback -- the
+  report closes, wherever that was done: from the board, from the
+  session's banner or from the report's own banner. The board's
+  item-at-point key (`SPC`) opens the report too, along with whatever
+  else the task has to show.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
 - `SPC` on a task that needs input pops out what it waits on -- the
