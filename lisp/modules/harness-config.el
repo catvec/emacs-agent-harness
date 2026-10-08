@@ -143,15 +143,24 @@ non-interactive anyway."
 
 (defconst harness-config-keys
   '(harness-model harness-permission-mode harness-thinking harness-btw-thinking
-    harness-allowed-directories harness-sandbox-policy harness-non-interactive)
-  "Settings that take part in layering.")
+    harness-allowed-directories harness-sandbox-policy harness-non-interactive
+    harness-supervisor)
+  "Settings that take part in layering.
+A module defines some of them, `harness-supervisor' the supervisor
+plugin: until it is loaded the key takes part in nothing, and every
+reader of the layers skips it (see `harness-config--layered-keys').")
 
 (defconst harness-config-sections
   '((sessions
      :title "New sessions"
      :doc "What a new session starts with.  A project can override these in its .dir-locals.el."
      :keys (harness-model harness-thinking harness-btw-thinking harness-permission-mode
-            harness-non-interactive))
+            harness-non-interactive harness-supervisor))
+    (supervisor
+     :title "Supervisor mode"
+     :doc "Top-level sessions plan and delegate: the session's model investigates and writes a plan, and worker sub-agents on cheaper models carry it out. The supervisor cannot change files itself."
+     :keys (harness-supervisor harness-supervisor-tasks harness-supervisor-tiers
+            harness-supervisor-step-budget))
     (spending
      :title "Spending"
      :doc "What all sessions together may spend.  Budgets for one project, one session or a calendar period are made in the usage dashboard."
@@ -192,7 +201,9 @@ non-interactive anyway."
 Each entry is (NAME :title TITLE :doc DOC :keys OPTIONS).
 `config/describe' lists these options first, in this order, each with
 its section; every other option it lists is an advanced one.  An option
-no loaded module defines is left out, and so is a section left empty.")
+no loaded module defines is left out, and so is a section left empty.
+An option two sections name, such as `harness-supervisor', is listed
+once, in the first.")
 
 (defconst harness-config-hidden-options
   '(harness-process harness-module-directories harness-enabled-modules harness-disabled-modules
@@ -275,18 +286,32 @@ the harness modules and core, not those of the UI (its own groups)."
           (cl-pushnew sym out))))
     (sort out (lambda (a b) (string< (symbol-name a) (symbol-name b))))))
 
+(defun harness-config--layered-keys ()
+  "Return the keys of `harness-config-keys' that some loaded module defines.
+A key whose module is not loaded yet has no value to read, so it takes
+part in no layer and no description until the module is."
+  (cl-remove-if-not #'boundp harness-config-keys))
+
+(defun harness-config--layered-p (key)
+  "Non-nil when KEY is a layered setting that a loaded module defines."
+  (and (memq key harness-config-keys) (boundp key) t))
+
 (defun harness-config--describable-p (key)
   "Non-nil when `config/describe' lists option KEY."
-  (or (memq key harness-config-keys) (harness-config--listed-p key)))
+  (or (harness-config--layered-p key) (harness-config--listed-p key)))
 
 (defun harness-config--placed ()
   "Return ((KEY . SECTION) ...) for the options `harness-config-sections' shows.
 In the order of the sections, then of their keys, without the options
-that no loaded module defines."
-  (cl-loop for (section . props) in harness-config-sections
-           append (cl-loop for key in (plist-get props :keys)
-                           when (and (boundp key) (harness-config--describable-p key))
-                           collect (cons key section))))
+that no loaded module defines.  An option that two sections name is
+placed in the first only, so that it is described once."
+  (let (placed)
+    (cl-loop for (section . props) in harness-config-sections
+             do (dolist (key (plist-get props :keys))
+                  (when (and (boundp key) (harness-config--describable-p key)
+                             (not (assq key placed)))
+                    (push (cons key section) placed))))
+    (nreverse placed)))
 
 (defun harness-config--key (key)
   "Return the option KEY names, a symbol or its name; signal for anything else.
@@ -296,7 +321,7 @@ init file only."
                    ((stringp key) (intern-soft key)))))
     (when (and sym (memq sym harness-config-hidden-options))
       (error "%s is set in the init file only" sym))
-    (unless (and sym (or (memq sym harness-config-keys) (harness-config--listed-p sym)))
+    (unless (and sym (harness-config--describable-p sym))
       (error "Unknown config key %s" key))
     sym))
 
@@ -461,19 +486,21 @@ Each V is a plist of KEY VALUE for the config keys set at that layer;
 global always lists every key.  The policy layer, which wins over the
 others, lists the keys the policy sets (see harness-policy.el); the
 project and directory layers list what their files say, even where the
-policy overrides it."
+policy overrides it.  A key that no loaded module defines (see
+`harness-config--layered-keys') is in none of them."
   (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
          (root (harness-config--root cwd))
-         (policy (cl-loop for k in harness-config-keys
+         (keys (harness-config--layered-keys))
+         (policy (cl-loop for k in keys
                           for v = (harness-policy-entry k)
                           when v append (list k (cdr v))))
-         (global (cl-loop for k in harness-config-keys
+         (global (cl-loop for k in keys
                           append (list k (symbol-value k))))
-         (project (cl-loop for k in harness-config-keys
+         (project (cl-loop for k in keys
                            for v = (harness-config--layer-value root k)
                            when v append (list k (cdr v))))
          (directory (and (not (string= cwd root))
-                         (cl-loop for k in harness-config-keys
+                         (cl-loop for k in keys
                                   for v = (harness-config--layer-value cwd k)
                                   when v append (list k (cdr v))))))
     (list (cons 'policy policy) (cons 'global global) (cons 'project project)
@@ -598,7 +625,7 @@ does not survive printing (a function object, say)."
                        (append (harness-config--describe-key
                                 key layered (and layered project) (and layered directory))
                                (list :section (and section (symbol-name section)))))))
-         (advanced (cl-loop for k in (append harness-config-keys (harness-config--global-options))
+         (advanced (cl-loop for k in (append (harness-config--layered-keys) (harness-config--global-options))
                             unless (assq k placed) collect k))
          (settings (append (mapcar (lambda (cell) (funcall describe (car cell) (cdr cell))) placed)
                            (mapcar (lambda (k) (funcall describe k nil)) advanced))))
