@@ -288,6 +288,10 @@ Before committing, check that
   far: the chat header dropped the % of quota windows, Markdown tables
   with inline code did not line up, a budget had "1 days left", and a
   report's file evidence gave its link count for its size ("1 B").
+- **Missing pictures.**  `test/harness-docs-test.el` fails when the
+  README links a picture that is not in `docs/media`, which git.sr.ht
+  and GitHub would show as a broken image: take it again with
+  `scripts/media.sh NAME`.
 - **Old pictures on GitHub.**  GitHub caches images by their URL, so a
   picture taken again under the same name can show the old one for a
   while after the push.  Reload without the cache, or wait.
