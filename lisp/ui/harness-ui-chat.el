@@ -342,6 +342,251 @@ Knows the chat's own `harness-chat-action' buttons and the shared
       (insert text))
     (harness-chat--fix-positions fix pt windows)))
 
+;;;; Scrolling by pixels
+;;
+;; An image is one character whose `display' draws it, so however tall
+;; it is it makes one line, and Emacs scrolls by lines: the mouse wheel
+;; and C-v jumped past a tall image whole, or stuck on one taller than
+;; the window.  The chat scrolls by pixels instead, through the window's
+;; vscroll as `pixel-scroll-precision-mode' does, a line's height for
+;; every line asked for: the wheel (`mwheel-scroll' calls
+;; `mwheel-scroll-up-function' and `mwheel-scroll-down-function' with a
+;; number of lines) and C-v and M-v, which the mode remaps.  An image
+;; goes by a line's height at a time like the text around it, and stays
+;; whole: nothing about it is measured or changed when it is drawn.  The
+;; window still starts at a whole line of text; only an image is left
+;; partly scrolled at the top, or, when one taller than the window shows
+;; from its top, the line above it scrolled out of view.
+
+(defvar mwheel-scroll-up-function)
+(defvar mwheel-scroll-down-function)
+
+;; Where screen lines start and how high they are, in the selected window.
+(defun harness-chat--line-start (pos)
+  "Return where the screen line at POS starts."
+  (save-excursion (goto-char pos) (vertical-motion 0) (point)))
+
+(defun harness-chat--line-after (pos)
+  "Return where the screen line after the one at POS starts, or nil at the end."
+  (save-excursion
+    (goto-char pos)
+    (and (= (vertical-motion 1) 1) (> (point) pos) (point))))
+
+(defun harness-chat--line-before (pos)
+  "Return where the screen line before the one at POS starts, or nil at the top."
+  (save-excursion
+    (goto-char pos)
+    (and (= (vertical-motion -1) -1) (< (point) pos) (point))))
+
+(defun harness-chat--line-height (pos)
+  "Return the height in pixels of the screen line at POS."
+  (save-excursion (goto-char pos) (line-pixel-height)))
+
+(defun harness-chat--scroll-pixels (pixels forward)
+  "Scroll the selected window PIXELS pixels, FORWARD toward the end or back.
+The window's start goes a screen line at a time and its vscroll takes
+up the rest, so a line of any height goes by a pixel at a time.  Back,
+it stops at the buffer's start; forward, with the last line of text at
+the top, as `scroll-up' does.  Each line's height is its own, from
+`line-pixel-height': `pixel-scroll-precision-scroll-up-page' measures
+back with `window-text-pixel-size', which can overshoot a tall line
+to start the window at the line above it."
+  (let ((start (window-start))
+        (vscroll (window-vscroll nil t)))
+    (while (> pixels 0)
+      (if forward
+          (let ((next (harness-chat--line-after start)))
+            (if (not (and next (< next (point-max))))
+                (setq pixels 0)
+              (let ((left (- (harness-chat--line-height start) vscroll)))
+                (if (< pixels left)
+                    (setq vscroll (+ vscroll pixels) pixels 0)
+                  (setq start next vscroll 0 pixels (- pixels (max left 0)))))))
+        (if (> vscroll 0)
+            (let ((step (min pixels vscroll)))
+              (setq vscroll (- vscroll step) pixels (- pixels step)))
+          (let ((before (harness-chat--line-before start)))
+            (if before
+                (setq start before vscroll (harness-chat--line-height before))
+              (setq pixels 0))))))
+    ;; Forced, the start holds whatever redisplay finds; an unforced one
+    ;; it may give up to recenter on point.  But forcing it loses the
+    ;; vscroll at redisplay, so scrolled partway into a line the start
+    ;; holds only while point's line shows whole above the window's
+    ;; bottom edge (`harness-chat--point-into-view').
+    (set-window-start nil start (> vscroll 0))
+    (set-window-vscroll nil vscroll t t)))
+
+(defun harness-chat--snap-start (forward)
+  "Start the selected window at a whole screen line unless its first is tall.
+Scrolling by pixels can stop partway into a line of text, which would
+then show cut through at the top.  A line at least two lines of text
+high, an image, keeps the part scrolled; any other goes back to its top,
+or FORWARD on to the next line when more than half of it was scrolled."
+  (let ((vscroll (window-vscroll nil t)))
+    (when (> vscroll 0)
+      (let* ((start (window-start))
+             ;; The whole line: `window-text-pixel-size' from the window's
+             ;; start counts only what the vscroll leaves of it, which near
+             ;; an image's bottom is as little as a line of text.
+             (height (harness-chat--line-height start)))
+        (when (< height (* 2 (default-line-height)))
+          (let ((next (and forward (> (* 2 vscroll) height)
+                           (harness-chat--line-after start))))
+            (set-window-vscroll nil 0 t t)
+            ;; Nothing is scrolled partway now, so the start is forced,
+            ;; as `harness-chat--scroll-pixels' forces it.
+            (set-window-start nil (or next start))
+            (when (and next (< (point) next)) (goto-char next))))))))
+
+(defun harness-chat--shown-whole-p (pos)
+  "Return non-nil if the selected window shows the screen line at POS whole.
+Scrolled into a tall line, the line has to end above the window's
+bottom edge, not on it.  The window's start is not forced then, which
+would lose the vscroll, and redisplay keeps a start it was not forced
+to only while point's line ends above that edge; else it recenters on
+point and keeps the vscroll, which cuts through the text at the top."
+  (let ((shown (pos-visible-in-window-p pos nil t)))
+    (and shown (null (cddr shown))
+         (or (zerop (window-vscroll nil t))
+             (< (+ (cadr shown) (harness-chat--line-height pos))
+                (+ (window-tab-line-height) (window-header-line-height)
+                   (window-text-height nil t)))))))
+
+(defun harness-chat--bottom-line ()
+  "Return a position on the selected window's bottom screen line, or nil."
+  (posn-point (posn-at-x-y 0 (+ (window-tab-line-height) (window-header-line-height)
+                                (1- (window-text-height nil t))))))
+
+(defun harness-chat--point-into-view ()
+  "Move point onto a screen line the selected window shows whole.
+Point left out of view, or partly out, would have redisplay recenter
+the window to show it, undoing the scroll.  Point below goes up to the
+last line shown whole, as `scroll-down' moves it, and point above to
+the first: a window scrolled into a tall line shows that line in part,
+and point stays on it only when no line shows whole (see
+`harness-chat--cursor-line-fully-visible')."
+  (let ((start (window-start)))
+    (unless (and (>= (point) start) (harness-chat--shown-whole-p (point)))
+      (let ((pos (if (< (point) start)
+                     start
+                   (let ((bottom (harness-chat--bottom-line)))
+                     (harness-chat--line-start
+                      (if (and bottom (> (point) bottom)) bottom (point)))))))
+        (while (and (> pos start) (not (harness-chat--shown-whole-p pos)))
+          (setq pos (or (harness-chat--line-before pos) start)))
+        (setq pos (max pos start))
+        (unless (harness-chat--shown-whole-p pos)
+          (let ((after (harness-chat--line-after pos)))
+            (when (and after (harness-chat--shown-whole-p after))
+              (setq pos after))))
+        (goto-char pos)))))
+
+(defun harness-chat--hold-tall-start ()
+  "Keep a line taller than the selected window at its top, point on it.
+That line fills the window, so point can be on no other, and redisplay
+keeps point on a line that runs past the window's bottom only while the
+window's start is forced, which lasts one redisplay.  The next, after
+any change, would recenter on point and undo the scroll.  It leaves a
+window with a vscroll alone, so the window starts at the line before
+instead, scrolled out of view by the vscroll.  The window looks the
+same, and its start holds."
+  (let ((start (window-start)))
+    (when (and (= (point) start)
+               (zerop (window-vscroll nil t))
+               (> (harness-chat--line-height start) (window-text-height nil t)))
+      (when-let* ((before (harness-chat--line-before start)))
+        (set-window-start nil before t)
+        (set-window-vscroll nil (harness-chat--line-height before) t t)))))
+
+(defun harness-chat--scroll (lines forward)
+  "Scroll the selected window LINES lines' height, FORWARD toward the end or back.
+LINES nil is the window's height less `next-screen-context-lines'
+lines, as `scroll-up' takes it, negative LINES go the other way, and
+zero stays.  Signals `end-of-buffer' or `beginning-of-buffer' when
+nothing moves, as `scroll-up' and `scroll-down' do: `mwheel-scroll'
+scrolls on until one does.  A terminal, which draws no images, scrolls
+by lines."
+  (cond
+   ((eql lines 0))
+   ((not (display-graphic-p))
+    (if forward (scroll-up lines) (scroll-down lines)))
+   (t
+    (let* ((line (default-line-height))
+           (forward (if (and lines (< lines 0)) (not forward) forward))
+           (pixels (if lines (* (abs lines) line)
+                     (max line (- (window-text-height nil t) (* next-screen-context-lines line)))))
+           (before (cons (window-start) (window-vscroll nil t))))
+      (harness-chat--scroll-pixels pixels forward)
+      (harness-chat--snap-start forward)
+      ;; Started at the very end, the window would show nothing; like
+      ;; `scroll-up', stop with the last line of text at its top.
+      (when (and forward (> (point-max) (point-min)) (>= (window-start) (point-max)))
+        (set-window-vscroll nil 0 t t)
+        (set-window-start nil (harness-chat--line-start (1- (point-max)))))
+      (harness-chat--point-into-view)
+      (harness-chat--hold-tall-start)
+      (when (equal before (cons (window-start) (window-vscroll nil t)))
+        (signal (if forward 'end-of-buffer 'beginning-of-buffer) nil))))))
+
+(defun harness-chat-scroll-forward (&optional lines)
+  "Scroll the chat LINES lines' height toward its end, by pixels.
+The wheel's `mwheel-scroll-up-function' in the chat; LINES nil is
+nearly a window.  See `harness-chat--scroll'."
+  (harness-chat--scroll lines t))
+
+(defun harness-chat-scroll-back (&optional lines)
+  "Scroll the chat LINES lines' height toward its start, by pixels.
+The wheel's `mwheel-scroll-down-function' in the chat; LINES nil is
+nearly a window.  See `harness-chat--scroll'."
+  (harness-chat--scroll lines nil))
+
+(defun harness-chat--scroll-command (arg forward)
+  "Scroll nearly a window, or ARG lines' height, FORWARD or back.
+As `scroll-up-command' takes ARG: `-' goes a window the other way.
+Where nothing is left to scroll, point moves that way instead when
+`scroll-error-top-bottom' says so, as that command moves it: ARG lines,
+or to the end of the buffer; else the error is signaled."
+  (let ((forward (if (eq arg '-) (not forward) forward))
+        (lines (and arg (not (eq arg '-)) (prefix-numeric-value arg))))
+    (condition-case err
+        (harness-chat--scroll lines forward)
+      ((beginning-of-buffer end-of-buffer)
+       (let* ((ahead (eq (car err) 'end-of-buffer))
+              (edge (if ahead (point-max) (point-min))))
+         (cond
+          ((or (not scroll-error-top-bottom) (= (point) edge))
+           (signal (car err) (cdr err)))
+          (lines (forward-line (if ahead (abs lines) (- (abs lines)))))
+          (t (goto-char edge))))))))
+
+(defun harness-chat-scroll-up (&optional arg)
+  "Scroll the chat nearly a window toward its end, by pixels.
+`scroll-up-command' in the chat: an image goes by a line's height at a
+time instead of all at once.  With ARG, scroll ARG lines' height; `-'
+scrolls back."
+  (interactive "^P")
+  (harness-chat--scroll-command arg t))
+
+(defun harness-chat-scroll-down (&optional arg)
+  "Scroll the chat nearly a window toward its start, by pixels.
+`scroll-down-command' in the chat; with ARG, ARG lines' height; `-'
+scrolls forward."
+  (interactive "^P")
+  (harness-chat--scroll-command arg nil))
+
+(dolist (command '(harness-chat-scroll-up harness-chat-scroll-down))
+  (put command 'scroll-command t)
+  (put command 'isearch-scroll t))
+
+(defun harness-chat--cursor-line-fully-visible (window)
+  "The chat's `make-cursor-line-fully-visible', for WINDOW.
+Point's line is brought into full view, as by default, unless WINDOW
+is scrolled partway into a tall line: that would undo the scroll.
+`pixel-scroll-precision-mode' turns the option off everywhere for this
+\(bug#65214)."
+  (zerop (window-vscroll window t)))
+
 ;;;; Auto-scroll
 
 (defun harness-chat--at-bottom-p (&optional window)
@@ -2773,6 +3018,9 @@ message sent from it resumes it."
   ;; The compose box's keys; not `special-mode-map', whose letters would
   ;; eat typing in the box.
   (set-keymap-parent map harness-compose-map)
+  ;; By pixels, so a tall image goes by a bit at a time.
+  (define-key map [remap scroll-up-command] #'harness-chat-scroll-up)
+  (define-key map [remap scroll-down-command] #'harness-chat-scroll-down)
   (define-key map (kbd "TAB") #'harness-chat-tab)
   (define-key map (kbd "C-c C-q") #'harness-chat-queue)
   (define-key map (kbd "C-c C-c") #'harness-chat-send)
@@ -2814,6 +3062,10 @@ e when it has a pattern to edit.
   (add-hook 'post-command-hook #'harness-chat--post-command nil t)
   (add-hook 'window-buffer-change-functions #'harness-chat--on-window-buffer-change nil t)
   (add-hook 'window-scroll-functions #'harness-chat--schedule-history nil t)
+  ;; The wheel scrolls by pixels too (see "Scrolling by pixels").
+  (setq-local mwheel-scroll-up-function #'harness-chat-scroll-forward
+              mwheel-scroll-down-function #'harness-chat-scroll-back
+              make-cursor-line-fully-visible #'harness-chat--cursor-line-fully-visible)
   (add-hook 'kill-buffer-hook #'harness-chat--on-kill nil t))
 
 ;; The chat's keys in the harness menu, as the buffer binds them.
