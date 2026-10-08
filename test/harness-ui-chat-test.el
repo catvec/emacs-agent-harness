@@ -770,8 +770,7 @@ is left partly shown while the window is scrolled partway into a line."
 
 (ert-deftest harness-ui-chat-scrolls-by-pixels ()
   "The chat scrolls a line's height in pixels for each line asked for.
-Less than a window at a time, as the precision scroll functions need;
-at either end, once nothing moves, it signals as `scroll-up' does,
+At either end, once nothing moves, it signals as `scroll-up' does,
 which `mwheel-scroll' needs to stop, and C-v moves point there when
 `scroll-error-top-bottom' says so.  A terminal scrolls by lines."
   (harness-ui-chat-test-with
@@ -786,23 +785,19 @@ which `mwheel-scroll' needs to stop, and C-v moves point there when
                   ((symbol-function 'window-text-height) (lambda (&rest _) 100))
                   ((symbol-function 'window-vscroll) (lambda (&rest _) vscroll))
                   ((symbol-function 'harness-chat--snap-start) #'ignore)
-                  ((symbol-function 'pixel-scroll-precision-scroll-down-page)
-                   (lambda (delta)
-                     (push delta steps)
-                     (setq vscroll (min 1000 (+ vscroll delta)))
-                     (when (= vscroll 1000) (signal 'end-of-buffer nil))))
-                  ((symbol-function 'pixel-scroll-precision-scroll-up-page)
-                   (lambda (delta)
-                     (push (- delta) steps)
-                     (setq vscroll (max 0 (- vscroll delta)))
-                     (when (zerop vscroll) (signal 'beginning-of-buffer nil)))))
+                  ((symbol-function 'harness-chat--point-into-view) #'ignore)
+                  ((symbol-function 'harness-chat--scroll-pixels)
+                   (lambda (pixels forward)
+                     (push (if forward pixels (- pixels)) steps)
+                     (setq vscroll (max 0 (min 1000 (if forward (+ vscroll pixels)
+                                                      (- vscroll pixels))))))))
           ;; A wheel notch of three lines goes three lines' height.
           (harness-chat-scroll-forward 3)
           (should (equal steps '(54)))
-          ;; More than the window goes in steps short of it.
+          ;; More than the window, all of it.
           (setq steps nil)
           (harness-chat-scroll-forward 10)
-          (should (equal (reverse steps) '(99 81)))
+          (should (equal steps '(180)))
           ;; Back; a negative count goes the other way; zero stays.
           (setq steps nil)
           (harness-chat-scroll-back 2)
@@ -869,7 +864,7 @@ stays where the scroll left it."
                   ((symbol-function 'window-start) (lambda (&rest _) start))
                   ((symbol-function 'set-window-start) (lambda (_w pos &rest _) (setq start pos)))
                   ((symbol-function 'harness-chat--line-after) (lambda (_pos) after))
-                  ((symbol-function 'line-pixel-height) (lambda () height)))
+                  ((symbol-function 'harness-chat--line-height) (lambda (_pos) height)))
           ;; A third into a line of text: back to its top, either way.
           (goto-char (point-min))
           (dolist (forward '(t nil))
@@ -895,6 +890,108 @@ stays where the scroll left it."
           (setq height 18 after nil vscroll 12)
           (harness-chat--snap-start t)
           (should (equal (list start vscroll) '(1 0))))))))
+
+(ert-deftest harness-ui-chat-scroll-walks-screen-lines ()
+  "Scrolling by pixels moves the window's start a screen line at a time.
+Its vscroll takes up the rest, so a tall image goes by a pixel at a
+time; going back, the line above is measured whole, which the precision
+scroll function overshot.  It stops at the first line, and forward with
+the last line of text at the top."
+  (harness-ui-chat-test-with
+    (with-temp-buffer
+      (insert "abcdefghij")
+      ;; Screen lines start at 1 to 6, the third an image 400 high; the
+      ;; one after the sixth is the empty end of the buffer.
+      (let ((heights '((1 . 18) (2 . 18) (3 . 400) (4 . 18) (5 . 18) (6 . 18)))
+            (start 1) (vscroll 0) (forced nil))
+        (cl-letf (((symbol-function 'window-start) (lambda (&rest _) start))
+                  ((symbol-function 'window-vscroll) (lambda (&rest _) vscroll))
+                  ((symbol-function 'set-window-start)
+                   (lambda (_w pos &optional noforce) (setq start pos forced (not noforce))))
+                  ((symbol-function 'set-window-vscroll) (lambda (_w v &rest _) (setq vscroll v)))
+                  ((symbol-function 'harness-chat--line-height) (lambda (pos) (cdr (assq pos heights))))
+                  ((symbol-function 'harness-chat--line-after)
+                   (lambda (pos) (if (< pos 6) (1+ pos) (point-max))))
+                  ((symbol-function 'harness-chat--line-before) (lambda (pos) (and (> pos 1) (1- pos)))))
+          (cl-flet ((scroll (pixels forward)
+                      (harness-chat--scroll-pixels pixels forward)
+                      (list start vscroll)))
+            ;; Two lines of text, then partway into the image, its start
+            ;; unforced so that redisplay keeps the vscroll.
+            (should (equal (scroll 54 t) '(3 18)))
+            (should-not forced)
+            ;; The rest of the image, then a line.
+            (should (equal (scroll 400 t) '(5 0)))
+            (should forced)
+            ;; Back a line and into the image from its bottom.
+            (should (equal (scroll 30 nil) '(3 388)))
+            ;; Far forward: the last line stays at the top.
+            (should (equal (scroll 1000 t) '(6 0)))
+            (should (equal (scroll 18 t) '(6 0)))
+            ;; Far back: the first line.
+            (should (equal (scroll 1000 nil) '(1 0)))))))))
+
+(ert-deftest harness-ui-chat-scroll-shown-whole ()
+  "A line shows whole when all of it is in the window.
+Scrolled partway into a tall line, it also has to end above the bottom
+edge: a line ending on it had redisplay recenter on point, keeping the
+vscroll, which cut through the text at the top."
+  (harness-ui-chat-test-with
+    (let ((vscroll 0) (shown nil))
+      ;; A header line of 17 over 527 of text: the edge is at 544.
+      (cl-letf (((symbol-function 'pos-visible-in-window-p) (lambda (&rest _) shown))
+                ((symbol-function 'window-vscroll) (lambda (&rest _) vscroll))
+                ((symbol-function 'window-text-height) (lambda (&rest _) 527))
+                ((symbol-function 'window-header-line-height) (lambda (&rest _) 17))
+                ((symbol-function 'window-tab-line-height) (lambda (&rest _) 0))
+                ((symbol-function 'harness-chat--line-height) (lambda (_pos) 17)))
+        (cl-flet ((whole (vis) (setq shown vis) (and (harness-chat--shown-whole-p 1) t)))
+          (should (whole '(8 510)))
+          (should (whole '(8 527)))
+          (should-not (whole '(0 536 0 9 8 8)))
+          (should-not (whole nil))
+          (setq vscroll 145)
+          (should (whole '(8 510)))
+          (should-not (whole '(8 527)))
+          (should-not (whole '(0 536 0 9 8 8))))))))
+
+(ert-deftest harness-ui-chat-scroll-keeps-point-in-view ()
+  "Scrolling leaves point on a screen line the window shows whole.
+Out of view, or partly, point would have redisplay recenter the window
+and undo the scroll.  Below, it goes up to the last line shown whole;
+above, down to the first; on a tall line scrolled partway at the top it
+stays only when no line shows whole."
+  (harness-ui-chat-test-with
+    (with-temp-buffer
+      (insert (make-string 30 ?x))
+      ;; Screen lines start at 1, 3, 5...; the window starts at START,
+      ;; shows the lines in WHOLE whole and BOTTOM's in part.
+      (let ((start 5) (whole '(5 7 9 11)) (bottom 13))
+        (cl-labels ((line-of (pos) (if (cl-oddp pos) pos (1- pos))))
+          (cl-letf (((symbol-function 'window-start) (lambda (&rest _) start))
+                    ((symbol-function 'harness-chat--line-start) #'line-of)
+                    ((symbol-function 'harness-chat--line-after) (lambda (pos) (+ (line-of pos) 2)))
+                    ((symbol-function 'harness-chat--line-before)
+                     (lambda (pos) (and (> (line-of pos) 1) (- (line-of pos) 2))))
+                    ((symbol-function 'harness-chat--shown-whole-p) (lambda (pos) (memq (line-of pos) whole)))
+                    ((symbol-function 'harness-chat--bottom-line) (lambda () bottom)))
+            (cl-flet ((from (pos) (goto-char pos) (harness-chat--point-into-view) (point)))
+              ;; Shown whole: it stays.
+              (should (= (from 8) 8))
+              ;; Partly out at the bottom, or far below: the last whole line.
+              (should (= (from 14) 11))
+              (should (= (from 25) 11))
+              ;; Above the window: its first line.
+              (should (= (from 2) 5))
+              ;; Scrolled into a tall line at the top: the line after it,
+              ;; from above or from the tall line itself.
+              (setq whole '(7 9 11))
+              (should (= (from 2) 7))
+              (should (= (from 6) 7))
+              ;; The tall line fills the window: point stays on it.
+              (setq whole nil)
+              (should (= (from 25) 5))
+              (should (= (from 2) 5)))))))))
 
 ;;;; Queue
 
