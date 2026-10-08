@@ -101,11 +101,11 @@ the one its session shows, with [Verify] and [Send back].")
   "Functions giving a report popout a compose box.
 Each is called with the TASK the popout shows, in the popout buffer, on
 every draw, and returns nil, or (SUBMIT . PLACEHOLDER): SUBMIT, a
-function of TEXT and ATTACHMENTS, takes what the box holds when C-c C-c
-sends it, the popout buffer current; PLACEHOLDER is the empty box's
-hint.  The first function returning non-nil wins; with none, the popout
-has no box.  The review module takes the feedback that sends a task back
-this way.")
+function of TEXT and ATTACHMENTS, takes what the box holds when
+\\<harness-ui-popout-mode-map>\\[harness-ui-popout-submit] sends it, the popout buffer current;
+PLACEHOLDER is the empty box's hint.  The first function returning
+non-nil wins; with none, the popout has no box.  The review module
+takes the feedback that sends a task back this way.")
 
 (defvar harness-ui-report--reports (make-hash-table :test 'equal)
   "Popout key -> the task record its popout shows, kept current.")
@@ -114,8 +114,8 @@ this way.")
   "The task record this popout shows.")
 
 (defvar-local harness-ui-report--box nil
-  "What `harness-ui-report-compose-functions' gave this popout as drawn
-last: (SUBMIT . PLACEHOLDER), or nil for no box.")
+  "What `harness-ui-report-compose-functions' gave this popout at its last draw.
+That is (SUBMIT . PLACEHOLDER), or nil for no box.")
 
 (defvar-local harness-ui-report--expanded (make-hash-table :test 'equal)
   "Referenced tool calls whose full output this popout shows.")
