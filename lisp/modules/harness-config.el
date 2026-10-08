@@ -7,6 +7,12 @@
 ;;   project    .dir-locals.el at the project root
 ;;   global     the customize value of the variable
 ;;
+;; Above them all, an option the policy sets (an administrator's file,
+;; see harness-policy.el and docs/policy.md) has the policy's value and
+;; no other: `config/get' gives it whatever the dir-locals files say,
+;; `config/describe' reports it locked with `:source' policy, and
+;; `config/set' and `config/unset' refuse to change it at any layer.
+;;
 ;; Every setting is an ordinary `defcustom' with a `:safe' predicate, so
 ;; the built-in dir-locals machinery reads and writes them without
 ;; prompting.  Persisting a setting writes the most specific file that
@@ -49,6 +55,8 @@
 (require 'wid-edit)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-files)
+(require 'harness-policy)
 
 ;; The provider module once had a default model of its own, the same
 ;; setting under a second name.  Declared before `harness-model' so a
@@ -148,11 +156,15 @@ non-interactive anyway."
      :title "Spending"
      :doc "What all sessions together may spend.  Budgets for one project, one session or a calendar period are made in the usage dashboard."
      :keys (harness-budget))
+    (compaction
+     :title "Compaction"
+     :doc "What stands in for a conversation that grew too long, and which model writes a brief summary of one.  Compacting by hand offers every kind, with what each costs."
+     :keys (harness-compaction-kind harness-compaction-brief-model))
     (safety
      :title "Files and safety"
      :doc "What sessions may reach, and what may run without asking you."
      :keys (harness-allowed-directories harness-sandbox-policy harness-perms-rules
-            harness-perms-auto-model))
+            harness-perms-auto-model harness-emacs-eval))
     (tasks
      :title "Task board"
      :doc "The sessions tasks start with, and when their work counts as done."
@@ -169,8 +181,9 @@ non-interactive anyway."
     (services
      :title "Models and services"
      :doc "Model providers besides Claude Code, and the other services the harness talks to."
-     :keys (harness-fallback-models harness-openai-endpoints harness-bedrock-endpoints
-            harness-websearch-provider harness-websearch-builtin harness-brave-api-key)))
+     :keys (harness-allowed-models harness-fallback-models harness-openai-endpoints
+            harness-bedrock-endpoints harness-websearch-provider harness-websearch-builtin
+            harness-brave-api-key)))
   "The settings most people change, in sections named by what they are for.
 Each entry is (NAME :title TITLE :doc DOC :keys OPTIONS).
 `config/describe' lists these options first, in this order, each with
@@ -282,6 +295,15 @@ init file only."
     (unless (and sym (or (memq sym harness-config-keys) (harness-config--listed-p sym)))
       (error "Unknown config key %s" key))
     sym))
+
+(defun harness-config--changeable-key (key)
+  "Return the option KEY names, as `harness-config--key' does, to change it.
+An option the policy sets is refused first, whatever else it is: no
+layer of it may change (see harness-policy.el)."
+  (let ((sym (cond ((symbolp key) key)
+                   ((stringp key) (intern-soft key)))))
+    (when sym (harness-policy-refuse sym))
+    (harness-config--key key)))
 
 (defun harness-config--secret-p (key)
   "Non-nil when option KEY holds a secret."
@@ -430,11 +452,17 @@ left without settings is deleted.  Return the file."
 ;;;; Methods
 
 (harness-defmethod config/layers (cwd)
-  "Return ((global . V) (project . V) (directory . V)) for every config key at CWD.
-Each V is a plist of KEY VALUE for keys set at that layer; global
-always lists every key."
+  "Return ((policy . V) (global . V) (project . V) (directory . V)) at CWD.
+Each V is a plist of KEY VALUE for the config keys set at that layer;
+global always lists every key.  The policy layer, which wins over the
+others, lists the keys the policy sets (see harness-policy.el); the
+project and directory layers list what their files say, even where the
+policy overrides it."
   (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
          (root (harness-config--root cwd))
+         (policy (cl-loop for k in harness-config-keys
+                          for v = (harness-policy-entry k)
+                          when v append (list k (cdr v))))
          (global (cl-loop for k in harness-config-keys
                           append (list k (symbol-value k))))
          (project (cl-loop for k in harness-config-keys
@@ -444,18 +472,22 @@ always lists every key."
                          (cl-loop for k in harness-config-keys
                                   for v = (harness-config--layer-value cwd k)
                                   when v append (list k (cdr v))))))
-    (list (cons 'global global) (cons 'project project) (cons 'directory directory))))
+    (list (cons 'policy policy) (cons 'global global) (cons 'project project)
+          (cons 'directory directory))))
 
 (harness-defmethod config/get (key cwd)
-  "Return the effective value of setting KEY (a symbol or its name) at CWD."
+  "Return the effective value of setting KEY (a symbol or its name) at CWD.
+A value the policy sets wins over every layer (see harness-policy.el)."
   (let ((key (harness-config--key key)))
     (unless (memq key harness-config-keys)
       (error "Unknown config key %s" key))
-    (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
-           (root (harness-config--root cwd))
-           (dir (and (not (string= cwd root)) (harness-config--layer-value cwd key)))
-           (proj (or dir (harness-config--layer-value root key))))
-      (if proj (cdr proj) (symbol-value key)))))
+    (if-let* ((pinned (harness-policy-entry key)))
+        (cdr pinned)
+      (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
+             (root (harness-config--root cwd))
+             (dir (and (not (string= cwd root)) (harness-config--layer-value cwd key)))
+             (proj (or dir (harness-config--layer-value root key))))
+        (if proj (cdr proj) (symbol-value key))))))
 
 (defun harness-config--effective (key cwd)
   "Return the value of option KEY in effect at CWD."
@@ -468,11 +500,12 @@ always lists every key."
 LAYERED is non-nil for a layered setting; PROJECT and DIRECTORY are the
 alists of the project's and the directory's dir-locals files."
   (let* ((secret (harness-config--secret-p key))
+         (pinned (harness-policy-entry key))
          (global (symbol-value key))
          (pcell (and layered (assq key project)))
          (dcell (and layered (assq key directory)))
-         (source (cond (dcell 'directory) (pcell 'project) (t 'global)))
-         (value (cond (dcell (cdr dcell)) (pcell (cdr pcell)) (t global)))
+         (source (cond (pinned 'policy) (dcell 'directory) (pcell 'project) (t 'global)))
+         (value (cond (pinned (cdr pinned)) (dcell (cdr dcell)) (pcell (cdr pcell)) (t global)))
          (standard (harness-config--standard key)))
     (append
      (list :key (symbol-name key)
@@ -481,11 +514,15 @@ alists of the project's and the directory's dir-locals files."
            :type (harness-config--print (or (get key 'custom-type) 'sexp))
            :layered (if layered t :false)
            :secret (if secret t :false)
+           :locked (if pinned t :false)
            :source (symbol-name source))
-     (if secret
-         (list :editable t :has-value (if global t :false))
-       (list :editable (if (cl-every #'harness-config--readable-p
-                                     (list global value standard (cdr pcell) (cdr dcell)))
+     (cond
+      (secret
+       (list :editable (if pinned :false t) :has-value (if value t :false)))
+      (t
+       (list :editable (if (and (not pinned)
+                                (cl-every #'harness-config--readable-p
+                                          (list global value standard (cdr pcell) (cdr dcell))))
                            t :false)
              ;; Judged here, where the functions a type names are defined.
              :invalid (cl-loop for (layer . cell) in (list (cons "global" (cons t global))
@@ -497,13 +534,32 @@ alists of the project's and the directory's dir-locals files."
              :global (harness-config--print global)
              :project (and pcell (harness-config--print (cdr pcell)))
              :directory (and dcell (harness-config--print (cdr dcell)))
-             :value (harness-config--print value))))))
+             :value (harness-config--print value)))))))
+
+(defun harness-config--describe-policy (described)
+  "Describe the policy in force for `config/describe'; nil without one.
+DESCRIBED lists the options `config/describe' describes.  Return
+\(:file FILE :settings ((:key NAME :value V :listed BOOL :defined BOOL)
+...)): every option the policy sets, in its order, those not described
+\(`harness-corporate-mode', say) included.  V is printed, and nil for a
+secret; :listed says whether the option is in DESCRIBED, :defined
+whether this harness defines it as an option at all (a policy written
+for another version may set one it does not)."
+  (when-let* ((file (harness-policy-file-name)))
+    (list :file file
+          :settings (cl-loop for (key . value) in (harness-policy-entries)
+                             collect (list :key (symbol-name key)
+                                           :value (unless (harness-config--secret-p key)
+                                                    (harness-config--print value))
+                                           :listed (if (memq key described) t :false)
+                                           :defined (if (custom-variable-p key) t :false))))))
 
 (harness-defmethod config/describe (cwd)
   "Describe every harness option as seen at CWD, for a settings page.
 Return (:cwd DIR :root DIR :project NAME :in-project BOOL
 :files (:project FILE :project-exists BOOL
         :directory FILE :directory-exists BOOL)
+:policy POLICY
 :sections ((:name NAME :title TITLE :doc DOC) ...)
 :modules ((:name NAME :doc DOC) ...) :settings (SETTING ...)).
 The settings of `harness-config-sections' come first, section by
@@ -511,11 +567,15 @@ section, then the advanced ones: the other settings that layer, then
 the options with a global value only.
 :sections lists the sections that have settings, in order.  SETTING is
   (:key NAME :module NAME :section NAME :doc DOC :type TYPE :layered BOOL
-   :secret BOOL :editable BOOL :invalid (LAYER ...) :standard V :global V
-   :project V :directory V :value V :source global|project|directory)
+   :secret BOOL :locked BOOL :editable BOOL :invalid (LAYER ...)
+   :standard V :global V :project V :directory V :value V
+   :source policy|global|project|directory)
 where :section is nil for an advanced setting, :value is what is in
 effect at CWD, :source the layer it comes from and :invalid names the
-layers whose value does not fit TYPE.
+layers whose value does not fit TYPE.  A setting the policy sets is
+:locked, its :source is policy and its :value the policy's, whatever
+the other layers say; it is not :editable.  POLICY is nil without a
+policy, else what `harness-config--describe-policy' returns.
 TYPE and every V are printed with `prin1': `read' them back.  An
 unset :project or :directory is nil, while one set to nil is \"nil\".
 :directory is nil when CWD is the project root.  A secret has no V;
@@ -534,9 +594,10 @@ does not survive printing (a function object, say)."
                        (append (harness-config--describe-key
                                 key layered (and layered project) (and layered directory))
                                (list :section (and section (symbol-name section)))))))
+         (advanced (cl-loop for k in (append harness-config-keys (harness-config--global-options))
+                            unless (assq k placed) collect k))
          (settings (append (mapcar (lambda (cell) (funcall describe (car cell) (cdr cell))) placed)
-                           (cl-loop for k in (append harness-config-keys (harness-config--global-options))
-                                    unless (assq k placed) collect (funcall describe k nil)))))
+                           (mapcar (lambda (k) (funcall describe k nil)) advanced))))
     (list :cwd cwd :root root
           :project (if (harness-method-exists-p 'project/name)
                        (harness-call 'project/name root)
@@ -544,6 +605,7 @@ does not survive printing (a function object, say)."
           :in-project (if (harness-config--in-project-p cwd) t :false)
           :files (list :project pfile :project-exists (if (file-exists-p pfile) t :false)
                        :directory dfile :directory-exists (if (and dfile (file-exists-p dfile)) t :false))
+          :policy (harness-config--describe-policy (append (mapcar #'car placed) advanced))
           :sections (cl-loop for (section . props) in harness-config-sections
                              when (rassq section placed)
                              collect (list :name (symbol-name section)
@@ -557,6 +619,100 @@ does not survive printing (a function object, say)."
                                             (or (and m (harness-module-doc m)) ""))))
                              (nreverse names)))
           :settings settings)))
+
+(defun harness-config--work-dirs ()
+  "Return the directories the harness works in now.
+Those of the active sessions and of the current tasks' sessions, and
+those of the current tasks of every project: a pending task starts in
+its own."
+  (append
+   (and (harness-method-exists-p 'session/select)
+        (mapcar (lambda (s) (plist-get s :cwd))
+                (harness-call 'session/select (list :active t :tasks t))))
+   (and (harness-method-exists-p 'task/list)
+        (let ((columns (if (boundp 'harness-tasks-bulk-columns)
+                           (symbol-value 'harness-tasks-bulk-columns)
+                         '(active pending needs-input))))
+          (cl-loop for task in (harness-call 'task/list)
+                   when (and (memq (plist-get task :column) columns)
+                             (not (harness-json-true-p (plist-get task :archived))))
+                   collect (plist-get task :cwd))))))
+
+(defun harness-config--tasks-option (key)
+  "Return the task default that wins over layered setting KEY for tasks, or nil.
+That is `harness-tasks-model' for `harness-model', and so on, when the
+tasks module defines it."
+  (let ((sym (intern-soft (replace-regexp-in-string "\\`harness-" "harness-tasks-" (symbol-name key)))))
+    (and sym (boundp sym) sym)))
+
+(defun harness-config--same-p (key a b)
+  "Non-nil when A and B are the same value of layered setting KEY."
+  (harness-setting-equal-p (if (eq key 'harness-non-interactive) :non-interactive key) a b))
+
+(defun harness-config--main-place (at root)
+  "Return (MAIN-AT . MAIN-ROOT): directory AT in the main checkout of ROOT.
+ROOT is AT's project root.  Return nil unless it is a linked git
+worktree, such as a task's (see `harness-files-main-checkout')."
+  (when-let* ((main (and root (ignore-errors (harness-files-main-checkout root))))
+              ((not (string= main root))))
+    (cons (file-name-as-directory (expand-file-name (file-relative-name at root) main)) main)))
+
+(harness-defmethod config/overrides (key &rest opts)
+  "Return what keeps the global value of layered setting KEY from applying.
+OPTS: `:value' (printed when `:printed' is non-nil), the value to
+compare with, by default KEY's global value; `:dirs', more directories
+to look at (a task board's, say).  The directories looked at are those
+of the active sessions, of the current tasks and their sessions, and
+DIRS; remote ones are skipped, and nothing is ever written.  Return
+\(:key NAME :value V :tasks (:option NAME :value V) :files (FILE ...)),
+where `:tasks' is the task default that wins over KEY for new tasks,
+nil when it is unset or the same, and each FILE is (:file PATH :scope
+project|directory :dir DIR :project NAME :value V) for a .dir-locals.el
+that sets KEY to another value for the sessions started there.  A
+linked git worktree's file (a task's, say) that sets KEY as the file at
+the same place in its main checkout does is the project's checked-in
+copy: FILE names the main checkout's, the one to change, once for all
+the tasks.  Every V is printed with `prin1', as `config/describe' gives
+them."
+  (let* ((key (harness-config--key key))
+         (value (cond ((not (plist-member opts :value)) (symbol-value key))
+                      ((plist-get opts :printed) (harness-config--read (plist-get opts :value)))
+                      (t (plist-get opts :value))))
+         (tasks (harness-config--tasks-option key))
+         (seen nil)
+         (files nil))
+    (unless (memq key harness-config-keys)
+      (error "%s does not layer" key))
+    (dolist (dir (delete-dups (delq nil (append (harness-config--work-dirs) (plist-get opts :dirs)))))
+      (when (and (stringp dir) (not (file-remote-p dir)) (file-directory-p dir))
+        (let* ((dir (file-name-as-directory (expand-file-name dir)))
+               (root (ignore-errors (harness-config--root dir))))
+          (dolist (layer (list (cons 'project root)
+                               (and root (not (string= dir root)) (cons 'directory dir))))
+            (when-let* ((at (cdr layer))
+                        (cell (harness-config--layer-value at key))
+                        ((not (harness-config--same-p key (cdr cell) value))))
+              (pcase-let* ((main (harness-config--main-place at root))
+                           (main-cell (and main (harness-config--layer-value (car main) key)))
+                           (`(,at . ,root)
+                            (if (and main-cell (harness-config--same-p key (cdr main-cell) (cdr cell)))
+                                main
+                              (cons at root)))
+                           (file (expand-file-name dir-locals-file at)))
+                (unless (member file seen)
+                  (push file seen)
+                  (push (list :file file :scope (symbol-name (car layer)) :dir at
+                              :project (if (harness-method-exists-p 'project/name)
+                                           (ignore-errors (harness-call 'project/name (or root at)))
+                                         (file-name-nondirectory (directory-file-name (or root at))))
+                              :value (harness-config--print (cdr cell)))
+                        files))))))))
+    (list :key (symbol-name key)
+          :value (harness-config--print value)
+          :tasks (let ((v (and tasks (symbol-value tasks))))
+                   (and v (not (harness-config--same-p key v value))
+                        (list :option (symbol-name tasks) :value (harness-config--print v))))
+          :files (nreverse files))))
 
 (defun harness-config--announce (key value scope cwd)
   "Emit `config/changed' for KEY with VALUE, SCOPE and CWD.
@@ -574,9 +730,10 @@ a layered one goes to the project file when CWD is in a project, unless
 a directory file already exists at CWD, and without a project to the
 directory file.  VALUE must fit the option's customize type, and a
 directory-local value its `:safe' predicate, which spares Emacs asking
-before using it; secrets never go to a dir-locals file.
+before using it; secrets never go to a dir-locals file.  An option the
+policy sets is refused at every scope (see harness-policy.el).
 Return (SCOPE . FILE-OR-NIL)."
-  (let* ((key (harness-config--key key))
+  (let* ((key (harness-config--changeable-key key))
          (value (if (plist-get opts :printed) (harness-config--read value) value))
          (cwd (harness-config--cwd opts))
          (root (harness-config--root cwd))
@@ -601,9 +758,10 @@ default for a layered setting) deletes KEY from that dir-locals file,
 and the file itself once nothing is left in it, so the next layer down
 applies again.  The `global' scope (the default for other options)
 sets KEY back to its standard value through customize.
-`config/changed' then carries the value now in effect at CWD.
+`config/changed' then carries the value now in effect at CWD.  An
+option the policy sets is refused, as by `config/set'.
 Return (SCOPE . FILE-OR-NIL); FILE is nil when the file had no KEY."
-  (let* ((key (harness-config--key key))
+  (let* ((key (harness-config--changeable-key key))
          (cwd (harness-config--cwd opts))
          (root (harness-config--root cwd))
          (scope (or (plist-get opts :scope)
@@ -624,7 +782,9 @@ Return (SCOPE . FILE-OR-NIL); FILE is nil when the file had no KEY."
 (harness-declare-event 'config/changed
                        "(KEY VALUE SCOPE CWD) after `config/set' or `config/unset'.
 VALUE is the value set, or after an unset the value now in effect at
-CWD; it is nil for a secret.")
+CWD; it is nil for a secret.  The perms module announces the options
+a permission answer or its undo saves the same way (SCOPE `global',
+CWD nil).")
 
 (harness-define-module 'config
   :doc "Layered settings through customize and dir-locals."

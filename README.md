@@ -21,7 +21,9 @@ OpenAI-compatible APIs and AWS Bedrock.
   buffer, saving it, documentation, `*Messages*`, and debugging its
   Lisp: describing symbols, finding definitions, tracing functions
   and variables), Emacs Lisp
-  evaluation in a separate background Emacs, web search and fetch,
+  evaluation in a separate background Emacs (and in your own Emacs,
+  for code a judge model expects to return at once, unless you turn
+  `harness-emacs-eval` off), web search and fetch,
   sub-agents and skills, plus tools that let an agent inspect and
   drive other sessions and tasks.
 - **Remote hosts.** Agents work on other machines through TRAMP: a
@@ -32,13 +34,15 @@ OpenAI-compatible APIs and AWS Bedrock.
   sandbox for tool processes (bubblewrap or `systemd-run`).
 - **Task board.** Run tasks in parallel, each in its own session and git
   worktree, review the results, and merge them back through a merge
-  queue.
+  queue. A per-project limit on running tasks starts the waiting ones
+  by priority (low, medium, high).
 - **Notifications.** A desktop notification, and a push to your phone
   through Gotify once you set it up, when a task waits for your review
   or is done. Agents can notify you too.
 - **Conversation management.** Fork sessions, ask side questions in
-  BTW conversations, browse the conversation tree, and let long
-  conversations compact automatically.
+  BTW conversations, browse the conversation tree, and compact long
+  conversations, automatically or by hand: into a summary, a cheap
+  brief one, or a transcript file the model reads from.
 - **Cost tracking.** Cost per turn, subscription quotas, budgets and a
   usage dashboard.
 - **Insights.** A report on how a day, a week or a month of work with
@@ -276,16 +280,20 @@ the menu's Version entry says so.
 | `C-c h f` | `harness-fork-session` | Fork the current session |
 | `C-c h b` | `harness-btw` | Open a BTW side conversation |
 | `C-c h k` | `harness-cancel-turn` | Cancel the running turn |
+| `C-c h C` | `harness-compact` | Compact the conversation: choose a summary, a brief summary or a transcript file, each with what it costs |
 | `C-c h D` | `harness-delete-session` | Delete the current session |
 | `C-c h m` | `harness-set-model` | Choose the model |
-| `C-c h M` | `harness-set-model-all` | Choose a model and switch every current session to it |
+| `C-c h M` | `harness-set-model-all` | Choose a model and switch every current session and task of every project to it |
 | `C-c h T` | `harness-set-thinking` | Choose the thinking level |
-| `C-c h H` | `harness-set-thinking-all` | Choose a thinking level and set it on every current session |
+| `C-c h H` | `harness-set-thinking-all` | Choose a thinking level and set it on every current session and task of every project |
 | `C-c h p` | `harness-set-permission-mode` | Choose the permission mode |
 | `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
+| `C-c h I` | `harness-set-non-interactive-all` | Turn non-interactive mode on or off for every current session and task of every project |
 | `C-c h d` | `harness-directories` | Manage the directories a session may access |
+| `C-c h W` | `harness-move-session` | Move a session to another working directory, and with it to that directory's project (see [Moving a session](#moving-a-session-to-another-directory)) |
+| `m` | `harness-ui-sessions-move` | In the session list, move the session at point to another directory |
 | `C-c h u` | `harness-usage` | Show the usage and cost dashboard |
-| `C-c h I` | `harness-insights` | Show the Insights report: how a period of work with the agents went |
+| `C-c h A` | `harness-insights` | Show the Insights report: how a period of work with the agents went |
 | `C-c h B` | `harness-delete-budget` | Delete a budget, chosen by name |
 | `C-c h w` | `harness-worktrees` | List the git worktrees of the project |
 | `C-c h S` | `harness-settings` | Show the settings page |
@@ -326,7 +334,7 @@ number of options, and a permission's `y`, `s`, `a`, `n` and `N`, and
 | `C-c C-q` | Queue the message for the next turn |
 | `RET` | Insert a newline |
 | `@` | Complete a file to attach: part of a name finds a project file in any subdirectory, a path (`/`, `~/`, `./`, `../`) any file. An `@path` typed out in full attaches its file when the message is sent, and stays in the text |
-| `/` | Complete a skill |
+| `/` | Complete a skill, or `/compact` |
 | `C-c C-a` | Attach a file found the same way, by part of a name or by path (`C-u C-c C-a` browses the file system) |
 | `C-y` | Attach the image on the clipboard (or the files a file manager copied), keeping `kill-ring` out of it; text yanks as usual |
 | `M-y` | Right after a media yank, swap it for an earlier capture; otherwise the usual `yank-pop` |
@@ -404,9 +412,14 @@ to settle it there: `[Allow]` and `[Deny]` for a permission request,
 which `y` and `n` press too, and `[Answer…]` for a question, which pops
 it out.
 `RET` or a click on a session opens it in its project: with Doom
-Emacs's workspaces, the project's workspace becomes current first, as
-switching project does, and a session already showing there gets its
-window selected instead of opening again
+Emacs's workspaces, the project's workspace becomes current first, with
+the windows and buffers you left in it, and a session already showing
+there gets its window selected instead of opening again. The project's
+workspace is the one named after the project, or one that records the
+project's directory (as some forks of Doom do); of two, the one with
+the project's files open. A project without a workspace gets a new one,
+as switching project makes it but without asking for a file, and the
+session takes its window instead of opening beside Doom's dashboard
 (`harness-ui-switch-project-function`, nil to never switch). `b`, or
 the banner's `[Show all]`, shows every session again. With nobody
 waiting, the click opens the session list as usual.
@@ -438,6 +451,13 @@ command. The directory is made with the session, made again if it went
 missing, and deleted with the session. `C-c h d` lists all of these
 directories. Remote sessions have no temporary directory.
 
+In the sandbox a shell command sees the system directories and, of
+yours, only these directories, each at its own path: a directory you
+grant the session reaches its commands at once, as it reaches the other
+tools. `~` is your home directory there as well, emptied, so
+`~/.emacs.d/x` names the same file inside as outside, and only what the
+session may use shows in it.
+
 Every permission request offers the same five answers, under the same
 names and keys wherever it shows (the chat, BTW, the popout, an ACP
 client): `[Allow]` `y`, `[Allow for session]` `s`, `[Always allow]` `a`,
@@ -449,17 +469,28 @@ this once, and for the agent's own request for a directory
 directory until the agent's turn ends, so the agent can do what it
 asked for and has to ask again in a later turn. A button's tooltip, and
 the echo area after it, say what it covers for the request at hand.
+The one exception is an agent's request to move a session (see
+[Moving a session](#moving-a-session-to-another-directory)), which you
+answer with `[Allow]` or `[Deny]` only.
 
 A permission request about a path outside the session's directories
 (a tool call reaching there, or the agent asking for a directory) is
 answered for a glob pattern, not for a single file. By default the
-pattern covers everything in the directory: the directory that holds
-the file, or the directory itself, such as `~/notes/**`. The panel
-shows the pattern on its own line. Press `e` on the panel, `C-c C-p`,
-or click `[Edit]` to change it in the minibuffer, either more specific
+pattern covers everything in a directory. For a tool call that is the
+root of the repository the path lies in (the closest directory above it
+with `.git` or another version control directory), so that one answer
+opens the project or package the agent is finding its way around, such
+as `~/.emacs.d/**`, rather than one directory of it after another. When
+there is no repository, or its root is or holds your home directory or
+the session's own working directory, it is the directory that holds
+the file, or the directory itself, such as `~/notes/**`; for the
+agent's own request, the directory it asked for. The panel shows the
+pattern on its own line. Press `e` on the panel, `C-c C-p`, or click
+`[Edit]` to change it in the minibuffer, either more specific
 (`~/notes/*.org`, a subdirectory, one file) or less (`~/**`). `*`
 matches within a name and `**` across directories, and `M-n` offers
-patterns around the request's own. The answer grants or denies the
+patterns around the request's own, from the file itself up to the
+directory above the pattern's. The answer grants or denies the
 pattern: once (for the one call, or until the turn ends for the agent's
 own request), for the session, or always (as an entry of
 `harness-allowed-directories`, or a rule in `harness-perms-rules` for
@@ -469,6 +500,25 @@ one, is about the call itself and shows no pattern: *Allow for
 session*, *Always allow* and *Always deny* hold for every call of that
 tool, and a call outside the session's directories still asks for the
 directory first.
+
+An answer that lasts -- *Allow for session*, *Always allow*, *Always
+deny* -- leaves a note in the session's chat, under the call it
+answered, whether you answered in the chat, a popout, the session list
+or the task board: `Always allowing every bash call, in every session
+[Undo]`. `[Undo]` takes back what that answer recorded, the rule or
+the directory, for the session or from `harness-perms-rules` and
+`harness-allowed-directories`, and nothing else. The call it answered
+stays allowed or denied. Once undone the note is struck through. When
+the rule has changed since, edited in Settings say, `[Undo]` leaves it
+as it is, and the note says so under it; it says so too when the rule
+or the directory is gone already. An answer that recorded nothing new,
+the same rule being there already, offers no `[Undo]`.
+
+The tools that inspect your Emacs never ask. When `emacs_find_definition`
+shows a definition, the file it names may then be read without a grant
+for the rest of the session, by the tools that only read, so the agent
+can read the code around it: only that file, not its directory, and not
+for writing.
 
 A shell command is about what its command line names, not only the
 directory it runs in. The prompt for `ls -la ~/.claude/projects/x`,
@@ -508,12 +558,33 @@ and show one at a time. Switch between them with the tabs above the
 area, `n` and `p` on the panel, `C-c C-f` and `C-c C-b` anywhere in the
 buffer, or by moving point onto an option.
 
+An image is a file the agent made, usually an SVG it wrote or a cropped
+screenshot of a mockup, in its session's temporary directory. Images
+are drawn black on white, as a browser shows them, so a drawing made
+for a white page reads under a dark theme too
+(`harness-ui-image-colors`, also for the transcript's images; nil draws
+them in the colours of the text around them). Each is sized to show
+whole: at most `harness-ui-image-max-height` pixels high and half the
+window's height in a chat, so a short window such as a BTW still shows
+it with the options around it. An image larger than Emacs draws at all
+(`max-image-size`, ten times the frame), such as a whole page's
+screenshot, shows as a line saying so that opens it outside Emacs; the
+agent is told to crop one over 8000 pixels on a side. Only you see the
+images; the model gets your answer. Try one with the demo provider's
+`images` prompt. When the UI reaches the harness at a host and port,
+which may run on another machine, or the image is on a remote host, the
+UI asks the harness for the image (`question/image`) instead of reading
+the file itself.
+
 The same request can be read and answered without opening the session:
 `SPC` in the session list, or on the task board, pops out
 what the session at point waits on, in a small window with the same
 panel -- the permission prompt or the question in full, its options,
 diagrams and keys, and a box for a typed answer. It closes itself once
 the request is settled, and the session's own view stays where it was.
+The popout of a question with images grows taller than others, up to
+`harness-ui-pending-popout-max-height` of the frame, and fits the image
+in beside the options and the box.
 Both views also answer in place, with the same buttons from the same
 code: a blocked session's row in the session list and a task's card on
 the board carry `[Allow]` and `[Deny]`, or `[Answer…]`.
@@ -537,6 +608,15 @@ such as CLAUDE.md. It refuses only what risks serious harm that is
 hard to undo, such as wiping data outside the project, force pushes,
 system changes, leaking secrets, or widening its own permissions. It
 never rules on the task or your workflow, and when in doubt it allows.
+It also follows the `autoMode` rules that Claude Code's own auto mode
+follows, taken from the same places: your `~/.claude/settings.json`
+and your organization's managed settings, never a project's. So with
+the same settings it is no stricter than Claude Code. Pushing to the
+repositories, buckets and services your organization lists as trusted
+counts as ordinary work, and the organization's `soft_deny` and
+`hard_deny` rules hold as they do in Claude Code. No entry lifts the
+judge's own rules. Set `harness-perms-claude-auto-mode` to nil to
+leave them out.
 A call it would deny is put to you in an interactive session, with the
 judge's reason, so you can allow it; in a non-interactive session the
 denial stands and the agent is told to find another
@@ -545,10 +625,121 @@ so it is denied while you are away. New sessions, task sessions
 included, start interactive unless `harness-non-interactive` is set.
 Setting `harness-tasks-non-interactive` makes every new task session
 start non-interactive. From then on each
-session has its own switch.
+session has its own switch. Switching a session that waits on a
+permission prompt to non-interactive hands the prompt to the judge,
+which decides it as it would a new call, denial and steering included;
+a directory prompt still waits for your answer.
+
+`C-c h I` (`harness-set-non-interactive-all`) is `C-c h i` for
+everything, as `C-c h M` is `C-c h m`: it turns non-interactive mode on
+or off at once for every current session (idle, running or blocked) and
+every current task (pending, active or needing input) of every project,
+for the next task of every open task board, and for new sessions too,
+unless a prefix argument (`C-u C-c h I`) leaves the default alone. It
+says how many sessions and tasks changed, and when it turns the mode
+off, what still turns it on for new work: a project's `.dir-locals.el`
+that sets `harness-non-interactive`, or `harness-tasks-non-interactive`.
+It changes neither.
+
+An agent can do the same when you ask it to, with its
+`set_non_interactive` tool, for itself, another session, or everything.
+Turning the mode on takes you out of the loop, so the harness asks you
+first, every time, in every permission mode, as it does for a directory
+outside the session: neither the judge nor a permission rule can allow
+it, and a non-interactive session, which has nobody to ask, is denied at
+once. Turning it off only brings you back, so it asks nothing.
 
 Opening an inactive session shows it without resuming it. Its compose
 box stays available, and the first message you send resumes it.
+
+### Moving a session to another directory
+
+A session works in the directory it was started in, and the session
+list files it under that directory's project. When a session started in
+one place turns out to work on another, move it there: `C-c h W`
+(`M-x harness-move-session`, also called `harness-session-move`) asks
+for the new directory, starting next to the session's own, and `m` does
+the same for the session at point in the session list and for the
+session of the directory access list (`C-c h d`). The session then
+works in the new directory and is listed under its project, also after
+a restart. It no longer reaches the old directory, unless you move it
+with a prefix argument (`C-u C-c h W`), which keeps the old directory
+allowed. The directories you granted it stay granted.
+
+The conversation goes on where it was, but the model's provider starts
+a new conversation in the new directory, which gets the transcript:
+the Claude Code CLI keeps its conversations per directory. A session in
+the middle of a turn moves when the turn ends, and moving it back to
+where it works cancels that. Some sessions cannot move:
+
+- a session working in a worktree, whose branch merges back through the
+  merge queue;
+- a task's session, which stays with its task: submit a task in the
+  other directory instead;
+- a session that branches are queued to merge into, until those merges
+  are through;
+- a session on a remote host, to another host.
+
+Agents can move a session too, their own or another one, with the
+`session_move` tool. You confirm every move, whatever the permission
+mode, yolo included: the request offers only `[Allow]` and `[Deny]`,
+and neither is remembered. An agent moving its own session may use the
+new directory for the rest of its turn, and the session moves when the
+turn ends. A non-interactive session cannot ask, so its agent says in
+its answer where it wanted to move.
+
+### Compacting a conversation
+
+A conversation that nears its model's context window is compacted
+before the next turn, unless its provider compacts on its own side, as
+Claude Code does: something much smaller stands in for it from then on,
+and the earlier messages stay in the conversation tree. There are three
+kinds:
+
+- **Summary**: the session's model summarises the whole conversation.
+  It reads all of it again, from the prompt cache while that lasts.
+- **Brief summary**: a cheap model (the cheap tier of the session's
+  provider, such as Claude Haiku or DeepSeek Flash; see
+  `harness-compaction-brief-model`) summarises only the first and last
+  messages. It costs cents however long the conversation, but most of
+  the middle is left out, and the summary says so.
+- **Transcript file**: the whole conversation goes to a file in
+  `.harness/transcripts/` in the session's directory (git ignores it),
+  and the model is told to read what it needs of it. No model is asked
+  anything, so it costs nothing.
+
+These are the ways a switch to another provider can hand the
+conversation over (see [Switching model or provider](#switching-model-or-provider)),
+here on the session's own model. Automatic compaction makes the kind
+`harness-compaction-kind` says, a summary by default; the settings page
+has both under **Compaction**.
+
+`C-c h C` (`M-x harness-compact`, or Compact context in the menu)
+compacts the current session by hand, between turns: it asks which kind,
+naming what each costs, beside a table of who writes each, what it
+costs and what it does, and of what carrying on without compacting
+costs. Typing `/compact` in the message box asks the same;
+`/compact brief`, `/compact summary` or `/compact transcript` (or just
+`b`, `s` or `t`) compacts that way at once. The chat then shows the
+compaction where the conversation now starts, with `[open the
+transcript]` for a transcript file.
+
+A provider's prompt cache lasts only a while after its last use: five
+minutes or an hour for Claude, hours for DeepSeek (see
+`harness-cache-ttl`). Once it expires, the next message re-sends the
+whole conversation uncached, at the full input price. A panel above
+the message box says when the cache expired and what the next message
+will cost instead of what it would have cost cached. Its last line offers
+to compact the conversation first, a button and a key per kind with
+what each costs:
+
+```
+Compact it first   b  Brief summary (~$0.011)   s  Summary (~$0.463)   t  Transcript file (free)
+```
+
+Press the key with point on that line, or click a button, and the
+conversation compacts that way. The panel goes once the compaction is
+done: the next message sends only what stands in for the conversation.
 
 ### Forks and side conversations
 
@@ -605,6 +796,17 @@ your checkout itself can be submitted to the **main tree** instead (the
   first: a task it already has is refused rather than written up (drop
   it, or write it up anyway), and the write-up names the tasks working
   on the same code, to coordinate with instead of redoing their work.
+- `harness-tasks-max-running` limits how many of a project's tasks work
+  at once (nil, the default, means no limit; the compose box notes it as
+  `N at a time`). Every project has that many slots of its own; a task
+  submitted while they are all taken waits in *Pending* and starts, by
+  priority and then oldest first, when one frees up, or at once with
+  `s`. Only top-level sessions are limited: a task takes a slot while
+  its own session works on it, running or waiting for your answer
+  mid-turn. The sessions working for it -- its sub-agents and forks, and
+  the sessions resolving its merge conflicts -- never take one, and
+  neither does a task in *Merging*, so the merge queue never holds up
+  the next task.
 - Each card is one line, with a subtitle that recaps the task: what it is
   doing or has done so far, written by a short model call and refreshed
   at the first of so many turns, seconds or tool calls since the last
@@ -629,6 +831,21 @@ your checkout itself can be submitted to the **main tree** instead (the
   as cleaning up uncommitted changes; those tasks show `main tree` on
   their card, and a refined task keeps the choice for when you start it.
   An agent can ask for the same thing with `task_submit`'s `main_tree`.
+- Every task has a **priority**: low, medium (the default) or high. It
+  matters when `harness-tasks-max-running` limits how many of a
+  project's tasks work at once: the others wait in *Pending*, and a
+  free slot goes to the highest priority waiting, the oldest of those
+  first, which is also the order *Pending* lists them in. A priority
+  never stops a task at work, and a backlog task still waits for you to
+  start it. The `medium priority` button beside the Submit / Refine
+  switch sets the next task's (a click cycles it through high and low);
+  `+` and `-` on a card raise and lower that task's, to reorder the
+  queue, and bulk edit (`B`) has a priority button that sets every
+  current task's at once, only when you click it. A high task shows `↑`
+  before its title and a low one `↓`. An
+  agent sets it with `task_submit`'s `priority` and `task_control`'s
+  `priority` action, and the board's search understands "do the docs
+  task first".
 - Task sessions run on at most 256k tokens of context
   (`harness-tasks-context-limit`): they compact sooner than interactive
   sessions, so a long task works from a smaller transcript between
@@ -650,16 +867,22 @@ your checkout itself can be submitted to the **main tree** instead (the
   its session with feedback. Any message you send to a task waiting
   for review sends it back the same way, with your message as the
   feedback, wherever you write it: in the task's session (no need to
-  press `[Send back]` first), with `m` on the board, from another
-  device, or from another session. The task goes back to work at once
-  and comes back for review when it is done.
+  press `[Send back]` first), with `m` on the board, or from another
+  device. The task goes back to work at once and comes back for review
+  when it is done. Only you review: a message another session's agent
+  sends the task (`session_send`, or `task_control`'s message) reaches
+  it as that session's, not as your feedback. The task deals with it
+  and waits for review again, its report standing unless it hands in a
+  new one; an agent sends work back only with `task_control` reject.
 - When the project is the harness itself, a card in *Ready for review*
-  whose worktree is a checkout of the harness also offers
-  `[Open harness]`: it opens an Emacs running that worktree's harness
-  in an instance of its own, its frame raised, so the work can be tried
-  before it is verified. The agent has the same as the `open_harness`
-  tool, which starts such an instance for its own worktree and says how
-  to drive it (`scripts/dev.sh` with its socket).
+  whose worktree is a checkout of the harness also has **Open harness**
+  in its menu (right-click the card): it opens an Emacs running that
+  worktree's harness in an instance of its own, its frame raised, so
+  the work can be tried before it is verified. It is not a button on
+  the card; a click on the card's title opens the task's session, as
+  on any card. The agent has the same as the `open_harness` tool, which
+  starts such an instance for its own worktree and says how to drive it
+  (`scripts/dev.sh` with its socket).
 - To skip review, press `V` or click `[Review: on]` in the board's
   header line. Finished tasks then merge and complete without waiting
   for you, and if tasks are already waiting for review, the board offers
@@ -718,7 +941,8 @@ your checkout itself can be submitted to the **main tree** instead (the
   tasks, archived ones included, under a banner that says what it shows;
   `C-g` or `[Clear]` shows every task again. An order that is easily
   undone or does no harm -- archive of a task not at work, restore,
-  retry, start -- runs at once and the banner says so, with `[Undo]`;
+  retry, start, a new priority -- runs at once and the banner says so,
+  with `[Undo]`;
   one that interrupts work, merges it or sends words to an agent --
   stop, archive of a working task, verify, mark done, message, send
   back -- is offered instead, and an empty `/` then `RET` runs it. The
@@ -877,7 +1101,7 @@ wrong one.
 
 ### Insights
 
-`C-c h I` (`M-x harness-insights`) opens the Insights report in a
+`C-c h A` (`M-x harness-insights`) opens the Insights report in a
 buffer of its own, `*harness insights*`. It shows how a period of your
 work with the agents went, like Claude Code's `/insights`. The report is
 built from the harness's own records: the transcripts, the usage log,
@@ -1003,7 +1227,9 @@ shows where its effective value comes from.
 The page leads with the settings most people change, grouped by what
 they are for: **New sessions** (model, thinking, permission mode,
 non-interactive), **Spending** (the budget, one for all sessions
-together), **Files and safety** (directory access,
+together), **Compaction** (what stands in for a conversation that grew
+too long, and which model writes a brief summary), **Files and safety**
+(directory access,
 sandbox policy, standing permission rules), **Task board** (what task
 sessions start with, and when their work counts as done),
 **Notifications** (which task events notify you, and through which
@@ -1212,14 +1438,22 @@ cached for it, so a changed URL or model list shows at once.
 `C-c h m` (`harness-set-model`) chooses the model for the current
 session, and `C-c h T` its thinking level. `C-c h M`
 (`harness-set-model-all`) chooses one model and switches every current
-session to it; `C-c h H` (`harness-set-thinking-all`) does the same for
-the thinking level. Both make the choice the default for new sessions
-too, unless a prefix argument (`C-u C-c h M`) says otherwise. Only idle,
-running and blocked sessions change — deactivated ones are history and
-are left alone — no running turn is cancelled (it takes the new model at
-its next step), and each session records the change as a hint. Use them
-when a plan runs out of credit, a provider fails, or a cheaper model
-should take over work already in flight.
+session of every project to it, and every current task (pending, active
+or needing input); `C-c h H` (`harness-set-thinking-all`) does the same
+for the thinking level. Both make the choice the default for new
+sessions too, and the setting of the next task on every open task
+board, unless a prefix argument (`C-u C-c h M`) says otherwise. Only
+idle, running and blocked sessions change — deactivated ones are history
+and are left alone, unless a current task goes on in one — no running
+turn is cancelled (it takes the new model at its next step), and each
+session records the change once, as a hint. When the default changes,
+they then say what still wins over it: a project whose `.dir-locals.el`
+sets `harness-model` (or `harness-thinking`), at the project or the
+directory layer, and `harness-tasks-model` (or `harness-tasks-thinking`)
+for tasks. They never rewrite a `.dir-locals.el`: change it yourself,
+or in the settings page (`C-c h S`) switched to the project's values.
+Use them when a plan runs out of credit, a provider fails, or a cheaper
+model should take over work already in flight.
 
 Claude Code and Copilot keep the conversation themselves and are sent
 only your newest message, so switching a session to one of them from
@@ -1261,7 +1495,11 @@ nothing and does not ask.
 The task board has the same thing scoped to its tasks: turn on bulk edit
 (`B`, or `[Bulk edit: N tasks]` in the board's header) and the model,
 thinking, permission-mode and interactivity buttons then change every
-running, pending and blocked task at once. A conspicuous `EDITING N
+running, pending and blocked task at once. A priority button joins them
+(`high priority`, or `mixed priority` while the tasks differ): click it
+and pick low, medium or high to give them all that priority. Each
+button changes only its own setting, so the tasks keep their
+priorities unless you click that one. A conspicuous `EDITING N
 CURRENT TASKS` banner shows while it is on, and review, done and
 archived tasks are history and are left alone.
 
@@ -1354,7 +1592,42 @@ It leaves alone:
 
 The settings page does not list the option, and no ACP client can
 change it. If you change it later with `setopt` or Customize, the
-harness process restarts so that the change reaches it.
+harness process restarts so that the change reaches it. An
+administrator can force it on with a policy (below).
+
+## Policy
+
+An administrator can fix settings so that the user cannot change them,
+as Claude Code's managed settings do. The policy is a file only root
+can write, `/etc/harness/policy.el` on Linux and macOS, holding one
+alist of options and values. It is read as data and never evaluated:
+
+```elisp
+;; /etc/harness/policy.el
+((harness-corporate-mode . t)
+ (harness-disabled-modules . nil)
+ (harness-permission-mode . ask)
+ (harness-sandbox-policy . required)
+ (harness-allowed-models . ("claude:*")))
+```
+
+Each setting is then unset (its default), set by you or your project,
+or set by policy. A policy value wins over the others, and nothing
+changes it: not the settings page, `setopt`, Customize, `setq`,
+`.dir-locals.el`, an ACP client or an agent. The settings page shows
+such settings locked, and says where the policy is.
+
+Sessions keep the model, permission mode and thinking level a policy
+fixes. A policy on the permission rules or the allowed directories
+removes the "Always" answers from prompts. `harness-allowed-models`,
+which anyone can set, keeps the harness to some models and refuses
+requests for others.
+
+A policy file that cannot be read, or that does not hold a valid
+policy, stops the harness from starting rather than being ignored. The
+file is read again by `harness-reload`. [docs/policy.md](docs/policy.md)
+has the whole design: why that path, what each setting means under a
+policy, and what a policy does not protect against.
 
 ## Persistence
 
@@ -1463,7 +1736,7 @@ ACP, so it works the same with a local or a remote harness.
 | Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `handoff` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `acp` `acp-remote` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-ssh` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` |
 
 Further documentation:
 

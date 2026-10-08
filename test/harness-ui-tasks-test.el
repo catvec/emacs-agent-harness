@@ -39,6 +39,7 @@
 (defvar harness-ui-tasks--target)
 (defvar harness-ui-tasks--list-end)
 (defvar harness-ui-tasks--error)
+(defvar harness-ui-tasks--collapse-min-width)
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-ui-tasks-submit "harness-ui-tasks")
 (declare-function harness-ui-tasks-edit "harness-ui-tasks")
@@ -49,6 +50,10 @@
 (declare-function harness-ui-tasks-tab "harness-ui-tasks")
 (declare-function harness-acp--drop-client "harness-acp")
 (declare-function harness-tasks--set "harness-tasks")
+(declare-function harness-ui-session-live "harness-ui")
+(declare-function harness-ui--store-live "harness-ui")
+(declare-function harness-ui-tasks--board-key "harness-ui-tasks")
+(declare-function harness-ui-tasks--card-buttons "harness-ui-tasks")
 
 (defmacro harness-ui-tasks-test-with (&rest body)
   "Load the state layer, tasks, ACP and the board UI; run BODY with `board' open.
@@ -202,6 +207,73 @@ redraws the board by itself."
               (harness-test-wait (lambda () (string-match-p "Write quickly\\(.\\|\n\\)*42 tok/s"
                                                             (harness-ui-tasks-test--board-text board)))
                                  5 "the rate on the card")))
+        (dolist (task (harness-call 'task/list default-directory))
+          (harness-call 'task/cancel (plist-get task :id)))))))
+
+(ert-deftest harness-ui-tasks-card-shows-the-token-figures ()
+  "A working task's card shows its session's token figures as they grow.
+They come with the harness's `usage/live-updated' events, which redraw
+the board by themselves, at most every half second, and not while the
+cards read the same.  A card short of room leaves them out first,
+keeping its other facts and its buttons."
+  (harness-ui-tasks-test-with
+    ;; A turn that never ends keeps the task in progress.
+    (let ((harness-provider-demo-script-override '((:type text :delta "Working on it."))))
+      (unwind-protect
+          (progn
+            (harness-ui-tasks-test--type-and-submit board "Count the tokens")
+            (harness-ui-tasks-test--wait-text board "In progress  1\\(.\\|\n\\)*Count the tokens")
+            ;; Nothing counted yet: no figures.
+            (should-not (string-match-p " out\\b\\|/[0-9.]+[kM]\\b" (harness-ui-tasks-test--board-text board)))
+            (let ((sid (plist-get (car (harness-call 'task/list default-directory)) :session)))
+              (should sid)
+              (harness-emit 'usage/live-updated sid '(:context 2400 :output 600 :estimated 600))
+              (harness-test-wait (lambda () (harness-ui-session-live sid)) 5 "the live figures")
+              (let ((timer (buffer-local-value 'harness-ui-tasks--live-timer board)))
+                (should (timerp timer))
+                (harness-emit 'usage/live-updated sid '(:context 2440 :output 640 :estimated 640))
+                (harness-test-wait (lambda () (= 640 (plist-get (harness-ui-session-live sid) :output)))
+                                   5 "the grown figures")
+                (should (eq timer (buffer-local-value 'harness-ui-tasks--live-timer board))))
+              (harness-test-wait (lambda () (string-match-p "Count the tokens.* ~2\\.4k/[0-9.]+[kM] · ~640 out"
+                                                            (harness-ui-tasks-test--board-text board)))
+                                 5 "the live figures on the card")
+              ;; Reported: the real numbers.
+              (harness-emit 'usage/live-updated sid '(:context 2600 :output 800 :estimated 0))
+              (harness-test-wait (lambda () (string-match-p "Count the tokens.* 2\\.6k/[0-9.]+[kM] · 800 out"
+                                                            (harness-ui-tasks-test--board-text board)))
+                                 5 "the reported figures on the card")
+              ;; What the cards depend on changes only with what they read.
+              (with-current-buffer board
+                (let ((sessions (nth 1 (harness-ui-tasks--board-key))))
+                  (harness-ui--store-live sid '(:context 2610 :output 800 :estimated 0))
+                  (should (equal sessions (nth 1 (harness-ui-tasks--board-key))))
+                  (harness-ui--store-live sid '(:context 2610 :output 810 :estimated 0))
+                  (should-not (equal sessions (nth 1 (harness-ui-tasks--board-key))))))
+              ;; Short of room, the card leaves the figures out first.
+              (let* ((task (car (buffer-local-value 'harness-ui-tasks--tasks board)))
+                     (buttons (substring-no-properties (harness-ui-tasks--card-buttons task)))
+                     (lines (cl-loop for width from 160 downto harness-ui-tasks--collapse-min-width
+                                     collect (cl-letf (((symbol-function 'harness-ui-tasks--width)
+                                                        (lambda () width)))
+                                               (with-temp-buffer
+                                                 (harness-ui-tasks--insert-card task 'active nil)
+                                                 (goto-char (point-min))
+                                                 (buffer-substring-no-properties (point) (line-end-position))))))
+                     (tokens (lambda (line) (string-search "810 out" line)))
+                     (elapsed (lambda (line) (string-match-p " [0-9]+s\\b" line)))
+                     (buttoned (lambda (line) (string-search buttons line))))
+                (should (string-search "Count the tokens" (car lines)))
+                (should (funcall tokens (car lines)))
+                (should (funcall elapsed (car lines)))
+                (should (funcall buttoned (car lines)))
+                ;; Some widths keep the elapsed time and the buttons alone.
+                (should (cl-some (lambda (line) (and (not (funcall tokens line)) (funcall elapsed line)
+                                                     (funcall buttoned line)))
+                                 lines))
+                ;; The figures never show without the rest of the facts.
+                (should-not (cl-some (lambda (line) (and (funcall tokens line) (not (funcall elapsed line))))
+                                     lines)))))
         (dolist (task (harness-call 'task/list default-directory))
           (harness-call 'task/cancel (plist-get task :id)))))))
 
@@ -515,6 +587,144 @@ told from, like a worktree git lost track of, still leads back."
         (harness-ui-tasks-toggle-bulk)
         (should-not harness-ui-tasks--bulk)
         (should-not (string-match-p "Bulk: editing" (harness-ui-tasks--header)))))))
+
+;;;; Commands that change every session and task
+
+(defvar harness-non-interactive)
+(defvar harness-model)
+(defvar harness-tasks-non-interactive)
+(declare-function harness-set-non-interactive-all "harness-ui")
+(declare-function harness-set-model-all "harness-ui")
+
+(defun harness-ui-tasks-test--open-board (directory)
+  "Open the board of DIRECTORY; return it once it has its tasks and settings."
+  (let ((board (harness-tasks directory)))
+    (harness-test-wait (lambda () (with-current-buffer board
+                                    (and (not harness-ui-tasks--loading) harness-ui-tasks--new)))
+                       5 "the board to load")
+    board))
+
+(defun harness-ui-tasks-test--said (said prefix)
+  "Wait until a message in the list SAID holds starts with PREFIX; return it.
+SAID is a function returning the messages said so far."
+  (harness-test-wait (lambda () (cl-find-if (lambda (m) (string-prefix-p prefix m)) (funcall said)))
+                     5 (format "a message saying %s" prefix)))
+
+(defun harness-ui-tasks-test--hint-count (sid text)
+  "How many hints of session SID say TEXT."
+  (cl-count-if (lambda (n) (and (eq (plist-get n :kind) 'hint) (equal (plist-get n :content) text)))
+               (harness-call 'session/nodes sid)))
+
+(ert-deftest harness-ui-tasks-set-all-reaches-every-project ()
+  "The all-sessions commands reach every project and every open board.
+`harness-set-non-interactive-all' turns non-interactive on for the
+sessions and the current tasks here and in another project, for both
+boards' next tasks and, as the default, for new sessions, and says what
+keeps new work there interactive all the same.  With a prefix argument
+it turns it off for them all and leaves the default alone.
+`harness-set-model-all' switches the sessions and tasks of both
+projects too, each session once, and both boards' next tasks."
+  (harness-ui-tasks-test-with
+    (harness-test-load-module 'compaction)
+    (harness-test-load-module 'handoff)
+    (let* ((harness-provider-demo--delay 5)   ; a started task keeps running
+           (harness-tasks-max-running 0)
+           (harness-tasks-non-interactive nil)
+           (harness-non-interactive nil)
+           (harness-model harness-model)
+           (other (harness-test-temp-dir))
+           (messages nil)
+           (said (lambda () messages))
+           (saved nil)
+           (other-board nil)
+           (tasks nil)
+           (sessions nil))
+      (cl-letf* ((orig (symbol-function 'message))
+                 ((symbol-function 'message)
+                  (lambda (format-string &rest args)
+                    (when format-string (push (apply #'format format-string args) messages))
+                    (apply orig format-string args)))
+                 ((symbol-function 'harness-save-user-option)
+                  (lambda (symbol value) (set symbol value) (push (cons symbol value) saved))))
+        (unwind-protect
+            (progn
+              ;; The other project keeps its new sessions interactive.
+              (with-temp-file (expand-file-name ".dir-locals.el" other)
+                (prin1 '((nil . ((harness-non-interactive . nil)))) (current-buffer)))
+              (setq other-board (harness-ui-tasks-test--open-board other))
+              (harness-test-wait (lambda () (buffer-local-value 'harness-ui-tasks--new board)) 5 "the settings")
+              (setq tasks (list (plist-get (harness-call 'task/submit dir "waiting here") :id)
+                                (plist-get (harness-call 'task/submit other "waiting there") :id)
+                                (plist-get (harness-call 'task/submit other "running there") :id)))
+              (harness-call 'task/start (nth 2 tasks))
+              (setq sessions (list (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted") :id)
+                                   (plist-get (harness-call 'session/create :cwd other :model "demo:scripted") :id)
+                                   (plist-get (harness-call 'task/get (nth 2 tasks)) :session)))
+              (should (cl-every #'stringp sessions))
+              (dolist (b (list board other-board))
+                (should-not (plist-get (buffer-local-value 'harness-ui-tasks--new b) :non-interactive)))
+              ;; On, offered first, for everything.
+              (cl-letf (((symbol-function 'completing-read)
+                         (lambda (_prompt table _pred _require _initial _hist def)
+                           (should (equal '("on" "off") (all-completions "" table)))
+                           def)))
+                (call-interactively #'harness-set-non-interactive-all))
+              (let ((report (harness-ui-tasks-test--said said "Non-interactive on")))
+                (should (string-prefix-p (concat "Non-interactive on for 3 sessions and 3 tasks, and for new"
+                                                 " sessions and the open boards' new tasks.  But new sessions in ")
+                                         report))
+                (should (string-search (format " start interactive (harness-non-interactive in %s)"
+                                               (abbreviate-file-name (expand-file-name ".dir-locals.el" other)))
+                                       report)))
+              (dolist (sid sessions)
+                (should (plist-get (harness-call 'session/get sid) :non-interactive))
+                (should (= 1 (harness-ui-tasks-test--hint-count sid "non-interactive on"))))
+              (dolist (id tasks)
+                (should (eq t (plist-get (harness-call 'task/get id) :non-interactive))))
+              (dolist (b (list board other-board))
+                (should (eq t (plist-get (buffer-local-value 'harness-ui-tasks--new b) :non-interactive))))
+              (should (equal '((harness-non-interactive . t)) saved))
+              ;; Off with a prefix argument: the default stays on.  The task
+              ;; default turns new tasks on all the same, and it says so.
+              (setq messages nil)
+              (let ((harness-tasks-non-interactive t))
+                (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "off")))
+                  (harness-set-non-interactive-all t))
+                (let ((report (harness-ui-tasks-test--said said "Non-interactive off")))
+                  (should (equal (concat "Non-interactive off for 3 sessions and 3 tasks, and for the open boards'"
+                                         " new tasks.  But new tasks start non-interactive"
+                                         " (harness-tasks-non-interactive); M-x harness-settings changes them.")
+                                 report))))
+              (should (equal '((harness-non-interactive . t)) saved))
+              (should (eq t harness-non-interactive))
+              (dolist (sid sessions)
+                (should-not (plist-get (harness-call 'session/get sid) :non-interactive))
+                (should (= 1 (harness-ui-tasks-test--hint-count sid "non-interactive off"))))
+              (dolist (id tasks)
+                (should (eq :false (plist-get (harness-call 'task/get id) :non-interactive))))
+              (dolist (b (list board other-board))
+                (should-not (plist-get (buffer-local-value 'harness-ui-tasks--new b) :non-interactive)))
+              ;; A model for everything, each session switched once.
+              (setq messages nil)
+              (cl-letf (((symbol-function 'harness-ui-choose-model)
+                         (lambda (callback) (funcall callback "demo:other" "Other (Demo)"))))
+                (harness-set-model-all))
+              (let ((report (harness-ui-tasks-test--said said "Model → Other (Demo)")))
+                (should (string-prefix-p (concat "Model → Other (Demo) for 3 sessions and 3 tasks, and for new"
+                                                 " sessions and the open boards' new tasks.  But new tasks start on ")
+                                         report))
+                (should (string-search "(harness-tasks-model)" report)))
+              (should (equal "demo:other" harness-model))
+              (dolist (sid sessions)
+                (should (equal "demo:other" (plist-get (harness-call 'session/get sid) :model)))
+                (should (= 1 (harness-ui-tasks-test--hint-count sid "model → demo:other"))))
+              (dolist (id tasks)
+                (should (equal "demo:other" (plist-get (harness-call 'task/get id) :model))))
+              (dolist (b (list board other-board))
+                (should (equal "demo:other" (plist-get (buffer-local-value 'harness-ui-tasks--new b) :model)))))
+          (ignore-errors (harness-call 'task/cancel (nth 2 tasks)))
+          (when (buffer-live-p other-board) (kill-buffer other-board))
+          (delete-directory other t))))))
 
 (declare-function harness-ui-tasks--on-resize "harness-ui-tasks")
 (declare-function harness-ui-tasks--refresh-soon "harness-ui-tasks")
@@ -975,6 +1185,178 @@ box alone again."
     (let ((task (car (harness-call 'task/list default-directory))))
       (should (harness-json-true-p (plist-get task :main-tree))))))
 
+(declare-function harness-ui-tasks-raise-priority "harness-ui-tasks")
+(declare-function harness-ui-tasks-lower-priority "harness-ui-tasks")
+(declare-function harness-ui-tasks-cycle-new-priority "harness-ui-tasks")
+(declare-function harness-ui-tasks--meta "harness-ui-tasks")
+(declare-function harness-ui-tasks--actions "harness-ui-tasks")
+
+(defun harness-ui-tasks-test--priority-actions (board text)
+  "The priority entries of the actions of BOARD's card showing TEXT."
+  (harness-ui-tasks-test--goto-card board text)
+  (with-current-buffer board
+    (seq-filter (lambda (label) (string-match-p "priority" label))
+                (mapcar #'car (harness-ui-tasks--actions (harness-ui-tasks--task))))))
+
+(ert-deftest harness-ui-tasks-pending-in-priority-order ()
+  "Pending lists the waiting tasks as they will start: by priority, then oldest first.
+A high or low card has an arrow before its title and says so among its
+facts; medium goes without saying.  + and - on a card move its priority
+a step, and the card moves with it; off a card they type."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (harness-call 'task/submit default-directory "Alpha, low" (list :priority "low"))
+      (harness-call 'task/submit default-directory "Bravo, medium")
+      (harness-call 'task/submit default-directory "Charlie, high" (list :priority "high"))
+      (harness-ui-tasks-test--wait-text board "Pending  3\\(.\\|\n\\)*Charlie\\(.\\|\n\\)*Bravo\\(.\\|\n\\)*Alpha")
+      (should (string-match-p "↑ Charlie, high" (harness-ui-tasks-test--card-text board "Charlie")))
+      (should (string-match-p "↓ Alpha, low" (harness-ui-tasks-test--card-text board "Alpha")))
+      (should-not (string-match-p "[↑↓]" (harness-ui-tasks-test--card-text board "Bravo")))
+      (with-current-buffer board
+        (let ((facts (lambda (title)
+                       (harness-ui-tasks--meta (cl-find title harness-ui-tasks--tasks
+                                                        :key (lambda (task) (plist-get task :prompt))
+                                                        :test #'equal)
+                                               'pending nil))))
+          (should (string-prefix-p "high priority · queued" (funcall facts "Charlie, high")))
+          (should (string-prefix-p "low priority · queued" (funcall facts "Alpha, low")))
+          (should (string-prefix-p "queued" (funcall facts "Bravo, medium")))))
+      ;; The place in line is the place it starts in.
+      (harness-ui-tasks-test--show-subtitle board "Charlie")
+      (harness-ui-tasks-test--show-subtitle board "Alpha")
+      (should (string-match-p "#1 in line" (harness-ui-tasks-test--card-text board "Charlie")))
+      (should (string-match-p "#3 in line" (harness-ui-tasks-test--card-text board "Alpha")))
+      ;; The menu offers the steps there are.
+      (should (equal '("Raise priority to high" "Lower priority to low")
+                     (harness-ui-tasks-test--priority-actions board "Bravo")))
+      (should (equal '("Lower priority to medium") (harness-ui-tasks-test--priority-actions board "Charlie")))
+      (should (equal '("Raise priority to medium") (harness-ui-tasks-test--priority-actions board "Alpha")))
+      ;; + raises Bravo to high: older than Charlie, it goes first now.
+      (with-current-buffer board
+        (should (eq board (window-buffer (selected-window))))
+        (harness-ui-tasks-test--goto-card board "Bravo")
+        (should (eq 'harness-ui-tasks-raise-priority (key-binding (kbd "+"))))
+        (should (eq 'harness-ui-tasks-lower-priority (key-binding (kbd "-"))))
+        (execute-kbd-macro "+"))
+      (harness-ui-tasks-test--wait-text board "Pending  3\\(.\\|\n\\)*Bravo\\(.\\|\n\\)*Charlie\\(.\\|\n\\)*Alpha")
+      (should (eq 'high (plist-get (harness-call 'task/get (harness-ui-tasks-test--card-id board "Bravo"))
+                                   :priority)))
+      (should (string-match-p "↑ Bravo" (harness-ui-tasks-test--card-text board "Bravo")))
+      ;; Nothing above high, nothing below low.
+      (harness-ui-tasks-test--goto-card board "Bravo")
+      (with-current-buffer board (should-error (harness-ui-tasks-raise-priority) :type 'user-error))
+      (harness-ui-tasks-test--goto-card board "Alpha")
+      (with-current-buffer board (should-error (harness-ui-tasks-lower-priority) :type 'user-error))
+      ;; - takes Charlie down to medium, after Bravo still, its arrow gone.
+      (with-current-buffer board
+        (harness-ui-tasks-test--goto-card board "Charlie")
+        (execute-kbd-macro "-"))
+      (harness-test-wait (lambda ()
+                           (with-current-buffer board (harness-ui-tasks--render))
+                           (not (string-match-p "[↑↓]" (harness-ui-tasks-test--card-text board "Charlie"))))
+                         5 "Charlie's arrow to go")
+      (should (eq 'medium (plist-get (harness-call 'task/get (harness-ui-tasks-test--card-id board "Charlie"))
+                                     :priority)))
+      (should (string-match-p "Pending  3\\(.\\|\n\\)*Bravo\\(.\\|\n\\)*Charlie\\(.\\|\n\\)*Alpha"
+                              (harness-ui-tasks-test--board-text board)))
+      ;; Off a card the keys type, into the compose box.
+      (with-current-buffer board
+        (harness-compose-set "")
+        (goto-char (point-min))
+        (search-forward "nothing working")
+        (should-not (get-text-property (point) 'harness-task-id))
+        (execute-kbd-macro "+")
+        (execute-kbd-macro "-")
+        (should (equal "+-" (harness-compose-text)))))))
+
+(ert-deftest harness-ui-tasks-new-task-priority ()
+  "The button beside Submit sets the next task's priority; each click moves it on."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (with-current-buffer board
+        (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
+        (should (string-match-p "Submit +medium priority\n" (harness-ui-tasks-test--tail-text board)))
+        (push-button (save-excursion (goto-char harness-ui-tasks--list-end)
+                                     (search-forward "medium priority")
+                                     (match-beginning 0)))
+        (should (string-match-p "Submit +high priority\n" (harness-ui-tasks-test--tail-text board))))
+      (harness-ui-tasks-test--type-and-submit board "Urgent fix")
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*↑ Urgent fix")
+      (should (eq 'high (plist-get (car (harness-call 'task/list default-directory)) :priority)))
+      ;; It stays for the tasks after, like the other settings, until changed.
+      (with-current-buffer board
+        (harness-ui-tasks-cycle-new-priority)
+        (should (string-match-p "Submit +low priority\n" (harness-ui-tasks-test--tail-text board)))
+        (harness-ui-tasks-cycle-new-priority)
+        (should (string-match-p "Submit +medium priority\n" (harness-ui-tasks-test--tail-text board))))
+      (harness-ui-tasks-test--type-and-submit board "Whenever")
+      (harness-ui-tasks-test--wait-text board "Pending  2\\(.\\|\n\\)*↑ Urgent fix\\(.\\|\n\\)*Whenever")
+      (should (eq 'medium (plist-get (cadr (harness-call 'task/list default-directory)) :priority))))))
+
+(declare-function harness-ui-tasks-bulk-priority "harness-ui-tasks")
+(declare-function harness-ui-tasks-toggle-bulk "harness-ui-tasks")
+
+(defun harness-ui-tasks-test--tail-button (board text)
+  "Where BOARD's button showing TEXT is, below the board."
+  (with-current-buffer board
+    (save-excursion
+      (goto-char harness-ui-tasks--list-end)
+      (search-forward text)
+      (match-beginning 0))))
+
+(ert-deftest harness-ui-tasks-bulk-edit-priority ()
+  "Bulk mode gives the current tasks a priority only when its button is used.
+The button is on the settings line, in place of the next task's beside
+Submit; the other bulk settings leave each task's priority alone, and
+the next task keeps its own."
+  (harness-ui-tasks-test-with
+    (let* ((harness-tasks-max-running 0)
+           (alpha (plist-get (harness-call 'task/submit default-directory "Alpha") :id))
+           (bravo (plist-get (harness-call 'task/submit default-directory "Bravo" (list :priority "low"))
+                             :id))
+           (priorities (lambda ()
+                         (mapcar (lambda (id) (plist-get (harness-call 'task/get id) :priority))
+                                 (list alpha bravo)))))
+      (harness-ui-tasks-test--wait-text board "Pending  2")
+      (with-current-buffer board
+        (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
+        (should-error (harness-ui-tasks-bulk-priority "high") :type 'user-error)
+        (harness-ui-tasks-toggle-bulk)
+        (let ((tail (harness-ui-tasks-test--tail-text board)))
+          (should-not (string-match-p "Submit +medium priority" tail))
+          (should (string-match-p "· mixed priority" tail)))
+        ;; Another setting leaves their priorities as they are.
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "YOLO")))
+          (harness-set-permission-mode)))
+      (harness-test-wait (lambda () (equal "yolo" (format "%s" (plist-get (harness-call 'task/get bravo)
+                                                                          :permission-mode))))
+                         5 "the tasks' mode to change")
+      (should (equal '(medium low) (funcall priorities)))
+      ;; The priority button asks; no answer is no change.
+      (with-current-buffer board
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "")))
+          (push-button (harness-ui-tasks-test--tail-button board "mixed priority"))))
+      (should (equal '(medium low) (funcall priorities)))
+      ;; An answer goes to them all.
+      (with-current-buffer board
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "high")))
+          (push-button (harness-ui-tasks-test--tail-button board "mixed priority"))))
+      (harness-test-wait (lambda () (equal '(high high) (funcall priorities))) 5 "both to be high")
+      (harness-test-wait (lambda ()
+                           (with-current-buffer board
+                             (harness-ui-tasks--render-tail)
+                             (string-match-p "· high priority" (harness-ui-tasks-test--tail-text board))))
+                         5 "the button to say high")
+      (with-current-buffer board
+        (should (eq 'harness-task-priority-high-face
+                    (get-text-property (harness-ui-tasks-test--tail-button board "high priority") 'face)))
+        ;; The next task keeps its own, beside Submit again once bulk mode is off.
+        (should (equal "medium" (harness-ui-tasks--priority harness-ui-tasks--new)))
+        (harness-ui-tasks-toggle-bulk)
+        (let ((tail (harness-ui-tasks-test--tail-text board)))
+          (should (string-match-p "Submit +medium priority\n" tail))
+          (should-not (string-match-p "high priority" tail)))))))
+
 (defun harness-ui-tasks-test--show-subtitle (board text)
   "Show the subtitle of BOARD's card whose title shows TEXT, and render.
 Cards are one line by default (see `harness-ui-tasks-toggle-subtitle');
@@ -994,8 +1376,8 @@ tests that check a card's detail line show it first."
       (with-current-buffer board
         (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
         (should-not harness-ui-tasks--refine)
-        ;; The toggle shows only the current mode.
-        (should (string-match-p "New task +. Submit\n" (harness-ui-tasks-test--tail-text board)))
+        ;; The toggle shows only the current mode, then the next task's priority.
+        (should (string-match-p "New task +. Submit +medium priority\n" (harness-ui-tasks-test--tail-text board)))
         (should (equal '("Submit") (harness-ui-tasks-test--modes-shown board)))
         (goto-char harness-compose-end)
         (should (eq 'harness-ui-tasks-toggle-refine (key-binding (kbd "C-c C-t"))))
@@ -1302,6 +1684,9 @@ the same would carry the bar on."
   (harness-ui-tasks-test-with
     (let ((harness-tasks-require-verification t)
           (notices nil))
+      ;; The board learns review is on as from a change of the option.
+      (with-current-buffer board (harness-ui-tasks-refresh))
+      (harness-ui-tasks-test--settings-say board t)
       (cl-letf* ((orig (symbol-function 'message))
                  ((symbol-function 'message)
                   (lambda (format-string &rest args)
@@ -1369,32 +1754,41 @@ the same would carry the bar on."
         (should-error (harness-ui-tasks-reject) :type 'user-error)))))
 
 (ert-deftest harness-ui-tasks-review-offers-the-worktree-harness ()
-  "A review card whose worktree is a harness checkout offers [Open harness]."
+  "A review card whose worktree is a harness checkout has Open harness in its menu.
+The card has no button for it, as it has none for its session, which a
+click on its title opens."
   (harness-ui-tasks-test-with
     (let ((harness-tasks-require-verification t)
-          (checkout nil))
+          (checkout nil)
+          (open-harness (lambda ()
+                          (assoc "Open harness" (harness-ui-tasks--actions (harness-ui-tasks--task))))))
       (harness-ui-tasks-test--type-and-submit board "Try the harness")
       (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*Try the harness")
-      ;; Without a checkout of its own the card has no such button.
+      ;; Without a checkout of its own the card does not offer it.
       (harness-ui-tasks-test--goto-card board "Try the harness")
       (with-current-buffer board
         (should-not (harness-ui-tasks--open-harness-p (harness-ui-tasks--task)))
-        (should-not (string-match-p "\\[Open harness\\]" (harness-ui-tasks-test--board-text board))))
-      ;; A worktree that is a checkout of the harness gets one.
+        (should-not (funcall open-harness)))
+      ;; A worktree that is a checkout of the harness gets it in the menu.
       (setq checkout (harness-test-harness-checkout))
       (harness-test-load-module 'tools-dev)
-      (harness-tasks--set (plist-get (car (harness-call 'task/list default-directory)) :id)
-                          :worktree checkout)
-      (harness-ui-tasks-refresh)
-      (harness-ui-tasks-test--wait-text board "\\[Open harness\\]")
+      (let ((id (plist-get (car (harness-call 'task/list default-directory)) :id)))
+        (harness-tasks--set id :worktree checkout)
+        (with-current-buffer board (harness-ui-tasks-refresh))
+        (harness-test-wait (lambda () (with-current-buffer board
+                                        (harness-ui-tasks--open-harness-p (harness-ui-tasks--find id))))
+                           5 "the board to know the task's worktree"))
       (harness-ui-tasks-test--goto-card board "Try the harness")
       (with-current-buffer board
-        (should (member "Open harness"
-                        (mapcar #'car (harness-ui-tasks--actions (harness-ui-tasks--task)))))
-        (let ((button (harness-ui-tasks--find-button "open-harness" (point-min) (point-max))))
-          (should button)
-          (push-button (nth 1 button))))
-      ;; The click starts the worktree's own live loop.
+        (harness-ui-tasks--render)
+        (should (funcall open-harness))
+        ;; Not as a button: the card's buttons stay Verify and Send back.
+        (should-not (string-match-p "\\[Open harness\\]" (harness-ui-tasks-test--board-text board)))
+        (should-not (harness-ui-tasks--find-button "open-harness" (point-min) (point-max)))
+        (should (string-match-p "\\[Verify\\] \\[Send back\\]" (harness-ui-tasks-test--board-text board)))
+        ;; The menu's entry starts the worktree's own live loop.
+        (harness-ui-tasks-test--goto-card board "Try the harness")
+        (call-interactively (nth 1 (funcall open-harness))))
       (harness-test-wait (lambda () (harness-test-dev-invocations checkout)) 5
                          "the worktree's dev loop to run")
       (should (equal "start" (cdr (assoc "args" (car (harness-test-dev-invocations checkout)))))))))

@@ -238,6 +238,12 @@ The menu groups BODY gives the test modes are taken back afterwards."
                   (push (cons mode group) groups))))
     groups))
 
+(defun harness-ui-test--suffix-plist (suffix)
+  "Return the properties of SUFFIX, a suffix of a transient layout.
+Transient 0.8 and later write it (CLASS . PLIST), earlier ones (LEVEL
+CLASS PLIST)."
+  (if (keywordp (cadr suffix)) (cdr suffix) (car (last suffix))))
+
 (defun harness-ui-test-menu (&optional keys)
   "Open `harness-menu' here and return its text, then type KEYS in it.
 KEYS default to C-g, which closes the menu."
@@ -707,6 +713,42 @@ and \"two\", `one' and `two'."
     (should (eq 'identity (cadr offered)))
     (should (equal "accept-edits" (plist-get sent :modeId)))))
 
+(ert-deftest harness-ui-models-redraw-only-when-new ()
+  "A model catalogue redraws every view only when it is new.
+The harness says the catalogue was updated each time a provider
+settles, mostly with nothing new, and each redraw fetched and rendered
+every chat buffer again.  It is new when it changed, or when it is the
+first over a connection (another harness may know other models)."
+  (let ((harness-ui--models (make-hash-table :test 'equal))
+        (harness-ui--models-seen nil)
+        (harness-ui-connection 'first)
+        (catalogue '((:id "demo:a") (:id "demo:b")))
+        (redrawn 0) (got nil)
+        (harness-ui-redraw-hook nil))
+    (add-hook 'harness-ui-redraw-hook (lambda () (cl-incf redrawn)))
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (method _params callback &rest _)
+                 (should (equal "_harness/provider/models" method))
+                 (funcall callback (copy-tree catalogue)))))
+      (harness-ui-refresh-models)
+      (should (= 1 redrawn))
+      (should (gethash "demo:b" harness-ui--models))
+      ;; The same again: nothing to redraw, the callback still called.
+      (harness-ui-refresh-models (lambda (models) (setq got models)))
+      (should (= 1 redrawn))
+      (should (equal catalogue got))
+      ;; Changed.
+      (setq catalogue '((:id "demo:a")))
+      (harness-ui-refresh-models)
+      (should (= 2 redrawn))
+      (should-not (gethash "demo:b" harness-ui--models))
+      ;; The same models, over another connection.
+      (setq harness-ui-connection 'second)
+      (harness-ui-refresh-models)
+      (should (= 3 redrawn))
+      (harness-ui-refresh-models)
+      (should (= 3 redrawn)))))
+
 (ert-deftest harness-ui-model-window-says-when-it-is-estimated ()
   "The model picker marks a window the catalogue estimated with a tilde."
   (should (equal "1.00M" (harness-ui-format-model-window '(:context-window 1000000))))
@@ -781,6 +823,52 @@ nothing about it and asks for nothing."
         (should (string-match-p " i Non-interactive: on" (harness-ui-test-menu "i")))
         (should (equal '((:non-interactive nil)) set))))
     (should-not sent)))
+
+(ert-deftest harness-ui-move-session-asks-the-harness ()
+  "C-c h W moves a session.  The harness gets the directory, absolute,
+and the project the UI sees there; a prefix argument keeps the old
+directory.  A remote session's directory goes as typed, a path on its
+host, and no TRAMP connection is opened for it."
+  (should (eq 'harness-move-session (lookup-key harness-ui-map (kbd "W"))))
+  (should (eq 'harness-move-session (lookup-key harness-global-mode-map (kbd "C-c h W"))))
+  (should (eq 'harness-move-session (symbol-function 'harness-session-move)))
+  (let* ((harness-ui--sessions (make-hash-table :test 'equal))
+         (harness-ui-sessions-changed-hook nil)
+         (base (file-name-as-directory (file-truename (harness-test-temp-dir))))
+         (repo (file-name-as-directory (expand-file-name "repo" base)))
+         (sub (file-name-as-directory (expand-file-name "sub" repo)))
+         (sent nil) (answer nil) (said nil))
+    (unwind-protect
+        (progn
+          (make-directory sub t)
+          (let ((default-directory repo)) (should (zerop (call-process "git" nil nil nil "init" "-q"))))
+          (harness-ui-cache-session (list :id "s-here" :name "Here" :cwd base :project base))
+          (harness-ui-cache-session (list :id "s-far" :name "Far" :cwd "/srv/app/" :host "/ssh:box:"))
+          (cl-letf (((symbol-function 'harness-ui-call)
+                     (lambda (method params callback &optional _on-error)
+                       (push (cons method params) sent)
+                       (funcall callback answer)))
+                    ((symbol-function 'message)
+                     (lambda (format &rest args) (push (apply #'format-message format args) said))))
+            ;; Moved at once: the cache has the session where it is now.
+            (setq answer (list :id "s-here" :name "Here" :cwd sub :project repo))
+            (harness-move-session (concat repo "sub") "s-here")
+            (should (equal (cons "_harness/session/move" (list :id "s-here" :dir sub :keep-old-dir :false :project repo))
+                           (pop sent)))
+            (should (equal sub (plist-get (harness-ui-session "s-here") :cwd)))
+            (should (string-match-p "\\`Moved .*Here to .*/repo/sub/\\'" (pop said)))
+            ;; Running a turn: it moves when the turn ends.
+            (setq answer (list :id "s-here" :name "Here" :cwd sub :project repo :move (list :cwd base)))
+            (harness-move-session base "s-here" t)
+            (should (eq t (plist-get (cdr (pop sent)) :keep-old-dir)))
+            (should (string-match-p "Here moves to .* when its turn ends\\'" (pop said)))
+            ;; A remote session's directory is for its host to resolve.
+            (setq answer (list :id "s-far" :name "Far" :cwd "/srv/other/" :host "/ssh:box:"))
+            (harness-move-session "../other" "s-far")
+            (should (equal (cons "_harness/session/move" (list :id "s-far" :dir "../other" :keep-old-dir :false))
+                           (pop sent)))
+            (should (string-match-p "Moved .*Far to /srv/other/\\'" (pop said)))))
+      (delete-directory base t))))
 
 (ert-deftest harness-ui-tool-outcome-tells-denied-from-failed ()
   "A refused call is `denied' whatever else its result says; one that
@@ -1159,7 +1247,11 @@ once, and a change made with `setopt' reaches it."
       (should (equal "harness-model" (plist-get config :key)))
       (should (equal "deepseek:deepseek-flash" (plist-get config :value)))
       (should (equal "global" (plist-get config :scope)))
-      (should (equal "deepseek:deepseek-flash" (plist-get (plist-get bulk :settings) :model))))))
+      (should (equal "deepseek:deepseek-flash" (plist-get (plist-get bulk :settings) :model)))
+      (should (equal '(:active t :tasks t) (plist-get bulk :filter)))
+      ;; The current tasks of every project: no `:cwd'.
+      (should (equal '(:settings (:model "deepseek:deepseek-flash")) (cdr (assoc "_harness/task/set-all" calls))))
+      (should (assoc "_harness/config/overrides" calls)))))
 
 (ert-deftest harness-ui-set-model-all-prefix-leaves-the-default-alone ()
   "A prefix argument switches the sessions but keeps the new-session default."
@@ -1176,7 +1268,203 @@ once, and a change made with `setopt' reaches it."
       (harness-set-model-all t))
     (should-not (assoc "_harness/config/set" calls))
     (should (equal "deepseek:deepseek-flash"
-                   (plist-get (plist-get (cdr (assoc "_harness/session/set-all" calls)) :settings) :model)))))
+                   (plist-get (plist-get (cdr (assoc "_harness/session/set-all" calls)) :settings) :model)))
+    (should (equal '(:settings (:model "deepseek:deepseek-flash")) (cdr (assoc "_harness/task/set-all" calls))))
+    ;; No new default, so nothing to say about what overrides it.
+    (should-not (assoc "_harness/config/overrides" calls))))
+
+(defmacro harness-ui-test-with-all (answers &rest body)
+  "Run BODY with the harness answering every request from ANSWERS.
+ANSWERS maps a method to its result.  BODY sees CALLS, the requests
+made, newest first; SAID, the messages said, newest first; and SET, the
+arguments of the calls of `harness-ui-set-all-functions', which stands
+for two open boards, of /p/ and /q/."
+  (declare (indent 1))
+  `(let ((calls nil) (said nil) (set nil))
+     (let ((harness-ui-set-all-functions
+            (list (lambda (key value) (push (list key value) set) (list "/p/" "/q/")))))
+       (cl-letf (((symbol-function 'harness-ui-call)
+                  (lambda (method params &optional callback _on-error)
+                    (push (cons method params) calls)
+                    (when callback (funcall callback (cdr (assoc method ,answers))))))
+                 ((symbol-function 'message)
+                  (lambda (format-string &rest args)
+                    (when format-string (push (apply #'format format-string args) said)))))
+         ,@body))))
+
+(ert-deftest harness-ui-set-non-interactive-all-changes-everything ()
+  "C-c h I, beside C-c h i for one session as M is beside m, turns
+non-interactive on or off, offering on first, for every session and
+current task of every project, for the open boards' next tasks and as
+the default for new sessions.  It says how many sessions and tasks
+changed, and what keeps the new default from new work: here a
+project's .dir-locals.el and a directory's."
+  (should (eq 'harness-set-non-interactive-all (lookup-key harness-ui-map (kbd "I"))))
+  (should (eq 'harness-set-non-interactive-all (lookup-key harness-global-mode-map (kbd "C-c h I"))))
+  (should (eq 'harness-toggle-non-interactive (lookup-key harness-global-mode-map (kbd "C-c h i"))))
+  ;; Beside i in the menu's session settings, as M is beside m.
+  (let* ((column (transient-get-suffix 'harness-menu '(0 1)))
+         (keys (mapcar (lambda (suffix) (plist-get (harness-ui-test--suffix-plist suffix) :key))
+                       (aref column (1- (length column))))))
+    (should (equal "Session settings" (plist-get (aref column (- (length column) 2)) :description)))
+    (should (equal '("i" "I") (seq-take (member "i" keys) 2)))
+    (should (equal '("m" "M") (seq-take (member "m" keys) 2))))
+  (harness-ui-test-with-all
+      (list (cons "_harness/session/set-all" '("s1" "s2" "s3"))
+            (cons "_harness/task/set-all" '("t1"))
+            (cons "_harness/config/overrides"
+                  '(:key "harness-non-interactive" :value "t"
+                    :files ((:file "/p/.dir-locals.el" :scope "project" :dir "/p/" :project "p" :value "nil")
+                            (:file "/q/sub/.dir-locals.el" :scope "directory" :dir "/q/sub/" :project "q"
+                             :value "nil")))))
+    (let (offered)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt table _pred require _initial _hist def)
+                   (setq offered (list (all-completions "" table)
+                                       (completion-metadata-get (completion-metadata "" table nil)
+                                                                'display-sort-function)
+                                       require def))
+                   def)))
+        (call-interactively #'harness-set-non-interactive-all))
+      (should (equal '(("on" "off") identity t "on") offered)))
+    (should (equal '((:non-interactive t)) set))
+    ;; Sessions, then tasks (whose sessions have it already), then the default.
+    (should (equal '("_harness/session/set-all" "_harness/task/set-all"
+                     "_harness/config/set" "_harness/config/overrides")
+                   (reverse (mapcar #'car calls))))
+    (should (equal '(:settings (:non-interactive t) :filter (:active t :tasks t))
+                   (cdr (assoc "_harness/session/set-all" calls))))
+    (should (equal '(:settings (:non-interactive t)) (cdr (assoc "_harness/task/set-all" calls))))
+    (should (equal '(:key "harness-non-interactive" :value "t" :printed t :scope "global")
+                   (cdr (assoc "_harness/config/set" calls))))
+    (should (equal '(:key "harness-non-interactive" :value "t" :printed t :dirs ("/p/" "/q/"))
+                   (cdr (assoc "_harness/config/overrides" calls))))
+    (should (equal (list (concat "Non-interactive on for 3 sessions and 1 task, and for new sessions"
+                                 " and the open boards' new tasks.  But new sessions in p start interactive"
+                                 " (harness-non-interactive in /p/.dir-locals.el), new sessions in /q/sub/"
+                                 " start interactive (harness-non-interactive in /q/sub/.dir-locals.el);"
+                                 " M-x harness-settings changes them."))
+                   said)))
+  ;; Off, when nothing overrides it: just the counts.
+  (harness-ui-test-with-all
+      (list (cons "_harness/session/set-all" '("s1"))
+            (cons "_harness/task/set-all" '("t1" "t2"))
+            (cons "_harness/config/overrides" '(:key "harness-non-interactive" :value "nil")))
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "off")))
+      (harness-set-non-interactive-all))
+    (should (equal '((:non-interactive nil)) set))
+    (should (equal '(:settings (:non-interactive :false) :filter (:active t :tasks t))
+                   (cdr (assoc "_harness/session/set-all" calls))))
+    (should (equal "nil" (plist-get (cdr (assoc "_harness/config/set" calls)) :value)))
+    (should (equal '("Non-interactive off for 1 session and 2 tasks, and for new sessions and the open boards' new tasks")
+                   said))))
+
+(ert-deftest harness-ui-set-non-interactive-all-prefix-leaves-the-default-alone ()
+  "With a prefix argument C-c h I leaves the default for new sessions alone.
+The boards' next tasks still change.  Turned on, there is no new default
+to say anything about; turned off, what still turns new work on is said
+all the same."
+  (harness-ui-test-with-all
+      (list (cons "_harness/session/set-all" '("s1"))
+            (cons "_harness/task/set-all" nil))
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "on")))
+      (harness-set-non-interactive-all t))
+    (should (equal '("_harness/session/set-all" "_harness/task/set-all") (reverse (mapcar #'car calls))))
+    (should (equal '((:non-interactive t)) set))
+    (should (equal '("Non-interactive on for 1 session and 0 tasks, and for the open boards' new tasks") said)))
+  (harness-ui-test-with-all
+      (list (cons "_harness/session/set-all" '("s1" "s2"))
+            (cons "_harness/task/set-all" '("t1" "t2"))
+            (cons "_harness/config/overrides"
+                  '(:key "harness-non-interactive" :value "nil"
+                    :tasks (:option "harness-tasks-non-interactive" :value "t"))))
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "off")))
+      (harness-set-non-interactive-all t))
+    (should-not (assoc "_harness/config/set" calls))
+    (should (equal '((:non-interactive nil)) set))
+    (should (equal '(:key "harness-non-interactive" :value "nil" :printed t :dirs ("/p/" "/q/"))
+                   (cdr (assoc "_harness/config/overrides" calls))))
+    (should (equal (list (concat "Non-interactive off for 2 sessions and 2 tasks, and for the open boards'"
+                                 " new tasks.  But new tasks start non-interactive"
+                                 " (harness-tasks-non-interactive); M-x harness-settings changes them."))
+                   said))))
+
+(ert-deftest harness-ui-set-thinking-all-reaches-every-project ()
+  "C-c h H sets a thinking level on every session and current task of
+every project, the open boards' next tasks and new sessions, and says
+what keeps the new default from new work.  With a prefix argument the
+default and the boards stay as they were."
+  (should (eq 'harness-set-thinking-all (lookup-key harness-ui-map (kbd "H"))))
+  (harness-ui-test-with-all
+      (list (cons "_harness/session/set-all" '("s1" "s2"))
+            (cons "_harness/task/set-all" '("t1" "t2" "t3"))
+            (cons "_harness/config/overrides"
+                  '(:key "harness-thinking" :value "\"high\""
+                    :tasks (:option "harness-tasks-thinking" :value "\"low\"")
+                    :files ((:file "/p/.dir-locals.el" :scope "project" :dir "/p/" :project "p" :value "nil")))))
+    (cl-letf (((symbol-function 'harness-ui-choose-thinking)
+               (lambda (callback &rest _) (funcall callback "high" "high"))))
+      (harness-set-thinking-all))
+    (should (equal '((:thinking "high")) set))
+    (should (equal '(:key "harness-thinking" :value "\"high\"" :printed t :scope "global")
+                   (cdr (assoc "_harness/config/set" calls))))
+    (should (equal '(:settings (:thinking "high") :filter (:active t :tasks t))
+                   (cdr (assoc "_harness/session/set-all" calls))))
+    (should (equal '(:settings (:thinking "high")) (cdr (assoc "_harness/task/set-all" calls))))
+    (should (equal '(:key "harness-thinking" :value "\"high\"" :printed t :dirs ("/p/" "/q/"))
+                   (cdr (assoc "_harness/config/overrides" calls))))
+    (should (equal (list (concat "Thinking → high for 2 sessions and 3 tasks, and for new sessions and the open"
+                                 " boards' new tasks.  But new sessions in p think at the model's default"
+                                 " (harness-thinking in /p/.dir-locals.el), new tasks think at low"
+                                 " (harness-tasks-thinking); M-x harness-settings changes them."))
+                   said)))
+  (harness-ui-test-with-all
+      (list (cons "_harness/session/set-all" '("s1"))
+            (cons "_harness/task/set-all" '("t1")))
+    (cl-letf (((symbol-function 'harness-ui-choose-thinking)
+               (lambda (callback &rest _) (funcall callback nil "default"))))
+      (harness-set-thinking-all t))
+    (should-not set)
+    (should-not (assoc "_harness/config/set" calls))
+    (should-not (assoc "_harness/config/overrides" calls))
+    (should (equal '(:settings (:thinking nil)) (cdr (assoc "_harness/task/set-all" calls))))
+    (should (equal '("Thinking → default for 1 session and 1 task") said))))
+
+(ert-deftest harness-ui-set-all-empty-answer-changes-nothing ()
+  "An empty answer at the model or thinking prompt, which a required
+match still lets through, chooses nothing: C-c h M and C-c h H change
+no session, task, board or default, where they once set the model to
+nil and the level to \"\" everywhere."
+  (dolist (command '(harness-set-model-all harness-set-thinking-all))
+    (harness-ui-test-with-all nil
+      (cl-letf (((symbol-function 'harness-ui-refresh-models)
+                 (lambda (&optional callback)
+                   (funcall callback (list (list :id "deepseek:deepseek-flash" :label "DeepSeek V4.1 Flash"
+                                                 :provider-label "DeepSeek" :context-window 1048576)))))
+                ((symbol-function 'completing-read) (lambda (&rest _) "")))
+        (call-interactively command))
+      (should-not calls)
+      (should-not set)
+      (should (equal (list (if (eq command 'harness-set-model-all) "No model chosen" "No thinking level chosen"))
+                     said)))))
+
+(ert-deftest harness-ui-set-all-without-task-mode-or-overrides ()
+  "A harness without task mode, or without `config/overrides', still has
+the all-sessions commands change every session and say how many."
+  (let ((calls nil) (said nil))
+    (let ((harness-ui-set-all-functions nil))
+      (cl-letf (((symbol-function 'harness-ui-call)
+                 (lambda (method params &optional callback on-error)
+                   (push (cons method params) calls)
+                   (if (member method '("_harness/task/set-all" "_harness/config/overrides"))
+                       (when on-error (funcall on-error '(:message "Method not found")))
+                     (when callback (funcall callback (and (equal method "_harness/session/set-all") '("s1")))))))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args) (push (apply #'format format-string args) said)))
+                ((symbol-function 'completing-read) (lambda (&rest _) "on")))
+        (harness-set-non-interactive-all)))
+    (should (assoc "_harness/config/set" calls))
+    (should (equal '("Non-interactive on for 1 session and 0 tasks, and for new sessions") said))))
 
 ;;;; Switches that lose the conversation
 
@@ -1339,12 +1627,21 @@ ever; the other choices always do."
         (should (string-match-p (concat "^  s2 +" from " +- +120k tokens: \\$0\\.60 to write, \\$0\\.02 to read$")
                                 help)))
       (should (string-match-p "The choice applies to each session listed; the others just switch" help)))
-    (should (equal '(:model "claude:claude-opus-5-5" :filter (:active t))
+    ;; Every project's sessions, those of the current tasks included, are
+    ;; checked and switched with the handoff; then the tasks' records,
+    ;; whose sessions have switched already.
+    (should (equal '(:model "claude:claude-opus-5-5" :filter (:active t :tasks t))
                    (cdr (assoc "_harness/handoff/check-all" calls))))
-    (should (equal '(:model "claude:claude-opus-5-5" :filter (:active t) :mode "compact")
+    (should (equal '(:model "claude:claude-opus-5-5" :filter (:active t :tasks t) :mode "compact")
                    (cdr (assoc "_harness/handoff/switch-all" calls))))
+    (should (equal '(:settings (:model "claude:claude-opus-5-5")) (cdr (assoc "_harness/task/set-all" calls))))
+    (should (< (cl-position "_harness/task/set-all" calls :key #'car :test #'equal)
+               (cl-position "_harness/handoff/switch-all" calls :key #'car :test #'equal)))
     (should-not (assoc "_harness/session/set-all" calls))
-    (should (equal "claude:claude-opus-5-5" (plist-get (cdr (assoc "_harness/config/set" calls)) :value))))
+    (should (equal "claude:claude-opus-5-5" (plist-get (cdr (assoc "_harness/config/set" calls)) :value)))
+    ;; Then what overrides the new default is looked up.
+    (should (equal '(:key "harness-model" :value "\"claude:claude-opus-5-5\"" :printed t :dirs nil)
+                   (cdr (assoc "_harness/config/overrides" calls)))))
   ;; Cancelled: nothing changes, not even the default for new sessions.
   (harness-ui-test-with-switch
       (list (cons "_harness/handoff/check-all" (list (harness-ui-test--lossy-check "s1" "Fix the parser"))))
@@ -1423,6 +1720,107 @@ A fetch replaces the whole cache; a deleted session's rate goes."
     ;; A deleted session's rate goes with it.
     (harness-ui--forget-session "s2")
     (should-not (harness-ui-session-rate "s2"))
+    (should (equal '("s2" nil) (car heard)))))
+
+;;;; Token figures
+
+(ert-deftest harness-ui-token-figures-read-the-totals-or-the-live-count ()
+  "A session's token figures are its totals, or its live count while it runs.
+The context in use is the latest prompt plus what that request wrote.
+While the turn streams, the harness's live count stands in, and \"~\"
+marks the figures that are partly estimated."
+  (let ((harness-ui--live (make-hash-table :test 'equal))
+        (session (list :id "s1" :status "running" :context-window 200000
+                       :usage (list :context 1000 :last-output 200 :output 300))))
+    (should (equal '(:context 1200 :output 300 :estimated 0) (harness-ui-session-tokens session)))
+    (should (equal "1.2k/200k" (substring-no-properties (harness-ui-format-context session))))
+    (should (equal "300 out" (substring-no-properties (harness-ui-format-output session))))
+    (should (equal "300" (substring-no-properties (harness-ui-format-output session t))))
+    (should (equal "Context tokens in use: 1.2k of a 200k window; output tokens: 300."
+                   (get-text-property 0 'help-echo (harness-ui-format-context session))))
+    ;; Nothing written: no output figure.  Totals recorded before the
+    ;; output of the last request was count its prompt alone.
+    (let ((old '(:id "s2" :status "idle" :context-window 200000 :usage (:context 500))))
+      (should (equal '(:context 500 :output 0 :estimated 0) (harness-ui-session-tokens old)))
+      (should-not (harness-ui-format-output old))
+      (should (equal "500/200k" (substring-no-properties (harness-ui-format-context old)))))
+    ;; Streaming: the live count, its estimate marked.
+    (puthash "s1" '(:context 1700 :output 800 :estimated 500) harness-ui--live)
+    (should (equal '(:context 1700 :output 800 :estimated 500) (harness-ui-session-tokens session)))
+    (should (equal "~1.7k/200k" (substring-no-properties (harness-ui-format-context session))))
+    (should (equal "~800 out" (substring-no-properties (harness-ui-format-output session))))
+    (should (equal "~800" (substring-no-properties (harness-ui-format-output session t))))
+    (let ((help (get-text-property 0 'help-echo (harness-ui-format-output session))))
+      (should (string-prefix-p "Context tokens in use: 1.7k; output tokens: 800. ~500 of them estimated" help))
+      (should-not (string-match-p "\n" help)))
+    ;; Reported: the real numbers, unmarked.
+    (puthash "s1" '(:context 1760 :output 860 :estimated 0) harness-ui--live)
+    (should (equal "1.8k/200k" (substring-no-properties (harness-ui-format-context session))))
+    (should (equal "860 out" (substring-no-properties (harness-ui-format-output session))))))
+
+(ert-deftest harness-ui-live-token-cache-follows-the-harness ()
+  "Live figures come from `usage/live-updated' events and tell the views.
+The event that ends a turn's count can come before the session's new
+totals: the last figures stay until the cache shows the session no
+longer running, so they never drop in between.  A fetch replaces the
+whole cache; a deleted session's figures go."
+  (let ((harness-ui--live (make-hash-table :test 'equal))
+        (harness-ui--sessions (make-hash-table :test 'equal))
+        (harness-ui--rates (make-hash-table :test 'equal))
+        (harness-ui-live-functions nil)
+        (harness-ui-rate-functions nil)
+        (harness-ui-event-functions nil)
+        (harness-ui-sessions-changed-hook nil)
+        (heard nil)
+        (live '(:context 1700 :output 800 :estimated 500))
+        (event (lambda (id live)
+                 (harness-ui--dispatch-ui "_harness/event"
+                                          (list :event "usage/live-updated" :args (list id live)) nil))))
+    (add-hook 'harness-ui-live-functions (lambda (id live) (push (list id live) heard)))
+    (harness-ui-cache-session (list :id "s1" :status "running" :context-window 200000
+                                    :usage (list :context 1000 :last-output 200 :output 300)))
+    (funcall event "s1" live)
+    (should (equal live (harness-ui-session-live "s1")))
+    (should (equal (list (list "s1" live)) heard))
+    ;; The count ends while the cache still shows the session running.
+    (funcall event "s1" nil)
+    (should-not (harness-ui-session-live "s1"))
+    (should (equal '("s1" nil) (car heard)))
+    (should (equal live (harness-ui-session-tokens (harness-ui-session "s1"))))
+    ;; Its new totals come with it idle: they count from now on.
+    (harness-ui-cache-session (list :id "s1" :status "idle" :context-window 200000
+                                    :usage (list :context 1000 :last-output 820 :output 920)))
+    (should-not (gethash "s1" harness-ui--live))
+    (should (equal '(:context 1820 :output 920 :estimated 0)
+                   (harness-ui-session-tokens (harness-ui-session "s1"))))
+    ;; The count of a session already shown idle ends at once.
+    (funcall event "s1" live)
+    (funcall event "s1" nil)
+    (should-not (gethash "s1" harness-ui--live))
+    ;; Fetching every session again settles an ended count the same way.
+    (harness-ui-cache-session (list :id "s3" :status "running" :usage (list :context 10)))
+    (funcall event "s3" live)
+    (funcall event "s3" nil)
+    (should (gethash "s3" harness-ui--live))
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (method _params callback &rest _)
+                 (should (equal "_harness/session/list" method))
+                 (funcall callback (list (list :id "s3" :status "idle" :usage (list :context 900)))))))
+      (harness-ui-refresh-sessions))
+    (should-not (gethash "s3" harness-ui--live))
+    ;; The fetch on connecting replaces the cache, then tells the views at once.
+    (puthash "gone" live harness-ui--live)
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (method _params callback &rest _)
+                 (should (equal "_harness/usage/live-all" method))
+                 (funcall callback (list (append '(:session "s2") live))))))
+      (harness-ui-refresh-live))
+    (should-not (gethash "gone" harness-ui--live))
+    (should (equal live (harness-ui-session-live "s2")))
+    (should (equal '(nil nil) (car heard)))
+    ;; A deleted session's figures go with it.
+    (harness-ui--forget-session "s2")
+    (should-not (gethash "s2" harness-ui--live))
     (should (equal '("s2" nil) (car heard)))))
 
 ;;;; Mouse targets

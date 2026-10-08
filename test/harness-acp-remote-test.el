@@ -534,6 +534,25 @@ PROTOCOLS are offered; HEADERS, an alist, are sent besides."
           (harness-acp-remote--init)
           (should-not (harness-acp-remote--running-p)))))))
 
+(ert-deftest harness-acp-remote-policy-decides-whether-it-serves ()
+  "A policy that turns `harness-acp-remote' off refuses `acp/remote-start'
+before anything listens; one that turns it on refuses `acp/remote-stop'
+before the listener stops."
+  (harness-acp-remote-test-with
+    (harness-acp-remote--stop)
+    (harness-test-with-policy '((harness-acp-remote . nil))
+      (should (string-match-p "harness-acp-remote is set by policy"
+                              (error-message-string (should-error (harness-call 'acp/remote-start)))))
+      (should-not (harness-acp-remote--running-p))
+      ;; Stopping what does not run changes nothing the policy fixes.
+      (should (eq :false (plist-get (harness-call 'acp/remote-stop) :running))))
+    (harness-acp-remote--listen)
+    (harness-test-with-policy '((harness-acp-remote . t))
+      (should (string-match-p "harness-acp-remote is set by policy"
+                              (error-message-string (should-error (harness-call 'acp/remote-stop)))))
+      (should (harness-acp-remote--running-p))
+      (should (eq t (plist-get (harness-call 'acp/remote-start) :running))))))
+
 (defun harness-acp-remote-test-idle-socket ()
   "Open a socket to the test listener that sends nothing; return (PROC . CLOSED-CELL)."
   (let* ((closed (list nil))

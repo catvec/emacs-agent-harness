@@ -453,6 +453,7 @@ That is the harness's shorter budget for a task's session."
 
 (ert-deftest harness-provider-claude-call-usage-follows-the-stream ()
   "Each streamed message's output goes out as `call-usage', in parts.
+A message says the size of its prompt as it starts, with no output yet.
 A `message_delta' counts its message's output so far, so only what it
 adds is reported; the next message counts from zero again, and a
 sub-agent's stream is left out."
@@ -463,25 +464,31 @@ sub-agent's stream is left out."
                  :on-event (lambda (ev) (push ev events))))
          (stream (lambda (event &optional sub-agent)
                    (harness-provider-claude--handle-stream entry event sub-agent)))
-         (reported (lambda ()
-                     (mapcar (lambda (e) (plist-get e :output))
-                             (cl-remove 'call-usage (reverse events)
-                                        :key (lambda (e) (plist-get e :type)) :test-not #'eq)))))
-    (funcall stream '(:type "message_start" :message (:usage (:input_tokens 10 :output_tokens 1))))
+         (calls (lambda ()
+                  (cl-remove 'call-usage (reverse events)
+                             :key (lambda (e) (plist-get e :type)) :test-not #'eq)))
+         (reported (lambda () (mapcar (lambda (e) (plist-get e :output)) (funcall calls)))))
+    (funcall stream '(:type "message_start"
+                      :message (:usage (:input_tokens 10 :cache_read_input_tokens 300 :output_tokens 1))))
+    ;; The prompt the call was sent, cached part included.
+    (should (equal '((:type call-usage :output 0 :context 310)) (funcall calls)))
     (funcall stream '(:type "message_delta" :usage (:output_tokens 5)))
     (funcall stream '(:type "message_delta" :usage (:output_tokens 9)))
     ;; A delta that adds nothing reports nothing.
     (funcall stream '(:type "message_delta" :usage (:output_tokens 9)))
-    (should (equal '(5 4) (funcall reported)))
+    (should (equal '(0 5 4) (funcall reported)))
+    ;; Only the start says the size of the prompt.
+    (should (equal '(310 nil nil) (mapcar (lambda (e) (plist-get e :context)) (funcall calls))))
     ;; A sub-agent's message neither reports nor starts the count over.
-    (funcall stream '(:type "message_start" :message (:usage (:output_tokens 0))) "toolu_sub")
+    (funcall stream '(:type "message_start" :message (:usage (:input_tokens 50 :output_tokens 0))) "toolu_sub")
     (funcall stream '(:type "message_delta" :usage (:output_tokens 30)) "toolu_sub")
     (funcall stream '(:type "message_delta" :usage (:output_tokens 12)))
-    (should (equal '(5 4 3) (funcall reported)))
-    ;; The next message of the main conversation counts from zero.
+    (should (equal '(0 5 4 3) (funcall reported)))
+    ;; The next message of the main conversation counts from zero; one
+    ;; that does not say its prompt reports no start.
     (funcall stream '(:type "message_start" :message (:usage (:output_tokens 0))))
     (funcall stream '(:type "message_delta" :usage (:output_tokens 2)))
-    (should (equal '(5 4 3 2) (funcall reported)))
+    (should (equal '(0 5 4 3 2) (funcall reported)))
     ;; The end of the turn forgets the count.
     (harness-provider-claude--finish entry '(:type done :stop-reason end-turn))
     (should-not (gethash "s-call-usage" harness-provider-claude--call-output))))
@@ -525,12 +532,16 @@ sub-agent's stream is left out."
       (should (= 2000 (plist-get usage :cache-read)))
       (should (= 100 (plist-get usage :cache-write)))
       (should (= 2112 (plist-get usage :context))))
-    ;; The streamed message's output was reported as it came, for the
-    ;; output rate, before the turn's usage counted it.
-    (should (equal '(7) (mapcar (lambda (e) (plist-get e :output))
-                                (cl-remove 'call-usage events
-                                           :key (lambda (e) (plist-get e :type)) :test-not #'eq))))
+    ;; The streamed message's prompt was reported as it started and its
+    ;; output as it came, for the output rate and the live token count,
+    ;; before the turn's usage counted it.
+    (let ((calls (cl-remove 'call-usage events
+                            :key (lambda (e) (plist-get e :type)) :test-not #'eq)))
+      (should (equal '(0 7) (mapcar (lambda (e) (plist-get e :output)) calls)))
+      (should (equal '(2112 nil) (mapcar (lambda (e) (plist-get e :context)) calls))))
     (should (< (cl-position 'call-usage types) (cl-position 'usage types)))
+    ;; The turn's usage says what its last message wrote after its prompt.
+    (should (= 7 (plist-get (harness-provider-claude-test--find events 'usage) :last-output)))
     (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
     ;; Quota windows were reported and remembered.
     (let ((q (harness-provider-claude-test--find events 'quota)))
@@ -1434,6 +1445,69 @@ with no state of the session is sent no ordinary transcript."
         (should (string-match-p (concat "read " (regexp-quote file) ": it is the whole conversation")
                                 (plist-get (car got) :text)))
         (should (string-match-p "carry on\\'" (plist-get (car got) :text)))))))
+
+(ert-deftest harness-provider-claude-compaction-starts-a-new-cli-session ()
+  "A compacted Claude Code session goes on in a new CLI session the summary opens.
+Resumed, the CLI would read the whole old conversation back, uncached
+once its cache lapsed, and take the summary as one more message of it.
+The summary itself is written on a fork of the session's CLI session,
+which has the whole conversation, and the session's own is let go."
+  (harness-provider-claude-test-with-handoff
+    (let ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id)))
+      (harness-provider-claude-test--turn sid "fix the parser")
+      (let ((old (harness-provider-claude-test--cli-id sid)))
+        (should (string-prefix-p "fake-" old))
+        (let ((node (harness-test-await (harness-call 'compaction/compact sid)))
+              (asked (car (last (funcall inputs)))))
+          (should (equal "summary" (harness-node-compaction-kind node)))
+          ;; The summariser: a fork of the session's CLI session.
+          (should (equal old (plist-get asked :resumed)))
+          (should (eq t (plist-get asked :forked)))
+          (should (string-match-p "Summarize the conversation above" (plist-get asked :text))))
+        (should-not (plist-get (harness-call 'session/get sid) :provider-state))
+        (let ((argv (harness-provider-claude-test--turn sid "carry on"))
+              (got (car (last (funcall inputs)))))
+          (should argv)
+          (should-not (member "--resume" argv))
+          (should-not (plist-get got :resumed))
+          (should (string-match-p "\\`Summary of the conversation so far:\n\nhello" (plist-get got :text)))
+          (should (string-match-p "carry on\\'" (plist-get got :text)))
+          (should-not (equal old (harness-provider-claude-test--cli-id sid))))))))
+
+(ert-deftest harness-provider-claude-brief-compaction-on-the-cheap-model ()
+  "A brief compaction of a Claude Code session is the cheap model's, beside the session.
+Haiku gets the first and last messages as text in a CLI session of its
+own, the session's own process untouched until the next turn, which
+starts a new CLI session that the brief summary opens."
+  (harness-provider-claude-test-with-handoff
+    (let ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id)))
+      (harness-provider-claude-test--turn sid "fix the parser")
+      (let* ((old (harness-provider-claude-test--cli-id sid))
+             (process (harness-provider-claude-session-process (gethash sid harness-provider-claude--sessions)))
+             (argv-file (harness-provider-claude-test--argv-file))
+             (node (let ((process-environment (cons (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file)
+                                                    process-environment)))
+                     (harness-test-await (harness-call 'compaction/compact sid (list :kind "brief")))))
+             (asked (car (last (funcall inputs))))
+             (argv (plist-get (harness-provider-claude-test--read-argv argv-file) :argv)))
+        (should (equal "brief" (harness-node-compaction-kind node)))
+        (should (equal "claude:claude-haiku-4-5-20251001" (plist-get (plist-get node :meta) :model)))
+        (should (member "claude-haiku-4-5-20251001" argv))
+        (should-not (plist-get asked :resumed))
+        (should (string-match-p "\\`### user\n\nfix the parser" (plist-get asked :text)))
+        (should (string-match-p "Claude Haiku 4.5 wrote this summary from only the first and the most recent"
+                                (plist-get node :content)))
+        ;; The summariser's process was its own: the session's was let go
+        ;; only with the conversation it held.
+        (should-not (process-live-p process))
+        (let ((argv (harness-provider-claude-test--turn sid "carry on"))
+              (got (car (last (funcall inputs)))))
+          (should-not (member "--resume" argv))
+          (should (member "claude-fable-5-1" argv))
+          (should-not (plist-get got :resumed))
+          (should (string-match-p "\\`Summary of the conversation so far:\n\nhello\n\nHarness note:"
+                                  (plist-get got :text)))
+          (should-not (equal old (harness-provider-claude-test--cli-id sid))))))))
 
 (ert-deftest harness-provider-claude-handoff-mid-turn-waits-for-the-next-step ()
   "A switch while a turn runs hands over at the turn's next step.

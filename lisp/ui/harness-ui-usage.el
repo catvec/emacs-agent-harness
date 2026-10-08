@@ -1558,7 +1558,15 @@ Defaults come from the budget on the current line when there is one."
     (harness-ui-usage--refresh-soon))))
 
 (defun harness-ui-usage--on-quota (_provider _quota)
-  "Redraw the dashboard, whose plan section shows the providers' quota."
+  "Redraw the dashboard, whose plan section shows the providers' quota.
+Once for all the quotas a slice of received messages brings (see
+`harness-acp-once-received'): a model's every reply in every session
+may change its provider's quota."
+  (when (get-buffer harness-ui-usage--buffer-name)
+    (harness-acp-once-received #'harness-ui-usage--draw-quota)))
+
+(defun harness-ui-usage--draw-quota ()
+  "Redraw the dashboard for the providers' quota, if it shows."
   (when-let* ((buf (get-buffer harness-ui-usage--buffer-name)))
     (with-current-buffer buf
       (when (and (derived-mode-p 'harness-ui-usage-mode) harness-ui-usage--data)

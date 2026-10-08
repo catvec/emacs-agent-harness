@@ -790,5 +790,60 @@ stopped drawing at that setting and never set its widgets up."
                                                   :type (prin1-to-string
                                                          '(repeat (string :names (provider model))))))))))
 
+;;;; A policy
+
+(defvar harness-corporate-mode)
+
+(ert-deftest harness-ui-config-shows-what-the-policy-sets-as-locked ()
+  "A setting an administrator's policy sets shows its value, locked, with
+where the policy is, and nothing to change it with, in either scope; a
+banner lists the whole policy, settings the page does not show
+included."
+  (skip-unless (executable-find "git"))
+  (harness-ui-config-test-with
+    (with-temp-file (expand-file-name ".dir-locals.el" root)
+      (insert "((nil . ((harness-permission-mode . yolo))))"))
+    (harness-test-with-policy '((harness-permission-mode . ask) (harness-corporate-mode . t)
+                                (harness-ui-config-test-limit . 30000) (harness-acp-allow-remote . nil))
+      (harness-ui-config-test-open root)
+      (let ((text (buffer-substring-no-properties (point-min) (point-max)))
+            (mode (harness-ui-config-test-block "harness-permission-mode")))
+        (should (string-match-p
+                 (concat "Set by policy  An administrator's policy, "
+                         (regexp-quote (abbreviate-file-name policy-file))
+                         ", sets these 4 settings everywhere: they cannot be changed here\\.")
+                 text))
+        (should (string-match-p "Permission mode (harness-permission-mode): Ask$" text))
+        (should (string-match-p "Corporate mode (harness-corporate-mode): on  not on this page" text))
+        (should (string-match-p "(harness-acp-allow-remote): off  not on this page" text))
+        (should (string-match-p "Permission mode: Ask  .*Locked" mode))
+        (should (string-match-p (concat "set by policy in " (regexp-quote (abbreviate-file-name policy-file)))
+                                mode))
+        ;; Nothing to change it with: no menu, no reset, no word of the project.
+        (should-not (string-match-p "Value Menu\\|Reset to default\\|this project uses" mode))
+        ;; The test limit, an advanced setting off its default, is not
+        ;; counted among the settings changed here: the policy changed it.
+        (should (string-match-p "^ Advanced  \\[?Show [0-9]+ more" text))
+        (should-not (string-match-p "[0-9]+ changed here" text)))
+      (goto-char (harness-ui-config--setting-start "harness-permission-mode"))
+      (should (string-match-p "is set by policy"
+                              (cadr (should-error (harness-ui-config-unset-setting) :type 'user-error))))
+      (should (string-match-p "is set by policy"
+                              (cadr (should-error (harness-ui-config-save-setting) :type 'user-error))))
+      ;; The Project scope shows it locked too, its override aside.
+      (harness-ui-config-set-scope 'project)
+      (let ((mode (harness-ui-config-test-block "harness-permission-mode")))
+        (should (string-match-p "Locked" mode))
+        (should-not (string-match-p "Remove override" mode)))
+      (should (eq 'ask harness-permission-mode)))
+    ;; Without the policy the page is as it was.
+    (harness-ui-config-refresh)
+    (harness-test-wait (lambda () (not (harness-ui-config--true
+                                        (plist-get (harness-ui-config-test-setting "harness-permission-mode")
+                                                   :locked))))
+                       5 "the lock gone")
+    (should-not (string-match-p "Set by policy" (buffer-substring-no-properties (point-min) (point-max))))
+    (should (string-match-p "\\[Value Menu\\] YOLO" (harness-ui-config-test-block "harness-permission-mode")))))
+
 (provide 'harness-ui-config-test)
 ;;; harness-ui-config-test.el ends here

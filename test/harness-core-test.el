@@ -60,6 +60,30 @@
   (harness-add-filter 'test/af2 (lambda (v next) (funcall next (plist-put v :never t))) 20)
   (should-not (plist-get (harness-await (harness-run-filter-async 'test/af2 nil)) :never)))
 
+(ert-deftest harness-core-async-filter-between-runs-some-stages ()
+  "`harness-run-filter-async-between' runs the stages whose priority lies
+between FROM and TO, both included, in order, with the same arguments,
+and `:final' stops it as it stops the whole chain."
+  (harness-test-reset-bus)
+  (let ((seen nil))
+    (dolist (priority '(5 10 20 30 90))
+      (let ((priority priority))
+        (harness-add-filter 'test/ab (lambda (v next extra)
+                                       (push (list priority extra) seen)
+                                       (funcall next (plist-put v :last priority)))
+                            priority)))
+    (should (equal '(:last 30) (harness-await (harness-run-filter-async-between 'test/ab 10 30 nil 'x))))
+    (should (equal '((30 x) (20 x) (10 x)) seen))
+    (setq seen nil)
+    (should (equal '(:start t) (harness-await (harness-run-filter-async-between 'test/ab 40 80 '(:start t) 'y))))
+    (should-not seen)
+    (should (equal '(:last 90) (harness-await (harness-run-filter-async 'test/ab nil 'z))))
+    (should (equal '(90 30 20 10 5) (mapcar #'car seen)))
+    (setq seen nil)
+    (harness-add-filter 'test/ab (lambda (v next _extra) (funcall next (plist-put v :final t))) 15)
+    (should (equal '(:last 10 :final t) (harness-await (harness-run-filter-async-between 'test/ab 6 40 nil 'w))))
+    (should (equal '((10 w)) seen))))
+
 (ert-deftest harness-core-promises ()
   (let ((p (harness-make-promise)))
     (should-not (harness-promise-settled-p p))
@@ -179,6 +203,65 @@ such a run: tens of seconds for one of 100,000."
   (should (equal '("harness-core.el" "harness-http.el")
                  (sort (harness-fuzzy-filter "hel" '("readme" "harness-core.el" "harness-http.el"))
                        #'string<))))
+
+(defun harness-core-test--bytes (&rest parts)
+  "Return PARTS, strings and byte values, as one unibyte string."
+  (apply #'unibyte-string
+         (apply #'append (mapcar (lambda (p) (if (stringp p) (append (string-to-unibyte p) nil) (list p))) parts))))
+
+(ert-deftest harness-util-image-pixel-size ()
+  "An image's size is read from its header, for every raster format
+ask_user takes; an SVG, a format it does not know and a missing file
+have none."
+  (let ((u16le (lambda (n) (list (logand n 255) (ash n -8))))
+        (u16be (lambda (n) (list (ash n -8) (logand n 255))))
+        (u24le (lambda (n) (list (logand n 255) (logand (ash n -8) 255) (ash n -16))))
+        (u32le (lambda (n) (list (logand n 255) (logand (ash n -8) 255) (logand (ash n -16) 255) (logand (ash n -24) 255)))))
+    (cl-flet ((size (&rest parts)
+                (harness-image-pixel-size
+                 nil (apply #'harness-core-test--bytes
+                            (apply #'append (mapcar (lambda (p) (if (listp p) p (list p))) parts))))))
+      (should (equal '(2 . 2) (harness-image-pixel-size nil harness-test-png)))
+      (should (equal '(1400 . 12000)
+                     (size "\211PNG\r\n\032\n" "\0\0\0\rIHDR" 0 0 5 120 0 0 46 224 8 6 0 0 0)))
+      (should (equal '(320 . 200) (size "GIF89a" (funcall u16le 320) (funcall u16le 200) 0 0 0)))
+      ;; JPEG: the frame header comes after other segments.
+      (should (equal '(640 . 480)
+                     (size 255 216 255 224 (funcall u16be 16) (make-list 14 0)
+                           255 225 (funcall u16be 300) (make-list 298 7)
+                           255 192 (funcall u16be 17) 8 (funcall u16be 480) (funcall u16be 640) 3 (make-list 12 0))))
+      (should (equal '(800 . 600)
+                     (size "RIFF" 0 0 0 0 "WEBPVP8 " 0 0 0 0 0 0 0 157 1 42
+                           (funcall u16le 800) (funcall u16le 600) 0 0)))
+      (should (equal '(100 . 50) (size "RIFF" 0 0 0 0 "WEBPVP8L" 0 0 0 0 47 #x63 #x40 #x0c 0 0 0)))
+      (should (equal '(4000 . 3000)
+                     (size "RIFF" 0 0 0 0 "WEBPVP8X" 0 0 0 0 0 0 0 0
+                           (funcall u24le 3999) (funcall u24le 2999) 0 0)))
+      ;; BMP, its height below zero for a top-down image.
+      (should (equal '(300 . 200)
+                     (size "BM" (make-list 12 0) (funcall u32le 40) (funcall u32le 300)
+                           (funcall u32le (- #x100000000 200)) 0 0)))
+      (should-not (size "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 600 400\"/>"))
+      (should-not (size "not an image at all"))
+      (should-not (size ""))))
+  (let ((file (make-temp-file "harness-util-test-" nil ".png"))
+        (jpeg (make-temp-file "harness-util-test-" nil ".jpg"))
+        (coding-system-for-write 'no-conversion))
+    (unwind-protect
+        (progn
+          (write-region harness-test-png nil file nil 'silent)
+          (should (equal '(2 . 2) (harness-image-pixel-size file)))
+          ;; A JPEG whose size comes after more than the first read:
+          ;; two long segments of metadata before it.
+          (write-region (concat (unibyte-string 255 216 255 225 255 0) (make-string 65278 7 nil)
+                                (unibyte-string 255 226 255 0) (make-string 65278 7 nil)
+                                (unibyte-string 255 192 0 17 8 1 224 2 128 3) (make-string 12 0 nil))
+                        nil jpeg nil 'silent)
+          (should (> (file-attribute-size (file-attributes jpeg)) 65536))
+          (should (equal '(640 . 480) (harness-image-pixel-size jpeg))))
+      (delete-file file)
+      (delete-file jpeg))
+    (should-not (harness-image-pixel-size file))))
 
 (ert-deftest harness-util-senders ()
   "Who sent a message reads the same before and after JSON (kind a string)."
