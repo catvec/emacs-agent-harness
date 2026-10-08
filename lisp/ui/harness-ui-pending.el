@@ -218,7 +218,7 @@ ITEM is (:id :kind :payload) in the wire shape."
     (if (equal kind "question")
         (list :id (plist-get item :id) :kind "question" :created (float-time)
               :question (plist-get payload :question) :options (plist-get payload :options)
-              :diagrams (plist-get payload :diagrams))
+              :diagrams (plist-get payload :diagrams) :cowboy (plist-get payload :cowboy))
       (list :id (plist-get item :id) :kind "permission" :created (float-time)
             :title (or (plist-get payload :title) (plist-get payload :tool) "tool call")
             :call-id (plist-get payload :call-id)
@@ -1147,11 +1147,33 @@ Options with diagrams get the area showing one of them under them."
                   (t (propertize "\n   or type another answer below\n" 'face 'harness-dim-face))))
     (harness-ui-pending--decorate start (point) pid (harness-ui-pending--question-map r))))
 
+(defvar harness-ui-pending-panel-functions nil
+  "Functions drawing the panel of a request their own way.
+Each takes a request record and, when it draws that request, inserts
+its panel at point and returns non-nil; the first to do so wins, and a
+request none draws gets the ordinary panel.  A panel drawn so is the
+request's as the ordinary one is: decorate it with
+`harness-ui-pending-decorate', so that point on it finds the request.
+The cold-cache question draws itself this way (harness-ui-cowboy.el).")
+
+(defun harness-ui-pending-decorate (start end pid map)
+  "Make START..END the panel of request PID, with keymap MAP.
+For a panel `harness-ui-pending-panel-functions' draw."
+  (harness-ui-pending--decorate start end pid map))
+
+(defun harness-ui-pending-session ()
+  "Return the session whose requests this buffer draws, or nil.
+A chat's session, or a popout's."
+  (harness-ui-pending--session))
+
 (defun harness-ui-pending-insert-panel (r)
-  "Insert the panel for request record R at point."
-  (if (equal (plist-get r :kind) "question")
-      (harness-ui-pending--insert-question r)
-    (harness-ui-pending--insert-permission r)))
+  "Insert the panel for request record R at point.
+A function of `harness-ui-pending-panel-functions' may draw it instead."
+  (cond
+   ((run-hook-with-args-until-success 'harness-ui-pending-panel-functions r))
+   ((equal (plist-get r :kind) "question")
+    (harness-ui-pending--insert-question r))
+   (t (harness-ui-pending--insert-permission r))))
 
 (defun harness-ui-pending-insert-panels (&optional session-id)
   "Insert the panels of SESSION-ID's requests at point, oldest first."
@@ -1244,7 +1266,7 @@ clients, or the session's own pending list, answer it."
        (list :id (or (plist-get params :requestId) (harness-short-id 6)) :kind "question" :respond respond
              :connection harness-ui-connection :created (float-time)
              :question (plist-get params :question) :options (plist-get params :options)
-             :diagrams (plist-get params :diagrams)))
+             :diagrams (plist-get params :diagrams) :cowboy (plist-get params :cowboy)))
       t)))
 
 (defvar harness-ui-pending-drawn-predicates nil

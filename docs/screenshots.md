@@ -68,6 +68,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `version` | The version page of a harness straight.el installed from GitHub, behind GitHub and its development checkout: the commits it lacks and how to pull them | `harness-media-shot-version` |
 | `insights` | The Insights report over 30 days of every project: the totals, the summary the scripted model wrote, the messages by hour and weekday | `harness-media-shot-insights` |
 | `insights-activity` | The same report further down: the busiest sessions, the tools, the permission decisions and the tasks | `harness-media-shot-insights-activity` |
+| `chat-cowboy` | A chat whose prompt cache went cold yesterday, `orders.py` beside it: another session's message waits while the panel asks what goes first, each choice with its cost | `harness-media-shot-chat-cowboy` |
 
 ## How the pictures are made
 

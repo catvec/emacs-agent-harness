@@ -2725,7 +2725,7 @@ judge denying them cannot stop the agent looking at its own harness."
   (harness-perms-test--setup)
   (harness-perms-test--install-pending)
   (dolist (tool '("emacs_buffers" "emacs_buffer" "emacs_describe" "emacs_messages" "emacs_windows"
-                  "session_list" "session_read" "session_search" "task_list"))
+                  "session_list" "session_read" "session_search" "session_history" "task_list"))
     (should (member tool harness-perms--inspection-tools)))
   (let ((probe (harness-perms-test--denying-judge))
         (harness-perms-auto-model "judge:x"))

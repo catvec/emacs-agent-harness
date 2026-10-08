@@ -123,6 +123,8 @@ The history of messages, tool calls, ect should be represented as a directed gra
 ## Compaction
 As a conversation approaches the maximum number of tokens a model can fit in its context window it must be compacted down to a smaller size. Enough headroom must be left in the conversation so that the compaction output can be generated and swapped out for the previous full context. As a conversation approaches the compaction limit start highlighting the token count of the session in progressive warning colors.
 
+A message that reaches a session after its prompt cache lapsed would send the whole conversation again, uncached, whoever sent it: the user coming back, feedback on a task that sat in review, another session's agent, the merge queue. Such a message waits while the session asks what goes first: a brief summary, a summary, a transcript file, a fresh start, carrying on with everything, or not now, each with its cost. Answering "always" with a choice makes it the default and stops the asking. A session that never waits for the user takes the default without asking, and no model judges the choice: the default is the brief summary, which never pays for the whole conversation uncached. Whatever goes first, the conversation compacted away stays searchable by the model (the session_history tool), so a summary that left something out never loses it.
+
 ## Session List
 View sessions and switch between them.
 

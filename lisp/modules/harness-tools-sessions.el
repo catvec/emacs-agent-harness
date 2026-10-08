@@ -12,11 +12,18 @@
 ;;   It greps the node logs on disk in a subprocess, so transcripts are
 ;;   never loaded into memory just to be searched.
 ;; - `session_read' shows the recent transcript of one session.
+;; - `session_history' searches and reads the calling session's own
+;;   conversation from before its last compaction or handoff, which the
+;;   model holds only as a summary, a transcript file or not at all; the
+;;   note a compaction ends with points the model at it (see
+;;   `harness-compaction--history-note').
 ;; - `session_send' sends a message: it starts a turn on an idle
 ;;   session, steers a running one, or queues for the next turn; it can
 ;;   wait for the reply.
 ;; - `session_control' cancels a turn, resumes, closes or renames a
-;;   session, or answers a question it asked with ask_user.
+;;   session, or answers a question it asked with ask_user.  The
+;;   harness's own question about a cold prompt cache (harness-cowboy.el)
+;;   is left to the user, as permission requests are.
 ;; - `session_move' moves a session, this one by default, to another
 ;;   working directory and that directory's project.  The user confirms
 ;;   every move, in every permission mode (see session_move below).
@@ -417,7 +424,7 @@ A line of STDOUT holds a whole node, which can be megabytes long:
 
 (harness-define-tool "session_search"
   :label "Search sessions"
-  :description "Search the transcripts of other sessions (messages, thinking, tool calls and results) and their names for a string, case-insensitively. Returns the matching sessions, newest first, with snippets and node ids; read one with session_read. Searches this project unless all_projects is set; closed sessions are included."
+  :description "Search the transcripts of other sessions (messages, thinking, tool calls and results) and their names for a string, case-insensitively. Returns the matching sessions, newest first, with snippets and node ids; read one with session_read. Searches this project unless all_projects is set; closed sessions are included. This session's own conversation from before a compaction is searched with session_history instead."
   :schema '(:type "object"
             :properties (:query (:type "string" :description "Text to find.")
                          :regexp (:type "boolean" :description "Treat query as an extended regular expression (default false).")
@@ -483,6 +490,169 @@ A line of STDOUT holds a whole node, which can be megabytes long:
   :coalescable t
   :subject (lambda (input) (harness-tools-sessions--short (plist-get input :session_id)))
   :handler #'harness-tools-sessions--read)
+
+;;;; session_history
+
+(defconst harness-tools-sessions--history-kinds
+  '(user assistant thinking tool-call tool-result plan compaction)
+  "The kinds of node session_history shows and searches by default.")
+
+(defconst harness-tools-sessions--history-whole 20000
+  "Characters of the node session_history shows whole, by default.")
+
+(defconst harness-tools-sessions--history-around 2
+  "Nodes before and after the node session_history shows whole.")
+
+(defun harness-tools-sessions--boundary (path)
+  "Return the position in PATH of the node this conversation opens with, or nil.
+That is its last compaction node, or its last handoff note when that
+comes later: what the model is sent starts there, and the nodes before
+it reach the model only as that node tells of them -- a summary, a
+transcript file, or nothing."
+  (cl-position-if (lambda (n) (or (eq (plist-get n :kind) 'compaction) (harness-node-handoff n)))
+                  path :from-end t))
+
+(defun harness-tools-sessions--when (node)
+  "Return when NODE was written, as a short date and time, or nil."
+  (let ((ts (plist-get node :ts)))
+    (and (numberp ts) (format-time-string "%b %-d %H:%M" ts))))
+
+(defun harness-tools-sessions--history-scope (path boundary all)
+  "Describe what session_history looks through, for its first line.
+PATH is the conversation, BOUNDARY the position of the node it opens
+with or nil, ALL non-nil when the whole of it is looked through."
+  (let* ((node (and boundary (nth boundary path)))
+         (what (cond ((null node) nil)
+                     ((harness-node-handoff node)
+                      (format "the handoff from %s"
+                              (or (plist-get (harness-node-handoff node) :from) "another model")))
+                     (t (format "the %scompaction"
+                                (let ((kind (harness-node-compaction-kind node)))
+                                  (if (member kind '("summary" "brief" "transcript" "fresh"))
+                                      (concat kind " ")
+                                    ""))))))
+         (stamp (and node (format "[%s %s, %s]" (plist-get node :kind) (plist-get node :id)
+                                  (or (harness-tools-sessions--when node) "undated")))))
+    (cond ((null node)
+           (format "This conversation was never compacted: all %d nodes are in your context already."
+                   (length path)))
+          (all (format "The whole conversation, %d nodes, %s %s included." (length path) what stamp))
+          (t (format "The conversation before %s %s: %d nodes your context holds only as that node tells of them."
+                     what stamp boundary)))))
+
+(defun harness-tools-sessions--history-line (node chars &optional query regexp)
+  "Return the line of NODE in session_history's answer.
+Its tag and date, then its text cut to CHARS, or the snippet around
+QUERY (a REGEXP when non-nil) when one is given."
+  (let ((text (harness-tools-sessions--node-text node))
+        (stamp (harness-tools-sessions--when node)))
+    (format "%s%s %s" (harness-tools-sessions--tag node)
+            (if stamp (format " (%s)" stamp) "")
+            (if query
+                (harness-tools-sessions--snippet text query regexp)
+              (harness-truncate-end text chars)))))
+
+(defun harness-tools-sessions--history-node (path node-id chars)
+  "Return session_history's answer for node NODE-ID of PATH: whole, in context.
+Its text is cut to CHARS; the nodes around it are shown short."
+  (let ((at (cl-position node-id path :key (lambda (n) (plist-get n :id)) :test #'equal))
+        (around harness-tools-sessions--history-around))
+    (unless at
+      (signal 'harness-error
+              (list (format "No node %s in this session's conversation; session_history with query finds ids"
+                            node-id))))
+    (let ((from (max 0 (- at around)))
+          (to (min (length path) (+ at around 1))))
+      (mapconcat (lambda (i)
+                   (let ((n (nth i path)))
+                     (if (= i at)
+                         (format "%s%s, the node asked for:\n%s"
+                                 (harness-tools-sessions--tag n)
+                                 (let ((stamp (harness-tools-sessions--when n)))
+                                   (if stamp (format " (%s)" stamp) ""))
+                                 (harness-truncate-end (harness-tools-sessions--node-text n) chars))
+                       (harness-tools-sessions--history-line n 300))))
+                 (number-sequence from (1- to)) "\n"))))
+
+(defun harness-tools-sessions--history (input ctx)
+  "Handler of session_history."
+  (let* ((sid (plist-get ctx :session-id))
+         (path (harness-call 'session/nodes sid))
+         (boundary (harness-tools-sessions--boundary path))
+         (all (harness-json-true-p (plist-get input :all)))
+         (scope (if (and boundary (not all)) (seq-take path boundary) path))
+         (query (let ((q (plist-get input :query))) (and (not (harness-string-blank-p q)) q)))
+         (regexp (harness-json-true-p (plist-get input :regexp)))
+         (node-id (let ((id (plist-get input :node_id))) (and (not (harness-string-blank-p id)) id)))
+         (before (let ((id (plist-get input :before))) (and (not (harness-string-blank-p id)) id)))
+         (limit (max 1 (or (plist-get input :limit) 20)))
+         (kinds (or (mapcar #'intern (append (plist-get input :kinds) nil))
+                    harness-tools-sessions--history-kinds))
+         (header (harness-tools-sessions--history-scope path boundary all)))
+    (harness-tool-ok
+     (if node-id
+         (concat header "\n\n"
+                 (harness-tools-sessions--history-node
+                  path node-id (or (plist-get input :max_chars) harness-tools-sessions--history-whole)))
+       (let* ((upto (if before
+                        (or (cl-position before scope :key (lambda (n) (plist-get n :id)) :test #'equal)
+                            (signal 'harness-error
+                                    (list (format "No node %s in what session_history looks through" before))))
+                      (length scope)))
+              (nodes (cl-remove-if-not (lambda (n) (memq (plist-get n :kind) kinds)) (seq-take scope upto)))
+              (chars (or (plist-get input :max_chars) 1500)))
+         (if query
+             (let* ((hits (nreverse
+                           (cl-remove-if-not
+                            (lambda (n) (harness-tools-sessions--locate
+                                         (harness-tools-sessions--node-text n) query regexp))
+                            nodes)))
+                    (shown (seq-take hits limit)))
+               (concat header "\n\n"
+                       (if (null hits)
+                           (format "Nothing%s mentions %S." (if before (format " before %s" before) "") query)
+                         (concat
+                          (format "%d node%s mention%s %S, newest first%s:\n"
+                                  (length hits) (if (= 1 (length hits)) "" "s")
+                                  (if (= 1 (length hits)) "s" "") query
+                                  (if before (format ", before %s" before) ""))
+                          (mapconcat (lambda (n) (harness-tools-sessions--history-line n chars query regexp))
+                                     shown "\n")
+                          (if (> (length hits) (length shown))
+                              (format "\n… %d older; page back with before=%s"
+                                      (- (length hits) (length shown)) (plist-get (car (last shown)) :id))
+                            "")
+                          "\nRead a node whole with node_id."))))
+           (let ((shown (last nodes limit)))
+             (concat header "\n\n"
+                     (if (null shown)
+                         (format "Nothing to show%s." (if before (format " before %s" before) ""))
+                       (concat
+                        (format "%d of %d nodes, oldest first%s:\n" (length shown) (length nodes)
+                                (if (> (length nodes) (length shown))
+                                    (format "; earlier ones with before=%s" (plist-get (car shown) :id))
+                                  ""))
+                        (mapconcat (lambda (n) (harness-tools-sessions--history-line n chars)) shown "\n")
+                        "\nRead a node whole with node_id; find one with query."))))))))))
+
+(harness-define-tool "session_history"
+  :label "Session history"
+  :description "Search and read this session's own conversation from before its last compaction (or a handoff from another model): the part your context holds only as a summary, a pointer to a transcript file, or not at all. Use it when you need something from back then -- what was asked, decided, tried, found or changed -- rather than guessing or redoing the work. query finds the messages, thinking, tool calls and results that mention it, newest first, with snippets and node ids; node_id shows one node whole with the nodes around it; with neither, the last nodes before the compaction, oldest first. Page back with before=<node id>. all=true looks through the whole conversation, the part since the compaction included. For other sessions, use session_search and session_read."
+  :schema '(:type "object"
+            :properties (:query (:type "string" :description "Text to find, case-insensitively.")
+                         :regexp (:type "boolean" :description "Treat query as an Emacs regular expression (default false).")
+                         :node_id (:type "string" :description "Show this node whole, with the nodes around it.")
+                         :before (:type "string" :description "Only nodes before this node id: pages back.")
+                         :limit (:type "integer" :description "Most nodes or matches to show (default 20).")
+                         :max_chars (:type "integer" :description "Characters kept per node (default 1500; 20000 for node_id).")
+                         :kinds (:type "array" :items (:type "string" :enum ("user" "assistant" "thinking" "tool-call" "tool-result" "plan" "compaction" "hint"))
+                                 :description "Only these node kinds (default: all but hints).")
+                         :all (:type "boolean" :description "Look through the whole conversation, not just the part before the compaction (default false).")))
+  :kind 'read
+  :coalescable t
+  :subject (lambda (input) (or (and (plist-get input :query) (harness-first-line (plist-get input :query) 60))
+                               (plist-get input :node_id)))
+  :handler #'harness-tools-sessions--history)
 
 ;;;; session_send
 
@@ -579,6 +749,12 @@ A line of STDOUT holds a whole node, which can be megabytes long:
                ((null q) (signal 'harness-error
                                  (list (format "Give question_id, one of: %s"
                                                (mapconcat (lambda (it) (format "%s" (plist-get it :id))) questions ", ")))))
+               ;; What a cold prompt cache is worth spending is the
+               ;; user's call (harness-cowboy.el), not another agent's.
+               ((plist-get (plist-get q :payload) :cowboy)
+                (signal 'harness-error
+                        (list (format "Question %s asks the user what to do about %s's cold prompt cache; that is left to the user"
+                                      (plist-get q :id) sid))))
                ((harness-string-blank-p answer) (signal 'harness-error (list "answer needs an answer"))))
          (harness-call 'question/answer sid (plist-get q :id) (list :answer answer))
          (harness-tool-ok (format "Answered %S in %s." (plist-get (plist-get q :payload) :question) sid))))
@@ -586,7 +762,7 @@ A line of STDOUT holds a whole node, which can be megabytes long:
 
 (harness-define-tool "session_control"
   :label "Control session"
-  :description "Control another session. action=cancel stops its running turn; resume reopens a closed session; close deactivates it (it can be resumed later); rename sets its name; answer replies to a question it asked with ask_user (question_id may be omitted when there is one). Permission requests are left to the user."
+  :description "Control another session. action=cancel stops its running turn; resume reopens a closed session; close deactivates it (it can be resumed later); rename sets its name; answer replies to a question it asked with ask_user (question_id may be omitted when there is one). Permission requests, and the harness's question about a cold prompt cache, are left to the user."
   :schema '(:type "object"
             :properties (:session_id (:type "string" :description "Session id, unique id prefix or unique name.")
                          :action (:type "string" :enum ("cancel" "resume" "close" "rename" "answer"))

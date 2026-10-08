@@ -279,7 +279,7 @@ the menu's Version entry says so.
 | `C-c h f` | `harness-fork-session` | Fork the current session |
 | `C-c h b` | `harness-btw` | Open a BTW side conversation |
 | `C-c h k` | `harness-cancel-turn` | Cancel the running turn |
-| `C-c h C` | `harness-compact` | Compact the conversation: choose a summary, a brief summary or a transcript file, each with what it costs |
+| `C-c h C` | `harness-compact` | Compact the conversation: choose a summary, a brief summary, a transcript file or a fresh start, each with what it costs |
 | `C-c h D` | `harness-delete-session` | Delete the current session |
 | `C-c h m` | `harness-set-model` | Choose the model |
 | `C-c h M` | `harness-set-model-all` | Choose a model and switch every current session and task of every project to it |
@@ -692,7 +692,7 @@ its answer where it wanted to move.
 A conversation that nears its model's context window is compacted
 before the next turn, unless its provider compacts on its own side, as
 Claude Code does: something much smaller stands in for it from then on,
-and the earlier messages stay in the conversation tree. There are three
+and the earlier messages stay in the conversation tree. There are four
 kinds:
 
 - **Summary**: the session's model summarises the whole conversation.
@@ -706,8 +706,20 @@ kinds:
   `.harness/transcripts/` in the session's directory (git ignores it),
   and the model is told to read what it needs of it. No model is asked
   anything, so it costs nothing.
+- **Fresh start**: nothing is carried over, not even a summary. The
+  model starts with a short note saying so, and looks back at what it
+  needs with `session_history` (below). It costs nothing.
 
-These are the ways a switch to another provider can hand the
+Whichever kind it is, the conversation it replaced stays on record.
+The compaction ends in a line pointing the model at the
+`session_history` tool, which searches and reads the session's own
+conversation from before its last compaction (or a handoff from another
+model): matches newest first with node ids, one node whole with the
+nodes around it, or the last nodes before the compaction, and
+`all=true` for the whole conversation. A model that needs what a summary
+left out looks it up instead of guessing.
+
+The first three kinds are the ways a switch to another provider can hand the
 conversation over (see [Switching model or provider](#switching-model-or-provider)),
 here on the session's own model. Automatic compaction makes the kind
 `harness-compaction-kind` says, a summary by default; the settings page
@@ -718,8 +730,8 @@ compacts the current session by hand, between turns: it asks which kind,
 naming what each costs, beside a table of who writes each, what it
 costs and what it does, and of what carrying on without compacting
 costs. Typing `/compact` in the message box asks the same;
-`/compact brief`, `/compact summary` or `/compact transcript` (or just
-`b`, `s` or `t`) compacts that way at once. The chat then shows the
+`/compact brief`, `/compact summary`, `/compact transcript` or
+`/compact fresh` (or just `b`, `s`, `t` or `f`) compacts that way at once. The chat then shows the
 compaction where the conversation now starts, with `[open the
 transcript]` for a transcript file.
 
@@ -733,12 +745,61 @@ to compact the conversation first, a button and a key per kind with
 what each costs:
 
 ```
-Compact it first   b  Brief summary (~$0.011)   s  Summary (~$0.463)   t  Transcript file (free)
+Compact it first   b  Brief summary (~$0.011)   s  Summary (~$0.463)   t  Transcript file (free)   f  Fresh start (free)
 ```
 
 Press the key with point on that line, or click a button, and the
 conversation compacts that way. The panel goes once the compaction is
 done: the next message sends only what stands in for the conversation.
+
+### A message to a session whose cache went cold
+
+Not every message comes from you while you watch. Feedback on a task
+that sat in review for a day, a message from another session's agent,
+the merge queue reporting a conflict: any of them can reach a session
+whose prompt cache lapsed long ago, and sending it as it is would pay
+for the whole conversation again, uncached. So a message that meets a
+cold cache, whoever sent it, waits while the session asks what goes
+first. The session is blocked on the question, and the chat (or its
+popout) shows it in place of the cache panel:
+
+```
+ ◷ Prompt cache cold  since 09:12 · Claude Opus · ~84.0k tokens
+   A message from the harness (tasks) waits: “The tests fail on CI; …”
+   Carrying on sends the whole conversation again, uncached: about $0.315 instead of the $0.025 it would cost cached.  What goes first?
+
+    b  Brief summary    ~$0.011           a cheap model summarises the first and last messages · the default
+    s  Summary          ~$0.463           the session's model summarises it all, reading it uncached
+    t  Transcript file  free              the conversation goes to a file the model reads as it needs
+    f  Start afresh     free              nothing is carried over; the model looks back when it needs to
+    c  Carry on         ~$0.315 uncached  the whole conversation goes again, uncached
+    q  Not now                            the message waits; nothing is sent yet
+
+    B   S   T   F   C  the same, from now on without asking
+   Whichever you choose, the model can search and read the conversation it leaves out (session_history).
+   or type a choice below: “transcript”, “always brief”
+```
+
+A key with point on the panel, or a click on a choice, answers it; so
+does a digit, or a choice typed in the message box ("transcript",
+"always brief"). The compaction goes first, then the message, which
+sees only what stands in for the conversation. Carry on sends it as
+before, and not now keeps the message, unsent, until the next one goes
+with it. Whatever you pick, the model can look back with
+`session_history`. Another session's agent cannot answer the question
+for you.
+
+A capital letter, or "always" with a choice, makes that choice the
+default and stops the asking (`harness-cowboy-default`,
+`harness-cowboy-ask`, saved like any setting; **Cold cache** on the
+settings page). A session that never waits for you, such as a
+non-interactive task, is never asked: no model judges what to do, the
+default goes first. The default default is the brief summary, the one
+choice that never pays for the whole conversation uncached and still
+leaves the model a summary to go on. A summary that cannot be made gives
+way to the transcript file, and that to carrying on: the message always
+goes, unless you hold it. `harness-cowboy-min-context` leaves smaller
+conversations to go uncached without asking.
 
 ### Forks and side conversations
 
@@ -1693,10 +1754,10 @@ ACP, so it works the same with a local or a remote harness.
 
 | Area | Modules |
 |---|---|
-| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `handoff` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `acp` `acp-remote` |
+| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `cowboy` `handoff` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `acp` `acp-remote` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-ssh` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` |
 
 Further documentation:
 

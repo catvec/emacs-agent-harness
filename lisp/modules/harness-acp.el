@@ -1062,7 +1062,10 @@ outcome.  A shell command's request carries where it runs in
 `diagrams', when the options have them, holds one per option:
 {type: \"ascii\", text} or {type: \"image\", path, mime}.  PATH is a file
 here, on the harness's machine: a client that cannot read it asks for
-the image with `_harness/question/image' (`question/image')."
+the image with `_harness/question/image' (`question/image').  `cowboy'
+marks the harness's question about a cold prompt cache and says what
+each choice costs (see harness-cowboy.el); a client that knows it
+draws its own panel, any other shows the question and its options."
   (let* ((payload (or (plist-get pending :payload) pending))
          (pid (plist-get pending :id)))
     (harness-acp--request-clients
@@ -1070,7 +1073,8 @@ the image with `_harness/question/image' (`question/image')."
      (append (list :sessionId sid :requestId pid
                    :question (plist-get payload :question)
                    :options (plist-get payload :options))
-             (and (plist-get payload :diagrams) (list :diagrams (plist-get payload :diagrams))))
+             (and (plist-get payload :diagrams) (list :diagrams (plist-get payload :diagrams)))
+             (and (plist-get payload :cowboy) (list :cowboy (plist-get payload :cowboy))))
      (lambda (result)
        (harness-acp--call-safely 'question/answer sid pid (plist-get result :answer))))))
 
