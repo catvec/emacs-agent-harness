@@ -128,6 +128,17 @@
 ;; directory prompt keeps waiting, because yolo does not grant
 ;; directories; nor does a confirmation, which only the user gives.
 ;;
+;; A policy (see harness-policy.el and docs/policy.md) holds here too.
+;; A permission mode or non-interactive switch it sets is every
+;; session's, whatever a session record says.  Standing rules it sets
+;; come before the session's own, so no answer overrides them, and no
+;; answer records a standing rule: the prompts leave out the answers
+;; for always, and one given anyway holds for the session.  Allowed
+;; directories it sets are not added to: a directory prompt offers no
+;; allow-always, and a grant is for the session or the turn.  That a
+;; person in front of a prompt may let a session reach a directory
+;; outside them, as they may let a call run, the policy leaves as it is.
+;;
 ;; The module works without the session and agent modules: methods it
 ;; needs from them are looked up with `harness-method-exists-p'.
 
@@ -139,6 +150,7 @@
 (require 'harness-util)
 (require 'harness-config)
 (require 'harness-tools)
+(require 'harness-policy)
 
 (defvar harness-state-directory)
 (defvar harness-directory)
@@ -338,20 +350,54 @@ agent can do what it asked for, and nothing is remembered (see
       (symbol-value key))))
 
 (defun harness-perms--mode-of (session)
-  "Return the effective permission mode symbol for SESSION."
-  (or (harness-perms--sym (plist-get session :permission-mode))
-      (harness-perms--sym (harness-perms--config 'harness-permission-mode session))
-      'ask))
+  "Return the effective permission mode symbol for SESSION.
+A mode the policy sets is every session's (see harness-policy.el)."
+  (if-let* ((pinned (harness-policy-entry 'harness-permission-mode)))
+      (harness-perms--sym (cdr pinned))
+    (or (harness-perms--sym (plist-get session :permission-mode))
+        (harness-perms--sym (harness-perms--config 'harness-permission-mode session))
+        'ask)))
 
 (defun harness-perms--non-interactive-p (session)
   "Non-nil when SESSION should never wait for the user.
 A session record's own switch decides, off as much as on: it starts
 from `harness-non-interactive' and the user flips it per session.  The
-setting alone decides only for a request without a session record."
+setting alone decides only for a request without a session record.  A
+switch the policy sets is every session's (see harness-policy.el)."
   (harness-json-true-p
-   (if (plist-member session :non-interactive)
-       (plist-get session :non-interactive)
-     (harness-perms--config 'harness-non-interactive session))))
+   (cond ((harness-policy-entry 'harness-non-interactive)
+          (cdr (harness-policy-entry 'harness-non-interactive)))
+         ((plist-member session :non-interactive)
+          (plist-get session :non-interactive))
+         (t (harness-perms--config 'harness-non-interactive session)))))
+
+(defun harness-perms--scope-allowed (scope option)
+  "Return SCOPE of an answer, or `session' when the policy rules it out.
+An answer for `always' changes OPTION -- `harness-allowed-directories'
+or `harness-perms-rules' -- which the policy may set; then it holds for
+the session instead."
+  (if (and (eq scope 'always) (harness-policy-pinned-p option))
+      (progn (harness-log 'info "perms: %s is set by policy; the answer holds for the session" option)
+             'session)
+    scope))
+
+(defun harness-perms--tool-options ()
+  "Return the answers a tool prompt offers.
+Those of `harness-perms-options', but for the ones for always, which
+record a standing rule, when the policy sets `harness-perms-rules'."
+  (if (harness-policy-pinned-p 'harness-perms-rules)
+      (cl-remove-if (lambda (o) (memq o '(allow-always deny-always))) harness-perms-options)
+    harness-perms-options))
+
+(defun harness-perms--dir-prompt-options (options)
+  "Return OPTIONS, the answers a directory prompt offers, as the policy allows.
+`allow-always' goes when the policy sets `harness-allowed-directories',
+which it would add to, and `deny-always' when it sets
+`harness-perms-rules', where it would record a rule."
+  (cl-remove-if (lambda (o)
+                  (or (and (eq o 'allow-always) (harness-policy-pinned-p 'harness-allowed-directories))
+                      (and (eq o 'deny-always) (harness-policy-pinned-p 'harness-perms-rules))))
+                options))
 
 (defun harness-perms--judge-p (session)
   "Non-nil when the auto-mode judge decides SESSION's undecided calls.
@@ -1217,7 +1263,7 @@ continue the chain once `permission/answer' arrives."
                            (harness-perms--prompt-dir (plist-get request :session) (harness-perms--dir-of bad))
                            (format "%s wants %s, which is outside the allowed directories"
                                    (harness-tools-label (plist-get request :tool)) (abbreviate-file-name bad))
-                           harness-perms-dir-options
+                           (harness-perms--dir-prompt-options harness-perms-dir-options)
                            :decision decision))
 
 (defun harness-perms--answer-dir (session-id waiting answer)
@@ -1253,7 +1299,7 @@ decision, or `continue' when the chain goes on."
         (funcall next d)
         d))
      (t
-      (pcase scope
+      (pcase (harness-perms--scope-allowed scope 'harness-allowed-directories)
         ('session (harness-call 'permission/allow-dir session-id grant))
         ('always (harness-call 'permission/allow-dir session-id grant 'always))
         (_ (setq request (plist-put (copy-sequence request) :jail-once
@@ -1300,7 +1346,7 @@ in particular, such as an \"Always deny\" answer to a directory prompt
 records."
   (let ((probe (list :session session :paths (list dir))))
     (cl-find-if (lambda (r) (and (plist-get r :path) (harness-perms--rule-matches-p r probe)))
-                (append (gethash (plist-get session :id) harness-perms--session-rules) harness-perms-rules))))
+                (harness-perms--rules (plist-get session :id)))))
 
 (defun harness-perms--dir-request (decision next request)
   "Decide a call to `harness-perms-dir-tool' from the user's answer alone.
@@ -1351,7 +1397,7 @@ grants a directory."
         (harness-perms--pend-dir (plist-put (copy-sequence request) :input (list :path path))
                                  next dir
                                  (harness-perms--request-reason session dir (plist-get input :reason))
-                                 harness-perms-dir-request-options
+                                 (harness-perms--dir-prompt-options harness-perms-dir-request-options)
                                  :explicit t))))))
 
 (defun harness-perms--grant-requested (session-id grant scope input)
@@ -1360,9 +1406,11 @@ This is the answer to an agent's own request.  GRANT is a directory or
 a glob pattern.  SCOPE `always' adds it to `harness-allowed-directories',
 `session' grants it to the session, and `once' grants it until the
 session's turn ends (`harness-perms--grant-for-turn').  The tool gets
-INPUT's path with `:granted' GRANT, so it can tell the agent."
+INPUT's path with `:granted' GRANT, so it can tell the agent.  When the
+policy sets `harness-allowed-directories', `always' grants to the
+session."
   (condition-case err
-      (progn
+      (let ((scope (harness-perms--scope-allowed scope 'harness-allowed-directories)))
         (pcase scope
           ('always (harness-call 'permission/allow-dir session-id grant 'always))
           ('session (harness-call 'permission/allow-dir session-id grant))
@@ -1536,10 +1584,21 @@ deny rule also stops it for a path it names inside them."
                              (lambda (p) (harness-perms--within-p pattern p))
                              paths)))))))
 
+(defun harness-perms--rules (session-id)
+  "Return the rules of SESSION-ID in the order they are weighed, first first.
+Its own rules (answers for the session) come before the standing ones
+\(`harness-perms-rules'), unless the policy sets those: then they come
+first, so no answer overrides them."
+  (let ((own (gethash session-id harness-perms--session-rules)))
+    (if (harness-policy-pinned-p 'harness-perms-rules)
+        (append harness-perms-rules own)
+      (append own harness-perms-rules))))
+
 (defun harness-perms--find-rule (request)
-  "Return the first session or global rule that applies to REQUEST."
+  "Return the first session or global rule that applies to REQUEST.
+See `harness-perms--rules' for the order."
   (let* ((sid (plist-get (plist-get request :session) :id))
-         (rules (append (gethash sid harness-perms--session-rules) harness-perms-rules))
+         (rules (harness-perms--rules sid))
          ;; A command is read once, not once per rule about paths.
          (request (if (cl-some (lambda (r) (plist-get r :path)) rules)
                       (harness-perms--with-reach request)
@@ -1564,8 +1623,10 @@ deny rule also stops it for a path it names inside them."
   (harness-save-user-option 'harness-perms-rules harness-perms-rules))
 
 (defun harness-perms-add-rule (session-id rule scope)
-  "Record RULE for SESSION-ID with SCOPE (`session' or `always')."
-  (pcase scope
+  "Record RULE for SESSION-ID with SCOPE (`session' or `always').
+When the policy sets `harness-perms-rules', `always' records it for the
+session."
+  (pcase (harness-perms--scope-allowed scope 'harness-perms-rules)
     ('session
      (puthash session-id (cons rule (cl-remove rule (gethash session-id harness-perms--session-rules)
                                                :test #'equal))
@@ -2280,7 +2341,7 @@ where it runs."
                                              (and cwd (list :cwd cwd))
                                              (list :title (harness-perms-describe-request request)
                                                    :reason (harness-perms--judge-prompt-reason decision)
-                                                   :options harness-perms-options))))
+                                                   :options (harness-perms--tool-options)))))
              (pid (harness-call 'session/pending-add sid pending)))
         (puthash pid (list :session-id sid :request request :next next :paths paths :cwd cwd)
                  harness-perms--waiting)
@@ -2498,13 +2559,15 @@ They are stored on the session record when there is one."
 (harness-defmethod permission/allow-dir (session-id dir &optional scope)
   "Grant SESSION-ID access to DIR.
 With SCOPE `always' DIR is added to the global
-`harness-allowed-directories'; with `turn' it is granted until the
-session's turn ends (see `harness-perms--turn-dirs'); otherwise the
-grant is kept with the session.  Return the session's effective roots."
+`harness-allowed-directories', which is refused when the policy sets
+it; with `turn' it is granted until the session's turn ends (see
+`harness-perms--turn-dirs'); otherwise the grant is kept with the
+session.  Return the session's effective roots."
   (let* ((session (harness-perms--session session-id))
          (dir (harness-perms--expand-dir session dir)))
     (pcase (harness-perms--sym scope)
       ('always
+       (harness-policy-refuse 'harness-allowed-directories)
        (unless (member dir (harness-perms--global-dirs session))
          (harness-save-user-option 'harness-allowed-directories
                                    (append (default-value 'harness-allowed-directories) (list dir))))
@@ -2520,9 +2583,9 @@ grant is kept with the session.  Return the session's effective roots."
   "Withdraw DIR from SESSION-ID.
 Removes a session grant, or one until the session's turn ends, or else
 the entry in the global `harness-allowed-directories'.  The cwd, the
-worktree, the session's own temporary directory and directories set in
-a project's .dir-locals.el cannot be revoked here.  Return the
-session's effective roots."
+worktree, the session's own temporary directory, directories set in a
+project's .dir-locals.el and those the policy sets cannot be revoked
+here.  Return the session's effective roots."
   (let* ((session (harness-perms--session session-id))
          (dir (harness-perms--expand-dir session dir))
          (granted (harness-perms--granted session))
@@ -2536,6 +2599,7 @@ session's effective roots."
           (puthash session-id (remove dir turn) harness-perms--turn-dirs)
         (remhash session-id harness-perms--turn-dirs)))
      ((member dir (harness-perms--global-dirs session))
+      (harness-policy-refuse 'harness-allowed-directories)
       (harness-save-user-option
        'harness-allowed-directories
        (cl-remove-if (lambda (d) (equal dir (harness-perms--expand-dir session d))) global)))
@@ -2553,9 +2617,10 @@ session's effective roots."
   "Return the directories SESSION-ID may touch as (:dir :source :revocable).
 SOURCE is as in `harness-perms-dirs'.  An entry is revocable when it
 is a grant, for the session or until its turn ends, or comes from the
-global `harness-allowed-directories'."
+global `harness-allowed-directories', unless the policy sets that."
   (let* ((session (harness-perms--session session-id))
-         (global (harness-perms--global-dirs session)))
+         (global (unless (harness-policy-pinned-p 'harness-allowed-directories)
+                   (harness-perms--global-dirs session))))
     (mapcar (lambda (e)
               (append e (list :revocable
                               (and (or (memq (plist-get e :source) '(session turn))
@@ -2601,7 +2666,11 @@ only reads may read (see `harness-perms-inspection-dirs' and
                                                 :cwd (plist-get w :cwd)
                                                 :dir (plist-get w :dir) :pattern (plist-get w :pattern)
                                                 :title (or (plist-get w :title) (harness-perms-describe-request r))
-                                                :options (or (plist-get w :options) harness-perms-options)))
+                                                :options (or (plist-get w :options)
+                                                             (if (plist-get w :dir)
+                                                                 (harness-perms--dir-prompt-options
+                                                                  harness-perms-dir-options)
+                                                               (harness-perms--tool-options)))))
                            out))))
                harness-perms--waiting)
       out)))

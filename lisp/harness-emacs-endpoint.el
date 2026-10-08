@@ -1421,13 +1421,18 @@ A request this Emacs refuses or cannot answer gets a JSON-RPC error."
 
 ;;;; Chores of the UI
 
+(declare-function harness-policy-refuse "harness-policy" (option))
+
 (defun harness-emacs-endpoint-customize-save (name printed)
   "Save the user option NAME with the value read from PRINTED in `custom-file'.
-Only `harness-' options: the request comes from the harness process."
+Only `harness-' options: the request comes from the harness process.
+One the policy sets (see harness-policy.el) is refused."
   (unless (and (stringp name) (string-prefix-p "harness-" name))
     (error "Refusing to save %s: not a harness option" name))
   ;; Module options are not defined in the UI's Emacs, so intern the name.
   (let ((sym (intern name)))
+    (when (fboundp 'harness-policy-refuse)
+      (harness-policy-refuse sym))
     (customize-save-variable sym (car (read-from-string printed)))
     t))
 

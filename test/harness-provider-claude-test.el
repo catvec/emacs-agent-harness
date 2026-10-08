@@ -1446,6 +1446,69 @@ with no state of the session is sent no ordinary transcript."
                                 (plist-get (car got) :text)))
         (should (string-match-p "carry on\\'" (plist-get (car got) :text)))))))
 
+(ert-deftest harness-provider-claude-compaction-starts-a-new-cli-session ()
+  "A compacted Claude Code session goes on in a new CLI session the summary opens.
+Resumed, the CLI would read the whole old conversation back, uncached
+once its cache lapsed, and take the summary as one more message of it.
+The summary itself is written on a fork of the session's CLI session,
+which has the whole conversation, and the session's own is let go."
+  (harness-provider-claude-test-with-handoff
+    (let ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id)))
+      (harness-provider-claude-test--turn sid "fix the parser")
+      (let ((old (harness-provider-claude-test--cli-id sid)))
+        (should (string-prefix-p "fake-" old))
+        (let ((node (harness-test-await (harness-call 'compaction/compact sid)))
+              (asked (car (last (funcall inputs)))))
+          (should (equal "summary" (harness-node-compaction-kind node)))
+          ;; The summariser: a fork of the session's CLI session.
+          (should (equal old (plist-get asked :resumed)))
+          (should (eq t (plist-get asked :forked)))
+          (should (string-match-p "Summarize the conversation above" (plist-get asked :text))))
+        (should-not (plist-get (harness-call 'session/get sid) :provider-state))
+        (let ((argv (harness-provider-claude-test--turn sid "carry on"))
+              (got (car (last (funcall inputs)))))
+          (should argv)
+          (should-not (member "--resume" argv))
+          (should-not (plist-get got :resumed))
+          (should (string-match-p "\\`Summary of the conversation so far:\n\nhello" (plist-get got :text)))
+          (should (string-match-p "carry on\\'" (plist-get got :text)))
+          (should-not (equal old (harness-provider-claude-test--cli-id sid))))))))
+
+(ert-deftest harness-provider-claude-brief-compaction-on-the-cheap-model ()
+  "A brief compaction of a Claude Code session is the cheap model's, beside the session.
+Haiku gets the first and last messages as text in a CLI session of its
+own, the session's own process untouched until the next turn, which
+starts a new CLI session that the brief summary opens."
+  (harness-provider-claude-test-with-handoff
+    (let ((sid (plist-get (harness-call 'session/create :cwd cwd :model "claude:claude-fable-5-1") :id)))
+      (harness-provider-claude-test--turn sid "fix the parser")
+      (let* ((old (harness-provider-claude-test--cli-id sid))
+             (process (harness-provider-claude-session-process (gethash sid harness-provider-claude--sessions)))
+             (argv-file (harness-provider-claude-test--argv-file))
+             (node (let ((process-environment (cons (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file)
+                                                    process-environment)))
+                     (harness-test-await (harness-call 'compaction/compact sid (list :kind "brief")))))
+             (asked (car (last (funcall inputs))))
+             (argv (plist-get (harness-provider-claude-test--read-argv argv-file) :argv)))
+        (should (equal "brief" (harness-node-compaction-kind node)))
+        (should (equal "claude:claude-haiku-4-5-20251001" (plist-get (plist-get node :meta) :model)))
+        (should (member "claude-haiku-4-5-20251001" argv))
+        (should-not (plist-get asked :resumed))
+        (should (string-match-p "\\`### user\n\nfix the parser" (plist-get asked :text)))
+        (should (string-match-p "Claude Haiku 4.5 wrote this summary from only the first and the most recent"
+                                (plist-get node :content)))
+        ;; The summariser's process was its own: the session's was let go
+        ;; only with the conversation it held.
+        (should-not (process-live-p process))
+        (let ((argv (harness-provider-claude-test--turn sid "carry on"))
+              (got (car (last (funcall inputs)))))
+          (should-not (member "--resume" argv))
+          (should (member "claude-fable-5-1" argv))
+          (should-not (plist-get got :resumed))
+          (should (string-match-p "\\`Summary of the conversation so far:\n\nhello\n\nHarness note:"
+                                  (plist-get got :text)))
+          (should-not (equal old (harness-provider-claude-test--cli-id sid))))))))
+
 (ert-deftest harness-provider-claude-handoff-mid-turn-waits-for-the-next-step ()
   "A switch while a turn runs hands over at the turn's next step.
 The incident: a session switched to Claude Code while a turn ran sent

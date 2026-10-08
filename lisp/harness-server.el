@@ -45,6 +45,8 @@
 (defvar harness-acp--server-enabled)
 (defvar harness-compile-subdirectory)
 (defvar harness-process)
+(defvar harness-policy-exempt)
+(defvar harness-server--own-variables)  ; Below, with the parent's code.
 (declare-function harness--reload "harness")
 (declare-function harness-start "harness")
 (declare-function harness-stop "harness")
@@ -148,7 +150,9 @@ HARNESS_SERVER_TOKEN and HARNESS_SERVER_PARENT from the environment."
           harness-acp-token (getenv "HARNESS_SERVER_TOKEN")
           harness-acp-host "127.0.0.1"
           harness-acp-port 0
-          harness-acp--server-enabled t)
+          harness-acp--server-enabled t
+          ;; They are this process's own, whatever a policy says.
+          harness-policy-exempt harness-server--own-variables)
     (require 'harness)
     (with-no-warnings
       (harness-defmethod harness/reload ()
@@ -206,7 +210,10 @@ the user's, as their own Emacs does.")
 (defconst harness-server--own-variables
   '(harness-process harness-module-directories harness-compile-subdirectory
     harness-acp-token harness-acp-host harness-acp-port
-    harness-server-forward-variables)
+    harness-server-forward-variables
+    ;; The harness process reads the policy from where the administrator
+    ;; put it, not from where this Emacs was told to look.
+    harness-policy-file)
   "Variables the harness process sets for itself; never forwarded.")
 
 (defun harness-server--forwardable-p (sym)

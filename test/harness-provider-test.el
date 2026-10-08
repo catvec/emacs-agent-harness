@@ -510,5 +510,60 @@ tool output is cut."
       (should-not (string-match-p "message 1" text))
       (should (string-match-p "\\[… [0-9]+ earlier messages omitted …\\]" text)))))
 
+;;;; Models allowed
+
+(defvar harness-allowed-models)
+(declare-function harness-provider-model-allowed-p "harness-provider")
+
+(ert-deftest harness-provider-allowed-models-are-globs-of-model-ids ()
+  "A pattern is a glob of a model id; one without a colon names providers."
+  (harness-provider-test-with ()
+    (let ((harness-allowed-models nil))
+      (should (harness-provider-model-allowed-p "anything:at-all")))
+    (let ((harness-allowed-models '("claude" "openai:gpt-5*" "*:*sonnet*")))
+      (dolist (id '("claude:opus" "claude:claude-fable-5-1" "openai:gpt-5" "openai:gpt-5-mini"
+                    "bedrock:anthropic.claude-sonnet-4" "deepseek:sonnet"))
+        (should (harness-provider-model-allowed-p id)))
+      (dolist (id '("claudex:opus" "openai:gpt-4o" "OPENAI:gpt-5" "deepseek:deepseek-flash"
+                    "no-provider" nil))
+        (should-not (harness-provider-model-allowed-p id))))))
+
+(ert-deftest harness-provider-policy-keeps-requests-to-models-allowed ()
+  "No provider is asked for a model the policy does not allow, whoever
+asks; the catalogue lists only the models allowed, and a tier's model is
+one of them."
+  (harness-provider-test-with (test-allowed test-other)
+    (let ((completed nil) (warmed nil))
+      (harness-define-provider 'test-allowed
+        :complete (lambda (request) (push (plist-get request :model) completed) (list :cancel #'ignore))
+        :warm (lambda (request) (push (plist-get request :model) warmed) t)
+        :models (lambda () (harness-resolved
+                            (list (list :name "small" :pricing '(:input 1.0 :output 5.0))
+                                  (list :name "big" :pricing '(:input 10.0 :output 50.0))))))
+      (harness-provider-test-static 'test-other '(("m" . 100000)))
+      (harness-test-with-policy '((harness-allowed-models "test-allowed:big"))
+        (let ((events nil))
+          (harness-call 'provider/complete
+                        (list :model "test-allowed:small" :on-event (lambda (e) (push e events))))
+          (should-not completed)
+          (should (= 1 (length events)))
+          (should (eq 'done (plist-get (car events) :type)))
+          (should (eq 'error (plist-get (car events) :stop-reason)))
+          (should (string-match-p "test-allowed:small is not allowed: harness-allowed-models, set by policy"
+                                  (plist-get (car events) :error)))
+          (harness-call 'provider/complete (list :model "test-allowed:big" :on-event #'ignore))
+          (should (equal '("test-allowed:big") completed)))
+        (should-not (harness-call 'provider/warm (list :model "test-allowed:small")))
+        (should (harness-call 'provider/warm (list :model "test-allowed:big")))
+        (should (equal '("test-allowed:big") warmed))
+        (should (equal '("test-allowed:big")
+                       (mapcar (lambda (m) (plist-get m :id))
+                               (harness-test-await (harness-call 'provider/models)))))
+        ;; The cheap model is the cheapest allowed.
+        (should (equal "test-allowed:big" (harness-call 'provider/tier-model "test-allowed" :cheap)))
+        (should-not (harness-call 'provider/tier-model "test-other" :cheap)))
+      (should (= 3 (length (harness-test-await (harness-call 'provider/models)))))
+      (should (equal "test-allowed:small" (harness-call 'provider/tier-model "test-allowed" :cheap))))))
+
 (provide 'harness-provider-test)
 ;;; harness-provider-test.el ends here

@@ -22,7 +22,7 @@ module needs something more, add it here first.
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE,
-                binary bodies)
+                binary bodies), harness-policy (settings an administrator fixes)
 ```
 
 The core never shows UI and never calls a model.  UI modules never
@@ -57,7 +57,10 @@ default) the layers above are split across two Emacs processes:
   (`harness-server--tramp-variables`: default methods, users and hosts,
   proxies, `tramp-remote-path`, connection sharing), plus
   `harness-server-forward-variables`; `harness-server-init-file` covers
-  anything else (hooks, bus filters).
+  anything else (hooks, bus filters).  The policy (an administrator's
+  file, see [policy.md](policy.md)) is not forwarded: each process
+  reads `/etc/harness/policy.el` itself, which overrides the user's
+  values there too, and `harness-policy-file` stays behind.
 - The child announces `HARNESS-ACP-ADDRESS host:port` and its log lines on
   stderr (batch Emacs buffers stdout); the parent copies the log into
   `*harness-log*`.  Its stdin is closed, so a stray prompt fails rather
@@ -247,9 +250,10 @@ cache lasts the session finds it warm again.  A step still sent to the
 old model after a switch stamps that model's cache (the agent passes
 the step's model).  Some changes start the conversation over instead,
 so the next request sends none of the old one, cached or not, and
-`:cache` is nil: a compaction, whose summary replaces the transcript
-(its usage record carries `:cache-reset`, which drops the stamp
-whichever model summarised, a handoff's summary included), and a model
+`:cache` is nil: a compaction, whose summary or transcript note
+replaces the transcript (its usage record carries `:cache-reset`, which
+drops the stamp whichever model summarised, a handoff's summary
+included), and a model
 whose provider keeps a conversation of its own and holds none of the
 session's (a hosted loop it was switched to, lossily:
 `session/provider-state` gives nothing for it), which is sent only the
@@ -404,7 +408,10 @@ these keys on either side of ACP.
 ### config
 
 Layered settings: directory `.dir-locals.el` (most specific) →
-project-root `.dir-locals.el` → customize default.  Variables are
+project-root `.dir-locals.el` → customize default.  Above them all is
+the policy (lisp/harness-policy.el, [policy.md](policy.md)): an option
+an administrator's policy file sets has the policy's value, for every
+option and not only the layered ones, and no layer changes it.  Variables are
 `defcustom`s with `:safe` predicates so dir-locals never prompt:
 `harness-model` (default "claude:claude-fable-5-1"),
 `harness-permission-mode`, `harness-thinking`, `harness-btw-thinking`
@@ -419,7 +426,8 @@ ones that decide how the harness starts or reaches the UI:
 `harness-server-*` and `harness-acp-*` options, minor modes, and less
 `harness-corporate-mode`) have a global value only.  `config/set` and
 `config/unset` refuse the ones of `harness-config-hidden-options`,
-`harness-corporate-mode` among them, as set in the init file only.
+`harness-corporate-mode` among them, as set in the init file only (or
+by a policy, which is how an administrator forces corporate mode on).
 Options named `...-api-key`, `-token`, `-secret` or `-password` are
 secrets: their values never leave the harness and never go to a
 `.dir-locals.el`.
@@ -446,7 +454,8 @@ has an opinion about is a `defconst`/`defvar` named `MODULE--thing`.
 See docs/configuration-audit.md for the rule and the audit behind it.
 
 - `config/get KEY CWD` → value for a session at CWD (KEY is the symbol
-  or its name; layered settings only).
+  or its name; layered settings only); the policy's when it sets KEY,
+  whatever the dir-locals files say.
 - `config/set KEY VALUE &key scope cwd printed` — scope
   `directory|project|global`; default: project if a project is found,
   else directory, and global for an option that does not layer.
@@ -456,20 +465,30 @@ See docs/configuration-audit.md for the rule and the audit behind it.
   predicate.  Persists with `add-dir-local-variable` (no backup file
   is left behind), or for `global` with `harness-save-user-option`,
   which asks the UI's Emacs to `customize-save-variable` (its custom
-  file).
+  file).  An option the policy sets is refused at every scope ("KEY is
+  set by policy (FILE) and cannot be changed"), and nothing is written.
 - `config/unset KEY &key scope cwd` — removes KEY from that layer: a
   `project` or `directory` scope deletes it from the `.dir-locals.el`
   (and the file once nothing is left in it); `global` sets the option
-  back to its standard value.
-- `config/layers CWD` → `((global . V) (project . V) (directory . V))` for display.
+  back to its standard value.  Refused as `config/set` refuses.
+- `config/layers CWD` → `((policy . V) (global . V) (project . V)
+  (directory . V))` for display; `policy` lists the keys the policy
+  sets, and the dir-locals layers what their files say, even where the
+  policy overrides it.
 - `config/describe CWD` → `(:cwd :root :project :in-project :files
-  :modules :settings)` for a settings page: every option, layered ones
+  :policy :modules :settings)` for a settings page: every option, layered ones
   first, each with its doc, customize `:type`, module, `:standard`,
   `:global`, `:project`, `:directory` and effective `:value` with the
   `:source` layer it comes from, plus the layers whose value does not
   fit the type (`:invalid`).  Types and values are printed (`read`
   them back), so they survive JSON; an unset layer is null, one set
   to nil is `"nil"`.  A secret has `:has-value` instead of values.
+  A setting the policy sets is `:locked`, its `:source` is `policy`,
+  its `:value` the policy's, and it is not `:editable`.  `:policy` is
+  null without a policy, else `(:file FILE :settings ((:key :value
+  :listed :defined) ...))`: every option the policy sets, in its order,
+  with whether the page lists it (corporate mode is not listed) and
+  whether this harness defines it at all.
 - Event `config/changed KEY VALUE SCOPE CWD` after a set or unset;
   after an unset VALUE is the value now in effect at CWD, and for a
   secret it is nil.
@@ -522,6 +541,18 @@ gone.
   `:thinking` takes `harness-btw-thinking` when its model offers that
   level (the catalogue lists it in `:thinking-levels`), else
   `harness-thinking`.  → session.  Event `session/created`.
+- Settings a policy fixes ([policy.md](policy.md)): when the policy sets
+  `harness-model`, `harness-permission-mode`, `harness-thinking` or
+  `harness-non-interactive`, every session's copy is the policy's value
+  (`harness-session--policy-options`; a BTW's thinking aside, which
+  follows `harness-btw-thinking`).  `session/create` and `session/fork`
+  give it whatever PLIST asks for, a record loaded from disk gets it,
+  and a reload (`harness/reloaded`) brings every session in line with
+  the policy as it is then, with `session/updated`.
+  `session/update`, `session/set-all` and the task board refuse another
+  value with "OPTION is set by policy (FILE) and cannot be changed",
+  changing nothing; `harness-session-check-policy` is the check, which
+  also refuses a model `harness-allowed-models` does not allow.
 - `session/get ID`, `session/list &optional FILTER` (`:project :status
   :kind :parent-id :active`), `session/delete ID` (its temporary
   directory goes too).
@@ -682,6 +713,18 @@ gone.
   back between a call and its result.  The transcript itself is not
   changed, and a message that needs no change comes out as it is.
 - `session/transcript-text ID` → searchable plain text.
+- `session/write-transcript ID &optional OPTS` → `(:file :lines)`:
+  writes `session/transcript-text` to a new Markdown file named after
+  the session and the time, in OPTS `:directory` relative to the
+  session's directory (`harness-session-transcript-directory`,
+  `.harness/transcripts/`, by default), under a heading (`:title`), the
+  session's name and id, a line on why (`:about`), its working
+  directory and a legend of the entries.  The session's directory is
+  where its tools read without asking and a provider's prompt cache
+  holds what the model reads, unlike the state directory; a
+  `.gitignore` of `*` there keeps git out.  Signals when the directory
+  does not exist.  A handoff (`.harness/handoff/`) and a compaction
+  into a transcript write theirs with it.
 - Event `session/changed ID SESSION` fires after any of the above (for UIs
   that just want to redraw).
 
@@ -982,6 +1025,16 @@ process now, so the answer comes sooner; a failure is only logged) and
 session id of a request that is not a session of its own, such as a task
 board's search; the CLI kills its process).  The model used when nothing
 more specific is configured is `harness-model`.
+
+`harness-allowed-models` keeps the harness to some models: glob
+patterns of model ids (`"claude:*"`; one without a colon names a
+provider), nil for any; an administrator's policy may set it
+([policy.md](policy.md)).  `provider/complete` refuses a request for
+another model before any provider sees it, with a `done` event of
+`:stop-reason error` that says why (`harness-provider-model-refusal`),
+so it holds for every request, the judge's, naming's and compaction's
+included.  `provider/warm` does not warm one, `provider/models` lists
+only the models allowed, and `provider/tier-model` chooses among them.
 
 Billing and quota: `provider/quota` (PROVIDER-ID a symbol or its name;
 REFRESH asks for fresh data first) returns a promise of QUOTA, nil when
@@ -1827,6 +1880,18 @@ non-interactive session it stays a denial.
   forks and sub-agents start with their parent's.  Changing the setting
   later leaves the sessions that exist alone.  The setting decides by
   itself only for a request without a session record.
+- A policy ([policy.md](policy.md)) holds here too.  A permission mode
+  or non-interactive switch it sets is every session's, whatever the
+  session record says (`harness-perms--mode-of`,
+  `harness-perms--non-interactive-p`).  When it sets
+  `harness-perms-rules`, those rules are weighed before the session's
+  own (`harness-perms--rules`), so no answer overrides them; prompts
+  offer no allow-always or deny-always, and an answer for always given
+  anyway holds for the session (`harness-perms--scope-allowed`).  When
+  it sets `harness-allowed-directories`, no directory prompt offers
+  allow-always, `permission/allow-dir` with SCOPE `always` is refused,
+  and the global entries are not `:revocable`; grants for the session
+  or the turn, which a person answering makes, stay as they are.
 
 ### sandbox
 
@@ -1834,6 +1899,9 @@ non-interactive session it stays a denial.
   command list (bwrap / systemd-run / plain).  `sandbox/status` →
   `(:backend bwrap|systemd|none :available (…) :policy …)`.  Fails closed
   when `harness-sandbox-policy` is `required` and no backend exists.
+  Without the sandbox module the bash tool fails closed for `required`
+  too (`harness-tools-shell--wrap`), rather than running the command
+  unconfined.
 - `$HOME`: bwrap keeps its path, covered by an empty tmpfs (after the
   one on /tmp, which may hold it, and before every bind), so `~/x`
   names the same path inside as outside and shows only what is mounted
@@ -2316,36 +2384,79 @@ and hinted.
 
 ### compaction
 
-- `compaction/compact SESSION-ID &optional OPTS` → promise; summarises
-  the transcript with the session's model (OPTS `:model` another),
-  appends a `compaction` node whose `:meta` points at the compacted
-  head, records the summariser (`:model`), what it was given
-  (`:context`) and the size compacted, sets it as head, hints
-  before/after.  `session/messages` starts at the node, as a user
-  message ("Summary of the conversation so far: ..."), followed by the
-  unanswered user messages carried over after it.  OPTS `:context` is
-  `full` (the default) or `sample`, which keeps only the first and last
-  few messages (`harness-compaction--sample-head`/`-tail`) with a user
-  message saying how many were left out: a bound on what a summariser
-  sent the conversation as text costs.  A summariser whose provider
-  keeps the conversation and can fork it (a hosted loop) works on a
-  fork of the session's provider state, so it summarises the real
-  conversation and leaves the session's own alone; one whose provider
-  is sent the transcript anyway (an API provider) gets it as messages.
-  A summariser that keeps the conversation and has no state of this
-  session (the target of a switch) is sent only the newest user
-  messages, so the context goes inside one message as structured text.
-  The summary's usage record carries `:cache-reset`: the conversation
-  starts over from the summary, so the prompt cache of the old one, the
-  summariser's included, is no use to the next request and the session
-  reports none (see "Session").  That holds for every compaction the
-  harness starts itself (automatic ones run only where the provider is
-  sent the transcript; a handoff's lands on a provider holding nothing
-  of the session).  A hosted loop compacted while it holds the
-  session's conversation goes on with it, the summary joining it, so a
-  summary its own model made on a fork of that conversation stamps the
-  cache like any request; one from a sample or another model resets it.
-- Auto: `agent/before-turn` compacts when the context comes within
+- `compaction/compact SESSION-ID &optional OPTS` → promise of the
+  `compaction` node, which stands in for the conversation from then on:
+  `session/messages` starts at it, as a user message, followed by the
+  unanswered user messages carried over after it.  OPTS `:kind` (one of
+  `harness-compaction-kinds`) says what it holds:
+  - `summary` (the default): the session's model (OPTS `:model`
+    another) summarises the conversation, and the message reads
+    "Summary of the conversation so far: ...".  OPTS `:context` is
+    `full` (the default) or `sample`, which keeps only the first and
+    last few messages (`harness-compaction--sample-head`/`-tail`) with a
+    user message saying how many were left out: a bound on what a
+    summariser sent the conversation as text costs.  A summary of a
+    sample is a brief one.
+  - `brief`: a summary of a sample, written by OPTS `:model`, else
+    `harness-compaction-brief-model` (`auto`, the default: the cheap
+    tier of the session's provider, `provider/tier-model`, else the
+    session's model; nil: the session's model; or a model named), and
+    ending in a note that it was written from only the first and last
+    messages and may lack what came between
+    (`harness-compaction--brief-caveat`; OPTS `:caveat` replaces it, nil
+    for none).  It costs cents however long the conversation.  A
+    handoff's `compact-new` is one, written by the new model.
+  - `transcript`: no request.  `session/write-transcript` writes the
+    conversation to a file in the session's directory, and the node
+    holds a note, sent as it is, saying where the file is and how long,
+    and to read its end and its start before answering, then what it
+    needs of the rest.
+  The node's `:meta` points at the compacted head and records the kind
+  (`:compaction`, read back by `harness-node-compaction-kind`), the
+  writer (`:model`, the session's for a transcript), what it was given
+  (`:context`), the size compacted, a transcript's `:file` and OPTS
+  `:meta` (a handoff's `:handoff`); hints say it began and what it
+  became.  A summariser whose provider keeps the conversation and can
+  fork it (a hosted loop) works on a fork of the session's provider
+  state, so it summarises the real conversation and leaves the
+  session's own alone; one whose provider is sent the transcript anyway
+  (an API provider) gets it as messages.  A summariser that keeps the
+  conversation and has no state of this session (the target of a
+  switch, a cheap model's side request) is sent the context inside one
+  message as structured text.  Every compaction starts the
+  conversation over (`harness-compaction--start-over`): its usage
+  record carries `:cache-reset`, so the session reports no prompt
+  cache (see "Session"), and the provider state of the session's model
+  goes (`session/set-provider-state` nil, which closes a hosted loop's
+  process), so a hosted loop's next request opens a new conversation
+  with the compaction instead of adding it to the old one, whose
+  context is what compacting was for.  The state of another provider,
+  left by a handoff, stays.  One compaction runs per session at a time,
+  a second call returning the running promise; OPTS `:idle` refuses a
+  session running a turn (`agent/running`), whose turn would go on
+  writing after the conversation it replaces, as compacting by hand
+  does.
+- `compaction/estimate SESSION-ID` → `(:context :model :model-label
+  :cached :carry-on :carry-on-cached :compacting :kind :kinds)`: the
+  context the next message sends, whether the prompt cache still lasts
+  for the session's model, what that message costs as things are and
+  read from the cache, whether a compaction runs, and the configured
+  kind; `:kinds` has `(:kind :model :model-label :input :output :cached
+  :cost :after)` per kind, at list prices (`usage/price`, so a
+  time-of-day price applies; nil without one).  A summary reads the
+  whole context, from the cache only on a fork of a hosted conversation
+  whose cache is warm, else at the uncached rate: the higher of the
+  cache-write and the input price, as a provider that does not charge
+  for writes (DeepSeek, priced 0) still charges the input.  A brief
+  summary reads the system prompt, the sample and the ask; either
+  writes up to the summary's budget
+  (`harness-compaction--summary-output`).  A transcript costs nothing
+  and leaves the note (`:after`) in place of the context.
+- Settings (section "Compaction"): `harness-compaction-kind`, the kind
+  automatic compaction makes (`summary`), and
+  `harness-compaction-brief-model`.
+- Auto: `agent/before-turn` compacts, as `harness-compaction-kind`
+  says, when the context comes within
   `harness-compaction--context-reserve` of the window unless the provider
   reports `:compaction hosted`.  The window is the session's
   (`:context-window' override, else its model's, capped by its
@@ -2391,15 +2502,17 @@ so switching to either loses nothing.
   which reads the conversation from its prompt cache while the cache
   lasts and pays for it all uncached once it lapsed (`:cache`), and
   `compact-new` has the *new* model summarise instead,
-  from a bounded context (`:context sample`: the first and last few
-  messages): use it when the old provider cannot answer -- its plan ran
-  out, it is down -- or to keep the job small.  The compaction node,
+  from a bounded context (`compaction/compact` `:kind brief` with
+  `:model`: the first and last few messages): use it when the old
+  provider cannot answer -- its plan ran out, it is down -- or to keep
+  the job small.  The compaction node,
   marked `:handoff` with the mode, summariser and context, opens the new
   conversation, ending in a harness note that the handoff is lossy and
   the model should re-investigate rather than trust it.  When no summary
   can be made (the summariser fails or its plan ran out) the transcript
-  goes over instead (`:fallback` says why).  `transcript` writes
-  `session/transcript-text` to `CWD/.harness/handoff/ID-TIME.md` -- in
+  goes over instead (`:fallback` says why).  `transcript` writes the
+  transcript (`session/write-transcript`) to
+  `CWD/.harness/handoff/ID-TIME.md` -- in
   the session's directory, which its tools may read and the new
   provider's prompt cache holds as it reads, unlike the state directory,
   and kept out of git by a `.gitignore` of `*` there -- and appends a
@@ -3633,7 +3746,9 @@ Methods (callable as `_harness/acp/remote-*`): `acp/remote-status` →
 :addresses ((:address :interface :kind lan|vpn|other) ...) :ws-url
 :code-expires :devices (... :connected N) :clients)`,
 `acp/remote-start` and `acp/remote-stop` (save `harness-acp-remote`;
-stopping drops the clients, the code and every pairing),
+stopping drops the clients, the code and every pairing; a policy that
+sets `harness-acp-remote` the other way refuses either before anything
+listens or stops),
 `acp/remote-pair`, `acp/remote-forget-code`, `acp/remote-revoke ID`,
 `acp/remote-set-address ADDRESS` (saves `harness-acp-remote-address`,
 "" detects; drops the code).  Event `acp/remote-changed (:what
@@ -3910,8 +4025,20 @@ redraws the box and whatever panel is above it (`harness-compose-redraw`);
 a session update (a new request stamps a new `:cache-at`) reschedules
 it, and the panel goes as soon as the session runs.  Its text names
 clock times only, never "idle for", so nothing in it goes stale between
-redraws.  It informs only: it has no buttons, and a session without
-context or cache use never shows it.
+redraws.  A session without context or cache use never shows it.  Its
+last line offers to compact the conversation first, so the next
+message sends only what stands in for it: a button per kind
+(`harness-ui-compact-kinds`), the brief summary first -- the cheap way
+out of a long conversation gone cold -- then the summary and the
+transcript file, each with its key on that line (b, s, t, through a
+keymap composed under the buttons' own, `harness-ui-with-keymap`) and
+what it costs (`compaction/estimate`, asked once per state the panel
+shows, `harness-ui-cache--estimate`, and drawn when it comes; the
+buttons only name the kinds until then, a transcript being free).
+Pressing one runs `compaction/compact` (`harness-ui-compact-run`); the
+line says so while it runs, and the panel goes once the compaction
+resets the cache.  A session blocked on an answer is in the middle of a
+turn: its panel offers nothing.
 Tools go by their labels everywhere: a tool block's header shows the
 label in `harness-tool-title-face` and what the call is about after it
 in `harness-tool-subject-face` (the faces stand in for the colon of the
@@ -4228,6 +4355,14 @@ deletes a project value, [Reset to default] a customized global one.
 Secrets show as set or not and are set through `read-passwd`; long
 texts open in `string-edit`.  The page reloads on `config/changed`,
 keeping edits not saved yet, point, and the records left open.
+A setting the policy sets ([policy.md](policy.md), `:locked` in
+`config/describe`) is drawn with its value, a lock and "Locked", and
+"set by policy in FILE" under its doc, in both scopes: no widget, no
+[Remove override] or [Reset to default], and the commands that would
+change it (`C-c C-c`, `d`) refuse with the reason.  A banner under the
+scope lists everything `:policy` sets, options the page does not show
+included ("not on this page"), and Advanced's count of changed
+settings leaves locked ones out.
 
 Session settings: `harness-set-model`, `-thinking`, `-permission-mode`
 and `harness-toggle-non-interactive` (`C-c h m` `T` `p` `i`) change what
@@ -4596,7 +4731,13 @@ and a key per way to hand over, falling back to the minibuffer question
 when no chat buffer shows; see "Switching model or provider"), the
 prompt cache warning of a session (`harness-ui-cache`: the chat panel
 that says the cache lapsed and what the next message re-sends, drawn
-by a timer at the moment it lapses; see "Chat buffer"), and the
+by a timer at the moment it lapses, with buttons that compact the
+conversation first; see "Chat buffer"), compacting by hand
+(`harness-ui-compact`: `harness-compact`, `C-c h C` and "C" in the
+menu, asks which kind with `read-multiple-choice`, the help buffer a
+table of each kind's writer, cost and effect and what carrying on
+costs, from `compaction/estimate`; refuses a session running a turn;
+registers /compact, /compact KIND, in `harness-chat-commands`), and the
 handed-in report (`harness-ui-report`: the summary as markdown and the
 evidence -- images as wide as the popout and up to
 `harness-ui-report-image-max-height` of the frame high, the popout
