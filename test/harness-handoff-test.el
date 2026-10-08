@@ -434,6 +434,36 @@ is the note: a hosted loop sent only tool results starts with nothing."
       ;; Nothing left to change.
       (should-not (harness-call 'handoff/switch-all "hosted:m")))))
 
+(ert-deftest harness-handoff-all-reaches-the-sessions-of-current-tasks ()
+  "With `:tasks', checking and switching every session take those of the
+current tasks too (`task/session-ids'), a closed one included: its task
+goes on in it, so it is asked about and handed over like the others."
+  (harness-handoff-test-with
+    (let* ((open (harness-handoff-test--session t))
+           (closed (harness-handoff-test--session t))
+           (history (harness-handoff-test--session t))
+           (ids (lambda (checks) (sort (mapcar (lambda (c) (plist-get c :id)) checks) #'string<))))
+      (harness-call 'session/deactivate closed)
+      (harness-call 'session/deactivate history)
+      (harness-register-method 'task/session-ids (lambda (&optional _filter) (list closed)))
+      ;; Without `:tasks' only the open one; with it the task's too, but
+      ;; not a closed session no current task goes on in.
+      (should (equal (list open) (funcall ids (harness-call 'handoff/check-all "hosted:m" '(:active t)))))
+      (should (equal (sort (list open closed) #'string<)
+                     (funcall ids (harness-call 'handoff/check-all "hosted:m" '(:active t :tasks t)))))
+      (should (cl-every (lambda (c) (plist-get c :lossy))
+                        (harness-call 'handoff/check-all "hosted:m" '(:active t :tasks t))))
+      (should (equal (sort (list open closed) #'string<)
+                     (sort (copy-sequence (harness-call 'handoff/switch-all "hosted:m" '(:active t :tasks t) 'transcript))
+                           #'string<)))
+      (harness-test-wait (lambda () (zerop (hash-table-count harness-handoff--pending))) 5 "the handoffs")
+      (dolist (sid (list open closed))
+        (should (equal "hosted:m" (plist-get (harness-call 'session/get sid) :model)))
+        (should (cl-find-if #'harness-node-handoff (harness-call 'session/nodes sid))))
+      (should (equal "demo:scripted" (plist-get (harness-call 'session/get history) :model)))
+      ;; Switched once: the second time nothing is left to switch.
+      (should-not (harness-call 'handoff/switch-all "hosted:m" '(:active t :tasks t))))))
+
 (ert-deftest harness-handoff-over-acp ()
   "A client checks and switches with string arguments, as the UI does."
   (harness-handoff-test-with

@@ -97,6 +97,17 @@ raw-byte characters there (\"\\342\\234\\227\" for U+2717), which
   "Non-nil when parsed JSON VALUE is truthy (not nil and not :false)."
   (and value (not (eq value :false))))
 
+(defun harness-setting-equal-p (key a b)
+  "Non-nil when A and B are the same value of session setting KEY.
+Values may come over JSON: `:non-interactive' compares as a boolean
+\(nil, `:false' and an absent value are all off), and a symbol equals
+its name, as a permission mode is a symbol in a session and a string
+in a request.  Anything else compares with `equal'."
+  (let ((name (lambda (v) (if (and v (symbolp v) (not (keywordp v))) (symbol-name v) v))))
+    (if (eq key :non-interactive)
+        (eq (and (harness-json-true-p a) t) (and (harness-json-true-p b) t))
+      (equal (funcall name a) (funcall name b)))))
+
 ;;;; Plists
 
 (defun harness-plist-get-in (plist path)

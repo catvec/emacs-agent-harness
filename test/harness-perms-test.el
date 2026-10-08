@@ -24,6 +24,7 @@
   (clrhash harness-perms--turn-dirs)
   (clrhash harness-perms--session-rules)
   (clrhash harness-perms--waiting)
+  (clrhash harness-perms--judging)
   (setq harness-perms--steered nil
         harness-perms-rules nil
         harness-perms-test--pending nil
@@ -1389,7 +1390,13 @@ To be used inside `harness-test-with-temp-state'; the caller clears
     (harness-test-load-module m))
   (clrhash harness-sessions)
   (clrhash harness-perms--waiting)
+  (clrhash harness-perms--judging)
   (clrhash harness-perms--allowed-dirs)
+  (clrhash harness-perms--session-rules)
+  (clrhash harness-perms--turn-dirs)
+  ;; Call ids repeat from test to test: one steered before must not
+  ;; keep the agent from being steered again.
+  (setq harness-perms--steered nil)
   (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :permission-mode mode) :id))
 
 (ert-deftest harness-perms-yolo-switch-accepts-a-waiting-prompt ()
@@ -1485,6 +1492,255 @@ To be used inside `harness-test-with-temp-state'; the caller clears
                           sid (plist-get (car (harness-call 'session/pending sid)) :id) "allow-session")
             (should-not (plist-get (harness-test-await p) :is-error))
             (should (= 1 ran))))
+      (clrhash harness-sessions))))
+
+;;;; Switching to non-interactive with a prompt waiting
+
+(defun harness-perms-test--start-call (tool kind)
+  "Start deciding a call to TOOL of KIND that touches no path.
+Return (PROMISE . PENDING) once its prompt waits."
+  (let ((n (length harness-perms-test--pending))
+        (p (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                     (harness-perms-test--request tool kind))))
+    (harness-test-wait (lambda () (> (length harness-perms-test--pending) n)) 2 "pending")
+    (cons p (car harness-perms-test--pending))))
+
+(ert-deftest harness-perms-non-interactive-switch-judges-waiting-prompts ()
+  "Switching a waiting session to non-interactive has its prompts decided
+as a new call would be, the judge deciding in the user's place, and its
+verdict answers the prompt for the call alone.  A directory prompt waits
+on: only the user grants a directory."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let* ((harness-perms-auto-model "judge:small")
+         (harness-perms--auto-timeout 2)
+         (probe (harness-perms-test--allowing-judge))
+         (dir (harness-perms-test--start "read_file" 'read (expand-file-name "x.txt" (harness-test-temp-dir))))
+         (tool (harness-perms-test--start-call "bash" 'exec)))
+    (should (= 2 (length harness-perms-test--pending)))
+    ;; Another change, interactive still: nothing is judged.
+    (harness-emit 'session/updated "s1" '(:permission-mode accept-edits))
+    (accept-process-output nil 0.1)
+    (should (null (funcall probe 'requests)))
+    (should-not (harness-promise-settled-p (car tool)))
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :non-interactive t))
+    (harness-emit 'session/updated "s1" '(:non-interactive t))
+    (let ((d (harness-test-await (car tool))))
+      (should (eq 'allow (plist-get d :behavior)))
+      (should (equal "ordinary work" (plist-get d :reason)))
+      (should (plist-get d :final)))
+    (should (= 1 (length (funcall probe 'requests))))
+    ;; Answered once, for this call: no rule left behind.
+    (let ((answered (assoc (plist-get (cdr tool) :id) harness-perms-test--resolved)))
+      (should (eq 'allow (plist-get (cdr answered) :behavior)))
+      (should (eq 'once (plist-get (cdr answered) :scope))))
+    (should (null (gethash "s1" harness-perms--session-rules)))
+    ;; The directory prompt waits on, through another switch too.
+    (harness-emit 'session/updated "s1" '(:non-interactive t))
+    (accept-process-output nil 0.1)
+    (should-not (harness-promise-settled-p (car dir)))
+    (should (equal (list (plist-get (cdr dir) :id))
+                   (mapcar (lambda (p) (plist-get p :id)) harness-perms-test--pending)))
+    (should (= 1 (length (funcall probe 'requests))))
+    (harness-call 'permission/answer "s1" (plist-get (cdr dir) :id) "deny-once")
+    (should (eq 'deny (plist-get (harness-test-await (car dir)) :behavior)))))
+
+(ert-deftest harness-perms-non-interactive-switch-denies-and-steers ()
+  "A blocked session switched to non-interactive gets the judge's verdict
+on the call it waits on: a denial refuses the call, and the agent is
+steered to find another way, as after any denial while the user is
+away.  A directory request of the same session keeps waiting for the
+user, whose answer still runs its call."
+  (harness-test-with-temp-state
+    (unwind-protect
+        (let* ((sid (harness-perms-test--real-session 'ask))
+               (harness-perms-auto-model "judge:small")
+               (harness-perms--auto-timeout 2)
+               (prompts (harness-perms-test--prompts))
+               (outside (harness-test-temp-dir))
+               (ran nil))
+          (harness-perms-test--judge-provider '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"not that\"}")
+                                                (:type done :stop-reason end-turn)))
+          (harness-define-tool "t_exec" :label "Run" :kind 'exec
+                               :handler (lambda (_in _ctx) (push 'exec ran) "done"))
+          (harness-define-tool "t_read" :label "Read" :kind 'read
+                               :paths (lambda (in) (list (plist-get in :path)))
+                               :handler (lambda (_in _ctx) (push 'read ran) "read"))
+          (let ((exec (harness-call 'tools/execute sid (list :id "c1" :name "t_exec" :input '(:command "x"))))
+                (read (harness-call 'tools/execute sid (list :id "c2" :name "t_read"
+                                                             :input (list :path (expand-file-name "x.txt" outside))))))
+            (harness-test-wait (lambda () (= 2 (length (harness-call 'session/pending sid)))) 2 "both prompts")
+            (should (eq 'blocked (plist-get (harness-call 'session/get sid) :status)))
+            (harness-call 'session/update sid :non-interactive t)
+            (let ((r (harness-test-await exec)))
+              (should (plist-get r :denied))
+              (should (string-match-p "\\`Denied: not that" (plist-get r :content))))
+            (should (equal (list (cons sid (format harness-perms-steering-text "t_exec"))) (funcall prompts)))
+            ;; The directory prompt is the one left, and its call waits.
+            (let ((left (harness-call 'session/pending sid)))
+              (should (= 1 (length left)))
+              (should (plist-get (plist-get (car left) :payload) :dir))
+              (should-not (harness-promise-settled-p read))
+              (should-not ran)
+              (harness-call 'permission/answer sid (plist-get (car left) :id) "allow-once"))
+            (should (equal "read" (plist-get (harness-test-await read) :content)))
+            (should (equal '(read) ran))
+            (should (null (harness-call 'session/pending sid)))))
+      (clrhash harness-sessions))))
+
+;;;; Requests to turn non-interactive mode on
+
+(defun harness-perms-test--away-request (&rest input)
+  "Build a request of the set_non_interactive tool with INPUT."
+  (list :session harness-perms-test--session :tool harness-perms-away-tool :kind 'meta
+        :input input :call-id (harness-short-id)))
+
+(defun harness-perms-test--start-away (&rest input)
+  "Start deciding a set_non_interactive call with INPUT; return (PROMISE . PENDING)."
+  (let ((n (length harness-perms-test--pending))
+        (p (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                     (apply #'harness-perms-test--away-request input))))
+    (harness-test-wait (lambda () (> (length harness-perms-test--pending) n)) 2 "pending")
+    (cons p (car harness-perms-test--pending))))
+
+(ert-deftest harness-perms-away-request-always-asks-the-user ()
+  "Turning non-interactive mode on asks the user in every permission mode.
+Neither a standing rule, nor yolo, nor the auto-mode judge approves it,
+and the user's answer holds for the call alone, whatever its scope."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let ((harness-perms-auto-model "judge:small")
+        (probe (harness-perms-test--allowing-judge)))
+    (harness-perms-add-rule "s1" (list :tool harness-perms-away-tool :behavior 'allow) 'session)
+    (dolist (mode '(ask accept-edits auto yolo))
+      (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode mode))
+      (let* ((started (harness-perms-test--start-away :enabled t :all t :reason "I am leaving for the day."))
+             (payload (plist-get (cdr started) :payload)))
+        (should-not (harness-promise-settled-p (car started)))
+        (should (equal "Turn non-interactive mode on for every current session and task, of every project"
+                       (plist-get payload :title)))
+        (should (string-prefix-p "The agent asks: I am leaving for the day.  Nobody is asked anything there"
+                                 (plist-get payload :reason)))
+        (should (equal harness-perms-away-options (plist-get payload :options)))
+        (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "allow-always")
+        (let ((d (harness-test-await (car started))))
+          (should (eq 'allow (plist-get d :behavior)))
+          (should (plist-get d :final))
+          (should (equal "the user confirmed it" (plist-get d :reason))))))
+    (should (null (funcall probe 'requests)))
+    ;; The answer recorded nothing: the rule added above is the only one.
+    (should (= 1 (length (gethash "s1" harness-perms--session-rules))))
+    ;; Refused, the agent is told not to ask again.
+    (let ((started (harness-perms-test--start-away :enabled t :session_id "other")))
+      (should (equal "Turn non-interactive mode on for session other"
+                     (plist-get (plist-get (cdr started) :payload) :title)))
+      (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "deny-once")
+      (let ((d (harness-test-await (car started))))
+        (should (eq 'deny (plist-get d :behavior)))
+        (should (equal "the user refused it" (plist-get d :reason)))
+        (should (string-match-p "Do not ask again" (plist-get d :hint)))))))
+
+(ert-deftest harness-perms-away-request-survives-the-switches ()
+  "Neither a switch to yolo nor one to non-interactive answers the request:
+it waits for the user."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let ((harness-perms-auto-model "judge:small")
+        (probe (harness-perms-test--allowing-judge))
+        (started (harness-perms-test--start-away :enabled t)))
+    (should (equal "Turn non-interactive mode on for this session"
+                   (plist-get (plist-get (cdr started) :payload) :title)))
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'yolo))
+    (harness-emit 'session/updated "s1" '(:permission-mode yolo))
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :non-interactive t))
+    (harness-emit 'session/updated "s1" '(:non-interactive t))
+    (accept-process-output nil 0.2)
+    (should-not (harness-promise-settled-p (car started)))
+    (should (null (funcall probe 'requests)))
+    (should (= 1 (length harness-perms-test--pending)))
+    (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "allow-once")
+    (should (eq 'allow (plist-get (harness-test-await (car started)) :behavior)))))
+
+(ert-deftest harness-perms-away-request-without-anyone-to-ask ()
+  "A non-interactive session cannot ask, so its request to turn the mode
+on is denied at once, in every mode, and the hint says to carry on.
+Turning it off needs no answer: it only brings the user back in."
+  (harness-perms-test--setup :permission-mode 'yolo :non-interactive t)
+  (harness-perms-test--install-pending)
+  (let ((harness-perms-auto-model "judge:small")
+        (probe (harness-perms-test--allowing-judge)))
+    (harness-perms-add-rule "s1" (list :tool harness-perms-away-tool :behavior 'allow) 'session)
+    (dolist (mode '(yolo auto ask))
+      (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode mode))
+      (let ((d (harness-perms-test--decide (harness-perms-test--away-request :enabled t :all t))))
+        (should (eq 'deny (plist-get d :behavior)))
+        (should (plist-get d :final))
+        (should (equal (concat "nobody can confirm turning non-interactive mode on for every current session"
+                               " and task, of every project: this session is non-interactive and the user is away")
+                       (plist-get d :reason)))
+        (should (string-match-p "Do not ask again" (plist-get d :hint)))))
+    (should (null harness-perms-test--pending))
+    (should (null (funcall probe 'requests)))
+    ;; Off, in an interactive ask-mode session too, with a rule against it.
+    (dolist (away '(t nil))
+      (setq harness-perms-test--session (plist-put (plist-put harness-perms-test--session :permission-mode 'ask)
+                                                   :non-interactive away))
+      (dolist (enabled '(:false nil))
+        (let ((d (harness-perms-test--decide (harness-perms-test--away-request :enabled enabled))))
+          (should (eq 'allow (plist-get d :behavior)))
+          (should (string-match-p "brings the user back in" (plist-get d :reason))))))
+    (should (null harness-perms-test--pending)))
+  ;; Without sessions to hold a prompt, nobody can answer either.
+  (harness-perms-test--setup :permission-mode 'ask)
+  (let ((d (harness-perms-test--decide (harness-perms-test--away-request :enabled t))))
+    (should (eq 'deny (plist-get d :behavior)))
+    (should (string-match-p "no user is available" (plist-get d :reason)))))
+
+(ert-deftest harness-perms-away-request-end-to-end ()
+  "The set_non_interactive tool asks before turning the mode on, and runs
+once the user confirms; the session then is non-interactive.  From
+there, asking again is refused at once, and turning it off runs as
+asked."
+  (harness-test-with-temp-state
+    (unwind-protect
+        (progn
+          (harness-test-reset-bus)
+          (dolist (m '(store project config provider provider-demo session tools agent perms tools-sessions))
+            (harness-test-load-module m))
+          (clrhash harness-sessions)
+          (clrhash harness-perms--waiting)
+          (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted"
+                                               :permission-mode 'yolo)
+                                 :id))
+                 (run (lambda (input)
+                        (harness-call 'tools/execute sid (list :id (harness-short-id) :name "set_non_interactive"
+                                                               :input input))))
+                 (prompts (harness-perms-test--prompts))
+                 (p (funcall run '(:enabled t :reason "The user is leaving"))))
+            (harness-test-wait (lambda () (harness-call 'session/pending sid)) 2 "the confirmation")
+            (should-not (harness-promise-settled-p p))
+            (should-not (plist-get (harness-call 'session/get sid) :non-interactive))
+            (harness-call 'permission/answer sid (plist-get (car (harness-call 'session/pending sid)) :id) "allow-once")
+            (let ((r (harness-test-await p)))
+              (should-not (plist-get r :is-error))
+              (should (equal "Non-interactive mode is now on for this session." (plist-get r :content))))
+            (should (plist-get (harness-call 'session/get sid) :non-interactive))
+            ;; Non-interactive now: refused at once, nothing waits, and
+            ;; the agent is not steered to reach that goal some other
+            ;; way, as it is after any other denial.
+            (harness-register-method 'agent/running (lambda (&rest _) t))
+            (let ((r (harness-test-await (funcall run '(:enabled t :all t)))))
+              (should (plist-get r :denied))
+              (should (string-match-p "nobody can confirm" (plist-get r :content))))
+            (should (null (harness-call 'session/pending sid)))
+            (should (null (funcall prompts)))
+            (harness-perms--on-decided sid (list :tool "bash" :call-id (harness-short-id)) (list :behavior 'deny))
+            (should (equal (list (cons sid (format harness-perms-steering-text "bash"))) (funcall prompts)))
+            ;; Off needs nobody.
+            (let ((r (harness-test-await (funcall run '(:enabled :false)))))
+              (should-not (plist-get r :is-error))
+              (should (equal "Non-interactive mode is now off for this session." (plist-get r :content))))
+            (should-not (plist-get (harness-call 'session/get sid) :non-interactive))))
       (clrhash harness-sessions))))
 
 (defun harness-perms-test--end-to-end ()
@@ -1944,7 +2200,9 @@ auto judge objecting to a call offers none either."
   (should (equal "t_unknown: echo hi" (harness-perms-describe-request '(:tool "t_unknown" :input (:command "echo hi\nmore")))))
   ;; Re-running init keeps exactly one handler per stage.
   (harness-perms--init)
-  (should (= 7 (length (gethash 'permission/decide harness--filters))))
+  (should (= 8 (length (gethash 'permission/decide harness--filters))))
+  (should (equal 6 (car (rassq #'harness-perms--away-request
+                               (gethash 'permission/decide harness--filters)))))
   (should (memq 'permission/requested (mapcar #'car (harness-events))))
   ;; A hot reload does not run `:init' again for a ready module; loading
   ;; the file still installs the stage that decides directory requests.
@@ -1952,7 +2210,7 @@ auto judge objecting to a call offers none either."
   (harness-test-load-module 'perms)
   (should (harness-module-ready-p 'perms))
   (should (rassq #'harness-perms--dir-request (gethash 'permission/decide harness--filters)))
-  (should (= 7 (length (gethash 'permission/decide harness--filters)))))
+  (should (= 8 (length (gethash 'permission/decide harness--filters)))))
 
 ;;;; Inspecting the harness itself
 

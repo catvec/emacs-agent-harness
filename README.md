@@ -277,11 +277,12 @@ the menu's Version entry says so.
 | `C-c h k` | `harness-cancel-turn` | Cancel the running turn |
 | `C-c h D` | `harness-delete-session` | Delete the current session |
 | `C-c h m` | `harness-set-model` | Choose the model |
-| `C-c h M` | `harness-set-model-all` | Choose a model and switch every current session to it |
+| `C-c h M` | `harness-set-model-all` | Choose a model and switch every current session and task of every project to it |
 | `C-c h T` | `harness-set-thinking` | Choose the thinking level |
-| `C-c h H` | `harness-set-thinking-all` | Choose a thinking level and set it on every current session |
+| `C-c h H` | `harness-set-thinking-all` | Choose a thinking level and set it on every current session and task of every project |
 | `C-c h p` | `harness-set-permission-mode` | Choose the permission mode |
 | `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
+| `C-c h A` | `harness-set-non-interactive-all` | Turn non-interactive mode on or off for every current session and task of every project |
 | `C-c h d` | `harness-directories` | Manage the directories a session may access |
 | `C-c h u` | `harness-usage` | Show the usage and cost dashboard |
 | `C-c h I` | `harness-insights` | Show the Insights report: how a period of work with the agents went |
@@ -544,7 +545,28 @@ so it is denied while you are away. New sessions, task sessions
 included, start interactive unless `harness-non-interactive` is set.
 Setting `harness-tasks-non-interactive` makes every new task session
 start non-interactive. From then on each
-session has its own switch.
+session has its own switch. Switching a session that waits on a
+permission prompt to non-interactive hands the prompt to the judge,
+which decides it as it would a new call, denial and steering included;
+a directory prompt still waits for your answer.
+
+`C-c h A` (`harness-set-non-interactive-all`) turns non-interactive
+mode on or off at once for every current session (idle, running or
+blocked) and every current task (pending, active or needing input) of
+every project, for the next task of every open task board, and for new
+sessions too, unless a prefix argument (`C-u C-c h A`) leaves the
+default alone. It says how many sessions and tasks changed, and when it
+turns the mode off, what still turns it on for new work: a project's
+`.dir-locals.el` that sets `harness-non-interactive`, or
+`harness-tasks-non-interactive`. It changes neither.
+
+An agent can do the same when you ask it to, with its
+`set_non_interactive` tool, for itself, another session, or everything.
+Turning the mode on takes you out of the loop, so the harness asks you
+first, every time, in every permission mode, as it does for a directory
+outside the session: neither the judge nor a permission rule can allow
+it, and a non-interactive session, which has nobody to ask, is denied at
+once. Turning it off only brings you back, so it asks nothing.
 
 Opening an inactive session shows it without resuming it. Its compose
 box stays available, and the first message you send resumes it.
@@ -1174,14 +1196,22 @@ cached for it, so a changed URL or model list shows at once.
 `C-c h m` (`harness-set-model`) chooses the model for the current
 session, and `C-c h T` its thinking level. `C-c h M`
 (`harness-set-model-all`) chooses one model and switches every current
-session to it; `C-c h H` (`harness-set-thinking-all`) does the same for
-the thinking level. Both make the choice the default for new sessions
-too, unless a prefix argument (`C-u C-c h M`) says otherwise. Only idle,
-running and blocked sessions change — deactivated ones are history and
-are left alone — no running turn is cancelled (it takes the new model at
-its next step), and each session records the change as a hint. Use them
-when a plan runs out of credit, a provider fails, or a cheaper model
-should take over work already in flight.
+session of every project to it, and every current task (pending, active
+or needing input); `C-c h H` (`harness-set-thinking-all`) does the same
+for the thinking level. Both make the choice the default for new
+sessions too, and the setting of the next task on every open task
+board, unless a prefix argument (`C-u C-c h M`) says otherwise. Only
+idle, running and blocked sessions change — deactivated ones are history
+and are left alone, unless a current task goes on in one — no running
+turn is cancelled (it takes the new model at its next step), and each
+session records the change once, as a hint. When the default changes,
+they then say what still wins over it: a project whose `.dir-locals.el`
+sets `harness-model` (or `harness-thinking`), at the project or the
+directory layer, and `harness-tasks-model` (or `harness-tasks-thinking`)
+for tasks. They never rewrite a `.dir-locals.el`: change it yourself,
+or in the settings page (`C-c h S`) switched to the project's values.
+Use them when a plan runs out of credit, a provider fails, or a cheaper
+model should take over work already in flight.
 
 Claude Code and Copilot keep the conversation themselves and are sent
 only your newest message, so switching a session to one of them from

@@ -1507,6 +1507,27 @@ them all; otherwise they are the new task's."
   (setq harness-ui-tasks--new (plist-put (copy-sequence harness-ui-tasks--new) key value))
   (harness-ui-tasks--render-tail))
 
+(defun harness-ui-tasks--set-all (key value)
+  "Give KEY VALUE in the new-task settings of every open board.
+This is the boards' part of `harness-ui-set-all-functions': a command
+that changes every current session and task changes what each board's
+next task starts with too, as the board's own buttons would.  A board
+whose settings have not come yet gets them, the new default included,
+from the harness when they do.  Return the boards' directories."
+  (let ((dirs nil))
+    (dolist (buffer (harness-ui-tasks--buffers))
+      (with-current-buffer buffer
+        (when harness-ui-tasks--new
+          (setq harness-ui-tasks--new (plist-put (copy-sequence harness-ui-tasks--new) key value))
+          (when (harness-compose-live-p)
+            (harness-ui-tasks--render-tail)))
+        (when harness-ui-tasks--dir
+          (push harness-ui-tasks--dir dirs))))
+    (nreverse dirs)))
+
+;; At top level, so a reload adds it in a running Emacs too.
+(add-hook 'harness-ui-set-all-functions #'harness-ui-tasks--set-all)
+
 (defun harness-ui-tasks--setting-target ()
   "Where the session setting commands apply on the board.
 In bulk mode, every current task; else the session of the started task

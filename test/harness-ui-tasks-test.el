@@ -516,6 +516,144 @@ told from, like a worktree git lost track of, still leads back."
         (should-not harness-ui-tasks--bulk)
         (should-not (string-match-p "Bulk: editing" (harness-ui-tasks--header)))))))
 
+;;;; Commands that change every session and task
+
+(defvar harness-non-interactive)
+(defvar harness-model)
+(defvar harness-tasks-non-interactive)
+(declare-function harness-set-non-interactive-all "harness-ui")
+(declare-function harness-set-model-all "harness-ui")
+
+(defun harness-ui-tasks-test--open-board (directory)
+  "Open the board of DIRECTORY; return it once it has its tasks and settings."
+  (let ((board (harness-tasks directory)))
+    (harness-test-wait (lambda () (with-current-buffer board
+                                    (and (not harness-ui-tasks--loading) harness-ui-tasks--new)))
+                       5 "the board to load")
+    board))
+
+(defun harness-ui-tasks-test--said (said prefix)
+  "Wait until a message in the list SAID holds starts with PREFIX; return it.
+SAID is a function returning the messages said so far."
+  (harness-test-wait (lambda () (cl-find-if (lambda (m) (string-prefix-p prefix m)) (funcall said)))
+                     5 (format "a message saying %s" prefix)))
+
+(defun harness-ui-tasks-test--hint-count (sid text)
+  "How many hints of session SID say TEXT."
+  (cl-count-if (lambda (n) (and (eq (plist-get n :kind) 'hint) (equal (plist-get n :content) text)))
+               (harness-call 'session/nodes sid)))
+
+(ert-deftest harness-ui-tasks-set-all-reaches-every-project ()
+  "The all-sessions commands reach every project and every open board.
+`harness-set-non-interactive-all' turns non-interactive on for the
+sessions and the current tasks here and in another project, for both
+boards' next tasks and, as the default, for new sessions, and says what
+keeps new work there interactive all the same.  With a prefix argument
+it turns it off for them all and leaves the default alone.
+`harness-set-model-all' switches the sessions and tasks of both
+projects too, each session once, and both boards' next tasks."
+  (harness-ui-tasks-test-with
+    (harness-test-load-module 'compaction)
+    (harness-test-load-module 'handoff)
+    (let* ((harness-provider-demo--delay 5)   ; a started task keeps running
+           (harness-tasks-max-running 0)
+           (harness-tasks-non-interactive nil)
+           (harness-non-interactive nil)
+           (harness-model harness-model)
+           (other (harness-test-temp-dir))
+           (messages nil)
+           (said (lambda () messages))
+           (saved nil)
+           (other-board nil)
+           (tasks nil)
+           (sessions nil))
+      (cl-letf* ((orig (symbol-function 'message))
+                 ((symbol-function 'message)
+                  (lambda (format-string &rest args)
+                    (when format-string (push (apply #'format format-string args) messages))
+                    (apply orig format-string args)))
+                 ((symbol-function 'harness-save-user-option)
+                  (lambda (symbol value) (set symbol value) (push (cons symbol value) saved))))
+        (unwind-protect
+            (progn
+              ;; The other project keeps its new sessions interactive.
+              (with-temp-file (expand-file-name ".dir-locals.el" other)
+                (prin1 '((nil . ((harness-non-interactive . nil)))) (current-buffer)))
+              (setq other-board (harness-ui-tasks-test--open-board other))
+              (harness-test-wait (lambda () (buffer-local-value 'harness-ui-tasks--new board)) 5 "the settings")
+              (setq tasks (list (plist-get (harness-call 'task/submit dir "waiting here") :id)
+                                (plist-get (harness-call 'task/submit other "waiting there") :id)
+                                (plist-get (harness-call 'task/submit other "running there") :id)))
+              (harness-call 'task/start (nth 2 tasks))
+              (setq sessions (list (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted") :id)
+                                   (plist-get (harness-call 'session/create :cwd other :model "demo:scripted") :id)
+                                   (plist-get (harness-call 'task/get (nth 2 tasks)) :session)))
+              (should (cl-every #'stringp sessions))
+              (dolist (b (list board other-board))
+                (should-not (plist-get (buffer-local-value 'harness-ui-tasks--new b) :non-interactive)))
+              ;; On, offered first, for everything.
+              (cl-letf (((symbol-function 'completing-read)
+                         (lambda (_prompt table _pred _require _initial _hist def)
+                           (should (equal '("on" "off") (all-completions "" table)))
+                           def)))
+                (call-interactively #'harness-set-non-interactive-all))
+              (let ((report (harness-ui-tasks-test--said said "Non-interactive on")))
+                (should (string-prefix-p (concat "Non-interactive on for 3 sessions and 3 tasks, and for new"
+                                                 " sessions and the open boards' new tasks.  But new sessions in ")
+                                         report))
+                (should (string-search (format " start interactive (harness-non-interactive in %s)"
+                                               (abbreviate-file-name (expand-file-name ".dir-locals.el" other)))
+                                       report)))
+              (dolist (sid sessions)
+                (should (plist-get (harness-call 'session/get sid) :non-interactive))
+                (should (= 1 (harness-ui-tasks-test--hint-count sid "non-interactive on"))))
+              (dolist (id tasks)
+                (should (eq t (plist-get (harness-call 'task/get id) :non-interactive))))
+              (dolist (b (list board other-board))
+                (should (eq t (plist-get (buffer-local-value 'harness-ui-tasks--new b) :non-interactive))))
+              (should (equal '((harness-non-interactive . t)) saved))
+              ;; Off with a prefix argument: the default stays on.  The task
+              ;; default turns new tasks on all the same, and it says so.
+              (setq messages nil)
+              (let ((harness-tasks-non-interactive t))
+                (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "off")))
+                  (harness-set-non-interactive-all t))
+                (let ((report (harness-ui-tasks-test--said said "Non-interactive off")))
+                  (should (equal (concat "Non-interactive off for 3 sessions and 3 tasks, and for the open boards'"
+                                         " new tasks.  But new tasks start non-interactive"
+                                         " (harness-tasks-non-interactive); M-x harness-settings changes them.")
+                                 report))))
+              (should (equal '((harness-non-interactive . t)) saved))
+              (should (eq t harness-non-interactive))
+              (dolist (sid sessions)
+                (should-not (plist-get (harness-call 'session/get sid) :non-interactive))
+                (should (= 1 (harness-ui-tasks-test--hint-count sid "non-interactive off"))))
+              (dolist (id tasks)
+                (should (eq :false (plist-get (harness-call 'task/get id) :non-interactive))))
+              (dolist (b (list board other-board))
+                (should-not (plist-get (buffer-local-value 'harness-ui-tasks--new b) :non-interactive)))
+              ;; A model for everything, each session switched once.
+              (setq messages nil)
+              (cl-letf (((symbol-function 'harness-ui-choose-model)
+                         (lambda (callback) (funcall callback "demo:other" "Other (Demo)"))))
+                (harness-set-model-all))
+              (let ((report (harness-ui-tasks-test--said said "Model → Other (Demo)")))
+                (should (string-prefix-p (concat "Model → Other (Demo) for 3 sessions and 3 tasks, and for new"
+                                                 " sessions and the open boards' new tasks.  But new tasks start on ")
+                                         report))
+                (should (string-search "(harness-tasks-model)" report)))
+              (should (equal "demo:other" harness-model))
+              (dolist (sid sessions)
+                (should (equal "demo:other" (plist-get (harness-call 'session/get sid) :model)))
+                (should (= 1 (harness-ui-tasks-test--hint-count sid "model → demo:other"))))
+              (dolist (id tasks)
+                (should (equal "demo:other" (plist-get (harness-call 'task/get id) :model))))
+              (dolist (b (list board other-board))
+                (should (equal "demo:other" (plist-get (buffer-local-value 'harness-ui-tasks--new b) :model)))))
+          (ignore-errors (harness-call 'task/cancel (nth 2 tasks)))
+          (when (buffer-live-p other-board) (kill-buffer other-board))
+          (delete-directory other t))))))
+
 (declare-function harness-ui-tasks--on-resize "harness-ui-tasks")
 (declare-function harness-ui-tasks--refresh-soon "harness-ui-tasks")
 (declare-function harness-ui-tasks--schedule-render "harness-ui-tasks")

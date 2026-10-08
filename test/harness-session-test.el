@@ -171,6 +171,48 @@ is never handed out, nor deleted with the session."
         (should (equal "deepseek:deepseek-flash" (plist-get (harness-call 'session/get (plist-get a :id)) :model)))
         (should (equal "claude:opus" (plist-get (harness-call 'session/get (plist-get b :id)) :model)))))))
 
+(ert-deftest harness-session-setting-equal-p-reads-json-values ()
+  "Settings compare as they mean: a false non-interactive is off however
+it is spelt, and a mode's name is the mode."
+  (should (harness-setting-equal-p :non-interactive nil :false))
+  (should (harness-setting-equal-p :non-interactive :false nil))
+  (should (harness-setting-equal-p :non-interactive t t))
+  (should-not (harness-setting-equal-p :non-interactive t :false))
+  (should-not (harness-setting-equal-p :non-interactive nil t))
+  (should (harness-setting-equal-p :permission-mode 'yolo "yolo"))
+  (should (harness-setting-equal-p :permission-mode "ask" 'ask))
+  (should-not (harness-setting-equal-p :permission-mode 'ask "yolo"))
+  (should (harness-setting-equal-p :model "claude:opus" "claude:opus"))
+  (should-not (harness-setting-equal-p :model "claude:opus" "claude:sonnet"))
+  ;; Elsewhere a false is a value of its own.
+  (should-not (harness-setting-equal-p :thinking nil :false)))
+
+(ert-deftest harness-session-set-all-takes-in-the-sessions-of-tasks ()
+  "With `:tasks', a bulk switch also reaches the closed session a current
+task goes on in, but not one `:except' names; a non-interactive switch
+compares as a boolean, so a session that is off stays untouched when
+asked for a false."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (open (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (task (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (left (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (skip (plist-get (harness-call 'session/create :cwd cwd) :id)))
+      (harness-call 'session/deactivate task)
+      (harness-call 'session/deactivate left)
+      (harness-register-method 'task/session-ids (lambda (&optional _filter) (list task skip "gone")))
+      (should (equal (sort (list open skip task) #'string<)
+                     (sort (mapcar (lambda (s) (plist-get s :id))
+                                   (harness-call 'session/select (list :active t :tasks t)))
+                           #'string<)))
+      (should-not (harness-call 'session/set-all (list :non-interactive :false) (list :active t :tasks t)))
+      (let ((changed (harness-call 'session/set-all (list :non-interactive t)
+                                   (list :active t :tasks t :except (list skip)))))
+        (should (equal (sort (list open task) #'string<) (sort changed #'string<)))
+        (should (harness-json-true-p (plist-get (harness-call 'session/get task) :non-interactive)))
+        (should-not (plist-get (harness-call 'session/get left) :non-interactive))
+        (should-not (plist-get (harness-call 'session/get skip) :non-interactive))))))
+
 (ert-deftest harness-session-non-interactive-is-its-own-switch ()
   "A session's non-interactive switch starts from the setting, unless an
 explicit false turns it off; it is stored as t or nil; a fork copies

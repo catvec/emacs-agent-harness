@@ -250,6 +250,85 @@ reaching a custom file."
       (should (equal "sk-secret" harness-config-test-api-key))
       (should (equal (list 'harness-config-test-api-key nil 'global sub) (car events))))))
 
+(defvar harness-tasks-model)
+(defvar harness-tasks-non-interactive)
+(defvar harness-non-interactive)
+
+(ert-deftest harness-config-overrides-names-what-wins-over-the-global-value ()
+  "`config/overrides' names the .dir-locals.el files of the places work
+goes on, at the project and the directory layer, that set the key to
+another value, and the task default that wins over it for tasks.  A
+finished task's directory, a remote one and a missing one are not
+looked at, and nothing is written."
+  (skip-unless (executable-find "git"))
+  (harness-config-test-with
+    (let* ((other (harness-config-test--project))
+           (finished (harness-config-test--project))
+           (board (harness-config-test--project))
+           (gone (expand-file-name "gone/" (harness-test-temp-dir)))
+           (dirs (list root sub (car other) (cdr other) (car finished) (car board)))
+           (before nil)
+           (summary (lambda (found)
+                      (mapcar (lambda (f) (list (plist-get f :file) (plist-get f :scope)
+                                                (plist-get f :dir) (plist-get f :value)))
+                              (plist-get found :files)))))
+      (harness-config-test--write root '((nil . ((harness-model . "claude:opus")))))
+      (harness-config-test--write sub '((nil . ((harness-model . "claude:sonnet")))))
+      ;; The new value already: nothing to say.
+      (harness-config-test--write (car other) '((nil . ((harness-model . "demo:scripted")))))
+      (harness-config-test--write (cdr other) '((nil . ((harness-thinking . "high")
+                                                        (harness-non-interactive . nil)))))
+      (harness-config-test--write (car finished) '((nil . ((harness-model . "claude:haiku")))))
+      (harness-config-test--write (car board) '((nil . ((harness-model . "claude:board")))))
+      (setq before (mapcar #'harness-config-test--read dirs))
+      (harness-register-method 'session/select
+        (lambda (&optional _filter)
+          (list (list :id "a" :cwd sub) (list :id "b" :cwd "/ssh:box:/srv/"))))
+      (harness-register-method 'task/list
+        (lambda (&rest _)
+          (list (list :id "t1" :column 'pending :cwd (cdr other))
+                (list :id "t2" :column 'done :cwd (car finished))
+                (list :id "t3" :column 'active :cwd gone))))
+      (let ((harness-tasks-model nil))
+        (let ((found (harness-call 'config/overrides "harness-model" :value "\"demo:scripted\""
+                                   :printed t :dirs (list (car board)))))
+          (should (equal "harness-model" (plist-get found :key)))
+          (should (equal "\"demo:scripted\"" (plist-get found :value)))
+          (should-not (plist-get found :tasks))
+          (should (equal (list (list (expand-file-name ".dir-locals.el" root) "project" root "\"claude:opus\"")
+                               (list (expand-file-name ".dir-locals.el" sub) "directory" sub "\"claude:sonnet\"")
+                               (list (expand-file-name ".dir-locals.el" (car board)) "project" (car board)
+                                     "\"claude:board\""))
+                         (funcall summary found)))
+          (should (equal (harness-call 'project/name root) (plist-get (car (plist-get found :files)) :project)))
+          (should (equal (harness-call 'project/name root) (plist-get (cadr (plist-get found :files)) :project))))
+        ;; Without a value, the global one is compared.
+        (let ((harness-model "claude:sonnet"))
+          (should (equal (list (list (expand-file-name ".dir-locals.el" root) "project" root "\"claude:opus\"")
+                               (list (expand-file-name ".dir-locals.el" (car other)) "project" (car other)
+                                     "\"demo:scripted\""))
+                         (funcall summary (harness-call 'config/overrides 'harness-model))))))
+      ;; The task default is named when it is set to something else.
+      (let ((harness-tasks-model "claude:tasks"))
+        (should (equal '(:option "harness-tasks-model" :value "\"claude:tasks\"")
+                       (plist-get (harness-call 'config/overrides "harness-model" :value "\"demo:scripted\""
+                                                :printed t)
+                                  :tasks)))
+        (should-not (plist-get (harness-call 'config/overrides "harness-model" :value "claude:tasks") :tasks)))
+      ;; Non-interactive compares as a boolean.
+      (let ((harness-tasks-non-interactive t))
+        (let ((found (harness-call 'config/overrides "harness-non-interactive" :value "nil" :printed t)))
+          (should (equal '(:option "harness-tasks-non-interactive" :value "t") (plist-get found :tasks)))
+          (should-not (plist-get found :files)))
+        (let ((found (harness-call 'config/overrides "harness-non-interactive" :value t)))
+          (should-not (plist-get found :tasks))
+          (should (equal (list (list (expand-file-name ".dir-locals.el" (cdr other)) "directory" (cdr other) "nil"))
+                         (funcall summary found)))))
+      ;; Only layered settings have overrides; nothing was written.
+      (should-error (harness-call 'config/overrides "harness-log-level"))
+      (should (equal before (mapcar #'harness-config-test--read dirs)))
+      (should-not saved))))
+
 (ert-deftest harness-config-describe-puts-common-settings-in-sections ()
   (harness-config-test-with
     (let* ((d (harness-call 'config/describe sub))

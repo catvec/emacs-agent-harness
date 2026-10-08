@@ -73,11 +73,11 @@
   (harness-tools-sessions-test-with
     (let ((names (mapcar (lambda (s) (plist-get s :name)) (harness-call 'tools/list))))
       (dolist (n '("session_list" "session_search" "session_read" "session_send" "session_control"
-                   "session_wait" "task_list" "task_submit" "task_control" "task_wait"))
+                   "set_non_interactive" "session_wait" "task_list" "task_submit" "task_control" "task_wait"))
         (should (member n names))))
     (dolist (n '("session_list" "session_search" "session_read" "session_wait" "task_list" "task_wait"))
       (should (eq 'read (plist-get (harness-call 'tools/get n) :kind))))
-    (dolist (n '("session_send" "session_control" "task_submit" "task_control"))
+    (dolist (n '("session_send" "session_control" "set_non_interactive" "task_submit" "task_control"))
       (should (eq 'meta (plist-get (harness-call 'tools/get n) :kind))))))
 
 (ert-deftest harness-tools-sessions-list-and-filters ()
@@ -327,6 +327,71 @@ tell it from the user's messages."
       (harness-tools-sessions-test-ok me "session_control" (list :session_id other :action "resume"))
       (should (eq 'idle (plist-get (harness-call 'session/get other) :status)))
       (should (plist-get (harness-tools-sessions-test-run me "session_control" (list :session_id me :action "cancel")) :is-error)))))
+
+(ert-deftest harness-tools-sessions-set-non-interactive ()
+  "set_non_interactive changes this session, another one, or with all
+every current session and task of every project, as
+`harness-set-non-interactive-all' does; the default for new sessions
+stays the user's.  (Its permission, the user's confirmation, is the
+permission chain's: see the perms tests.)"
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (harness-tasks-non-interactive nil)
+           (elsewhere (harness-test-temp-dir))
+           (me (harness-tools-sessions-test-session :name "Me"))
+           (other (harness-tools-sessions-test-session :name "Other"))
+           (there (let ((default-directory elsewhere)) (harness-tools-sessions-test-session :name "There")))
+           (waiting (plist-get (harness-call 'task/submit elsewhere "waiting there") :id))
+           (spec (harness-call 'tools/get "set_non_interactive")))
+      (should (eq 'meta (plist-get spec :kind)))
+      (should (equal '("enabled") (plist-get (plist-get spec :schema) :required)))
+      (should (string-match-p "always asks the user to confirm" (plist-get spec :description)))
+      ;; This session by default.
+      (should (equal "Non-interactive mode is now on for this session."
+                     (harness-tools-sessions-test-ok me "set_non_interactive" '(:enabled t))))
+      (should (plist-get (harness-call 'session/get me) :non-interactive))
+      (should (equal "Non-interactive mode was already on for this session."
+                     (harness-tools-sessions-test-ok me "set_non_interactive" '(:enabled t))))
+      ;; Another one, by name.
+      (should (string-match-p "\\`Non-interactive mode is now on for session .* \"Other\"\\.\\'"
+                              (harness-tools-sessions-test-ok me "set_non_interactive" '(:enabled t :session_id "Other"))))
+      (should (plist-get (harness-call 'session/get other) :non-interactive))
+      (should-not (plist-get (harness-call 'session/get there) :non-interactive))
+      (should (plist-get (harness-tools-sessions-test-run me "set_non_interactive" '(:enabled t :all t :session_id "Other"))
+                         :is-error))
+      ;; Everything current, in every project: the session over there and
+      ;; the task waiting there.
+      (let ((text (harness-tools-sessions-test-ok me "set_non_interactive" '(:enabled t :all t))))
+        (should (string-match-p "1 session and 1 task changed" text)))
+      (should (plist-get (harness-call 'session/get there) :non-interactive))
+      (should (eq t (plist-get (harness-call 'task/get waiting) :non-interactive)))
+      ;; Off, with JSON's false.
+      (let ((text (harness-tools-sessions-test-ok me "set_non_interactive" '(:enabled :false :all t))))
+        (should (string-match-p "\\`Non-interactive mode is off for every current session and task of every project: 3 sessions and 1 task changed" text)))
+      (dolist (sid (list me other there))
+        (should-not (plist-get (harness-call 'session/get sid) :non-interactive)))
+      (should (eq :false (plist-get (harness-call 'task/get waiting) :non-interactive)))
+      (harness-call 'task/cancel waiting))))
+
+(declare-function harness-provider-demo--script "harness-provider-demo" (request))
+
+(ert-deftest harness-tools-sessions-demo-away-and-back-scripts ()
+  "The demo provider's `away' and `back' scripts call set_non_interactive
+for everything, on and off, with input its schema takes, so the user's
+confirmation can be tried live without a model."
+  (harness-tools-sessions-test-with
+    (let ((harness-provider-demo-script-override nil)
+          (schema (plist-get (harness-call 'tools/get "set_non_interactive") :schema)))
+      (pcase-dolist (`(,text ,enabled) '(("I am going away now" t) ("I am back" :false)))
+        (let* ((events (harness-provider-demo--script
+                        `(:messages ((:role user :content ((:type "text" :text ,text)))))))
+               (calls (cl-remove-if-not (lambda (e) (eq (plist-get e :type) 'tool-call)) events)))
+          (should (equal '("set_non_interactive") (mapcar (lambda (e) (plist-get e :name)) calls)))
+          (let ((input (plist-get (car calls) :input)))
+            (should (eq enabled (plist-get input :enabled)))
+            (should (eq t (plist-get input :all)))
+            (dolist (key (harness-plist-keys input))
+              (should (plist-member (plist-get schema :properties) key)))))))))
 
 (ert-deftest harness-tools-sessions-tasks ()
   (harness-tools-sessions-test-with
