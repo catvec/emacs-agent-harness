@@ -1709,8 +1709,11 @@ never made it (`harness-outside-node-p')."
           ('user (user n))
           ('compaction (flush)
                        (add 'user (list :type "text"
-                                        :text (concat "Summary of the conversation so far:\n\n"
-                                                      (plist-get n :content)))))
+                                        :text (if (equal (harness-node-compaction-kind n) "transcript")
+                                                  ;; A note pointing at the file, no summary.
+                                                  (plist-get n :content)
+                                                (concat "Summary of the conversation so far:\n\n"
+                                                        (plist-get n :content))))))
           ('assistant (unless (eq cur-role 'assistant) (flush))
                       (unless (harness-string-blank-p (plist-get n :content))
                         (add 'assistant (list :type "text" :text (plist-get n :content)))))
@@ -1745,6 +1748,64 @@ A user message the user did not write says who sent it."
                           (or (plist-get n :content) "")))
                  (k (format "[%s] %s" k (or (plist-get n :content) "")))))
              (harness-session--path (harness-session--get id)) "\n"))
+
+;;;; The transcript as a file
+
+(defconst harness-session-transcript-directory ".harness/transcripts/"
+  "Where in a session's directory `session/write-transcript' writes by default.")
+
+(defconst harness-session--transcript-legend
+  (concat "This is the conversation so far, oldest first, one entry per message:"
+          " [user] the user (or who sent it), [assistant] the model's replies, [thinking] its reasoning,"
+          " [tool NAME] a tool call and what it was about, [result] that call's result, [hint] notes of the"
+          " harness, [compaction] a summary that stood in for what came before it.")
+  "What a transcript file says of its entries, before them.")
+
+(defun harness-session-directory (session)
+  "Return the directory of SESSION, a session plist, as this Emacs opens it.
+A session on another host has its directory there, through TRAMP."
+  (let ((cwd (plist-get session :cwd))
+        (host (plist-get session :host)))
+    (file-name-as-directory (if (and host (not (file-remote-p cwd))) (concat host cwd) cwd))))
+
+(harness-defmethod session/write-transcript (id &optional opts)
+  "Write the transcript of session ID to a new Markdown file in its directory.
+The file holds a heading, OPTS `:title' (\"Conversation\" by default),
+the session's name and id, OPTS `:about' (a line saying why it was
+written), its working directory, a legend of the entries, and then
+`session/transcript-text'.  It goes in OPTS `:directory', a directory
+relative to the session's, `harness-session-transcript-directory' by
+default, named after the session and the time.  The session's own
+directory is where its tools read without asking, and a provider's
+prompt cache holds what the model reads of it, unlike the state
+directory; a `.gitignore' of `*' written there keeps git out.  Signal
+when the session's directory does not exist.  Return (:file FILE :lines
+N): FILE as this Emacs opens it (through TRAMP for another host's), N
+its number of lines.  The handoff to another provider and compaction
+into a transcript both write theirs here."
+  (let* ((session (harness-session-plist (harness-session--get id)))
+         (root (harness-session-directory session))
+         (dir (expand-file-name (or (plist-get opts :directory) harness-session-transcript-directory) root))
+         (file (expand-file-name (format "%s-%s.md" (substring id 0 (min 8 (length id)))
+                                         (format-time-string "%Y%m%dT%H%M%S"))
+                                 dir))
+         (text (concat
+                (format "# %s\n\n" (or (plist-get opts :title) "Conversation"))
+                (format "- Session: %s (%s)\n" (or (plist-get session :name) "unnamed") id)
+                (if (plist-get opts :about) (format "- %s\n" (plist-get opts :about)) "")
+                (format "- Working directory: %s\n\n" (plist-get session :cwd))
+                harness-session--transcript-legend "\n\n"
+                "---\n\n"
+                (harness-call 'session/transcript-text id)
+                "\n")))
+    (unless (file-directory-p root)
+      (signal 'harness-error (list (format "the session's directory %s does not exist" root))))
+    (harness-ensure-directory dir)
+    (let ((ignore (expand-file-name ".gitignore" dir)))
+      (unless (file-exists-p ignore)
+        (harness-write-file-atomically ignore "*\n")))
+    (harness-write-file-atomically file text)
+    (list :file file :lines (1+ (cl-count ?\n text)))))
 
 ;;;; Init and reload
 

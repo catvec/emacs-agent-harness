@@ -148,6 +148,10 @@ non-interactive anyway."
      :title "Spending"
      :doc "What all sessions together may spend.  Budgets for one project, one session or a calendar period are made in the usage dashboard."
      :keys (harness-budget))
+    (compaction
+     :title "Compaction"
+     :doc "What stands in for a conversation that grew too long, and which model writes a brief summary of one.  Compacting by hand offers every kind, with what each costs."
+     :keys (harness-compaction-kind harness-compaction-brief-model))
     (safety
      :title "Files and safety"
      :doc "What sessions may reach, and what may run without asking you."

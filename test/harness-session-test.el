@@ -1050,7 +1050,42 @@ one; one that holds it carries it on, uncached for its model."
         (should (= 1 (length msgs)))
         (should (string-prefix-p "Summary of the conversation so far"
                                  (plist-get (car (plist-get (car msgs) :content)) :text)))
-        (should (= 2 (length (plist-get (car msgs) :content))))))))
+        (should (= 2 (length (plist-get (car msgs) :content)))))
+      ;; One that points at a transcript file is sent as it is: no summary.
+      (harness-call 'session/append id '(:kind compaction :content "Read /x/t.md first."
+                                         :meta (:compaction "transcript" :file "/x/t.md")))
+      (should (equal "Read /x/t.md first."
+                     (plist-get (car (plist-get (car (harness-call 'session/messages id)) :content)) :text))))))
+
+(ert-deftest harness-session-write-transcript ()
+  "The transcript goes to a new file in the session's directory, which git ignores."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (id (plist-get (harness-call 'session/create :cwd cwd :name "parser work") :id)))
+      (harness-call 'session/append id '(:kind user :content "fix the parser"))
+      (harness-call 'session/append id '(:kind assistant :content "Fixed."))
+      (let* ((written (harness-call 'session/write-transcript id))
+             (file (plist-get written :file))
+             (text (harness-read-file file)))
+        (should (equal (expand-file-name ".harness/transcripts/" cwd) (file-name-directory file)))
+        (should (string-prefix-p (substring id 0 8) (file-name-nondirectory file)))
+        (should (equal "*\n" (harness-read-file (expand-file-name ".harness/transcripts/.gitignore" cwd))))
+        (should (string-prefix-p (format "# Conversation\n\n- Session: parser work (%s)\n- Working directory: %s\n" id cwd)
+                                 text))
+        (should (string-match-p "oldest first, one entry per message" text))
+        (should (string-match-p "^\\[user\\] fix the parser\n\\[assistant\\] Fixed\\.\n\\'" text))
+        (should (= (plist-get written :lines) (1+ (cl-count ?\n text)))))
+      ;; Another directory, a title and a line about it.
+      (let* ((written (harness-call 'session/write-transcript id '(:directory "elsewhere/" :title "Handed over"
+                                                                    :about "Handed over from A to B")))
+             (text (harness-read-file (plist-get written :file))))
+        (should (file-in-directory-p (plist-get written :file) (expand-file-name "elsewhere/" cwd)))
+        (should (string-prefix-p "# Handed over\n\n- Session: parser work" text))
+        (should (string-match-p "^- Handed over from A to B$" text)))
+      ;; Without its directory, nothing is written.
+      (delete-directory cwd t)
+      (should-error (harness-call 'session/write-transcript id) :type 'harness-error)
+      (should-not (file-exists-p cwd)))))
 
 (ert-deftest harness-session-messages-place-delivered-steering ()
   "A steering message reaches the model where it was delivered, not where it was sent."

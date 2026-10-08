@@ -391,6 +391,22 @@ model of another provider holds (:mode transcript|compact :file PATH
   (let ((h (plist-get (plist-get node :meta) :handoff)))
     (and (consp h) h)))
 
+(defun harness-node-compaction-kind (node)
+  "Return the kind of compaction NODE is, as a string, or nil for no compaction.
+That is its `:meta' `:compaction': \"summary\", \"brief\" (a summary of
+only the first and last messages) or \"transcript\" (a note pointing at
+the conversation written to the file of its `:meta' `:file').  A
+compaction node from before there were kinds is a \"summary\"; so is
+one a handoff's old model wrote, while the new model's is \"brief\".
+NODE's kind may be the symbol or, as a client hears it, its name."
+  (when (equal (format "%s" (plist-get node :kind)) "compaction")
+    (let* ((meta (plist-get node :meta))
+           (kind (plist-get meta :compaction)))
+      (cond ((and kind (symbolp kind) (not (memq kind '(t :null :false)))) (symbol-name kind))
+            ((and (stringp kind) (not (string-empty-p kind))) kind)
+            ((equal (format "%s" (plist-get meta :context)) "sample") "brief")
+            (t "summary")))))
+
 ;;;; Paths
 
 (defun harness-path-normalize (path)
