@@ -982,7 +982,7 @@ is not merged yet.  Return a promise, or nil when there is nothing to do."
 Before the task starts they write it up (`harness-tasks--refine-prompt');
 afterwards they learn how to hand the finished work in, and, in a
 worktree, how it reaches the main branch -- or, in the main tree
-(`harness-tasks--main-tree-p'), that the work takes effect there."
+\(`harness-tasks--main-tree-p'), that the work takes effect there."
   (let ((task (harness-tasks--by-session (plist-get session :id))))
     (cond
      ((and task (harness-tasks--refinement-p task)

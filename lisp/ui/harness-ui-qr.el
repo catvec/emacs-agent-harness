@@ -153,7 +153,9 @@
       (nreverse out))))
 
 (defun harness-qr--interleave (data version level)
-  "Return DATA, the data codewords, split in blocks with their EC, interleaved."
+  "Return DATA, the data codewords, split in blocks with their EC, interleaved.
+The blocks, and how many EC codewords each has, are those of VERSION at
+LEVEL."
   (let* ((i (harness-qr--level-index level))
          (blocks (aref (aref harness-qr--blocks i) version))
          (ecc (aref (aref harness-qr--ecc-per-block i) version))
@@ -328,7 +330,8 @@
        (if (and core (>= (aref history 6) (* 4 n)) (>= (aref history 0) n)) 1 0))))
 
 (defun harness-qr--history-add (run history size)
-  "Push RUN onto the run HISTORY, counting the border before the first run."
+  "Push RUN onto the run HISTORY, counting the border before the first run.
+That light border counts as SIZE modules, the width of the symbol."
   (when (zerop (aref history 0)) (setq run (+ run size)))
   (cl-loop for i from 6 downto 1 do (aset history i (aref history (1- i))))
   (aset history 0 run))
@@ -386,7 +389,9 @@ Rule 1 (runs of five or more) and rule 3 (finder-like patterns)."
       (error "Text too long for a QR code: %d bytes" (length bytes))))
 
 (defun harness-qr--matrix-penalty (m mask level)
-  "Return the penalty of M with MASK applied, leaving M as it was."
+  "Return the penalty of M with MASK applied, leaving M as it was.
+The format bits it is scored with are those of error correction LEVEL
+and MASK."
   (harness-qr--apply-mask m mask)
   (harness-qr--draw-format m level mask)
   (prog1 (harness-qr--penalty m)
@@ -398,7 +403,7 @@ TEXT's UTF-8 bytes go in byte mode, at error correction LEVEL (the
 symbol L, M, Q or H, default M), in the smallest version that holds
 them.  MASK, 0 to 7, forces a mask; by default the one with the lowest
 penalty is used.  :modules is a vector of rows, top first, each a
-bool-vector whose t are dark modules."
+`bool-vector' whose t are dark modules."
   (let* ((level (or level 'M))
          (bytes (encode-coding-string text 'utf-8 t))
          (version (harness-qr--version-for bytes level))

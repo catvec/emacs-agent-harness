@@ -319,7 +319,8 @@ triangle).  Words that go with the icon take `harness-ui-level-face'."
 
 (defvar harness-ui-connection nil "The ACP connection the UI talks through.")
 (defvar harness-ui-connection-address nil
-  "Where the harness is: nil in this Emacs, `process' for the harness
+  "Address of the harness the UI talks to.
+It is nil for the harness in this Emacs, `process' for the harness
 process `harness-start' manages (see `harness-process'), or \"host:port\".")
 
 (defvar harness-ui-update-functions nil
@@ -372,10 +373,11 @@ Each is (METHOD PARAMS PROMISE); PROMISE is nil for notifications.")
   (and harness-ui-connection (harness-acp-connected-p harness-ui-connection)))
 
 (defun harness-ui-connect (&optional address)
-  "Connect the UI to ADDRESS: nil for the in-process harness, `process'
-for the managed harness process, or \"host:port\".  Return the
-connection, or nil while the harness process is still starting; requests
-made meanwhile are queued and sent once it listens.
+  "Connect the UI to ADDRESS.
+ADDRESS is nil for the in-process harness, `process' for the managed
+harness process, or \"host:port\".  Return the connection, or nil while
+the harness process is still starting; requests made meanwhile are
+queued and sent once it listens.
 In corporate mode (`harness-corporate-mode') a \"host:port\" ADDRESS
 gives way to this Emacs's own harness: the UI connects to no other."
   (when (and (stringp address) (harness-corporate-p))
@@ -440,15 +442,19 @@ initialize: one it let go of for another closes on purpose."
     conn))
 
 (defun harness-ui-connection ()
-  "Return the live connection, connecting if needed; nil while the harness
-process is starting.  A TCP connection still connecting is live: what is
-sent meanwhile goes out once it connects, whereas connecting again would
-drop it along with every request it carries."
+  "Return the live connection, connecting if needed.
+Return nil while the harness process is starting.  A TCP connection
+still connecting is live: what is sent meanwhile goes out once it
+connects, whereas connecting again would drop it along with every
+request it carries."
   (if (harness-acp-open-p harness-ui-connection)
       harness-ui-connection
     (harness-ui-connect harness-ui-connection-address)))
 
 (defun harness-ui--on-close ()
+  "Say in the echo area that the UI's connection closed.
+A connection to the managed harness process is left to its supervisor
+to report."
   (unless (eq harness-ui-connection-address 'process) ; the supervisor reports that
     (message "Harness: connection closed%s"
              (if harness-ui-connection-address (format " (%s)" harness-ui-connection-address) ""))))
@@ -662,11 +668,15 @@ as needing input and its chat panel or task card answers it later."
   t)
 
 (defun harness-ui--default-permission (params respond)
-  "Fallback when no UI module claimed permission request PARAMS: leave it pending."
+  "Leave permission request PARAMS pending, as no UI module claimed it.
+Declining it through RESPOND keeps it pending on its session (see
+`harness-ui--leave-pending')."
   (harness-ui--leave-pending params respond "permission request"))
 
 (defun harness-ui--default-question (params respond)
-  "Fallback when no UI module claimed question PARAMS: leave it pending."
+  "Leave question PARAMS pending, as no UI module claimed it.
+Declining it through RESPOND keeps it pending on its session (see
+`harness-ui--leave-pending')."
   (harness-ui--leave-pending params respond "question"))
 
 ;;;; Desktop notifications
@@ -817,6 +827,7 @@ yet: it starts after the init file, with the value set there."
 (defalias 'harness-ui--cache-session #'harness-ui-cache-session)
 
 (defun harness-ui--forget-session (id)
+  "Remove session ID, and its output rate, from the cache and notify listeners."
   (remhash id harness-ui--sessions)
   (harness-ui--store-rate id nil)
   (run-hooks 'harness-ui-sessions-changed-hook))
@@ -1153,8 +1164,9 @@ NOW defaults to the current time."
               (if (numberp limit) (format " of %s" (harness-format-cost limit)) "")))))
 
 (defun harness-ui-quota-headline-windows (quota)
-  "Return the windows of QUOTA worth a glance: the 5-hour and weekly ones,
-and any other that is at least 70% used."
+  "Return the windows of QUOTA worth a glance.
+They are the 5-hour and weekly ones, and any other that is at least
+70% used."
   (cl-remove-if-not (lambda (w) (or (member (plist-get w :name) '("5h" "7d"))
                                     (>= (or (plist-get w :used) 0) 0.7)))
                     (plist-get quota :windows)))
@@ -1536,7 +1548,7 @@ PROPS are extra text properties; `:help' sets the tooltip."
                         'mouse-face 'highlight)))
 
 (defun harness-ui-mouse-keymap (command)
-  "Return a keymap running COMMAND on mouse-1, mouse-2 and RET.
+  "Return a keymap running COMMAND on a left or middle click and on RET.
 The bindings also work from header-line and mode-line segments."
   (let ((map (make-sparse-keymap))
         ;; Not (interactive "e"), which signals for RET, an event without
@@ -1615,7 +1627,7 @@ warning colour." :group 'harness-ui)
   (propertize key 'face 'harness-ui-key-face))
 
 (defun harness-ui-action-map (command)
-  "Return a keymap running COMMAND on mouse-1, mouse-2 and RET."
+  "Return a keymap running COMMAND on a left or middle click and on RET."
   (let ((map (make-sparse-keymap)))
     (define-key map [mouse-1] command)
     (define-key map [mouse-2] command)
@@ -2374,6 +2386,9 @@ fullscreen layout this ends the layout, as `harness-ui-quit-view' does."
 ;;;; Commands
 
 (defun harness-ui--default-directory ()
+  "Return the directory that prompts for a directory offer by default.
+That is the root of the project `default-directory' is in, else
+`default-directory' itself."
   (harness-files-project-root default-directory))
 
 ;;;###autoload
@@ -2403,7 +2418,7 @@ fullscreen layout this ends the layout, as `harness-ui-quit-view' does."
   "Function telling the session setting commands what to change in this buffer.
 It returns a session id, or (SETTINGS . SET) for settings that are not a
 session's yet: SETTINGS is a plist with a session's setting keys
-(`:model' `:thinking' `:permission-mode' `:non-interactive') and SET a
+\(`:model' `:thinking' `:permission-mode' `:non-interactive') and SET a
 function of KEY and VALUE storing one.  The task board uses it so the
 same commands set up the next task.  When it is nil or returns nil, the
 commands use `harness-ui-current-session-id'.")
@@ -2686,7 +2701,8 @@ their number).  The risks show before the question.  Return a mode of
 
 (defun harness-ui--ask-handoff (checks label total _session _host callback)
   "Ask how to hand over a lossy switch in the minibuffer.
-See `harness-ui-switch-function'; CALLBACK gets the mode chosen."
+See `harness-ui-switch-function' for CHECKS, LABEL and TOTAL; CALLBACK
+gets the mode chosen."
   (funcall callback (harness-ui--read-handoff checks label total)))
 
 (defvar harness-ui-switch-function #'harness-ui--ask-handoff
@@ -2783,9 +2799,9 @@ becomes the default for new sessions too, unless NO-DEFAULT."
 ;;;###autoload
 (defun harness-set-model-all (&optional no-default)
   "Choose a model and switch every current session to it.
-The choice also becomes the default for new sessions, unless a prefix
-argument says otherwise.  Use this when a plan runs out, a provider
-fails, or a cheaper model should take over work already in flight.
+The choice also becomes the default for new sessions, unless NO-DEFAULT
+\(the prefix argument) says otherwise.  Use this when a plan runs out, a
+provider fails, or a cheaper model should take over work already in flight.
 Idle, running and blocked sessions of every project change, each
 recording it as a hint; inactive ones are history and are left alone,
 and no running turn is cancelled: it takes the new model at its next
@@ -2868,7 +2884,8 @@ without one the common levels are."
   "Choose a thinking level and set it on every current session.
 Idle, running and blocked sessions of every project change; inactive
 ones are history and are left alone.  The level also becomes the
-default for new sessions, unless a prefix argument says otherwise."
+default for new sessions, unless NO-DEFAULT (the prefix argument)
+says otherwise."
   (interactive "P")
   (harness-ui-choose-thinking
    (lambda (value label)
@@ -3042,6 +3059,8 @@ the harness UI loads, that is before `harness-start'."
   :global t :group 'harness-ui :keymap harness-global-mode-map)
 
 (defun harness-ui--command-available-p (symbol)
+  "Non-nil when the command SYMBOL is defined, so the menu may offer it.
+Some commands belong to modules that may be off."
   (fboundp symbol))
 
 (defun harness-ui--free-side-slot (side)
@@ -3321,9 +3340,15 @@ leaves the buffer's commands out, never the whole menu."
 ;;;; Module
 
 (defun harness-ui--on-reloaded ()
+  "Have every UI buffer redraw, as after a reload."
   (run-hooks 'harness-ui-redraw-hook))
 
 (defun harness-ui--init ()
+  "Start the UI: connect it to the harness and turn on `harness-global-mode'.
+Also stop the harness process when Emacs exits, and make changes of
+`harness-corporate-mode' reach the harness.  A click on a notification
+this Emacs no longer knows lists the sessions waiting for you, unless
+another function already handles such clicks."
   (add-hook 'kill-emacs-hook #'harness-ui--stop-server)
   (add-hook 'harness-corporate-mode-change-hook #'harness-ui--corporate-mode-changed)
   ;; A click on a macOS notification this Emacs no longer knows (one it

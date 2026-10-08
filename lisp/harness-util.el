@@ -505,7 +505,7 @@ KEY extracts the string to match; LIMIT caps the result count."
   (or (null s) (string-blank-p s)))
 
 (defun harness-safe-substring (string from &optional to)
-  "Like `substring' but clamps FROM and TO into range."
+  "Like `substring' on STRING, but clamps FROM and TO into its range."
   (let* ((len (length string))
          (from (max 0 (min from len)))
          (to (if to (max from (min to len)) len)))
@@ -555,7 +555,7 @@ walking the process table catches it."
 (defun harness-kill-process-tree (tree &optional signal)
   "Send SIGNAL (TERM by default) to every process in TREE.
 TREE is what `harness-process-tree' returned: the root and its group
-(when local) and the descendants collected with it.  Best-effort: a
+\(when local) and the descendants collected with it.  Best-effort: a
 process that is already gone is not an error."
   (let ((sig (or signal 'term))
         (pid (plist-get tree :pid))
