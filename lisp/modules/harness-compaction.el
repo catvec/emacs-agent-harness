@@ -286,7 +286,8 @@ the session's provider goes on with the conversation MODEL summarised
                                 :cache-read (plist-get usage :cache-read)
                                 :cache-write (plist-get usage :cache-write)
                                 :cost (plist-get usage :cost)
-                                :context (harness-estimate-tokens summary)
+                                ;; The summary is all the conversation holds now.
+                                :context (harness-estimate-tokens summary) :last-output 0
                                 :model model)
                           (if goes-on
                               (list :cache-at (plist-get usage :cache-at)

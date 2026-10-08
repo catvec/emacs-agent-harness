@@ -881,6 +881,36 @@ and so does a queued one; the searchable transcript says who sent it."
         (should (= 1500 (plist-get u :context)))
         (should (= 1 (plist-get u :turns)))))))
 
+(ert-deftest harness-session-usage-keeps-the-output-after-the-prompt ()
+  "`:last-output' is what the request the context measures wrote after its prompt.
+Together they are the size of the conversation, which the next request
+sends back.  A record of one request wrote its own output; a hosted
+loop's turn says what its last request wrote; a record without a
+context leaves both."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (usage (lambda () (plist-get (harness-call 'session/get id) :usage))))
+      (should-not (plist-get (funcall usage) :last-output))
+      (harness-call 'session/usage-add id '(:input 100 :output 30 :context 1000))
+      (should (= 1000 (plist-get (funcall usage) :context)))
+      (should (= 30 (plist-get (funcall usage) :last-output)))
+      ;; A turn of several requests: its output is theirs together, its
+      ;; last request's is what follows the context.
+      (harness-call 'session/usage-add id '(:input 50 :output 300 :context 1200 :last-output 20))
+      (should (= 1200 (plist-get (funcall usage) :context)))
+      (should (= 20 (plist-get (funcall usage) :last-output)))
+      (should (= 330 (plist-get (funcall usage) :output)))
+      ;; Usage that measures no prompt leaves the conversation's size.
+      (harness-call 'session/usage-add id '(:input 5 :output 7))
+      (harness-call 'session/usage-add id '(:turns 1))
+      (should (= 1200 (plist-get (funcall usage) :context)))
+      (should (= 20 (plist-get (funcall usage) :last-output)))
+      ;; It is kept with the session.
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (= 20 (plist-get (funcall usage) :last-output))))))
+
 (defvar harness-cache-ttl)
 (defvar harness-cache-ttl-overrides)
 

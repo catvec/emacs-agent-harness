@@ -1288,21 +1288,34 @@ list cost needs pricing.  Records without tokens are returned as is."
                             (t cost))))
       (harness-plist-merge record (list :cost cost :list-cost list-cost)))))
 
+(defun harness-session--last-output (record)
+  "Return the output of the request whose prompt usage RECORD's `:context' sizes.
+That is RECORD's `:last-output', which a record of several requests (a
+hosted loop's turn) gives, else its `:output', else 0."
+  (let ((last (plist-get record :last-output))
+        (output (plist-get record :output)))
+    (cond ((numberp last) last)
+          ((numberp output) output)
+          (t 0))))
+
 (harness-defmethod session/usage-add (id record)
   "Add usage RECORD to session ID.
 RECORD keys: :input :output :cache-read :cache-write :cost :list-cost
-:context :turns, :billing and :plan saying how the call was paid,
-:model the model the request was sent to (the session's when unsaid),
-:cache-at and :cache-ttl, when the request used the prompt cache and
-how long its provider said it keeps it, and :cache-reset, which says
-the conversation starts over (a compaction).  Counters accumulate;
-`:context' replaces, and so do `:billing' and `:plan' when RECORD has
-a billing.  A request that read or wrote the cache stamps the totals'
-`:cache-at', `:cache-model' and `:cache-ttl' (see
-`harness-session--cache-stamp').  A missing `:cost' is priced
-from the model catalogue; a missing `:list-cost', the call at API
-prices, is the cost, or priced when a subscription paid.  Return the
-totals."
+:context :last-output :turns, :billing and :plan saying how the call
+was paid, :model the model the request was sent to (the session's when
+unsaid), :cache-at and :cache-ttl, when the request used the prompt
+cache and how long its provider said it keeps it, and :cache-reset,
+which says the conversation starts over (a compaction).  Counters
+accumulate; `:context' replaces, and so do `:billing' and `:plan' when
+RECORD has a billing.  With `:context', the size of the latest prompt,
+comes the totals' `:last-output': the output of that request, which the
+next one sends back (`harness-session--last-output'), so the
+conversation holds about `:context' plus `:last-output' tokens.  A
+request that read or wrote the cache stamps the totals' `:cache-at',
+`:cache-model' and `:cache-ttl' (see `harness-session--cache-stamp').
+A missing `:cost' is priced from the model catalogue; a missing
+`:list-cost', the call at API prices, is the cost, or priced when a
+subscription paid.  Return the totals."
   (let* ((s (harness-session--get id))
          (u (copy-sequence (harness-session-usage s)))
          (record (harness-session--price-record (harness-session-model s) record)))
@@ -1313,7 +1326,8 @@ totals."
       (when (numberp (plist-get record k))
         (setq u (plist-put u k (+ (or (plist-get u k) 0) (plist-get record k))))))
     (when (numberp (plist-get record :context))
-      (setq u (plist-put u :context (plist-get record :context))))
+      (setq u (plist-put u :context (plist-get record :context)))
+      (setq u (plist-put u :last-output (harness-session--last-output record))))
     (when (harness-billing-of record)
       (setq u (plist-put u :billing (harness-billing-of record)))
       (setq u (plist-put u :plan (plist-get record :plan))))

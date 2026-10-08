@@ -1129,19 +1129,24 @@ present, as in the CLI's own accounting."
   "Add the model call that assistant.usage DATA reports to TURN.
 AGENT, the sub-agent that made the call, adds to the cost but not to
 the size of the main conversation.  A call of the main conversation is
-reported as a `call-usage' event, for the output rate; the turn's
-`usage' event counts it with the rest."
+reported as a `call-usage' event, with the size of its prompt, for the
+output rate and the live token count; the turn's `usage' event counts
+it with the rest, and its output as the conversation's last."
   (let* ((call (harness-provider-copilot-call-usage data))
-         (sum (harness-provider-copilot-turn-usage turn)))
+         (sum (harness-provider-copilot-turn-usage turn))
+         (context (plist-get call :context)))
     (unless agent
-      (harness-provider-copilot--emit turn (list :type 'call-usage :output (plist-get call :output))))
+      (harness-provider-copilot--emit
+       turn (append (list :type 'call-usage :output (plist-get call :output))
+                    (and (numberp context) (> context 0) (list :context context)))))
     (dolist (k '(:input :output :cache-read :cache-write))
       (setq sum (plist-put sum k (+ (or (plist-get sum k) 0) (plist-get call k)))))
     (dolist (k '(:nano-aiu :requests))
       (when (plist-get call k)
         (setq sum (plist-put sum k (+ (or (plist-get sum k) 0) (plist-get call k))))))
     (unless agent
-      (setq sum (plist-put sum :context (plist-get call :context)))
+      (setq sum (plist-put sum :context context))
+      (setq sum (plist-put sum :last-output (plist-get call :output)))
       (setq sum (plist-put sum :finish (plist-get call :finish))))
     (setq sum (plist-put sum :calls (1+ (or (plist-get sum :calls) 0))))
     (setf (harness-provider-copilot-turn-usage turn) sum)
@@ -1166,7 +1171,10 @@ up and additional usage is on (`extra-usage', billed at list price)."
       (list :billing 'subscription :plan plan :cost 0.0 :list-cost list-cost))))
 
 (defun harness-provider-copilot--usage-event (turn)
-  "Return the usage event for TURN, or nil when it made no model call."
+  "Return the usage event for TURN, or nil when it made no model call.
+Its `:context' is the prompt of the main conversation's last call, which
+that call's output, `:last-output', follows; without one, the size the
+CLI last gave the conversation, which leaves nothing to follow."
   (let ((usage (harness-provider-copilot-turn-usage turn)))
     (when (plist-get usage :calls)
       (append (list :type 'usage
@@ -1174,7 +1182,10 @@ up and additional usage is on (`extra-usage', billed at list price)."
                     :cache-read (plist-get usage :cache-read) :cache-write (plist-get usage :cache-write)
                     :context (or (plist-get usage :context) (plist-get usage :current)
                                  (+ (plist-get usage :input) (plist-get usage :cache-read)
-                                    (plist-get usage :cache-write))))
+                                    (plist-get usage :cache-write)))
+                    :last-output (if (plist-get usage :context)
+                                     (or (plist-get usage :last-output) 0)
+                                   0))
               (harness-provider-copilot--billing-fields usage)))))
 
 ;;;; Account and quota

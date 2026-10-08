@@ -14,9 +14,14 @@
 (require 'harness-acp)
 
 (defvar harness-provider-claude-program)
+(defvar harness-provider-demo--delay)
+(defvar harness-provider-demo-script-override)
+(defvar harness-usage-live-interval)
+(defvar harness-ui--live)
 (defvar mwheel-scroll-up-function)
 (defvar mwheel-scroll-down-function)
 (declare-function harness-provider-claude-close-all "harness-provider-claude")
+(declare-function harness-ui-session-live "harness-ui")
 
 (defvar harness-ui-chat-test-events nil "Recorded (EVENT . ARGS), newest first.")
 
@@ -214,7 +219,9 @@
           (should (string-match-p "Tour" header))
           (should (string-match-p "demo" header))
           (should (string-match-p "\\$0.0042" header))
-          (should (string-match-p "2.0k/" header)))
+          ;; The context in use: the last prompt and what its call wrote.
+          (should (string-match-p "2.2k/" header))
+          (should (string-match-p " 180 out " header)))
         (should (string-match-p "idle" (harness-chat--mode-line)))
         (should (equal "" (harness-compose-text)))))))
 
@@ -469,6 +476,63 @@ session is idle, dimmed, and makes room first in a narrow window."
             (should (equal (string-replace (concat "  " text) "" (substring-no-properties full))
                            (substring-no-properties
                             (harness-chat--header (1- (harness-ui-header-string-width full))))))))))))
+
+(ert-deftest harness-ui-chat-header-counts-tokens-as-they-stream ()
+  "The header's token figures grow while the model streams, not at the end.
+The harness counts what streams, a token for every four characters, and
+the header marks figures so estimated with \"~\".  The call's usage
+report replaces the estimate with the real numbers, which stay once the
+turn ended: the context in use is then the prompt plus what the call
+wrote.  The output goes after the context and before the rate."
+  (harness-ui-chat-test-with
+    (harness-test-load-module 'usage)
+    (clrhash harness-ui--live)
+    (clrhash harness-ui--rates)
+    (let* ((sid (harness-ui-chat-test-session "Live"))
+           (buf (harness-ui-chat-test-open sid))
+           (harness-usage-live-interval 0.05)
+           (harness-provider-demo--delay 0.05)
+           (harness-provider-demo-script-override
+            (append (make-list 40 '(:type text :delta "eight ch"))
+                    '((:type usage :input 100 :output 70 :cost 0.0001 :context 100)
+                      (:type done :stop-reason end-turn))))
+           (out (lambda (live) (plist-get live :output))))
+      (with-current-buffer buf
+        (should-not (string-match-p " out" (harness-chat--header most-positive-fixnum)))
+        (harness-ui-chat-test-type buf "hello")
+        (harness-chat-send))
+      ;; Streaming: two tokens for each delta of eight characters, all estimated.
+      (harness-test-wait (lambda () (>= (or (funcall out (harness-ui-session-live sid)) 0) 10))
+                         5 "the live count")
+      (let ((live (harness-ui-session-live sid)))
+        (should (= 0 (% (funcall out live) 2)))
+        (should (= (funcall out live) (plist-get live :estimated)))
+        (should (= (funcall out live) (plist-get live :context)))
+        (with-current-buffer buf
+          (let ((header (harness-chat--header most-positive-fixnum)))
+            (should (string-search (format "  ~%d/" (plist-get live :context)) header))
+            (should (string-search (format "  ~%d out" (funcall out live)) header))))
+        (harness-test-wait (lambda () (> (or (funcall out (harness-ui-session-live sid)) 0) (funcall out live)))
+                           5 "the live count to grow"))
+      (should (equal "running" (plist-get (harness-ui-session sid) :status)))
+      ;; Reported and ended: the real numbers.
+      (harness-test-wait (lambda () (= 1 (harness-ui-chat-test-turns-ended sid))) 10 "the turn to end")
+      (harness-test-wait (lambda () (equal "idle" (plist-get (harness-ui-session sid) :status)))
+                         5 "the session idle")
+      (harness-test-wait (lambda () (harness-ui-session-rate sid)) 5 "the rate")
+      (should-not (gethash sid harness-ui--live))
+      (with-current-buffer buf
+        (let* ((header (harness-chat--header most-positive-fixnum))
+               (context (string-search "  170/" header))
+               (output (string-search "  70 out" header))
+               (rate (string-search " tok/s" header)))
+          (should context)
+          (should output)
+          (should rate)
+          (should (< context output rate))
+          (should-not (string-search "~" header))
+          (should (equal "Context tokens in use: 170; output tokens: 70."
+                         (get-text-property (+ 2 output) 'help-echo header))))))))
 
 (ert-deftest harness-ui-chat-hover-help-is-one-line ()
   "Every tooltip of a rendered session fits one echo-area line.

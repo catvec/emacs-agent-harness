@@ -16,6 +16,9 @@
 ;;   "debug"       describes find-file in the user's Emacs, finds its
 ;;                 definition and traces find-file-noselect
 ;;   "status"      looks at the task board with task_list (a BTW over it)
+;;   "stream"      two model calls paced like a real model's: thinking
+;;                 without text, then with it, text, a tool call's input,
+;;                 each call's usage -- for the live token count
 ;;   anything else echo the prompt back as markdown
 ;;
 ;; A session writing a backlog task up (the system prompt has the task
@@ -175,10 +178,101 @@ answers) gives a function.")
         (:type text :delta "Those are the tasks on the board, each with its column and state. Ask about one and I will read its session.")
         (:type usage :input 700 :output 45 :cost 0.0012 :context 900)
         (:type done :stop-reason end-turn)))
+     ((string-match-p "\\bstream\\b" text)
+      (harness-provider-demo--stream request))
      (t
-      `((:type text :delta ,(format "You said: *%s*\n\nThis is the demo provider; try `tour`, `tools`, `ask`, `diagram` or `debug`." text))
+      `((:type text :delta ,(format "You said: *%s*\n\nThis is the demo provider; try `tour`, `tools`, `ask`, `diagram`, `debug` or `stream`." text))
         (:type usage :input 400 :output 30 :cost 0.0008 :context 450)
         (:type done :stop-reason end-turn))))))
+
+(defun harness-provider-demo--paced (type text size seconds)
+  "Return TEXT as events of TYPE (`text' or `thinking'), paced like a model's.
+TEXT goes out in chunks of whole words, about SIZE characters each, with
+a pause of SECONDS after each."
+  (let ((events nil) (start 0) (len (length text)))
+    (while (< start len)
+      (let ((end (min len (+ start size))))
+        ;; Run on to the end of the word.
+        (while (and (< end len) (not (memq (aref text end) '(?\s ?\n))))
+          (cl-incf end))
+        (when (< end len) (cl-incf end))
+        (push (list :type type :delta (substring text start end)) events)
+        (push (list :type 'wait :seconds seconds) events)
+        (setq start end)))
+    (nreverse events)))
+
+(defconst harness-provider-demo--stream-texts
+  '(:first "## Counting as it streams
+
+The header counts this reply while it arrives: the context in use and \
+the output tokens grow with every chunk, a token for every four \
+characters, marked `~` while they are estimates.  When the provider \
+reports its usage, the real numbers replace the estimate, so nothing \
+counts twice.
+
+Thinking that streams no text, as Claude Code's does, counts by the \
+clock at the session's output rate, and a tool call's input counts as \
+the model writes it.  Next comes a todo list, a tool call with a \
+sizeable input, so you can watch that part grow too.
+"
+    :thinking "The todo list is in.  This is the second model call: its \
+prompt holds the first call's output and the tool's result, so the \
+context starts from there and grows again as I write."
+    :second "That was the second model call.  Its prompt held all that \
+came before, the todo list included, and the figures grew from there \
+as this text streamed in:
+
+- the chat header shows the context in use and the output
+- the session list has them in its Context and Output columns
+- a running task's card shows them too
+
+All of it is counted in the harness process, and the views redraw a \
+few times a second at most.")
+  "What the demo `stream' script writes, call by call.
+That is the text of its first model call, then the thinking and the
+text of its second.")
+
+(defun harness-provider-demo--stream (request)
+  "Return the script of two model calls paced like a real model's.
+It shows the live token count at work: each call says the size of its
+prompt as it starts, as Claude Code's do, then streams thinking without
+text, thinking text, text and a tool call's input, and reports its usage
+as it ends.  The prompt grows with REQUEST's messages."
+  (let* ((texts harness-provider-demo--stream-texts)
+         (prompt (+ 1200 (/ (length (prin1-to-string (plist-get request :messages))) 4)))
+         (todos (list :todos
+                      (cl-mapcar (lambda (id label status) (list :id id :text label :status status))
+                                 '("1" "2" "3" "4")
+                                 '("Stream thinking without text, counted by the clock"
+                                   "Stream text, counted a token for every four characters"
+                                   "Stream this todo list, a tool call's input"
+                                   "Replace the estimate with the reported usage")
+                                 '("done" "done" "in-progress" "pending"))))
+         (input-chars (length (harness-json-encode-text todos)))
+         ;; Each call writes a little more than the estimate reckons.
+         (first-output (+ 90 (ceiling (* 1.1 (+ (length (plist-get texts :first)) input-chars)) 4)))
+         (second-prompt (+ prompt first-output 60))
+         (second-output (ceiling (* 1.1 (+ (length (plist-get texts :thinking))
+                                            (length (plist-get texts :second))))
+                                 4)))
+    `((:type call-usage :output 0 :context ,prompt)
+      (:type activity :phase thinking)
+      (:type wait :seconds 2.0)
+      ,@(harness-provider-demo--paced 'text (plist-get texts :first) 28 0.09)
+      ,@(cl-loop for step from 0 to 6
+                 append `((:type activity :phase tool-input :tool "todo_write"
+                                 :chars ,(/ (* step input-chars) 6))
+                          (:type wait :seconds 0.3)))
+      (:type usage :input ,(- prompt 1000) :output ,first-output :cache-read 1000 :cache-write 0
+             :cost 0.0021 :context ,prompt)
+      (:type tool-call :id "demo-st1" :name "todo_write" :input ,todos)
+      (:type call-usage :output 0 :context ,second-prompt)
+      (:type wait :seconds 0.6)
+      ,@(harness-provider-demo--paced 'thinking (plist-get texts :thinking) 24 0.12)
+      ,@(harness-provider-demo--paced 'text (plist-get texts :second) 28 0.09)
+      (:type usage :input ,(- second-prompt 1000) :output ,second-output :cache-read 1000 :cache-write 0
+             :cost 0.0018 :context ,second-prompt)
+      (:type done :stop-reason end-turn))))
 
 (defun harness-provider-demo--title (request)
   "Answer the naming REQUEST as a model would: the gist of the opening message.
@@ -414,22 +508,27 @@ the JSON the report asks for."
                         nil
                       (let ((ev (pop script)))
                         (cl-incf steps)
-                        (if (eq (plist-get ev :type) 'tool-call)
-                            ;; Native loop: emit the call, then stop with tool-use so the
-                            ;; agent executes it and calls us again; the rest of the script
-                            ;; continues on the next request.
-                            (progn
-                              ;; Stored before the call runs: the call may
-                              ;; end the turn (a tool handing its work in
-                              ;; with `:end-turn'), and the cancel must find
-                              ;; this to drop it, rather than leave the rest
-                              ;; of the script for the next turn.
-                              (puthash sid script harness-provider-demo--continuations)
-                              (funcall on-event ev)
-                              (funcall on-event '(:type done :stop-reason tool-use)))
-                          (funcall on-event ev)
-                          (unless (eq (plist-get ev :type) 'done)
-                            (setq timer (run-at-time harness-provider-demo--delay nil #'step)))))))))
+                        (pcase (plist-get ev :type)
+                          ;; A pause in the script, as a model takes its time.
+                          ('wait
+                           (setq timer (run-at-time (or (plist-get ev :seconds) harness-provider-demo--delay)
+                                                    nil #'step)))
+                          ;; Native loop: emit the call, then stop with tool-use so the
+                          ;; agent executes it and calls us again; the rest of the script
+                          ;; continues on the next request.
+                          ('tool-call
+                           ;; Stored before the call runs: the call may
+                           ;; end the turn (a tool handing its work in
+                           ;; with `:end-turn'), and the cancel must find
+                           ;; this to drop it, rather than leave the rest
+                           ;; of the script for the next turn.
+                           (puthash sid script harness-provider-demo--continuations)
+                           (funcall on-event ev)
+                           (funcall on-event '(:type done :stop-reason tool-use)))
+                          (type
+                           (funcall on-event ev)
+                           (unless (eq type 'done)
+                             (setq timer (run-at-time harness-provider-demo--delay nil #'step))))))))))
       (when (and (gethash sid harness-provider-demo--continuations)
                  (harness-provider-demo--has-tool-results-p request))
         (setq script (gethash sid harness-provider-demo--continuations))
