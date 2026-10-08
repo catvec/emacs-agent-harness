@@ -12,6 +12,10 @@
 ;;                       answer decides; turning it off needs none
 ;;    7 sandbox-guard    shell commands the sandbox would make destructive
 ;;                       (`git worktree prune' and the like) are refused
+;;    8 supervisor       a plugin's stage, not this module's (see below): a
+;;                       session in supervisor mode is denied, for good,
+;;                       every tool but the ones it plans and coordinates
+;;                       with, and bash where the sandbox cannot confine it
 ;;   10 jail             every path must lie inside an allowed root, or,
 ;;                       for a call that only reads, in the harness itself
 ;;                       or a skills directory; otherwise the user is asked
@@ -31,9 +35,10 @@
 ;; `:hint', because a denial the model can act on is the difference
 ;; between an autonomous session and one that stalls.  Other modules
 ;; add stages of their own: the session tools have the user confirm
-;; session_move at 6 (`harness-perms-confirm', see Confirmations), and
-;; the tasks module keeps the turns that write a backlog task up
-;; read-only at 25.
+;; session_move at 6 (`harness-perms-confirm', see Confirmations), the
+;; supervisor module denies a supervising session what it may not use at
+;; 8, ahead of the jail and every question, and the tasks module keeps
+;; the turns that write a backlog task up read-only at 25.
 ;;
 ;; Non-interactive mode (the user is away) is no permission policy of
 ;; its own: what the session's mode would ask the user, the auto-mode
