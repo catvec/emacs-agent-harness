@@ -2396,6 +2396,7 @@ Task mode: one session per task.  TASK =
 :state pending|refining|active|merging|review|done
 :column pending|needs-input|active|review|merging|done
 :backlog BOOL :note "the words a backlog task was written up from" :refined F
+:priority low|medium|high
 :session SID :outcome nil|end-turn|error|cancelled|duplicate|merge-failed|merged|…
 :error "…" :duplicate-of ID :main-tree BOOL :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
 :merge-queued F :conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
@@ -2405,17 +2406,24 @@ blocked on a request or the task stopped part way, `merging` while its
 branch holds a place in the merge queue (`:merge-status` is queued,
 merging or conflict; `:merge-queued` is when it joined, which orders the
 board's section), `review` while its finished work waits for the user's
-verdict.
+verdict.  `:priority` is one of `harness-tasks-priorities`, a symbol
+in memory and a string on disk and the wire; every read has it, and a
+record from before priorities reads `medium` without being rewritten.
 
 - `task/submit CWD PROMPT &optional (:attachments :model :permission-mode
-  :thinking :non-interactive :refine :main-tree)` → task; it starts when
-  one of its project's `harness-tasks-max-running` slots is free.  The
-  limit is per project: every project (a task's `:project`, the main
-  checkout, else its `:cwd`) has that many slots of its own, and the
-  scheduler (`harness-tasks--schedule`) starts each project's queued
-  tasks oldest first while that project has slots left
-  (`harness-tasks--free-slots PROJECT`), so a project at its limit holds
-  up only its own tasks.  Missing options come from
+  :thinking :non-interactive :refine :main-tree :priority)` → task; it
+  starts when one of its project's `harness-tasks-max-running` slots is
+  free.  The limit is per project: every project (a task's `:project`,
+  the main checkout, else its `:cwd`) has that many slots of its own,
+  and the scheduler (`harness-tasks--schedule`) starts each project's
+  queued tasks in start order (`harness-tasks--start-order`: highest
+  `:priority` first, oldest first among equals) while that project has
+  slots left (`harness-tasks--free-slots PROJECT`), so a project at its
+  limit holds up only its own tasks.  `:priority` is `low`, `medium`
+  (the default; `med` reads as it) or `high`, a symbol or a string in
+  any case; anything else is refused before the task is made.  A
+  priority only orders the queue: it never stops a task at work, and a
+  backlog task still waits for `task/start`.  Missing options come from
   `harness-tasks-model`, `-permission-mode` (auto), `-thinking` and
   `-non-interactive` (off), else from what the directory configures, so
   a task is interactive unless `harness-tasks-non-interactive` or the
@@ -2574,6 +2582,10 @@ verdict.
   comes back to the board.
 - `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`,
   `task/start ID` (ignores the limit; not while a write-up runs),
+  `task/set-priority ID PRIORITY` (low, medium or high, as `task/submit`
+  reads it; any task, though it only matters to one still waiting; it
+  starts nothing, as no slot frees, and `task/changed` tells the board,
+  which reorders *Pending*),
   `task/update ID PROMPT` (not started only; writes a stopped write-up by
   hand; a task named from its prompt is named again), `task/set-all SETTINGS &optional FILTER` (apply `:model',
   `:thinking', `:permission-mode' and `:non-interactive' to every task
@@ -2668,8 +2680,10 @@ on them, answered by a cheap model that returns JSON only.
   first, archived ones included; ACTIONS are what QUERY orders, each
   `(:task ID :action NAME :text TEXT :title TITLE :confirm BOOL)`, NAME
   one of `harness-tasks-search-actions` (`archive`, `restore`, `stop`,
-  `retry`, `start`, `verify`, `complete`, `message`, `reject`), TEXT the
-  words a message or a send-back carries, and `:confirm` t for an action
+  `retry`, `start`, `verify`, `complete`, `message`, `reject`,
+  `priority`), TEXT the words a message or a send-back carries or the
+  priority a `priority` action gives (one naming none, or the task's own,
+  or for a done task, is dropped), and `:confirm` t for an action
   that interrupts work, merges it or sends words to an agent (stop,
   verify, complete, message, reject, and archive of a working task),
   false for the rest.  `:shown` is what the board shows now, which
@@ -2677,9 +2691,10 @@ on them, answered by a cheap model that returns JSON only.
   board.
 - The message to the model carries a compact dump of the board: for
   every task (newest first, at most `harness-tasks-search--max-tasks`)
-  its id, column and state, title, the request it was asked in, the todo
-  it is on, what it waits for the user on, the summary it handed in, its
-  branch, times and errors.  The system prompt
+  its id, column and state, title, the request it was asked in, its
+  priority when it is not medium, the todo it is on, what it waits for
+  the user on, the summary it handed in, its branch, times and errors.
+  The system prompt
   (`harness-tasks-search--system`) is constant, and the model must
   answer one line of JSON `{"show":[ID…],"do":[{"task":ID,"action":…}]}`.
   Unknown ids are dropped and acted-on tasks are always shown.  When the
@@ -2710,14 +2725,16 @@ on them, answered by a cheap model that returns JSON only.
   (`harness-tasks-search--stop-wait`), stop never drops a task that has
   not started, retry is `task/retry`, message is a follow-up to the
   task's session (or words added to the prompt of a task with no session
-  yet), and the rest are the tasks methods.  ARCHIVE and RESTORE carry
-  `:undo`, the action that undoes them.
+  yet), priority is `task/set-priority` (its result says the priority
+  given, as `:text`), and the rest are the tasks methods.  ARCHIVE and
+  RESTORE carry `:undo`, the action that undoes them, and PRIORITY the
+  priority action back to what the task had.
 - Searches are not sessions: their cost is recorded with `usage/record`
   under the board's project with `:session nil`.
 - Settings `harness-tasks-search-model`, `harness-tasks-search-thinking`;
   the demo provider answers search requests heuristically (word match
-  plus action verbs), so the dev daemon, the tests and the screenshots
-  work offline.
+  plus action verbs, and priority words such as "prioritize"), so the
+  dev daemon, the tests and the screenshots work offline.
 
 ### pet
 
@@ -2964,8 +2981,8 @@ TRAMP prefixes come from the session host):
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
 | `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_list` | List tasks | column (pending/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read (needs no approval: `harness-perms--inspection-tools`) |
-| `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout) | meta |
-| `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete), message (the feedback, for reject) | meta |
+| `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: the order waiting tasks start in) | meta |
+| `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete/priority), message (the feedback, for reject), priority (low/medium/high, for priority) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus | exec (tools-dev; offered in a checkout of the harness only; needs no approval: `harness-perms--auto-allow-tools`) |
@@ -4058,7 +4075,18 @@ the task as a duplicate, or sends feedback on a backlog task's.  A task
 whose write-up refused it as a duplicate shows it in Requires your
 input, naming the task it duplicates and saying why: `k` drops it, `r`
 writes it up anyway, `m` takes what makes it another task than the one
-it duplicates.  `I` or
+it duplicates.  Beside the Submit / Refine toggle, the priority button
+(`medium priority`, `harness-ui-tasks-cycle-new-priority`) cycles the
+next task's priority through high and low and back; it is a setting of
+the board like the others, sent as `task/submit`'s `:priority`, never
+bulk.  `+` and `-` on a card raise and lower its task's priority
+(`harness-ui-tasks-raise-priority` / `-lower-priority`, through
+`task/set-priority`; a completed task refuses, as it no longer waits),
+and so do the card's menu entries while the task has not started.  A
+high task wears `↑` (`harness-icon-task-priority-high`) before its
+title and a low one `↓`, and their facts open with "high priority" or
+"low priority" (`harness-task-priority-high-face` /
+`-low-face`); medium shows nothing.  `I` or
 [Add session] makes an ongoing session a task.  A card in Ready for
 review whose worktree is itself a checkout of the harness gets an
 [Open harness] button: it starts the worktree's own live development
@@ -4077,7 +4105,8 @@ the top of in progress (latest started first), review lists the latest
 finished first and completed the latest completed (verified, else
 finished) first; merging is the queue's own order, from when each
 branch joined it; pending is the queue, in the order its tasks start,
-with the backlog among it (oldest first; only queued tasks have a place
+with the backlog among it (highest priority first, then oldest first,
+as `harness-tasks--start-order` has it; only queued tasks have a place
 in line).
 
 The board's search (`harness-ui-tasks-search`, `/` on the board,
@@ -4092,7 +4121,8 @@ function that drops it, which `C-g` on the board runs when the compose
 box has nothing to leave ([Clear] does too).  The columns left without a
 task are hidden.  An action the answer does not need confirmed runs at
 once, and the banner and the echo area say what it did (the toast), with
-[Undo] when it can be undone (archive and restore undo each other);
+[Undo] when it can be undone (archive and restore undo each other, and
+a new priority goes back to the old one: "Made “A” high priority");
 `task/search-apply` runs them.  An action that interrupts work, merges
 it or sends words to an agent is proposed instead: the banner asks, with
 a button that does it and [Skip], and `/` then RET on an empty line does

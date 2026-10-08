@@ -193,6 +193,101 @@ leaves its later tasks waiting and the walk goes on to the next one."
         (should (eq 'pending (harness-tasks-test-state b2)))
         (dolist (id (list a1 a2 b1 b2)) (harness-tasks-test-wait-state id 'done))))))
 
+(defun harness-tasks-test-submit-at (prompt priority)
+  "Submit PROMPT here with PRIORITY; return its id."
+  (plist-get (harness-call 'task/submit default-directory prompt (list :priority priority)) :id))
+
+(defun harness-tasks-test-start-order (ids)
+  "Return IDS in the order their tasks started."
+  (sort (copy-sequence ids)
+        (lambda (a b) (< (plist-get (harness-tasks-test-task a) :started)
+                         (plist-get (harness-tasks-test-task b) :started)))))
+
+(ert-deftest harness-tasks-schedule-starts-highest-priority-first ()
+  "Waiting tasks take free slots by priority, the oldest first among equals.
+With one slot, the tasks run one after the other in that order."
+  (harness-tasks-test-with
+    (let (low med high med2 high2)
+      (let ((harness-tasks-max-running 0))
+        (setq low (harness-tasks-test-submit-at "low" "low")
+              med (harness-tasks-test-submit "medium, by default")
+              high (harness-tasks-test-submit-at "high" 'high)
+              med2 (harness-tasks-test-submit-at "medium, later" "med")
+              high2 (harness-tasks-test-submit-at "high, later" "HIGH")))
+      (let ((harness-tasks-max-running 1))
+        (harness-tasks--schedule)
+        ;; The oldest high one gets the slot, older tasks of lower priority wait.
+        (should (eq 'active (harness-tasks-test-state high)))
+        (dolist (id (list low med med2 high2)) (should (eq 'pending (harness-tasks-test-state id))))
+        (dolist (id (list low med high med2 high2)) (harness-tasks-test-wait-state id 'done))
+        (should (equal (list high high2 med med2 low)
+                       (harness-tasks-test-start-order (list low med high med2 high2))))))))
+
+(ert-deftest harness-tasks-priority-reorders-the-queue ()
+  "`task/set-priority' moves a waiting task up or down the queue."
+  (harness-tasks-test-with
+    (let (a b c)
+      (let ((harness-tasks-max-running 0))
+        (setq a (harness-tasks-test-submit "first")
+              b (harness-tasks-test-submit "second")
+              c (harness-tasks-test-submit "third"))
+        (should (eq 'high (plist-get (harness-call 'task/set-priority c "high") :priority)))
+        (should (eq 'low (plist-get (harness-call 'task/set-priority a 'low) :priority)))
+        ;; Changing a priority frees no slot: nothing starts.
+        (dolist (id (list a b c)) (should (eq 'pending (harness-tasks-test-state id)))))
+      (let ((harness-tasks-max-running 1))
+        (harness-tasks--schedule)
+        (should (eq 'active (harness-tasks-test-state c)))
+        (dolist (id (list a b c)) (harness-tasks-test-wait-state id 'done))
+        (should (equal (list c b a) (harness-tasks-test-start-order (list a b c))))))))
+
+(ert-deftest harness-tasks-priority-is-checked-and-persisted ()
+  "A priority is low, medium or high, from a symbol or a string (\"med\" too).
+It is a symbol in memory, a string on disk and over the wire, and a
+record without one is medium."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (let ((high (harness-tasks-test-submit-at "urgent" "High"))
+            (plain (harness-tasks-test-submit "whenever")))
+        (should (eq 'high (plist-get (harness-tasks-test-task high) :priority)))
+        (should (eq 'medium (plist-get (harness-tasks-test-task plain) :priority)))
+        (should (eq 'medium (plist-get (harness-call 'task/set-priority plain "med") :priority)))
+        ;; Anything else is refused, and adds or changes nothing.
+        (should-error (harness-call 'task/submit default-directory "nope" (list :priority "urgent")))
+        (should (= 2 (length (harness-call 'task/list))))
+        (should-error (harness-call 'task/set-priority high 'critical))
+        (should-error (harness-call 'task/set-priority "t-missing" 'low))
+        (should (eq 'high (plist-get (harness-tasks-test-task high) :priority)))
+        ;; A record from before priorities is medium.
+        (puthash plain (harness-plist-remove (gethash plain harness-tasks--table) :priority)
+                 harness-tasks--table)
+        (should (eq 'medium (plist-get (harness-tasks-test-task plain) :priority)))
+        (should-not (plist-member (gethash plain harness-tasks--table) :priority))
+        (harness-call 'task/set-priority plain "low")
+        ;; Saved as strings, read back as symbols.
+        (harness-tasks--save)
+        (should (equal "high" (plist-get (cl-find high (harness-tasks-test--read (harness-tasks-test--global))
+                                                  :key (lambda (r) (plist-get r :id)) :test #'equal)
+                                         :priority)))
+        (clrhash harness-tasks--table)
+        (setq harness-tasks--loaded nil)
+        (should (= 2 (length (harness-call 'task/list))))
+        (should (eq 'high (plist-get (harness-tasks-test-task high) :priority)))
+        (should (eq 'low (plist-get (harness-tasks-test-task plain) :priority)))
+        ;; Over the wire: strings both ways.
+        (let* ((conn (harness-acp-connect))
+               (task (harness-test-await
+                      (harness-acp-request conn "_harness/task/set-priority"
+                                           (list :id high :priority "low")))))
+          (should (equal "low" (plist-get task :priority)))
+          (should (eq 'low (plist-get (harness-tasks-test-task high) :priority)))
+          (let ((sent (harness-test-await
+                       (harness-acp-request conn "_harness/task/submit"
+                                            (list :cwd default-directory :prompt "from a client"
+                                                  :opts (list :priority "high"))))))
+            (should (equal "high" (plist-get sent :priority)))
+            (should (eq 'high (plist-get (harness-tasks-test-task (plist-get sent :id)) :priority)))))))))
+
 (ert-deftest harness-tasks-free-slots-count-per-project ()
   "A project's free slots count its own working tasks only.
 A task's project is its `:project', else its `:cwd'."

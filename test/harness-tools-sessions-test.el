@@ -466,6 +466,38 @@ tell it from the user's messages."
                               :task-id)))
         (should-not (harness-json-true-p (plist-get (harness-call 'task/get plain) :main-tree)))))))
 
+(ert-deftest harness-tools-sessions-task-priority ()
+  "task_submit takes a priority, task_control changes it, task_list shows it unless medium."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (me (harness-tools-sessions-test-session))
+           (submitted (harness-tools-sessions-test-run me "task_submit" '(:prompt "Urgent fix" :priority "high")))
+           (id (plist-get (plist-get submitted :meta) :task-id))
+           (plain (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Ordinary"))
+                                        :meta)
+                             :task-id)))
+      (should-not (plist-get submitted :is-error))
+      (should (eq 'high (plist-get (harness-call 'task/get id) :priority)))
+      (should (eq 'medium (plist-get (harness-call 'task/get plain) :priority)))
+      (let ((listing (harness-tools-sessions-test-ok me "task_list" nil)))
+        (should (string-match-p (concat (regexp-quote id) ".*\n    state pending, priority high") listing))
+        ;; Medium is the default and goes without saying.
+        (should-not (string-match-p "priority medium" listing)))
+      (let ((text (harness-tools-sessions-test-ok me "task_control" (list :task_id plain :action "priority" :priority "low"))))
+        (should (string-match-p "\\`Priority low\\." text))
+        (should (string-match-p ", priority low" text)))
+      (should (eq 'low (plist-get (harness-call 'task/get plain) :priority)))
+      ;; It needs a priority, and a real one.
+      (should (plist-get (harness-tools-sessions-test-run me "task_control" (list :task_id plain :action "priority"))
+                         :is-error))
+      (should (plist-get (harness-tools-sessions-test-run me "task_control"
+                                                          (list :task_id plain :action "priority" :priority "urgent"))
+                         :is-error))
+      (should (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Nope" :priority "urgent"))
+                         :is-error))
+      (should (eq 'low (plist-get (harness-call 'task/get plain) :priority)))
+      (should (= 2 (length (harness-call 'task/list)))))))
+
 (ert-deftest harness-tools-sessions-task-review ()
   "task_wait settles when finished work waits for review; task_control sends it back, then verifies it."
   (harness-tools-sessions-test-with

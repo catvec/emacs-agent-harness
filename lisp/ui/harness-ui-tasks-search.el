@@ -18,13 +18,15 @@
 ;; while they change, so what an action does shows on their cards.
 ;;
 ;; An order runs at once when it is easily undone or does no harm --
-;; archive (of a task not at work), restore, retry, start -- and the
-;; banner says what was done, the way a toast would, with [Undo] where
-;; it can: archive and restore undo each other.  An order that
-;; interrupts work, merges it or sends words to an agent -- stop,
-;; archive of a task at work, verify, mark done, message, send back --
-;; is proposed instead: the banner asks, with a button that does it and
-;; one that skips it, and / then RET on an empty line does it too.
+;; archive (of a task not at work), restore, retry, start, a new
+;; priority ("do the docs task first") -- and the banner says what was
+;; done, the way a toast would, with [Undo] where it can: archive and
+;; restore undo each other, and a priority goes back to what it was.
+;; An order that interrupts work, merges it or sends words to an agent
+;; -- stop, archive of a task at work, verify, mark done, message, send
+;; back -- is proposed instead: the banner asks, with a button that
+;; does it and one that skips it, and / then RET on an empty line does
+;; it too.
 ;;
 ;; The model's process starts as the line is being typed
 ;; (`task/search-warm'), so the answer comes sooner, and the header
@@ -85,9 +87,12 @@
     ("verify" "Verified" "verify")
     ("complete" "Marked done" "mark done")
     ("message" "Sent a message to" "message")
-    ("reject" "Sent back" "send back"))
+    ("reject" "Sent back" "send back")
+    ("priority" "Changed the priority of" "change the priority of"))
   "How a board says each action of a search: (ACTION DONE FAILED).
-DONE opens what it did, FAILED says what it could not do.")
+DONE opens what it did, FAILED says what it could not do.  What a
+priority action did names the priority it gave instead, when it is
+known: \"Made “A” and “B” high priority\".")
 
 (defun harness-ui-tasks-search--title (action)
   "The title of the task ACTION is about, quoted."
@@ -105,14 +110,17 @@ DONE opens what it did, FAILED says what it could not do.")
       (2 (concat (car titles) " and " (cadr titles)))
       (_ (concat (string-join (butlast titles) ", ") " and " (car (last titles)))))))
 
-(defun harness-ui-tasks-search--group (actions)
+(defun harness-ui-tasks-search--group (actions &optional key)
   "ACTIONS grouped by action, in the order each first comes.
-Each group is (NAME . ACTIONS)."
-  (let (groups)
+Each group is (NAME . ACTIONS).  KEY, a function of an action, gives
+what to group by instead, and NAME is that."
+  (let ((key (or key (lambda (a) (plist-get a :action))))
+        groups)
     (dolist (a actions)
-      (let ((cell (assoc (plist-get a :action) groups)))
+      (let* ((name (funcall key a))
+             (cell (assoc name groups)))
         (if cell (setcdr cell (append (cdr cell) (list a)))
-          (push (list (plist-get a :action) a) groups))))
+          (push (list name a) groups))))
     (nreverse groups)))
 
 (defun harness-ui-tasks-search--done-text (results)
@@ -123,9 +131,17 @@ Failures follow, each saying why: \"could not retry “C”: it is working alrea
     (string-join
      (append
       (mapcar (lambda (group)
-                (let ((verb (or (nth 1 (assoc (car group) harness-ui-tasks-search--verbs)) (capitalize (car group)))))
-                  (concat verb " " (harness-ui-tasks-search--titles (cdr group)))))
-              (harness-ui-tasks-search--group ok))
+                (let ((titles (harness-ui-tasks-search--titles (cdr group))))
+                  (pcase (car group)
+                    (`("priority" . ,(and priority (pred stringp)))
+                     (format "Made %s %s priority" titles priority))
+                    (`(,name . ,_)
+                     (concat (or (nth 1 (assoc name harness-ui-tasks-search--verbs)) (capitalize name))
+                             " " titles)))))
+              ;; Priorities given go by the priority: each says it.
+              (harness-ui-tasks-search--group
+               ok (lambda (r) (let ((name (plist-get r :action)))
+                                (cons name (and (equal name "priority") (plist-get r :text)))))))
       (mapcar (lambda (r)
                 (format "%s %s %s: %s" (if ok "could not" "Could not")
                         (or (nth 2 (assoc (plist-get r :action) harness-ui-tasks-search--verbs)) (plist-get r :action))
@@ -149,6 +165,7 @@ Failures follow, each saying why: \"could not retry “C”: it is working alrea
                  ("complete" (format "Mark %s done?" titles))
                  ("message" (format "Send %s to %s?" (harness-ui-tasks--quote (harness-truncate-end text 80)) titles))
                  ("reject" (format "Send %s back: %s?" titles (harness-ui-tasks--quote (harness-truncate-end text 80))))
+                 ("priority" (format "Change the priority of %s?" titles))
                  (name (format "%s %s?" (capitalize name) titles)))))
            (harness-ui-tasks-search--group proposed))
    "  "))
@@ -276,6 +293,7 @@ says what the actions did, and a third asks about what waits for an OK."
                        ("archive" "archiving") ("restore" "restoring") ("stop" "stopping")
                        ("retry" "retrying") ("start" "starting") ("verify" "verifying")
                        ("complete" "marking done") ("message" "sending to") ("reject" "sending back")
+                       ("priority" "changing the priority of")
                        (name name))
                      " " (harness-ui-tasks-search--titles (cdr group))))
            (harness-ui-tasks-search--group running))
@@ -458,7 +476,8 @@ the board shows that search."
   (message "Left as it is"))
 
 (defun harness-ui-tasks-search-undo ()
-  "Undo what this board's search just did: archive and restore undo each other."
+  "Undo what this board's search just did.
+Archive and restore undo each other; a priority goes back to what it was."
   (interactive)
   (let* ((state (harness-ui-tasks-search--state-or-error))
          (undo (or (plist-get state :undo) (user-error "Nothing to undo"))))

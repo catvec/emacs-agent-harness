@@ -32,7 +32,8 @@ OpenAI-compatible APIs and AWS Bedrock.
   sandbox for tool processes (bubblewrap or `systemd-run`).
 - **Task board.** Run tasks in parallel, each in its own session and git
   worktree, review the results, and merge them back through a merge
-  queue.
+  queue. A per-project limit on running tasks starts the waiting ones
+  by priority (low, medium, high).
 - **Notifications.** A desktop notification, and a push to your phone
   through Gotify once you set it up, when a task waits for your review
   or is done. Agents can notify you too.
@@ -628,6 +629,19 @@ your checkout itself can be submitted to the **main tree** instead (the
   as cleaning up uncommitted changes; those tasks show `main tree` on
   their card, and a refined task keeps the choice for when you start it.
   An agent can ask for the same thing with `task_submit`'s `main_tree`.
+- Every task has a **priority**: low, medium (the default) or high. It
+  matters when `harness-tasks-max-running` limits how many of a
+  project's tasks work at once: the others wait in *Pending*, and a
+  free slot goes to the highest priority waiting, the oldest of those
+  first, which is also the order *Pending* lists them in. A priority
+  never stops a task at work, and a backlog task still waits for you to
+  start it. The `medium priority` button beside the Submit / Refine
+  switch sets the next task's (a click cycles it through high and low);
+  `+` and `-` on a card raise and lower that task's, to reorder the
+  queue. A high task shows `↑` before its title and a low one `↓`. An
+  agent sets it with `task_submit`'s `priority` and `task_control`'s
+  `priority` action, and the board's search understands "do the docs
+  task first".
 - Task sessions run on at most 256k tokens of context
   (`harness-tasks-context-limit`): they compact sooner than interactive
   sessions, so a long task works from a smaller transcript between
@@ -717,7 +731,8 @@ your checkout itself can be submitted to the **main tree** instead (the
   tasks, archived ones included, under a banner that says what it shows;
   `C-g` or `[Clear]` shows every task again. An order that is easily
   undone or does no harm -- archive of a task not at work, restore,
-  retry, start -- runs at once and the banner says so, with `[Undo]`;
+  retry, start, a new priority -- runs at once and the banner says so,
+  with `[Undo]`;
   one that interrupts work, merges it or sends words to an agent --
   stop, archive of a working task, verify, mark done, message, send
   back -- is offered instead, and an empty `/` then `RET` runs it. The
