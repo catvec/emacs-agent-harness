@@ -749,5 +749,284 @@ other view, shows the command as it was left."
       (should (equal (list 'permission sid pid "allow-once") (car harness-ui-pending-test-answers)))
       (harness-test-wait (lambda () (null (harness-ui-popout-buffer key))) 5 "the popout to close"))))
 
+(declare-function harness-ui-pending--pattern-suggestions "harness-ui-pending")
+
+(ert-deftest harness-ui-pending-pattern-suggestions-go-from-the-file-to-the-root ()
+  "Editing a pattern offers, narrowest first, the call's path, the files
+like it beside it, its directory and each one above it up to the
+prompt's own, which may be the root of a repository far above the
+file, then that pattern and the directory above it."
+  (require 'harness-ui-pending)
+  (should (equal '("/srv/emacs.d/modules/doom/compat/compat.el"
+                   "/srv/emacs.d/modules/doom/compat/*.el"
+                   "/srv/emacs.d/modules/doom/compat/**"
+                   "/srv/emacs.d/modules/doom/**"
+                   "/srv/emacs.d/modules/**"
+                   "/srv/emacs.d/**"
+                   "/srv/**")
+                 (harness-ui-pending--pattern-suggestions
+                  (list :pattern "/srv/emacs.d/**" :paths ["/srv/emacs.d/modules/doom/compat/compat.el"]))))
+  ;; A pattern for the file's own directory, and one for a directory itself.
+  (should (equal '("/srv/x/a.txt" "/srv/x/*.txt" "/srv/x/**" "/srv/**")
+                 (harness-ui-pending--pattern-suggestions (list :pattern "/srv/x/**" :paths '("/srv/x/a.txt")))))
+  (should (equal '("/srv/x/sub" "/srv/x/sub/**" "/srv/x/**")
+                 (harness-ui-pending--pattern-suggestions (list :pattern "/srv/x/sub/**" :paths '("/srv/x/sub")))))
+  ;; A path named through a link elsewhere: nothing between.
+  (should (equal '("/link/x/a.el" "/real/x/**" "/real/**")
+                 (harness-ui-pending--pattern-suggestions (list :pattern "/real/x/**" :paths '("/link/x/a.el"))))))
+
+;;;; Image diagrams
+
+(defvar harness-ui-pending--images)
+(defvar harness-ui-image-colors)
+(defvar harness-ui-pending-popout-max-height)
+(defvar harness-ui-popout-max-height)
+(defvar harness-ui-connection)
+(defvar harness-ui-connected-hook)
+(declare-function harness-ui-pending--diagram-string "harness-ui-pending" (session-id r index))
+(declare-function harness-ui-pending--fetched-image "harness-ui-pending" (session-id pid index))
+(declare-function harness-ui-pending--retry-images "harness-ui-pending" ())
+(declare-function harness-ui-pending--forget-images "harness-ui-pending" (session-id records))
+(declare-function harness-ui-pending--diagram-image "harness-ui-pending" (session-id r index))
+(declare-function harness-ui-pending--image-box "harness-ui-pending" (r))
+(declare-function harness-ui-popout--max-lines "harness-ui-popout" (frame))
+(declare-function harness-ui-popout-close "harness-ui-popout" (key &optional quiet))
+(declare-function harness-acp-connection-kind "harness-acp" (conn))
+
+(defun harness-ui-pending-test-image-question (sid files &optional id)
+  "Make SID wait on a question showing FILES, one per option; return its record.
+ID names the question, \"q1\" by default."
+  (let ((id (or id "q1")))
+    (harness-ui-pending-sync
+     sid (list (list :id id :kind "question"
+                     :payload (list :question "Which layout?"
+                                    :options (mapcar #'file-name-base files)
+                                    :diagrams (mapcar (lambda (f) (list :type "image" :path f :mime "image/png"))
+                                                      files)))))
+    (harness-ui-pending-record sid id)))
+
+(defun harness-ui-pending-test-image (string &optional file)
+  "Return the first image STRING displays, or nil.
+With FILE, the first image of that file: icons are images too."
+  (let ((pos 0) found)
+    (while (and (not found) pos (< pos (length string)))
+      (let ((display (get-text-property pos 'display string)))
+        (when (and (eq 'image (car-safe display))
+                   (or (not file) (equal file (image-property display :file))))
+          (setq found display)))
+      (setq pos (next-single-property-change pos 'display string)))
+    found))
+
+(defun harness-ui-pending-test-png (dir name)
+  "Write a small PNG called NAME in DIR; return its path."
+  (let ((file (expand-file-name name dir))
+        (coding-system-for-write 'no-conversion))
+    (write-region harness-test-png nil file nil 'silent)
+    file))
+
+(ert-deftest harness-ui-pending-image-diagrams-on-white-and-whole ()
+  "An option's image is drawn black on white, as a browser shows it, and
+fits half the window, so a short one (a BTW's) shows it whole.
+`harness-ui-image-colors' nil draws it in the text's colours instead."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Pictures"))
+           (r (harness-ui-pending-test-image-question
+               sid (list (harness-ui-pending-test-png dir "left.png") (harness-ui-pending-test-png dir "top.png")))))
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))
+        (with-temp-buffer
+          (set-window-buffer (selected-window) (current-buffer))
+          (let ((image (harness-ui-pending-test-image (harness-ui-pending--diagram-string sid r 1))))
+            (should image)
+            (should (equal (expand-file-name "top.png" dir) (image-property image :file)))
+            (should (equal "black" (image-property image :foreground)))
+            (should (equal "white" (image-property image :background)))
+            (should (<= (image-property image :max-height) (/ (window-body-height nil t) 2)))
+            (should (<= (image-property image :max-width) (window-body-width nil t))))
+          (let* ((harness-ui-image-colors nil)
+                 (image (harness-ui-pending-test-image (harness-ui-pending--diagram-string sid r 0))))
+            (should image)
+            (should-not (image-property image :foreground))
+            (should-not (image-property image :background))))))))
+
+(ert-deftest harness-ui-pending-image-too-large-to-draw ()
+  "An image larger than Emacs draws (`max-image-size', ten times the
+frame) is a line saying so, a button opening it outside Emacs, rather
+than an empty box Emacs complains about on every redisplay."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Pictures"))
+           (page (expand-file-name "page.png" dir))
+           (small (harness-ui-pending-test-png dir "small.png"))
+           (opened nil))
+      ;; Only its header: a full page's screenshot, 1400x12000.
+      (let ((coding-system-for-write 'no-conversion))
+        (write-region (unibyte-string #x89 ?P ?N ?G ?\r ?\n #x1a ?\n 0 0 0 13 ?I ?H ?D ?R
+                                      0 0 5 120 0 0 46 224 8 6 0 0 0)
+                      nil page nil 'silent))
+      (let ((r (harness-ui-pending-test-image-question sid (list page small)))
+            (max-image-size 10.0))
+        (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+                  ((symbol-function 'harness-ui-popout-open-file) (lambda (file) (setq opened file))))
+          (with-temp-buffer
+            (set-window-buffer (selected-window) (current-buffer))
+            (let ((s (harness-ui-pending--diagram-string sid r 0)))
+              (should-not (harness-ui-pending-test-image s))
+              (should (string-search (format "[image %s: 1400\N{U+00D7}12000 pixels, too large to draw here"
+                                             (abbreviate-file-name page))
+                                     s))
+              (funcall (get-text-property (string-search "[image" s) 'harness-ui-action s))
+              (should (equal page opened)))
+            ;; A small one draws as ever, and so does the large one where
+            ;; Emacs is told to draw larger images.
+            (should (harness-ui-pending-test-image (harness-ui-pending--diagram-string sid r 1) small))
+            (let ((max-image-size 20000))
+              (should (harness-ui-pending-test-image (harness-ui-pending--diagram-string sid r 0) page)))))))))
+
+(ert-deftest harness-ui-pending-popout-of-images-grows-and-fits-them ()
+  "The popout of a question with images grows taller than others, and
+sizes the image to show whole beside the panel and the box.  A question
+with images arriving while the popout is open makes it grow too."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Pictures"))
+           (key (list 'pending sid))
+           (files (list (harness-ui-pending-test-png dir "left.png") (harness-ui-pending-test-png dir "top.png"))))
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))
+        ;; A question without images: an ordinary popout.
+        (harness-ui-pending-test-question sid "q0" "Which colour?")
+        (harness-ui-pending-popout sid)
+        (with-current-buffer (harness-ui-popout-buffer key)
+          (should (= (max 4 (floor (* harness-ui-popout-max-height (frame-height))))
+                     (harness-ui-popout--max-lines (selected-frame)))))
+        ;; The images come: it grows, and draws them to fit.
+        (let ((r (harness-ui-pending-test-image-question sid files "q1")))
+          (with-current-buffer (harness-ui-popout-buffer key)
+            (should (= (max 4 (floor (* harness-ui-pending-popout-max-height (frame-height))))
+                       (harness-ui-popout--max-lines (selected-frame))))
+            (let ((image (harness-ui-pending-test-image (buffer-string) (car files)))
+                  (box (harness-ui-pending--image-box r)))
+              (should (eq 'image (car-safe image)))
+              (should box)
+              (should (equal (plist-get box :max-height) (image-property image :max-height)))
+              (should (equal (plist-get box :max-width) (image-property image :max-width)))
+              (should (< (image-property image :max-width) (window-body-width (get-buffer-window) t)))
+              (should (equal "white" (image-property image :background))))))
+        (harness-ui-popout-close key)))))
+
+(ert-deftest harness-ui-pending-images-come-from-a-harness-elsewhere ()
+  "A harness reached at a host and port may run on another machine: the
+UI asks it for an option's image (`question/image') instead of reading
+the path, shows it once it comes, says why when it cannot, and forgets
+it with the question."
+  (harness-ui-pending-test-with
+    (harness-test-load-module 'tools-agent)
+    (let* ((sid (harness-ui-pending-test-session "Far away"))
+           (png (harness-ui-pending-test-png dir "far.png"))
+           (gone (harness-ui-pending-test-png dir "gone.png"))
+           (pid (harness-call 'session/pending-add sid
+                              (list :kind 'question
+                                    :payload (list :question "Which?" :options '("Far" "Gone")
+                                                   :diagrams (list (list :type "image" :path png :mime "image/png")
+                                                                   (list :type "image" :path gone :mime "image/png"))))))
+           (changed nil)
+           (note (lambda (session-id) (push session-id changed)))
+           (port (plist-get (harness-call 'acp/start :port 0) :port)))
+      (delete-file gone)
+      (add-hook 'harness-ui-pending-changed-hook note)
+      (unwind-protect
+          (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))
+            (harness-connect-remote (format "127.0.0.1:%d" port))
+            (should (eq 'tcp (harness-acp-connection-kind harness-ui-connection)))
+            (harness-ui-pending-sync sid (harness-call 'session/pending sid))
+            (let ((r (harness-ui-pending-record sid pid)))
+              (should r)
+              ;; Asked for, not read: it shows once it comes.
+              (should (string-match-p "\\`\\[loading the image far\\.png…\\]"
+                                      (harness-ui-pending--diagram-image sid r 0)))
+              (should (string-match-p "\\`\\[loading the image gone\\.png…\\]"
+                                      (harness-ui-pending--diagram-image sid r 1)))
+              (harness-test-wait (lambda () (cl-notany (lambda (i) (eq 'loading (car-safe (gethash (list sid pid i) harness-ui-pending--images))))
+                                                       '(0 1)))
+                                 5 "the images from the harness")
+              ;; The panels showing it are drawn again.
+              (should (member sid changed))
+              (let ((image (harness-ui-pending-test-image (harness-ui-pending--diagram-image sid r 0))))
+                (should image)
+                (should-not (image-property image :file))
+                (should (equal harness-test-png (image-property image :data)))
+                (should (equal "white" (image-property image :background))))
+              (should (string-match-p (regexp-quote (format "[image %s: The image %s cannot be read any more]" gone gone))
+                                      (harness-ui-pending--diagram-image sid r 1)))
+              ;; Answered, the question takes its images along.
+              (harness-ui-pending-remove sid pid)
+              (should-not (gethash (list sid pid 0) harness-ui-pending--images))
+              (should-not (gethash (list sid pid 1) harness-ui-pending--images))))
+        (remove-hook 'harness-ui-pending-changed-hook note)
+        (harness-call 'acp/stop)
+        (setq harness-ui-connection-address nil)))))
+
+(ert-deftest harness-ui-pending-image-fetch-weathers-connection-trouble ()
+  "Asking the harness for an image never breaks the panel asking: a
+connection that cannot be made is an error the panel shows; a
+connection the UI let go of for another asks that one; an answer to an
+asking since replaced is dropped; and what failed is asked for again
+once the UI connects again."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session "Far away"))
+           (key (list sid "q1" 0))
+           (unknown t)
+           (asked nil)
+           (changed nil)
+           (note (lambda (session-id) (push session-id changed))))
+      (should (memq #'harness-ui-pending--retry-images harness-ui-connected-hook))
+      (add-hook 'harness-ui-pending-changed-hook note)
+      (unwind-protect
+          (cl-letf (((symbol-function 'harness-ui-call)
+                     (lambda (method params callback on-error)
+                       (when unknown (error "Unknown host far.example"))
+                       (push (list method params callback on-error) asked)
+                       nil)))
+            ;; Connecting fails as the panel is drawn: the panel says why.
+            (should (equal '(:error "Unknown host far.example") (harness-ui-pending--fetched-image sid "q1" 0)))
+            (should (equal '(:error "Unknown host far.example") (harness-ui-pending--fetched-image sid "q1" 0)))
+            (should-not changed)
+            ;; Connected, the UI asks for it again.
+            (setq unknown nil)
+            (harness-ui-pending--retry-images)
+            (should (equal (list sid) changed))
+            (should (eq 'loading (harness-ui-pending--fetched-image sid "q1" 0)))
+            (should (eq 'loading (harness-ui-pending--fetched-image sid "q1" 0)))
+            (should (= 1 (length asked)))
+            (should (equal (list "_harness/question/image" (list :session-id sid :pid "q1" :index 0))
+                           (seq-take (car asked) 2)))
+            ;; The UI let go of that connection for another: the next
+            ;; drawing asks that one.
+            (setq changed nil)
+            (funcall (nth 3 (car asked))
+                     (list 'acp-error harness-acp-error-transport "connection replaced" (list :closed "replaced")))
+            (should-not (gethash key harness-ui-pending--images))
+            (should (equal (list sid) changed))
+            (should (eq 'loading (harness-ui-pending--fetched-image sid "q1" 0)))
+            (should (= 2 (length asked)))
+            ;; The question went and came back, and is asked for anew:
+            ;; the answer to the asking before is not the one awaited.
+            (let ((before (car asked)))
+              (harness-ui-pending--forget-images sid nil)
+              (should (eq 'loading (harness-ui-pending--fetched-image sid "q1" 0)))
+              (should (= 3 (length asked)))
+              (setq changed nil)
+              (funcall (nth 2 before) (list :data "b2xk" :mime "image/png"))
+              (should-not changed)
+              (should (eq 'loading (harness-ui-pending--fetched-image sid "q1" 0))))
+            ;; The awaited one comes, and the panels are drawn again.
+            (funcall (nth 2 (car asked)) (list :data "bmV3" :mime "image/png"))
+            (should (equal (list sid) changed))
+            (should (equal '(:data "bmV3" :mime "image/png") (harness-ui-pending--fetched-image sid "q1" 0)))
+            ;; An image that came is kept: connecting again asks nothing.
+            (setq changed nil)
+            (harness-ui-pending--retry-images)
+            (should-not changed)
+            (should (equal '(:data "bmV3" :mime "image/png") (harness-ui-pending--fetched-image sid "q1" 0)))
+            (should (= 3 (length asked))))
+        (remove-hook 'harness-ui-pending-changed-hook note)))))
+
 (provide 'harness-ui-pending-test)
 ;;; harness-ui-pending-test.el ends here

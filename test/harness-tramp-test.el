@@ -62,5 +62,36 @@
             (should (plist-get d :is-error))
             (should (string-match-p "denied access" (plist-get d :content)))))))))
 
+(ert-deftest harness-tramp-command-end-spares-the-current-buffer ()
+  "The end of a remote command leaves alone the process of the buffer current then.
+TRAMP reads a remote command's standard error over a connection of its
+own and, when the command ends, deletes the process of the current
+buffer if that reader has gone already -- which it has when the
+command closed its standard error early, as this one does."
+  (harness-tramp-test--enable-mock)
+  (let* ((dir (concat "/mock::" (file-name-as-directory (harness-test-temp-dir))))
+         (bystander (make-process :name "bystander" :buffer (generate-new-buffer " *bystander*")
+                                  :command '("sleep" "60") :noquery t)))
+    (unwind-protect
+        (with-current-buffer (process-buffer bystander)
+          (let ((r (harness-await (harness-run-command
+                                   '("sh" "-c" "echo out; echo err >&2; exec 2>&-; sleep 1")
+                                   :cwd dir)
+                                  60)))
+            (should (eql 0 (plist-get r :exit)))
+            (should (equal "out\n" (plist-get r :stdout)))
+            (should (equal "err\n" (plist-get r :stderr))))
+          (should (process-live-p bystander)))
+      (delete-process bystander)
+      (kill-buffer (process-buffer bystander))))
+  ;; Asked to, it leaves standard error in the output: no reader, no cleanup.
+  (let ((r (harness-await (harness-run-command '("sh" "-c" "echo out; echo err >&2; exit 3")
+                                               :cwd (concat "/mock::" (file-name-as-directory (harness-test-temp-dir)))
+                                               :merge-remote-stderr t)
+                          60)))
+    (should (eql 3 (plist-get r :exit)))
+    (should (equal "out\nerr\n" (plist-get r :stdout)))
+    (should (equal "" (plist-get r :stderr)))))
+
 (provide 'harness-tramp-test)
 ;;; harness-tramp-test.el ends here

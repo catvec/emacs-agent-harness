@@ -471,6 +471,77 @@ names are case-sensitive."
         (insert-file-contents path))
       (buffer-string))))
 
+;;;; Image sizes
+
+(defun harness--image-header-size ()
+  "Return (WIDTH . HEIGHT) of the image whose bytes the buffer holds, or nil.
+The buffer is unibyte, the image's header at its start."
+  (cl-labels ((byte (pos) (char-after pos))
+              (u16le (pos) (+ (byte pos) (* 256 (byte (1+ pos)))))
+              (u16be (pos) (+ (* 256 (byte pos)) (byte (1+ pos))))
+              (u24le (pos) (+ (u16le pos) (* 65536 (byte (+ pos 2)))))
+              (u32le (pos) (+ (u16le pos) (* 65536 (u16le (+ pos 2)))))
+              (u32be (pos) (+ (* 65536 (u16be pos)) (u16be (+ pos 2))))
+              (at (pos string) (and (<= (+ pos (length string)) (point-max))
+                                    (string= string (buffer-substring pos (+ pos (length string)))))))
+    (let ((size
+           (cond
+            ((and (at 1 "\211PNG\r\n\032\n") (at 13 "IHDR"))
+             (cons (u32be 17) (u32be 21)))
+            ((or (at 1 "GIF87a") (at 1 "GIF89a"))
+             (cons (u16le 7) (u16le 9)))
+            ((and (at 1 "RIFF") (at 9 "WEBP"))
+             (cond ((and (at 13 "VP8 ") (at 24 "\235\001\052"))
+                    (cons (logand (u16le 27) #x3fff) (logand (u16le 29) #x3fff)))
+                   ((at 13 "VP8L")
+                    (let ((b0 (byte 22)) (b1 (byte 23)) (b2 (byte 24)) (b3 (byte 25)))
+                      (cons (1+ (logior (ash (logand b1 #x3f) 8) b0))
+                            (1+ (logior (ash (logand b3 #x0f) 10) (ash b2 2) (ash (logand b1 #xc0) -6))))))
+                   ((at 13 "VP8X") (cons (1+ (u24le 25)) (1+ (u24le 28))))))
+            ((at 1 "BM")
+             (if (= (u32le 15) 12)
+                 (cons (u16le 19) (u16le 21))
+               (let ((h (u32le 23)))
+                 ;; A height below zero, in two's complement, is a top-down image.
+                 (cons (u32le 19) (if (>= h #x80000000) (- #x100000000 h) h)))))
+            ((at 1 "\377\330")
+             ;; JPEG: the size is in the frame header, after the segments
+             ;; before it (EXIF, colour profiles...), each saying its length.
+             (let ((pos 3) found)
+               (while (and (not found) (< (+ pos 8) (point-max)) (= (byte pos) #xff))
+                 (let ((marker (byte (1+ pos))))
+                   (cond ((= marker #xff) (cl-incf pos))
+                         ((and (<= #xc0 marker #xcf) (not (memq marker '(#xc4 #xc8 #xcc))))
+                          (setq found (cons (u16be (+ pos 7)) (u16be (+ pos 5)))))
+                         ((or (memq marker '(#x01 #xd8)) (<= #xd0 marker #xd7)) (cl-incf pos 2))
+                         (t (cl-incf pos (+ 2 (u16be (+ pos 2))))))))
+               found)))))
+      (and size (> (car size) 0) (> (cdr size) 0) size))))
+
+(defun harness-image-pixel-size (file &optional bytes)
+  "Return (WIDTH . HEIGHT) of the image FILE, in its own pixels, or nil.
+It is read from the file's header, without decoding the image, so it
+costs the same for any size.  BYTES, the image's bytes as a unibyte
+string, are read instead of FILE when given.  PNG, GIF, JPEG, WebP and
+BMP are known; nil for other formats (an SVG has no size of its own),
+and when the file cannot be read."
+  (condition-case nil
+      (with-temp-buffer
+        (set-buffer-multibyte nil)
+        (if bytes
+            (insert bytes)
+          (insert-file-contents-literally file nil 0 65536))
+        (or (harness--image-header-size)
+            ;; Other headers fit in the first few dozen bytes, but the
+            ;; segments before a JPEG's size (EXIF, colour profiles) may
+            ;; be longer.
+            (and (not bytes) (= (buffer-size) 65536)
+                 (equal (buffer-substring 1 3) "\377\330")
+                 (progn (erase-buffer)
+                        (insert-file-contents-literally file nil 0 (* 4 1024 1024))
+                        (harness--image-header-size)))))
+    (error nil)))
+
 ;;;; Strings
 
 (defun harness-fuzzy-score (query candidate)
@@ -522,11 +593,14 @@ this many seconds.")
 
 (defun harness--process-children (pid)
   "Return the direct children of PID, from the system process table.
-Empty when the table cannot be read (no /proc, a sandbox, a remote
-host), which leaves the group kill in `harness-process-tree' as the
-only mechanism."
+Empty when the table cannot be read (no /proc, a sandbox), which leaves
+the group kill in `harness-process-tree' as the only mechanism.  PID
+is a process of this machine, a remote command's too (the ssh that
+runs it), so the table is this machine's whatever buffer is current:
+with a remote `default-directory' it would be the remote host's."
   (when (fboundp 'list-system-processes)
-    (let (children)
+    (let ((default-directory "/")
+          children)
       (dolist (candidate (ignore-errors (list-system-processes)))
         (let ((attrs (ignore-errors (process-attributes candidate))))
           (when (eql pid (alist-get 'ppid attrs))
@@ -564,7 +638,19 @@ process that is already gone is not an error."
         (ignore-errors (signal-process (- pid) sig)))
       (ignore-errors (signal-process pid sig)))))
 
-(cl-defun harness-run-command (command &key cwd (timeout 120) stdin on-output name env)
+(defun harness--sentinel-in-plain-buffer (sentinel process event)
+  "Call SENTINEL with PROCESS and EVENT in a buffer that has no process.
+It goes around the sentinel of a remote command whose standard error
+has a buffer.  TRAMP's part of that sentinel deletes the process that
+reads standard error, as `delete-process' of `get-buffer-process'; when
+that reader has exited already, that is `delete-process' of nil, which
+deletes the current buffer's process.  The sentinel runs inside
+whatever is waiting for output then: often a TRAMP call, in the buffer
+of the connection it waits on, which would die under it."
+  (with-temp-buffer (funcall sentinel process event)))
+
+(cl-defun harness-run-command (command &key cwd (timeout 120) stdin on-output name env
+                                       merge-remote-stderr)
   "Run COMMAND (a list of strings) asynchronously and return a promise.
 The promise resolves to (:exit CODE :stdout STRING :stderr STRING).
 CWD defaults to `default-directory'; a remote (TRAMP) CWD runs the
@@ -573,13 +659,22 @@ an alist, is prepended to `process-environment' for the command.
 ON-OUTPUT is called with every chunk of standard output as it arrives.
 After TIMEOUT seconds the process is killed -- its whole process group
 on a local CWD, so children cannot outlive it -- and :exit is
-`timeout'."
+`timeout'.
+
+MERGE-REMOTE-STDERR non-nil leaves the standard error of a command on a
+remote CWD in :stdout, as the command wrote it, and :stderr empty.
+TRAMP keeps standard error apart through a FIFO on the host, read over
+a connection of its own and deleted from the sentinel, so in the middle
+of whatever TRAMP call is running then; a caller that only shows the
+output is better off without all that."
   (harness-with-promise (resolve reject)
     (ignore reject)
     (let* ((default-directory (file-name-as-directory (expand-file-name (or cwd default-directory))))
-           (group (not (file-remote-p default-directory)))
+           (remote (file-remote-p default-directory))
+           (group (not remote))
            (chunks nil)
-           (stderr-buf (generate-new-buffer " *harness-cmd-stderr*" t))
+           (stderr-buf (unless (and remote merge-remote-stderr)
+                         (generate-new-buffer " *harness-cmd-stderr*" t)))
            (done nil) (timer nil) (kill-timer nil) (pid nil) (proc nil) (tree nil)
            (finish (lambda (code)
                      (unless done
@@ -598,22 +693,30 @@ on a local CWD, so children cannot outlive it -- and :exit is
                                                      env)
                                              process-environment)
                                    process-environment)))
-        (setq proc (make-process :name (or name "harness-cmd")
-                                 :command command
-                                 :connection-type 'pipe
-                                 :noquery t
-                                 :file-handler t
-                                 :stderr stderr-buf
-                                 :filter (lambda (_p chunk)
-                                           (push chunk chunks)
-                                           (when on-output (funcall on-output chunk)))
-                                 :sentinel (lambda (p _e)
-                                             (unless (process-live-p p)
-                                               (funcall finish (process-exit-status p))))))
+        (setq proc (condition-case err
+                       (make-process :name (or name "harness-cmd")
+                                     :command command
+                                     :connection-type 'pipe
+                                     :noquery t
+                                     :file-handler t
+                                     :stderr stderr-buf
+                                     :filter (lambda (_p chunk)
+                                               (push chunk chunks)
+                                               (when on-output (funcall on-output chunk)))
+                                     :sentinel (lambda (p _e)
+                                                 (unless (process-live-p p)
+                                                   (funcall finish (process-exit-status p)))))
+                     ;; No process, such as a TRAMP host that cannot be
+                     ;; reached: the promise rejects, and nothing reads
+                     ;; the buffer for its standard error.
+                     (error (when stderr-buf (kill-buffer stderr-buf))
+                            (signal (car err) (cdr err)))))
         (setq pid (process-id proc)))
-      (when-let* ((ep (get-buffer-process stderr-buf)))
+      (when-let* ((ep (and stderr-buf (get-buffer-process stderr-buf))))
         (set-process-query-on-exit-flag ep nil)
         (set-process-sentinel ep #'ignore))
+      (when (and remote stderr-buf)
+        (add-function :around (process-sentinel proc) #'harness--sentinel-in-plain-buffer))
       (setq timer (run-at-time timeout nil
                                (lambda ()
                                  (setq tree (harness-process-tree pid group))

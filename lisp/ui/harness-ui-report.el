@@ -219,14 +219,18 @@ clicking it, or RET on it, shows it larger still, in a popout of its
 own, and dragging it drops the file into another application
 \(`harness-ui-drag-source').  Without image support, and for a remote
 file, which reading here would block on, a button opening the file is
-inserted instead."
+inserted instead; so it is for an image too large for Emacs to draw
+\(`harness-ui-image-too-large'), which says so."
   (let* ((label (format "[image %s]" (abbreviate-file-name path)))
          (task harness-ui-report--task)
-         (image (and (display-images-p) (not (file-remote-p path)) (file-readable-p path)
+         (readable (and (display-images-p) (not (file-remote-p path)) (file-readable-p path)))
+         (too-large (and readable (harness-ui-image-too-large path)))
+         (image (and readable (not too-large)
                      (ignore-errors
-                       (create-image path nil nil
-                                     :max-width (harness-ui-report--image-width)
-                                     :max-height (harness-ui-report--image-max-height))))))
+                       (apply #'create-image path nil nil
+                              :max-width (harness-ui-report--image-width)
+                              :max-height (harness-ui-report--image-max-height)
+                              (harness-ui-image-color-props))))))
     (if image
         (let ((view (let ((id (plist-get task :id))
                           (title (harness-ui-report--title task)))
@@ -237,7 +241,8 @@ inserted instead."
                                'keymap (harness-ui-mouse-keymap view))
                    path)
                   "\n"))
-      (harness-ui-button label (lambda () (harness-ui-report--open-file path))
+      (harness-ui-button (if too-large (harness-ui-image-too-large-label label too-large) label)
+                         (lambda () (harness-ui-report--open-file path))
                          :help "Open the image")
       (insert "\n"))))
 
@@ -324,6 +329,22 @@ The renderer drops the last newline; what follows starts a line of its own."
   (harness-ui-markdown-insert text)
   (unless (bolp) (insert "\n")))
 
+(defun harness-ui-report--insert-message (text)
+  "Insert TEXT, a message the session wrote in Markdown, rendered.
+\\[harness-compose-quote-reply] on it quotes TEXT whole, as written,
+wherever it shows: the popout, or the banner of the task's session."
+  (let ((start (point)))
+    (harness-ui-report--insert-markdown text)
+    (put-text-property start (point) 'harness-compose-quote text)))
+
+(defun harness-ui-report--quote ()
+  "Return the message this popout's report shows, to quote, or nil.
+The summary, or the last message of a round that handed none in: the
+popout's `harness-compose-quote-function', so \\[harness-compose-quote-reply]
+quotes it from the box too."
+  (let ((summary (plist-get (harness-ui-report--report harness-ui-report--task) :summary)))
+    (and (stringp summary) (not (harness-string-blank-p summary)) summary)))
+
 (defun harness-ui-report--insert-item (item task)
   "Insert one piece of evidence, ITEM, of TASK's report, with its caption."
   (let ((kind (format "%s" (plist-get item :kind)))
@@ -370,7 +391,7 @@ is to read, and a button to the session, where the work is."
   (let ((summary (plist-get report :summary)))
     (if (and (stringp summary) (not (harness-string-blank-p summary)))
         (progn (insert (propertize "Its last message\n" 'face 'harness-label-face) "\n")
-               (harness-ui-report--insert-markdown summary))
+               (harness-ui-report--insert-message summary))
       (insert (propertize "It wrote no message either.\n" 'face 'harness-dim-face)))))
 
 (defun harness-ui-report--open-session (task)
@@ -400,7 +421,7 @@ A report recorded for a round that handed none in says so instead
               "\n\n")
       (let ((summary (plist-get report :summary)))
         (when (and (stringp summary) (not (string-empty-p summary)))
-          (harness-ui-report--insert-markdown summary)))
+          (harness-ui-report--insert-message summary)))
       (insert "\n" (propertize (format "Evidence (%d)\n" (length evidence)) 'face 'harness-label-face) "\n")
       (if evidence
           ;; A blank line between pieces of evidence, so each reads as one
@@ -443,6 +464,7 @@ box's placeholder."
 (defun harness-ui-report--insert-buffer (task)
   "Insert TASK's report in the current popout, and name it in its header."
   (harness-ui-report--insert task)
+  (setq-local harness-compose-quote-function #'harness-ui-report--quote)
   (force-mode-line-update))
 
 ;;;; In the session

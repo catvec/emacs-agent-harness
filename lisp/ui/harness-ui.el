@@ -47,6 +47,7 @@
 (declare-function harness-reload "harness")
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-sessions "harness-ui-sessions")
+(declare-function harness-ui-notify-show-waiting "harness-ui-notify")
 
 (defgroup harness-ui nil
   "Presentation layer of the Emacs agent harness."
@@ -677,20 +678,36 @@ or a task opens it when clicked (`harness-ui--notification-clicked')."
    (lambda (shown)
      (list :backend (format "%s" (plist-get shown :backend))))))
 
-(defun harness-ui--notification-clicked (params)
-  "Show what the clicked notification PARAMS is about.
-`harness-ui-notification-functions' come first (the task board opens
-on a task); otherwise the notification's session opens.  The frame it
-opens in comes to the front, as the user just asked for it."
+(defun harness-ui--raise-for-notification ()
+  "Bring a graphical frame of this Emacs to the front, for a notification click.
+The user just asked to see what the notification is about."
   (let ((frame (if (display-graphic-p (selected-frame))
                    (selected-frame)
                  (cl-find-if #'display-graphic-p (frame-list)))))
     (when (and frame (frame-live-p frame))
       (harness-ignore-errors-logged "showing the frame for a notification"
-        (select-frame-set-input-focus frame))))
+        (select-frame-set-input-focus frame)))))
+
+(defun harness-ui--notification-clicked (params)
+  "Show what the clicked notification PARAMS is about.
+`harness-ui-notification-functions' come first (the task board opens
+on a task); otherwise the notification's session opens.  The frame it
+opens in comes to the front, as the user just asked for it."
+  (harness-ui--raise-for-notification)
   (unless (run-hook-with-args-until-success 'harness-ui-notification-functions params)
     (when-let* ((sid (plist-get params :session)))
       (harness-ui-display-session sid))))
+
+(defun harness-ui--unknown-notification-clicked ()
+  "Show the sessions waiting for you, for a click on a forgotten notification.
+macOS keeps notifications in its Notification Center after the Emacs
+that showed them restarted, so a click can name one this Emacs never
+showed (`harness-notifications-desktop-unknown-click-function').  The
+sessions waiting for you show as the mode line's notifier shows them
+\(`harness-ui-notify-show-waiting'), else the session list."
+  (harness-ui--raise-for-notification)
+  (cond ((fboundp 'harness-ui-notify-show-waiting) (harness-ui-notify-show-waiting))
+        ((fboundp 'harness-sessions) (call-interactively 'harness-sessions))))
 
 (defun harness-ui--notification-summary (result)
   "Describe RESULT, what `notification/send' returned, in one line."
@@ -854,13 +871,24 @@ comes, or when naming it failed."
 (defvar harness-ui--models (make-hash-table :test 'equal)
   "Model id -> model plist from the harness catalogue.")
 
+(defvar harness-ui--models-seen nil
+  "(CONNECTION . MODELS): the catalogue last fetched, and over which connection.")
+
 (defun harness-ui-refresh-models (&optional callback)
-  "Reload the model catalogue cache, redraw, then call CALLBACK with the models."
+  "Reload the model catalogue cache, then call CALLBACK with the models.
+Every view redraws (`harness-ui-redraw-hook') when the catalogue is new:
+it changed, or it is the first over this connection.  The harness says
+the catalogue was updated (`provider/models-updated') whenever a
+provider settles, mostly with nothing new, and a redraw fetches and
+renders every chat buffer again."
   (harness-ui-call "_harness/provider/models" nil
                    (lambda (models)
-                     (clrhash harness-ui--models)
-                     (dolist (m models) (puthash (plist-get m :id) m harness-ui--models))
-                     (run-hooks 'harness-ui-redraw-hook)
+                     (let ((new (not (and (eq harness-ui-connection (car harness-ui--models-seen))
+                                          (equal models (cdr harness-ui--models-seen))))))
+                       (setq harness-ui--models-seen (cons harness-ui-connection models))
+                       (clrhash harness-ui--models)
+                       (dolist (m models) (puthash (plist-get m :id) m harness-ui--models))
+                       (when new (run-hooks 'harness-ui-redraw-hook)))
                      (when callback (funcall callback models)))
                    (unless callback #'ignore)))
 
@@ -1685,12 +1713,81 @@ warning colour." :group 'harness-ui)
 (defface harness-ui-key-face '((t :inherit help-key-binding))
   "Keyboard shortcut hints in panels." :group 'harness-ui)
 
+;; Its name while the chat drew the panels.  Text still carrying the old
+;; name, undefined, made each redisplay log "Invalid face reference".
+(define-obsolete-face-alias 'harness-chat-key-face 'harness-ui-key-face "3.1")
+
 (defface harness-ui-output-face '((t :inherit (fixed-pitch harness-md-code-block)))
   "Fixed-width output, such as the diagram of a question's option." :group 'harness-ui)
 
 (defcustom harness-ui-image-max-height 400
   "Maximum pixel height of inline images in harness views."
   :type 'integer :group 'harness-ui)
+
+(defcustom harness-ui-image-colors '("black" . "white")
+  "Colours images are drawn in: (FOREGROUND . BACKGROUND), or nil.
+BACKGROUND shows through the transparent parts of an image, and an SVG
+draws in FOREGROUND what it gives no colour of its own, such as text
+without a fill: the way a web browser shows an image file, black on
+white, which is what most drawings and mockups are made for.  It holds
+for every image the harness shows: the diagrams of a question's
+options, images in the transcript, a task's report, the image popout
+and the thumbnails of attachments.  Nil draws them in the colours of
+the text around them, where a drawing made for a white page vanishes
+under a dark theme."
+  :type '(choice (const :tag "Black on white, as a browser shows them" ("black" . "white"))
+                 (const :tag "The colours of the text around them" nil)
+                 (cons :tag "Other colours" (color :tag "Foreground") (color :tag "Background")))
+  :group 'harness-ui)
+
+(defun harness-ui-image-color-props ()
+  "Return the `create-image' properties colouring an image, or nil.
+They follow `harness-ui-image-colors'."
+  (let ((colors harness-ui-image-colors))
+    (and (consp colors)
+         (append (and (stringp (car colors)) (list :foreground (car colors)))
+                 (and (stringp (cdr colors)) (list :background (cdr colors)))))))
+
+(defun harness-ui-image-too-large (source &optional frame)
+  "Return (WIDTH . HEIGHT) of the image SOURCE when Emacs will not draw it.
+SOURCE is a file name or (:data BASE64).  Emacs loads no image larger
+than `max-image-size' allows in FRAME, ten times the frame by default,
+however small it would show it: it draws an empty box instead, and
+complains on every redisplay.  Nil when the image is not that large,
+or when its size cannot be told from its header
+\(`harness-image-pixel-size'), as for an SVG."
+  (let* ((data (and (consp source) (plist-get source :data)))
+         (size (cond
+                ;; The header is at the start: a megabyte of it will do.
+                (data (let ((bytes (ignore-errors
+                                     (base64-decode-string (substring data 0 (min (length data) 1398100))))))
+                        (and bytes (harness-image-pixel-size nil bytes))))
+                ((stringp source) (harness-image-pixel-size source))))
+         (frame (or frame (selected-frame)))
+         (limit max-image-size))
+    (when (and size
+               (cond ((integerp limit) (or (> (car size) limit) (> (cdr size) limit)))
+                     ((floatp limit) (or (> (car size) (* limit (frame-pixel-width frame)))
+                                         (> (cdr size) (* limit (frame-pixel-height frame)))))))
+      size)))
+
+(defun harness-ui-image-too-large-label (label size)
+  "Return LABEL, an image's, saying it is SIZE pixels, too large to draw.
+SIZE is (WIDTH . HEIGHT), as `harness-ui-image-too-large' returns it."
+  (format "%s: %d\N{U+00D7}%d pixels, too large to draw here (`max-image-size')]"
+          (string-remove-suffix "]" label) (car size) (cdr size)))
+
+(declare-function harness-ui-popout-open-file "harness-ui-popout" (file))
+
+(defun harness-ui-open-image-outside (file)
+  "Return a command opening the image FILE outside Emacs, which cannot draw it.
+The desktop's opener shows it (`harness-ui-popout-open-file'); without
+the popout module, FILE is visited."
+  (lambda ()
+    (interactive)
+    (if (fboundp 'harness-ui-popout-open-file)
+        (harness-ui-popout-open-file file)
+      (find-file-other-window file))))
 
 (defun harness-ui-add-face (string face)
   "Return STRING with FACE added on top of its faces."
@@ -1782,26 +1879,40 @@ position just after the region moves to the end of TEXT."
       (insert text))
     (harness-ui--fix-positions fix pt windows)))
 
-(defun harness-ui-image-string (source &optional mime)
+(defun harness-ui-image-string (source &optional mime &rest props)
   "Return a string displaying SOURCE (a path or a (:data BASE64) plist).
-MIME is a hint for the image type.  The image can be dragged into
-another application (`harness-ui-drag-props').  Without image support,
-and for a path on a remote host, which reading here would block on, a
-button opening the file is returned instead."
+MIME is a hint for the image type.  PROPS may hold `:max-width' and
+`:max-height', the most pixels the image takes; by default it takes at
+most 60% of the width of the window showing the buffer and half its
+height, and never more than `harness-ui-image-max-height', so a short
+window, such as a BTW's, still shows it whole with the lines around
+it.  It is drawn in `harness-ui-image-colors'.  The image can be
+dragged into another application (`harness-ui-drag-props').  Without
+image support, and for a path on a remote host, which reading here
+would block on, a button opening the file is returned instead.  An
+image too large for Emacs to draw (`harness-ui-image-too-large') is a
+line saying so, a button opening it outside Emacs."
   (let* ((path (and (stringp source) source))
          (data (and (consp source) (plist-get source :data)))
          (label (if path (format "[image %s]" (abbreviate-file-name path)) "[image]"))
          (local (and path (not (file-remote-p path))))
          (open (and path (lambda () (interactive) (find-file-other-window path))))
-         (img (and (display-images-p) (or data (and local (file-readable-p path)))
-                   (let* ((w (car (get-buffer-window-list nil nil t)))
-                          (width (floor (* 0.6 (if w (window-body-width w t) 800)))))
+         ;; The window shows the image, so its frame is the one that
+         ;; must draw images, not whichever frame happens to be selected.
+         (w (car (get-buffer-window-list nil nil t)))
+         (frame (and w (window-frame w)))
+         (drawable (and (display-images-p frame) (or data (and local (file-readable-p path)))))
+         (too-large (and drawable (harness-ui-image-too-large source frame)))
+         (img (and drawable (not too-large)
+                   (let ((width (or (plist-get props :max-width)
+                                    (floor (* 0.6 (if w (window-body-width w t) 800)))))
+                         (height (or (plist-get props :max-height)
+                                     (min harness-ui-image-max-height
+                                          (if w (/ (window-body-height w t) 2) harness-ui-image-max-height)))))
                      (condition-case nil
-                         (if data
-                             (create-image (base64-decode-string data) nil t
-                                           :max-width width :max-height harness-ui-image-max-height)
-                           (create-image path nil nil
-                                         :max-width width :max-height harness-ui-image-max-height))
+                         (apply #'create-image (if data (base64-decode-string data) path) nil (and data t)
+                                :max-width (max 1 width) :max-height (max 1 height)
+                                (harness-ui-image-color-props))
                        (error nil))))))
     (cond
      (img (concat (apply #'propertize label 'display img
@@ -1811,6 +1922,12 @@ button opening the file is returned instead."
                                 'keymap (and open (harness-ui-action-map open)))
                           path))
                   "\n"))
+     ((and too-large path)
+      (concat (harness-ui-action-button (harness-ui-image-too-large-label label too-large)
+                                        (harness-ui-open-image-outside path)
+                                        :help (format "Open %s outside Emacs" path))
+              "\n"))
+     (too-large (concat (propertize (harness-ui-image-too-large-label label too-large) 'face 'harness-dim-face) "\n"))
      (open (concat (harness-ui-action-button label open :help (format "Open %s" path)) "\n"))
      (t (concat (propertize label 'face 'harness-dim-face) "\n")))))
 
@@ -2086,10 +2203,29 @@ window selected now even when another frame is selected by then."
 ;; as switching project would (Doom Emacs's workspaces), and then shows
 ;; the session, unless it shows there already, in which case its window
 ;; is selected.
+;;
+;; The project's workspace is looked for here, not left to Doom's
+;; project switch: a fork of Doom that notes a workspace's project (its
+;; `+workspace-project') takes only a workspace noting it for the
+;; project's, and a workspace that got the project's name otherwise --
+;; the empty one a project was first opened in, which Doom renames
+;; without noting anything -- is passed over for a new, empty one beside
+;; it.  Switching to the workspace that is there brings back the windows
+;; and buffers left in it; of two, the one with the project's files open
+;; wins, not the empty one made beside it.  A project with none gets a
+;; new one from Doom, and the session then takes its window, which has
+;; nothing else to show.
 
 (defvar +workspaces-switch-project-function)
+(defvar doom-fallback-buffer-name)
 (declare-function +workspaces-switch-to-project-h "ext:workspaces")
 (declare-function +workspace-current-name "ext:workspaces")
+(declare-function +workspace-list-names "ext:workspaces")
+(declare-function +workspace-get "ext:workspaces")
+(declare-function +workspace-buffer-list "ext:workspaces")
+(declare-function +workspace-switch "ext:workspaces")
+(declare-function +workspace-message "ext:workspaces")
+(declare-function persp-parameter "ext:persp-mode")
 (declare-function doom-project-name "ext:doom-projects")
 (declare-function doom-project-p "ext:doom-projects")
 
@@ -2098,33 +2234,98 @@ window selected now even when another frame is selected by then."
 It is called with the project's root directory when a session is
 visited (`harness-ui-visit-session'), from the session list say, and
 returns non-nil when it switched; when that project is current already
-it does nothing and returns nil.  The root is the main checkout of the
-session's project: a task's git worktree belongs to its repository's.
-The default switches workspaces where there are any; nil never
-switches."
+it does nothing and returns nil.  It returns `blank' when what it
+switched to shows nothing yet, a workspace just made say: the session
+then takes the selected window instead of opening beside it.  The root
+is the main checkout of the session's project: a task's git worktree
+belongs to its repository's.  The default switches workspaces where
+there are any; nil never switches."
   :type '(choice (const :tag "Never switch" nil)
                  (function-item harness-ui-switch-project-workspace)
                  function)
   :group 'harness-ui)
 
+(defun harness-ui--workspace-of-project-p (name root project)
+  "Non-nil when NAME names a Doom workspace of the project at ROOT.
+PROJECT is the project's name, as Doom names its workspace.  A
+workspace noting the project it is for -- its `+workspace-project', as
+a fork of Doom keeps it -- is ROOT's when that is ROOT, whatever its
+name; one noting none, or a directory gone since, moved say, is ROOT's
+when it is named PROJECT.  A directory on another host than ROOT's is
+not looked at, which would connect to it."
+  (when-let* ((persp (+workspace-get name t)))
+    (let ((dir (persp-parameter '+workspace-project persp)))
+      (cond ((not (stringp dir)) (equal name project))
+            ((not (equal (file-remote-p dir) (file-remote-p root))) nil)
+            ((file-directory-p dir) (ignore-errors (file-equal-p dir root)))
+            (t (equal name project))))))
+
+(defun harness-ui--workspace-files (name root)
+  "Return how many files under ROOT the Doom workspace NAME has open.
+Remote files are not looked at."
+  (cl-count-if (lambda (buffer)
+                 (let ((file (buffer-file-name buffer)))
+                   (and file (not (file-remote-p file)) (file-in-directory-p file root))))
+               (+workspace-buffer-list (+workspace-get name))))
+
+(defun harness-ui--project-workspace (root project)
+  "Return the name of the Doom workspace of the project at ROOT, or nil.
+PROJECT is the project's name.  The workspaces that may be ROOT's (see
+`harness-ui--workspace-of-project-p') are the one named PROJECT and
+those noting ROOT under another name, which a fork of Doom makes beside
+the first; of more than one, the one with the most of the project's
+files open is ROOT's, the one named PROJECT on a tie, else the first."
+  (let ((names (cl-remove-if-not
+                (lambda (name) (harness-ui--workspace-of-project-p name root project))
+                (cons project (remove project (+workspace-list-names))))))
+    (if (cdr names)
+        (let ((files (mapcar (lambda (name) (harness-ui--workspace-files name root)) names)))
+          (nth (cl-position (apply #'max files) files) names))
+      (car names))))
+
+(defun harness-ui--workspace-blank-p ()
+  "Non-nil when the selected frame shows nothing but Doom's fallback buffer.
+That is a workspace just made: one window, on Doom's dashboard or
+scratch buffer."
+  (let ((windows (window-list nil 'never)))
+    (and (null (cdr windows))
+         (boundp 'doom-fallback-buffer-name)
+         (equal (buffer-name (window-buffer (car windows))) doom-fallback-buffer-name))))
+
 (defun harness-ui-switch-project-workspace (root)
   "Switch to the workspace of the project at ROOT, if there are workspaces.
-That is Doom Emacs's workspaces, on with `persp-mode': the project's
-workspace becomes current, made when it has none, as switching project
-makes it, but without asking for a file to open.  Return non-nil when
-the workspace changed.  Without workspaces this does nothing: a buffer
-belongs to no project.  Nor does a ROOT that is no project, a scratch
-directory say, which would only get a workspace of its own."
+That is Doom Emacs's workspaces, on with `persp-mode'.  The project's
+workspace is the one named after the project, or one noting ROOT as
+its project (see `harness-ui--project-workspace'), and switching to it
+brings back the windows and buffers left in it.  A project with none
+gets one, as switching project makes it, but without asking for a file
+to open.  Return nil when the project's workspace is current already,
+`blank' when the workspace switched to shows nothing yet but Doom's
+fallback buffer, as a new one does, and t otherwise.  Without
+workspaces this does nothing: a buffer belongs to no project.  Nor does
+a ROOT that is no project, a scratch directory say, which would only
+get a workspace of its own."
   (when (and (bound-and-true-p persp-mode)
              (fboundp '+workspaces-switch-to-project-h)
              (fboundp '+workspace-current-name)
+             (fboundp '+workspace-list-names)
+             (fboundp '+workspace-get)
+             (fboundp '+workspace-buffer-list)
+             (fboundp '+workspace-switch)
+             (fboundp 'persp-parameter)
              (fboundp 'doom-project-name)
              (fboundp 'doom-project-p)
-             (doom-project-p root)
-             (not (equal (+workspace-current-name) (doom-project-name root))))
-    (let ((+workspaces-switch-project-function #'ignore))
-      (+workspaces-switch-to-project-h root))
-    t))
+             (doom-project-p root))
+    (let ((name (harness-ui--project-workspace root (doom-project-name root))))
+      (unless (and name (equal name (+workspace-current-name)))
+        (if name
+            (progn
+              (+workspace-switch name)
+              (when (fboundp '+workspace-message)
+                (+workspace-message (format "Switched to '%s'" name) 'success)))
+          (let ((+workspaces-switch-project-function #'ignore))
+            (+workspaces-switch-to-project-h root)))
+        (if (harness-ui--workspace-blank-p) 'blank t)))))
 
 (defun harness-ui-session-project (session)
   "Return the main checkout of SESSION's project, or nil.
@@ -2153,14 +2354,19 @@ project's workspace, after a switch -- that shows it already is
 selected, and otherwise it opens in POSITION.  POSITION defaults to the
 current buffer's own, as `harness-ui-session-opener' has it, and after a
 switch, which leaves the current buffer's window behind, to where
-sessions open (`harness-ui-default-position')."
+sessions open (`harness-ui-default-position'), beside the windows of
+the project's workspace; a workspace showing nothing yet, a new one,
+has its window taken instead (`full')."
   (unless harness-ui-open-session-function
     (user-error "No chat module loaded"))
   (let* ((here (or position
                    (and (harness-ui--fullscreen-layout) 'fullscreen)
                    harness-ui-position
                    harness-ui-default-position))
-         (position (if (harness-ui-switch-to-session-project id) position here))
+         (switched (harness-ui-switch-to-session-project id))
+         (position (cond ((null switched) here)
+                         (position)
+                         ((eq switched 'blank) 'full)))
          (buffer (funcall harness-ui-open-session-function id))
          (window (get-buffer-window buffer)))
     (if (window-live-p window)
@@ -3035,6 +3241,59 @@ either the command asks for a session, so the label has no state."
   (harness-ui-call "_harness/session/update" (list :id (or session-id (harness-ui-current-session-id)) :name name)
                    (lambda (_) (message "Renamed to %s" name))))
 
+(defun harness-ui-read-move-directory (session)
+  "Read the directory to move SESSION, a session plist, to.
+Completion starts in the directory that holds its working directory,
+where a sibling project is.  A remote session's directory is read as
+text, a path on its host, so that no TRAMP connection is opened."
+  (let ((cwd (plist-get session :cwd))
+        (prompt (format "Move %s to directory: " (harness-ui-session-label session))))
+    (if (or (plist-get session :host) (and cwd (file-remote-p cwd)))
+        (read-string prompt (and cwd (file-local-name cwd)))
+      (read-directory-name prompt (and cwd (file-name-directory (directory-file-name cwd))) nil t))))
+
+;;;###autoload
+(defun harness-move-session (directory &optional session-id keep-old)
+  "Move SESSION-ID to the working directory DIRECTORY, and to its project.
+For a session started in one place that works on another: it works in
+DIRECTORY from then on, and the session list shows it under
+DIRECTORY's project.  Interactively it is the current buffer's session,
+or one you choose, and with a prefix argument KEEP-OLD its old working
+directory stays allowed to it.  A session running a turn moves when the
+turn ends.  Its next turn starts a new provider conversation in
+DIRECTORY, which gets the transcript.  The harness refuses sessions in
+worktrees, task sessions and sessions merges are queued into."
+  (interactive
+   (let ((sid (harness-ui-current-session-id)))
+     (list (harness-ui-read-move-directory (harness-ui-session sid)) sid current-prefix-arg)))
+  (let* ((sid (or session-id (harness-ui-current-session-id)))
+         (session (harness-ui-session sid))
+         (remote (or (plist-get session :host) (file-remote-p (or (plist-get session :cwd) ""))))
+         ;; A remote session's path is one on its host, for the harness to
+         ;; resolve; a local one is rooted here, as for a new session.
+         (dir (if (or (not remote) (file-remote-p directory))
+                  (file-name-as-directory (expand-file-name directory))
+                directory))
+         (label (if session (harness-ui-session-label session) (substring sid 0 (min 8 (length sid))))))
+    (harness-ui-call "_harness/session/move"
+                     (append (list :id sid :dir dir :keep-old-dir (if keep-old t :false))
+                             (and (not remote) (list :project (harness-files-project-root dir))))
+                     (lambda (result)
+                       (harness-ui-cache-session result)
+                       (let ((move (plist-get result :move)))
+                         (message (cond (move "%s moves to %s when its turn ends")
+                                        ((equal (plist-get result :cwd) (plist-get session :cwd))
+                                         "%s stays in %s: the move it waited to make is cancelled")
+                                        (t "Moved %s to %s"))
+                                  label (abbreviate-file-name (or (plist-get move :cwd) (plist-get result :cwd) dir)))))
+                     (lambda (e)
+                       (unless (harness-ui-connection-replaced-p e)
+                         (message "Not moved: %s" (harness-error-message e)))
+                       nil))))
+
+;;;###autoload
+(defalias 'harness-session-move #'harness-move-session)
+
 ;;;###autoload
 (defun harness-fork-session (&optional session-id position)
   "Fork SESSION-ID (default the current session) and open the fork in POSITION."
@@ -3097,6 +3356,7 @@ either the command asks for a session, so the label has no state."
 ;; Emacs too.
 (define-key harness-ui-map (kbd "i") #'harness-toggle-non-interactive)
 (define-key harness-ui-map (kbd "F") #'harness-fullscreen)
+(define-key harness-ui-map (kbd "W") #'harness-move-session)
 
 (defvar harness-global-mode-map (make-sparse-keymap)
   "Keymap of `harness-global-mode': `harness-ui-map' under `harness-ui-prefix-key'.")
@@ -3386,7 +3646,8 @@ leaves the buffer's commands out, never the whole menu."
     ("p" "Permission mode" harness-set-permission-mode)
     ("d" "Directory access" harness-directories :if (lambda () (harness-ui--command-available-p 'harness-directories)))
     ("i" (lambda () (harness-ui--non-interactive-menu-label)) harness-toggle-non-interactive)
-    ("r" "Rename" harness-rename-session)]
+    ("r" "Rename" harness-rename-session)
+    ("W" "Move to another directory" harness-move-session)]
    ["Tools"
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
     ("I" "Insights" harness-insights :if (lambda () (harness-ui--command-available-p 'harness-insights)))
@@ -3418,6 +3679,11 @@ leaves the buffer's commands out, never the whole menu."
 (defun harness-ui--init ()
   (add-hook 'kill-emacs-hook #'harness-ui--stop-server)
   (add-hook 'harness-corporate-mode-change-hook #'harness-ui--corporate-mode-changed)
+  ;; A click on a macOS notification this Emacs no longer knows (one it
+  ;; showed before a restart) lists the sessions waiting for you.
+  (unless harness-notifications-desktop-unknown-click-function
+    (setq harness-notifications-desktop-unknown-click-function
+          #'harness-ui--unknown-notification-clicked))
   (harness-ui-connect harness-ui-connection-address)
   ;; A reload reaches the UI as the forwarded `harness/reloaded' event, for
   ;; local and remote harnesses alike, so no bus subscription is needed.

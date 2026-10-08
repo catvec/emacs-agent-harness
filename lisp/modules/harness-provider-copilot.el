@@ -1650,12 +1650,17 @@ system prompt replaces Copilot's."
       (base64-encode-string (buffer-string) t))))
 
 (defun harness-provider-copilot--image-attachment (block)
-  "Return a blob attachment for image BLOCK, or nil when it has no data."
+  "Return a blob attachment for image BLOCK, or nil when it has no data.
+It goes by the image's label, which its token in the text names (image
+1 for [image 1]), else by its file's name."
   (let* ((path (plist-get block :path))
+         (label (plist-get block :label))
          (data (or (plist-get block :data) (harness-provider-copilot--read-base64 path))))
     (when data
       (list :type "blob" :data data :mimeType (or (plist-get block :mime) "image/png")
-            :displayName (if path (file-name-nondirectory path) "image")))))
+            :displayName (cond ((and (stringp label) (not (string-empty-p label))) label)
+                               (path (file-name-nondirectory path))
+                               (t "image"))))))
 
 (defun harness-provider-copilot-prompt (request)
   "Return (TEXT . ATTACHMENTS) for the trailing user messages of REQUEST, or nil.

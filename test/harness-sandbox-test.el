@@ -25,52 +25,82 @@ re-detected before BODY and restored afterwards."
   (cl-loop for tail on list
            thereis (equal (seq-take tail (length needle)) needle)))
 
+(defun harness-sandbox-test--binds (cmd)
+  "Return the (FLAG SOURCE DEST) bind mounts of bwrap command line CMD, in order."
+  (cl-loop for tail on cmd
+           when (member (car tail) '("--bind" "--ro-bind"))
+           collect (seq-take tail 3)))
+
+(defmacro harness-sandbox-test-with-home (home &rest body)
+  "Run BODY with HOME, a fresh directory, as $HOME; delete it afterwards."
+  (declare (indent 1))
+  `(let* ((,home (harness-test-temp-dir))
+          (process-environment (cons (concat "HOME=" (directory-file-name ,home)) process-environment)))
+     (unwind-protect (progn ,@body)
+       (delete-directory ,home t))))
+
 (ert-deftest harness-sandbox-bwrap-arguments ()
   (harness-sandbox-test--setup)
-  (let* ((cwd (harness-test-temp-dir))
-         (extra (harness-test-temp-dir))
-         ;; The sandbox's own home must differ from the process home, or the
-         ;; "real home is never bound" check below cannot tell them apart.
-         (harness-sandbox--home (expand-file-name "sandbox-home" cwd))
-         (harness-sandbox-policy 'preferred)
-         (harness-sandbox-backend 'auto)
-         (command '("sh" "-c" "true")))
-    (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
-      (should (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
-      (should (equal '(bwrap) (plist-get (harness-call 'sandbox/status) :available)))
-      (let ((cmd (harness-call 'sandbox/wrap cwd command)))
-        (should (equal "/usr/bin/bwrap" (car cmd)))
-        (should (harness-sandbox-test--subseq-p '("--ro-bind" "/usr" "/usr") cmd))
-        (should (harness-sandbox-test--subseq-p '("--ro-bind" "/etc" "/etc") cmd))
-        (should (harness-sandbox-test--subseq-p '("--proc" "/proc") cmd))
-        (should (harness-sandbox-test--subseq-p '("--dev" "/dev") cmd))
-        (should (harness-sandbox-test--subseq-p '("--tmpfs" "/tmp") cmd))
-        (should (harness-sandbox-test--subseq-p
-                 (list "--bind" (directory-file-name cwd) (directory-file-name cwd)) cmd))
-        ;; The tmpfs must come before the cwd bind so a cwd under /tmp stays visible.
-        (should (< (cl-position "--tmpfs" cmd :test #'equal) (cl-position "--bind" cmd :test #'equal)))
-        (dolist (flag '("--unshare-pid" "--unshare-ipc" "--unshare-uts" "--die-with-parent" "--new-session"))
-          (should (member flag cmd)))
-        (should (harness-sandbox-test--subseq-p (list "--chdir" (directory-file-name cwd)) cmd))
-        (should (harness-sandbox-test--subseq-p (list "--setenv" "HOME" harness-sandbox--home) cmd))
-        ;; Network stays on by default.
-        (should-not (member "--unshare-net" cmd))
-        ;; The real home is never bound.
-        (should-not (member (harness-test-real-home) cmd))
-        ;; The command follows the separator untouched.
-        (should (equal command (cdr (member "--" cmd)))))
-      ;; Options: network off and extra writable/readable directories.
-      (let ((cmd (harness-call 'sandbox/wrap cwd command :network nil :writable (list extra)
-                               :readable (list "/var/empty-nonexistent-dir"))))
-        (should (member "--unshare-net" cmd))
-        (should (harness-sandbox-test--subseq-p
-                 (list "--bind" (directory-file-name extra) (directory-file-name extra)) cmd))
-        ;; Missing readable directories are silently skipped.
-        (should-not (member "/var/empty-nonexistent-dir" cmd))))
-    ;; Restore the real detection for later tests.
-    (harness-sandbox-detect)
-    (delete-directory cwd t)
-    (delete-directory extra t)))
+  (harness-sandbox-test-with-home home
+    (let* ((cwd (harness-test-temp-dir))
+           (extra (harness-test-temp-dir))
+           (harness-sandbox-policy 'preferred)
+           (harness-sandbox-backend 'auto)
+           (command '("sh" "-c" "true")))
+      (with-temp-file (expand-file-name "secret.txt" home) (insert "s3cret\n"))
+      (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+        (should (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+        (should (equal '(bwrap) (plist-get (harness-call 'sandbox/status) :available)))
+        (let ((cmd (harness-call 'sandbox/wrap cwd command)))
+          (should (equal "/usr/bin/bwrap" (car cmd)))
+          (should (harness-sandbox-test--subseq-p '("--ro-bind" "/usr" "/usr") cmd))
+          (should (harness-sandbox-test--subseq-p '("--ro-bind" "/etc" "/etc") cmd))
+          (should (harness-sandbox-test--subseq-p '("--proc" "/proc") cmd))
+          (should (harness-sandbox-test--subseq-p '("--dev" "/dev") cmd))
+          (should (harness-sandbox-test--subseq-p '("--tmpfs" "/tmp") cmd))
+          (should (harness-sandbox-test--subseq-p
+                   (list "--bind" (directory-file-name cwd) (directory-file-name cwd)) cmd))
+          ;; The tmpfs must come before the cwd bind so a cwd under /tmp stays visible.
+          (should (< (cl-position "--tmpfs" cmd :test #'equal) (cl-position "--bind" cmd :test #'equal)))
+          (dolist (flag '("--unshare-pid" "--unshare-ipc" "--unshare-uts" "--die-with-parent" "--new-session"))
+            (should (member flag cmd)))
+          (should (harness-sandbox-test--subseq-p (list "--chdir" (directory-file-name cwd)) cmd))
+          ;; $HOME keeps its path, emptied by a tmpfs after /tmp's (it
+          ;; may lie there) and before every bind.
+          (let ((at (cl-loop for tail on cmd for i from 0
+                             when (equal (seq-take tail 2) (list "--tmpfs" (directory-file-name home))) return i)))
+            (should at)
+            (should (< (cl-position "/tmp" cmd :test #'equal) at))
+            (should (< at (cl-position "--bind" cmd :test #'equal))))
+          (should-not (member "--setenv" (seq-take-while (lambda (a) (not (equal a "--"))) cmd)))
+          ;; Network stays on by default.
+          (should-not (member "--unshare-net" cmd))
+          ;; Neither home directory is ever a bind's source.
+          (should-not (member (directory-file-name home) (mapcar #'cadr (harness-sandbox-test--binds cmd))))
+          (should-not (member (harness-test-real-home) cmd))
+          ;; The command follows the separator untouched.
+          (should (equal command (cdr (member "--" cmd)))))
+        ;; Options: network off and extra writable/readable directories.
+        (let ((cmd (harness-call 'sandbox/wrap cwd command :network nil :writable (list extra)
+                                 :readable (list "/var/empty-nonexistent-dir"))))
+          (should (member "--unshare-net" cmd))
+          (should (harness-sandbox-test--subseq-p
+                   (list "--bind" (directory-file-name extra) (directory-file-name extra)) cmd))
+          ;; Missing readable directories are silently skipped.
+          (should-not (member "/var/empty-nonexistent-dir" cmd)))
+        ;; A $HOME no tmpfs may cover, or none, gives way to a home of
+        ;; the sandbox's own.
+        (dolist (value '("HOME=/" "HOME=/usr" "HOME=/etc/x" "HOME=relative" "HOME"))
+          (let* ((process-environment (cons value process-environment))
+                 (cmd (harness-call 'sandbox/wrap cwd command)))
+            (should (harness-sandbox-test--subseq-p (list "--dir" harness-sandbox--home) cmd))
+            (should (harness-sandbox-test--subseq-p (list "--setenv" "HOME" harness-sandbox--home) cmd))
+            (should-not (cl-loop for tail on cmd thereis (and (equal (car tail) "--tmpfs")
+                                                              (not (equal (cadr tail) "/tmp"))))))))
+      ;; Restore the real detection for later tests.
+      (harness-sandbox-detect)
+      (delete-directory cwd t)
+      (delete-directory extra t))))
 
 (ert-deftest harness-sandbox-systemd-arguments ()
   (harness-sandbox-test--setup)
@@ -146,45 +176,46 @@ re-detected before BODY and restored afterwards."
     (delete-directory cwd t)))
 
 (ert-deftest harness-sandbox-bwrap-real-run-hides-home ()
-  "Run a command under the real bwrap and check the real HOME is unreachable."
+  "Run a command under the real bwrap and check the real HOME is unreachable.
+$HOME keeps its path in there, but shows nothing of what it holds, and
+nothing written there reaches it."
   (harness-sandbox-test--setup)
   (skip-unless (executable-find "bwrap"))
   (harness-sandbox-detect)
   (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
-  (let* ((cwd (harness-test-temp-dir))
-         ;; A home of the test's own with a file in it, so the check does not
-         ;; depend on what, if anything, the process's own home holds.
-         (home (harness-test-temp-dir))
-         ;; A distinct sandbox home, so the real home is a different path even
-         ;; when the process is started with HOME under /tmp.
-         (harness-sandbox--home (expand-file-name "sandbox-home" cwd))
-         (harness-sandbox-policy 'required))
-    (unwind-protect
-        (progn
-          (with-temp-file (expand-file-name "secret-in-real-home" home)
-            (insert "must not show\n"))
-          (let* ((cmd (harness-call 'sandbox/wrap cwd
-                                    (list "sh" "-c" (format "echo HOME=$HOME; ls $HOME; ls %s 2>&1; touch outside-test 2>&1 || true; echo ok" home))))
-                 (r (harness-await (harness-run-command cmd :cwd cwd :timeout 20))))
-            (when (and (not (eql 0 (plist-get r :exit)))
-                       (string-match-p "bwrap:" (plist-get r :stderr)))
-              (ert-skip (format "bwrap cannot start in this environment: %s"
-                                (string-trim (plist-get r :stderr)))))
-            (should (eql 0 (plist-get r :exit)))
-            (let* ((out (plist-get r :stdout))
-                   (lines (split-string out "\n" t)))
-              (should (member "ok" lines))
-              (should (member (concat "HOME=" harness-sandbox--home) lines))
-              ;; Nothing from the real home directory shows up: not the
-              ;; sandbox home, not a listing of the real path.
-              (let ((real-entries (directory-files home nil "\\`[^.]" t)))
-                (should real-entries)
-                (should-not (cl-intersection real-entries lines :test #'equal))
-                (should (cl-some (lambda (l) (string-match-p "cannot access\\|No such file" l)) lines)))
-              ;; The cwd itself is writable.
-              (should (file-exists-p (expand-file-name "outside-test" cwd))))))
-      (delete-directory cwd t)
-      (delete-directory home t))))
+  ;; A home of the test's own with a file in it, so the check does not
+  ;; depend on what, if anything, the process's own home holds.
+  (harness-sandbox-test-with-home home
+    (let* ((cwd (harness-test-temp-dir))
+           (harness-sandbox-policy 'required))
+      (unwind-protect
+          (progn
+            (with-temp-file (expand-file-name "secret-in-real-home" home)
+              (insert "must not show\n"))
+            (let* ((cmd (harness-call 'sandbox/wrap cwd
+                                      (list "sh" "-c" (format "echo HOME=$HOME; ls -A $HOME; cat %ssecret-in-real-home 2>&1; touch ~/left-behind 2>&1; touch outside-test 2>&1 || true; echo ok" home))))
+                   (r (harness-await (harness-run-command cmd :cwd cwd :timeout 20))))
+              (when (and (not (eql 0 (plist-get r :exit)))
+                         (string-match-p "bwrap:" (plist-get r :stderr)))
+                (ert-skip (format "bwrap cannot start in this environment: %s"
+                                  (string-trim (plist-get r :stderr)))))
+              (should (eql 0 (plist-get r :exit)))
+              (let* ((out (plist-get r :stdout))
+                     (lines (split-string out "\n" t)))
+                (should (member "ok" lines))
+                (should (member (concat "HOME=" (directory-file-name home)) lines))
+                ;; Nothing from the real home directory shows up, and the
+                ;; file in it cannot be read.
+                (let ((real-entries (directory-files home nil "\\`[^.]" t)))
+                  (should real-entries)
+                  (should-not (cl-intersection real-entries lines :test #'equal))
+                  (should-not (string-search "must not show" out))
+                  (should (cl-some (lambda (l) (string-match-p "No such file" l)) lines)))
+                ;; What a command leaves in $HOME stays in the sandbox.
+                (should-not (file-exists-p (expand-file-name "left-behind" home)))
+                ;; The cwd itself is writable.
+                (should (file-exists-p (expand-file-name "outside-test" cwd))))))
+        (delete-directory cwd t)))))
 
 ;;;; Git worktrees
 
@@ -519,17 +550,17 @@ anyway; and no mount below another one, where bwrap would find a link."
                (should-not (rassoc (directory-file-name skills) (harness-sandbox--readable-mounts readable work harness-sandbox--home)))
                (should (rassoc (directory-file-name skills) (harness-sandbox--readable-mounts readable cwd harness-sandbox--home)))
                (delete-file work))
+             ;; bwrap keeps $HOME's path, so it needs no second place.
              (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
                (let* ((cmd (harness-call 'sandbox/wrap cwd '("true") :readable readable))
                       (bind (cl-position "--bind" cmd :test #'equal)))
-                 (dolist (m (harness-sandbox--readable-mounts readable cwd harness-sandbox--home))
-                   (let ((at (cl-loop for tail on cmd for i from 0
-                                      when (equal (seq-take tail 3) (list "--ro-bind" (car m) (cdr m))) return i)))
-                     (should at)
-                     ;; Before the working directory, which stays writable.
-                     (should (< at bind))))
+                 (should (equal (mapcar (lambda (m) (list "--ro-bind" (car m) (cdr m)))
+                                        (harness-sandbox--readable-mounts readable cwd nil))
+                                (cl-remove-if (lambda (b) (member (cadr b) '("/usr" "/etc" "/lib" "/lib64" "/bin" "/sbin")))
+                                              (harness-sandbox-test--binds (seq-take cmd bind)))))
                  (should (equal (list "--bind" (directory-file-name cwd) (directory-file-name cwd)) (seq-take (nthcdr bind cmd) 3)))
-                 (should-not (member (directory-file-name home) cmd))
+                 (should-not (cl-find-if (lambda (a) (string-prefix-p "/tmp/harness-sandbox-test-home" a)) cmd))
+                 (should-not (member (directory-file-name home) (mapcar #'cadr (harness-sandbox-test--binds cmd))))
                  (should-not (member (harness-test-real-home) cmd))
                  (should-not (member "/var/empty-nonexistent-dir" cmd)))))
          (harness-sandbox-detect)
@@ -598,7 +629,6 @@ none of them, while the rest of the home directory stays hidden."
   (harness-sandbox-test--call-with-skills
    (lambda (home skills _dotfiles _other)
      (let* ((cwd (harness-test-temp-dir))
-            (harness-sandbox--home "/tmp/harness-sandbox-test-home")
             (harness-sandbox-policy 'required)
             (script (mapconcat
                      #'identity
@@ -629,6 +659,130 @@ none of them, while the rest of the home directory stays hidden."
                (should-not (file-exists-p (expand-file-name "new" skills)))
                (should (file-exists-p (expand-file-name "made-here" cwd)))))
          (delete-directory cwd t))))))
+
+;;;; Directories shown read-write: what a session was granted
+
+(ert-deftest harness-sandbox-writable-dirs-show-where-they-are-named ()
+  "A writable directory or file is shown read-write where it is named and
+where its links lead, after the read-only mounts, which may hold it.
+One named both ways is writable, a read-only one inside a writable one
+goes, the home directory shows when it is granted itself, and neither
+the root directory nor what the working directory holds is mounted.
+systemd-run shows them under its $HOME, /tmp, too."
+  (harness-sandbox-test--setup)
+  (harness-sandbox-test-with-home home
+    (let* ((cwd (harness-test-temp-dir))
+           (outside (harness-test-temp-dir))
+           (real (lambda (p) (directory-file-name (file-truename p))))
+           (granted (file-name-as-directory (expand-file-name "granted" home)))
+           (linked (expand-file-name "linked" home))
+           (file (expand-file-name "notes.txt" home))
+           (claude (file-name-as-directory (expand-file-name ".claude" home)))
+           (skills (file-name-as-directory (expand-file-name "skills" claude)))
+           (mine (file-name-as-directory (expand-file-name "mine" skills)))
+           (harness-sandbox-policy 'preferred)
+           (harness-sandbox-backend 'auto))
+      (make-directory granted t)
+      (make-directory mine t)
+      (make-directory (expand-file-name "sub" cwd))
+      (make-symbolic-link (directory-file-name outside) linked)
+      (with-temp-file file (insert "notes\n"))
+      (unwind-protect
+          (let ((expected (list (list 'ro (funcall real skills) (funcall real skills))
+                                (list 'rw (funcall real granted) (funcall real granted))
+                                (list 'rw (funcall real outside) linked)
+                                (list 'rw (funcall real outside) (funcall real outside))
+                                (list 'rw (funcall real file) (funcall real file))
+                                (list 'rw (funcall real mine) (funcall real mine)))))
+            (should (equal expected
+                           (harness-sandbox--mounts (list skills)
+                                                    (list granted linked file mine "/" "/nonexistent/x"
+                                                          (expand-file-name "sub" cwd))
+                                                    cwd nil)))
+            ;; Named both ways: writable, once.
+            (should (equal (list (list 'rw (funcall real granted) (funcall real granted)))
+                           (harness-sandbox--mounts (list granted) (list granted) cwd nil)))
+            ;; A read-only directory inside a writable one shows through it.
+            (should (equal (list (list 'rw (funcall real claude) (funcall real claude)))
+                           (harness-sandbox--mounts (list skills) (list claude) cwd nil)))
+            ;; The home directory: granted, it shows; read-only, never.
+            (should (equal (list (list 'rw (funcall real home) (funcall real home)))
+                           (harness-sandbox--mounts nil (list home) cwd nil)))
+            (should-not (harness-sandbox--mounts (list home) nil cwd nil))
+            ;; Under a $HOME of the sandbox's own, at the same place too.
+            (should (equal (list (list 'rw (funcall real granted) (funcall real granted))
+                                 (list 'rw (funcall real granted) "/tmp/granted"))
+                           (harness-sandbox--mounts nil (list granted) cwd "/tmp")))
+            (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+              (let* ((cmd (harness-call 'sandbox/wrap cwd '("true") :readable (list skills)
+                                        :writable (list granted linked file mine)))
+                     (binds (harness-sandbox-test--binds cmd)))
+                ;; In that order, the working directory last.
+                (should (harness-sandbox-test--subseq-p
+                         (append (mapcar (lambda (m) (list (if (eq (car m) 'rw) "--bind" "--ro-bind") (nth 1 m) (nth 2 m)))
+                                         expected)
+                                 (list (list "--bind" (directory-file-name cwd) (directory-file-name cwd))))
+                         binds))
+                ;; After the tmpfs that empties the home directory.
+                (should (< (cl-position (directory-file-name home) cmd :test #'equal)
+                           (cl-position (funcall real granted) cmd :test #'equal)))))
+            (harness-sandbox-test-with-executables '(("systemd-run" . "/usr/bin/systemd-run"))
+              (let ((cmd (harness-call 'sandbox/wrap cwd '("true") :writable (list granted linked))))
+                (dolist (setting (list (concat "BindPaths=" (funcall real granted))
+                                       (concat "BindPaths=" (funcall real granted) ":/tmp/granted")
+                                       (concat "BindPaths=" (funcall real outside) ":" linked)
+                                       (concat "BindPaths=" (funcall real outside))
+                                       (concat "BindPaths=" (funcall real outside) ":/tmp/linked")))
+                  (should (harness-sandbox-test--subseq-p (list "-p" setting) cmd))))))
+        (harness-sandbox-detect)
+        (delete-directory cwd t)
+        (delete-directory outside t)))))
+
+(ert-deftest harness-sandbox-bwrap-real-run-shows-grants ()
+  "Under the real bwrap a directory granted to the session is there,
+read-write, at its own path and from ~, wherever the command runs,
+while the rest of the home directory stays hidden.  Bash used to see
+none of them: a grant reached every tool but the sandbox, whose $HOME
+was somewhere else."
+  (harness-sandbox-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (harness-sandbox-test-with-home home
+    (let* ((cwd (harness-test-temp-dir))
+           (granted (file-name-as-directory (expand-file-name ".emacs.d/modules" home)))
+           (harness-sandbox-policy 'required)
+           (script (mapconcat
+                    #'identity
+                    (list (format "cat %snote.txt" granted)
+                          "cat ~/.emacs.d/modules/note.txt"
+                          "ls -A ~ ~/.emacs.d"
+                          "cat ~/secret.txt 2>/dev/null || echo secret-hidden"
+                          "ls ~/.emacs.d/init.el 2>/dev/null || echo sibling-hidden"
+                          "echo made > ~/.emacs.d/modules/made.txt && echo granted-writable")
+                    "; ")))
+      (harness-sandbox-test--write (expand-file-name "note.txt" granted) "granted-note\n")
+      (harness-sandbox-test--write (expand-file-name ".emacs.d/init.el" home) ";; init\n")
+      (harness-sandbox-test--write (expand-file-name "secret.txt" home) "s3cret\n")
+      (unwind-protect
+          (let ((probe (harness-await (harness-run-command (harness-call 'sandbox/wrap cwd '("true"))
+                                                           :cwd cwd :timeout 20))))
+            ;; Skipped only when bwrap cannot start at all: a mount it
+            ;; refuses here is a failure.
+            (unless (eql 0 (plist-get probe :exit))
+              (ert-skip (format "bwrap cannot start here: %s" (string-trim (plist-get probe :stderr)))))
+            (let* ((cmd (harness-call 'sandbox/wrap cwd (list "sh" "-c" script) :writable (list granted)))
+                   (r (harness-await (harness-run-command cmd :cwd cwd :timeout 20))))
+              (should (equal "" (plist-get r :stderr)))
+              (should (equal (list "granted-note" "granted-note"
+                                   (concat (directory-file-name home) ":") ".emacs.d"
+                                   (concat (directory-file-name home) "/.emacs.d:") "modules"
+                                   "secret-hidden" "sibling-hidden" "granted-writable")
+                             (split-string (plist-get r :stdout) "\n" t)))
+              (should (equal "made\n" (with-temp-buffer
+                                        (insert-file-contents (expand-file-name "made.txt" granted))
+                                        (buffer-string))))))
+        (delete-directory cwd t)))))
 
 (provide 'harness-sandbox-test)
 ;;; harness-sandbox-test.el ends here

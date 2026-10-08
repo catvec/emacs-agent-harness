@@ -261,6 +261,25 @@ forwarded as every `harness-' option the user sets."
       (should (string-search "(customize-set-variable 'harness-corporate-mode 't)"
                              (harness-read-file file))))))
 
+(ert-deftest harness-server-forwards-tramp-settings ()
+  "The TRAMP options the user set reach the harness process, which
+reaches remote hosts through a TRAMP of its own; those left alone stay
+behind, and the harness process has TRAMP's own defaults."
+  (require 'tramp)
+  (require 'tramp-sh)
+  (harness-test-with-temp-state
+    (should-not (assq 'tramp-remote-path (harness-server--forwarded)))
+    (should-not (assq 'tramp-default-method (harness-server--forwarded)))
+    (let ((tramp-remote-path (cons 'tramp-own-remote-path tramp-remote-path))
+          (tramp-default-method "sshx")
+          (file (expand-file-name "server-config.el" harness-state-directory)))
+      (should (equal tramp-remote-path (cdr (assq 'tramp-remote-path (harness-server--forwarded)))))
+      (should (equal "sshx" (cdr (assq 'tramp-default-method (harness-server--forwarded)))))
+      (harness-server--write-config file)
+      (let ((config (harness-read-file file)))
+        (should (string-search "(customize-set-variable 'tramp-default-method '\"sshx\")" config))
+        (should (string-search "(customize-set-variable 'tramp-remote-path '(tramp-own-remote-path " config))))))
+
 (ert-deftest harness-server-restarts-after-a-crash ()
   (harness-server-test-with-process
     (harness-test-await (harness-ui-request "_harness/session/list") 30)

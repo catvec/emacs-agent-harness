@@ -37,6 +37,33 @@
     (let ((pos (string-match "item one" plain)))
       (should (equal "  " (get-text-property pos 'wrap-prefix s))))))
 
+(ert-deftest harness-md-code-block-fontified-once ()
+  "A code block rendered again, as a message streaming in is, is not fontified again.
+Fontifying runs the language's major mode in a buffer of its own, and a
+long message was rendered whole, each of its blocks fontified, every
+few tenths of a second as it streamed in."
+  (let ((harness-ui-markdown--fontified (make-hash-table :test 'equal))
+        (harness-ui-markdown--fontified-size 0)
+        (calls 0)
+        (fontify-in (symbol-function 'harness-ui-markdown--fontify-in)))
+    (cl-letf (((symbol-function 'harness-ui-markdown--fontify-in)
+               (lambda (&rest args) (cl-incf calls) (apply fontify-in args))))
+      (dotimes (_ 3)
+        (let* ((s (harness-ui-markdown-render "Some code:\n\n```emacs-lisp\n(defun x () 1)\n```\n"))
+               (pos (string-match "(defun" s)))
+          (should (memq 'harness-md-code-block (harness-md-test-face-at s pos)))
+          (should (memq 'font-lock-keyword-face (harness-md-test-face-at s (1+ pos))))))
+      (should (= 1 calls))
+      ;; Other code is fontified anew.
+      (harness-ui-markdown-render "```emacs-lisp\n(defvar y 2)\n```\n")
+      (should (= 2 calls))
+      (should (= 2 (hash-table-count harness-ui-markdown--fontified)))
+      ;; Past its size the cache starts over.
+      (let ((harness-ui-markdown--fontified-max 20))
+        (harness-ui-markdown-render "```emacs-lisp\n(defvar a-longer-name 3)\n```\n"))
+      (should (= 3 calls))
+      (should (= 1 (hash-table-count harness-ui-markdown--fontified))))))
+
 (ert-deftest harness-md-unclosed-fence-and-empty ()
   (should (equal "" (harness-ui-markdown-render "")))
   (should (string-match-p "still code" (substring-no-properties (harness-ui-markdown-render "```\nstill code"))))
@@ -73,6 +100,53 @@
   (let ((s (harness-ui-markdown-inline "see [the docs](https://x.org/a_(b)) now")))
     (should (string-prefix-p "see the docs" (substring-no-properties s)))
     (should (equal "https://x.org/a_(b" (get-text-property 5 'harness-url s)))))
+
+;;;; Reading rendered text back
+
+(defun harness-md-test-source (markdown &optional from to)
+  "Render MARKDOWN in a buffer and read it back from FROM to TO.
+FROM and TO are texts of the rendering: the read starts at FROM and
+ends after TO, the whole rendering by default."
+  (with-temp-buffer
+    (insert (harness-ui-markdown-render markdown))
+    (let ((beg (if from (progn (goto-char (point-min)) (search-forward from) (match-beginning 0)) (point-min)))
+          (end (if to (progn (goto-char (point-min)) (search-forward to) (point)) (point-max))))
+      (harness-ui-markdown-source beg end))))
+
+(ert-deftest harness-md-source-reads-the-rendering-back ()
+  "What the renderer drew of its own reads back as the Markdown it was:
+a code block's fences and language, inline code, a link's target, the
+bullets and the quote bars.  Emphasis and headings, faces alone, read
+as plain text, and a link that is its own URL as the URL."
+  (should (equal (concat "Title\n\nSee `x` in [the docs](https://x.org) or https://y.org\n\n"
+                         "- one\n  - two\n\n1. first\n\n```elisp\n(defun x () 1)\n```\n\n"
+                         "> quoted text\n\nbold end")
+                 (harness-md-test-source
+                  (concat "# Title\n\nSee `x` in [the docs](https://x.org) or https://y.org\n\n"
+                          "- one\n  - two\n\n1. first\n\n```elisp\n(defun x () 1)\n```\n\n"
+                          "> quoted\n> *text*\n\n**bold** end"))))
+  ;; A block with no language has bare fences.
+  (should (equal "```\nno lang\n```\nafter" (harness-md-test-source "```\nno lang\n```\nafter"))))
+
+(ert-deftest harness-md-source-of-part-of-a-code-block ()
+  "Part of a code block reads back fenced, under the whole block's language.
+The part may start in the code or in the language's label line; the
+fence closes on a line of its own, wherever the part ends."
+  (let ((md "```elisp\n(defun foo ()\n  (bar))\n```"))
+    (should (equal "```elisp\n  (bar))\n```\n" (harness-md-test-source md "  (bar)")))
+    (should (equal "```elisp\n(defun foo ()\n```\n" (harness-md-test-source md "isp" "foo ()")))))
+
+(ert-deftest harness-md-source-leaves-out-what-does-not-show ()
+  "Invisible text, by a property or an overlay as a folded block's, is left out."
+  (with-temp-buffer
+    (insert "one two three four")
+    (put-text-property 5 9 'invisible t)
+    (add-to-invisibility-spec 'folded)
+    (overlay-put (make-overlay 9 15) 'invisible 'folded)
+    (should (equal "one four" (harness-ui-markdown-source (point-min) (point-max))))
+    ;; Unfolded, it shows, and reads back.
+    (remove-from-invisibility-spec 'folded)
+    (should (equal "one three four" (harness-ui-markdown-source (point-min) (point-max))))))
 
 ;;;; Following links
 
