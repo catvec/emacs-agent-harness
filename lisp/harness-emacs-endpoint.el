@@ -6,7 +6,7 @@
 
 ;; Every tool runs in the harness, never in a client.  Some tools are
 ;; about the user's Emacs -- its buffers, its windows, its symbols, its
-;; *Messages* and, when the user turns it on, evaluating Lisp in it --
+;; *Messages* and, unless the user turns it off, evaluating Lisp in it --
 ;; and for them that Emacs is a resource the tool reaches, as a TRAMP
 ;; host is for the file tools.  This file is the Emacs's side of it.
 ;;
@@ -69,11 +69,11 @@
 ;;
 ;; `eval' is the one request that runs code a model wrote, and it runs
 ;; it on this Emacs's only thread, where code that blocks freezes typing
-;; and redisplay.  So this Emacs refuses it unless its own
-;; `harness-emacs-eval' is on, which it is not by default: the Emacs
-;; that would freeze decides, whatever the harness asks.  The harness
-;; sends only code a judge model expects to return within a fraction of
-;; a second (the emacs_eval tool, lisp/modules/harness-tools-emacs-eval.el),
+;; and redisplay.  So this Emacs refuses it while its own
+;; `harness-emacs-eval' is off (it is on by default): the Emacs that
+;; would freeze decides, whatever the harness asks.  The harness sends
+;; only code a judge model expects to return within a fraction of a
+;; second (the emacs_eval tool, lisp/modules/harness-tools-emacs-eval.el),
 ;; and here that code runs guarded as far as Lisp allows:
 ;;
 ;; - It starts only while the user is not typing and no other
@@ -88,10 +88,11 @@
 ;; - Its value, output and messages come back cut at `maxChars'.
 ;;
 ;; Code that neither waits nor reads input, a loop that runs on, can
-;; still hold this Emacs until it returns or the user stops it: that is
-;; why the setting is off by default, and why the elisp tool evaluates
-;; in a background Emacs instead (see harness-elisp.el).  `eval' is
-;; answered once the code has run, not at once like the other requests
+;; still hold this Emacs until it returns or the user stops it: keeping
+;; such code out is the judge's work, the elisp tool evaluates in a
+;; background Emacs instead (see harness-elisp.el), and a user who would
+;; rather not take the risk turns the setting off.  `eval' is answered
+;; once the code has run, not at once like the other requests
 ;; (`harness-emacs-endpoint--deferred-methods').
 ;;
 ;; The UI also asks this file for two chores of its own: saving a
@@ -1409,7 +1410,7 @@ As many as the `:count' of PARAMS says, 50 by default."
 
 ;;;; eval
 
-(defcustom harness-emacs-eval nil
+(defcustom harness-emacs-eval t
   "Non-nil lets agents evaluate Emacs Lisp in this Emacs, while you use it.
 Sessions then get the emacs_eval tool, which runs a model's code here
 rather than in a background Emacs, so it can change this one: define a
@@ -1419,11 +1420,11 @@ the code to return within a fraction of a second; the code may not
 prompt, stops at your next key (\\[keyboard-quit] included), and is
 stopped once it has waited two seconds.
 
-Off by default: the code runs on this Emacs's only thread, and code
+On by default.  The code runs on this Emacs's only thread, so code
 that never waits, such as a loop the judge misjudged, holds it until it
-returns or you stop it.  The elisp tool evaluates in a background
-Emacs, and the other emacs_* tools read and drive this one, without
-that risk.
+returns or you stop it.  Turn this off to keep model-written code out
+of this Emacs: the elisp tool still evaluates in a background Emacs,
+and the other emacs_* tools still read and drive this one.
 
 Set it on the settings page, or in your init file before the harness
 starts.  Only the global value counts, and this Emacs refuses to
@@ -1608,7 +1609,7 @@ gets a message when the code does not run."
   (unless (harness-emacs-eval-p)
     ;; Verbatim, not through `format-message', which would curl the
     ;; apostrophe and quotes of a message the model reads.
-    (signal 'error (list "The user's Emacs does not let agents evaluate Lisp in it: `harness-emacs-eval' is off there, as it is by default")))
+    (signal 'error (list "The user's Emacs does not let agents evaluate Lisp in it: the user turned `harness-emacs-eval' off there")))
   (let ((code (plist-get params :code)))
     (unless (and (stringp code) (not (string-blank-p code)))
       (error "Missing code"))

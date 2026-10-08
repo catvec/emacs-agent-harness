@@ -360,10 +360,11 @@ and put back after."
              (harness-acp-close ,conn)))))))
 
 (ert-deftest harness-emacs-endpoint-eval-is-refused-unless-the-user-lets-agents ()
-  "Off, as it is by default, the lent Emacs evaluates nothing, whatever
-the harness asks; a buffer's own value does not turn it on."
+  "On by default; turned off, the lent Emacs evaluates nothing, whatever
+the harness asks.  Only the global value counts: a buffer's own value
+turns it neither on nor off."
   (require 'harness-emacs-endpoint)
-  (should-not (eval (car (get 'harness-emacs-eval 'standard-value)) t))
+  (should (eq t (eval (car (get 'harness-emacs-eval 'standard-value)) t)))
   (harness-emacs-endpoint-test--with-eval
     (setq-default harness-emacs-eval nil)
     (let ((r (harness-emacs-endpoint-test--eval "(cl-incf harness-emacs-endpoint-test--evaluations)")))
@@ -374,7 +375,11 @@ the harness asks; a buffer's own value does not turn it on."
       (setq-local harness-emacs-eval t)
       (should-not (harness-emacs-eval-p))
       (should (eq 'failed (car (harness-emacs-endpoint-test--eval "(cl-incf harness-emacs-endpoint-test--evaluations)")))))
-    (should (= 0 harness-emacs-endpoint-test--evaluations))))
+    (should (= 0 harness-emacs-endpoint-test--evaluations))
+    (setq-default harness-emacs-eval t)
+    (with-temp-buffer
+      (setq-local harness-emacs-eval nil)
+      (should (harness-emacs-eval-p)))))
 
 (ert-deftest harness-emacs-endpoint-eval-answers-the-value-output-and-messages ()
   "The code runs here, form by form with lexical binding, and changes

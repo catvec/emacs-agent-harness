@@ -33,10 +33,10 @@
 ;;   harness-elisp.el); a timeout kills the child, its whole process
 ;;   group included.  The user's Emacs is read and driven with the
 ;;   bounded `emacs_*' tools (tools-emacs); only emacs_eval
-;;   (tools-emacs-eval) evaluates there, when the user turned on
-;;   `harness-emacs-eval' and a judge model expects the code to return
-;;   at once.  The tool itself runs here, in the harness, like every
-;;   tool.
+;;   (tools-emacs-eval) evaluates there, when a judge model expects the
+;;   code to return at once and the user did not turn it off with
+;;   `harness-emacs-eval'.  The tool itself runs here, in the harness,
+;;   like every tool.
 
 ;;; Code:
 
@@ -202,10 +202,10 @@ directories it may read."
 ;; The tool runs here, in the harness, like every tool, and always
 ;; evaluates in a fresh background Emacs, apart from the user's, so code
 ;; that blocks cannot freeze theirs.  The Emacs a client lent the
-;; harness evaluates only for emacs_eval (tools-emacs-eval), which is
-;; off unless the user turns on `harness-emacs-eval' and runs only code
-;; a judge expects to return at once; the other `emacs_*' tools read
-;; and drive it without evaluating anything.  The background child
+;; harness evaluates only for emacs_eval (tools-emacs-eval), which runs
+;; only code a judge expects to return at once, unless the user turned
+;; it off with `harness-emacs-eval'; the other `emacs_*' tools read and
+;; drive it without evaluating anything.  The background child
 ;; reports its result with `harness-elisp-payload', which one function
 ;; words.
 
@@ -299,7 +299,7 @@ is killed, tree and all, when it overruns."
   "Handler for the elisp tool with INPUT under CTX; returns a promise.
 The code always evaluates in a background Emacs, so a call that asks
 for the user's Emacs is refused with that explanation, which names
-emacs_eval while the user has that on (`harness-emacs-eval')."
+emacs_eval unless the user turned that off (`harness-emacs-eval')."
   (let ((code (plist-get input :code))
         (where (plist-get input :emacs)))
     (cond

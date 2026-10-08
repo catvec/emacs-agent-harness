@@ -237,11 +237,11 @@ call is about nothing in particular."
 ;; file tools reach a TRAMP host: a client lends its Emacs to the
 ;; harness (see lisp/harness-emacs-endpoint.el), and the tool asks it
 ;; for plain data or a few bounded actions.  Only emacs_eval
-;; (tools-emacs-eval) asks it to evaluate code, when the user turned
-;; that on there (`harness-emacs-eval') and a judge model expects the
-;; code to return at once.  A client that lends no Emacs, such as a
-;; phone, is never asked, and a harness with none attached (headless)
-;; runs every other tool as usual.
+;; (tools-emacs-eval) asks it to evaluate code, when a judge model
+;; expects the code to return at once and the user did not turn that
+;; off there (`harness-emacs-eval').  A client that lends no Emacs,
+;; such as a phone, is never asked, and a harness with none attached
+;; (headless) runs every other tool as usual.
 
 (defun harness-tools-reason (err)
   "Return the message of ERR, a rejection or an error, for the model to read.

@@ -19,9 +19,9 @@
 ;;
 ;; The elisp tool has no other place to run.  Code reaches the user's
 ;; Emacs only through the separate emacs_eval tool
-;; (lisp/modules/harness-tools-emacs-eval.el), which the user turns on
-;; with `harness-emacs-eval' (off by default) and which runs only code a
-;; judge model expects to return within a fraction of a second, guarded
+;; (lisp/modules/harness-tools-emacs-eval.el), which the user can turn
+;; off with `harness-emacs-eval' (on by default) and which runs only code
+;; a judge model expects to return within a fraction of a second, guarded
 ;; there as lisp/harness-emacs-endpoint.el describes.  Both read code
 ;; with `harness-elisp-read-forms' and word results with
 ;; `harness-elisp-format-result'.  `harness-elisp-eval-string' is the

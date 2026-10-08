@@ -319,11 +319,11 @@ lets the code run only when they all say fast."
 ;;;; Before the judge
 
 (ert-deftest harness-tools-emacs-eval-is-offered-only-while-on ()
-  "Off, as it is by default, sessions do not get the tool, and a call that
-names it anyway runs nothing and asks no judge; only the global value
-counts.  The catalogue lists it either way."
+  "On, as it is by default, sessions get the tool; turned off, they do
+not, and a call that names it anyway runs nothing and asks no judge.
+Only the global value counts.  The catalogue lists it either way."
   (require 'harness-emacs-endpoint)
-  (should-not (eval (car (get 'harness-emacs-eval 'standard-value)) t))
+  (should (eq t (eval (car (get 'harness-emacs-eval 'standard-value)) t)))
   (harness-tools-emacs-eval-test--with
     (should (member "emacs_eval" (harness-tools-emacs-eval-test--names "s1")))
     (setq-default harness-emacs-eval nil)
@@ -421,7 +421,7 @@ whatever the harness process has."
   (harness-tools-emacs-eval-test--with
     (let ((conn (harness-tools-emacs-eval-test--lend
                  (lambda (method params respond)
-                   ;; An Emacs whose user left `harness-emacs-eval' off.
+                   ;; An Emacs whose user turned `harness-emacs-eval' off.
                    (cl-letf (((symbol-function 'harness-emacs-eval-p) #'ignore))
                      (unless (harness-emacs-endpoint-answer method params respond)
                        (when respond (harness-acp-respond-error respond -32601 (format "unhandled %s" method)))))))))

@@ -11,9 +11,9 @@
 ;; of a function or the changes of a variable while the user works.
 ;; None of them evaluates code: the elisp tool (tools-shell) evaluates
 ;; in a background Emacs, and model-written Lisp runs in the user's
-;; Emacs only through emacs_eval (tools-emacs-eval), which is off unless
-;; the user turns on `harness-emacs-eval' and runs only code a judge
-;; model expects to return at once.
+;; Emacs only through emacs_eval (tools-emacs-eval), which runs only
+;; code a judge model expects to return at once, unless the user turned
+;; it off with `harness-emacs-eval'.
 ;;
 ;; Like every tool these run here, in the harness.  The user's Emacs is
 ;; a resource they reach, as a TRAMP host is for the file tools: they

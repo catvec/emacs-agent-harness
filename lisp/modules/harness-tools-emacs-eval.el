@@ -9,9 +9,9 @@
 ;; emacs_* tools (tools-emacs) read and drive the live one without
 ;; evaluating anything.  Code here runs on that Emacs's only thread,
 ;; where code that blocks freezes typing and redisplay, and nothing can
-;; stop Lisp that never waits; so the tool is off unless the user turns
-;; on `harness-emacs-eval' (off by default), and a call passes three
-;; gates before its code runs:
+;; stop Lisp that never waits; so the user can turn the tool off with
+;; `harness-emacs-eval' (on by default), and a call passes three gates
+;; before its code runs:
 ;;
 ;; 1. The permission chain decides it as any tool of kind exec, as it
 ;;    would a bash command: the user approves it, or the permission
@@ -94,7 +94,7 @@ responding (`harness-tools-ask-emacs').")
   "Characters of the value, the output and the messages an evaluation sends back.")
 
 (defconst harness-tools-emacs-eval--off-message
-  "emacs_eval is off: the user has not turned on `harness-emacs-eval', which lets agents evaluate Lisp in their Emacs. Evaluate Lisp in a background Emacs with the elisp tool, and read or drive the user's Emacs with the other emacs_* tools. Only the user turns it on (on the harness's settings page or in their init file); do not try to change it."
+  "emacs_eval is off: the user turned off `harness-emacs-eval', which lets agents evaluate Lisp in their Emacs. Evaluate Lisp in a background Emacs with the elisp tool, and read or drive the user's Emacs with the other emacs_* tools. Only the user turns it back on (on the harness's settings page or in their init file); do not try to change it."
   "What the model is told when it calls emacs_eval while it is off.")
 
 (defconst harness-tools-emacs-eval--headless-message
@@ -472,7 +472,7 @@ The catalogue (SESSION nil) keeps every tool."
 (harness-tools-emacs-eval--init)
 
 (harness-define-module 'tools-emacs-eval
-  :doc "Evaluate in Emacs: run Lisp in the user's Emacs, only when it is on (`harness-emacs-eval') and a judge model expects the code to return at once."
+  :doc "Evaluate in Emacs: run Lisp in the user's Emacs when a judge model expects the code to return at once, unless the user turned it off (`harness-emacs-eval')."
   :requires '(tools)
   :init #'harness-tools-emacs-eval--init)
 

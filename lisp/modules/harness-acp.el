@@ -462,10 +462,9 @@ callable over ACP."
 ;; Emacs (its buffers, its windows, its symbols) reach that Emacs as a
 ;; resource, the way the file tools reach a TRAMP host; it is never
 ;; where a tool runs, and the one request that evaluates code in it,
-;; emacs_eval's, is refused there unless its user turned that on
-;; (`harness-emacs-eval').  An Emacs
-;; lends itself by advertising `_harness.emacs' among the
-;; `clientCapabilities' of `initialize'
+;; emacs_eval's, is refused there once its user turned that off
+;; (`harness-emacs-eval').  An Emacs lends itself by advertising
+;; `_harness.emacs' among the `clientCapabilities' of `initialize'
 ;; (lisp/harness-emacs-endpoint.el), the way ACP clients offer an agent
 ;; their files with `fs'.  A client that lends nothing, such as a phone,
 ;; is never asked; a harness no Emacs is attached to (headless) runs

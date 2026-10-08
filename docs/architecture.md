@@ -90,9 +90,9 @@ default) the layers above are split across two Emacs processes:
   function or a variable); none evaluates code.  The `elisp` tool
   evaluates in a child `emacs --batch` (lisp/harness-elisp.el), never
   in the lent Emacs.  Model-written Lisp reaches the lent Emacs only
-  through `emacs_eval` (tools-emacs-eval), which is off unless the user
-  turns on `harness-emacs-eval` (off by default): the code runs on the
-  UI's only thread, where a blocking call freezes typing and redisplay,
+  through `emacs_eval` (tools-emacs-eval), which the user can turn off
+  with `harness-emacs-eval` (on by default): the code runs on the UI's
+  only thread, where a blocking call freezes typing and redisplay,
   so a judge model must expect it to return at once, the permission
   chain must allow the call as it would a bash command, and the lent
   Emacs runs it guarded (the user's next key or C-g stops it; it may
@@ -2954,7 +2954,7 @@ TRAMP prefixes come from the session host):
 | `emacs_describe` | Describe symbol | symbol, buffer | read (needs no approval: `harness-perms--inspection-tools`) |
 | `emacs_find_definition` | Find definition | symbol, type (function/variable/face) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `emacs_trace` | Trace symbol | action (start/stop/list), symbol, type (function/variable), callers, limit | write |
-| `emacs_eval` | Evaluate in Emacs | code | exec (tools-emacs-eval; offered only while `harness-emacs-eval` is on, off by default; a judge model must call the code fast first) |
+| `emacs_eval` | Evaluate in Emacs | code | exec (tools-emacs-eval; offered only while `harness-emacs-eval` is on, as it is by default; a judge model must call the code fast first) |
 | `web_search` | Web search | query, count | net |
 | `web_fetch` | Fetch page | url, max_chars | net |
 | `emacs_messages` | Emacs messages | count | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -3176,16 +3176,16 @@ overruns (lisp/harness-elisp.el); its result comes back as JSON, in the
 shape `harness-elisp-payload` describes (value, output, messages or
 error).  It never runs in the lent Emacs.  A call that asks for the
 user's Emacs (the old `emacs` input) is refused with that explanation,
-naming `emacs_eval` when that is on.
+naming `emacs_eval` unless that is off.
 
 `emacs_eval` (tools-emacs-eval) is the one tool that evaluates
 model-written Lisp in the lent Emacs, so a model can change the Emacs
 the user works in: define or fix a function, set a variable, adjust a
-buffer.  It is off unless the user turns on `harness-emacs-eval` (off
-by default, in the safety section of the settings page): code there
-runs on the UI's only thread, and code that never waits, such as a loop
-the judge misjudged, holds it until it returns or the user stops it.
-While it is off the `agent/tools` filter leaves the tool out of every
+buffer.  It is on by default, and the user can turn it off with
+`harness-emacs-eval` (in the safety section of the settings page): code
+there runs on the UI's only thread, and code that never waits, such as
+a loop the judge misjudged, holds it until it returns or the user stops
+it.  While it is off the `agent/tools` filter leaves the tool out of every
 session (the catalogue, with no session, still lists it), and a call
 that names it anyway is refused without asking anyone.  A call passes
 three gates before its code runs, in order:
@@ -3331,9 +3331,9 @@ buffer, lines}`; `messages {count}` → `{text}`.
 
 `eval {code, timeout, deadline, host, maxChars}` → `{value, output,
 messages, error, stopped, seconds}` is the one request that evaluates
-model-written code, emacs_eval's, and the lent Emacs refuses it unless
-its own `harness-emacs-eval` is on (the global value; a buffer-local
-one does not count).  It is answered once the code ran
+model-written code, emacs_eval's, and the lent Emacs refuses it while
+its own `harness-emacs-eval` is off (on by default; the global value
+counts, a buffer-local one does not).  It is answered once the code ran
 (`harness-emacs-endpoint--deferred-methods`), and runs it guarded:
 
 - The code is read whole first, so code that does not read runs not at
@@ -3359,7 +3359,8 @@ one does not count).  It is answered once the code ran
 
 Code that never waits (a loop that does not yield) can still hold the
 Emacs until it returns or the user stops it: nothing preempts Lisp on
-its thread.  That is why it is off by default.
+its thread.  Keeping such code out is the judge's work; a user who
+would rather not take the risk turns `harness-emacs-eval` off.
 
 The server writes its address to `<state>/acp-address` and, when
 `harness-acp-token` is set (always, for the harness process), the token
