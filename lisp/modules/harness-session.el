@@ -849,9 +849,10 @@ some for a session (see `session/set-ext'), a plist."
     (puthash (harness-session-id s) s harness-sessions)
     (harness-session--save (harness-session-id s))
     (harness-session--tmp-dir s)
-    (let ((pl (harness-session-plist s)))
-      (harness-emit 'session/created (harness-session-id s) pl)
-      (harness-session--announce s pl))))
+    (harness-emit 'session/created (harness-session-id s) (harness-session-plist s))
+    ;; Announced and returned as it is now: a subscriber of
+    ;; `session/created' may have set something on it (its `:ext', say).
+    (harness-session--announce s)))
 
 (harness-defmethod session/get (id)
   "Return the public plist of session ID."

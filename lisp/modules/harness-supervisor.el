@@ -361,17 +361,6 @@ The tasks module makes it for itself and names it
 A hint would start the transcript of a session that has no message yet."
   (harness-call 'session/set-ext id key value))
 
-(defun harness-supervisor--update-payload (payload id)
-  "Make PAYLOAD, a session plist, carry the `:ext' that session ID holds now.
-`session/create' hands the plist it announced with to `session/created'
-and then announces it again and returns it, so without this the last
-`session/changed' of a new session, and the plist its maker gets, would
-lack the setting made here, and the header would not show it until the
-session changes again."
-  (let ((cell (plist-member payload :ext)))
-    (when cell
-      (setcar (cdr cell) (plist-get (harness-call 'session/get id) :ext)))))
-
 (defun harness-supervisor--on-created (id session)
   "Give the new session ID, whose plist is SESSION, its supervisor setting.
 A subscriber of `session/created'.  A top-level session takes
@@ -389,9 +378,10 @@ A setting its maker gave it in `:ext' stays."
                         (if (harness-supervisor--setting (plist-get session :cwd)) t :false))
                        ((and (eq kind 'fork) parent-id (harness-call 'session/exists-p parent-id))
                         (harness-supervisor--value (harness-call 'session/get parent-id))))))
+          ;; `session/create' announces and returns the session as it is
+          ;; after this, so its maker and the header see the setting.
           (when value
-            (harness-supervisor--set-ext id :supervisor value)
-            (harness-supervisor--update-payload session id))))
+            (harness-supervisor--set-ext id :supervisor value))))
     (error (harness-log 'warn "supervisor: setting up session %s failed: %S" id err))))
 
 (defun harness-supervisor--write-up-p (task)
