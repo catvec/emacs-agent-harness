@@ -348,5 +348,106 @@ the backquotes of `code', take no room."
   "Insert Markdown TEXT rendered at point."
   (insert (harness-ui-markdown-render text)))
 
+;;;; Reading rendered text back
+
+;; Quoting part of a rendered message takes the text as it shows, which
+;; has lost its Markdown.  What the renderer drew of its own -- the
+;; fences and language of a code block, the backquotes of inline code, a
+;; link's target, bullets, quote bars -- its text properties still tell,
+;; and `harness-ui-markdown-source' puts back.
+
+(defun harness-ui-markdown--face-p (pos face)
+  "Non-nil when the text at POS is drawn in FACE, alone or among others."
+  (let ((faces (get-text-property pos 'face)))
+    (if (consp faces) (memq face faces) (eq faces face))))
+
+(defun harness-ui-markdown--quoted-line-p (pos)
+  "Non-nil when POS is on a line of a rendered block quote."
+  (save-excursion
+    (goto-char pos)
+    (harness-ui-markdown--face-p (line-beginning-position) 'harness-md-quote-bar)))
+
+(defun harness-ui-markdown--code-lang (pos)
+  "Return the language of the rendered code block POS is in, or \"\".
+That is its label line: the nearest one at or above POS among the
+block's lines."
+  (save-excursion
+    (goto-char pos)
+    (forward-line 0)
+    (catch 'found
+      (while (eq (get-text-property (point) 'harness-md-block) 'code)
+        (when (harness-ui-markdown--face-p (point) 'harness-md-code-lang)
+          (throw 'found (string-trim (buffer-substring-no-properties (point) (line-end-position)))))
+        (when (bobp) (throw 'found ""))
+        (forward-line -1))
+      "")))
+
+(defun harness-ui-markdown--piece-kind (pos)
+  "Return what the rendered text at POS was made from, to read it back.
+One of `hidden' (it does not show), `label' (a code block's language),
+`code' (a code block's text), `inline' (inline code), (link . URL),
+`bullet', `bar' (a block quote's) or `text', anything else.  A code
+block inside a quote reads as text: its fences would have to go inside
+the quote."
+  (let ((url (get-text-property pos 'harness-url)))
+    (cond ((invisible-p pos) 'hidden)
+          ((and (eq (get-text-property pos 'harness-md-block) 'code)
+                (not (harness-ui-markdown--quoted-line-p pos)))
+           (if (harness-ui-markdown--face-p pos 'harness-md-code-lang) 'label 'code))
+          ((harness-ui-markdown--face-p pos 'harness-md-code) 'inline)
+          (url (cons 'link url))
+          ((harness-ui-markdown--face-p pos 'harness-md-bullet) 'bullet)
+          ((harness-ui-markdown--face-p pos 'harness-md-quote-bar) 'bar)
+          (t 'text))))
+
+(defun harness-ui-markdown--pieces (beg end)
+  "Return the text from BEG to END as (KIND START . END) pieces, in order.
+KIND is what `harness-ui-markdown--piece-kind' says of the piece; text
+next to each other of the same kind is one piece."
+  (let ((pos beg) (pieces nil))
+    (while (< pos end)
+      (let ((next (min (next-single-char-property-change pos 'invisible nil end)
+                       (next-single-property-change pos 'face nil end)
+                       (next-single-property-change pos 'harness-md-block nil end)
+                       (next-single-property-change pos 'harness-url nil end)))
+            (kind (harness-ui-markdown--piece-kind pos)))
+        (if (and pieces (equal kind (car (car pieces))))
+            (setcdr (cdr (car pieces)) next)
+          (push (cons kind (cons pos next)) pieces))
+        (setq pos next)))
+    (nreverse pieces)))
+
+(defun harness-ui-markdown-source (beg end)
+  "Return Markdown for the rendered text from BEG to END in this buffer.
+The text is read back as far as its properties tell what the renderer
+made it from: a code block goes back between fences, under its
+language, inline code between backquotes, a link whose label is not its
+target to [label](target), a bullet to \"-\", a quote bar to \">\".
+Emphasis and headings, which are faces alone, read as plain text, and
+so does text the renderer did not make.  Text that does not show,
+hidden in a folded block say, is left out."
+  (let ((parts nil) (fenced nil))
+    (cl-labels ((emit (string) (unless (string-empty-p string) (push string parts)))
+                (fresh-line () (when (and parts (not (string-suffix-p "\n" (car parts)))) (emit "\n")))
+                (open-fence (pos) (fresh-line) (emit (concat "```" (harness-ui-markdown--code-lang pos) "\n"))
+                            (setq fenced t))
+                (close-fence () (when fenced (fresh-line) (emit "```\n") (setq fenced nil))))
+      (pcase-dolist (`(,kind ,from . ,to) (harness-ui-markdown--pieces beg end))
+        (let ((text (buffer-substring-no-properties from to)))
+          (pcase kind
+            ('hidden nil)
+            ;; The label is the fence's language, not a line of code.
+            ('label (close-fence) (open-fence from))
+            ('code (unless fenced (open-fence from)) (emit text))
+            (_ (close-fence)
+               (emit (pcase kind
+                       ('inline (concat "`" text "`"))
+                       (`(link . ,url) (if (equal text url) text (format "[%s](%s)" text url)))
+                       ('bullet (string-replace "•" "-" text))
+                       ('bar (string-replace "┃" ">" text))
+                       (_ text)))))))
+      (close-fence))
+    (apply #'concat (nreverse parts))))
+
 (provide 'harness-ui-markdown)
 ;;; harness-ui-markdown.el ends here

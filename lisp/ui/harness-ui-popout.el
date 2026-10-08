@@ -152,7 +152,8 @@ box, other typing there goes into the box.
        ["Popout"
         (". q" "Close" harness-ui-popout-quit)
         (". g" "Draw again" harness-ui-popout-redraw)
-        ("C-c C-c" "Send the box" harness-ui-popout-submit)]))
+        ("C-c C-c" "Send the box" harness-ui-popout-submit)
+        ("C-c >" "Quote reply: region or message" harness-compose-quote-reply)]))
 
 (defun harness-ui-popout--header ()
   "Return the header line: the title, then a [close] button.

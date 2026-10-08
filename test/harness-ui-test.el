@@ -277,6 +277,7 @@ whose own group says d deletes the budget at point."
       (should (string-match-p "C-c C-a +Attach file" text))
       ;; Pasting is C-y; C-c C-v is the review banner's [Verify].
       (should (string-match-p "C-y +Paste; an image attaches" text))
+      (should (string-match-p "C-c > +Quote reply: region or message" text))
       (should-not (string-match-p "C-c C-v" text))
       (should-not (string-match-p "Task board" text)))))
 
@@ -287,7 +288,8 @@ whose own group says d deletes the budget at point."
       (should (string-match-p "^Chat .* BTW$" text))
       (should (string-match-p "C-c C-k +Close" text))
       (should-not (string-match-p "C-c C-k +Cancel turn" text))
-      (should (string-match-p "C-c C-c +Send" text)))))
+      (should (string-match-p "C-c C-c +Send" text))
+      (should (string-match-p "C-c > +Quote reply" text)))))
 
 (ert-deftest harness-ui-menu-in-review-shows-its-keys-over-the-chats ()
   "While a task's review banner shows, C-c C-v verifies and C-c C-x sends

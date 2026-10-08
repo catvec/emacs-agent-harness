@@ -1139,6 +1139,70 @@ stays only when no line shows whole."
               (should (= (from 25) 5))
               (should (= (from 2) 5)))))))))
 
+;;;; Quoting to reply
+
+(defun harness-ui-chat-test-quote (buf from &optional to)
+  "Type C-c > in BUF, point at FROM, or the region from FROM to TO.
+The key goes through the command loop, BUF in the selected window.
+Return (TEXT . UNDER): what the box then holds, and whether the
+window's point ends at the end of the box, under the quote."
+  (with-current-buffer buf
+    (save-window-excursion
+      (set-window-buffer nil buf)
+      (goto-char (or to from))
+      (when to
+        (setq-local transient-mark-mode t)
+        (push-mark from t t))
+      (execute-kbd-macro (kbd "C-c >"))
+      (cons (harness-compose-text) (= (window-point) harness-compose-end)))))
+
+(ert-deftest harness-ui-chat-quote-reply ()
+  "C-c > quotes an agent's message in the box, as Markdown, to reply to it.
+Without a region the response or plan point is on, whole, as written;
+elsewhere -- the user's message, the box -- the one above point, so
+from the box the last.  A region quotes what it selects as it shows,
+read back into Markdown, and nothing a fold hides.  Point ends under
+the quote, ready for the reply."
+  (harness-ui-chat-test-with
+    (let ((sid (harness-ui-chat-test-session)))
+      (harness-call 'session/append sid '(:kind user :content "fix the parser"))
+      (harness-call 'session/append sid '(:kind thinking :content "The parser drops the last token."))
+      (harness-call 'session/append sid '(:kind assistant :content "Fixed **the parser**: it was `parse-it`."))
+      (harness-call 'session/append sid '(:kind user :content "and the tests?"))
+      (harness-call 'session/append sid (list :kind 'plan :title "Tests" :content "1. Add a test\n2. Run it"))
+      (harness-call 'session/append sid '(:kind assistant :content "Run them:\n\n```sh\nmake test\n```\n\nThey pass."))
+      (let ((buf (harness-ui-chat-test-open sid))
+            (fixed "> Fixed **the parser**: it was `parse-it`.\n\n"))
+        (with-current-buffer buf
+          (should (eq 'harness-compose-quote-reply (key-binding (kbd "C-c >"))))
+          ;; From the box: the last message.
+          (should (equal '("> Run them:\n>\n> ```sh\n> make test\n> ```\n>\n> They pass.\n\n" . t)
+                         (harness-ui-chat-test-quote buf harness-compose-end)))
+          (harness-compose-set "")
+          ;; On a response: that one.
+          (should (equal (cons fixed t) (harness-ui-chat-test-quote buf (harness-ui-chat-test-find buf "Fixed"))))
+          ;; On the user's message after it: it again, after what the box holds.
+          (should (equal (cons (concat fixed fixed) t)
+                         (harness-ui-chat-test-quote buf (harness-ui-chat-test-find buf "and the tests"))))
+          (harness-compose-set "")
+          ;; On the plan: the plan.
+          (should (equal '("> 1. Add a test\n> 2. Run it\n\n" . t)
+                         (harness-ui-chat-test-quote buf (harness-ui-chat-test-find buf "Add a test"))))
+          (harness-compose-set "")
+          ;; A region: what it selects, the code block fenced again.
+          (should (equal '("> Run them:\n>\n> ```sh\n> make test\n> ```\n\n" . t)
+                         (harness-ui-chat-test-quote buf (- (harness-ui-chat-test-find buf "Run them:") 9)
+                                                     (harness-ui-chat-test-find buf "make test"))))
+          (should-not (region-active-p))
+          (harness-compose-set "")
+          ;; Over the folded thinking: what shows of it, its header, alone.
+          (let ((text (car (harness-ui-chat-test-quote buf (- (harness-ui-chat-test-find buf "fix the parser") 14)
+                                                       (harness-ui-chat-test-find buf "parse-it")))))
+            (should (string-prefix-p "> fix the parser\n" text))
+            (should (string-match-p "^> .*thinking (6 words)$" text))
+            (should (string-match-p "^> Fixed the parser: it was `parse-it`$" text))
+            (should-not (string-match-p "drops the last token" text))))))))
+
 ;;;; Queue
 
 (ert-deftest harness-ui-chat-queue-add-edit-remove ()

@@ -655,6 +655,32 @@ From Lisp a question can be asked at once; it names the BTW."
         ;; A kept BTW is open: it stays active.
         (should (eq 'idle (plist-get (harness-call 'session/get sid) :status)))))))
 
+(ert-deftest harness-ui-btw-quotes-its-answer-to-reply ()
+  "C-c > in a BTW quotes its answer in the box, to reply to it, as in a chat.
+The key is the chat's, the reply follows the quote, and what C-c C-c
+sends is the quote and the reply."
+  (harness-ui-btw-test-with
+    (pcase-let ((`(,_parent . ,parent-window) (harness-ui-btw-test--open-session)))
+      (let* ((window (harness-ui-btw-test--open-btw parent-window #'harness-btw))
+             (buffer (window-buffer window))
+             (sid (buffer-local-value 'harness-ui-session-id buffer)))
+        (should (harness-ui-btw-test--ready-p window))
+        (harness-ui-btw-test--ask window "how are the tasks going?")
+        (harness-ui-btw-test--wait-reply sid)
+        (harness-test-wait (lambda () (string-match-p "Two tasks are in progress"
+                                                      (harness-ui-btw-test--buffer-text buffer)))
+                           5 "the answer in the BTW")
+        (with-selected-window window
+          (should (eq 'harness-compose-quote-reply (key-binding (kbd "C-c >"))))
+          (execute-kbd-macro (kbd "C-c >"))
+          (should (equal "> Two tasks are in progress.\n\n" (harness-compose-text)))
+          (should (= (point) harness-compose-end))
+          (execute-kbd-macro "Which two?")
+          (call-interactively (key-binding (kbd "C-c C-c"))))
+        (harness-test-wait (lambda () (= 2 (length (harness-ui-btw-test--user-texts sid)))) 5 "the reply sent")
+        (should (equal "> Two tasks are in progress.\n\nWhich two?"
+                       (cadr (harness-ui-btw-test--user-texts sid))))))))
+
 (defun harness-ui-btw-test--goto-tree-node (id)
   "Move point to the tree row of node ID."
   (goto-char (point-min))

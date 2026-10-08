@@ -3729,6 +3729,28 @@ question, on the board or in a popout, carries no attachment: there a
 file the text names goes as its reference
 (`harness-compose-without-references`).
 
+Quoting to reply: `C-c >` in the box's keymap
+(`harness-compose-quote-reply`) puts what a reply answers in the box as
+a Markdown quote, its lines after "> ", with point under it, a blank
+line apart.  A region over the host's text quotes what it selects as it
+shows, read back into Markdown by `harness-ui-markdown-source`, which
+undoes the renderer from the faces and properties it left: fenced code
+gets its fences back, its language from the label line above the
+block, code spans their backticks, links their `[label](url)`, bullets
+their `-` and the quote bar its `>`, while invisible text -- a folded
+block's body -- is left out.  Only the part of a region above the box
+counts, quoted at the box's end; a region within the box turns into a
+quote where it is.  Without a region the message at point is quoted
+whole, as written, at point in the box or else at its end (the box's
+windows follow it there).  Which message that is the host says: text
+it marks with a `harness-compose-quote` property, a string, is quoted
+as that Markdown (a report's summary carries it, into the chat's review
+banner too), and elsewhere the buffer-local
+`harness-compose-quote-function` returns it -- the chat's
+`harness-chat--quote-at-point` the response, plan or thinking point is
+on, else the nearest response or plan above point, so the last one from
+the box; a report popout's its summary.
+
 Dragging images out (`harness-ui-drag`): the images the UI shows -- the
 transcript's (`harness-chat--image-string`, `harness-ui-image-string`),
 a compose chip's thumbnail and name, a report's and the image popout's

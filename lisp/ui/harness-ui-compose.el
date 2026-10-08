@@ -9,6 +9,8 @@
 ;;
 ;;   - multi-line editing: RET and C-j insert a newline, a placeholder
 ;;     shows while the box is empty;
+;;   - quoting to reply: C-c > quotes the region, or the message at
+;;     point, in the box as Markdown, point under it for the reply;
 ;;   - typing anywhere in the buffer goes into the box: a printable
 ;;     character (or a yank) with point outside it moves point to the
 ;;     end of the box and types there, unless the key is a command where
@@ -69,6 +71,7 @@
 (require 'harness-ui-media-ring)
 (require 'harness-ui)
 (require 'harness-ui-drag)
+(require 'harness-ui-markdown)
 
 ;;;; State
 
@@ -134,6 +137,9 @@ See `harness-compose--line-up-undo'.")
   (define-key map (kbd "S-<return>") #'harness-compose-newline)
   (define-key map (kbd "C-j") #'harness-compose-newline)
   (define-key map (kbd "C-c C-a") #'harness-compose-add-attachment)
+  ;; `>' is Markdown's quote, and C-c with a punctuation key is a major
+  ;; mode's to bind, the box's hosts all being major modes.
+  (define-key map (kbd "C-c >") #'harness-compose-quote-reply)
   ;; C-c C-v, the clipboard's key once, is the review banner's [Verify]
   ;; in a chat; unbound here so a reload frees it there too.  Other
   ;; MIME types are chosen from with M-x harness-compose-attach-clipboard.
@@ -732,6 +738,102 @@ Jumping drops the region, which would reach outside the box."
       (insert "\n")
     (deactivate-mark)
     (goto-char harness-compose-end)))
+
+;;;; Quoting
+
+;; C-c > quotes in the box, as Markdown, what the reply answers: the
+;; region, or else the message at point.  Which message that is the host
+;; says, as text it marks with a `harness-compose-quote' property -- a
+;; string, the Markdown the text was rendered from -- or, for the rest of
+;; the buffer, with `harness-compose-quote-function'.
+
+(defvar-local harness-compose-quote-function nil
+  "Function returning the Markdown of the message at point to quote, or nil.
+Called with no arguments, in the buffer, point where
+\\[harness-compose-quote-reply] was typed, when there is no region and no
+`harness-compose-quote' property at point.  A host that shows messages
+sets it; the chat's returns the agent's message at point, else the one
+above it.")
+
+(defun harness-compose-quote-string (text)
+  "Return TEXT as a Markdown block quote: every line after \"> \".
+Blank lines around TEXT and spaces at the ends of lines are dropped; a
+blank line within TEXT reads \">\", which keeps the quote one block."
+  (mapconcat (lambda (line)
+               (let ((line (string-trim-right line)))
+                 (if (string-empty-p line) ">" (concat "> " line))))
+             (split-string (string-trim-left (string-trim-right text) "\\(?:[ \t]*\n\\)+") "\n")
+             "\n"))
+
+(defun harness-compose-quote (text)
+  "Quote TEXT in the box as Markdown, ready to reply under it.
+The quote goes at point in the box, else at its end, a blank line apart
+from the text before it.  A blank line follows it, which Markdown needs
+between a quote and what is not part of it, and point ends after that,
+where the reply goes; from outside the box, that takes point into it."
+  (unless (harness-compose-live-p) (user-error "No compose box here"))
+  (when (string-blank-p text) (user-error "Nothing to quote"))
+  (deactivate-mark)
+  (unless (harness-compose-in-p)
+    ;; The box may be out of sight: its windows follow it again.
+    (cl-incf harness-compose--jumps)
+    (goto-char harness-compose-end))
+  (let ((before (buffer-substring-no-properties harness-compose-start (point))))
+    (insert (cond ((or (string-empty-p before) (string-suffix-p "\n\n" before)) "")
+                  ((string-suffix-p "\n" before) "\n")
+                  (t "\n\n"))
+            (harness-compose-quote-string text)
+            "\n\n"))
+  (harness-compose-update-placeholder))
+
+(defun harness-compose--front ()
+  "Return where the box starts, its prompt included."
+  (if (and harness-compose-overlay (overlay-buffer harness-compose-overlay))
+      (min (overlay-start harness-compose-overlay) harness-compose-start)
+    harness-compose-start))
+
+(defun harness-compose-quote-reply (&optional beg end)
+  "Quote the region, or the message at point, in the box, to reply to it.
+The quote is Markdown, its lines after \"> \", and point ends under it,
+after a blank line, ready for the reply (`harness-compose-quote').
+Interactively, BEG and END are the region's, while it is active.
+
+A region quotes the text it selects as it shows, read back into
+Markdown as far as can be (`harness-ui-markdown-source'): code keeps its
+fences and links their targets, while text hidden in a folded block is
+left out.  Only the part above the box counts, quoted at the end of the
+box; a region in the box turns into a quote where it is.
+
+Without a region the message at point is quoted whole, as it was
+written, at point in the box or else at its end.  The buffer says which
+message that is: the text at point names it with a
+`harness-compose-quote' property, else `harness-compose-quote-function'
+finds it; in a chat, the agent's message at point or, anywhere else,
+the one above."
+  (interactive (and (use-region-p) (list (region-beginning) (region-end))))
+  (unless (harness-compose-live-p) (user-error "No compose box here"))
+  (let ((front (harness-compose--front)))
+    (cond
+     ((and beg end (< beg front))
+      (let ((text (harness-ui-markdown-source beg (min end front))))
+        ;; Not where the region ends in the box: it reached in from above.
+        (when (harness-compose-in-p) (goto-char harness-compose-end))
+        (harness-compose-quote text)))
+     ((and beg end (< (max beg harness-compose-start) (min end harness-compose-end)))
+      (let* ((beg (max beg harness-compose-start))
+             (end (min end harness-compose-end))
+             (text (buffer-substring-no-properties beg end)))
+        (when (string-blank-p text) (user-error "Nothing to quote"))
+        (delete-region beg end)
+        (goto-char beg)
+        (harness-compose-quote text)))
+     (t
+      (let ((text (or (get-char-property (point) 'harness-compose-quote)
+                      (and harness-compose-quote-function
+                           (funcall harness-compose-quote-function)))))
+        (unless (and (stringp text) (not (string-blank-p text)))
+          (user-error "Nothing to quote here: select the text to quote"))
+        (harness-compose-quote text))))))
 
 (defun harness-compose-skill-reference-p (text)
   "Non-nil when TEXT references a skill by /name or @skill:name."

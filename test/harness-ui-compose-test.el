@@ -1075,6 +1075,81 @@ returned once none was."
       (should (equal (list "@~/doc.txt" (expand-file-name "doc.txt" home))
                      (pcase (harness-compose-take) (`(,sent ,att) (list sent (plist-get att :path)))))))))
 
+;;;; Quoting
+
+(defun harness-ui-compose-test--quote (&optional from to)
+  "Type C-c > with the region from FROM to TO, when given; return the box's text.
+The key goes through the command loop, as typed."
+  (when from
+    (setq-local transient-mark-mode t)
+    (goto-char to)
+    (push-mark from t t))
+  (execute-kbd-macro (kbd "C-c >"))
+  (harness-compose-text))
+
+(ert-deftest harness-ui-compose-quote-string ()
+  "Every line of a quote follows \"> \".  Blank lines around the text go,
+and spaces ending a line; a blank line within it is a bare \">\", so the
+quote stays one block.  Indentation stays, as code needs."
+  (should (equal "> one\n>\n>   two" (harness-compose-quote-string "\n \none  \n\t\n  two\n\n")))
+  (should (equal "> one" (harness-compose-quote-string "one"))))
+
+(ert-deftest harness-ui-compose-quote-reply-quotes-the-region ()
+  "C-c > quotes the region in the box, as Markdown, point under the quote.
+The quote follows what the box holds, a blank line apart, and a blank
+line follows it, so what is typed next is the reply.  Point jumps into
+the box, which its windows follow.  A region reaching into the box
+quotes its part above the box; one in the box becomes a quote in place."
+  (harness-ui-compose-test-with
+    (should (eq 'harness-compose-quote-reply (key-binding (kbd "C-c >"))))
+    (let ((jumps harness-compose--jumps))
+      ;; "transcript", of "The transcript.\n".
+      (should (equal "> transcript\n\n" (harness-ui-compose-test--quote (+ (point-min) 4) (+ (point-min) 14))))
+      (should (= (point) harness-compose-end))
+      (should (> harness-compose--jumps jumps)))
+    (should-not (region-active-p))
+    (execute-kbd-macro "Why?")
+    (should (equal "> transcript\n\nWhy?" (harness-compose-text)))
+    ;; From above the box into it: the part above, after the reply.
+    (should (equal "> transcript\n\nWhy?\n\n> The transcript.\n\n"
+                   (harness-ui-compose-test--quote (point-min) (+ harness-compose-start 3))))
+    (should (= (point) harness-compose-end))
+    ;; In the box, in place.
+    (harness-compose-set "Look:\nHello\nworld")
+    (should (equal "Look:\n\n> Hello\n> world\n\n"
+                   (harness-ui-compose-test--quote (+ harness-compose-start 6) harness-compose-end)))
+    (should (= (point) harness-compose-end))
+    (should (equal "The transcript.\n" (harness-ui-compose-test--transcript)))))
+
+(ert-deftest harness-ui-compose-quote-reply-without-a-region ()
+  "Without a region C-c > quotes the message at point, whole, as written.
+Text marked with a `harness-compose-quote' property says which, else
+the host's `harness-compose-quote-function'; with neither, nothing is
+quoted.  The quote goes at point in the box, else at its end."
+  (harness-ui-compose-test-with
+    (goto-char (point-min))
+    (should-error (harness-compose-quote-reply) :type 'user-error)
+    (should (equal "" (harness-compose-text)))
+    (setq-local harness-compose-quote-function
+                (lambda () (and (< (point) harness-compose-start) "The **transcript**.")))
+    (goto-char (point-min))
+    (should (equal "> The **transcript**.\n\n" (harness-ui-compose-test--quote)))
+    (should (= (point) harness-compose-end))
+    ;; The function said nothing in the box.
+    (should-error (harness-compose-quote-reply) :type 'user-error)
+    ;; Marked text wins.
+    (harness-compose-set "")
+    (let ((inhibit-read-only t))
+      (put-text-property (point-min) (+ (point-min) 3) 'harness-compose-quote "*The*"))
+    (goto-char (1+ (point-min)))
+    (should (equal "> *The*\n\n" (harness-ui-compose-test--quote)))
+    ;; In the box, at point.
+    (harness-compose-set "Before\nAfter")
+    (setq-local harness-compose-quote-function (lambda () "Quoted"))
+    (goto-char (+ harness-compose-start (length "Before\n")))
+    (should (equal "Before\n\n> Quoted\n\nAfter" (harness-ui-compose-test--quote)))
+    (should (= (point) (+ harness-compose-start (length "Before\n\n> Quoted\n\n"))))))
+
 ;;;; Typing outside the box
 
 (defun harness-ui-compose-test--transcript ()
