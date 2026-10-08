@@ -363,6 +363,63 @@ and says how it went; archive and restore undo each other."
                                                                 (plist-get (harness-tasks-search-test--task done) :session)))))
                                       :content)))))))))
 
+(ert-deftest harness-tasks-search-sets-priorities ()
+  "The model reads the priorities that are not medium, and may set one:
+a priority action names low, medium or high, runs at once, and its undo
+gives the task the priority it had.  One that changes nothing, names no
+priority or is for a done task is dropped."
+  (harness-tasks-search-test-with
+    (let ((done (harness-tasks-search-test--submit "Finished work")))
+      (harness-tasks-search-test--done done)
+      (let* ((harness-tasks-max-running 0)
+             (docs (harness-tasks-search-test--submit "Write the docs"))
+             (bug (plist-get (harness-call 'task/submit default-directory "Fix the login bug"
+                                           (list :priority "high"))
+                             :id))
+             (later (harness-tasks-search-test--submit "Tidy the changelog"))
+             (plan (harness-tasks-search-test--search
+                    "the docs first, the changelog whenever"
+                    (harness-json-encode-text
+                     (list :show (list docs later)
+                           :do (list (list :task docs :action "prioritize" :text " High ")
+                                     (list :task bug :action "priority" :text "high")
+                                     (list :task later :action "priority" :text "urgent")
+                                     (list :task later :action "priority")
+                                     (list :task done :action "priority" :text "low")
+                                     (list :task later :action "priority" :text "low"))))))
+             (actions (plist-get plan :actions)))
+        ;; The board the model read says which tasks are not medium.
+        (let ((text (harness-tasks-search-test--asked (car harness-tasks-search-test--requests))))
+          (should (string-match-p (format "^%s | .*\n  priority high; created " (regexp-quote bug)) text))
+          (should-not (string-match-p "priority \\(medium\\|low\\)" text)))
+        (should (equal (list (list docs "priority" "high" :false) (list later "priority" "low" :false))
+                       (mapcar (lambda (a) (list (plist-get a :task) (plist-get a :action)
+                                                 (plist-get a :text) (plist-get a :confirm)))
+                               actions)))
+        (let ((results (harness-test-await (harness-call 'task/search-apply actions) 10)))
+          (should (equal '(t t) (mapcar (lambda (r) (plist-get r :ok)) results)))
+          (should (equal '("high" "low") (mapcar (lambda (r) (plist-get r :text)) results)))
+          (should (equal (list (list :task docs :action "priority" :text "medium")
+                               (list :task later :action "priority" :text "medium"))
+                         (mapcar (lambda (r) (plist-get r :undo)) results)))
+          (should (eq 'high (plist-get (harness-tasks-search-test--task docs) :priority)))
+          (should (eq 'low (plist-get (harness-tasks-search-test--task later) :priority)))
+          ;; Nothing starts: a priority only orders the queue.
+          (should (eq 'pending (plist-get (harness-tasks-search-test--task docs) :state)))
+          ;; The undo puts the old priority back.
+          (harness-test-await (harness-call 'task/search-apply (mapcar (lambda (r) (plist-get r :undo)) results)) 10)
+          (should (eq 'medium (plist-get (harness-tasks-search-test--task docs) :priority)))
+          (should (eq 'medium (plist-get (harness-tasks-search-test--task later) :priority))))
+        ;; Run without a priority it names, it fails and changes nothing.
+        (let ((results (harness-test-await
+                        (harness-call 'task/search-apply
+                                      (list (list :task docs :action "priority" :text "urgent")
+                                            (list :task docs :action "priority")))
+                        10)))
+          (should (equal '(:false :false) (mapcar (lambda (r) (plist-get r :ok)) results)))
+          (should (string-match-p "unknown priority urgent" (plist-get (car results) :error)))
+          (should (eq 'medium (plist-get (harness-tasks-search-test--task docs) :priority))))))))
+
 ;;;; The model's process and the cost
 
 (ert-deftest harness-tasks-search-runs-each-search-in-a-process-of-its-own ()
@@ -439,7 +496,14 @@ the board's search works offline: topics, states and orders."
               (should (equal '("archive") (mapcar (lambda (a) (plist-get a :action)) (plist-get plan :actions)))))
             (let ((plan (search "restart errored tasks")))
               (should (equal (list failed) (plist-get plan :ids)))
-              (should (equal '("retry") (mapcar (lambda (a) (plist-get a :action)) (plist-get plan :actions)))))))))))
+              (should (equal '("retry") (mapcar (lambda (a) (plist-get a :action)) (plist-get plan :actions)))))
+            (let* ((docs (let ((harness-tasks-max-running 0))
+                           (harness-tasks-search-test--submit "Write the parser docs")))
+                   (plan (search "prioritize the parser docs")))
+              (should (equal (list docs) (plist-get plan :ids)))
+              (should (equal '(("priority" "high"))
+                             (mapcar (lambda (a) (list (plist-get a :action) (plist-get a :text)))
+                                     (plist-get plan :actions)))))))))))
 
 (declare-function harness-provider-demo--search "harness-provider-demo")
 

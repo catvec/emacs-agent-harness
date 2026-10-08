@@ -18,7 +18,8 @@
 ;; the user's OK.  Those are the ones that interrupt work, merge it or
 ;; send words to an agent (stop, verify, complete, message, reject, and
 ;; archiving a task at work); the others (archive, restore, retry,
-;; start) undo easily or do no harm, and a board runs them at once.
+;; start, priority) undo easily or do no harm, and a board runs them at
+;; once.
 ;; `task/search-apply ACTIONS' runs actions and says how each went, with
 ;; the action that undoes it where there is one.
 ;;
@@ -114,7 +115,8 @@ After that it is closed.")
 - complete: mark a task done by hand
 - message: send \"text\" to the task's agent: an instruction, a follow-up, a question for it
 - reject: send a task in review back to its agent with \"text\" as the feedback
-\"text\" is only for message and reject.
+- priority: set the task's priority to \"text\": high, medium or low (\"prioritize\", \"urgent\", \"do first\", \"bump\", \"deprioritize\", \"later\"). While the slots are full, waiting tasks start highest priority first. A task says its priority when it is not medium.
+\"text\" is only for message, reject and priority.
 
 Match loosely: words in any order, abbreviations (mq = merge queue), typos, synonyms; titles, requests, todos, summaries and branches all count. \"Errored\", \"failed\" or \"broken\" tasks are those whose state says error or failed. \"Them\", \"those\" and \"these\" are the tasks shown on the board now. Act only on tasks the query clearly means; when unsure, show them and do nothing.
 
@@ -165,6 +167,17 @@ title is its prompt's first line."
 (defun harness-tasks-search--archived-p (task)
   "Non-nil when TASK is archived."
   (harness-json-true-p (plist-get task :archived)))
+
+(defconst harness-tasks-search--priorities '("low" "medium" "high")
+  "The priorities a task may have, lowest first (see `harness-tasks-priorities').")
+
+(defun harness-tasks-search--priority (value)
+  "VALUE as a priority, \"low\", \"medium\" or \"high\"; nil when it names none.
+VALUE is a string or a symbol; \"med\" is medium, and case and spaces
+around it do not matter."
+  (when-let* ((name (and value (or (stringp value) (symbolp value))
+                         (downcase (string-trim (format "%s" value))))))
+    (car (member (if (equal name "med") "medium" name) harness-tasks-search--priorities))))
 
 (defun harness-tasks-search--waits-on (session)
   "Say what SESSION waits for the user on, or nil."
@@ -222,9 +235,11 @@ title is its prompt's first line."
          (summary (plist-get (plist-get task :report) :summary))
          (rounds (length (plist-get task :feedback)))
          (created (plist-get task :created))
-         (finished (plist-get task :finished)))
+         (finished (plist-get task :finished))
+         (priority (harness-tasks-search--priority (plist-get task :priority))))
     (delq nil
-          (list (and current (format "doing: %s (%d/%d done)"
+          (list (and priority (not (equal priority "medium")) (format "priority %s" priority))
+                (and current (format "doing: %s (%d/%d done)"
                                      (harness-tasks-search--squash (plist-get current :text) 100)
                                      done (length todos)))
                 (and (not (harness-string-blank-p summary))
@@ -305,7 +320,7 @@ REF is an id, an id without its \"t-\", or the start of exactly one."
             (and (= 1 (length hits)) (car hits)))))))
 
 (defconst harness-tasks-search-actions
-  '("archive" "restore" "stop" "retry" "start" "verify" "complete" "message" "reject")
+  '("archive" "restore" "stop" "retry" "start" "verify" "complete" "message" "reject" "priority")
   "The actions a search may propose.")
 
 (defconst harness-tasks-search--confirm-actions '("stop" "verify" "complete" "message" "reject")
@@ -322,7 +337,9 @@ task at work does too, as it stops the task first.")
     ("restart" . "retry") ("resume" . "retry") ("rerun" . "retry")
     ("approve" . "verify") ("accept" . "verify") ("done" . "complete") ("finish" . "complete")
     ("send" . "message") ("tell" . "message") ("steer" . "message") ("reply" . "message")
-    ("send-back" . "reject") ("send back" . "reject"))
+    ("send-back" . "reject") ("send back" . "reject")
+    ("prioritize" . "priority") ("prioritise" . "priority") ("reprioritize" . "priority")
+    ("set-priority" . "priority") ("set priority" . "priority"))
   "Names a model may give an action instead of its own: (NAME . ACTION).")
 
 (defun harness-tasks-search--action-name (value)
@@ -332,32 +349,40 @@ task at work does too, as it stops the task first.")
     (or (car (member name harness-tasks-search-actions))
         (cdr (assoc name harness-tasks-search--synonyms)))))
 
-(defun harness-tasks-search--applies-p (action task session)
+(defun harness-tasks-search--applies-p (action task session &optional priority)
   "Non-nil when ACTION means anything for TASK, with SESSION, as it is now.
-Archiving an archived task, restoring one that is not and stopping one
-not at work do nothing; whether the rest can run, running them says."
+Archiving an archived task, restoring one that is not, stopping one
+not at work, and giving a task the PRIORITY it has (or a done task any)
+do nothing; whether the rest can run, running them says."
   (pcase action
     ("archive" (not (harness-tasks-search--archived-p task)))
     ("restore" (harness-tasks-search--archived-p task))
     ("stop" (harness-tasks-search--working-p task session))
+    ("priority" (and (not (equal (harness-tasks-search--str (plist-get task :column)) "done"))
+                     (not (equal priority (or (harness-tasks-search--priority (plist-get task :priority))
+                                              "medium")))))
     (_ t)))
 
 (defun harness-tasks-search--action (entry tasks)
   "Return the action ENTRY of the model's answer proposes for one of TASKS, or nil.
 The action is (:task ID :action NAME :text TEXT :title TITLE :confirm
 BOOL); nil when ENTRY names no task of the board, no known action, an
-action that would do nothing, or one that needs words without them."
+action that would do nothing, one that needs words without them, or a
+priority action whose text names no priority.  The TEXT of a priority
+action is the priority: low, medium or high."
   (when (keywordp (car-safe entry))
     (let* ((id (harness-tasks-search--resolve (or (plist-get entry :task) (plist-get entry :id)) tasks))
            (task (and id (cl-find id tasks :key (lambda (task) (plist-get task :id)) :test #'equal)))
            (session (and task (harness-tasks-search--session task)))
            (name (harness-tasks-search--action-name (or (plist-get entry :action) (plist-get entry :do))))
-           (text (let ((text (plist-get entry :text))) (and (stringp text) (string-trim text)))))
+           (text (let ((text (plist-get entry :text))) (and (stringp text) (string-trim text))))
+           (priority (and (equal name "priority") (harness-tasks-search--priority text))))
       (when (and task name
                  (or (not (member name harness-tasks-search--text-actions)) (not (harness-string-blank-p text)))
-                 (harness-tasks-search--applies-p name task session))
+                 (or (not (equal name "priority")) priority)
+                 (harness-tasks-search--applies-p name task session priority))
         (list :task id :action name
-              :text (and (member name harness-tasks-search--text-actions) text)
+              :text (or priority (and (member name harness-tasks-search--text-actions) text))
               :title (harness-tasks-search--title task session)
               :confirm (if (or (member name harness-tasks-search--confirm-actions)
                                (and (equal name "archive") (harness-tasks-search--working-p task session)))
@@ -696,7 +721,8 @@ IDS are the tasks QUERY is about, best match first, archived ones
 included: the board shows only those.  ACTIONS are what QUERY orders,
 in order, each (:task ID :action NAME :text TEXT :title TITLE :confirm
 BOOL), NAME being one of `harness-tasks-search-actions' and TEXT the
-words a message or a send-back carries; `:confirm' is t for an action
+words a message or a send-back carries, or the priority a priority
+action gives (low, medium or high); `:confirm' is t for an action
 that waits for the user's OK (see `harness-tasks-search--confirm-actions'),
 else false.  `task/search-apply' runs them.  LOOKED says what the model
 looked at besides the board, when it did.
@@ -820,14 +846,19 @@ Never `task/cancel' on a task that is not at work: that drops a pending one."
   "Run ACTION, as `task/search' proposes it; return a promise of how it went.
 That is ACTION's `:task' and `:action' with `:ok' t, or false and
 `:error' the reason, `:title' the task's title, and `:undo' the action
-that undoes it, when there is one.  The promise never rejects."
+that undoes it, when there is one; a priority action's `:text' is the
+priority it gives.  The promise never rejects."
   (let* ((id (plist-get action :task))
          (name (harness-tasks-search--action-name (plist-get action :action)))
          (text (plist-get action :text))
-         (title (or (ignore-errors (harness-tasks-search--title (harness-call 'task/get id)))
-                    (plist-get action :title)))
-         (result (list :task id :action (or name (harness-tasks-search--str (plist-get action :action)))
-                       :title title)))
+         (task (ignore-errors (harness-call 'task/get id)))
+         (title (or (and task (ignore-errors (harness-tasks-search--title task))) (plist-get action :title)))
+         ;; The priority to go back to, for undo.
+         (was (and task (harness-tasks-search--priority (plist-get task :priority))))
+         (priority (and (equal name "priority") (harness-tasks-search--priority text)))
+         (result (append (list :task id :action (or name (harness-tasks-search--str (plist-get action :action)))
+                               :title title)
+                         (and (equal name "priority") (list :text (or priority text))))))
     (harness-then
      (condition-case err
          (harness-as-promise
@@ -841,13 +872,19 @@ that undoes it, when there is one.  The promise never rejects."
             ("complete" (harness-call 'task/complete id))
             ("message" (harness-tasks-search--message id text))
             ("reject" (harness-call 'task/reject id text))
+            ;; Never nothing for medium, as `task/set-priority' would take it.
+            ("priority" (harness-call 'task/set-priority id
+                                      (or priority (error "Unknown priority %s; it is low, medium or high"
+                                                          (or text "(none)")))))
             (_ (error "Unknown action %s" (plist-get action :action)))))
        (error (harness-rejected err)))
      (lambda (_)
        (append result (list :ok t)
                (pcase name
                  ("archive" (list :undo (list :task id :action "restore")))
-                 ("restore" (list :undo (list :task id :action "archive"))))))
+                 ("restore" (list :undo (list :task id :action "archive")))
+                 ("priority" (and was (not (equal was priority))
+                                  (list :undo (list :task id :action "priority" :text was)))))))
      (lambda (e)
        (append result (list :ok :false :error (harness-tasks-search--clean-error e)))))))
 
@@ -864,11 +901,13 @@ board can say \"Could not retry “Fix X”: it is working already\"."
   "Run ACTIONS, as `task/search' proposed them, one after the other.
 Return a promise of how each went: its `:task' and `:action', `:ok' t
 or false with `:error', its `:title', and `:undo', the action that
-undoes it when there is one (restore for archive and back).  The
-actions mean what a search's model was told: archive stops a task at
-work first and archives it once stopped, stop never drops a pending
-task, retry is `task/retry', message is a follow-up to the session (or
-words added to the prompt of a task with no session yet)."
+undoes it when there is one (restore for archive and back, the
+priority it had for priority).  The actions mean what a search's model
+was told: archive stops a task at work first and archives it once
+stopped, stop never drops a pending task, retry is `task/retry',
+message is a follow-up to the session (or words added to the prompt of
+a task with no session yet), priority is `task/set-priority' with the
+action's text."
   (let ((results nil)
         (chain (harness-resolved nil)))
     (dolist (action actions)

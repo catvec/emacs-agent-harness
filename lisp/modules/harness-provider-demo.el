@@ -13,9 +13,17 @@
 ;;                 in a worktree it also writes and commits notes/ID.md
 ;;   "ask"         calls ask_user
 ;;   "diagram"     calls ask_user with an ASCII diagram for each option
+;;   "images"      calls ask_user with an image for each option: SVG
+;;                 mockups written to the session's temporary directory
 ;;   "debug"       describes find-file in the user's Emacs, finds its
 ;;                 definition and traces find-file-noselect
 ;;   "status"      looks at the task board with task_list (a BTW over it)
+;;   "away"        asks to turn non-interactive mode on for every session
+;;                 and task (set_non_interactive), which you confirm
+;;   "back"        turns non-interactive mode off for all of them again
+;;   "stream"      two model calls paced like a real model's: thinking
+;;                 without text, then with it, text, a tool call's input,
+;;                 each call's usage -- for the live token count
 ;;   anything else echo the prompt back as markdown
 ;;
 ;; A session writing a backlog task up (the system prompt has the task
@@ -75,6 +83,74 @@ answers) gives a function.")
 |               [ Save ]               |
 +--------------------------------------+"))
   "Options of the demo `diagram' question: (LABEL . ASCII-DIAGRAM).")
+
+(defconst harness-provider-demo--layout-images
+  '((left . "layout-sidebar-left.svg") (right . "layout-sidebar-right.svg") (top . "layout-tabs.svg"))
+  "The mockups of the demo `images' question: (LAYOUT . FILE-NAME).
+One per option of `harness-provider-demo--layouts', in the same order.")
+
+(defun harness-provider-demo--layout-svg (layout)
+  "Return an SVG mockup of the settings page laid out as LAYOUT.
+LAYOUT says where its sections go: `left' or `right' in a sidebar,
+`top' in tabs.  It is drawn as the ask_user tool tells a model to draw
+one, 600x400 with large text and a viewBox, and as models write them:
+no background of its own, and text in the default colour."
+  (let* ((nav-x (if (eq layout 'right) 440 0))
+         ;; The form's top left corner.
+         (fx (pcase layout ('left 210) ('right 40) (_ 130)))
+         (fy (if (eq layout 'top) 80 40))
+         (field (lambda (y)
+                  (format "<rect x=\"%d\" y=\"%d\" width=\"250\" height=\"40\" rx=\"4\" fill=\"#ffffff\" stroke=\"#8a8f98\" stroke-width=\"2\"/>\n"
+                          (+ fx 90) (+ fy y))))
+         (nav (if (eq layout 'top)
+                  (concat
+                   "<rect x=\"0\" y=\"0\" width=\"600\" height=\"60\" fill=\"#eef1f6\"/>\n"
+                   "<path d=\"M0 60 H600\" stroke=\"#8a8f98\" stroke-width=\"2\"/>\n"
+                   "<rect x=\"16\" y=\"12\" width=\"150\" height=\"50\" rx=\"6\" fill=\"#ffffff\" stroke=\"#8a8f98\" stroke-width=\"2\"/>\n"
+                   "<rect x=\"17\" y=\"55\" width=\"148\" height=\"10\" fill=\"#ffffff\"/>\n"
+                   "<text x=\"91\" y=\"45\" font-size=\"22\" font-weight=\"bold\" text-anchor=\"middle\">General</text>\n"
+                   "<text x=\"241\" y=\"45\" font-size=\"22\" text-anchor=\"middle\">Account</text>\n"
+                   "<text x=\"391\" y=\"45\" font-size=\"22\" text-anchor=\"middle\">Privacy</text>\n")
+                (concat
+                 (format "<rect x=\"%d\" y=\"0\" width=\"160\" height=\"400\" fill=\"#eef1f6\"/>\n" nav-x)
+                 (format "<path d=\"M%d 0 V400\" stroke=\"#8a8f98\" stroke-width=\"2\"/>\n"
+                         (if (eq layout 'right) nav-x 160))
+                 (format "<text x=\"%d\" y=\"44\" font-size=\"24\" font-weight=\"bold\">Settings</text>\n" (+ nav-x 20))
+                 (format "<rect x=\"%d\" y=\"70\" width=\"140\" height=\"40\" rx=\"6\" fill=\"#d6e2ff\"/>\n" (+ nav-x 10))
+                 (format "<text x=\"%d\" y=\"98\" font-size=\"22\">General</text>\n" (+ nav-x 24))
+                 (format "<text x=\"%d\" y=\"148\" font-size=\"22\">Account</text>\n" (+ nav-x 24))
+                 (format "<text x=\"%d\" y=\"198\" font-size=\"22\">Privacy</text>\n" (+ nav-x 24))))))
+    (concat
+     "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"600\" height=\"400\" viewBox=\"0 0 600 400\" font-family=\"sans-serif\">\n"
+     nav
+     (format "<text x=\"%d\" y=\"%d\" font-size=\"28\" font-weight=\"bold\">General</text>\n" fx (+ fy 20))
+     (format "<text x=\"%d\" y=\"%d\" font-size=\"22\">Name</text>\n" fx (+ fy 88))
+     (funcall field 60)
+     (format "<text x=\"%d\" y=\"%d\" font-size=\"22\">Theme</text>\n" fx (+ fy 148))
+     (funcall field 120)
+     (format "<text x=\"%d\" y=\"%d\" font-size=\"20\">Dark</text>\n" (+ fx 104) (+ fy 147))
+     (format "<path d=\"M%d %d l10 10 l10 -10\" fill=\"none\" stroke=\"#555555\" stroke-width=\"2\"/>\n"
+             (+ fx 310) (+ fy 136))
+     (format "<rect x=\"%d\" y=\"%d\" width=\"120\" height=\"44\" rx=\"6\" fill=\"#2f6fdf\"/>\n" (+ fx 220) (+ fy 220))
+     (format "<text x=\"%d\" y=\"%d\" font-size=\"22\" fill=\"#ffffff\" text-anchor=\"middle\">Save</text>\n"
+             (+ fx 280) (+ fy 249))
+     "<rect x=\"1\" y=\"1\" width=\"598\" height=\"398\" fill=\"none\" stroke=\"#8a8f98\" stroke-width=\"2\"/>\n"
+     "</svg>\n")))
+
+(defun harness-provider-demo--layout-files (request)
+  "Write the mockups of the demo `images' question; return their paths.
+They go to the temporary directory of REQUEST's session, where the
+ask_user tool tells a model to put the images it makes, or to a new
+temporary directory when the session has none."
+  (let* ((sid (plist-get (plist-get request :session) :id))
+         (dir (or (and sid (harness-method-exists-p 'session/tmp-dir)
+                       (ignore-errors (harness-call 'session/tmp-dir sid)))
+                  (make-temp-file "harness-demo-" t))))
+    (mapcar (lambda (image)
+              (let ((path (expand-file-name (cdr image) dir)))
+                (write-region (harness-provider-demo--layout-svg (car image)) nil path nil 'silent)
+                path))
+            harness-provider-demo--layout-images)))
 
 (defun harness-provider-demo--last-user-text (request)
   "Return the text of the last text block of REQUEST's user messages.
@@ -166,6 +242,16 @@ one (see the Commentary)."
         (:type text :delta "Open a file with `C-x C-f`: each call is recorded in `*trace-output*`, with the functions that led to it.")
         (:type usage :input 1100 :output 90 :cost 0.0021 :context 1400)
         (:type done :stop-reason end-turn)))
+     ((string-match-p "\\bimages?\\b" text)
+      `((:type text :delta "I drew the layouts that would work; have a look at each.\n")
+        (:type tool-call :id "demo-i" :name "ask_user"
+               :input (:question "Which layout should the settings page use?"
+                       :options ,(cl-mapcar (lambda (layout path) (list :label (car layout) :image path))
+                                            harness-provider-demo--layouts
+                                            (harness-provider-demo--layout-files request))))
+        (:type text :delta "Thanks, noted.")
+        (:type usage :input 900 :output 1400 :cost 0.0037 :context 2300)
+        (:type done :stop-reason end-turn)))
      ((string-match-p "\\bdiagrams?\\b" text)
       `((:type text :delta "A few layouts would work; have a look at each.\n")
         (:type tool-call :id "demo-d" :name "ask_user"
@@ -187,10 +273,115 @@ one (see the Commentary)."
         (:type text :delta "Those are the tasks on the board, each with its column and state. Ask about one and I will read its session.")
         (:type usage :input 700 :output 45 :cost 0.0012 :context 900)
         (:type done :stop-reason end-turn)))
+     ((string-match-p "\\baway\\b" text)
+      `((:type text :delta "I will turn non-interactive mode on for everything, so nothing waits for you.\n")
+        (:type tool-call :id ,(concat "demo-n" (harness-short-id)) :name "set_non_interactive"
+               :input (:enabled t :all t :reason "you said you are going away"))
+        (:type text :delta "That is settled either way; enjoy your time away.")
+        (:type usage :input 600 :output 40 :cost 0.001 :context 700)
+        (:type done :stop-reason end-turn)))
+     ((string-match-p "\\bback\\b" text)
+      `((:type text :delta "Welcome back: I will turn non-interactive mode off for everything.\n")
+        (:type tool-call :id ,(concat "demo-n" (harness-short-id)) :name "set_non_interactive"
+               :input (:enabled :false :all t))
+        (:type text :delta "Everything asks you again.")
+        (:type usage :input 600 :output 30 :cost 0.001 :context 700)
+        (:type done :stop-reason end-turn)))
+     ((string-match-p "\\bstream\\b" text)
+      (harness-provider-demo--stream request))
      (t
-      `((:type text :delta ,(format "You said: *%s*\n\nThis is the demo provider; try `tour`, `tools`, `ask`, `diagram` or `debug`." text))
+      `((:type text :delta ,(format "You said: *%s*\n\nThis is the demo provider; try `tour`, `tools`, `ask`, `diagram`, `images`, `debug` or `stream`." text))
         (:type usage :input 400 :output 30 :cost 0.0008 :context 450)
         (:type done :stop-reason end-turn))))))
+
+(defun harness-provider-demo--paced (type text size seconds)
+  "Return TEXT as events of TYPE (`text' or `thinking'), paced like a model's.
+TEXT goes out in chunks of whole words, about SIZE characters each, with
+a pause of SECONDS after each."
+  (let ((events nil) (start 0) (len (length text)))
+    (while (< start len)
+      (let ((end (min len (+ start size))))
+        ;; Run on to the end of the word.
+        (while (and (< end len) (not (memq (aref text end) '(?\s ?\n))))
+          (cl-incf end))
+        (when (< end len) (cl-incf end))
+        (push (list :type type :delta (substring text start end)) events)
+        (push (list :type 'wait :seconds seconds) events)
+        (setq start end)))
+    (nreverse events)))
+
+(defconst harness-provider-demo--stream-texts
+  '(:first "## Counting as it streams
+
+The header counts this reply while it arrives: the context in use and \
+the output tokens grow with every chunk, a token for every four \
+characters, marked `~` while they are estimates.  When the provider \
+reports its usage, the real numbers replace the estimate, so nothing \
+counts twice.
+
+Thinking that streams no text, as Claude Code's does, counts by the \
+clock at the session's output rate, and a tool call's input counts as \
+the model writes it.  Next comes a todo list, a tool call with a \
+sizeable input, so you can watch that part grow too.
+"
+    :thinking "The todo list is in.  This is the second model call: its \
+prompt holds the first call's output and the tool's result, so the \
+context starts from there and grows again as I write."
+    :second "That was the second model call.  Its prompt held all that \
+came before, the todo list included, and the figures grew from there \
+as this text streamed in:
+
+- the chat header shows the context in use and the output
+- the session list has them in its Context and Output columns
+- a running task's card shows them too
+
+All of it is counted in the harness process, and the views redraw a \
+few times a second at most.")
+  "What the demo `stream' script writes, call by call.
+That is the text of its first model call, then the thinking and the
+text of its second.")
+
+(defun harness-provider-demo--stream (request)
+  "Return the script of two model calls paced like a real model's.
+It shows the live token count at work: each call says the size of its
+prompt as it starts, as Claude Code's do, then streams thinking without
+text, thinking text, text and a tool call's input, and reports its usage
+as it ends.  The prompt grows with REQUEST's messages."
+  (let* ((texts harness-provider-demo--stream-texts)
+         (prompt (+ 1200 (/ (length (prin1-to-string (plist-get request :messages))) 4)))
+         (todos (list :todos
+                      (cl-mapcar (lambda (id label status) (list :id id :text label :status status))
+                                 '("1" "2" "3" "4")
+                                 '("Stream thinking without text, counted by the clock"
+                                   "Stream text, counted a token for every four characters"
+                                   "Stream this todo list, a tool call's input"
+                                   "Replace the estimate with the reported usage")
+                                 '("done" "done" "in-progress" "pending"))))
+         (input-chars (length (harness-json-encode-text todos)))
+         ;; Each call writes a little more than the estimate reckons.
+         (first-output (+ 90 (ceiling (* 1.1 (+ (length (plist-get texts :first)) input-chars)) 4)))
+         (second-prompt (+ prompt first-output 60))
+         (second-output (ceiling (* 1.1 (+ (length (plist-get texts :thinking))
+                                            (length (plist-get texts :second))))
+                                 4)))
+    `((:type call-usage :output 0 :context ,prompt)
+      (:type activity :phase thinking)
+      (:type wait :seconds 2.0)
+      ,@(harness-provider-demo--paced 'text (plist-get texts :first) 28 0.09)
+      ,@(cl-loop for step from 0 to 6
+                 append `((:type activity :phase tool-input :tool "todo_write"
+                                 :chars ,(/ (* step input-chars) 6))
+                          (:type wait :seconds 0.3)))
+      (:type usage :input ,(- prompt 1000) :output ,first-output :cache-read 1000 :cache-write 0
+             :cost 0.0021 :context ,prompt)
+      (:type tool-call :id "demo-st1" :name "todo_write" :input ,todos)
+      (:type call-usage :output 0 :context ,second-prompt)
+      (:type wait :seconds 0.6)
+      ,@(harness-provider-demo--paced 'thinking (plist-get texts :thinking) 24 0.12)
+      ,@(harness-provider-demo--paced 'text (plist-get texts :second) 28 0.09)
+      (:type usage :input ,(- second-prompt 1000) :output ,second-output :cache-read 1000 :cache-write 0
+             :cost 0.0018 :context ,second-prompt)
+      (:type done :stop-reason end-turn))))
 
 (defun harness-provider-demo--title (request)
   "Answer the naming REQUEST as a model would: the gist of the opening message.
@@ -317,6 +508,12 @@ happened, or remarks on the longest word of the user's last message."
     ("start" "start"))
   "Words that order an action in a search, by action, for the demo's answers.")
 
+(defconst harness-provider-demo--search-priorities
+  '(("high" "prioritize" "prioritise" "urgent" "high priority")
+    ("low" "deprioritize" "deprioritise" "low priority")
+    ("medium" "medium priority" "normal priority"))
+  "Words of a search that give a priority, by priority, for the demo's answers.")
+
 (defconst harness-provider-demo--search-states
   '(("error\\|fail\\|stopped" "errored" "failed" "failing" "broken" "stopped")
     ("^needs input" "blocked" "stuck" "waiting" "need me" "needs me")
@@ -334,9 +531,10 @@ happened, or remarks on the longest word of the user's last message."
 
 (defun harness-provider-demo--search (request)
   "Answer a task board search from REQUEST's board, as a scripted model would.
-No model: words of the query that order an action pick it, words that
-name a state keep the tasks in that state, and the other words keep the
-tasks whose lines hold them all (or, when none does, the most of them)."
+No model: words of the query that order an action pick it (or, failing
+that, words that give a priority), words that name a state keep the
+tasks in that state, and the other words keep the tasks whose lines
+hold them all (or, when none does, the most of them)."
   (let* ((text (harness-provider-demo--last-user-text request))
          (query (downcase (if (string-match "^Query: \\(.*\\)$" text) (match-string 1 text) "")))
          (entries nil))
@@ -350,11 +548,16 @@ tasks whose lines hold them all (or, when none does, the most of them)."
     (let* ((action (car (cl-find-if (lambda (verbs) (cl-some (lambda (w) (string-match-p (concat "\\b" (regexp-quote w) "\\b") query))
                                                               (cdr verbs)))
                                     harness-provider-demo--search-verbs)))
+           (priority (and (not action)
+                          (car (cl-find-if (lambda (words) (cl-some (lambda (w) (string-match-p (concat "\\b" (regexp-quote w) "\\b") query))
+                                                                     (cdr words)))
+                                           harness-provider-demo--search-priorities))))
            (state (car (cl-find-if (lambda (states) (cl-some (lambda (w) (string-match-p (concat "\\b" (regexp-quote w) "\\b") query))
                                                               (cdr states)))
                                    harness-provider-demo--search-states)))
            (noise (append harness-provider-demo--search-stopwords
                           (split-string (string-join (apply #'append (mapcar #'cdr harness-provider-demo--search-verbs)) " "))
+                          (split-string (string-join (apply #'append (mapcar #'cdr harness-provider-demo--search-priorities)) " "))
                           (split-string (string-join (apply #'append (mapcar #'cdr harness-provider-demo--search-states)) " "))))
            (words (cl-remove-if (lambda (w) (or (< (length w) 2) (member w noise)))
                                 (split-string query "[^[:alnum:]]+" t)))
@@ -369,9 +572,13 @@ tasks whose lines hold them all (or, when none does, the most of them)."
                                 ((> best 0) (cl-remove-if-not (lambda (s) (= (car s) best)) scored)))))
            (answer (format "{\"show\":[%s],\"do\":[%s]}"
                            (mapconcat (lambda (id) (format "%S" id)) shown ",")
-                           (if action
-                               (mapconcat (lambda (id) (format "{\"task\":%S,\"action\":%S}" id action)) shown ",")
-                             ""))))
+                           (cond (action
+                                  (mapconcat (lambda (id) (format "{\"task\":%S,\"action\":%S}" id action)) shown ","))
+                                 (priority
+                                  (mapconcat (lambda (id) (format "{\"task\":%S,\"action\":\"priority\",\"text\":%S}"
+                                                                  id priority))
+                                             shown ","))
+                                 (t "")))))
       `((:type text :delta ,answer)
         (:type usage :input ,(/ (length text) 4) :output ,(/ (length answer) 4) :cost 0.0004 :context ,(/ (length text) 4))
         (:type done :stop-reason end-turn)))))
@@ -431,22 +638,27 @@ Return the handle plist, whose `:cancel' stops the script."
                         nil
                       (let ((ev (pop script)))
                         (cl-incf steps)
-                        (if (eq (plist-get ev :type) 'tool-call)
-                            ;; Native loop: emit the call, then stop with tool-use so the
-                            ;; agent executes it and calls us again; the rest of the script
-                            ;; continues on the next request.
-                            (progn
-                              ;; Stored before the call runs: the call may
-                              ;; end the turn (a tool handing its work in
-                              ;; with `:end-turn'), and the cancel must find
-                              ;; this to drop it, rather than leave the rest
-                              ;; of the script for the next turn.
-                              (puthash sid script harness-provider-demo--continuations)
-                              (funcall on-event ev)
-                              (funcall on-event '(:type done :stop-reason tool-use)))
-                          (funcall on-event ev)
-                          (unless (eq (plist-get ev :type) 'done)
-                            (setq timer (run-at-time harness-provider-demo--delay nil #'step)))))))))
+                        (pcase (plist-get ev :type)
+                          ;; A pause in the script, as a model takes its time.
+                          ('wait
+                           (setq timer (run-at-time (or (plist-get ev :seconds) harness-provider-demo--delay)
+                                                    nil #'step)))
+                          ;; Native loop: emit the call, then stop with tool-use so the
+                          ;; agent executes it and calls us again; the rest of the script
+                          ;; continues on the next request.
+                          ('tool-call
+                           ;; Stored before the call runs: the call may
+                           ;; end the turn (a tool handing its work in
+                           ;; with `:end-turn'), and the cancel must find
+                           ;; this to drop it, rather than leave the rest
+                           ;; of the script for the next turn.
+                           (puthash sid script harness-provider-demo--continuations)
+                           (funcall on-event ev)
+                           (funcall on-event '(:type done :stop-reason tool-use)))
+                          (type
+                           (funcall on-event ev)
+                           (unless (eq type 'done)
+                             (setq timer (run-at-time harness-provider-demo--delay nil #'step))))))))))
       (when (and (gethash sid harness-provider-demo--continuations)
                  (harness-provider-demo--has-tool-results-p request))
         (setq script (gethash sid harness-provider-demo--continuations))

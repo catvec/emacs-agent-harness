@@ -33,6 +33,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-acp)
+(require 'harness-policy)
 
 ;;;; WebSocket: bytes
 
@@ -1012,8 +1013,12 @@ Return (:running :enabled :corporate :host :port :address :address-set
 
 (harness-defmethod acp/remote-start ()
   "Serve other devices, now and whenever the harness starts.
-Saves `harness-acp-remote'.  Corporate mode refuses.  Return the status."
+Saves `harness-acp-remote'.  Corporate mode refuses, and so does a
+policy that turns `harness-acp-remote' off.  Return the status."
   (harness-acp-remote--refuse-in-corporate-mode)
+  ;; Before anything listens: the save would refuse too, too late.
+  (unless harness-acp-remote
+    (harness-policy-refuse 'harness-acp-remote))
   (unless (harness-acp-remote--running-p)
     (harness-acp-remote--listen))
   (unless harness-acp-remote
@@ -1024,7 +1029,10 @@ Saves `harness-acp-remote'.  Corporate mode refuses.  Return the status."
 (harness-defmethod acp/remote-stop ()
   "Stop serving other devices, now and at the next starts.
 Their connections close and every pairing is forgotten.  Saves
-`harness-acp-remote'.  Return the status."
+`harness-acp-remote'; a policy that turns it on refuses.  Return the
+status."
+  (when harness-acp-remote
+    (harness-policy-refuse 'harness-acp-remote))
   (harness-acp-remote--stop)
   (when harness-acp-remote
     (harness-save-user-option 'harness-acp-remote nil))

@@ -54,6 +54,12 @@
 ;; prompt names it.  /tmp is shared, so only a directory that is the
 ;; user's own is ever handed out.
 ;;
+;; A session can move to another working directory, and with it to that
+;; directory's project (`session/move'): one started in the wrong place
+;; need not stay listed there.  Its provider conversation stays behind,
+;; and a session in the middle of a turn moves when the turn ends (see
+;; Methods: moving to another directory).
+;;
 ;; A session may instead cap its context window at a number of tokens
 ;; (`:context-window-limit' to `session/create' or `session/update'):
 ;; the window in effect is then the smaller of the model's and the
@@ -68,10 +74,13 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-policy)
 
 (defvar harness-state-directory)
 (defvar harness-provider-fallback-context-window)
 (defvar harness-cache-ttl)
+
+(declare-function harness-provider-model-refusal "harness-provider" (model-id))
 
 (defconst harness-session--save-delay 0.3
   "Seconds of quiet before a changed session record is written to disk.")
@@ -88,7 +97,8 @@
   (loaded nil)
   (runtime nil)
   ;; Slots added later go last, see `harness-session--upgrade-records'.
-  provider-node)                        ; the node its provider conversation reached
+  provider-node                         ; the node its provider conversation reached
+  move)                                 ; a move waiting for its turn to end, or nil
 
 (defvar harness-sessions (make-hash-table :test 'equal)
   "Session id -> `harness-session'.")
@@ -114,7 +124,7 @@ defaults."
   '(:id :name :kind :project :cwd :host :worktree :model :permission-mode :thinking
     :non-interactive :allowed-dirs :status :parent-id :fork-node :created :updated :usage
     :context-window :context-window-override :context-window-limit :budget :head :queue :pending
-    :todos :plan :provider-state :provider-node :cache))
+    :todos :plan :provider-state :provider-node :cache :move))
 
 (defconst harness-session--symbol-keys '(:kind :status :permission-mode)
   "Keys whose values are symbols in memory and strings on disk.")
@@ -156,7 +166,8 @@ cache (see `harness-session--cache')."
         :todos (harness-session-todos s) :plan (harness-session-plan s)
         :provider-state (harness-session-provider-state s)
         :provider-node (harness-session-provider-node s)
-        :cache (harness-session--cache s)))
+        :cache (harness-session--cache s)
+        :move (harness-session-move s)))
 
 (defun harness-session--intern-values (plist)
   "Turn string enum values in PLIST back into symbols."
@@ -199,8 +210,107 @@ cache (see `harness-session--cache')."
           (harness-session-todos s) (plist-get pl :todos)
           (harness-session-plan s) (plist-get pl :plan)
           (harness-session-provider-state s) (plist-get pl :provider-state)
-          (harness-session-provider-node s) (plist-get pl :provider-node))
+          (harness-session-provider-node s) (plist-get pl :provider-node)
+          (harness-session-move s) (harness-session--move-value (plist-get pl :move)))
+    ;; A session saved before the policy came keeps no setting it fixes.
+    (harness-session--apply-policy s)
     s))
+
+;;;; Settings a policy fixes
+
+(defconst harness-session--policy-options
+  '((:model . harness-model) (:permission-mode . harness-permission-mode)
+    (:thinking . harness-thinking) (:non-interactive . harness-non-interactive))
+  "Session settings that start from an option, each with that option.
+Every session holds a copy of its own, which it may change.  When the
+policy sets the option (see harness-policy.el), the copy of every
+session -- new, forked, a sub-agent's, a task's, one saved before the
+policy came -- is the policy's value instead, and `session/update'
+refuses to change it.  A BTW session's thinking starts from
+`harness-btw-thinking' when its model offers that level, so it is left
+to `session/create', which reads both options as the policy has them.")
+
+(defun harness-session--policy-option (key kind)
+  "Return the option that fixes setting KEY of a session of KIND, or nil."
+  (unless (and (eq key :thinking) (eq kind 'btw))
+    (alist-get key harness-session--policy-options)))
+
+(defun harness-session--setting-value (key value)
+  "Return VALUE of session setting KEY as a session holds it."
+  (pcase key
+    (:permission-mode (if (stringp value) (intern value) value))
+    (:non-interactive (and (harness-json-true-p value) t))
+    (_ value)))
+
+(defun harness-session--pinned (key kind)
+  "Return (VALUE) when the policy fixes setting KEY of a session of KIND, else nil.
+VALUE is the policy's, as a session holds it."
+  (when-let* ((option (harness-session--policy-option key kind))
+              (entry (harness-policy-entry option)))
+    (list (harness-session--setting-value key (cdr entry)))))
+
+(defun harness-session--setting (s key)
+  "Return setting KEY of session S, one of `harness-session--policy-options'."
+  (pcase key
+    (:model (harness-session-model s))
+    (:permission-mode (harness-session-permission-mode s))
+    (:thinking (harness-session-thinking s))
+    (:non-interactive (harness-session-non-interactive s))))
+
+(defun harness-session--apply-policy (s)
+  "Give session S the policy's value of every setting it fixes.
+Return the changes as a plist of KEY VALUE, nil when there were none.
+A model that changes takes its own context window, as in
+`session/update'."
+  (let ((kind (harness-session-kind s))
+        changes)
+    (dolist (cell harness-session--policy-options)
+      (let ((key (car cell)))
+        (when-let* ((pinned (harness-session--pinned key kind)))
+          (let ((value (car pinned)))
+            (unless (equal value (harness-session--setting s key))
+              (pcase key
+                (:model (setf (harness-session-model s) value
+                              (harness-session-context-window s) nil))
+                (:permission-mode (setf (harness-session-permission-mode s) value))
+                (:thinking (setf (harness-session-thinking s) value))
+                (:non-interactive (setf (harness-session-non-interactive s) value)))
+              (setq changes (plist-put changes key value)))))))
+    changes))
+
+(defun harness-session--without-pinned (plist kind)
+  "Return PLIST without the settings the policy fixes for a session of KIND.
+What `session/create' is asked for gives way to the policy: the session
+gets the policy's values, as it reads them from the configuration."
+  (cl-loop for (k v) on plist by #'cddr
+           unless (harness-session--pinned k kind)
+           append (list k v)))
+
+(defun harness-session-check-policy (settings &optional kind)
+  "Signal an error when SETTINGS would change a setting the policy fixes.
+SETTINGS is a plist of `session/update' keys for a session of KIND
+\(`main' when nil).  A value equal to the policy's passes: it changes
+nothing.  A model `harness-allowed-models' does not allow is refused
+too.  Callers that change sessions for the user, such as the task
+board, check first, so they refuse before they change anything else."
+  (cl-loop for (k v) on settings by #'cddr
+           for pinned = (harness-session--pinned k (or kind 'main))
+           when (and pinned (not (equal (harness-session--setting-value k v) (car pinned))))
+           do (error "%s" (harness-policy-locked-message
+                           (harness-session--policy-option k (or kind 'main)))))
+  (when-let* ((model (plist-get settings :model))
+              ((fboundp 'harness-provider-model-refusal))
+              (refusal (harness-provider-model-refusal model)))
+    (error "%s" refusal)))
+
+(defun harness-session--on-reloaded (&rest _)
+  "Hold every session to the policy as it is after a reload.
+The policy file is read again on reload, and may fix what it did not."
+  (maphash (lambda (id s)
+             (when-let* ((changes (harness-session--apply-policy s)))
+               (harness-emit 'session/updated id changes)
+               (harness-session--touch s)))
+           harness-sessions))
 
 ;;;; Persistence
 
@@ -651,8 +761,11 @@ deleted; symbolic links inside it are removed, never followed."
   "Create a session.  PLIST needs `:cwd'; see docs/architecture.md for the rest.
 A `btw' session without `:thinking' thinks at `harness-btw-thinking'
 when its model offers that level, else at `harness-thinking', as
-configured at `:cwd'."
-  (let* ((cwd (or (plist-get plist :cwd) (error "The session/create method needs :cwd")))
+configured at `:cwd'.  A setting the policy fixes (see
+`harness-session--policy-options') has the policy's value, whatever
+PLIST asks for."
+  (let* ((plist (harness-session--without-pinned plist (or (plist-get plist :kind) 'main)))
+         (cwd (or (plist-get plist :cwd) (error "The session/create method needs :cwd")))
          (host (or (plist-get plist :host) (file-remote-p cwd)))
          (cwd (file-name-as-directory (expand-file-name cwd)))
          (kind (or (plist-get plist :kind) 'main))
@@ -692,6 +805,9 @@ configured at `:cwd'."
           (harness-session-budget s) (plist-get plist :budget)
           (harness-session-provider-state s) (plist-get plist :provider-state)
           (harness-session-loaded s) t)
+    ;; Without a config module the defaults are the options' values,
+    ;; which hold the policy's already; this makes sure either way.
+    (harness-session--apply-policy s)
     (puthash (harness-session-id s) s harness-sessions)
     (harness-session--save (harness-session-id s))
     (harness-session--tmp-dir s)
@@ -809,13 +925,18 @@ written to the configuration layer.  With `:silent' no hint is added.
 model's again; a new `:model' brings its own window too, unless PLIST
 also sets one.  `:context-window-limit N' caps its model's window at N
 tokens, nil the model's again; a `:context-window' set for the session
-wins over it."
+wins over it.  A setting the policy fixes (see
+`harness-session--policy-options') cannot change: asking for another
+value signals an error and changes nothing, asking for the policy's
+changes nothing either."
   (let* ((s (harness-session--get id))
          (persist (plist-get plist :persist))
          (silent (plist-get plist :silent))
          changes)
+    (harness-session-check-policy plist (harness-session-kind s))
     (cl-loop for (k v) on plist by #'cddr
-             when (memq k harness-session--settings)
+             when (and (memq k harness-session--settings)
+                       (not (harness-session--pinned k (harness-session-kind s))))
              do (pcase k
                   (:name (setf (harness-session-name s) v))
                   (:model (setf (harness-session-model s) v)
@@ -847,23 +968,47 @@ wins over it."
     (harness-session--touch s)
     (harness-session-plist s)))
 
+(harness-defmethod session/select (&optional filter)
+  "Return the session plists FILTER selects, newest first.
+FILTER is `session/list''s filter (`:project' `:status' `:kind'
+`:parent-id' `:active'), plus `:except', a list of session ids to leave
+out, and `:tasks': non-nil adds the sessions of the current tasks of
+every project (`task/session-ids'), whatever the other keys say, so
+an inactive session a task goes on in is not missed.  Nil selects
+every session.  This is the selection of `session/set-all' and of the
+handoff's `handoff/check-all' and `handoff/switch-all'."
+  (let* ((except (plist-get filter :except))
+         (selected (harness-call 'session/list (harness-plist-remove filter :except :tasks))))
+    (when (and (plist-get filter :tasks) (harness-method-exists-p 'task/session-ids))
+      (let ((have (mapcar (lambda (s) (plist-get s :id)) selected))
+            (more nil))
+        (dolist (id (harness-call 'task/session-ids))
+          (when (and (not (member id have)) (gethash id harness-sessions))
+            (push id have)
+            (push (harness-session-plist (gethash id harness-sessions)) more)))
+        (when more
+          (setq selected (sort (append selected more)
+                               (lambda (a b) (> (plist-get a :updated) (plist-get b :updated))))))))
+    (cl-remove-if (lambda (s) (member (plist-get s :id) except)) selected)))
+
 (harness-defmethod session/set-all (settings &optional filter)
   "Apply SETTINGS to every session FILTER selects; return the ids changed.
 SETTINGS is a plist of keys `session/update' accepts, usually just
-`:model'.  FILTER is `session/list''s filter (`:project' `:status'
-`:kind' `:parent-id' `:active'), plus `:except', a list of session ids
-to leave alone; nil means every session.  A session whose value is
-already the one asked for is left alone, and one that changes is
-changed exactly as `session/update' would (same event, same hint).  The
-return value lists the ids that changed, newest first."
-  (let* ((except (plist-get filter :except))
-         (list-filter (harness-plist-remove filter :except))
-         (keys (cl-intersection (harness-plist-keys settings) harness-session--settings))
-         changed)
-    (dolist (s (harness-call 'session/list list-filter))
+`:model'.  FILTER is the one of `session/select': `session/list''s
+filter (`:project' `:status' `:kind' `:parent-id' `:active'), plus
+`:except', a list of session ids to leave alone, and `:tasks' to add
+the sessions of the current tasks; nil means every session.  A session
+whose value is already the one asked for is left alone (see
+`harness-setting-equal-p': a false non-interactive is off, a mode's
+name is the mode), and one that changes is changed exactly as
+`session/update' would (same event, same hint).  The return value
+lists the ids that changed, newest first."
+  (let ((keys (cl-intersection (harness-plist-keys settings) harness-session--settings))
+        changed)
+    (dolist (s (harness-call 'session/select filter))
       (let ((id (plist-get s :id)))
-        (when (and (not (member id except))
-                   (cl-some (lambda (k) (not (equal (plist-get s k) (plist-get settings k)))) keys))
+        (when (cl-some (lambda (k) (not (harness-setting-equal-p k (plist-get s k) (plist-get settings k))))
+                       keys)
           (apply #'harness-call 'session/update id settings)
           (push id changed))))
     (nreverse changed)))
@@ -939,6 +1084,251 @@ With only ID return the whole runtime plist."
           ((eq value :get) (plist-get (harness-session-runtime s) key))
           (t (setf (harness-session-runtime s) (plist-put (harness-session-runtime s) key value))
              value))))
+
+;;;; Methods: moving to another directory
+;;
+;; A session works in the directory it was started in, and belongs to
+;; that directory's project, until it moves: `session/move' gives it
+;; another working directory, and with it the project the session list
+;; files it under.  The provider conversation stays behind.  The Claude
+;; Code CLI keeps its conversations per directory and cannot resume one
+;; elsewhere, so the provider state goes, and the next turn starts a new
+;; conversation that gets the transcript as text
+;; (`harness-provider-history-text').
+;;
+;; A session in the middle of a turn moves when the turn ends: its
+;; provider process and the system prompt the model works from stay in
+;; the old directory until then, and the provider records its state as
+;; the turn goes on.  The move waits in the record (`:move'), so a
+;; harness that stops first makes it as it loads the session again.
+;;
+;; Some moves are refused:
+;;   - a session working in a worktree, whose branch belongs to the
+;;     merge queue;
+;;   - a directory on another host: the session's grants hold on its
+;;     host, and its temporary directory is this machine's;
+;;   - a directory that does not exist;
+;;   - whatever a module vetoes through the sync filter
+;;     `session/before-move'.  Its value is (:proceed t) and its
+;;     arguments the session plist and the new directory; a filter
+;;     that refuses returns (:proceed nil :reason WHY).  The tasks
+;;     module keeps a task's session in its task's directory this way,
+;;     and the merge queue keeps a session that branches are queued to
+;;     merge into.
+
+(defun harness-session--move-value (value)
+  "Return VALUE, a stored move, as `session/move' records one, or nil.
+A move is (:cwd DIR :project ROOT :keep-old-dir BOOL); anything without
+a directory is none."
+  (when (and (consp value) (stringp (plist-get value :cwd)))
+    (list :cwd (plist-get value :cwd)
+          :project (let ((p (plist-get value :project))) (and (stringp p) p))
+          :keep-old-dir (and (harness-json-true-p (plist-get value :keep-old-dir)) t))))
+
+(defun harness-session--label (s)
+  "Return the name of session S, or the start of its id when it has none."
+  (let ((name (harness-session-name s)) (id (format "%s" (harness-session-id s))))
+    (if (and (stringp name) (not (harness-string-blank-p name)))
+        name
+      (substring id 0 (min 8 (length id))))))
+
+(defun harness-session--full-cwd (s)
+  "Return the working directory of session S, a remote name on a remote host."
+  (let ((cwd (harness-session-cwd s))
+        (host (harness-session-host s)))
+    (if (and host (not (file-remote-p cwd))) (concat host cwd) cwd)))
+
+(defun harness-session--move-target (s dir)
+  "Return DIR, where session S is to move, as an absolute directory name.
+A relative DIR is relative to S's working directory, and a local name
+is one on S's host, as for its tools.  A remote session's DIR may not
+start with ~: only the host knows where that is."
+  (let* ((cwd (harness-session--full-cwd s))
+         (host (file-remote-p cwd))
+         (dir (string-trim dir)))
+    (file-name-as-directory
+     (cond ((file-remote-p dir) (expand-file-name dir))
+           ((null host) (expand-file-name dir cwd))
+           ((string-prefix-p "~" dir)
+            (signal 'harness-error (list (format "Give an absolute path on %s rather than %s" host dir))))
+           (t (concat host (expand-file-name dir (file-local-name cwd))))))))
+
+(defun harness-session--project-of (dir)
+  "Return the project root of DIR, as `session/create' finds it."
+  (if (harness-method-exists-p 'project/root) (harness-call 'project/root dir) dir))
+
+(defun harness-session--turn-running-p (id)
+  "Non-nil while session ID runs a turn."
+  (if (harness-method-exists-p 'agent/running)
+      (harness-call 'agent/running id)
+    (eq (harness-session-status (harness-session--get id)) 'running)))
+
+(defun harness-session--move-check (s dir)
+  "Return how session S moves to DIR, or signal why it cannot.
+The value is (:id ID :name NAME :cwd NEW :host HOST :project ROOT
+:old-cwd OLD :old-project OLD-ROOT :defer BOOL :cancel BOOL).  NEW is
+DIR as an absolute directory name on S's host, ROOT its project.
+DEFER says S runs a turn, so the move waits for the turn to end.
+CANCEL says NEW is where S works already: moving there only cancels the
+move S waits to make, and with none waiting it is refused."
+  (unless (and (stringp dir) (not (harness-string-blank-p dir)))
+    (signal 'harness-error (list "Give the directory to move the session to")))
+  (let ((label (harness-session--label s))
+        (old (harness-session--full-cwd s)))
+    (when (harness-session-worktree s)
+      (signal 'harness-error
+              (list (format "Session %s works in the worktree %s, whose branch merges back through the merge queue; it cannot move. Start or fork a session in the other directory instead"
+                            label (abbreviate-file-name (harness-session-worktree s))))))
+    (let* ((new (harness-session--move-target s dir))
+           (host (file-remote-p new)))
+      (unless (equal host (file-remote-p old))
+        (signal 'harness-error
+                (list (format "%s is on %s and session %s on %s: a session cannot move to another host"
+                              new (or host "this machine") label (or (file-remote-p old) "this machine")))))
+      (unless (or host (file-directory-p new))
+        (signal 'harness-error (list (format "%s is not a directory" (abbreviate-file-name new)))))
+      (let ((same (or (equal new (file-name-as-directory old))
+                      (and (not host) (file-equal-p new old)))))
+        (cond
+         ((and same (null (harness-session-move s)))
+          (signal 'harness-error (list (format "Session %s works in %s already" label (abbreviate-file-name old)))))
+         ((not same)
+          (let ((gate (harness-run-filter 'session/before-move (list :proceed t) (harness-session-plist s) new)))
+            (unless (plist-get gate :proceed)
+              (signal 'harness-error
+                      (list (format "Session %s cannot move: %s" label
+                                    (or (plist-get gate :reason) "a module refused it"))))))))
+        (list :id (harness-session-id s) :name (harness-session-name s)
+              :cwd new :host host
+              :project (if same (harness-session-project s) (harness-session--project-of new))
+              :old-cwd old :old-project (harness-session-project s)
+              :defer (and (not same) (harness-session--turn-running-p (harness-session-id s)) t)
+              :cancel (and same t))))))
+
+(defun harness-session--moved-grants (s old move)
+  "Return the grants of session S after MOVE away from OLD, its working directory.
+A grant written relative to the working directory keeps naming what it
+named, and with MOVE's `:keep-old-dir' OLD joins them, unless the new
+directory holds it already."
+  (let* ((local (file-local-name old))
+         (grants (mapcar (lambda (d) (if (and (stringp d) (not (file-name-absolute-p d)) (not (file-remote-p d)))
+                                         (expand-file-name d local)
+                                       d))
+                         (harness-session-allowed-dirs s)))
+         (new (plist-get move :cwd)))
+    (if (and (plist-get move :keep-old-dir)
+             (not (member old grants))
+             (not (string-prefix-p new (file-name-as-directory old))))
+        (append grants (list old))
+      grants)))
+
+(defun harness-session--apply-move (s move)
+  "Move session S as MOVE, a pending move, says, now.
+MOVE is (:cwd NEW :project ROOT :keep-old-dir BOOL): S works in NEW
+from now on, and belongs to the project at ROOT (by default NEW's).
+Its provider state goes, so the next turn starts a new conversation in
+NEW.  Emits `session/updated' and `session/moved'; the record is
+written at once."
+  (let* ((id (harness-session-id s))
+         (old (harness-session--full-cwd s))
+         (new (plist-get move :cwd))
+         (host (file-remote-p new))
+         (project (or (plist-get move :project) (harness-session--project-of new)))
+         (grants (harness-session--moved-grants s old move))
+         (kept (and (member old grants) (not (member old (harness-session-allowed-dirs s)))))
+         (conversation (harness-session-provider-state s)))
+    (setf (harness-session-move s) nil)
+    ;; The provider conversation stays in OLD: the Claude Code CLI can
+    ;; only resume a conversation in the directory it was held in.  A
+    ;; process that held it closes once it is idle; the next turn starts
+    ;; a new one in NEW, which gets the transcript.
+    (harness-call 'session/set-provider-state id nil)
+    (setf (harness-session-cwd s) new
+          (harness-session-host s) host
+          (harness-session-project s) project
+          (harness-session-allowed-dirs s) grants)
+    (harness-call 'session/hint id
+                  (concat (format "Moved to %s (was %s)" (abbreviate-file-name new) (abbreviate-file-name old))
+                          (if kept (format "; %s stays allowed" (abbreviate-file-name old)) "")
+                          (if conversation
+                              "; the next turn starts a new provider conversation there, which gets the transcript"
+                            "")))
+    (harness-emit 'session/updated id (list :cwd new :host host :project project :allowed-dirs grants))
+    (harness-emit 'session/moved id old new)
+    (harness-session--touch s)
+    (harness-session--save id)
+    (harness-session-plist s)))
+
+(defun harness-session--apply-pending-move (id &rest _)
+  "Make the move session ID waits to make, now that its turn ended.
+On `agent/turn-ended'.  A move that cannot be made any more (its
+directory went, a module refuses it now) is dropped, and a hint says
+why."
+  (when-let* ((s (gethash id harness-sessions))
+              (move (harness-session-move s)))
+    (condition-case err
+        (let ((check (harness-session--move-check s (plist-get move :cwd))))
+          (if (plist-get check :cancel)
+              (progn (setf (harness-session-move s) nil)
+                     (harness-session--touch s)
+                     (harness-session--save id))
+            (harness-session--apply-move s (append (list :cwd (plist-get check :cwd)) move))))
+      (error
+       (setf (harness-session-move s) nil)
+       (harness-call 'session/hint id (format "Not moved to %s: %s" (abbreviate-file-name (plist-get move :cwd))
+                                              ;; A refusal reads as its message alone.
+                                              (if (and (eq (car err) 'harness-error) (stringp (cadr err)) (null (cddr err)))
+                                                  (cadr err)
+                                                (harness-error-message err))))
+       (harness-session--touch s)
+       (harness-session--save id)))))
+
+(harness-defmethod session/move-check (id dir)
+  "Return how session ID would move to DIR, or signal why it cannot.
+Nothing changes: this is what a prompt asking the user about the move
+says.  See `harness-session--move-check' for the value."
+  (harness-session--move-check (harness-session--get id) dir))
+
+(harness-defmethod session/move (id dir &rest options)
+  "Move session ID to the working directory DIR, and to DIR's project.
+DIR is absolute, or relative to the session's working directory, and
+on the session's host.  OPTIONS: `:keep-old-dir' non-nil grants the
+old working directory to the session, so it may still reach it;
+`:project' names the root of the project to file the session under,
+by default the one `project/root' finds for DIR (a UI passes its own,
+as for `session/new').
+The session's provider conversation stays behind: its next turn starts
+a new one, which gets the transcript.  A session running a turn moves
+when the turn ends, and the plist returned has the move it waits to
+make in `:move'.  Moving a session to where it works cancels that.
+Signals when the session cannot move (another host, a worktree, a
+directory that is not one, a module's veto through the filter
+`session/before-move').  Returns the session plist."
+  (let* ((s (harness-session--get id))
+         (check (harness-session--move-check s dir))
+         (project (plist-get options :project))
+         (move (list :cwd (plist-get check :cwd)
+                     :project (if (and (stringp project) (not (harness-string-blank-p project)))
+                                  (file-name-as-directory (expand-file-name project))
+                                (plist-get check :project))
+                     :keep-old-dir (and (harness-json-true-p (plist-get options :keep-old-dir)) t))))
+    (cond
+     ((plist-get check :cancel)
+      (let ((pending (harness-session-move s)))
+        (setf (harness-session-move s) nil)
+        (harness-call 'session/hint id (format "Move to %s cancelled; the session stays in %s"
+                                               (abbreviate-file-name (plist-get pending :cwd))
+                                               (abbreviate-file-name (plist-get check :old-cwd))))
+        (harness-session--touch s)
+        (harness-session--save id)))
+     ((plist-get check :defer)
+      (setf (harness-session-move s) move)
+      (harness-call 'session/hint id (format "Moves to %s when this turn ends"
+                                             (abbreviate-file-name (plist-get move :cwd))))
+      (harness-session--touch s)
+      (harness-session--save id))
+     (t (harness-session--apply-move s move)))
+    (harness-session-plist s)))
 
 ;;;; Methods: forks, BTWs and trees
 
@@ -1304,21 +1694,34 @@ list cost needs pricing.  Records without tokens are returned as is."
                             (t cost))))
       (harness-plist-merge record (list :cost cost :list-cost list-cost)))))
 
+(defun harness-session--last-output (record)
+  "Return the output of the request whose prompt usage RECORD's `:context' sizes.
+That is RECORD's `:last-output', which a record of several requests (a
+hosted loop's turn) gives, else its `:output', else 0."
+  (let ((last (plist-get record :last-output))
+        (output (plist-get record :output)))
+    (cond ((numberp last) last)
+          ((numberp output) output)
+          (t 0))))
+
 (harness-defmethod session/usage-add (id record)
   "Add usage RECORD to session ID.
 RECORD keys: :input :output :cache-read :cache-write :cost :list-cost
-:context :turns, :billing and :plan saying how the call was paid,
-:model the model the request was sent to (the session's when unsaid),
-:cache-at and :cache-ttl, when the request used the prompt cache and
-how long its provider said it keeps it, and :cache-reset, which says
-the conversation starts over (a compaction).  Counters accumulate;
-`:context' replaces, and so do `:billing' and `:plan' when RECORD has
-a billing.  A request that read or wrote the cache stamps the totals'
-`:cache-at', `:cache-model' and `:cache-ttl' (see
-`harness-session--cache-stamp').  A missing `:cost' is priced
-from the model catalogue; a missing `:list-cost', the call at API
-prices, is the cost, or priced when a subscription paid.  Return the
-totals."
+:context :last-output :turns, :billing and :plan saying how the call
+was paid, :model the model the request was sent to (the session's when
+unsaid), :cache-at and :cache-ttl, when the request used the prompt
+cache and how long its provider said it keeps it, and :cache-reset,
+which says the conversation starts over (a compaction).  Counters
+accumulate; `:context' replaces, and so do `:billing' and `:plan' when
+RECORD has a billing.  With `:context', the size of the latest prompt,
+comes the totals' `:last-output': the output of that request, which the
+next one sends back (`harness-session--last-output'), so the
+conversation holds about `:context' plus `:last-output' tokens.  A
+request that read or wrote the cache stamps the totals' `:cache-at',
+`:cache-model' and `:cache-ttl' (see `harness-session--cache-stamp').
+A missing `:cost' is priced from the model catalogue; a missing
+`:list-cost', the call at API prices, is the cost, or priced when a
+subscription paid.  Return the totals."
   (let* ((s (harness-session--get id))
          (u (copy-sequence (harness-session-usage s)))
          (record (harness-session--price-record (harness-session-model s) record)))
@@ -1329,7 +1732,8 @@ totals."
       (when (numberp (plist-get record k))
         (setq u (plist-put u k (+ (or (plist-get u k) 0) (plist-get record k))))))
     (when (numberp (plist-get record :context))
-      (setq u (plist-put u :context (plist-get record :context))))
+      (setq u (plist-put u :context (plist-get record :context)))
+      (setq u (plist-put u :last-output (harness-session--last-output record))))
     (when (harness-billing-of record)
       (setq u (plist-put u :billing (harness-billing-of record)))
       (setq u (plist-put u :plan (plist-get record :plan))))
@@ -1474,8 +1878,11 @@ never made it (`harness-outside-node-p')."
           ('user (user n))
           ('compaction (flush)
                        (add 'user (list :type "text"
-                                        :text (concat "Summary of the conversation so far:\n\n"
-                                                      (plist-get n :content)))))
+                                        :text (if (equal (harness-node-compaction-kind n) "transcript")
+                                                  ;; A note pointing at the file, no summary.
+                                                  (plist-get n :content)
+                                                (concat "Summary of the conversation so far:\n\n"
+                                                        (plist-get n :content))))))
           ('assistant (unless (eq cur-role 'assistant) (flush))
                       (unless (harness-string-blank-p (plist-get n :content))
                         (add 'assistant (list :type "text" :text (plist-get n :content)))))
@@ -1510,6 +1917,64 @@ A user message the user did not write says who sent it."
                           (or (plist-get n :content) "")))
                  (k (format "[%s] %s" k (or (plist-get n :content) "")))))
              (harness-session--path (harness-session--get id)) "\n"))
+
+;;;; The transcript as a file
+
+(defconst harness-session-transcript-directory ".harness/transcripts/"
+  "Where in a session's directory `session/write-transcript' writes by default.")
+
+(defconst harness-session--transcript-legend
+  (concat "This is the conversation so far, oldest first, one entry per message:"
+          " [user] the user (or who sent it), [assistant] the model's replies, [thinking] its reasoning,"
+          " [tool NAME] a tool call and what it was about, [result] that call's result, [hint] notes of the"
+          " harness, [compaction] a summary that stood in for what came before it.")
+  "What a transcript file says of its entries, before them.")
+
+(defun harness-session-directory (session)
+  "Return the directory of SESSION, a session plist, as this Emacs opens it.
+A session on another host has its directory there, through TRAMP."
+  (let ((cwd (plist-get session :cwd))
+        (host (plist-get session :host)))
+    (file-name-as-directory (if (and host (not (file-remote-p cwd))) (concat host cwd) cwd))))
+
+(harness-defmethod session/write-transcript (id &optional opts)
+  "Write the transcript of session ID to a new Markdown file in its directory.
+The file holds a heading, OPTS `:title' (\"Conversation\" by default),
+the session's name and id, OPTS `:about' (a line saying why it was
+written), its working directory, a legend of the entries, and then
+`session/transcript-text'.  It goes in OPTS `:directory', a directory
+relative to the session's, `harness-session-transcript-directory' by
+default, named after the session and the time.  The session's own
+directory is where its tools read without asking, and a provider's
+prompt cache holds what the model reads of it, unlike the state
+directory; a `.gitignore' of `*' written there keeps git out.  Signal
+when the session's directory does not exist.  Return (:file FILE :lines
+N): FILE as this Emacs opens it (through TRAMP for another host's), N
+its number of lines.  The handoff to another provider and compaction
+into a transcript both write theirs here."
+  (let* ((session (harness-session-plist (harness-session--get id)))
+         (root (harness-session-directory session))
+         (dir (expand-file-name (or (plist-get opts :directory) harness-session-transcript-directory) root))
+         (file (expand-file-name (format "%s-%s.md" (substring id 0 (min 8 (length id)))
+                                         (format-time-string "%Y%m%dT%H%M%S"))
+                                 dir))
+         (text (concat
+                (format "# %s\n\n" (or (plist-get opts :title) "Conversation"))
+                (format "- Session: %s (%s)\n" (or (plist-get session :name) "unnamed") id)
+                (if (plist-get opts :about) (format "- %s\n" (plist-get opts :about)) "")
+                (format "- Working directory: %s\n\n" (plist-get session :cwd))
+                harness-session--transcript-legend "\n\n"
+                "---\n\n"
+                (harness-call 'session/transcript-text id)
+                "\n")))
+    (unless (file-directory-p root)
+      (signal 'harness-error (list (format "the session's directory %s does not exist" root))))
+    (harness-ensure-directory dir)
+    (let ((ignore (expand-file-name ".gitignore" dir)))
+      (unless (file-exists-p ignore)
+        (harness-write-file-atomically ignore "*\n")))
+    (harness-write-file-atomically file text)
+    (list :file file :lines (1+ (cl-count ?\n text)))))
 
 ;;;; Init and reload
 
@@ -1575,7 +2040,14 @@ Sessions saved mid-turn are settled with `harness-session--settle'."
       (condition-case err
           (harness-session--settle (car entry) (cdr entry))
         (error (harness-log 'warn "session %s: could not settle its interrupted turn: %S"
-                            (harness-session-id (car entry)) err))))))
+                            (harness-session-id (car entry)) err))))
+    ;; A move waiting for a turn that the stop ended.
+    (maphash (lambda (id s)
+               (when (harness-session-move s)
+                 (condition-case err
+                     (harness-session--apply-pending-move id)
+                   (error (harness-log 'warn "session %s: could not make its move: %S" id err)))))
+             harness-sessions)))
 
 (defconst harness-session--budget-copies-marker "session-budget-copies-dropped.json"
   "Store document written once the copies of the Budget setting are dropped.")
@@ -1618,16 +2090,22 @@ After that, a budget a session has was given to it, and stays."
 (defun harness-session--init ()
   "Start the session module.
 Load the saved sessions, drop the copies of the Budget setting they
-hold, follow the updates of the model catalogue, and write every
-record when Emacs exits."
+hold, follow the updates of the model catalogue, hold every session to
+the policy after a reload, make the move a session waits to make once
+its turn ends, and write every record when Emacs exits."
   (harness-session--load-all)
   (harness-session--drop-budget-copies)
   (harness-on 'provider/models-updated #'harness-session--on-models-updated)
+  (harness-on 'harness/reloaded #'harness-session--on-reloaded)
+  ;; A session that asked to move during a turn moves when it ends.
+  (harness-on 'agent/turn-ended #'harness-session--apply-pending-move)
   (add-hook 'kill-emacs-hook #'harness-session--on-kill-emacs))
 
 ;; A reload does not run `:init' again for a ready module, so the
-;; subscription is made here too.
+;; subscriptions are made here too.
 (harness-on 'provider/models-updated #'harness-session--on-models-updated)
+(harness-on 'harness/reloaded #'harness-session--on-reloaded)
+(harness-on 'agent/turn-ended #'harness-session--apply-pending-move)
 
 ;; The context-window slot of sessions loaded by an earlier version of
 ;; this file holds a copy of their model's window, or the stand-in for
@@ -1653,6 +2131,7 @@ record when Emacs exits."
               (session/provider-state-changed . "(ID STATE) when the provider state is replaced by another")
               (session/node-added . "(ID NODE)") (session/node-updated . "(ID NODE TRANSIENT)")
               (session/head-moved . "(ID NODE-ID)")
+              (session/moved . "(ID OLD-CWD NEW-CWD) after the session moved to another working directory")
               (session/queue-changed . "(ID ITEMS)") (session/pending-changed . "(ID ITEMS)")
               (session/pending-resolved . "(ID ITEM ANSWER)")
               (session/usage . "(ID TOTALS RECORD)") (session/todos . "(ID TODOS)") (session/plan . "(ID TEXT)")))

@@ -275,6 +275,43 @@
               (should (= 4 (plist-get (nth 4 responses) :id)))))
         (delete-process proc)))))
 
+(ert-deftest harness-acp-tcp-slow-client-gets-sends-in-line ()
+  "What is sent to a client that does not read waits in line, not nested.
+`process-send-string' runs the timers due while it waits for room in
+the socket, and each of them sending to the same client used to wait
+inside the one before: a UI busy for a while, with sessions streaming
+to it, made the harness process exceed `max-lisp-eval-depth'."
+  (harness-acp-tcp-test-with
+    (let* ((conn (harness-acp-tcp-test-connect port))
+           (client (progn (harness-test-await (harness-acp-initialize conn))
+                          (cl-find 'tcp harness-acp--clients :key #'harness-acp-client-kind)))
+           (socket (harness-acp-connection-process conn))
+           (pad (make-string 1000000 ?x))
+           (n 30)
+           (sending 0)
+           (deepest 0)
+           (received (lambda ()
+                       (let (out)
+                         (dolist (m harness-acp-tcp-test-messages out)
+                           (when (equal (car m) "_test/pad")
+                             (push (plist-get (cadr m) :n) out)))))))
+      ;; The client stops reading, as a busy UI does, while the server
+      ;; sends it far more than its socket holds.
+      (stop-process socket)
+      (dotimes (i n)
+        (run-at-time 0 nil (lambda ()
+                             (setq deepest (max deepest (cl-incf sending)))
+                             (unwind-protect
+                                 (harness-acp--client-notify client "_test/pad" (list :n i :pad pad))
+                               (cl-decf sending)))))
+      (run-at-time 1 nil #'continue-process socket)
+      (harness-test-wait (lambda () (= n (length (funcall received)))) 30 "the notifications")
+      (should (equal (number-sequence 0 (1- n)) (funcall received)))
+      ;; One send waited for room; the timers run meanwhile queued theirs.
+      (should (<= deepest 2))
+      (should (memq client harness-acp--clients))
+      (should-not (process-get (harness-acp-client-process client) 'harness-acp-waiting)))))
+
 (ert-deftest harness-acp-tcp-refuses-non-loopback-without-opt-in ()
   (harness-acp-tcp-test-with
     (harness-call 'acp/stop)

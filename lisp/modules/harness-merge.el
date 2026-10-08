@@ -720,10 +720,33 @@ child or the fresh session resolving its conflicts."
   :subject #'ignore
   :handler #'harness-merge--done)
 
+;;;; Moves
+
+(defun harness-merge--before-move (gate session _dir)
+  "Keep a session where the merges it takes part in expect it.
+A `session/before-move' filter: GATE is (:proceed t) and SESSION the
+plist of the session that is to move.  A queued merge goes into its
+parent's working directory as it is when the merge starts, and the
+session resolving a merge's conflicts works in the child's worktree."
+  (let* ((id (plist-get session :id))
+         (entries (gethash id harness-merge--queues)))
+    (cond
+     ((not (plist-get gate :proceed)) gate)
+     (entries
+      (list :proceed nil
+            :reason (format "the merge queue has %s to merge into it (%s); move it after %s"
+                            (if (cdr entries) (format "%d branches" (length entries)) "a branch")
+                            (mapconcat (lambda (e) (harness-merge--label (plist-get e :child))) entries ", ")
+                            (if (cdr entries) "those merges" "that merge"))))
+     ((harness-merge--entry-of id)
+      (list :proceed nil :reason "it takes part in a merge the merge queue has not finished"))
+     (t gate))))
+
 ;;;; Registration
 
 (defun harness-merge--init ()
   "Register the module's filters and subscribers (idempotent)."
+  (harness-add-filter 'session/before-move #'harness-merge--before-move)
   (harness-add-filter 'agent/step #'harness-merge--hold 30)
   (harness-add-filter 'agent/before-turn #'harness-merge--hold 30)
   (harness-on 'agent/turn-started #'harness-merge--on-turn-started)

@@ -14,9 +14,17 @@
 (require 'harness-acp)
 
 (defvar harness-provider-claude-program)
+(defvar harness-provider-demo--delay)
+(defvar harness-provider-demo-script-override)
+(defvar harness-usage-live-interval)
+(defvar harness-ui--live)
 (defvar mwheel-scroll-up-function)
 (defvar mwheel-scroll-down-function)
+(defvar harness-perms-rules)
+(defvar harness-perms--session-rules)
 (declare-function harness-provider-claude-close-all "harness-provider-claude")
+(declare-function harness-perms--add-rule-noted "harness-perms")
+(declare-function harness-ui-session-live "harness-ui")
 
 (defvar harness-ui-chat-test-events nil "Recorded (EVENT . ARGS), newest first.")
 
@@ -214,7 +222,9 @@
           (should (string-match-p "Tour" header))
           (should (string-match-p "demo" header))
           (should (string-match-p "\\$0.0042" header))
-          (should (string-match-p "2.0k/" header)))
+          ;; The context in use: the last prompt and what its call wrote.
+          (should (string-match-p "2.2k/" header))
+          (should (string-match-p " 180 out " header)))
         (should (string-match-p "idle" (harness-chat--mode-line)))
         (should (equal "" (harness-compose-text)))))))
 
@@ -470,6 +480,63 @@ session is idle, dimmed, and makes room first in a narrow window."
                            (substring-no-properties
                             (harness-chat--header (1- (harness-ui-header-string-width full))))))))))))
 
+(ert-deftest harness-ui-chat-header-counts-tokens-as-they-stream ()
+  "The header's token figures grow while the model streams, not at the end.
+The harness counts what streams, a token for every four characters, and
+the header marks figures so estimated with \"~\".  The call's usage
+report replaces the estimate with the real numbers, which stay once the
+turn ended: the context in use is then the prompt plus what the call
+wrote.  The output goes after the context and before the rate."
+  (harness-ui-chat-test-with
+    (harness-test-load-module 'usage)
+    (clrhash harness-ui--live)
+    (clrhash harness-ui--rates)
+    (let* ((sid (harness-ui-chat-test-session "Live"))
+           (buf (harness-ui-chat-test-open sid))
+           (harness-usage-live-interval 0.05)
+           (harness-provider-demo--delay 0.05)
+           (harness-provider-demo-script-override
+            (append (make-list 40 '(:type text :delta "eight ch"))
+                    '((:type usage :input 100 :output 70 :cost 0.0001 :context 100)
+                      (:type done :stop-reason end-turn))))
+           (out (lambda (live) (plist-get live :output))))
+      (with-current-buffer buf
+        (should-not (string-match-p " out" (harness-chat--header most-positive-fixnum)))
+        (harness-ui-chat-test-type buf "hello")
+        (harness-chat-send))
+      ;; Streaming: two tokens for each delta of eight characters, all estimated.
+      (harness-test-wait (lambda () (>= (or (funcall out (harness-ui-session-live sid)) 0) 10))
+                         5 "the live count")
+      (let ((live (harness-ui-session-live sid)))
+        (should (= 0 (% (funcall out live) 2)))
+        (should (= (funcall out live) (plist-get live :estimated)))
+        (should (= (funcall out live) (plist-get live :context)))
+        (with-current-buffer buf
+          (let ((header (harness-chat--header most-positive-fixnum)))
+            (should (string-search (format "  ~%d/" (plist-get live :context)) header))
+            (should (string-search (format "  ~%d out" (funcall out live)) header))))
+        (harness-test-wait (lambda () (> (or (funcall out (harness-ui-session-live sid)) 0) (funcall out live)))
+                           5 "the live count to grow"))
+      (should (equal "running" (plist-get (harness-ui-session sid) :status)))
+      ;; Reported and ended: the real numbers.
+      (harness-test-wait (lambda () (= 1 (harness-ui-chat-test-turns-ended sid))) 10 "the turn to end")
+      (harness-test-wait (lambda () (equal "idle" (plist-get (harness-ui-session sid) :status)))
+                         5 "the session idle")
+      (harness-test-wait (lambda () (harness-ui-session-rate sid)) 5 "the rate")
+      (should-not (gethash sid harness-ui--live))
+      (with-current-buffer buf
+        (let* ((header (harness-chat--header most-positive-fixnum))
+               (context (string-search "  170/" header))
+               (output (string-search "  70 out" header))
+               (rate (string-search " tok/s" header)))
+          (should context)
+          (should output)
+          (should rate)
+          (should (< context output rate))
+          (should-not (string-search "~" header))
+          (should (equal "Context tokens in use: 170; output tokens: 70."
+                         (get-text-property (+ 2 output) 'help-echo header))))))))
+
 (ert-deftest harness-ui-chat-hover-help-is-one-line ()
   "Every tooltip of a rendered session fits one echo-area line.
 With tooltips off (`tooltip-mode' nil) the help shows in the echo area,
@@ -620,6 +687,99 @@ the header follows, and the transcript notes each change."
                                           :_harness (list :nodeId "n-think")))
         (should (equal "thinking" (harness-chat-block-kind (gethash "n-think" harness-chat--blocks))))
         (should (equal '("n-think" "n-live") harness-chat--order))))))
+
+;;;; Bursts of messages
+
+(defun harness-ui-chat-test-connect ()
+  "Connect the UI and wait for the model catalogue.
+The first one over a connection redraws every chat buffer; a test that
+streams into a buffer of its own must not see it rebuilt halfway."
+  (harness-ui-connection)
+  (harness-test-wait (lambda () (eq harness-ui-connection (car harness-ui--models-seen))) 5 "the model catalogue"))
+
+(defun harness-ui-chat-test-push (sid update)
+  "Send UPDATE of session SID to the UI, as the harness does, through its client."
+  (harness-acp--client-send (cl-find harness-ui-connection harness-acp--clients
+                                     :key #'harness-acp-client-connection)
+                            (list :jsonrpc "2.0" :method "session/update"
+                                  :params (list :sessionId sid :update update))))
+
+(defun harness-ui-chat-test-chunk (id text)
+  "Return the update streaming TEXT into node ID."
+  (list :sessionUpdate "agent_message_chunk" :content (list :type "text" :text text)
+        :_harness (list :nodeId id)))
+
+(ert-deftest harness-ui-chat-burst-scrolls-once-a-slice ()
+  "A burst of streamed text scrolls the window following it a few times only.
+Messages that piled up while Emacs was busy were handled in one go, and
+each chunk scrolled the window it streamed into again: with four
+sessions streaming, Emacs froze for seconds at a time (2026-10-07).
+They are handled a slice at a time now (`harness-acp-receive-slice'),
+and a window is scrolled once a slice, to the end of the text still."
+  (harness-ui-chat-test-with
+    (harness-ui-chat-test-connect)
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (w (selected-window))
+           (n 300)
+           (pins 0)
+           (pin (symbol-function 'harness-chat--pin)))
+      (set-window-buffer w buf)
+      (with-current-buffer buf
+        (set-window-point w harness-compose-end)
+        (harness-chat--apply-update (list :sessionUpdate "_harness/node"
+                                          :node (list :id "n-burst" :kind "assistant" :content ""))))
+      (cl-letf (((symbol-function 'harness-chat--pin)
+                 (lambda (window) (cl-incf pins) (funcall pin window))))
+        (dotimes (i n)
+          (harness-ui-chat-test-push sid (harness-ui-chat-test-chunk "n-burst" (format "line %d\n" i))))
+        (harness-test-wait (lambda () (with-current-buffer buf
+                                        (string-suffix-p (format "line %d\n" (1- n))
+                                                         (harness-chat-block-content
+                                                          (gethash "n-burst" harness-chat--blocks)))))
+                           10 "the burst to be handled"))
+      (with-current-buffer buf
+        ;; Every chunk, in order.
+        (should (equal (mapconcat (lambda (i) (format "line %d\n" i)) (number-sequence 0 (1- n)) "")
+                       (harness-chat-block-content (gethash "n-burst" harness-chat--blocks))))
+        ;; The window scrolled a few times, not once a chunk ...
+        (should (< 0 pins 20))
+        ;; ... and shows the end of the buffer.
+        (should (> (window-start w) (harness-chat-block-start (gethash "n-burst" harness-chat--blocks))))
+        (should (<= (count-lines (window-start w) (point-max)) (window-body-height w)))))))
+
+(ert-deftest harness-ui-chat-hidden-chat-renders-once-shown ()
+  "A chat no window shows keeps streamed text as it came, and renders it once shown.
+Rendering the Markdown of a message streaming in, again and again,
+cost the UI as much for chats nobody looked at as for the one it showed."
+  (harness-ui-chat-test-with
+    (harness-ui-chat-test-connect)
+    (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session)))
+           (w (selected-window)))
+      (with-current-buffer buf
+        (should-not (harness-chat--windows))
+        (should-not harness-chat--redraw-pending)
+        (harness-chat--apply-update (list :sessionUpdate "_harness/node"
+                                          :node (list :id "n-hidden" :kind "assistant" :content "")))
+        (harness-chat--apply-update (harness-ui-chat-test-chunk "n-hidden" "Hello **world**")))
+      ;; The re-render came due with no window: the text is as it came.
+      (harness-test-wait (lambda () (buffer-local-value 'harness-chat--stale buf)) 5 "the re-render to be due")
+      (with-current-buffer buf
+        (should (equal '("n-hidden") harness-chat--stale))
+        (should (= 0 (hash-table-count harness-chat--render-timers)))
+        (should (harness-ui-chat-test-find buf "Hello **world**"))
+        ;; Shown, it is rendered.
+        (set-window-buffer w buf)
+        (harness-chat--on-window-buffer-change w)
+        (should-not harness-chat--stale)
+        (should-not (harness-ui-chat-test-find buf "**"))
+        (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "world")) 'bold))
+        ;; Streaming on while shown re-renders as before.
+        (harness-chat--apply-update (harness-ui-chat-test-chunk "n-hidden" " and *more*"))
+        (harness-test-wait (lambda () (with-current-buffer buf (not (harness-ui-chat-test-find buf "*more*"))))
+                           5 "the re-render")
+        (should-not harness-chat--stale)
+        (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "more")) 'italic))))))
 
 ;;;; The activity line
 
@@ -1515,6 +1675,63 @@ Its Allow grants the directory until the turn ends, and says so."
           (harness-chat-push))
         (harness-test-wait (lambda () recorded) 5 "answered through the method")
         (should (equal (list sid "pre" "allow-always") (car recorded)))))))
+
+(ert-deftest harness-ui-chat-permission-note-undoes-its-answer ()
+  "The note of a lasting answer offers [Undo], which takes back what it recorded.
+The note then shows how that went: struck through when undone, the
+reason under it when the rule changed since.  Other hints have no
+button."
+  (harness-ui-chat-test-with
+    (harness-test-load-module 'perms)
+    (let ((harness-perms-rules nil)
+          (shown nil))
+      (cl-letf (((symbol-function 'harness-save-user-option) (lambda (sym value) (set sym value))))
+        (let* ((sid (harness-ui-chat-test-session))
+               (buf (harness-ui-chat-test-open sid))
+               (click (lambda (text)
+                        (with-current-buffer buf
+                          (goto-char (- (harness-ui-chat-test-find buf text) 2))
+                          (setq shown nil)
+                          (cl-letf (((symbol-function 'message)
+                                     (lambda (fmt &rest args) (when fmt (push (apply #'format fmt args) shown)))))
+                            (harness-chat-push)
+                            (harness-test-wait (lambda () shown) 5 "the echo area"))))))
+          (harness-call 'session/hint sid "Plan updated")
+          (harness-perms--add-rule-noted sid '(:tool "bash" :behavior allow) 'always)
+          (harness-perms--add-rule-noted sid '(:tool "web_fetch" :behavior deny) 'session)
+          (harness-test-wait (lambda () (harness-ui-chat-test-find buf "Denying every web_fetch call for this session  [Undo]\n"))
+                             5 "the notes")
+          (with-current-buffer buf
+            (should (harness-ui-chat-test-find buf "    Plan updated\n"))
+            (let ((pos (harness-ui-chat-test-find buf "    Always allowing every bash call, in every session  [Undo]\n")))
+              (should pos)
+              (should (harness-ui-chat-test-face-at (- pos 3) 'button))
+              (should (equal "Take back what this answer recorded; the call it answered stays allowed"
+                             (get-text-property (- pos 3) 'help-echo))))
+            (should (equal "Take back what this answer recorded; the call it answered stays denied"
+                           (get-text-property (- (harness-ui-chat-test-find buf "for this session  [Undo]") 2)
+                                              'help-echo))))
+          ;; Undone: the rule is gone, the echo area says so, the note is struck through.
+          (funcall click "in every session  [Undo]")
+          (should (member "Undone: no longer always allowing every bash call, in every session" shown))
+          (should-not harness-perms-rules)
+          (harness-test-wait (lambda () (harness-ui-chat-test-find
+                                         buf "    Always allowing every bash call, in every session  undone\n"))
+                             5 "the note redrawn")
+          (with-current-buffer buf
+            (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "Always allowing"))
+                                                  'harness-chat-undone-face))
+            (should-not (harness-ui-chat-test-find buf "in every session  [Undo]")))
+          ;; Changed since: the rule stays, and the note says why.
+          (puthash sid (list '(:tool "web_fetch" :behavior allow)) harness-perms--session-rules)
+          (funcall click "for this session  [Undo]")
+          (should (member "Not undone: this session's rule for web_fetch has changed since, so it stays as it is" shown))
+          (should (equal '((:tool "web_fetch" :behavior allow)) (gethash sid harness-perms--session-rules)))
+          (harness-test-wait (lambda () (harness-ui-chat-test-find
+                                         buf (concat "    Denying every web_fetch call for this session\n"
+                                                     "    Not undone: this session's rule for web_fetch has changed since, so it stays as it is\n")))
+                             5 "the reason")
+          (should-not (harness-ui-chat-test-find buf "[Undo]")))))))
 
 (ert-deftest harness-ui-chat-permission-pattern-is-editable ()
   "A prompt about paths shows the pattern it is answered for; e edits it, the answer carries it."
@@ -2658,7 +2875,11 @@ split the run of reads around it, so part of the run stayed unfolded."
       (with-current-buffer buf
         (harness-compose-add-attachment (expand-file-name "harness-ui-chat-test.el" (expand-file-name "test" harness-test-root)))
         (should (harness-ui-chat-test-find buf "chat-test.el")))
-      (run-hooks 'harness-ui-redraw-hook)
+      ;; Shown in a window, as a hidden chat is rebuilt once one shows it.
+      (set-window-buffer (selected-window) buf)
+      (let ((generation (buffer-local-value 'harness-chat--generation buf)))
+        (run-hooks 'harness-ui-redraw-hook)
+        (should (> (buffer-local-value 'harness-chat--generation buf) generation)))
       (harness-test-wait (lambda () (with-current-buffer buf (and (not harness-chat--loading) harness-chat--order))) 5 "redrawn")
       (with-current-buffer buf
         (should (equal "a draft in progress" (harness-compose-text)))
@@ -2671,6 +2892,39 @@ split the run of reads around it, so part of the run stayed unfolded."
           (should (string-prefix-p "file://" (plist-get blocks :uri))))
         (harness-compose-remove-attachment (plist-get (car harness-compose-attachments) :path))
         (should (null harness-compose-attachments))))))
+
+(ert-deftest harness-ui-chat-redraw-waits-for-a-window ()
+  "A redraw rebuilds the chats windows show, and each other one once shown.
+Every chat buffer fetched and rendered its whole transcript again at
+once, even when nothing showed it, whenever the model catalogue came."
+  (harness-ui-chat-test-with
+    (harness-ui-chat-test-connect)
+    (let* ((shown (harness-ui-chat-test-open (harness-ui-chat-test-session "Shown")))
+           (hidden (harness-ui-chat-test-open (harness-ui-chat-test-session "Hidden")))
+           (w (selected-window))
+           (loads nil)
+           (load (symbol-function 'harness-chat--load)))
+      (harness-ui-chat-test-prompt hidden "hello there")
+      (set-window-buffer w shown)
+      (cl-letf (((symbol-function 'harness-chat--load)
+                 (lambda (&rest args) (push (current-buffer) loads) (apply load args))))
+        (run-hooks 'harness-ui-redraw-hook)
+        (should (equal loads (list shown)))
+        (should (buffer-local-value 'harness-chat--redraw-pending hidden))
+        (should-not (buffer-local-value 'harness-chat--redraw-pending shown))
+        ;; Shown, the other is rebuilt, from a timer (Emacs is redisplaying).
+        (set-window-buffer w hidden)
+        (with-current-buffer hidden
+          (harness-chat--on-window-buffer-change w)
+          (should-not harness-chat--redraw-pending))
+        (should (equal loads (list shown)))
+        (harness-test-wait (lambda () (memq hidden loads)) 5 "the hidden chat to be rebuilt")
+        (harness-test-wait (lambda () (not (buffer-local-value 'harness-chat--loading hidden))) 5 "its load")
+        ;; Once only.
+        (with-current-buffer hidden (harness-chat--on-window-buffer-change w))
+        (accept-process-output nil 0.05)
+        (should (equal loads (list hidden shown)))
+        (should (harness-ui-chat-test-find hidden "hello there"))))))
 
 (ert-deftest harness-ui-chat-dropped-link-is-sent-as-an-image ()
   ;; A link dropped on a chat downloads behind a chip in the tail; the

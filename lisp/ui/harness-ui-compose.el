@@ -84,6 +84,9 @@
 (defvar-local harness-compose--text "" "The box's text, kept across redraws.")
 (defvar-local harness-compose--files nil "Project files for @ completion.")
 (defvar-local harness-compose--skills nil "Skill names for / completion.")
+(defvar-local harness-compose-commands nil
+  "Names of the commands this box runs as /NAME, for / completion.
+The chat sets them from `harness-chat-commands'.")
 (defvar-local harness-compose--pads nil "Window -> overlay padding the buffer so the box sits at the bottom.")
 (defvar-local harness-compose--pad-at nil "Function returning where the padding goes, or nil for the top.")
 (defvar-local harness-compose--outside 0
@@ -1420,14 +1423,19 @@ was empty, the completion UI is asked again."
 
 (defun harness-compose--table (var category)
   "Return a completion table over the strings in VAR, with CATEGORY metadata.
-VAR, a variable of the current buffer, is read each time the table is
-asked: the box's sources arrive asynchronously, and a table made before
-one did offers it once it has."
+VAR, a variable of the current buffer or a list of them whose strings
+are offered together, is read each time the table is asked: the box's
+sources arrive asynchronously, and a table made before one did offers
+it once it has."
   (let ((buf (current-buffer)))
     (lambda (string pred action)
       (if (eq action 'metadata)
           (list 'metadata (cons 'category category))
-        (complete-with-action action (and (buffer-live-p buf) (buffer-local-value var buf))
+        (complete-with-action action
+                              (and (buffer-live-p buf)
+                                   (delete-dups
+                                    (mapcan (lambda (v) (copy-sequence (buffer-local-value v buf)))
+                                            (ensure-list var))))
                               string pred)))))
 
 (defun harness-compose--attach-token (name root)
@@ -1450,9 +1458,10 @@ files to complete next."
   "Complete @files and /skills in the box.
 An @ completes a project file by part of its name, or any file by its
 path (see `harness-compose--file-table'); a completed file becomes an
-attachment.  The sigil is what starts completion, the way an LSP
-trigger character does: popups that wait for a few characters show
-right after it."
+attachment.  A / at the start of the box completes a skill, or a
+command of the box (`harness-compose-commands').  The sigil is what
+starts completion, the way an LSP trigger character does: popups that
+wait for a few characters show right after it."
   (let ((file (harness-compose--capf-bounds ?@))
         (skill (harness-compose--capf-bounds ?/))
         (root (harness-compose--root)))
@@ -1474,7 +1483,8 @@ right after it."
                 (harness-compose--attach-token str root)))))
      ((and skill (= (1- (car skill)) harness-compose-start))
       (list (car skill) (cdr skill)
-            (harness-compose--table 'harness-compose--skills 'harness-compose-skill)
+            (harness-compose--table '(harness-compose-commands harness-compose--skills)
+                                    'harness-compose-skill)
             :exclusive 'no
             :company-prefix-length t
             :exit-function (lambda (_str status) (when (memq status '(finished sole)) (insert " "))))))))
@@ -1593,11 +1603,12 @@ another application (`harness-ui-drag-source')."
 (defun harness-compose--image (file height &optional width)
   "Return a string showing the image FILE, or nil.
 It is at most HEIGHT pixels high and WIDTH wide, three times HEIGHT by
-default."
+default, and drawn in `harness-ui-image-colors'."
   (when (and file (file-readable-p file) (ignore-errors (image-supported-file-p file)))
-    (when-let* ((image (ignore-errors (create-image file nil nil :max-height height
-                                                    :max-width (or width (* 3 height))
-                                                    :ascent 'center))))
+    (when-let* ((image (ignore-errors (apply #'create-image file nil nil :max-height height
+                                             :max-width (or width (* 3 height))
+                                             :ascent 'center
+                                             (harness-ui-image-color-props)))))
       (propertize " " 'display image))))
 
 (defun harness-compose--thumbnail (att &optional max-width)

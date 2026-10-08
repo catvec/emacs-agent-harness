@@ -8,8 +8,9 @@
 ;; the directories granted at runtime (to the session, or until its turn
 ;; ends) and the tool output directory.  `a' grants another directory
 ;; to the session (with a prefix argument: to every session), `k'
-;; revokes the grant at point, `g' refreshes.  The list follows grants
-;; made from permission prompts elsewhere.
+;; revokes the grant at point, `m' moves the session to another working
+;; directory (`harness-move-session'), `g' refreshes.  The list follows
+;; grants made from permission prompts elsewhere, and moves.
 
 ;;; Code:
 
@@ -47,7 +48,10 @@
           (vector (propertize (abbreviate-file-name (plist-get e :dir))
                               'face (if revocable 'default 'harness-dim-face))
                   (propertize (harness-ui-dirs--describe (plist-get e :source)) 'face 'harness-dim-face)
-                  (if revocable (propertize "k to revoke" 'face 'harness-hint-face) "")))))
+                  (cond (revocable (propertize "k to revoke" 'face 'harness-hint-face))
+                        ((equal (format "%s" (plist-get e :source)) "cwd")
+                         (propertize "m to move" 'face 'harness-hint-face))
+                        (t ""))))))
 
 (defconst harness-ui-dirs--min-width 50
   "Narrowest the Directory column gets.")
@@ -92,6 +96,10 @@ BUFFER defaults to the current buffer."
     map)
   "Keymap of `harness-ui-dirs-mode'.")
 
+;; At top level, not in the `defvar', so a reload binds it in a running
+;; Emacs too.
+(define-key harness-ui-dirs-mode-map (kbd "m") #'harness-ui-dirs-move)
+
 (define-derived-mode harness-ui-dirs-mode tabulated-list-mode "Dirs"
   "Major mode listing the directories a harness session may touch.
 \\{harness-ui-dirs-mode-map}"
@@ -108,6 +116,7 @@ BUFFER defaults to the current buffer."
        ["Directories"
         (". a" "Allow a directory" harness-ui-dirs-add)
         (". k" "Revoke at point" harness-ui-dirs-revoke)
+        (". m" "Move the session to another directory" harness-ui-dirs-move)
         (". RET" "Open in Dired" harness-ui-dirs-visit)
         (". g" "Reload" harness-ui-dirs-reload)]))
 
@@ -162,6 +171,14 @@ so every session may access it."
                          (message "Revoked %s" (abbreviate-file-name dir))
                          (harness-ui-dirs--refresh-session sid))))))
 
+(defun harness-ui-dirs-move (directory &optional keep-old)
+  "Move the session of this buffer to the working directory DIRECTORY.
+With a prefix argument KEEP-OLD its old working directory stays
+allowed to it.  See `harness-move-session'."
+  (interactive (list (harness-ui-read-move-directory (harness-ui-session harness-ui-session-id))
+                     current-prefix-arg))
+  (harness-move-session directory harness-ui-session-id keep-old))
+
 (defun harness-ui-dirs-reload ()
   "Fetch the directories again."
   (interactive)
@@ -182,17 +199,22 @@ A config grant reaches every session, so with SID nil refresh them all."
                  (or (null sid) (equal harness-ui-session-id sid)))
         (harness-ui-dirs--refresh buf)))))
 
-(defun harness-ui-dirs--on-event (event _args)
+(defun harness-ui-dirs--on-event (event args)
   "Refresh directory buffers after a grant changed (EVENT from the harness).
 A grant may change the configured directories of every session, so all
-open directory buffers are refreshed."
-  (when (member event '("permission/dir-allowed" "permission/dir-revoked" "config/changed"))
-    (harness-ui-dirs--refresh-session nil)))
+open directory buffers are refreshed.  A session that moved (ARGS is
+\(ID OLD-CWD NEW-CWD)) has another working directory: its buffer is."
+  (cond
+   ((member event '("permission/dir-allowed" "permission/dir-revoked" "config/changed"))
+    (harness-ui-dirs--refresh-session nil))
+   ((equal event "session/moved")
+    (harness-ui-dirs--refresh-session (car args)))))
 
 (defun harness-ui-dirs--init ()
   "Wire the directory buffers into the UI.
 Granting or revoking a directory, or changing the config, refreshes
-them, and d in `harness-ui-map' runs `harness-directories'."
+them, and a session that moves refreshes its own; d in
+`harness-ui-map' runs `harness-directories'."
   (add-hook 'harness-ui-event-functions #'harness-ui-dirs--on-event)
   (define-key harness-ui-map (kbd "d") #'harness-directories))
 

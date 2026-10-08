@@ -13,8 +13,8 @@
 ;;
 ;; - the agent's `open_harness' tool (with `path' defaulting to the
 ;;   session's worktree), and
-;; - the `harness-dev/open' method, which the task board calls from the
-;;   [Open harness] button on a card waiting for review.
+;; - the `harness-dev/open' method, which the task board calls from
+;;   Open harness, in the menu of a card waiting for review.
 ;;
 ;; The tool is for this project only: sessions whose working directory
 ;; or worktree is a checkout of the harness (`harness.el' and
@@ -198,8 +198,9 @@ its frame exists."
   "Start an Emacs instance running the harness of PATH; return a promise.
 The promise resolves to the instance's info plist (see
 `harness-tools-dev-start').  FOCUS raises and focuses its frame.  This
-is what the task board's [Open harness] button calls; the agent uses
-the `open_harness' tool, which shares the same start."
+is what the task board's Open harness calls, from the menu of a card
+waiting for review; the agent uses the `open_harness' tool, which
+shares the same start."
   (harness-tools-dev-start path (harness-json-true-p focus)))
 
 ;;;; Project gating

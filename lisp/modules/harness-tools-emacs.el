@@ -9,9 +9,11 @@
 ;; is and holds (its documentation, value, advice, watchers), where it
 ;; is defined and the source of that definition, and tracing the calls
 ;; of a function or the changes of a variable while the user works.
-;; None of them evaluates code: model-written Lisp never runs in the
-;; user's Emacs, and the elisp tool (tools-shell) evaluates in a
-;; background Emacs instead.
+;; None of them evaluates code: the elisp tool (tools-shell) evaluates
+;; in a background Emacs, and model-written Lisp runs in the user's
+;; Emacs only through emacs_eval (tools-emacs-eval), which runs only
+;; code a judge model expects to return at once, unless the user turned
+;; it off with `harness-emacs-eval'.
 ;;
 ;; Like every tool these run here, in the harness.  The user's Emacs is
 ;; a resource they reach, as a TRAMP host is for the file tools: they
@@ -21,6 +23,12 @@
 ;; result here.  A client that lends no Emacs, such as a phone, is
 ;; never asked; with none attached (a headless harness) these tools say
 ;; so, and every other tool works.
+;;
+;; emacs_find_definition reports the source file it showed a definition
+;; from to the permission layer (`permission/reveal-file'), so the
+;; agent can read the code around the definition with read_file or grep
+;; without the user being asked about a file whose definitions these
+;; tools already show.
 
 ;;; Code:
 
@@ -561,8 +569,27 @@ Empty is nil: the user's Emacs then works out the type from the symbol."
         ((and (stringp value) (member (downcase value) types)) (downcase value))
         (t :invalid)))
 
-(defun harness-tools-emacs--find-definition (input _ctx)
-  "Handler for emacs_find_definition with INPUT."
+(defun harness-tools-emacs--reveal (ctx answer)
+  "Report the source file ANSWER showed a definition in to the permission layer.
+ANSWER is what the user's Emacs found for emacs_find_definition, in
+CTX's session.  A call that only reads may then read that file without
+a prompt (see `permission/reveal-file'), as the rest of what the
+definition was shown from.  Nothing is reported without the
+permissions module, for a definition printed from memory, or for a
+file named relatively, such as an autoload's library."
+  (let ((sid (plist-get ctx :session-id))
+        (file (plist-get answer :file)))
+    (when (and sid (stringp file) (file-name-absolute-p file)
+               (harness-json-true-p (plist-get answer :known))
+               (not (harness-json-true-p (plist-get answer :printed)))
+               (harness-method-exists-p 'permission/reveal-file))
+      (condition-case err
+          (harness-call 'permission/reveal-file sid file)
+        (error (harness-log 'debug "emacs_find_definition: could not report %s: %s"
+                            file (harness-error-message err)))))))
+
+(defun harness-tools-emacs--find-definition (input ctx)
+  "Handler for emacs_find_definition with INPUT under CTX."
   (let* ((name (plist-get input :symbol))
          (types '("function" "variable" "face"))
          (type (harness-tools-emacs--type (plist-get input :type) types)))
@@ -575,12 +602,16 @@ Empty is nil: the user's Emacs then works out the type from the symbol."
      (t
       (harness-tools-emacs--ask
        "definition" (list :symbol name :type type :maxChars (harness-tools-emacs--buffer-chars))
-       (lambda (answer) (harness-tools-emacs--format-definition name answer))
+       (lambda (answer)
+         (let ((result (harness-tools-emacs--format-definition name answer)))
+           (unless (plist-get result :is-error)
+             (harness-tools-emacs--reveal ctx answer))
+           result))
        "Search the sources with grep, or ask emacs_describe what the symbol is.")))))
 
 (harness-define-tool "emacs_find_definition"
   :label "Find definition"
-  :description "Find where a function, variable or face is defined in the user's live Emacs, as find-function does: what it is, the file it was loaded from (and its native code), and the source file with the line range and text of its definition, numbered. An alias is followed to what it names, an autoload to the library it will load, and a buffer visiting the source is read as it stands, unsaved changes included. A function evaluated outside any file is printed as Emacs holds it. Nothing is visited, shown or run: the source is only read."
+  :description "Find where a function, variable or face is defined in the user's live Emacs, as find-function does: what it is, the file it was loaded from (and its native code), and the source file with the line range and text of its definition, numbered. An alias is followed to what it names, an autoload to the library it will load, and a buffer visiting the source is read as it stands, unsaved changes included. A function evaluated outside any file is printed as Emacs holds it. Nothing is visited, shown or run: the source is only read. The source file named may then be read with the tools that only read (read_file, grep) without a grant, for the code around the definition."
   :schema '(:type "object"
             :properties (:symbol (:type "string" :description "The symbol name, e.g. find-file or fill-column")
                          :type (:type "string" :enum ("function" "variable" "face")

@@ -201,22 +201,46 @@ or \":12\" suffix names."
 
 ;;;; Block rendering
 
+(defvar harness-ui-markdown--fontified (make-hash-table :test 'equal)
+  "(MODE . CODE) -> CODE fontified in MODE, for the code blocks rendered lately.
+A message streaming in is rendered again and again, all of it, and
+fontifying a block runs its major mode in a buffer of its own: the
+blocks it finished come from here instead.")
+
+(defvar harness-ui-markdown--fontified-size 0
+  "Characters of code `harness-ui-markdown--fontified' holds.")
+
+(defconst harness-ui-markdown--fontified-max 1000000
+  "Characters of code `harness-ui-markdown--fontified' holds before it starts over.")
+
 (defun harness-ui-markdown--fontify-code (code lang)
-  "Return CODE fontified with the major mode for LANG when possible."
+  "Return CODE fontified with the major mode for LANG when possible.
+The string may be shared with other renderings: change a copy of it."
   (let ((mode (and lang (cdr (assoc (downcase lang) harness-ui-markdown-language-modes)))))
     (if (and mode (fboundp mode) (< (length code) harness-ui-markdown--fontify-limit))
-        (condition-case nil
-            (with-temp-buffer
-              (insert code)
-              (delay-mode-hooks (funcall mode))
-              (let ((inhibit-message t))
-                (font-lock-ensure))
-              ;; Font-lock leaves `face' properties; keep them as `font-lock-face' too.
-              (let ((s (buffer-string)))
-                (remove-text-properties 0 (length s) '(fontified nil) s)
-                s))
-          (error code))
+        (let ((key (cons mode code)))
+          (or (gethash key harness-ui-markdown--fontified)
+              (let ((fontified (harness-ui-markdown--fontify-in code mode)))
+                (when (> (cl-incf harness-ui-markdown--fontified-size (length code))
+                         harness-ui-markdown--fontified-max)
+                  (clrhash harness-ui-markdown--fontified)
+                  (setq harness-ui-markdown--fontified-size (length code)))
+                (puthash key fontified harness-ui-markdown--fontified))))
       code)))
+
+(defun harness-ui-markdown--fontify-in (code mode)
+  "Return CODE fontified by major MODE, or CODE itself when that fails."
+  (condition-case nil
+      (with-temp-buffer
+        (insert code)
+        (delay-mode-hooks (funcall mode))
+        (let ((inhibit-message t))
+          (font-lock-ensure))
+        ;; Font-lock leaves `face' properties; keep them as `font-lock-face' too.
+        (let ((s (buffer-string)))
+          (remove-text-properties 0 (length s) '(fontified nil) s)
+          s))
+    (error code)))
 
 (defun harness-ui-markdown--code-block (code lang)
   "Render fenced block CODE, in language LANG (a string or nil), as text.

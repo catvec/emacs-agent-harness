@@ -62,6 +62,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `usage-worktrees` | The same, the demo project's worktrees unfolded | `harness-media-shot-usage-worktrees` |
 | `worktrees` | The worktrees of the demo project | `harness-media-shot-worktrees` |
 | `settings` | The settings page for the demo project, which overrides two settings | `harness-media-shot-settings` |
+| `settings-policy` | The settings page under an administrator's policy (docs/policy.md): the banner listing what it sets, the settings it sets locked | `harness-media-shot-settings-policy` |
 | `btw` | A BTW under the rate-limit session's chat, `acme/ratelimit.py` beside it | `harness-media-shot-btw` |
 | `menu` | The menu, opened from that chat | `harness-media-shot-menu` |
 | `version` | The version page of a harness straight.el installed from GitHub, behind GitHub and its development checkout: the commits it lacks and how to pull them | `harness-media-shot-version` |

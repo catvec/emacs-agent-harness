@@ -4,6 +4,7 @@
 (require 'harness-test-helpers)
 
 (defvar harness-providers)
+(defvar harness-allowed-directories)
 
 (defvar harness-perms-test--session nil
   "Plist returned by the fake `session/get'.")
@@ -24,6 +25,7 @@
   (clrhash harness-perms--turn-dirs)
   (clrhash harness-perms--session-rules)
   (clrhash harness-perms--waiting)
+  (clrhash harness-perms--judging)
   (setq harness-perms--steered nil
         harness-perms-rules nil
         harness-perms-test--pending nil
@@ -705,6 +707,204 @@ weigh what the call would do, never whether a value looks complete."
     (let ((harness-perms-auto-model "judge:x"))
       (should (equal "perms: auto judge gave no verdict for bash (end-turn); it replied: I refuse to answer in JSON"
                      (funcall warning))))))
+
+;;;; The rules Claude Code's own auto mode follows
+
+(defun harness-perms-test--call-with-claude-settings (files fn &optional profile)
+  "Call FN with Claude Code's settings made of FILES and nothing else.
+FILES maps names to the JSON text of files under one root: config/ is
+Claude Code's configuration directory ($CLAUDE_CONFIG_DIR), system/
+the system directory of its managed settings files, and project/ a
+project.  PROFILE stands for the settings of the macOS configuration
+profile.  FN is called with the root.  No real settings are read."
+  (let* ((root (harness-test-temp-dir))
+         (process-environment (cons (concat "CLAUDE_CONFIG_DIR=" (expand-file-name "config" root))
+                                    process-environment))
+         (harness-perms-claude-auto-mode t))
+    (dolist (dir '("config/" "system/" "project/"))
+      (make-directory (expand-file-name dir root) t))
+    (pcase-dolist (`(,name . ,text) files)
+      (let ((path (expand-file-name name root)))
+        (make-directory (file-name-directory path) t)
+        (with-temp-file path (insert text))))
+    (cl-letf (((symbol-function 'harness-perms--claude-system-dir)
+               (lambda () (file-name-as-directory (expand-file-name "system" root))))
+              ((symbol-function 'harness-perms--claude-profile-settings)
+               (lambda () profile)))
+      (unwind-protect (funcall fn root)
+        (delete-directory root t)))))
+
+(ert-deftest harness-perms-claude-auto-mode-rules-are-the-ones-claude-code-reads ()
+  "The judge reads the autoMode rules Claude Code's auto mode reads.
+They come from the managed settings Claude Code applies and from the
+user's settings.json, combined list by list as Claude Code combines
+them: the managed entries first, managed-settings.json before the
+files of managed-settings.d in alphabetical order, then the user's,
+without the \"$defaults\" marker, blank entries or duplicates.  A
+project's .claude/settings.json and settings.local.json are never
+read, as Claude Code never reads them: whoever writes the repository
+would be writing the judge's exceptions."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (harness-perms-test--call-with-claude-settings
+   '(("system/managed-settings.json"
+      . "{\"autoMode\": {\"environment\": [\"$defaults\", \"Source control: github.example.com/acme-corp\"],
+                         \"hard_deny\": [\"Never send repository contents to third-party code-review APIs\"]}}")
+     ("system/managed-settings.d/20-security.json" . "{\"autoMode\": {\"soft_deny\": [\"Never run terraform apply\"]}}")
+     ("system/managed-settings.d/10-buckets.json"
+      . "{\"autoMode\": {\"environment\": [\"Trusted cloud buckets: s3://acme-builds\"]}}")
+     ("system/managed-settings.d/.hidden.json" . "{\"autoMode\": {\"allow\": [\"A hidden file\"]}}")
+     ("system/managed-settings.d/notes.txt" . "{\"autoMode\": {\"allow\": [\"No .json file\"]}}")
+     ("config/settings.json"
+      . "{\"model\": \"opus\",
+          \"autoMode\": {\"environment\": [\"Source control: github.example.com/acme-corp\", \"  \", 7,
+                                           \"Trusted internal domains: *.corp.example.com\"],
+                         \"allow\": [\"$defaults\", \"Deploying to the staging namespace is allowed\"],
+                         \"classifyAllShell\": true}}")
+     ("project/.claude/settings.json" . "{\"autoMode\": {\"allow\": [\"Whatever the repository says\"]}}")
+     ("project/.claude/settings.local.json" . "{\"autoMode\": {\"allow\": [\"Anything at all\"]}}"))
+   (lambda (root)
+     (let ((default-directory (expand-file-name "project/" root)))
+       (setq harness-perms-test--session (plist-put harness-perms-test--session :cwd default-directory))
+       (should (equal '(:environment ("Source control: github.example.com/acme-corp"
+                                      "Trusted cloud buckets: s3://acme-builds"
+                                      "Trusted internal domains: *.corp.example.com")
+                        :hard_deny ("Never send repository contents to third-party code-review APIs")
+                        :soft_deny ("Never run terraform apply")
+                        :allow ("Deploying to the staging namespace is allowed"))
+                      (harness-perms-claude-auto-mode-rules))))))
+  ;; Claude Code's configuration directory is $CLAUDE_CONFIG_DIR, else ~/.claude.
+  (let ((process-environment (cons "CLAUDE_CONFIG_DIR=/opt/claude-config" process-environment)))
+    (should (equal "/opt/claude-config/" (harness-perms--claude-config-dir))))
+  (let ((process-environment (cons "CLAUDE_CONFIG_DIR" process-environment)))
+    (should (equal (expand-file-name "~/.claude/") (harness-perms--claude-config-dir)))))
+
+(ert-deftest harness-perms-claude-managed-sources-rank-as-in-claude-code ()
+  "Of the managed sources the judge reads the ones Claude Code applies.
+By default that is the highest-ranked source that delivers a policy
+key: the server-managed settings Claude Code caches, then the macOS
+configuration profile, then the managed settings files.  A source
+with only control keys or metadata delivers none, and a lower
+source's autoMode never counts when a higher one delivers a policy,
+whatever it is.  When the highest-ranked source that says anything
+sets managedSourcesBehavior to \"merge\", every source with a policy
+key adds its entries; a lower source cannot ask for that."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (let ((remote "{\"$checksum\": \"abc\", \"autoMode\": {\"environment\": [\"Remote: acme\"]}}")
+        (file "{\"autoMode\": {\"environment\": [\"File: acme\"]}}")
+        (profile '(:autoMode (:environment ("Profile: acme")))))
+    (cl-flet ((environment (files &optional profile)
+                (let (out)
+                  (harness-perms-test--call-with-claude-settings
+                   files
+                   (lambda (_root) (setq out (plist-get (harness-perms-claude-auto-mode-rules) :environment)))
+                   profile)
+                  out)))
+      ;; The first source with a policy wins.
+      (should (equal '("Remote: acme")
+                     (environment `(("config/remote-settings.json" . ,remote) ("system/managed-settings.json" . ,file))
+                                  profile)))
+      (should (equal '("Profile: acme") (environment `(("system/managed-settings.json" . ,file)) profile)))
+      (should (equal '("File: acme") (environment `(("system/managed-settings.json" . ,file)))))
+      ;; Control keys and metadata are no policy.
+      (should (equal '("File: acme")
+                     (environment `(("config/remote-settings.json"
+                                     . "{\"$schema\": \"x\", \"managedSourcesBehavior\": \"first-wins\", \"model\": null}")
+                                    ("system/managed-settings.json" . ,file)))))
+      ;; A policy without autoMode still wins over a lower one with it.
+      (should-not (environment `(("config/remote-settings.json" . "{\"permissions\": {\"deny\": [\"Bash(curl *)\"]}}")
+                                 ("system/managed-settings.json" . ,file))))
+      ;; Merging, asked for by the highest-ranked source, with or without a policy of its own.
+      (should (equal '("Remote: acme" "Profile: acme" "File: acme")
+                     (environment `(("config/remote-settings.json"
+                                     . "{\"managedSourcesBehavior\": \"merge\", \"autoMode\": {\"environment\": [\"Remote: acme\"]}}")
+                                    ("system/managed-settings.json" . ,file))
+                                  profile)))
+      (should (equal '("Profile: acme" "File: acme")
+                     (environment `(("config/remote-settings.json" . "{\"managedSourcesBehavior\": \"merge\"}")
+                                    ("system/managed-settings.json" . ,file))
+                                  profile)))
+      ;; Asked for by a lower source, it is not done.
+      (should (equal '("Remote: acme")
+                     (environment `(("config/remote-settings.json" . ,remote)
+                                    ("system/managed-settings.json"
+                                     . "{\"managedSourcesBehavior\": \"merge\", \"autoMode\": {\"environment\": [\"File: acme\"]}}"))))))))
+
+(ert-deftest harness-perms-judge-follows-claude-auto-mode-rules ()
+  "The judge is given Claude Code's autoMode rules, after its own.
+Claude Code's auto mode trusts what the organization's environment
+names, so pushing to its repositories or uploading to its buckets is
+routine there.  A judge without those rules takes that for sending
+private data off the machine, which is stricter than Claude Code
+with the same settings.  Each list comes under what it means to
+Claude Code.  The judge's own prompt comes first, word for word, and
+no entry lifts its rules.  Writing such rules counts as the agent
+widening its own permissions."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-perms-test--call-with-claude-settings
+   '(("system/managed-settings.json"
+      . "{\"autoMode\": {\"environment\": [\"$defaults\", \"Source control: github.example.com/acme-corp\"],
+                         \"hard_deny\": [\"Never send repository contents to third-party code-review APIs\"],
+                         \"soft_deny\": [\"Never run terraform apply\"],
+                         \"allow\": [\"Writing to s3://acme-scratch/ is allowed:\\nan ephemeral bucket\"]}}"))
+   (lambda (_root)
+     (let* ((requests (harness-perms-test--scripted-judge
+                       '(((:type text :delta "{\"decision\":\"allow\",\"reason\":\"the organization's own repository\"}")
+                          (:type done :stop-reason end-turn)))))
+            (harness-perms-auto-model "judge:x")
+            (d (harness-perms-test--decide
+                (list :session harness-perms-test--session :tool "bash" :kind 'exec
+                      :input '(:command "git push git@github.example.com:acme-corp/tools.git HEAD")
+                      :call-id "c1")))
+            (system (plist-get (car (funcall requests)) :system)))
+       (should (eq 'allow (plist-get d :behavior)))
+       (should (equal system (harness-perms--judge-system-prompt)))
+       (should (string-prefix-p (concat harness-perms--judge-system "\n\nRules from Claude Code's settings.") system))
+       (should (string-search "lift none\nof them" system))
+       (dolist (part '("\nEnvironment: what counts as the organization's own infrastructure"
+                       "not sending private data off\nthe machine"
+                       "Secrets still go nowhere but the service they belong to"
+                       "do not name is judged by the rules above alone"
+                       "\n- Source control: github.example.com/acme-corp\n"
+                       "\nHard deny: deny every call one of these describes, whatever else applies.\n- Never send repository contents to third-party code-review APIs\n"
+                       "\nSoft deny: deny every call one of these describes, unless an allow entry\ncovers it.\n- Never run terraform apply\n"
+                       "\nAllow: exceptions to the soft deny entries, and to nothing else.\n- Writing to s3://acme-scratch/ is allowed:\n  an ephemeral bucket"))
+         (should (string-search part system)))
+       (should-not (string-search "$defaults" system)))))
+  ;; Its hard rules are all there, and writing the rules widens the agent's permissions.
+  (dolist (rule '("deleting or overwriting existing data outside the allowed roots"
+                  "force pushes, deleting remote branches" "sending secrets or private data off the machine"
+                  "changing system configuration" "widening the agent's own permissions"
+                  "writing autoMode rules into Claude"))
+    (should (string-search rule harness-perms--judge-system))))
+
+(ert-deftest harness-perms-judge-without-claude-auto-mode-rules-keeps-its-prompt ()
+  "Without autoMode rules the judge's prompt is its own, word for word.
+So it is with no settings at all, with lists that are empty or only
+hold \"$defaults\", with settings that cannot be read or are of the
+wrong shape, and with `harness-perms-claude-auto-mode' off."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (let ((unchanged (lambda (files)
+                     (harness-perms-test--call-with-claude-settings
+                      files
+                      (lambda (_root)
+                        (should-not (harness-perms-claude-auto-mode-rules))
+                        (should (equal harness-perms--judge-system (harness-perms--judge-system-prompt))))))))
+    (funcall unchanged nil)
+    (funcall unchanged
+             '(("config/settings.json"
+                . "{\"autoMode\": {\"environment\": [\"$defaults\"], \"allow\": [], \"soft_deny\": \"Never this\",
+                                   \"hard_deny\": {\"a\": \"Never that\"}},
+                    \"permissions\": {\"allow\": [\"Bash(make *)\"]}}")
+               ("config/remote-settings.json" . "[\"not\", \"an\", \"object\"]")
+               ("system/managed-settings.json" . "{\"autoMode\": ")
+               ("system/managed-settings.d/10-x.json" . "{\"autoMode\": \"everything\"}")))
+    (harness-perms-test--call-with-claude-settings
+     '(("config/settings.json" . "{\"autoMode\": {\"environment\": [\"Source control: github.example.com/acme-corp\"]}}"))
+     (lambda (_root)
+       (should (harness-perms-claude-auto-mode-rules))
+       (let ((harness-perms-claude-auto-mode nil))
+         (should-not (harness-perms-claude-auto-mode-rules))
+         (should (equal harness-perms--judge-system (harness-perms--judge-system-prompt))))))))
 
 ;;;; Non-interactive
 
@@ -1389,7 +1589,13 @@ To be used inside `harness-test-with-temp-state'; the caller clears
     (harness-test-load-module m))
   (clrhash harness-sessions)
   (clrhash harness-perms--waiting)
+  (clrhash harness-perms--judging)
   (clrhash harness-perms--allowed-dirs)
+  (clrhash harness-perms--session-rules)
+  (clrhash harness-perms--turn-dirs)
+  ;; Call ids repeat from test to test: one steered before must not
+  ;; keep the agent from being steered again.
+  (setq harness-perms--steered nil)
   (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :permission-mode mode) :id))
 
 (ert-deftest harness-perms-yolo-switch-accepts-a-waiting-prompt ()
@@ -1487,6 +1693,342 @@ To be used inside `harness-test-with-temp-state'; the caller clears
             (should (= 1 ran))))
       (clrhash harness-sessions))))
 
+;;;; Switching to non-interactive with a prompt waiting
+
+(defun harness-perms-test--start-call (tool kind)
+  "Start deciding a call to TOOL of KIND that touches no path.
+Return (PROMISE . PENDING) once its prompt waits."
+  (let ((n (length harness-perms-test--pending))
+        (p (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                     (harness-perms-test--request tool kind))))
+    (harness-test-wait (lambda () (> (length harness-perms-test--pending) n)) 2 "pending")
+    (cons p (car harness-perms-test--pending))))
+
+(ert-deftest harness-perms-non-interactive-switch-judges-waiting-prompts ()
+  "Switching a waiting session to non-interactive has its prompts decided
+as a new call would be, the judge deciding in the user's place, and its
+verdict answers the prompt for the call alone.  A directory prompt waits
+on: only the user grants a directory."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let* ((harness-perms-auto-model "judge:small")
+         (harness-perms--auto-timeout 2)
+         (probe (harness-perms-test--allowing-judge))
+         (dir (harness-perms-test--start "read_file" 'read (expand-file-name "x.txt" (harness-test-temp-dir))))
+         (tool (harness-perms-test--start-call "bash" 'exec)))
+    (should (= 2 (length harness-perms-test--pending)))
+    ;; Another change, interactive still: nothing is judged.
+    (harness-emit 'session/updated "s1" '(:permission-mode accept-edits))
+    (accept-process-output nil 0.1)
+    (should (null (funcall probe 'requests)))
+    (should-not (harness-promise-settled-p (car tool)))
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :non-interactive t))
+    (harness-emit 'session/updated "s1" '(:non-interactive t))
+    (let ((d (harness-test-await (car tool))))
+      (should (eq 'allow (plist-get d :behavior)))
+      (should (equal "ordinary work" (plist-get d :reason)))
+      (should (plist-get d :final)))
+    (should (= 1 (length (funcall probe 'requests))))
+    ;; Answered once, for this call: no rule left behind.
+    (let ((answered (assoc (plist-get (cdr tool) :id) harness-perms-test--resolved)))
+      (should (eq 'allow (plist-get (cdr answered) :behavior)))
+      (should (eq 'once (plist-get (cdr answered) :scope))))
+    (should (null (gethash "s1" harness-perms--session-rules)))
+    ;; The directory prompt waits on, through another switch too.
+    (harness-emit 'session/updated "s1" '(:non-interactive t))
+    (accept-process-output nil 0.1)
+    (should-not (harness-promise-settled-p (car dir)))
+    (should (equal (list (plist-get (cdr dir) :id))
+                   (mapcar (lambda (p) (plist-get p :id)) harness-perms-test--pending)))
+    (should (= 1 (length (funcall probe 'requests))))
+    (harness-call 'permission/answer "s1" (plist-get (cdr dir) :id) "deny-once")
+    (should (eq 'deny (plist-get (harness-test-await (car dir)) :behavior)))))
+
+(ert-deftest harness-perms-non-interactive-switch-denies-and-steers ()
+  "A blocked session switched to non-interactive gets the judge's verdict
+on the call it waits on: a denial refuses the call, and the agent is
+steered to find another way, as after any denial while the user is
+away.  A directory request of the same session keeps waiting for the
+user, whose answer still runs its call."
+  (harness-test-with-temp-state
+    (unwind-protect
+        (let* ((sid (harness-perms-test--real-session 'ask))
+               (harness-perms-auto-model "judge:small")
+               (harness-perms--auto-timeout 2)
+               (prompts (harness-perms-test--prompts))
+               (outside (harness-test-temp-dir))
+               (ran nil))
+          (harness-perms-test--judge-provider '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"not that\"}")
+                                                (:type done :stop-reason end-turn)))
+          (harness-define-tool "t_exec" :label "Run" :kind 'exec
+                               :handler (lambda (_in _ctx) (push 'exec ran) "done"))
+          (harness-define-tool "t_read" :label "Read" :kind 'read
+                               :paths (lambda (in) (list (plist-get in :path)))
+                               :handler (lambda (_in _ctx) (push 'read ran) "read"))
+          (let ((exec (harness-call 'tools/execute sid (list :id "c1" :name "t_exec" :input '(:command "x"))))
+                (read (harness-call 'tools/execute sid (list :id "c2" :name "t_read"
+                                                             :input (list :path (expand-file-name "x.txt" outside))))))
+            (harness-test-wait (lambda () (= 2 (length (harness-call 'session/pending sid)))) 2 "both prompts")
+            (should (eq 'blocked (plist-get (harness-call 'session/get sid) :status)))
+            (harness-call 'session/update sid :non-interactive t)
+            (let ((r (harness-test-await exec)))
+              (should (plist-get r :denied))
+              (should (string-match-p "\\`Denied: not that" (plist-get r :content))))
+            (should (equal (list (cons sid (format harness-perms-steering-text "t_exec"))) (funcall prompts)))
+            ;; The directory prompt is the one left, and its call waits.
+            (let ((left (harness-call 'session/pending sid)))
+              (should (= 1 (length left)))
+              (should (plist-get (plist-get (car left) :payload) :dir))
+              (should-not (harness-promise-settled-p read))
+              (should-not ran)
+              (harness-call 'permission/answer sid (plist-get (car left) :id) "allow-once"))
+            (should (equal "read" (plist-get (harness-test-await read) :content)))
+            (should (equal '(read) ran))
+            (should (null (harness-call 'session/pending sid)))))
+      (clrhash harness-sessions))))
+
+;;;; Requests to turn non-interactive mode on
+
+(defun harness-perms-test--away-request (&rest input)
+  "Build a request of the set_non_interactive tool with INPUT."
+  (list :session harness-perms-test--session :tool harness-perms-away-tool :kind 'meta
+        :input input :call-id (harness-short-id)))
+
+(defun harness-perms-test--start-away (&rest input)
+  "Start deciding a set_non_interactive call with INPUT; return (PROMISE . PENDING)."
+  (let ((n (length harness-perms-test--pending))
+        (p (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                     (apply #'harness-perms-test--away-request input))))
+    (harness-test-wait (lambda () (> (length harness-perms-test--pending) n)) 2 "pending")
+    (cons p (car harness-perms-test--pending))))
+
+(ert-deftest harness-perms-away-request-always-asks-the-user ()
+  "Turning non-interactive mode on asks the user in every permission mode.
+Neither a standing rule, nor yolo, nor the auto-mode judge approves it,
+and the user's answer holds for the call alone, whatever its scope."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let ((harness-perms-auto-model "judge:small")
+        (probe (harness-perms-test--allowing-judge)))
+    (harness-perms-add-rule "s1" (list :tool harness-perms-away-tool :behavior 'allow) 'session)
+    (dolist (mode '(ask accept-edits auto yolo))
+      (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode mode))
+      (let* ((started (harness-perms-test--start-away :enabled t :all t :reason "I am leaving for the day."))
+             (payload (plist-get (cdr started) :payload)))
+        (should-not (harness-promise-settled-p (car started)))
+        (should (equal "Turn non-interactive mode on for every current session and task, of every project"
+                       (plist-get payload :title)))
+        (should (string-prefix-p "The agent asks: I am leaving for the day.  Nobody is asked anything there"
+                                 (plist-get payload :reason)))
+        (should (equal harness-perms-away-options (plist-get payload :options)))
+        (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "allow-always")
+        (let ((d (harness-test-await (car started))))
+          (should (eq 'allow (plist-get d :behavior)))
+          (should (plist-get d :final))
+          (should (equal "the user confirmed it" (plist-get d :reason))))))
+    (should (null (funcall probe 'requests)))
+    ;; The answer recorded nothing: the rule added above is the only one.
+    (should (= 1 (length (gethash "s1" harness-perms--session-rules))))
+    ;; Refused, the agent is told not to ask again.
+    (let ((started (harness-perms-test--start-away :enabled t :session_id "other")))
+      (should (equal "Turn non-interactive mode on for session other"
+                     (plist-get (plist-get (cdr started) :payload) :title)))
+      (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "deny-once")
+      (let ((d (harness-test-await (car started))))
+        (should (eq 'deny (plist-get d :behavior)))
+        (should (equal "the user refused it" (plist-get d :reason)))
+        (should (string-match-p "Do not ask again" (plist-get d :hint)))))))
+
+(ert-deftest harness-perms-away-request-survives-the-switches ()
+  "Neither a switch to yolo nor one to non-interactive answers the request:
+it waits for the user."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let ((harness-perms-auto-model "judge:small")
+        (probe (harness-perms-test--allowing-judge))
+        (started (harness-perms-test--start-away :enabled t)))
+    (should (equal "Turn non-interactive mode on for this session"
+                   (plist-get (plist-get (cdr started) :payload) :title)))
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'yolo))
+    (harness-emit 'session/updated "s1" '(:permission-mode yolo))
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :non-interactive t))
+    (harness-emit 'session/updated "s1" '(:non-interactive t))
+    (accept-process-output nil 0.2)
+    (should-not (harness-promise-settled-p (car started)))
+    (should (null (funcall probe 'requests)))
+    (should (= 1 (length harness-perms-test--pending)))
+    (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "allow-once")
+    (should (eq 'allow (plist-get (harness-test-await (car started)) :behavior)))))
+
+(ert-deftest harness-perms-away-request-without-anyone-to-ask ()
+  "A non-interactive session cannot ask, so its request to turn the mode
+on is denied at once, in every mode, and the hint says to carry on.
+Turning it off needs no answer: it only brings the user back in."
+  (harness-perms-test--setup :permission-mode 'yolo :non-interactive t)
+  (harness-perms-test--install-pending)
+  (let ((harness-perms-auto-model "judge:small")
+        (probe (harness-perms-test--allowing-judge)))
+    (harness-perms-add-rule "s1" (list :tool harness-perms-away-tool :behavior 'allow) 'session)
+    (dolist (mode '(yolo auto ask))
+      (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode mode))
+      (let ((d (harness-perms-test--decide (harness-perms-test--away-request :enabled t :all t))))
+        (should (eq 'deny (plist-get d :behavior)))
+        (should (plist-get d :final))
+        (should (equal (concat "nobody can confirm turning non-interactive mode on for every current session"
+                               " and task, of every project: this session is non-interactive and the user is away")
+                       (plist-get d :reason)))
+        (should (string-match-p "Do not ask again" (plist-get d :hint)))))
+    (should (null harness-perms-test--pending))
+    (should (null (funcall probe 'requests)))
+    ;; Off, in an interactive ask-mode session too, with a rule against it.
+    (dolist (away '(t nil))
+      (setq harness-perms-test--session (plist-put (plist-put harness-perms-test--session :permission-mode 'ask)
+                                                   :non-interactive away))
+      (dolist (enabled '(:false nil))
+        (let ((d (harness-perms-test--decide (harness-perms-test--away-request :enabled enabled))))
+          (should (eq 'allow (plist-get d :behavior)))
+          (should (string-match-p "brings the user back in" (plist-get d :reason))))))
+    (should (null harness-perms-test--pending)))
+  ;; Without sessions to hold a prompt, nobody can answer either.
+  (harness-perms-test--setup :permission-mode 'ask)
+  (let ((d (harness-perms-test--decide (harness-perms-test--away-request :enabled t))))
+    (should (eq 'deny (plist-get d :behavior)))
+    (should (string-match-p "no user is available" (plist-get d :reason)))))
+
+(ert-deftest harness-perms-away-request-end-to-end ()
+  "The set_non_interactive tool asks before turning the mode on, and runs
+once the user confirms; the session then is non-interactive.  From
+there, asking again is refused at once, and turning it off runs as
+asked."
+  (harness-test-with-temp-state
+    (unwind-protect
+        (progn
+          (harness-test-reset-bus)
+          (dolist (m '(store project config provider provider-demo session tools agent perms tools-sessions))
+            (harness-test-load-module m))
+          (clrhash harness-sessions)
+          (clrhash harness-perms--waiting)
+          (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted"
+                                               :permission-mode 'yolo)
+                                 :id))
+                 (run (lambda (input)
+                        (harness-call 'tools/execute sid (list :id (harness-short-id) :name "set_non_interactive"
+                                                               :input input))))
+                 (prompts (harness-perms-test--prompts))
+                 (p (funcall run '(:enabled t :reason "The user is leaving"))))
+            (harness-test-wait (lambda () (harness-call 'session/pending sid)) 2 "the confirmation")
+            (should-not (harness-promise-settled-p p))
+            (should-not (plist-get (harness-call 'session/get sid) :non-interactive))
+            (harness-call 'permission/answer sid (plist-get (car (harness-call 'session/pending sid)) :id) "allow-once")
+            (let ((r (harness-test-await p)))
+              (should-not (plist-get r :is-error))
+              (should (equal "Non-interactive mode is now on for this session." (plist-get r :content))))
+            (should (plist-get (harness-call 'session/get sid) :non-interactive))
+            ;; Non-interactive now: refused at once, nothing waits, and
+            ;; the agent is not steered to reach that goal some other
+            ;; way, as it is after any other denial.
+            (harness-register-method 'agent/running (lambda (&rest _) t))
+            (let ((r (harness-test-await (funcall run '(:enabled t :all t)))))
+              (should (plist-get r :denied))
+              (should (string-match-p "nobody can confirm" (plist-get r :content))))
+            (should (null (harness-call 'session/pending sid)))
+            (should (null (funcall prompts)))
+            (harness-perms--on-decided sid (list :tool "bash" :call-id (harness-short-id)) (list :behavior 'deny))
+            (should (equal (list (cons sid (format harness-perms-steering-text "bash"))) (funcall prompts)))
+            ;; Off needs nobody.
+            (let ((r (harness-test-await (funcall run '(:enabled :false)))))
+              (should-not (plist-get r :is-error))
+              (should (equal "Non-interactive mode is now off for this session." (plist-get r :content))))
+            (should-not (plist-get (harness-call 'session/get sid) :non-interactive))))
+      (clrhash harness-sessions))))
+
+;;;; Confirmations
+
+(defun harness-perms-test--confirming-stage ()
+  "Have every call of the tool t_confirm confirmed, as a tool's stage would."
+  (harness-add-filter 'permission/decide
+                      (lambda (decision next request)
+                        (if (equal (plist-get request :tool) "t_confirm")
+                            (harness-perms-confirm request next
+                                                   :title "Confirm: do it" :reason "It does what only you decide."
+                                                   :paths '("/somewhere/") :input '(:confirmed yes)
+                                                   :hint "Do something else.")
+                          (funcall next decision)))
+                      6))
+
+(ert-deftest harness-perms-confirm-asks-every-time ()
+  "A confirmation offers allow-once and deny-once, survives a switch to
+yolo, hands the call the confirmed input and records no rule, whatever
+the answer names."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (harness-perms-test--confirming-stage)
+  (let ((p (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                     (harness-perms-test--request "t_confirm" 'meta))))
+    (harness-test-wait (lambda () harness-perms-test--pending) 2 "the confirmation")
+    (let ((payload (plist-get (car harness-perms-test--pending) :payload)))
+      (should (equal '(allow-once deny-once) (plist-get payload :options)))
+      (should (equal "Confirm: do it" (plist-get payload :title)))
+      (should (equal "It does what only you decide." (plist-get payload :reason)))
+      (should (equal '("/somewhere/") (plist-get payload :paths)))
+      (should (plist-get payload :confirm)))
+    ;; Listed with its own title and options, too.
+    (let ((listed (plist-get (car (hash-table-values harness-perms--waiting)) :options)))
+      (should (equal '(allow-once deny-once) listed)))
+    ;; Yolo does not answer it: only the user does.
+    (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'yolo))
+    (harness-emit 'session/updated "s1" '(:permission-mode yolo))
+    (accept-process-output nil 0.1)
+    (should-not (harness-promise-settled-p p))
+    (harness-call 'permission/answer "s1" (plist-get (car harness-perms-test--pending) :id) "allow-always")
+    (let ((d (harness-test-await p)))
+      (should (eq 'allow (plist-get d :behavior)))
+      (should (plist-get d :final))
+      (should (equal '(:confirmed yes) (plist-get d :input)))))
+  (should-not harness-perms-rules)
+  (should-not (gethash "s1" harness-perms--session-rules))
+  ;; A no denies this call, with the stage's hint; the next call asks again.
+  (let ((p (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                     (harness-perms-test--request "t_confirm" 'meta))))
+    (harness-test-wait (lambda () harness-perms-test--pending) 2 "the second confirmation")
+    (harness-call 'permission/answer "s1" (plist-get (car harness-perms-test--pending) :id) "deny-session")
+    (let ((d (harness-test-await p)))
+      (should (eq 'deny (plist-get d :behavior)))
+      (should (plist-get d :final))
+      (should (equal "the user said no" (plist-get d :reason)))
+      (should (equal "Do something else." (plist-get d :hint)))))
+  (should-not (gethash "s1" harness-perms--session-rules))
+  (should (= 2 (length harness-perms-test--resolved))))
+
+(ert-deftest harness-perms-confirm-without-a-user ()
+  "A session nobody answers for is denied a confirmation at once."
+  (harness-perms-test--setup :permission-mode 'yolo :non-interactive t)
+  (harness-perms-test--install-pending)
+  (harness-perms-test--confirming-stage)
+  (let ((d (harness-perms-test--decide (harness-perms-test--request "t_confirm" 'meta))))
+    (should (eq 'deny (plist-get d :behavior)))
+    (should (plist-get d :final))
+    (should (string-match-p "needs the user's confirmation, and the session is non-interactive"
+                            (plist-get d :reason))))
+  (should-not harness-perms-test--pending)
+  (should (zerop (hash-table-count harness-perms--waiting))))
+
+(ert-deftest harness-perms-allow-dir-until-the-turn-ends ()
+  "`permission/allow-dir' with scope `turn' grants a directory to the
+session until its turn ends, and nothing is kept."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (let ((dir (harness-perms-test--real (harness-test-temp-dir)))
+        (allowed nil))
+    (harness-on 'permission/dir-allowed (lambda (sid d) (push (cons sid d) allowed)))
+    (harness-call 'permission/allow-dir "s1" dir 'turn)
+    (should (equal (list (cons "s1" dir)) allowed))
+    (should (equal (list dir) (gethash "s1" harness-perms--turn-dirs)))
+    (should (member dir (harness-call 'permission/allowed-dirs "s1")))
+    (should-not (plist-get harness-perms-test--session :allowed-dirs))
+    (should-not (gethash "s1" harness-perms--allowed-dirs))
+    (harness-emit 'agent/turn-ended "s1" 'end-turn)
+    (should-not (member dir (harness-call 'permission/allowed-dirs "s1")))))
+
 (defun harness-perms-test--end-to-end ()
   "Body of `harness-perms-dir-request-end-to-end', with real sessions loaded."
   (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :permission-mode 'auto) :id))
@@ -1504,7 +2046,9 @@ To be used inside `harness-test-with-temp-state'; the caller clears
       (harness-call 'permission/answer sid (plist-get item :id) "allow-session"))
     (let ((r (harness-test-await p)))
       (should-not (plist-get r :is-error))
-      (should (string-match-p "now an allowed directory of this session" (plist-get r :content))))
+      (should (string-match-p "now an allowed directory of this session" (plist-get r :content)))
+      ;; The sandbox shows a grant to bash, wherever bash runs.
+      (should (string-search "bash sees it at the same path" (plist-get r :content))))
     (should (equal (list (harness-perms-test--real outside)) (plist-get (harness-call 'session/get sid) :allowed-dirs)))
     (should (null (harness-call 'session/pending sid)))
     (should (eq 'idle (plist-get (harness-call 'session/get sid) :status)))
@@ -1700,6 +2244,181 @@ directories offers no pattern at all."
       (harness-call 'permission/answer "s1" (plist-get (car harness-perms-test--pending) :id) "allow-session")
       (harness-test-await p)
       (should (equal '((:tool "elisp" :behavior allow)) (gethash "s1" harness-perms--session-rules))))))
+
+(defun harness-perms-test--tree (root &rest files)
+  "Make FILES under ROOT and return ROOT.
+Each is a name relative to ROOT; one ending in a slash is a directory."
+  (dolist (f files)
+    (let ((path (expand-file-name f root)))
+      (if (directory-name-p f)
+          (make-directory path t)
+        (make-directory (file-name-directory path) t)
+        (write-region (format ";; %s\n" f) nil path nil 'silent))))
+  root)
+
+(defmacro harness-perms-test-with-home (home &rest body)
+  "Run BODY with HOME, a fresh directory, as the home directory.
+`~' and `abbreviate-file-name' follow it; it is deleted afterwards."
+  (declare (indent 1))
+  `(let* ((,home (harness-perms-test--real (harness-test-temp-dir)))
+          (process-environment (cons (concat "HOME=" (directory-file-name ,home)) process-environment))
+          (abbreviated-home-dir nil))
+     (unwind-protect (progn ,@body)
+       (delete-directory ,home t))))
+
+(ert-deftest harness-perms-one-answer-opens-the-repository ()
+  "A session reaching around one tree outside asks the user once.
+This replays a session that had to grant the same tree three times:
+emacs_find_definition named ~/.emacs.d/modules/doom/compat/compat.el,
+reading it asked for that directory alone, and the files, listings and
+searches that followed, each a step outside the last grant, asked
+again.  Now the file the definition was shown from reads without a
+prompt, the first prompt beside it offers the root of the repository,
+~/.emacs.d/, and after one allow-session nothing else asks."
+  (harness-perms-test-with-home home
+    (let* ((emacs-d (harness-perms-test--tree (file-name-as-directory (expand-file-name ".emacs.d" home))
+                                              ".git/" "init.el" "modules/doom/compat/compat.el"
+                                              "modules/doom/compat/other.el" "modules/lang/x.el"
+                                              "sources/doom+/doom+.el"))
+           (compat (expand-file-name "modules/doom/compat/" emacs-d))
+           (prompts 0))
+      (harness-perms-test--setup :permission-mode 'ask)
+      (harness-perms-test--install-pending)
+      (clrhash harness-perms--revealed)
+      (harness-on 'permission/requested (lambda (&rest _) (cl-incf prompts)))
+      ;; emacs_find_definition showed a definition in compat.el.
+      (harness-call 'permission/reveal-file "s1" (expand-file-name "compat.el" compat))
+      (should (eq 'allow (harness-perms-test--behavior "read_file" 'read (expand-file-name "compat.el" compat))))
+      (should (= 0 prompts))
+      ;; The file beside it asks, for the whole repository.
+      (let* ((started (harness-perms-test--start "read_file" 'read (expand-file-name "other.el" compat)))
+             (payload (plist-get (cdr started) :payload)))
+        (should (equal emacs-d (plist-get payload :dir)))
+        (should (equal (concat emacs-d "**") (plist-get payload :pattern)))
+        (should (equal "Access ~/.emacs.d/" (plist-get payload :title)))
+        ;; The reason still names the file the call wants.
+        (should (string-search "~/.emacs.d/modules/doom/compat/other.el" (plist-get payload :reason)))
+        (should (eq 'continue (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "allow-session")))
+        (should (eq 'allow (plist-get (harness-test-await (car started)) :behavior))))
+      (should (= 1 prompts))
+      ;; What the session did next asks nothing more.
+      (dolist (call `(("list_dir" read ,(expand-file-name "modules" emacs-d))
+                      ("glob" read ,(directory-file-name emacs-d))
+                      ("grep" read ,(expand-file-name "modules/lang" emacs-d))
+                      ("read_file" read ,(expand-file-name "sources/doom+/doom+.el" emacs-d))
+                      ("list_dir" read ,(expand-file-name "sources/doom+" emacs-d))))
+        (should (eq 'allow (apply #'harness-perms-test--behavior call))))
+      (should (= 1 prompts))
+      (should (null harness-perms-test--pending))
+      ;; One grant, the root, kept as the directory.
+      (should (equal (list emacs-d) (harness-perms--granted harness-perms-test--session))))))
+
+(ert-deftest harness-perms-prompt-root-stays-within-bounds ()
+  "A prompt offers the repository's root only when that opens no more than it.
+Without a repository the prompt offers the directory itself, as it
+does when the root is the home directory or holds it, or holds the
+session's working directory or worktree (the main checkout of a
+worktree, say).  A remote directory is not looked into."
+  (harness-perms-test-with-home home
+    (let* ((plain (harness-perms-test--tree (harness-perms-test--real (harness-test-temp-dir)) "a/b.txt"))
+           (repo (harness-perms-test--tree (file-name-as-directory (expand-file-name "repo" home))
+                                           ".git/" "lisp/a.el" "docs/x/y.md"))
+           (worktree (harness-perms-test--tree (file-name-as-directory (expand-file-name ".worktrees/task" repo))
+                                               ".git" "lisp/a.el"))
+           ;; A session working elsewhere; the jail's below works in the worktree.
+           (s (list :id "s1" :cwd (harness-perms-test--real (harness-test-temp-dir))))
+           (in (lambda (dir name) (file-name-as-directory (expand-file-name name dir)))))
+      (harness-perms-test--setup :permission-mode 'ask)
+      (unwind-protect
+          (progn
+            (should (equal (funcall in plain "a") (harness-perms--prompt-dir s (funcall in plain "a"))))
+            ;; The root, from any depth below it.
+            (should (equal repo (harness-perms--prompt-dir s (funcall in repo "docs/x"))))
+            (should (equal repo (harness-perms--prompt-dir s repo)))
+            ;; A worktree is a repository of its own.
+            (should (equal worktree (harness-perms--prompt-dir s (funcall in worktree "lisp"))))
+            ;; The main checkout of the session's own worktree.
+            (dolist (session (list (list :id "s1" :cwd worktree)
+                                   (list :id "s1" :cwd (funcall in worktree "lisp") :worktree worktree)))
+              (should (equal (funcall in repo "lisp") (harness-perms--prompt-dir session (funcall in repo "lisp")))))
+            ;; Through the jail: the prompt for a file of the main checkout.
+            (setq harness-perms-test--session (plist-put harness-perms-test--session :cwd worktree))
+            (harness-perms-test--install-pending)
+            (let ((started (harness-perms-test--start "read_file" 'read (expand-file-name "lisp/a.el" repo))))
+              (should (equal (concat (funcall in repo "lisp") "**")
+                             (plist-get (plist-get (cdr started) :payload) :pattern)))
+              (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "deny-once")
+              (harness-test-await (car started)))
+            ;; The home directory kept in git: what lies in it directly
+            ;; offers its own directory, a repository below it its root.
+            (make-directory (expand-file-name ".git" home))
+            (harness-perms-test--tree home "notes/todo.org")
+            (should (equal (funcall in home "notes") (harness-perms--prompt-dir s (funcall in home "notes"))))
+            (should (equal repo (harness-perms--prompt-dir s (funcall in repo "docs"))))
+            ;; A root that holds the home directory.
+            (let* ((outer (harness-perms-test--tree (harness-perms-test--real (harness-test-temp-dir))
+                                                    ".git/" "home/" "other/x.txt"))
+                   (process-environment (cons (concat "HOME=" (expand-file-name "home" outer)) process-environment)))
+              (unwind-protect
+                  (should (equal (funcall in outer "other") (harness-perms--prompt-dir s (funcall in outer "other"))))
+                (delete-directory outer t)))
+            (should (equal "/ssh:u@box:/srv/x/" (harness-perms--prompt-dir s "/ssh:u@box:/srv/x/"))))
+        (delete-directory plain t)))))
+
+(ert-deftest harness-perms-revealed-file-reads-without-a-prompt ()
+  "A file the user's Emacs showed a definition in may be read, and only read.
+emacs_find_definition reports it with `permission/reveal-file'; a call
+that only reads may then read that one file, in every mode, while its
+directory, the files beside it and writing it stay jailed, a rule still
+denies it, and another session gets nothing."
+  (let* ((outside (harness-perms-test--real (harness-test-temp-dir)))
+         (elsewhere (harness-perms-test--real (harness-test-temp-dir)))
+         (file (expand-file-name "compat.el" outside))
+         (beside (expand-file-name "other.el" outside))
+         (link (expand-file-name "link.el" elsewhere)))
+    (harness-perms-test--tree outside "compat.el" "other.el")
+    (make-symbolic-link file link)
+    (unwind-protect
+        (progn
+          ;; Nobody to ask here: what the jail stops is denied.
+          (harness-perms-test--setup :permission-mode 'ask)
+          (clrhash harness-perms--revealed)
+          (should (eq 'deny (harness-perms-test--behavior "read_file" 'read file)))
+          (should (equal file (harness-call 'permission/reveal-file "s1" file)))
+          (dolist (mode '(ask auto accept-edits yolo))
+            (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode mode))
+            (let ((d (harness-perms-test--decide (harness-perms-test--request "read_file" 'read file))))
+              (should (eq 'allow (plist-get d :behavior)))
+              (should (string-search "showed a definition" (plist-get d :reason)))))
+          (setq harness-perms-test--session (plist-put harness-perms-test--session :permission-mode 'ask))
+          (should (eq 'allow (harness-perms-test--behavior "grep" 'read file)))
+          ;; A link to it leads to the same file.
+          (should (eq 'allow (harness-perms-test--behavior "read_file" 'read link)))
+          ;; Only reading, and only that file.
+          (should (eq 'deny (harness-perms-test--behavior "write_file" 'write file)))
+          (should (eq 'deny (harness-perms-test--behavior "edit_file" 'write file)))
+          (should (eq 'deny (harness-perms-test--behavior "read_file" 'read beside)))
+          (should (eq 'deny (harness-perms-test--behavior "list_dir" 'read outside)))
+          (should (eq 'deny (harness-perms-test--behavior "grep" 'read outside)))
+          ;; Another session.
+          (should (eq 'deny (plist-get (harness-perms-test--decide
+                                        (list :session (list :id "s2" :cwd (plist-get harness-perms-test--session :cwd))
+                                              :tool "read_file" :kind 'read :input (list :path file) :paths (list file)))
+                                       :behavior)))
+          ;; A standing rule still decides first.
+          (harness-perms-add-rule "s1" (list :path file :behavior 'deny) 'session)
+          (should (eq 'deny (harness-perms-test--behavior "read_file" 'read file)))
+          ;; Only an existing local file is recorded.
+          (should-not (harness-call 'permission/reveal-file "s1" outside))
+          (should-not (harness-call 'permission/reveal-file "s1" (expand-file-name "missing.el" outside)))
+          (should-not (harness-call 'permission/reveal-file "s1" "compat.el"))
+          (should-not (harness-call 'permission/reveal-file "s1" "/ssh:u@box:/srv/a.el"))
+          (should (equal (list file) (gethash "s1" harness-perms--revealed)))
+          ;; A deleted session's files are forgotten.
+          (harness-emit 'session/deleted "s1" nil)
+          (should-not (gethash "s1" harness-perms--revealed)))
+      (delete-directory outside t)
+      (delete-directory elsewhere t))))
 
 (ert-deftest harness-perms-jail-grants-the-pattern-the-user-edits ()
   "Allow answers to the jail grant the pattern: narrower, wider, or just this call."
@@ -1944,7 +2663,9 @@ auto judge objecting to a call offers none either."
   (should (equal "t_unknown: echo hi" (harness-perms-describe-request '(:tool "t_unknown" :input (:command "echo hi\nmore")))))
   ;; Re-running init keeps exactly one handler per stage.
   (harness-perms--init)
-  (should (= 7 (length (gethash 'permission/decide harness--filters))))
+  (should (= 8 (length (gethash 'permission/decide harness--filters))))
+  (should (equal 6 (car (rassq #'harness-perms--away-request
+                               (gethash 'permission/decide harness--filters)))))
   (should (memq 'permission/requested (mapcar #'car (harness-events))))
   ;; A hot reload does not run `:init' again for a ready module; loading
   ;; the file still installs the stage that decides directory requests.
@@ -1952,7 +2673,7 @@ auto judge objecting to a call offers none either."
   (harness-test-load-module 'perms)
   (should (harness-module-ready-p 'perms))
   (should (rassq #'harness-perms--dir-request (gethash 'permission/decide harness--filters)))
-  (should (= 7 (length (gethash 'permission/decide harness--filters)))))
+  (should (= 8 (length (gethash 'permission/decide harness--filters)))))
 
 ;;;; Inspecting the harness itself
 
@@ -2768,6 +3489,389 @@ A deny rule stops it for any path it runs in or names."
       (let ((d (harness-perms-test--decide (harness-perms-test--bash (format "cat %sa" outside)))))
         (should (eq 'deny (plist-get d :behavior)))
         (should (equal "no user available" (plist-get d :reason)))))))
+
+;;;; Notes of lasting answers, and their undo
+
+(defvar harness-perms-rules)
+(defvar harness-allowed-directories)
+(declare-function harness-session-flush "harness-session")
+(declare-function harness-session--load-all "harness-session")
+
+(defvar harness-perms-test--saved nil
+  "(OPTION . VALUE) of every option saved, newest first.")
+
+(defvar harness-perms-test--announced nil
+  "The options `config/changed' announced, newest first.")
+
+(defmacro harness-perms-test--with-notes (&rest body)
+  "Run BODY with real sessions; `sid' is a fresh session in ask mode.
+The saved rules and the allowed directories start empty, and saving
+an option only records it in `harness-perms-test--saved'."
+  (declare (indent 0))
+  `(let ((harness-perms-rules nil)
+         (harness-allowed-directories nil)
+         (harness-perms-test--saved nil)
+         (harness-perms-test--announced nil))
+     (harness-test-with-temp-state
+       (cl-letf (((symbol-function 'harness-save-user-option)
+                  (lambda (sym value) (set sym value) (push (cons sym value) harness-perms-test--saved))))
+         (unwind-protect
+             (let ((sid (harness-perms-test--real-session 'ask)))
+               (clrhash harness-perms--session-rules)
+               (clrhash harness-perms--turn-dirs)
+               (harness-on 'config/changed (lambda (key &rest _) (push key harness-perms-test--announced)))
+               (harness-define-tool "t_exec" :label "Run" :kind 'exec :handler (lambda (_in _ctx) "ran"))
+               (harness-define-tool "t_read" :label "Read" :kind 'read
+                                    :paths (lambda (in) (list (plist-get in :path)))
+                                    :handler (lambda (_in _ctx) "read"))
+               ,@body)
+           (clrhash harness-sessions))))))
+
+(defun harness-perms-test--answered (sid tool input answer)
+  "Run TOOL with INPUT in SID, answer its prompt with ANSWER; return the result.
+The call goes into the transcript first, as the agent puts it there."
+  (let* ((call-id (harness-short-id))
+         (p (progn (harness-call 'session/append sid (list :kind 'tool-call :tool tool :call-id call-id :input input))
+                   (harness-call 'tools/execute sid (list :id call-id :name tool :input input)))))
+    (harness-test-wait (lambda () (harness-call 'session/pending sid)) 2 "the prompt")
+    (harness-call 'permission/answer sid (plist-get (car (harness-call 'session/pending sid)) :id) answer)
+    (harness-test-await p)))
+
+(defun harness-perms-test--notes (sid)
+  "Return the notes of lasting answers in SID's transcript, oldest first."
+  (cl-remove-if-not #'harness-node-permission (harness-call 'session/nodes sid)))
+
+(defun harness-perms-test--undo (sid note)
+  "Undo the answer NOTE of SID tells of; return (OUTCOME . MESSAGE)."
+  (let ((r (harness-call 'permission/undo sid (plist-get note :id))))
+    (cons (plist-get r :outcome) (plist-get r :message))))
+
+(defun harness-perms-test--record (sid note)
+  "Return the record NOTE of SID holds now."
+  (harness-node-permission (harness-call 'session/node sid (plist-get note :id))))
+
+(ert-deftest harness-perms-lasting-answer-is-noted-and-undone ()
+  "Always allow notes its rule under the call; undo takes back that rule only.
+The call stays allowed, the note says it was undone, and undoing again
+changes nothing."
+  (harness-perms-test--with-notes
+    (setq harness-perms-rules (list '(:tool "web_fetch" :behavior deny)))
+    (let ((r (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-always")))
+      (should (equal "ran" (plist-get r :content))))
+    (should (equal '((:tool "t_exec" :behavior allow) (:tool "web_fetch" :behavior deny)) harness-perms-rules))
+    (let* ((nodes (harness-call 'session/nodes sid))
+           (note (car (last nodes))))
+      ;; Right under the call it answers, a hint the model never gets.
+      (should (equal '(tool-call hint) (mapcar (lambda (n) (plist-get n :kind)) nodes)))
+      (should (equal "Always allowing every t_exec call, in every session" (plist-get note :content)))
+      (should (equal '(:scope always :rule (:tool "t_exec" :behavior allow) :undo offered)
+                     (harness-node-permission note)))
+      (should-not (string-match-p "Always allowing" (format "%S" (harness-call 'session/messages sid))))
+      (setq harness-perms-test--saved nil harness-perms-test--announced nil)
+      (should (equal '(undone . "Undone: no longer always allowing every t_exec call, in every session")
+                     (harness-perms-test--undo sid note)))
+      ;; Only that rule went, saved again, and an open settings page hears so.
+      (should (equal '((:tool "web_fetch" :behavior deny)) harness-perms-rules))
+      (should (equal (list (cons 'harness-perms-rules '((:tool "web_fetch" :behavior deny)))) harness-perms-test--saved))
+      (should (memq 'harness-perms-rules harness-perms-test--announced))
+      (let ((record (harness-perms-test--record sid note)))
+        (should (eq 'undone (plist-get record :undo)))
+        (should (equal "Undone: no longer always allowing every t_exec call, in every session"
+                       (plist-get record :result))))
+      ;; Undone once: the same rule recorded again since stays.
+      (harness-perms-add-rule sid '(:tool "t_exec" :behavior allow) 'always)
+      (should (eq 'undone (car (harness-perms-test--undo sid note))))
+      (should (member '(:tool "t_exec" :behavior allow) harness-perms-rules)))
+    ;; A once answer records nothing, and notes nothing.
+    (harness-perms-test--answered sid "t_read" (list :path (expand-file-name "x" (harness-test-temp-dir))) "allow-once")
+    (should (= 1 (length (harness-perms-test--notes sid))))
+    ;; Nor is there a note to undo anywhere else.
+    (should-error (harness-call 'permission/undo sid (plist-get (car (harness-call 'session/nodes sid)) :id)))))
+
+(ert-deftest harness-perms-every-lasting-answer-is-noted ()
+  "Each answer for the session or always notes what it recorded, and undo
+takes that back from where it was recorded; the call keeps its answer."
+  (harness-perms-test--with-notes
+    (pcase-dolist (`(,answer ,text ,record ,denied)
+                   '(("allow-session" "Allowing every t_exec call for this session"
+                      (:scope session :rule (:tool "t_exec" :behavior allow)) nil)
+                     ("deny-session" "Denying every t_exec call for this session"
+                      (:scope session :rule (:tool "t_exec" :behavior deny)) t)
+                     ("deny-always" "Always denying every t_exec call, in every session"
+                      (:scope always :rule (:tool "t_exec" :behavior deny)) t)))
+      (let ((r (harness-perms-test--answered sid "t_exec" '(:command "make") answer))
+            (note (car (last (harness-perms-test--notes sid)))))
+        (should (eq denied (and (plist-get r :denied) t)))
+        (should (equal text (plist-get note :content)))
+        (should (equal (append record '(:undo offered)) (harness-node-permission note)))
+        (should (equal (list (plist-get record :rule))
+                       (if (eq 'always (plist-get record :scope))
+                           harness-perms-rules
+                         (gethash sid harness-perms--session-rules))))
+        (should (eq 'undone (car (harness-perms-test--undo sid note))))
+        (should-not (gethash sid harness-perms--session-rules))
+        (should-not harness-perms-rules)))
+    (should (= 3 (length (harness-perms-test--notes sid))))))
+
+(ert-deftest harness-perms-undo-leaves-a-rule-changed-since-alone ()
+  "A rule changed in Settings after the answer stays as it is, and undo says so.
+One saved again in another form, but saying the same, is still undone."
+  (harness-perms-test--with-notes
+    (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-always")
+    (let ((note (car (last (harness-perms-test--notes sid)))))
+      ;; Edited on the settings page: the rule now denies exec calls.
+      (harness-call 'config/set 'harness-perms-rules '((:tool "t_exec" :kind exec :behavior deny)) :scope 'global)
+      (setq harness-perms-test--saved nil)
+      (should (equal '(changed . "Not undone: the saved rule for t_exec has changed since (in Settings, say), so it stays as it is")
+                     (harness-perms-test--undo sid note)))
+      (should (equal '((:tool "t_exec" :kind exec :behavior deny)) harness-perms-rules))
+      (should-not harness-perms-test--saved)
+      (let ((record (harness-perms-test--record sid note)))
+        (should (eq 'changed (plist-get record :undo)))
+        (should (string-prefix-p "Not undone" (plist-get record :result)))))
+    ;; Saved again with its keys in another order and a string: the same rule.
+    (setq harness-perms-rules nil)
+    (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-always")
+    (setq harness-perms-rules (list '(:behavior "allow" :tool "t_exec") '(:tool "web_fetch" :behavior deny)))
+    (should (eq 'undone (car (harness-perms-test--undo sid (car (last (harness-perms-test--notes sid)))))))
+    (should (equal '((:tool "web_fetch" :behavior deny)) harness-perms-rules))))
+
+(ert-deftest harness-perms-undo-when-the-rule-is-gone ()
+  "Nothing to undo once the rule went: removed in Settings, or a session
+rule lost when the harness restarted.  Nothing else is touched."
+  (harness-perms-test--with-notes
+    (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-session")
+    (clrhash harness-perms--session-rules)
+    (should (equal '(gone . "Nothing to undo: this session has no such rule now (session rules end when the harness restarts, and a fork starts without them)")
+                   (harness-perms-test--undo sid (car (last (harness-perms-test--notes sid))))))
+    (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-always")
+    (setq harness-perms-rules (list '(:tool "web_fetch" :behavior deny)))
+    (setq harness-perms-test--saved nil)
+    (should (equal '(gone . "Nothing to undo: the saved rules no longer have one for t_exec")
+                   (harness-perms-test--undo sid (car (last (harness-perms-test--notes sid))))))
+    (should (equal '((:tool "web_fetch" :behavior deny)) harness-perms-rules))
+    (should-not harness-perms-test--saved)))
+
+(ert-deftest harness-perms-note-offers-no-undo-for-nothing-new ()
+  "A second prompt answered the same way adds nothing, so its note offers no undo."
+  (harness-perms-test--with-notes
+    (let* ((calls (mapcar (lambda (id)
+                            (harness-call 'session/append sid (list :kind 'tool-call :tool "t_exec" :call-id id))
+                            (harness-call 'tools/execute sid (list :id id :name "t_exec" :input nil)))
+                          '("c1" "c2"))))
+      (harness-test-wait (lambda () (= 2 (length (harness-call 'session/pending sid)))) 2 "two prompts")
+      (dolist (pending (harness-call 'session/pending sid))
+        (harness-call 'permission/answer sid (plist-get pending :id) "allow-session"))
+      (dolist (p calls) (should (equal "ran" (plist-get (harness-test-await p) :content)))))
+    (pcase-let ((`(,first ,second) (harness-perms-test--notes sid)))
+      (should (eq 'offered (plist-get (harness-node-permission first) :undo)))
+      (should (equal "Allowing every t_exec call for this session (already so: nothing new to undo)"
+                     (plist-get second :content)))
+      (should-not (plist-member (harness-node-permission second) :undo))
+      (should (eq 'none (car (harness-perms-test--undo sid second))))
+      (should (equal '((:tool "t_exec" :behavior allow)) (gethash sid harness-perms--session-rules))))))
+
+(ert-deftest harness-perms-undo-reads-its-note-back-from-the-log ()
+  "A note read back from the node log, its symbols strings, is undone the same."
+  (harness-perms-test--with-notes
+    (harness-perms-test--answered sid "t_exec" '(:command "make") "deny-always")
+    ;; A restart: every node is read back from the session's log.
+    (harness-session-flush)
+    (clrhash harness-sessions)
+    (harness-session--load-all)
+    (let ((record (harness-node-permission (car (last (harness-perms-test--notes sid))))))
+      (should (equal "always" (plist-get record :scope)))
+      (should (equal "deny" (plist-get (plist-get record :rule) :behavior))))
+    (should (eq 'undone (car (harness-perms-test--undo sid (car (last (harness-perms-test--notes sid)))))))
+    (should-not harness-perms-rules)))
+
+(ert-deftest harness-perms-directory-grants-are-noted-and-undone ()
+  "A directory granted for the session or always is noted, and undo withdraws
+that grant only; one changed since in Settings stays, and undo says so."
+  (harness-perms-test--with-notes
+    (let* ((cwd (plist-get (harness-call 'session/get sid) :cwd))
+           (other (harness-test-temp-dir))
+           (a (harness-test-temp-dir))
+           (b (harness-test-temp-dir))
+           (c (harness-test-temp-dir))
+           (revoked nil)
+           (read (lambda (dir answer)
+                   (harness-perms-test--answered sid "t_read" (list :path (expand-file-name "f.txt" dir)) answer)
+                   (car (last (harness-perms-test--notes sid))))))
+      (ignore cwd)
+      (harness-on 'permission/dir-revoked (lambda (_sid dir) (push dir revoked)))
+      ;; For the session.
+      (let ((note (funcall read a "allow-session")))
+        (should (equal (format "Allowing %s for this session" (abbreviate-file-name a)) (plist-get note :content)))
+        (should (equal (list :scope 'session :dir a :undo 'offered) (harness-node-permission note)))
+        (should (equal (list a) (plist-get (harness-call 'session/get sid) :allowed-dirs)))
+        (should (eq 'undone (car (harness-perms-test--undo sid note))))
+        (should-not (plist-get (harness-call 'session/get sid) :allowed-dirs))
+        (should (equal (list a) revoked))
+        (should-not harness-allowed-directories))
+      ;; Always, beside an entry of the user's.
+      (setq harness-allowed-directories (list other))
+      (let ((note (funcall read b "allow-always")))
+        (should (equal (format "Always allowing %s, in every session" (abbreviate-file-name b))
+                       (plist-get note :content)))
+        (should (equal (list other b) harness-allowed-directories))
+        (setq harness-perms-test--announced nil)
+        (should (equal (cons 'undone (format "Undone: no longer always allowing %s, in every session"
+                                             (abbreviate-file-name b)))
+                       (harness-perms-test--undo sid note)))
+        (should (equal (list other) harness-allowed-directories))
+        (should (equal (cons 'harness-allowed-directories (list other)) (car harness-perms-test--saved)))
+        (should (memq 'harness-allowed-directories harness-perms-test--announced)))
+      ;; Written another way in Settings, the same directory: undone.
+      (let ((note (funcall read c "allow-always")))
+        (setq harness-allowed-directories (list other (directory-file-name c)))
+        (should (eq 'undone (car (harness-perms-test--undo sid note))))
+        (should (equal (list other) harness-allowed-directories)))
+      ;; Changed in Settings to its parent, which still covers it: it stays.
+      (let* ((d (file-name-as-directory (expand-file-name "sub" (harness-test-temp-dir))))
+             (_ (make-directory d))
+             (note (funcall read d "allow-always"))
+             (parent (file-name-directory (directory-file-name d))))
+        (setq harness-allowed-directories (list other parent))
+        (should (equal (cons 'changed (format "Not undone: the allowed directories changed since (in Settings, say), and %s still covers %s, so they stay as they are"
+                                              (abbreviate-file-name parent) (abbreviate-file-name d)))
+                       (harness-perms-test--undo sid note)))
+        (should (equal (list other parent) harness-allowed-directories))
+        ;; Removed: nothing to undo.
+        (setq harness-allowed-directories (list other))
+        (let ((note (funcall read d "allow-always")))
+          (setq harness-allowed-directories (list other))
+          (should (equal (cons 'gone (format "Nothing to undo: %s is no longer among the allowed directories"
+                                             (abbreviate-file-name d)))
+                         (harness-perms-test--undo sid note))))))))
+
+(ert-deftest harness-perms-directory-denials-and-requests-are-noted ()
+  "Always deny for a path outside notes its rule; an agent's own request granted
+for the session is noted too, but one granted until the turn ends is not."
+  (harness-perms-test--with-notes
+    (let* ((outside (harness-test-temp-dir))
+           (pattern (concat outside "**")))
+      (let ((r (harness-perms-test--answered sid "t_read" (list :path (expand-file-name "f" outside)) "deny-always"))
+            (note (car (last (harness-perms-test--notes sid)))))
+        (should (plist-get r :denied))
+        (should (equal (list (list :path pattern :behavior 'deny)) harness-perms-rules))
+        (should (equal (format "Always denying %s to every tool, in every session" (abbreviate-file-name pattern))
+                       (plist-get note :content)))
+        (should (equal (list :scope 'always :rule (list :path pattern :behavior 'deny) :undo 'offered)
+                       (harness-node-permission note)))
+        (should (eq 'undone (car (harness-perms-test--undo sid note))))
+        (should-not harness-perms-rules))
+      ;; The agent asks for a directory itself.
+      (let ((request (harness-test-temp-dir)))
+        (harness-perms-test--answered sid "request_directory_access" (list :path request :reason "Read it") "allow-once")
+        (should (= 1 (length (harness-perms-test--notes sid))))
+        ;; That grant ends with the turn; the next request asks again.
+        (harness-emit 'agent/turn-ended sid)
+        (harness-perms-test--answered sid "request_directory_access" (list :path request :reason "Read it") "allow-session")
+        (let ((note (car (last (harness-perms-test--notes sid)))))
+          (should (equal (list :scope 'session :dir (harness-perms-test--real request) :undo 'offered)
+                         (harness-node-permission note)))
+          (should (eq 'undone (car (harness-perms-test--undo sid note))))
+          (should-not (plist-get (harness-call 'session/get sid) :allowed-dirs)))))))
+
+;;;; A policy
+
+(ert-deftest harness-perms-policy-mode-and-non-interactive-are-every-sessions ()
+  "A permission mode or non-interactive switch the policy sets wins over
+what a session record says."
+  (harness-perms-test--setup :permission-mode 'yolo :non-interactive nil)
+  (harness-perms-test--install-pending)
+  (let ((file (expand-file-name "x.txt" (plist-get harness-perms-test--session :cwd))))
+    (should (eq 'allow (harness-perms-test--behavior "write_file" 'write file)))
+    (harness-test-with-policy '((harness-permission-mode . ask) (harness-non-interactive . t))
+      (should (eq 'ask (harness-perms--mode-of harness-perms-test--session)))
+      (should (harness-perms--non-interactive-p harness-perms-test--session))
+      (should (eq 'ask (plist-get (harness-call 'permission/rules "s1") :mode))))
+    (harness-test-with-policy '((harness-permission-mode . ask))
+      ;; The write asks now, as the session were in ask mode.
+      (let ((s (harness-perms-test--start "write_file" 'write file)))
+        (should-not (plist-get (plist-get (cdr s) :payload) :dir))
+        (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) "deny-once")
+        (should (eq 'deny (plist-get (harness-test-await (car s)) :behavior)))))
+    (should (eq 'allow (harness-perms-test--behavior "write_file" 'write file)))))
+
+(ert-deftest harness-perms-policy-rules-come-first-and-answers-stay-in-the-session ()
+  "Standing rules the policy sets come before a session's own, so no
+answer overrides them; the prompts offer no answer for always, and one
+given anyway holds for the session."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let ((saved nil)
+        (cwd (plist-get harness-perms-test--session :cwd)))
+    (cl-letf (((symbol-function 'harness-save-user-option)
+               (lambda (sym value) (push (cons sym value) saved))))
+      (harness-perms-add-rule "s1" '(:tool "bash" :behavior allow) 'session)
+      (should (eq 'allow (harness-perms-test--behavior "bash" 'exec)))
+      (harness-test-with-policy '((harness-perms-rules (:tool "bash" :behavior deny)))
+        (let ((d (harness-perms-test--decide (harness-perms-test--request "bash" 'exec))))
+          (should (eq 'deny (plist-get d :behavior)))
+          (should (string-match-p "standing rule" (plist-get d :reason))))
+        (should (equal '(allow-once allow-session deny-once) (harness-perms--tool-options)))
+        (let ((s (harness-perms-test--start "write_file" 'write (expand-file-name "f" cwd))))
+          (should (equal '(allow-once allow-session deny-once)
+                         (plist-get (plist-get (cdr s) :payload) :options)))
+          (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) "allow-always")
+          (should (eq 'allow (plist-get (harness-test-await (car s)) :behavior))))
+        ;; The answer holds for this session only.
+        (should (equal '((:tool "bash" :behavior deny)) harness-perms-rules))
+        (should (cl-find "write_file" (gethash "s1" harness-perms--session-rules)
+                         :key (lambda (r) (plist-get r :tool)) :test #'equal))
+        (harness-perms-add-rule "s1" '(:tool "elisp" :behavior deny) 'always)
+        (should (equal '((:tool "bash" :behavior deny)) harness-perms-rules))
+        ;; A directory prompt keeps deny-always only while the rules are free.
+        (should (equal '(allow-once allow-session allow-always deny-once)
+                       (harness-perms--dir-prompt-options harness-perms-dir-options))))
+      (should-not saved)
+      ;; Without the policy, the session's own rules come first again.
+      (should (eq 'allow (harness-perms-test--behavior "bash" 'exec))))))
+
+(ert-deftest harness-perms-policy-allowed-directories-are-not-added-to ()
+  "Allowed directories the policy sets are what every session reaches
+besides its own: no prompt offers allow-always, an answer for always
+grants to the session, and none of them is revoked."
+  (let ((saved nil)
+        (fixed (harness-test-temp-dir))
+        (outside (harness-test-temp-dir))
+        (harness-allowed-directories nil))
+    (harness-test-with-temp-state
+      (harness-perms-test--setup :permission-mode 'ask)
+      (harness-perms-test--install-pending)
+      (cl-letf (((symbol-function 'harness-save-user-option)
+                 (lambda (sym value) (set sym value) (push (cons sym value) saved))))
+        (harness-test-with-policy `((harness-allowed-directories ,fixed))
+          (should (member fixed (harness-call 'permission/allowed-dirs "s1")))
+          (let ((s (harness-perms-test--start "read_file" 'read (expand-file-name "f" outside))))
+            (should (equal '(allow-once allow-session deny-once deny-always)
+                           (plist-get (plist-get (cdr s) :payload) :options)))
+            (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) "allow-always")
+            (should (eq 'allow (plist-get (harness-test-await (car s)) :behavior))))
+          ;; Granted to the session, not added to the policy's list.
+          (should (member outside (harness-call 'permission/allowed-dirs "s1")))
+          (should (equal (list fixed) harness-allowed-directories))
+          (should-not saved)
+          (should (string-match-p "set by policy"
+                                  (cadr (should-error (harness-call 'permission/allow-dir "s1"
+                                                                    (harness-test-temp-dir) 'always)))))
+          (should-error (harness-call 'permission/revoke-dir "s1" fixed))
+          (let ((entries (harness-call 'permission/dirs "s1")))
+            (should-not (plist-get (cl-find 'config entries :key (lambda (e) (plist-get e :source)))
+                                   :revocable))
+            (should (plist-get (cl-find 'session entries :key (lambda (e) (plist-get e :source)))
+                               :revocable)))
+          ;; An agent's own request is answered the same way.
+          (let* ((wanted (harness-test-temp-dir))
+                 (s (harness-perms-test--start-request wanted "Read the docs")))
+            (should-not (memq 'allow-always (plist-get (plist-get (cdr s) :payload) :options)))
+            (let ((d (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) "allow-always")))
+              (should (eq 'allow (plist-get d :behavior)))
+              (should (string-match-p "to this session" (plist-get d :reason)))))
+          (should (equal (list fixed) harness-allowed-directories))
+          (should-not saved))))))
 
 (provide 'harness-perms-test)
 ;;; harness-perms-test.el ends here

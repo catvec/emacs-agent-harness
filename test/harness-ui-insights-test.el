@@ -51,6 +51,8 @@
 (defvar harness-ui-usage--loading)
 (defvar harness-ui-insights-default-period)
 (declare-function harness-insights "harness-ui-insights")
+(declare-function harness-set-non-interactive-all "harness-ui")
+(declare-function transient-get-suffix "transient")
 (declare-function harness-usage "harness-ui-usage")
 (declare-function harness-ui-insights-open "harness-ui-insights")
 (declare-function harness-ui-insights-cycle-period "harness-ui-insights")
@@ -302,9 +304,16 @@
       (should (equal (format "   one · two\n   %s\n" (make-string 70 ?x)) (buffer-string))))))
 
 (ert-deftest harness-ui-insights-keys ()
-  "I opens the report from the harness keys; the report has its own."
+  "A opens the report from the harness keys; the report has its own.
+I is non-interactive mode for every session, beside i for one."
   (harness-ui-insights-test-with
-    (should (eq #'harness-insights (lookup-key harness-ui-map (kbd "I"))))
+    (should (eq #'harness-insights (lookup-key harness-ui-map (kbd "A"))))
+    (should (eq #'harness-set-non-interactive-all (lookup-key harness-ui-map (kbd "I"))))
+    ;; The menu teaches the same key.  A suffix is (CLASS . PLIST) since
+    ;; transient 0.8, (LEVEL CLASS PLIST) before.
+    (let ((suffix (transient-get-suffix 'harness-menu "A")))
+      (should (eq 'harness-insights
+                  (plist-get (if (keywordp (cadr suffix)) (cdr suffix) (car (last suffix))) :command))))
     (dolist (binding '(("g" . harness-ui-insights-refresh) ("t" . harness-ui-insights-cycle-period)
                        ("p" . harness-ui-insights-set-project) ("n" . harness-ui-insights-write)
                        ("RET" . harness-ui-insights-open) ("q" . quit-window)))

@@ -27,12 +27,20 @@
 ;; `harness-provider-fallback-context-window'.  A provider can say
 ;; more about a name it does not list (an alias, a variant) through
 ;; its `:resolve' function.
+;;
+;; `harness-allowed-models' keeps the harness to some models, which an
+;; administrator's policy may set (see docs/policy.md).  Every request
+;; for another is refused here, where every request passes, whoever
+;; made it: a session, a task, the auto-mode judge, naming or
+;; compaction.  The catalogue clients get (`provider/models') lists
+;; only the models allowed, and a tier's model is chosen among them.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-policy)
 
 ;;;; Customize types of model plists
 ;;
@@ -142,6 +150,52 @@ lifetime the provider reports for a request still wins over these."
   :type '(alist :key-type (regexp :tag "Model id")
                 :value-type (integer :tag "Seconds"))
   :group 'harness)
+
+(defcustom harness-allowed-models nil
+  "The models the harness may use, as patterns of model ids; nil allows any.
+A model id is \"provider:name\", such as \"claude:opus\".  A pattern is
+a glob: * stands for any run of characters and ? for one, so
+\"claude:*\" allows every model of Claude Code's provider and
+\"*:*sonnet*\" a Sonnet at any provider.  A pattern without a colon
+names providers: \"claude\" is \"claude:*\".  A request for any other
+model is refused before its provider sees it, the harness's own
+requests (the auto-mode judge, naming, compaction) included, and the
+model picker lists only models allowed.  An administrator's policy may
+set this (see docs/policy.md)."
+  :type '(repeat (string :tag "Provider, model or pattern" :names (provider model)))
+  :group 'harness)
+
+(defun harness-provider-model-allowed-p (model-id)
+  "Non-nil when `harness-allowed-models' lets the harness use MODEL-ID."
+  (let ((patterns (default-value 'harness-allowed-models)))
+    (or (null patterns)
+        (and (stringp model-id)
+             (let ((provider (car (harness-provider-parse-model model-id)))
+                   (case-fold-search nil))
+               (cl-some (lambda (pattern)
+                          (and (stringp pattern)
+                               (if (string-search ":" pattern)
+                                   (string-match-p (wildcard-to-regexp pattern) model-id)
+                                 (and provider
+                                      (string-match-p (wildcard-to-regexp pattern)
+                                                      (symbol-name provider))))))
+                        patterns))))))
+
+(defun harness-provider-model-refusal (model-id)
+  "Return why the harness may not use MODEL-ID, or nil when it may."
+  (unless (harness-provider-model-allowed-p model-id)
+    (format "Model %s is not allowed: harness-allowed-models%s allows only %s"
+            (or model-id "(none)")
+            (if (harness-policy-pinned-p 'harness-allowed-models)
+                (format ", set by policy (%s)," (harness-policy-file-name))
+              "")
+            (mapconcat (lambda (p) (format "%s" p)) (default-value 'harness-allowed-models) ", "))))
+
+(defun harness-provider--allowed (models)
+  "Return those of MODELS, model plists, that `harness-allowed-models' allows."
+  (if (default-value 'harness-allowed-models)
+      (cl-remove-if-not (lambda (m) (harness-provider-model-allowed-p (plist-get m :id))) models)
+    models))
 
 ;;;; Model catalogue cache
 
@@ -538,10 +592,11 @@ slow endpoint never hides a fast one; REFRESH forces a new query, and
 is passed on to the providers whose models function takes it.  A
 provider that fails is logged and skipped.  Every model has a
 `:context-window'; one its provider does not size has an estimate,
-flagged `:context-window-estimated' (see `harness-provider--estimate')."
+flagged `:context-window-estimated' (see `harness-provider--estimate').
+Only the models `harness-allowed-models' allows are listed."
   (cond
    ((and (not refresh) (harness-provider--complete-p))
-    (harness-resolved harness-provider--models))
+    (harness-resolved (harness-provider--allowed harness-provider--models)))
    ((and harness-provider--models-promise (not refresh)
          (not (harness-promise-settled-p harness-provider--models-promise)))
     harness-provider--models-promise)
@@ -554,7 +609,7 @@ flagged `:context-window-estimated' (see `harness-provider--estimate')."
                harness-providers)
       (setq harness-provider--models-promise
             (harness-then (harness-all (nreverse promises))
-                          (lambda (_) harness-provider--models)))))))
+                          (lambda (_) (harness-provider--allowed harness-provider--models))))))))
 
 (defun harness-provider--resolve (p name)
   "Return what provider P's `:resolve' function says of model NAME, or nil.
@@ -771,7 +826,7 @@ has."
          (pid (harness-provider--provider-id model-id))
          (provider (and pid (harness-provider-get pid))))
     (when provider
-      (let* ((models (harness-provider--listed-models pid))
+      (let* ((models (harness-provider--allowed (harness-provider--listed-models pid)))
              (model (and models
                          (or (harness-provider--tier-match
                               models (plist-get (harness-provider-tiers provider) tier))
@@ -861,12 +916,18 @@ the same over the wire."
   "Start a completion for REQUEST; return a handle plist with `:cancel'.
 The provider is chosen from the request's `:model'.  Errors in setup
 are reported through the `:on-event' callback as a `done' event with
-`:stop-reason' error."
+`:stop-reason' error, and so is a model `harness-allowed-models' does
+not allow, which no provider is asked for."
   (pcase-let* ((`(,pid . ,_) (harness-provider-parse-model (plist-get request :model)))
                (provider (and pid (harness-provider-get pid)))
                (on-event (harness-provider--guard-events (or (plist-get request :on-event) #'ignore)))
-               (request (plist-put (copy-sequence request) :on-event on-event)))
+               (request (plist-put (copy-sequence request) :on-event on-event))
+               (refusal (harness-provider-model-refusal (plist-get request :model))))
     (cond
+     (refusal
+      (harness-log 'warn "provider/complete: %s" refusal)
+      (funcall on-event (list :type 'done :stop-reason 'error :error refusal))
+      (list :cancel #'ignore))
      ((null provider)
       (funcall on-event (list :type 'done :stop-reason 'error
                               :error (format "No provider for model %s" (plist-get request :model))))
@@ -888,9 +949,12 @@ REQUEST is shaped like `provider/complete''s, without messages or
 provider that keeps a process per session (the Claude CLI) starts it
 now, so a request that comes later with the same settings is answered
 sooner; one with nothing to prepare does nothing.  A failure is
-logged, never signalled: warming is only ever a head start."
+logged, never signalled: warming is only ever a head start.  A model
+`harness-allowed-models' does not allow is not warmed."
   (pcase-let* ((`(,pid . ,_) (harness-provider-parse-model (plist-get request :model)))
-               (warm (and pid (harness-provider-get pid) (harness-provider--hook pid :warm))))
+               (warm (and pid (harness-provider-get pid)
+                          (harness-provider-model-allowed-p (plist-get request :model))
+                          (harness-provider--hook pid :warm))))
     (when warm
       (condition-case err
           (and (funcall warm request) t)
