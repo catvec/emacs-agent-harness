@@ -32,6 +32,8 @@
 (defvar harness-compose-end)
 (defvar harness-cache-ttl)
 (defvar harness-cache-ttl-overrides)
+(defvar harness-ui-switch--prompt)
+(defvar harness-compose-redraw-function)
 (declare-function harness-chat-buffer "harness-ui-chat")
 (declare-function harness-chat-send "harness-ui-chat")
 (declare-function harness-acp--drop-client "harness-acp")
@@ -43,7 +45,7 @@
   (harness-plist-merge
    (list :id "s1" :status "idle" :model "test:m"
          :usage '(:context 84000 :cache-at 1000.0)
-         :cache '(:at 1000.0 :ttl 300 :expires 1300.0))
+         :cache '(:at 1000.0 :ttl 300 :expires 1300.0 :model "test:m"))
    overrides))
 
 (defun harness-ui-cache-test--local (hour minute &optional day)
@@ -122,6 +124,64 @@ cached, at list prices: clock times, never an age that goes stale."
         (should (string-match-p "cached for 5 minutes after a request uses it"
                                 (get-text-property 0 'help-echo banner)))
         (should (get-text-property 0 'harness-ui-cache-panel banner))))))
+
+(ert-deftest harness-ui-cache-state-after-a-switch ()
+  "Switched to another model, a session finds nothing cached for it: the
+panel shows at once, whatever the time, naming the model whose cache it
+was, until a request caches the conversation for the new model or the
+session switches back while the old cache lasts."
+  (let ((s (harness-ui-cache-test--session :model "test:other")))
+    (should (equal "test:m" (plist-get (harness-ui-cache--state s 1000.0) :from)))
+    (should (equal (harness-ui-cache--state s 1000.0) (harness-ui-cache--state s 90000.0)))
+    (should-not (harness-ui-cache--state (harness-ui-cache-test--session :model "test:other" :status "running")
+                                         1000.0))
+    ;; Back on the cache's model while it lasts: nothing to say.
+    (should-not (harness-ui-cache--state (harness-ui-cache-test--session) 1000.0))
+    (should-not (plist-get (harness-ui-cache--state (harness-ui-cache-test--session) 2000.0) :from))
+    ;; A cache that names no model is the session's own.
+    (should-not (harness-ui-cache--state (harness-ui-cache-test--session
+                                          :model "test:other" :cache '(:at 1000.0 :ttl 300 :expires 1300.0))
+                                         1000.0))))
+
+(ert-deftest harness-ui-cache-banner-after-a-switch ()
+  "Switched, the panel says whose cache it was, and what the new model's
+first request costs uncached against cached, at its own list prices."
+  (let ((harness-ui--models (make-hash-table :test 'equal)))
+    (puthash "test:m" '(:id "test:m" :label "Model M" :provider-label "Test"
+                        :pricing (:input 3.0 :output 15.0 :cache-read 0.3 :cache-write 3.75))
+             harness-ui--models)
+    (puthash "test:other" '(:id "test:other" :label "Model O" :provider-label "Test"
+                            :pricing (:input 1.0 :output 5.0 :cache-read 0.1 :cache-write 1.25))
+             harness-ui--models)
+    (let* ((s (harness-ui-cache-test--session :model "test:other"))
+           (text (harness-ui-cache-test--banner s 1100.0)))
+      (should (string-match-p (format "Prompt cache cold  cached for %s, not %s$"
+                                      (regexp-quote (harness-ui-model-label "test:m"))
+                                      (regexp-quote (harness-ui-model-label "test:other")))
+                              text))
+      ;; 84000 tokens written to the new model's cache at 1.25, against read at 0.1.
+      (should (string-match-p "^   Your next message re-sends ~84\\.0k tokens uncached: about \\$0\\.105 instead of \\$0\\.0084, at list prices\\.$"
+                              text))
+      (should (string-match-p "for one model only"
+                              (get-text-property 0 'help-echo (harness-ui-cache--banner
+                                                               (harness-ui-cache--state s 1100.0) 1100.0)))))))
+
+(ert-deftest harness-ui-cache-stays-away-while-the-switch-banner-asks ()
+  "While the switch banner asks how to hand over, the panel does not show:
+what the next message sends depends on the answer, which the banner
+weighs.  The moment the cache lapses still draws the tail again, so the
+banner says it did."
+  (with-temp-buffer
+    (let ((s (harness-ui-cache-test--session))
+          (drawn 0))
+      (should (harness-ui-cache--current s 2000.0))
+      (setq-local harness-ui-switch--prompt '(:checks nil))
+      (should-not (harness-ui-cache--current s 2000.0))
+      (setq-local harness-compose-redraw-function (lambda () (cl-incf drawn)))
+      (cl-letf (((symbol-function 'harness-compose-redraw)
+                 (lambda () (funcall harness-compose-redraw-function))))
+        (harness-ui-cache--lapse (current-buffer)))
+      (should (= 1 drawn)))))
 
 (ert-deftest harness-ui-cache-duration-in-words ()
   "Cache lifetimes read as words."
@@ -293,6 +353,34 @@ panel, however long they wait; one that used the cache does, meanwhile."
         (should-not (harness-ui-cache-test--shows-p buffer))
         (should-not (string-match-p "Prompt cache expired" (harness-ui-cache-test--text buffer)))
         (with-current-buffer buffer (should-not harness-ui-cache--timer))))))
+
+(ert-deftest harness-ui-cache-panel-after-a-switch ()
+  "Switched to another model after a cached turn, the session shows the
+panel at once: the new model has nothing of the conversation cached.
+Switched back while the cache lasts, it goes, and the timer is set for
+the lapse again; the new model's first request caches the conversation
+for it, and the panel goes for good."
+  (harness-ui-cache-test-with
+    (let* ((harness-cache-ttl 600)
+           (sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted")
+                           :id))
+           (buffer (harness-ui-cache-test--open sid)))
+      (harness-ui-cache-test--send buffer "first")
+      (should-not (harness-ui-cache-test--shows-p buffer))
+      (harness-call 'session/update sid :model "demo:other" :silent t)
+      (harness-test-wait (lambda () (harness-ui-cache-test--shows-p buffer)) 5 "the cache panel")
+      (should (string-match-p "Prompt cache cold  cached for .*, not " (harness-ui-cache-test--text buffer)))
+      (should (string-match-p "Your next message re-sends ~84\\.5k tokens uncached"
+                              (harness-ui-cache-test--text buffer)))
+      (with-current-buffer buffer (should-not harness-ui-cache--timer))
+      (harness-call 'session/update sid :model "demo:scripted" :silent t)
+      (harness-test-wait (lambda () (not (harness-ui-cache-test--shows-p buffer))) 5 "the panel to go")
+      (with-current-buffer buffer (should (timerp harness-ui-cache--timer)))
+      (harness-call 'session/update sid :model "demo:other" :silent t)
+      (harness-test-wait (lambda () (harness-ui-cache-test--shows-p buffer)) 5 "the cache panel again")
+      (harness-ui-cache-test--send buffer "on the other model")
+      (should-not (harness-ui-cache-test--shows-p buffer))
+      (should (equal "demo:other" (plist-get (plist-get (harness-ui-session sid) :cache) :model))))))
 
 (ert-deftest harness-ui-cache-timer-goes-with-the-buffer ()
   "Killing a chat buffer stops its cache timer."

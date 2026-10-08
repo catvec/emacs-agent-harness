@@ -165,8 +165,28 @@ lifetime it asked for, the session keeps both: its cache lapses then."
                          (:type done :stop-reason end-turn))))
     (let ((id (harness-agent-test-hosted-session)))
       (harness-await (harness-call 'agent/prompt id "hello"))
-      (should (equal '(:at 1000.0 :ttl 3600 :expires 4600.0)
+      (should (equal '(:at 1000.0 :ttl 3600 :expires 4600.0 :model "hosted:loop")
                      (plist-get (harness-call 'session/get id) :cache))))))
+
+(ert-deftest harness-agent-usage-stamps-the-cache-of-the-step-model ()
+  "A step that ends after a switch used the old model's cache, not the new one's.
+The session's cache names the model the step went to, which the new
+one finds nothing of: the next request sends the conversation uncached."
+  (harness-agent-test-with
+    (let ((id nil))
+      (harness-agent-test-define-hosted
+       (lambda (_prompt)
+         (list (lambda () (harness-call 'session/update id :model "demo:scripted" :silent t))
+               '(:type text :delta "still hosted")
+               '(:type usage :input 10 :output 5 :cache-read 900 :cache-write 0
+                       :context 915 :cache-at 1000.0 :cache-ttl 3600)
+               '(:type done :stop-reason end-turn))))
+      (setq id (harness-agent-test-hosted-session))
+      (harness-await (harness-call 'agent/prompt id "hello"))
+      (let ((s (harness-call 'session/get id)))
+        (should (equal "demo:scripted" (plist-get s :model)))
+        (should (equal '(:at 1000.0 :ttl 3600 :expires 4600.0 :model "hosted:loop")
+                       (plist-get s :cache)))))))
 
 (ert-deftest harness-agent-step-writes-under-its-own-model ()
   "What a step reports belongs to the model it went to, though the session switched meanwhile.

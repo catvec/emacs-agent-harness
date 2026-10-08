@@ -279,6 +279,40 @@ summary it writes opens the new conversation with a lossy-handoff note."
             (should (equal "sample" (plist-get handoff :context)))
             (should (equal "hosted:m" (plist-get handoff :summarizer)))))))))
 
+(ert-deftest harness-handoff-and-the-prompt-cache ()
+  "What the session knows of its prompt cache after each way of switching.
+The check hands the UI the session's cache, which says whether a
+summary on the current model reads the conversation back cached.  A
+lossy switch starts a conversation of its own on the new provider,
+whichever the handoff: no cache is reported, as none of the old
+conversation is sent there, and a summary drops the old stamp, though
+the summariser's request read the cache.  A switch that carries the
+conversation on reports the old model's cache, which the new model
+reads none of."
+  (harness-handoff-test-with
+    (let ((harness-provider-demo-script-override
+           '((:type text :delta "SUMMARY: fix the parser")
+             (:type usage :input 20 :output 5 :cache-read 900 :context 925)
+             (:type done :stop-reason end-turn)))
+          (stamp (lambda (sid)
+                   (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 900 :context 920))
+                   (plist-get (harness-call 'session/get sid) :cache))))
+      (let* ((sid (harness-handoff-test--session t))
+             (cache (funcall stamp sid)))
+        (should (equal "demo:scripted" (plist-get cache :model)))
+        (should (equal cache (plist-get (harness-call 'handoff/check sid "hosted:m") :cache))))
+      (dolist (mode '(none transcript compact compact-new))
+        (let ((sid (harness-handoff-test--session t)))
+          (funcall stamp sid)
+          (should (plist-get (harness-test-await (harness-call 'handoff/switch sid "hosted:m" mode)) :lossy))
+          (let ((s (harness-call 'session/get sid)))
+            (should (equal "hosted:m" (plist-get s :model)))
+            (should-not (plist-get s :cache)))))
+      (let ((sid (harness-handoff-test--session t)))
+        (funcall stamp sid)
+        (should-not (plist-get (harness-test-await (harness-call 'handoff/switch sid "api:m" 'compact)) :lossy))
+        (should (equal "demo:scripted" (plist-get (plist-get (harness-call 'session/get sid) :cache) :model)))))))
+
 (ert-deftest harness-handoff-compact-falls-back-to-the-transcript ()
   "When the old model cannot summarise -- its plan ran out, say -- the transcript goes over."
   (harness-handoff-test-with

@@ -7,21 +7,35 @@
 ;; DeepSeek (see `harness-cache-ttl').  A session left alone for longer
 ;; sends its whole context again uncached with its next message, which
 ;; costs more and answers slower.  The harness knows when each session's
-;; requests last used the cache and how long its provider keeps it: the
-;; session's `:cache', (:at TIME :ttl SECONDS :expires TIME).  Once that
-;; moment is past, a panel above the compose box says so, with how much
-;; context the next message sends uncached and what that costs at list
-;; prices.  It informs; there is nothing to do about it but know, as
-;; even a compaction would read the history uncached.
+;; requests last used the cache, the model they went to and how long its
+;; provider keeps it: the session's `:cache', (:at TIME :ttl SECONDS
+;; :expires TIME :model MODEL).  Once that moment is past, a panel above
+;; the compose box says so, with how much context the next message sends
+;; uncached and what that costs at list prices.  It informs; there is
+;; nothing to do about it but know, as a summary on the same model would
+;; read the history uncached too.
+;;
+;; A cache serves one model, so a session switched to another model
+;; finds nothing cached for it: the panel says so at once, with what the
+;; new model's first request costs, and goes when that request caches the
+;; conversation again (or the session switches back while the old cache
+;; lasts).  A switch that starts a conversation of its own on the new
+;; provider -- a hosted loop, handed over a summary or a transcript or
+;; nothing -- sends none of the old one, and a compaction replaces it
+;; with its summary: the session reports no cache then, and no panel
+;; shows.  While the switch banner asks how to hand over
+;; (harness-ui-switch.el), the panel stays away: what the next request
+;; sends depends on the answer, and the banner says what the cache
+;; means for each.
 ;;
 ;; The panel comes on its own: each chat buffer has one timer, for the
 ;; moment its session's cache lapses, which draws the tail again then
-;; (`harness-compose-redraw').  Nothing polls.  A session update moves
-;; the timer, as a new request keeps the cache longer, and hides the
-;; panel as soon as a request is under way.  The panel names clock
-;; times, never ages, so it stays true for as long as it shows without
-;; being drawn again.  A session that never used a cache, a new one
-;; included, has no `:cache' and never shows it.
+;; (`harness-compose-redraw'), the switch banner included.  Nothing
+;; polls.  A session update moves the timer, as a new request keeps the
+;; cache longer, and hides the panel as soon as a request is under way.
+;; The panel names clock times, never ages, so it stays true for as long
+;; as it shows without being drawn again.  A session that never used a
+;; cache, a new one included, has no `:cache' and never shows it.
 
 ;;; Code:
 
@@ -36,6 +50,7 @@
 (defvar harness-chat--session)
 (defvar harness-ui-session-id)
 (defvar harness-compose-redraw-function)
+(defvar harness-ui-switch--prompt)
 (declare-function harness-chat--buffer-for "harness-ui-chat" (sid))
 (declare-function harness-compose-redraw "harness-ui-compose" ())
 
@@ -69,24 +84,42 @@ See `harness-ui-cache--state'.")
   (or (bound-and-true-p harness-chat--session)
       (and harness-ui-session-id (harness-ui-session harness-ui-session-id))))
 
+(defun harness-ui-cache--other-model (session)
+  "Return the model of SESSION's cache when it is not SESSION's model, else nil.
+A cache serves the model that wrote it, so SESSION, switched since,
+has nothing cached for its own."
+  (let ((cached (plist-get (plist-get session :cache) :model)))
+    (and cached (not (equal cached (plist-get session :model))) cached)))
+
 (defun harness-ui-cache--state (session &optional now)
   "Return what the cache panel shows of SESSION at NOW, or nil for nothing.
 NOW is the current time by default.  The panel shows once the cache
 SESSION's requests last used has lapsed (its `:cache' `:expires' is
-past) while SESSION waits for the user: idle, closed, or blocked on
-an answer.  A running session sends requests, which keep the cache.
+past), and at once when that cache is of a model SESSION no longer uses
+\(`:from'), while SESSION waits for the user: idle, closed, or blocked
+on an answer.  A running session sends requests, which keep the cache.
 States that read the same are `equal', so a session update that
 changes nothing the panel says does not draw it again."
   (let* ((cache (plist-get session :cache))
          (expires (plist-get cache :expires))
+         (from (harness-ui-cache--other-model session))
          (status (format "%s" (plist-get session :status))))
     (when (and (numberp expires)
                (member status '("idle" "inactive" "blocked"))
-               (>= (or now (float-time)) expires))
+               (or from (>= (or now (float-time)) expires)))
       (list :at (plist-get cache :at) :ttl (plist-get cache :ttl) :expires expires
             :context (plist-get (plist-get session :usage) :context)
             :model (plist-get session :model)
+            :from from
             :blocked (equal status "blocked")))))
+
+(defun harness-ui-cache--current (session &optional now)
+  "Return what this buffer's cache panel shows of SESSION at NOW, or nil.
+That is `harness-ui-cache--state', save while the switch banner asks
+how to hand over: what the next request sends depends on the answer,
+and the banner says what the cache means for each."
+  (unless (bound-and-true-p harness-ui-switch--prompt)
+    (harness-ui-cache--state session now)))
 
 (defun harness-ui-cache--duration (seconds)
   "Describe SECONDS, how long a cache lasts, in words: \"5 minutes\"."
@@ -96,12 +129,6 @@ changes nothing the panel says does not draw it again."
                                     ((< s 172800) (cons (round s 3600) "hour"))
                                     (t (cons (round s 86400) "day")))))
     (format "%d %s%s" n unit (if (= n 1) "" "s"))))
-
-(defun harness-ui-cache--clock (time now)
-  "Return TIME as a clock time, with its day unless that is NOW's."
-  (if (equal (format-time-string "%F" time) (format-time-string "%F" now))
-      (format-time-string "%H:%M" time)
-    (format-time-string "%b %-d, %H:%M" time)))
 
 (defun harness-ui-cache--price (tokens model key)
   "Return what TOKENS tokens cost at MODEL's KEY price, or nil.
@@ -128,14 +155,41 @@ back from it.  Nil when the catalogue does not price both."
 
 (defun harness-ui-cache--help (state)
   "Return the tooltip of the cache panel for STATE."
-  (format (concat "The provider keeps the start of a conversation cached for %s after a request uses it.\n"
-                  "This session's requests last used the cache at %s, so it lapsed at %s.\n"
-                  "%s sends the whole context, %s tokens, at the uncached rate, and caches it again.")
-          (harness-ui-cache--duration (plist-get state :ttl))
-          (format-time-string "%H:%M:%S" (plist-get state :at))
-          (format-time-string "%H:%M:%S" (plist-get state :expires))
-          (harness-ui-cache--next state)
-          (harness-format-tokens (plist-get state :context))))
+  (concat
+   (if-let* ((from (plist-get state :from)))
+       (format (concat "A provider caches a conversation for one model only.\n"
+                       "This session's requests last used the cache of %s, at %s; %s has none of it.\n")
+               (harness-ui-model-label from)
+               (format-time-string "%H:%M:%S" (plist-get state :at))
+               (harness-ui-model-label (plist-get state :model)))
+     (format (concat "The provider keeps the start of a conversation cached for %s after a request uses it.\n"
+                     "This session's requests last used the cache at %s, so it lapsed at %s.\n")
+             (harness-ui-cache--duration (plist-get state :ttl))
+             (format-time-string "%H:%M:%S" (plist-get state :at))
+             (format-time-string "%H:%M:%S" (plist-get state :expires))))
+   (format "%s sends the whole context, %s tokens, at the uncached rate, and caches it again."
+           (harness-ui-cache--next state)
+           (harness-format-tokens (plist-get state :context)))))
+
+(defun harness-ui-cache--heading (state now)
+  "Return the first line of the cache panel for STATE, drawn at NOW.
+It says why nothing is cached: the cache lapsed, and when, or it is
+the cache of the model the session used before."
+  (let ((from (plist-get state :from)))
+    (concat
+     " " (propertize (concat (harness-ui-icon 'harness-icon-clock)
+                             (if from " Prompt cache cold" " Prompt cache expired"))
+                     'face 'harness-label-face)
+     "  "
+     (propertize (if from
+                     (format "cached for %s, not %s"
+                             (harness-ui-model-label from)
+                             (harness-ui-model-label (plist-get state :model)))
+                   (format "at %s, %s after its last use"
+                           (harness-ui-format-clock (plist-get state :expires) now)
+                           (harness-ui-cache--duration (plist-get state :ttl))))
+                 'face 'harness-dim-face)
+     "\n")))
 
 (defun harness-ui-cache--banner (state now)
   "Return the cache panel for STATE, drawn at NOW."
@@ -143,14 +197,7 @@ back from it.  Nil when the catalogue does not price both."
          (tokens (plist-get state :context))
          (string
           (concat
-           " " (propertize (concat (harness-ui-icon 'harness-icon-clock) " Prompt cache expired")
-                           'face 'harness-label-face)
-           "  "
-           (propertize (format "at %s, %s after its last use"
-                               (harness-ui-cache--clock (plist-get state :expires) now)
-                               (harness-ui-cache--duration (plist-get state :ttl)))
-                       'face 'harness-dim-face)
-           "\n"
+           (harness-ui-cache--heading state now)
            (propertize (concat "   " (harness-ui-cache--next state)
                                (if (and (numberp tokens) (> tokens 0))
                                    (format " re-sends ~%s tokens uncached" (harness-format-tokens tokens))
@@ -177,10 +224,13 @@ back from it.  Nil when the catalogue does not price both."
 
 (defun harness-ui-cache--schedule (session)
   "Set this buffer's timer for the moment SESSION's cache lapses.
-Nothing is set when it has lapsed already or SESSION has no cache; a
-timer already set for that moment stays."
+Nothing is set when it has lapsed already, SESSION has no cache, or
+it is another model's, which is cold already; a timer already set for
+that moment stays."
   (let* ((expires (plist-get (plist-get session :cache) :expires))
-         (due (and (numberp expires) (> expires (float-time)) expires)))
+         (due (and (numberp expires) (> expires (float-time))
+                   (not (harness-ui-cache--other-model session))
+                   expires)))
     (unless (and due (equal due harness-ui-cache--due)
                  (memq harness-ui-cache--timer timer-list))
       (harness-ui-cache--cancel)
@@ -199,24 +249,27 @@ timer already set for that moment stays."
 The tail is drawn again only when what the panel shows changed."
   (let ((session (harness-ui-cache--session)))
     (harness-ui-cache--schedule session)
-    (unless (equal (harness-ui-cache--state session) harness-ui-cache--shown)
+    (unless (equal (harness-ui-cache--current session) harness-ui-cache--shown)
       (harness-ui-cache--redraw))))
 
 (defun harness-ui-cache--lapse (buffer)
-  "Show BUFFER's cache panel, its session's cache having lapsed by now."
+  "Draw BUFFER's tail again, its session's cache having lapsed by now.
+The cache panel shows from now on, or, while the switch banner asks
+instead, the banner says the cache expired; drawing sets the next
+timer, if any."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (setq harness-ui-cache--timer nil
             harness-ui-cache--due nil)
-      (harness-ui-cache--sync))))
+      (harness-ui-cache--redraw))))
 
 (defun harness-ui-cache--panel ()
-  "Return the cache panel when this session's prompt cache has lapsed, else nil.
+  "Return the cache panel when this session's prompt cache is cold, else nil.
 On `harness-chat-panel-functions'.  Drawing sets the timer for when
 the cache lapses too, so a buffer that just opened shows it on time."
   (let* ((session (harness-ui-cache--session))
          (now (float-time))
-         (state (harness-ui-cache--state session now)))
+         (state (harness-ui-cache--current session now)))
     (setq harness-ui-cache--shown state)
     (harness-ui-cache--schedule session)
     (and state (harness-ui-cache--banner state now))))

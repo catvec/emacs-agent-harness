@@ -43,6 +43,16 @@
 ;; gates run it and hold the step until it is done, and a turn that
 ;; ends first has it run as soon as it is over.  An idle session's
 ;; handoff starts at once, and a turn started meanwhile waits for it.
+;;
+;; The prompt cache decides what a summary on the old model costs: it
+;; reads the conversation back from that model's cache while the cache
+;; lasts, and pays for all of it again uncached once it lapsed, so
+;; `handoff/check' hands the UI the session's cache (`:cache') to say
+;; which.  Whatever the mode, the new provider starts a conversation of
+;; its own, which nothing cached serves and none of the old one is sent
+;; to: the session reports no cache for it until its first request
+;; caches one (see harness-session.el), and a summary drops the old
+;; cache's stamp as any compaction does.
 
 ;;; Code:
 
@@ -174,22 +184,28 @@ See `handoff/check' for the shape."
                                       " the model's last reply, so none of this session's history reaches it.")
                               (harness-handoff--provider-label model)))
           :risks (and lossy harness-handoff-risks)
-          :cache-cost (and lossy (harness-handoff--cache-cost session model)))))
+          :cache-cost (and lossy (harness-handoff--cache-cost session model))
+          ;; Summarising on the current model is cheap while its cache
+          ;; lasts: the UI says whether it still does when it asks.
+          :cache (plist-get session :cache))))
 
 (harness-defmethod handoff/check (session-id model)
   "Say what switching SESSION-ID to MODEL means for its conversation.
 Return (:id :name :from :from-label :to :to-label :to-provider :lossy
 BOOL :history BOOL :running BOOL :reason TEXT :risks (TEXT...)
-:cache-cost TEXT).  A switch is lossy when MODEL's provider runs a
-hosted loop (it keeps the conversation and is sent only the newest user
-messages), cannot continue the session's own conversation
+:cache-cost TEXT :cache CACHE).  A switch is lossy when MODEL's provider
+runs a hosted loop (it keeps the conversation and is sent only the
+newest user messages), cannot continue the session's own conversation
 \(`session/provider-state'), is not the session's current provider, and
 the session has history that would not reach it with no handoff
 waiting for it.  `:reason' says why it is lossy or why not; for a lossy
 switch `:risks' are `harness-handoff-risks', `:cache-cost' what the
 cold cache costs at MODEL's list prices (nil when they are unknown),
 and `:running' says a turn runs, which the switch reaches at its next
-step."
+step.  `:cache' is the session's prompt cache as `session/get' gives
+it, (:at :ttl :expires :model) or nil: a summary on the current model
+\(mode `compact') reads the conversation back from it while it lasts,
+and pays for all of it again uncached once it lapsed."
   (harness-handoff--check (harness-call 'session/get session-id) model))
 
 (defun harness-handoff--selected (filter)

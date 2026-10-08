@@ -27,6 +27,8 @@
 (defvar harness-ui-default-position)
 (defvar harness-chat--loading)
 (defvar harness-chat-mode)
+(defvar harness-cache-ttl)
+(defvar harness-cache-ttl-overrides)
 (declare-function harness-chat-buffer "harness-ui-chat")
 (declare-function harness-define-provider "harness-provider")
 
@@ -222,6 +224,41 @@
                          5 "the banner to go")
       (dolist (sid (list one two))
         (should (harness-node-handoff (car (last (harness-call 'session/nodes sid)))))))))
+
+(ert-deftest harness-ui-switch-banner-and-an-expired-cache ()
+  "Asked to switch once the cache lapsed, the banner says a summary on the
+current model reads it all again uncached, not that its cache is warm,
+and the cache panel stays away while it asks: what the next message
+sends depends on the answer.  Cancelled, the panel is back; switched
+with a handoff, the new conversation has nothing cached and no panel
+shows."
+  (harness-ui-switch-test-with
+    (harness-test-load-module 'ui-cache)
+    (let* ((harness-cache-ttl 1)
+           (harness-cache-ttl-overrides nil)
+           (sid (harness-ui-switch-test--session))
+           (chat (harness-ui-switch-test--chat sid)))
+      (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 900 :context 920))
+      (harness-ui-switch-test--wait-text chat "Prompt cache expired")
+      (harness-ui-switch-test--choose-hosted (lambda () (harness-set-model sid)))
+      (harness-ui-switch-test--wait-text chat "Switch model")
+      (let ((text (harness-ui-switch-test--text chat)))
+        (should (string-match-p "current model summarises +cache expired at [0-9:]+: re-reads it all uncached"
+                                text))
+        (should-not (string-match-p "warm cache" text))
+        (should-not (string-match-p "Prompt cache expired" text)))
+      (harness-ui-switch-test--press chat "q")
+      (harness-ui-switch-test--wait-text chat "Prompt cache expired")
+      (should-not (string-match-p "Switch model" (harness-ui-switch-test--text chat)))
+      (harness-ui-switch-test--choose-hosted (lambda () (harness-set-model sid)))
+      (harness-ui-switch-test--wait-text chat "Switch model")
+      (harness-ui-switch-test--press chat "t")
+      (harness-test-wait (lambda () (equal "hosted:m" (plist-get (harness-call 'session/get sid) :model)))
+                         10 "the switch")
+      (harness-test-wait (lambda () (not (string-match-p "Switch model\\|Prompt cache"
+                                                         (harness-ui-switch-test--text chat))))
+                         5 "the banner and the panel to go")
+      (should-not (plist-get (harness-call 'session/get sid) :cache)))))
 
 (provide 'harness-ui-switch-test)
 ;;; harness-ui-switch-test.el ends here

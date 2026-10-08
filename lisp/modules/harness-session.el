@@ -410,23 +410,43 @@ outright (`:context-window') wins over the limit."
 ;; A provider keeps the start of a conversation cached for a while
 ;; after a request used it, and every request that reads or writes the
 ;; cache keeps it longer.  The usage of a session remembers when its
-;; last such request was made (`:cache-at') and the lifetime its
-;; provider reported for it, if any (`:cache-ttl'), so a session idle
-;; for longer can be told that its next request sends everything again
-;; uncached.  Both persist with the session.
+;; last such request was made (`:cache-at'), the model it was sent to
+;; (`:cache-model') and the lifetime its provider reported for it, if
+;; any (`:cache-ttl'), so a session idle for longer can be told that
+;; its next request sends everything again uncached.  All three
+;; persist with the session.
+;;
+;; A cache serves the model that wrote it, no other, so a session
+;; switched to another model has nothing cached for it whatever the
+;; stamp says: its `:cache' names the stamp's model, which tells the two
+;; apart.  A request still sent to the old model (a step that ends after
+;; the switch) stamps that model's cache.  Some changes start the
+;; conversation over instead, so that the next request sends none of the
+;; old one, cached or not: a compaction, whose summary replaces it, and a
+;; switch to a provider that keeps a conversation of its own and holds
+;; none of this session's (a hosted loop: Claude Code, Copilot), which is
+;; sent only the newest messages and whatever a handoff gives it.  The
+;; compaction drops the stamp (`:cache-reset'); the switch is told by
+;; the provider state the session holds for the model, and the session
+;; reports no cache while it holds none.
 
 (defun harness-session--tokens (value)
   "Return VALUE when it is a number of tokens, else 0."
   (if (numberp value) value 0))
 
-(defun harness-session--cache-stamp (usage record)
-  "Return USAGE, a copy, with the prompt cache stamp of usage RECORD.
-A record of a request, one that counts tokens, that read or wrote the
-cache stamps when that was (its `:cache-at', else now) and the
-lifetime its provider reported (its `:cache-ttl', else none).  One that
-used no cache drops both: nothing is cached to lose.  A record without
-tokens, a turn counted, leaves them."
+(defun harness-session--cache-stamp (usage record model)
+  "Return USAGE with the prompt cache stamp of usage RECORD.
+MODEL is the session's model.  A record with `:cache-reset' drops the
+stamp: the conversation starts over, from a summary say, so nothing its
+next request sends is cached yet.  A record of a request, one that
+counts tokens, that read or wrote the cache stamps when that was (its
+`:cache-at', else now), the model it was sent to (its `:model', else
+MODEL), and the lifetime its provider reported (its `:cache-ttl', else
+none).  One that used no cache drops the stamp: nothing is cached to
+lose.  A record without tokens, a turn counted, leaves it."
   (cond
+   ((harness-json-true-p (plist-get record :cache-reset))
+    (harness-plist-remove usage :cache-at :cache-ttl :cache-model))
    ((not (or (numberp (plist-get record :input)) (numberp (plist-get record :output))))
     usage)
    ((> (+ (harness-session--tokens (plist-get record :cache-read))
@@ -434,11 +454,12 @@ tokens, a turn counted, leaves them."
        0)
     (let* ((at (plist-get record :cache-at))
            (ttl (plist-get record :cache-ttl))
-           (u (plist-put usage :cache-at (if (numberp at) (float at) (float-time)))))
+           (u (plist-put usage :cache-at (if (numberp at) (float at) (float-time))))
+           (u (plist-put u :cache-model (or (plist-get record :model) model))))
       (if (and (numberp ttl) (> ttl 0))
           (plist-put u :cache-ttl ttl)
         (harness-plist-remove u :cache-ttl))))
-   (t (harness-plist-remove usage :cache-at :cache-ttl))))
+   (t (harness-plist-remove usage :cache-at :cache-ttl :cache-model))))
 
 (defun harness-session--cache-ttl (model reported)
   "Return the seconds MODEL's provider keeps a prompt cache after its use.
@@ -454,18 +475,43 @@ is a positive number, else `harness-cache-ttl'."
       (bound-and-true-p harness-cache-ttl)
       300))
 
+(defun harness-session--new-conversation-p (s model)
+  "Non-nil when S's next request on MODEL starts a conversation of its own.
+That is a model whose provider keeps the conversation itself (a hosted
+loop) and holds none of S's: it is sent only the newest messages, so
+none of the old conversation is sent to it again.  Only the provider a
+state names counts: a state written before states named theirs would
+take reading the transcript to place."
+  (and (harness-method-exists-p 'provider/capabilities)
+       (harness-json-true-p
+        (plist-get (condition-case err
+                       (harness-call 'provider/capabilities model)
+                     (error (harness-log 'debug "session: no capabilities for %s: %S" model err)
+                            nil))
+                   :hosted-loop))
+       (not (eq (harness-provider-state-owner (harness-session-provider-state s))
+                (harness-model-provider model)))))
+
 (defun harness-session--cache (s)
   "Return what is known of the prompt cache of session S, or nil.
-That is (:at TIME :ttl SECONDS :expires TIME): when the last request
-that used the cache was made, how long the provider keeps it, and when
-it lapses unless another request comes first.  Nil while S has no
-context, before any of its requests used a cache, and after one that
-did not."
+That is (:at TIME :ttl SECONDS :expires TIME :model MODEL): when the
+last request that used the cache was made, how long the provider keeps
+it, when it lapses unless another request comes first, and the model it
+was sent to.  A cache serves its MODEL only: one of a model S no longer
+uses holds nothing S's next request reads back, which then sends the
+conversation uncached.  Nil while S has no context, before any of its
+requests used a cache, after one that did not, after a compaction, and
+while S's next request starts a conversation of its own on its new
+model (`harness-session--new-conversation-p'), which sends none of the
+old one."
   (let* ((u (harness-session-usage s))
-         (at (plist-get u :cache-at)))
-    (when (and (numberp at) (> (harness-session--tokens (plist-get u :context)) 0))
-      (let ((ttl (harness-session--cache-ttl (harness-session-model s) (plist-get u :cache-ttl))))
-        (list :at at :ttl ttl :expires (+ at ttl))))))
+         (at (plist-get u :cache-at))
+         (model (or (plist-get u :cache-model) (harness-session-model s))))
+    (when (and (numberp at) (> (harness-session--tokens (plist-get u :context)) 0)
+               (or (equal model (harness-session-model s))
+                   (not (harness-session--new-conversation-p s (harness-session-model s)))))
+      (let ((ttl (harness-session--cache-ttl model (plist-get u :cache-ttl))))
+        (list :at at :ttl ttl :expires (+ at ttl) :model model)))))
 
 (defun harness-session--model-levels (model)
   "Return the thinking levels the provider catalogue gives MODEL, or nil."
@@ -1236,15 +1282,18 @@ list cost needs pricing.  Records without tokens are returned as is."
 (harness-defmethod session/usage-add (id record)
   "Add usage RECORD to session ID.
 RECORD keys: :input :output :cache-read :cache-write :cost :list-cost
-:context :turns, :billing and :plan saying how the call was paid, and
+:context :turns, :billing and :plan saying how the call was paid,
+:model the model the request was sent to (the session's when unsaid),
 :cache-at and :cache-ttl, when the request used the prompt cache and
-how long its provider said it keeps it.  Counters accumulate;
+how long its provider said it keeps it, and :cache-reset, which says
+the conversation starts over (a compaction).  Counters accumulate;
 `:context' replaces, and so do `:billing' and `:plan' when RECORD has
 a billing.  A request that read or wrote the cache stamps the totals'
-`:cache-at' and `:cache-ttl' (see `harness-session--cache-stamp').  A
-missing `:cost' is priced from the model catalogue; a missing
-`:list-cost', the call at API prices, is the cost, or priced when a
-subscription paid.  Return the totals."
+`:cache-at', `:cache-model' and `:cache-ttl' (see
+`harness-session--cache-stamp').  A missing `:cost' is priced
+from the model catalogue; a missing `:list-cost', the call at API
+prices, is the cost, or priced when a subscription paid.  Return the
+totals."
   (let* ((s (harness-session--get id))
          (u (copy-sequence (harness-session-usage s)))
          (record (harness-session--price-record (harness-session-model s) record)))
@@ -1259,7 +1308,7 @@ subscription paid.  Return the totals."
     (when (harness-billing-of record)
       (setq u (plist-put u :billing (harness-billing-of record)))
       (setq u (plist-put u :plan (plist-get record :plan))))
-    (setq u (harness-session--cache-stamp u record))
+    (setq u (harness-session--cache-stamp u record (harness-session-model s)))
     (setf (harness-session-usage s) u)
     (harness-emit 'session/usage id u record)
     (harness-session--touch s)
