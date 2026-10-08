@@ -1754,32 +1754,41 @@ the same would carry the bar on."
         (should-error (harness-ui-tasks-reject) :type 'user-error)))))
 
 (ert-deftest harness-ui-tasks-review-offers-the-worktree-harness ()
-  "A review card whose worktree is a harness checkout offers [Open harness]."
+  "A review card whose worktree is a harness checkout has Open harness in its menu.
+The card has no button for it, as it has none for its session, which a
+click on its title opens."
   (harness-ui-tasks-test-with
     (let ((harness-tasks-require-verification t)
-          (checkout nil))
+          (checkout nil)
+          (open-harness (lambda ()
+                          (assoc "Open harness" (harness-ui-tasks--actions (harness-ui-tasks--task))))))
       (harness-ui-tasks-test--type-and-submit board "Try the harness")
       (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*Try the harness")
-      ;; Without a checkout of its own the card has no such button.
+      ;; Without a checkout of its own the card does not offer it.
       (harness-ui-tasks-test--goto-card board "Try the harness")
       (with-current-buffer board
         (should-not (harness-ui-tasks--open-harness-p (harness-ui-tasks--task)))
-        (should-not (string-match-p "\\[Open harness\\]" (harness-ui-tasks-test--board-text board))))
-      ;; A worktree that is a checkout of the harness gets one.
+        (should-not (funcall open-harness)))
+      ;; A worktree that is a checkout of the harness gets it in the menu.
       (setq checkout (harness-test-harness-checkout))
       (harness-test-load-module 'tools-dev)
-      (harness-tasks--set (plist-get (car (harness-call 'task/list default-directory)) :id)
-                          :worktree checkout)
-      (harness-ui-tasks-refresh)
-      (harness-ui-tasks-test--wait-text board "\\[Open harness\\]")
+      (let ((id (plist-get (car (harness-call 'task/list default-directory)) :id)))
+        (harness-tasks--set id :worktree checkout)
+        (with-current-buffer board (harness-ui-tasks-refresh))
+        (harness-test-wait (lambda () (with-current-buffer board
+                                        (harness-ui-tasks--open-harness-p (harness-ui-tasks--find id))))
+                           5 "the board to know the task's worktree"))
       (harness-ui-tasks-test--goto-card board "Try the harness")
       (with-current-buffer board
-        (should (member "Open harness"
-                        (mapcar #'car (harness-ui-tasks--actions (harness-ui-tasks--task)))))
-        (let ((button (harness-ui-tasks--find-button "open-harness" (point-min) (point-max))))
-          (should button)
-          (push-button (nth 1 button))))
-      ;; The click starts the worktree's own live loop.
+        (harness-ui-tasks--render)
+        (should (funcall open-harness))
+        ;; Not as a button: the card's buttons stay Verify and Send back.
+        (should-not (string-match-p "\\[Open harness\\]" (harness-ui-tasks-test--board-text board)))
+        (should-not (harness-ui-tasks--find-button "open-harness" (point-min) (point-max)))
+        (should (string-match-p "\\[Verify\\] \\[Send back\\]" (harness-ui-tasks-test--board-text board)))
+        ;; The menu's entry starts the worktree's own live loop.
+        (harness-ui-tasks-test--goto-card board "Try the harness")
+        (call-interactively (nth 1 (funcall open-harness))))
       (harness-test-wait (lambda () (harness-test-dev-invocations checkout)) 5
                          "the worktree's dev loop to run")
       (should (equal "start" (cdr (assoc "args" (car (harness-test-dev-invocations checkout)))))))))

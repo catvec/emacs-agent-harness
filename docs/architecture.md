@@ -3536,8 +3536,8 @@ session's worktree, else its cwd; a directory that is not a checkout
 (`harness.el` and `scripts/dev.sh` side by side) is refused.  The sync
 filter `agent/tools` drops the tool outside such checkouts: it is for
 this project only.  The bus method `harness-dev/open PATH &optional
-FOCUS` does the same for the UI (focus raises the frame); the task
-board's [Open harness] button on a review card calls it, and the tool
+FOCUS` does the same for the UI (focus raises the frame); Open harness
+in the menu of a task board's review card calls it, and the tool
 is in `harness-perms--auto-allow-tools', so the agent needs no approval
 to use it.
 
@@ -4789,10 +4789,12 @@ title and a low one `↓`, and their facts open with "high priority" or
 "low priority" (`harness-task-priority-high-face` /
 `-low-face`); medium shows nothing.  `I` or
 [Add session] makes an ongoing session a task.  A card in Ready for
-review whose worktree is itself a checkout of the harness gets an
-[Open harness] button: it starts the worktree's own live development
-loop in an Emacs of its own, frame raised, through `harness-dev/open`,
-so the work can be tried before it is verified.  `b` or [BTW] (or the
+review whose worktree is itself a checkout of the harness gets Open
+harness in its menu (`mouse-3`, `harness-ui-tasks-open-harness`; no
+button, the title's click opening the session as on every card): it
+starts the worktree's own live development loop in an Emacs of its
+own, frame raised, through `harness-dev/open`, so the work can be
+tried before it is verified.  `b` or [BTW] (or the
 usual BTW command) opens a BTW side conversation over the board about
 its tasks (`task/btw`).  `SPC` over a card, or [Answer…] / [Request…]
 on it, pops out what the task at point needs -- the permission prompt or

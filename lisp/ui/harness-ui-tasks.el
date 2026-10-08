@@ -740,6 +740,8 @@ on a narrow board.  See `harness-ui-tasks--shown-priority'."
                   (append
                    '(("Verify" harness-ui-tasks-verify) ("Send back" harness-ui-tasks-reject)
                      ("Open" harness-ui-tasks-open))
+                   ;; The card's menu only: its buttons are Verify and
+                   ;; Send back, and a click on its title is Open.
                    (and (harness-ui-tasks--open-harness-p task)
                         '(("Open harness" harness-ui-tasks-open-harness)))
                    '(("Archive" harness-ui-tasks-archive)))))
@@ -830,9 +832,13 @@ A task that handed a report in (`hand_in') gets a [Review] button too:
 its final message and evidence, in a popout.  One whose turn ended
 without it gets [No report] there instead, which pops out what the
 harness recorded for it: that nothing was handed in, and the session's
-last message (`harness-tasks--missing-report')."
-  (let ((id (plist-get task :id))
-        (missing (harness-json-true-p (plist-get (plist-get task :report) :missing))))
+last message (`harness-tasks--missing-report').
+
+A card has no button for opening its session: a click on its title
+does that.  Nor for Open harness, which stays in the card's menu
+\(`mouse-3') for a task in review whose worktree is a checkout of the
+harness (`harness-ui-tasks--open-harness-p')."
+  (let ((missing (harness-json-true-p (plist-get (plist-get task :report) :missing))))
     (concat
      (harness-ui-tasks--action-buttons task)
      (when (and (plist-get task :report) (fboundp 'harness-ui-report-popout))
@@ -845,12 +851,7 @@ last message (`harness-tasks--missing-report')."
                      (if missing
                          "It handed no report in: no summary, no evidence; see what its session said last"
                        "Review what it handed in: the final message and the evidence")
-                     "report")))
-     (when (harness-ui-tasks--open-harness-p task)
-       (concat " " (harness-ui-tasks--button
-                    "[Open harness]"
-                    (lambda () (harness-ui-tasks--with-task id (harness-ui-tasks-open-harness)))
-                    "Open an Emacs running the harness from this task's worktree" "open-harness"))))))
+                     "report"))))))
 
 (defun harness-ui-tasks--subtitle-button (task shown)
   "The chevron that shows or hides TASK's recap subtitle.
@@ -2930,7 +2931,8 @@ and with a backlog task the session that wrote it up."
   "Non-nil when TASK's worktree can be run as a harness of its own.
 That is a card waiting for review whose worktree holds harness.el and
 the live development loop scripts/dev.sh side by side: the work it
-handed in can then be tried live before verifying it."
+handed in can then be tried live before verifying it, with Open
+harness in the card's menu (`harness-ui-tasks-open-harness')."
   (and (equal (plist-get task :state) "review")
        (not (harness-ui-tasks--archived-p task))
        (let ((dir (plist-get task :worktree)))
@@ -2968,7 +2970,11 @@ sent at once."
         (message "Sent back: its session works on your feedback")))))
 
 (defun harness-ui-tasks-open-harness ()
-  "Open an Emacs running the harness from the task's worktree."
+  "Open an Emacs running the harness from the task's worktree.
+The task at point waits for your review, and its worktree is a
+checkout of the harness; the card's menu (`mouse-3') offers it then.
+This is not the task's session, which a click on the card's title
+opens."
   (interactive)
   (let* ((task (harness-ui-tasks--review-task))
          (dir (plist-get task :worktree)))
