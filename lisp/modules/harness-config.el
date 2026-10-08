@@ -178,7 +178,8 @@ its section; every other option it lists is an advanced one.  An option
 no loaded module defines is left out, and so is a section left empty.")
 
 (defconst harness-config-hidden-options
-  '(harness-process harness-module-directories harness-enabled-modules harness-disabled-modules
+  '(harness-process harness-module-directories harness-extra-module-directories
+    harness-enabled-modules harness-disabled-modules
     harness-state-directory harness-server-emacs harness-server-forward-variables
     harness-server-init-file harness-corporate-mode)
   "Harness options `config/describe' leaves out, besides the `harness-acp-' ones.

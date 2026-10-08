@@ -44,16 +44,22 @@ default) the layers above are split across two Emacs processes:
  user's Emacs                         harness process (emacs --batch -Q)
  harness.el, core, lisp/ui,     ACP   harness.el, core, lisp/modules
  harness-acp (client only),  <------> (acp serves 127.0.0.1:ephemeral,
- harness-files,               TCP     token per spawn; every tool runs here)
- harness-emacs-endpoint
+ harness-files,               TCP     token per spawn; every tool runs here),
+ harness-emacs-endpoint,              the user's other modules
+ the user's UI modules
 ```
 
-- `harness-start` in the user's Emacs loads only the UI and the ACP client,
-  then `harness-server-spawn` (lisp/harness-server.el) starts the child
-  once init has finished, so settings made later in the init file reach
-  it.  Requests made before the child listens are queued by `harness-ui`.
+- `harness-start` in the user's Emacs loads only the UI (with the UI
+  modules of `harness-extra-module-directories`, see Modules of your
+  own) and the ACP client, then `harness-server-spawn`
+  (lisp/harness-server.el) starts the child once init has finished, so
+  settings made later in the init file reach it.  Requests made before
+  the child listens are queued by `harness-ui`.
 - The child is configured from a generated file: every `harness-`
-  variable the user set (minus UI ones), the TRAMP options the user set
+  variable the user set (minus those a UI module defines, told by the
+  name of its file, `harness-ui[-NAME].el`: what loads is a compiled
+  copy in the state directory), `harness-extra-module-directories` made
+  absolute, the TRAMP options the user set
   (`harness-server--tramp-variables`: default methods, users and hosts,
   proxies, `tramp-remote-path`, connection sharing), plus
   `harness-server-forward-variables`; `harness-server-init-file` covers
@@ -146,7 +152,10 @@ Promises: `harness-make-promise`, `harness-resolve`, `harness-reject`,
 Naming: bus methods are `area/verb` symbols and are exactly the ACP
 extension methods (`_harness/area/verb` on the wire).  Events are
 `area/past-tense`.  Files: `lisp/modules/harness-NAME.el` defines
-module `NAME` and provides feature `harness-NAME`.
+module `NAME` and provides feature `harness-NAME`; a UI module is `ui`
+or `ui-NAME`, in `lisp/ui/harness-ui-NAME.el`.  The directories of
+`harness-extra-module-directories` hold modules named the same way
+(see Modules of your own).
 
 Reload safety: keep state in `defvar`s (never re-initialised), register
 subscribers with named functions, and make `:init` idempotent.
@@ -161,6 +170,113 @@ way that tolerates records without it (see `harness-acp--client-get`),
 or the module drops its stale records (see
 `harness-provider-claude--drop-stale-entries`).  After a reload the
 `harness/reloaded` event fires and the UI redraws every session buffer.
+
+## Modules of your own
+
+A module of the user's own lives outside the harness's tree, in a
+directory of `harness-extra-module-directories` (absolute, or relative
+to `user-emacs-directory`).  It is bound by this document as the
+harness's own modules are.  `harness--module-files` decides what loads
+where:
+
+- Every `harness-NAME.el` of such a directory is module `NAME`,
+  filtered by `harness-enabled-modules` and `harness-disabled-modules`.
+  Its other files are not modules.  The directories are on `load-path`,
+  after everything else so that no file there shadows a library, so a
+  module may `require` its other files.  Only module files are
+  compiled and reloaded.
+- A UI module (`ui` or `ui-NAME`, `harness--ui-module-p`) loads where
+  lisp/ui does: in the user's Emacs.  Any other module loads where
+  lisp/modules does: in the harness process, or in the user's Emacs
+  when `harness-process` is nil.  As in Layers, the two halves of a
+  feature talk over ACP and never `require` each other.
+- They load after the harness's own modules, a directory at a time.  A
+  module whose name is taken is left out with a warning in
+  `*harness-log*` rather than replacing what has the name: one of the
+  harness's modules, core files or libraries, or a module of a
+  directory listed earlier.
+- They compile into the state directory and reload as the harness's
+  own do.  `harness-reload` and `harness-update` load nothing when one
+  of them does not compile, and `harness-auto-reload-mode` watches their
+  directories.  A module records its source as `harness-module-file`
+  (from `harness--defining-file` while it loads), not the compiled copy
+  that `load-file-name` names.
+- The harness process gets the directories made absolute when it
+  starts (its `emacs -Q` has its own `user-emacs-directory`), so a
+  change takes `harness-restart`.  A reload never changes them, and no
+  request over ACP does either.
+- The options of a module are forwarded to the harness process like any
+  `harness-` variable the user set, whether this Emacs loads the module
+  or not: an option set before its module loads has no `symbol-file`,
+  so it is the user's.  The options of a UI module stay in the user's
+  Emacs.  Only `harness-...` variables are forwarded (list the others in
+  `harness-server-forward-variables`), so a module names its options
+  `harness-NAME-...`.  `config/describe` lists those of the `harness`
+  group under the module's name.
+- Over ACP, a module's methods are callable as `_harness/NAME` once
+  their prefix is in `harness-acp-extra-method-prefixes`.  Its events
+  reach clients as `_harness/event` once they are in
+  `harness-acp-extra-events`, and the UI hears them through
+  `harness-ui-event-functions` (EVENT a string, ARGS a list).  A module
+  adds to both as it loads, with `with-eval-after-load 'harness-acp`,
+  which holds in the harness process when `harness-process` is on.
+- `harness/modules` describes the modules of a harness, as
+  `harness-module-descriptions` does (name, state, doc, file, error).
+  `harness-describe-modules` lists those of the user's Emacs, then
+  those of the harness process, through
+  `harness-describe-modules-functions`.  For a module from outside the
+  tree, the list names its file.
+
+A minimal pair, in `~/.config/emacs/harness-modules/`, with
+`harness-extra-module-directories` set to `("harness-modules")`:
+
+```elisp
+;;; harness-hello.el --- Says hello  -*- lexical-binding: t; -*-
+(require 'harness-core)
+
+(defcustom harness-hello-greeting "Hello"
+  "How `hello/greet' greets."
+  :type 'string :group 'harness)
+
+(harness-defmethod hello/greet (name)
+  "Greet NAME, and tell every client."
+  (harness-emit 'hello/greeted name)
+  (format "%s, %s!" harness-hello-greeting name))
+
+(defvar harness-acp-extra-method-prefixes)
+(defvar harness-acp-extra-events)
+(with-eval-after-load 'harness-acp
+  (add-to-list 'harness-acp-extra-method-prefixes "hello/")
+  (add-to-list 'harness-acp-extra-events 'hello/greeted))
+
+(harness-define-module 'hello :doc "Says hello.")
+(provide 'harness-hello)
+```
+
+```elisp
+;;; harness-ui-hello.el --- Asks hello to greet  -*- lexical-binding: t; -*-
+(require 'harness-ui)
+
+(defun harness-hello (name)
+  "Have the harness greet NAME."
+  (interactive "sName: ")
+  (harness-ui-call "_harness/hello/greet" (list :name name)
+                   (lambda (greeting) (message "%s" greeting))))
+
+(defun harness-ui-hello--on-event (event args)
+  "Say whom the harness greeted, whichever client asked."
+  (when (equal event "hello/greeted")
+    (message "The harness greeted %s" (car args))))
+
+(add-hook 'harness-ui-event-functions #'harness-ui-hello--on-event)
+
+(harness-define-module 'ui-hello :doc "Asks hello to greet." :requires '(ui))
+(provide 'harness-ui-hello)
+```
+
+`harness-server-loads-extra-modules-on-each-side`
+(test/harness-server-test.el) runs such a pair, one module in each
+process.
 
 ## Data shapes
 
@@ -403,7 +519,8 @@ it is one budget for all sessions together (see usage).
 
 The other harness options (the `harness` customize group, less the
 ones that decide how the harness starts or reaches the UI:
-`harness-process`, `harness-state-directory`, the module lists, the
+`harness-process`, `harness-state-directory`, the module directories
+and lists (`harness-extra-module-directories` among them), the
 `harness-server-*` and `harness-acp-*` options, minor modes, and less
 `harness-corporate-mode`) have a global value only.  `config/set` and
 `config/unset` refuse the ones of `harness-config-hidden-options`,
@@ -3238,11 +3355,22 @@ the image data, since the pending question is saved with the session.
 
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `fallback/`, `worktree/`, `merge/`,
-`config/`, `skills/`, `permission/`, `question/`, `compaction/`, `handoff/`, `naming/`, `task/`,
-`notification/`, `sandbox/status`, `harness-dev/`, `harness/api`, `harness/version`, `harness/reload`, `acp/remote-` is callable as `_harness/NAME` with a
+`config/`, `skills/`, `permission/`, `question/`, `compaction/`, `handoff/`, `naming/`,
+`project/`, `task/`, `notification/`, `sandbox/status`, `harness-dev/`, `harness/api`,
+`harness/modules`, `harness/version`, `harness/reload`, `acp/remote-`, `pet/`, `version/`,
+`insights/` (`harness-acp-extension-prefixes`), or with one of
+`harness-acp-extra-method-prefixes`, which modules of the user's own
+add to (see Modules of your own), is callable as `_harness/NAME` with a
 params object whose keys become the plist arguments (`{"id": …}` →
 `:id`).  Methods take a single plist argument on the wire; the ACP
 layer maps positional bus signatures through a small table.
+`harness/modules` → `[{name, state, doc, file, error}]`, every module
+of the harness, as `harness-describe-modules` lists them.
+
+The bus events of `harness-acp--forwarded-events` and
+`harness-acp-extra-events` reach every client as `_harness/event
+{event, args}` notifications (the UI runs `harness-ui-event-functions`
+with them).
 
 Harness → UI requests for chores any client may do go through the bus
 method `client/request METHOD PARAMS` → promise of the first client's

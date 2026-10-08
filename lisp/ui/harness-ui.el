@@ -578,6 +578,18 @@ tasks among them carry on once the process is back (see
                      (lambda (_) (message "Harness process reloaded"))
                      (lambda (e) (message "Harness process: %s" (harness-error-message e))))))
 
+(defun harness-ui--harness-modules ()
+  "Return (TITLE . PROMISE) of the modules of the harness the UI talks to.
+For `harness-describe-modules-functions'.  Nil when that harness runs
+in this Emacs, whose modules `harness-describe-modules' lists anyway."
+  (when harness-ui-connection-address
+    (cons (if (eq harness-ui-connection-address 'process)
+              "Modules of the harness process"
+            (format "Modules of the harness at %s" harness-ui-connection-address))
+          (harness-ui-request "_harness/harness/modules"))))
+
+(add-hook 'harness-describe-modules-functions #'harness-ui--harness-modules)
+
 (defun harness-ui--advertise ()
   "Tell the harness again what this Emacs lends it, as `initialize' did.
 After a reload, so that a connection opened by older code, which lent

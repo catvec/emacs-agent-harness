@@ -13,6 +13,8 @@
 ;; Every feature (sessions, providers, tools, the chat UI, the ACP
 ;; server) is a module under lisp/modules or lisp/ui.  A harness with
 ;; every module disabled starts, does nothing, and shows nothing.
+;; Modules of the user's own live in `harness-extra-module-directories',
+;; outside the harness's tree, and load beside its own.
 ;;
 ;; Start it with `harness-start'.  Reload it after editing the sources
 ;; with `harness-reload': each file is checked and compiled first and
@@ -61,8 +63,32 @@ See `harness--source-directory'.")
 
 (defcustom harness-module-directories '("lisp/modules" "lisp/ui")
   "Directories, relative to `harness-directory', that hold module files.
-Every file named harness-NAME.el in them is a module called NAME."
+Every file named harness-NAME.el in them is a module called NAME.
+These are the harness's own; modules of your own go in
+`harness-extra-module-directories'."
   :type '(repeat string) :group 'harness)
+
+(defcustom harness-extra-module-directories nil
+  "Directories of modules of your own, outside the harness's tree.
+Each is absolute, or relative to `user-emacs-directory'.  As in the
+harness's own directories, every file named harness-NAME.el in them is
+a module called NAME, which `harness-enabled-modules' and
+`harness-disabled-modules' name like any other.
+
+A module named ui or ui-NAME (in harness-ui-NAME.el) is a UI module:
+it loads where the harness's own UI modules do, in this Emacs.  Every
+other module loads where the rest of the harness runs: in the harness
+process while `harness-process' is on, else in this Emacs too.  A
+module whose name an earlier one has, the harness's own included, is
+left out, with a warning in the log.
+
+The modules are compiled and reloaded like the harness's own:
+`harness-reload' and `harness-update' reload them, and
+`harness-auto-reload-mode' watches their directories, which are on
+`load-path' so that a module can require the other files of its
+directory.  The harness process reads this option when it starts, so
+after changing it run \\[harness-restart]."
+  :type '(repeat directory) :group 'harness)
 
 (defcustom harness-enabled-modules t
   "Modules to load: t for every discovered module, or a list of names."
@@ -122,39 +148,96 @@ recompile the modules.")
 (defun harness--path (relative)
   (expand-file-name relative harness-directory))
 
+(defun harness--extra-module-directories ()
+  "Return `harness-extra-module-directories' as absolute directory names.
+An entry that is not absolute is relative to `user-emacs-directory'."
+  (cl-loop for dir in harness-extra-module-directories
+           when (stringp dir)
+           collect (directory-file-name (expand-file-name dir user-emacs-directory))))
+
 (defun harness--setup-load-path ()
+  "Put the harness's directories on `load-path', and the user's module ones.
+The harness's go first, the user's last, so that a file of the user's
+never shadows a library."
   (dolist (dir (append '("lisp" "lisp/modules" "lisp/ui") harness-module-directories))
-    (add-to-list 'load-path (harness--path dir))))
+    (add-to-list 'load-path (harness--path dir)))
+  (dolist (dir (harness--extra-module-directories))
+    (add-to-list 'load-path dir t)))
 
 (defun harness--module-directories ()
   "Directories modules load from in this Emacs."
   (if harness-process '("lisp/ui") harness-module-directories))
 
+(defconst harness--module-file-regexp "\\`harness-[a-z0-9-]+\\.el\\'"
+  "Names of module files: harness-NAME.el holds module NAME.")
+
 (defun harness--file-module-name (file)
   "Return the module name symbol for FILE (harness-NAME.el -> NAME)."
   (intern (string-remove-prefix "harness-" (file-name-base file))))
 
+(defun harness--ui-module-p (name)
+  "Non-nil when module NAME, a symbol, is a UI module: ui or ui-SOMETHING."
+  (string-match-p "\\`ui\\(?:-\\|\\'\\)" (symbol-name name)))
+
+(defun harness--ui-module-file-p (file)
+  "Non-nil when FILE, a module's source or compiled file, holds a UI module."
+  (string-match-p "\\`harness-ui\\(?:-\\|\\'\\)" (file-name-base file)))
+
+(defun harness--module-enabled-p (name)
+  "Non-nil when module NAME is to load.
+That is when `harness-enabled-modules' has it and
+`harness-disabled-modules' does not."
+  (and (or (eq harness-enabled-modules t)
+           (memq name harness-enabled-modules))
+       (not (memq name harness-disabled-modules))))
+
 (defun harness--module-files ()
-  "Return the enabled module files, sorted by directory then name."
-  (let ((files (and harness-process
-                     (reverse (mapcar #'harness--path harness--client-module-files)))))
-    (dolist (dir (harness--module-directories))
+  "Return the enabled module files of this Emacs, in the order they load.
+The harness's own come first, by directory then name, then those of
+`harness-extra-module-directories', likewise.  Of these, a UI module
+\(`harness--ui-module-p') loads where the harness's own UI modules do,
+from lisp/ui, and any other where the rest of its modules do, from
+lisp/modules.  One whose name an earlier one has, or one of the
+harness's libraries, is left out with a warning: it would replace it."
+  (let* ((dirs (harness--module-directories))
+         (kinds (append (and (member "lisp/ui" dirs) '(ui))
+                        (and (member "lisp/modules" dirs) '(other))))
+         (files (and harness-process
+                     (reverse (mapcar #'harness--path harness--client-module-files))))
+         (taken (mapcar (lambda (f) (cons (harness--file-module-name f) (harness--path f)))
+                        (append harness--core-files harness--library-files
+                                harness--client-module-files))))
+    (dolist (dir dirs)
       (let ((full (harness--path dir)))
         (when (file-directory-p full)
-          (dolist (f (directory-files full t "\\`harness-[a-z0-9-]+\\.el\\'"))
+          (dolist (f (directory-files full t harness--module-file-regexp))
             (let ((name (harness--file-module-name f)))
-              (when (and (or (eq harness-enabled-modules t)
-                             (memq name harness-enabled-modules))
-                         (not (memq name harness-disabled-modules)))
-                (push f files)))))))
+              (when (harness--module-enabled-p name)
+                (push f files)
+                (push (cons name f) taken)))))))
+    (dolist (dir (harness--extra-module-directories))
+      (when (file-directory-p dir)
+        (dolist (f (directory-files dir t harness--module-file-regexp))
+          (let ((name (harness--file-module-name f)))
+            (when (and (memq (if (harness--ui-module-p name) 'ui 'other) kinds)
+                       (harness--module-enabled-p name))
+              (if-let* ((other (alist-get name taken)))
+                  (harness-log 'warn "module %s: %s is left out, as %s has that name"
+                               name (abbreviate-file-name f) (abbreviate-file-name other))
+                (push f files)
+                (push (cons name f) taken)))))))
     (nreverse files)))
 
 (defun harness--load-file (file)
-  "Compile and load FILE with `harness--defining-module' bound to its module name."
-  (let ((harness--defining-module (harness--file-module-name file)))
+  "Compile and load FILE with `harness--defining-module' bound to its module name.
+`harness--defining-file' is bound to FILE, which its module records as
+its source: what loads is a compiled copy elsewhere."
+  (let ((harness--defining-module (harness--file-module-name file))
+        (harness--defining-file file))
     (harness-load-compiled file)))
 
 (defvar harness--defining-module)
+(defvar harness--defining-file)
 (defvar harness-acp--server-enabled)
 (defvar harness-ui-connection-address)
 (declare-function harness-ui-reload-server "harness-ui")
@@ -341,16 +424,17 @@ Return non-nil when every file loaded again."
       (harness-debounce 'auto-reload 0.6 #'harness-reload))))
 
 (define-minor-mode harness-auto-reload-mode
-  "Reload the harness whenever one of its source files changes on disk."
+  "Reload the harness whenever one of its source files changes on disk.
+The modules of `harness-extra-module-directories' count as its sources."
   :global t :group 'harness
   (dolist (w harness--watches) (ignore-errors (file-notify-rm-watch w)))
   (setq harness--watches nil)
   (when harness-auto-reload-mode
-    (dolist (dir (cons "." (cons "lisp" harness-module-directories)))
-      (let ((full (harness--path dir)))
-        (when (file-directory-p full)
-          (push (file-notify-add-watch full '(change) #'harness--auto-reload-callback)
-                harness--watches))))))
+    (dolist (full (append (mapcar #'harness--path (cons "." (cons "lisp" harness-module-directories)))
+                          (harness--extra-module-directories)))
+      (when (file-directory-p full)
+        (push (file-notify-add-watch full '(change) #'harness--auto-reload-callback)
+              harness--watches)))))
 
 ;;;; Version and updates
 

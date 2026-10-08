@@ -278,6 +278,226 @@ that does not compile refuses the reload like a module does."
       (setq features (delq 'harness-testlib features))
       (delete-directory dir t))))
 
+;;;; Modules of the user's own
+
+(defun harness-core-test--write-elisp (file &rest forms)
+  "Write FORMS to FILE, a file of lexical Emacs Lisp."
+  (make-directory (file-name-directory file) t)
+  (with-temp-file file
+    (insert ";;; -*- lexical-binding: t -*-\n")
+    (dolist (form forms)
+      (prin1 form (current-buffer))
+      (insert "\n"))))
+
+(ert-deftest harness-loader-picks-extra-modules-by-side ()
+  "Which modules of `harness-extra-module-directories' an Emacs loads.
+They load after the harness's own.  A UI module (ui-NAME) loads where
+lisp/ui does and any other where lisp/modules does: both in a harness
+with no process of its own, only the UI ones in the UI of a harness
+process, and only the others in that process.  One whose name the
+harness has already, a library's included, is left out with a warning;
+the enabled and disabled lists filter them as they do the harness's own."
+  (let* ((config (harness-test-temp-dir))
+         (mine (expand-file-name "my-modules/" config))
+         (warned nil)
+         (harness-log-hook
+          (list (lambda (level msg)
+                  (when (and (eq level 'warn) (string-match "\\`module \\([^:]+\\): .* is left out" msg))
+                    (push (match-string 1 msg) warned)))))
+         (left-out (lambda () (prog1 (sort warned #'string<) (setq warned nil))))
+         (user-emacs-directory config)
+         ;; Relative to `user-emacs-directory'; one that does not exist is
+         ;; no error.
+         (harness-extra-module-directories '("my-modules" "/nonexistent/harness-modules"))
+         (harness-enabled-modules t)
+         (harness-disabled-modules nil)
+         (mine-of (lambda (files)
+                    (mapcar #'file-name-nondirectory
+                            (cl-remove-if-not (lambda (f) (string-prefix-p mine f)) files)))))
+    (dolist (name '("hello" "ui-hello" "session" "ui-chat" "files"))
+      (harness-core-test--write-elisp (expand-file-name (format "harness-%s.el" name) mine)
+                                      '(ignore)))
+    ;; Not modules: the files a module of the directory may require.
+    (harness-core-test--write-elisp (expand-file-name "hello-util.el" mine) '(ignore))
+    (harness-core-test--write-elisp (expand-file-name "harness_hello.el" mine) '(ignore))
+    (unwind-protect
+        (progn
+          ;; A harness with no process of its own loads both, after its own.
+          (let* ((harness-process nil)
+                 (harness-module-directories '("lisp/modules" "lisp/ui"))
+                 (files (harness--module-files)))
+            (should (equal (list (expand-file-name "harness-hello.el" mine)
+                                 (expand-file-name "harness-ui-hello.el" mine))
+                           (last files 2)))
+            (should (equal '("harness-hello.el" "harness-ui-hello.el") (funcall mine-of files)))
+            ;; The harness's own of the names taken stay.
+            (should (member (harness--path "lisp/modules/harness-session.el") files))
+            (should (member (harness--path "lisp/ui/harness-ui-chat.el") files))
+            (should (equal '("files" "session" "ui-chat") (funcall left-out))))
+          ;; The UI of a harness process loads the UI one.
+          (let ((harness-process t)
+                (harness-module-directories '("lisp/modules" "lisp/ui")))
+            (should (equal '("harness-ui-hello.el") (funcall mine-of (harness--module-files))))
+            (should (equal '("ui-chat") (funcall left-out))))
+          ;; The harness process, which loads lisp/modules, the other.
+          (let ((harness-process nil)
+                (harness-module-directories '("lisp/modules")))
+            (should (equal '("harness-hello.el") (funcall mine-of (harness--module-files))))
+            (should (equal '("files" "session") (funcall left-out))))
+          ;; The enabled and disabled lists name them as they do any other.
+          (let ((harness-process nil)
+                (harness-module-directories '("lisp/modules" "lisp/ui")))
+            (let ((harness-disabled-modules '(hello)))
+              (should (equal '("harness-ui-hello.el") (funcall mine-of (harness--module-files)))))
+            (let ((harness-enabled-modules '(hello session)))
+              (should (equal (list (harness--path "lisp/modules/harness-session.el")
+                                   (expand-file-name "harness-hello.el" mine))
+                             (harness--module-files))))))
+      (delete-directory config t))))
+
+(ert-deftest harness-loader-starts-and-reloads-extra-modules ()
+  "Modules of `harness-extra-module-directories' start and reload as the harness's own.
+They load compiled and record their source, not that compiled copy.
+They require the other files of their directory, which is on
+`load-path'.  `harness-reload' loads them again: it refuses a broken
+edit, naming the file, and picks up a good one."
+  (harness-test-reset-bus)
+  (harness-test-with-temp-state
+    (let* ((tree (harness-test-temp-dir))
+           (config (harness-test-temp-dir))
+           (mine (expand-file-name "my-modules/" config))
+           (hello (expand-file-name "harness-hello.el" mine))
+           (ui-hello (expand-file-name "harness-ui-hello.el" mine))
+           (write-hello
+            (lambda (fmt)
+              (harness-core-test--write-elisp
+               hello
+               '(require 'harness-core)
+               '(require 'hello-util)
+               '(defcustom harness-hello-greeting "hello" "How to greet."
+                  :type 'string :group 'harness)
+               `(harness-defmethod hello/greet (name)
+                  "Greet NAME."
+                  (format ,fmt (hello-util-greet harness-hello-greeting name)))
+               '(harness-define-module 'hello :doc "Says hello.")
+               '(provide 'harness-hello)))))
+      (harness-core-test--write-elisp (expand-file-name "lisp/modules/harness-own.el" tree)
+                                      '(harness-define-module 'own :doc "The harness's own.")
+                                      '(provide 'harness-own))
+      (harness-core-test--write-elisp (expand-file-name "hello-util.el" mine)
+                                      '(defun hello-util-greet (greeting name)
+                                         (format "%s, %s" greeting name))
+                                      '(provide 'hello-util))
+      (funcall write-hello "%s")
+      (harness-core-test--write-elisp ui-hello
+                                      '(require 'harness-core)
+                                      '(defun harness-ui-hello-greet (name)
+                                         (harness-call 'hello/greet name))
+                                      '(harness-define-module 'ui-hello :doc "Its UI."
+                                                              :requires '(hello))
+                                      '(provide 'harness-ui-hello))
+      (unwind-protect
+          (cl-letf (((symbol-function 'harness--path)
+                     (lambda (rel) (expand-file-name rel tree))))
+            (let ((harness-module-directories '("lisp/modules" "lisp/ui"))
+                  (harness--core-files nil)
+                  (harness--library-files nil)
+                  (harness-process nil)
+                  (user-emacs-directory config)
+                  (harness-extra-module-directories '("my-modules"))
+                  (load-path load-path))
+              (should (harness-start))
+              (should (equal '(hello own ui-hello) (mapcar #'harness-module-name (harness-modules))))
+              (should (harness-module-ready-p 'ui-hello))
+              (should (equal "hello, you" (harness-ui-hello-greet "you")))
+              ;; Compiled, in the state directory; the module records its source.
+              (should (funcall (if (fboundp 'compiled-function-p) #'compiled-function-p #'byte-code-function-p)
+                               (symbol-function 'harness-ui-hello-greet)))
+              (should (equal (harness--compiled-name hello) (symbol-file 'harness-hello-greeting 'defvar)))
+              (should (equal hello (harness-module-file (harness-module-get 'hello))))
+              (should (equal (list hello ui-hello)
+                             (mapcar (lambda (d) (plist-get d :file))
+                                     (cl-remove 'own (harness-module-descriptions)
+                                                :key (lambda (d) (plist-get d :name))))))
+              ;; On `load-path', after everything else.
+              (should (equal (directory-file-name mine) (car (last load-path))))
+              ;; A broken edit is refused and leaves the old definitions.
+              (with-temp-file hello (insert "(harness-define-module 'hello :init (lambda () (oops"))
+              (let ((problems (plist-get (harness--reload) :refused)))
+                (should (equal 1 (length problems)))
+                (should (string-prefix-p "harness-hello.el: " (car problems))))
+              (should (equal "hello, you" (harness-ui-hello-greet "you")))
+              ;; A good one is picked up, and the module stays ready.
+              (funcall write-hello "%s!")
+              (should (harness-reload))
+              (should (equal "hello, you!" (harness-ui-hello-greet "you")))
+              (should (harness-module-ready-p 'hello))
+              (should (equal hello (harness-module-file (harness-module-get 'hello))))
+              (harness-stop)))
+        (fmakunbound 'harness-ui-hello-greet)
+        (fmakunbound 'hello-util-greet)
+        (makunbound 'harness-hello-greeting)
+        (setq features (cl-remove-if (lambda (f) (memq f '(harness-own harness-hello harness-ui-hello hello-util)))
+                                     features))
+        (delete-directory tree t)
+        (delete-directory config t)))))
+
+(ert-deftest harness-core-describe-modules-lists-every-emacs ()
+  "`harness-describe-modules' lists the modules of this Emacs, then of others.
+A module from outside the harness's tree names its file, and a failed
+one its error.  The modules of another Emacs, such as the harness
+process, fill their section when they arrive, or it says why not."
+  (harness-test-reset-bus)
+  (let* ((outside (expand-file-name "harness-hello.el" (harness-test-temp-dir)))
+         (process (harness-make-promise))
+         (remote (harness-make-promise))
+         (harness-describe-modules-functions
+          (list (lambda () (cons "Modules of the harness process" process))
+                #'ignore
+                (lambda () (cons "Modules of the harness at there:1" remote)))))
+    (let ((harness--defining-module 'own)
+          (harness--defining-file (expand-file-name "lisp/modules/harness-own.el" harness-directory)))
+      (harness-define-module 'own :doc "The harness's own."))
+    (let ((harness--defining-module 'hello)
+          (harness--defining-file outside))
+      (harness-define-module 'hello :doc "Says hello."))
+    ;; Defined as another module's file loads: its file is not that one.
+    (let ((harness--defining-module 'hello)
+          (harness--defining-file outside))
+      (harness-define-module 'broken :doc "Fails." :init (lambda () (error "No luck"))))
+    (harness-modules-init)
+    (should-not (harness-module-file (harness-module-get 'broken)))
+    (harness-describe-modules)
+    (with-current-buffer harness--modules-buffer-name
+      (let ((text (buffer-string)))
+        (should (string-prefix-p "Modules of this Emacs\n\n" text))
+        (should (string-match-p "^  broken +failed +Fails\\.\n +error: No luck\n" text))
+        (should (string-match-p (concat "^  hello +ready +Says hello\\.\n +"
+                                        (regexp-quote (abbreviate-file-name outside)) "\n")
+                                text))
+        ;; The harness's own names no file.
+        (should (string-match-p "^  own +ready +The harness's own\\.\n\nModules of the harness process\n\n  …\n" text))
+        (should (string-suffix-p "Modules of the harness at there:1\n\n  …\n" text))))
+    (harness-resolve process (list (list :name 'session :state 'ready :doc "Sessions." :file nil :error nil)
+                                   (list :name "hi" :state "failed" :doc "Hi." :file outside :error "Oops")))
+    (harness-reject remote '(acp-error -32603 "Connection lost" nil))
+    (harness-test-wait (lambda ()
+                         (with-current-buffer harness--modules-buffer-name
+                           (not (string-search "…" (buffer-string)))))
+                       5 "the other Emacs's modules")
+    (with-current-buffer harness--modules-buffer-name
+      (let ((text (buffer-string)))
+        (should (string-search
+                 (concat "Modules of the harness process\n\n"
+                         (format "  %-22s %-10s %s\n" "session" "ready" "Sessions.")
+                         (format "  %-22s %-10s %s\n" "hi" "failed" "Hi.")
+                         (format "  %-22s %-10s %s\n" "" "" (abbreviate-file-name outside))
+                         (format "  %-22s %-10s error: %s\n" "" "" "Oops")
+                         "\nModules of the harness at there:1\n\n"
+                         "  They could not be listed: Connection lost\n")
+                 text))))
+    (kill-buffer harness--modules-buffer-name)))
+
 (ert-deftest harness-util-run-command ()
   (let ((r (harness-await (harness-run-command '("sh" "-c" "echo out; echo err >&2; exit 3")))))
     (should (= 3 (plist-get r :exit)))
