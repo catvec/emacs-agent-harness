@@ -3035,6 +3035,59 @@ either the command asks for a session, so the label has no state."
   (harness-ui-call "_harness/session/update" (list :id (or session-id (harness-ui-current-session-id)) :name name)
                    (lambda (_) (message "Renamed to %s" name))))
 
+(defun harness-ui-read-move-directory (session)
+  "Read the directory to move SESSION, a session plist, to.
+Completion starts in the directory that holds its working directory,
+where a sibling project is.  A remote session's directory is read as
+text, a path on its host, so that no TRAMP connection is opened."
+  (let ((cwd (plist-get session :cwd))
+        (prompt (format "Move %s to directory: " (harness-ui-session-label session))))
+    (if (or (plist-get session :host) (and cwd (file-remote-p cwd)))
+        (read-string prompt (and cwd (file-local-name cwd)))
+      (read-directory-name prompt (and cwd (file-name-directory (directory-file-name cwd))) nil t))))
+
+;;;###autoload
+(defun harness-move-session (directory &optional session-id keep-old)
+  "Move SESSION-ID to the working directory DIRECTORY, and to its project.
+For a session started in one place that works on another: it works in
+DIRECTORY from then on, and the session list shows it under
+DIRECTORY's project.  Interactively it is the current buffer's session,
+or one you choose, and with a prefix argument KEEP-OLD its old working
+directory stays allowed to it.  A session running a turn moves when the
+turn ends.  Its next turn starts a new provider conversation in
+DIRECTORY, which gets the transcript.  The harness refuses sessions in
+worktrees, task sessions and sessions merges are queued into."
+  (interactive
+   (let ((sid (harness-ui-current-session-id)))
+     (list (harness-ui-read-move-directory (harness-ui-session sid)) sid current-prefix-arg)))
+  (let* ((sid (or session-id (harness-ui-current-session-id)))
+         (session (harness-ui-session sid))
+         (remote (or (plist-get session :host) (file-remote-p (or (plist-get session :cwd) ""))))
+         ;; A remote session's path is one on its host, for the harness to
+         ;; resolve; a local one is rooted here, as for a new session.
+         (dir (if (or (not remote) (file-remote-p directory))
+                  (file-name-as-directory (expand-file-name directory))
+                directory))
+         (label (if session (harness-ui-session-label session) (substring sid 0 (min 8 (length sid))))))
+    (harness-ui-call "_harness/session/move"
+                     (append (list :id sid :dir dir :keep-old-dir (if keep-old t :false))
+                             (and (not remote) (list :project (harness-files-project-root dir))))
+                     (lambda (result)
+                       (harness-ui-cache-session result)
+                       (let ((move (plist-get result :move)))
+                         (message (cond (move "%s moves to %s when its turn ends")
+                                        ((equal (plist-get result :cwd) (plist-get session :cwd))
+                                         "%s stays in %s: the move it waited to make is cancelled")
+                                        (t "Moved %s to %s"))
+                                  label (abbreviate-file-name (or (plist-get move :cwd) (plist-get result :cwd) dir)))))
+                     (lambda (e)
+                       (unless (harness-ui-connection-replaced-p e)
+                         (message "Not moved: %s" (harness-error-message e)))
+                       nil))))
+
+;;;###autoload
+(defalias 'harness-session-move #'harness-move-session)
+
 ;;;###autoload
 (defun harness-fork-session (&optional session-id position)
   "Fork SESSION-ID (default the current session) and open the fork in POSITION."
@@ -3097,6 +3150,7 @@ either the command asks for a session, so the label has no state."
 ;; Emacs too.
 (define-key harness-ui-map (kbd "i") #'harness-toggle-non-interactive)
 (define-key harness-ui-map (kbd "F") #'harness-fullscreen)
+(define-key harness-ui-map (kbd "W") #'harness-move-session)
 
 (defvar harness-global-mode-map (make-sparse-keymap)
   "Keymap of `harness-global-mode': `harness-ui-map' under `harness-ui-prefix-key'.")
@@ -3386,7 +3440,8 @@ leaves the buffer's commands out, never the whole menu."
     ("p" "Permission mode" harness-set-permission-mode)
     ("d" "Directory access" harness-directories :if (lambda () (harness-ui--command-available-p 'harness-directories)))
     ("i" (lambda () (harness-ui--non-interactive-menu-label)) harness-toggle-non-interactive)
-    ("r" "Rename" harness-rename-session)]
+    ("r" "Rename" harness-rename-session)
+    ("W" "Move to another directory" harness-move-session)]
    ["Tools"
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
     ("I" "Insights" harness-insights :if (lambda () (harness-ui--command-available-p 'harness-insights)))

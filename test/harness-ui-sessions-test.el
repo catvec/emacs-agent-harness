@@ -36,6 +36,10 @@ tasks when they are `fail', fails.  Each request is recorded in
          (harness-resolved harness-ui-sessions-test--tasks))
         ((member method '("_harness/permission/answer" "_harness/question/answer"))
          (harness-resolved t))
+        ((equal method "_harness/session/move")
+         (harness-resolved (harness-plist-merge (harness-ui-session (plist-get params :id))
+                                                (list :cwd (plist-get params :dir)
+                                                      :project (plist-get params :project)))))
         (t (harness-rejected (list 'harness-error (format "%s: no such method" method))))))
 
 (defun harness-ui-sessions-test--answers ()
@@ -466,6 +470,31 @@ before the session says it waits no more."
             (harness-ui-action-push))
           (should (equal '("child") popped))
           (should (= 2 (length (harness-ui-sessions-test--answers)))))))))
+
+(ert-deftest harness-ui-sessions-move-the-session-at-point ()
+  "m moves the session at point to another directory, read from the
+directory that holds its own, and the list follows it to the project
+there."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--with-init
+      (let ((asked nil))
+        (harness-ui-sessions-test--add "lost" other)
+        (harness-ui-sessions-test--add "home" root)
+        (let ((default-directory other)) (harness-sessions))
+        (with-current-buffer harness-ui-sessions--buffer-name
+          (should (equal '("lost") (harness-ui-sessions-test--shown)))
+          (harness-ui-sessions-test--goto "lost")
+          (should (eq 'harness-ui-sessions-move (key-binding (kbd "m"))))
+          (cl-letf (((symbol-function 'read-directory-name)
+                     (lambda (prompt dir &rest _) (push (list prompt dir) asked) root)))
+            (call-interactively (key-binding (kbd "m"))))
+          (should (= 1 (length asked)))
+          (should (string-match-p "\\`Move .*lost to directory: \\'" (car (car asked))))
+          (should (equal base (cadr (car asked))))
+          (should (equal (list (list "_harness/session/move" (list :id "lost" :dir root :keep-old-dir :false :project root)))
+                         (harness-ui-sessions-test--answers)))
+          (should (equal root (plist-get (harness-ui-session "lost") :project)))
+          (harness-test-wait (lambda () (null (harness-ui-sessions-test--shown))) 5 "the list to follow the move"))))))
 
 (ert-deftest harness-ui-sessions-open-in-its-project ()
   "RET opens the session at point in its project, from either of its lines.

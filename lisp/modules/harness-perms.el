@@ -28,8 +28,10 @@
 ;; `:reason' and, when there is something the model can do about it, a
 ;; `:hint', because a denial the model can act on is the difference
 ;; between an autonomous session and one that stalls.  Other modules
-;; add stages of their own: the tasks module keeps the turns that write
-;; a backlog task up read-only at 25.
+;; add stages of their own: the session tools have the user confirm
+;; session_move at 6 (`harness-perms-confirm', see Confirmations), and
+;; the tasks module keeps the turns that write a backlog task up
+;; read-only at 25.
 ;;
 ;; Non-interactive mode (the user is away) is no permission policy of
 ;; its own: what the session's mode would ask the user, the auto-mode
@@ -117,7 +119,7 @@
 ;; the prompt: the call was open only because the old mode asked, and
 ;; yolo would have allowed it.  A standing rule still decides, and a
 ;; directory prompt keeps waiting, because yolo does not grant
-;; directories.
+;; directories; nor does a confirmation, which only the user gives.
 ;;
 ;; The module works without the session and agent modules: methods it
 ;; needs from them are looked up with `harness-method-exists-p'.
@@ -2061,7 +2063,8 @@ ANSWER is (:behavior allow|deny :scope once|session|always :reason
 a path outside the allowed directories (one with `:dir') is answered
 for a glob pattern: the payload's `:pattern' unless ANSWER's names
 another, absolute or relative to the session's cwd.  Any other prompt
-is answered for its tool.
+is answered for its tool, and a confirmation (`harness-perms-confirm')
+for this call alone.
 Resolves the pending request, records session or standing rules (for
 a directory prompt: grants the pattern to the session or, with
 `always', to every session, or denies it) and lets the tool call
@@ -2071,11 +2074,14 @@ the final decision, or `continue' when a jail prompt hands the call on."
     (unless waiting
       (signal 'harness-error (list (format "no pending permission %s" pending-id))))
     (remhash pending-id harness-perms--waiting)
-    (if (plist-get waiting :dir)
-        (let ((answer (harness-perms--parse-answer answer)))
-          (harness-perms--resolve session-id pending-id answer)
-          (harness-perms--answer-dir session-id waiting answer))
-      (harness-perms--answer-tool session-id pending-id waiting answer))))
+    (cond
+     ((plist-get waiting :dir)
+      (let ((answer (harness-perms--parse-answer answer)))
+        (harness-perms--resolve session-id pending-id answer)
+        (harness-perms--answer-dir session-id waiting answer)))
+     ((plist-get waiting :confirm)
+      (harness-perms--answer-confirm session-id pending-id waiting answer))
+     (t (harness-perms--answer-tool session-id pending-id waiting answer)))))
 
 (defun harness-perms--resolve (session-id pending-id answer)
   "Mark PENDING-ID of SESSION-ID resolved with ANSWER."
@@ -2104,6 +2110,78 @@ the jail still decides where each call may reach."
     (funcall (plist-get waiting :next) decision)
     decision))
 
+;;;; Confirmations
+;;
+;; Some calls change what only the user may change, whatever the
+;; permission mode, the standing rules and the judge would say: moving a
+;; session to another directory changes the directories it may reach.
+;; The tool's own `permission/decide' stage, ahead of the jail, has the
+;; user confirm each such call with `harness-perms-confirm'.  The prompt
+;; offers allow-once and deny-once only, records no rule, and its answer
+;; is final; yolo does not answer it, and a session nobody can answer
+;; for is denied at once.
+
+(defconst harness-perms-confirm-options '(allow-once deny-once)
+  "Answer options of a confirmation (see `harness-perms-confirm').")
+
+(defun harness-perms-confirm (request next &rest prompt)
+  "Have the user confirm REQUEST, a tool call, then go on with NEXT.
+For the `permission/decide' stage of a tool whose every call needs the
+user's yes.  PROMPT is a plist: `:title', the prompt's headline;
+`:reason', what the call would do; `:paths', the paths it is about
+\(REQUEST's by default); `:input', what the tool's handler gets once
+the user allows the call (REQUEST's input by default); `:hint', what the
+agent is told after a denial.  The prompt shows REQUEST's input.  The
+decision handed to NEXT is final: the user's answer, or a denial at once
+when REQUEST's session is non-interactive or there is no user to ask."
+  (let* ((session (plist-get request :session))
+         (sid (plist-get session :id))
+         (hint (or (plist-get prompt :hint) "Do not ask again unless the user wants it.")))
+    (if (or (harness-perms--non-interactive-p session)
+            (not (harness-method-exists-p 'session/pending-add)))
+        (funcall next (list :behavior 'deny :final t
+                            :reason (format "%s needs the user's confirmation, and %s"
+                                            (harness-tools-label (plist-get request :tool))
+                                            (if (harness-perms--non-interactive-p session)
+                                                "the session is non-interactive: the user is away"
+                                              "no user is available"))
+                            :hint "Do not retry; say in your answer what you wanted to do, so the user can do it."))
+      (let* ((title (plist-get prompt :title))
+             (pending (list :kind 'permission
+                            :payload (list :tool (plist-get request :tool)
+                                           :input (plist-get request :input)
+                                           :kind (plist-get request :kind)
+                                           :paths (if (plist-member prompt :paths) (plist-get prompt :paths)
+                                                    (plist-get request :paths))
+                                           :call-id (plist-get request :call-id)
+                                           :title title
+                                           :reason (plist-get prompt :reason)
+                                           :options harness-perms-confirm-options
+                                           :confirm t)))
+             (pid (harness-call 'session/pending-add sid pending)))
+        (puthash pid (list :session-id sid :request request :next next :confirm t
+                           :input (plist-get prompt :input) :hint hint :title title
+                           :options harness-perms-confirm-options)
+                 harness-perms--waiting)
+        (harness-emit 'permission/requested sid (plist-put (copy-sequence pending) :id pid))))))
+
+(defun harness-perms--answer-confirm (session-id pending-id waiting answer)
+  "Answer the confirmation WAITING (PENDING-ID of SESSION-ID) with ANSWER.
+Allow lets the call go on, with the input the confirmation was made for;
+anything else denies it.  Either way only this call: no rule is
+recorded, whatever scope ANSWER names."
+  (let* ((answer (harness-perms--parse-answer answer))
+         (decision (if (eq (plist-get answer :behavior) 'allow)
+                       (append (list :behavior 'allow :final t
+                                     :reason (or (plist-get answer :reason) "confirmed by the user"))
+                               (and (plist-get waiting :input) (list :input (plist-get waiting :input))))
+                     (list :behavior 'deny :final t
+                           :reason (or (plist-get answer :reason) "the user said no")
+                           :hint (plist-get waiting :hint)))))
+    (harness-perms--resolve session-id pending-id answer)
+    (funcall (plist-get waiting :next) decision)
+    decision))
+
 ;;;; Switching to yolo with a prompt waiting
 
 (defun harness-perms--accept-yolo (session-id)
@@ -2113,7 +2191,8 @@ call undecided; once the session is in yolo the call would be allowed
 without asking, so the prompt is answered allow-once and the call runs.
 Only what the mode stage now allows is answered, so a standing deny
 rule still decides, and a directory prompt keeps waiting: not even yolo
-grants a directory without the user's answer."
+grants a directory without the user's answer.  Nor does it confirm what
+only the user confirms (`harness-perms-confirm')."
   (let ((session (harness-perms--session session-id)) pids)
     (when (eq (harness-perms--mode-of session) 'yolo)
       (maphash
@@ -2124,6 +2203,7 @@ grants a directory without the user's answer."
                   ;; prompt was made; the mode stage must see the new one.
                   (fresh (plist-put (copy-sequence request) :session session)))
              (when (and (not (plist-get waiting :dir))
+                        (not (plist-get waiting :confirm))
                         (eq 'allow (plist-get (harness-perms--mode-decision nil fresh) :behavior)))
                (push pid pids)))))
        harness-perms--waiting)
@@ -2166,18 +2246,22 @@ They are stored on the session record when there is one."
 (harness-defmethod permission/allow-dir (session-id dir &optional scope)
   "Grant SESSION-ID access to DIR.
 With SCOPE `always' DIR is added to the global
-`harness-allowed-directories'; otherwise the grant is kept with the
-session.  Return the session's effective roots."
+`harness-allowed-directories'; with `turn' it is granted until the
+session's turn ends (see `harness-perms--turn-dirs'); otherwise the
+grant is kept with the session.  Return the session's effective roots."
   (let* ((session (harness-perms--session session-id))
          (dir (harness-perms--expand-dir session dir)))
-    (if (eq (harness-perms--sym scope) 'always)
-        (unless (member dir (harness-perms--global-dirs session))
-          (harness-save-user-option 'harness-allowed-directories
-                                    (append (default-value 'harness-allowed-directories) (list dir))))
-      (let ((granted (harness-perms--granted session)))
-        (unless (member dir granted)
-          (harness-perms--set-granted session-id (append granted (list dir))))))
-    (harness-emit 'permission/dir-allowed session-id dir)
+    (pcase (harness-perms--sym scope)
+      ('always
+       (unless (member dir (harness-perms--global-dirs session))
+         (harness-save-user-option 'harness-allowed-directories
+                                   (append (default-value 'harness-allowed-directories) (list dir))))
+       (harness-emit 'permission/dir-allowed session-id dir))
+      ('turn (harness-perms--grant-for-turn session-id dir))
+      (_ (let ((granted (harness-perms--granted session)))
+           (unless (member dir granted)
+             (harness-perms--set-granted session-id (append granted (list dir)))))
+         (harness-emit 'permission/dir-allowed session-id dir)))
     (harness-perms-roots (harness-perms--session session-id))))
 
 (harness-defmethod permission/revoke-dir (session-id dir)
@@ -2264,8 +2348,8 @@ only reads may read (see `harness-perms-inspection-dirs' and
                                                          (plist-get r :paths))
                                                 :cwd (plist-get w :cwd)
                                                 :dir (plist-get w :dir) :pattern (plist-get w :pattern)
-                                                :title (harness-perms-describe-request r)
-                                                :options harness-perms-options))
+                                                :title (or (plist-get w :title) (harness-perms-describe-request r))
+                                                :options (or (plist-get w :options) harness-perms-options)))
                            out))))
                harness-perms--waiting)
       out)))
