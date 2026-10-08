@@ -146,6 +146,7 @@ recompile the modules.")
 (require 'harness-util)
 
 (defun harness--path (relative)
+  "Return RELATIVE, a file name in the harness's tree, made absolute."
   (expand-file-name relative harness-directory))
 
 (defun harness--extra-module-directories ()
@@ -332,7 +333,7 @@ harness always runs compiled code, even while developing."
                (inhibit-message t)
                (ok (byte-compile-file file)))
           (unless (eq ok t)
-            (error "byte compilation failed (see *Compile-Log*)"))
+            (error "Byte compilation failed (see *Compile-Log*)"))
           dest))
     (error (error "%s: %s" (file-name-nondirectory file) (error-message-string err)))))
 
@@ -417,6 +418,9 @@ Return non-nil when every file loaded again."
 (defvar harness--watches nil)
 
 (defun harness--auto-reload-callback (event)
+  "Schedule `harness-reload' for EVENT, a file notification of a watch.
+A change, creation or rename of an .el file reloads the harness 0.6
+seconds after the last such event; lock and flycheck files do not."
   (pcase-let ((`(,_ ,action ,file . ,_) event))
     (when (and (memq action '(changed created renamed))
                (string-suffix-p ".el" file)

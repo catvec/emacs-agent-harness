@@ -376,13 +376,13 @@ content; it inserts the item.  It is called again on every redraw
 \(`harness-ui-popout-refresh', g).  Text-property keymaps it puts in
 win over the popout's own keys.
 
-PROPS:
+PROPS:\\<harness-ui-popout-mode-map>
   :compose FN       FN, of no arguments, is called on every draw.
                     It returns SUBMIT, a function of TEXT and
                     ATTACHMENTS, to show the shared compose box under
-                    the content, or nil for no box.  C-c C-c empties the
-                    box and calls SUBMIT with what it held, the popout
-                    buffer current.
+                    the content, or nil for no box.
+                    \\[harness-ui-popout-submit] empties the box and calls
+                    SUBMIT with what it held, the popout buffer current.
   :placeholder HINT the empty box's hint, a string or a function.
   :dir DIR          the project directory of the box (@ completion).
   :max-height FRACTION
@@ -492,7 +492,8 @@ whose item is settled (a question answered) drops it."
 
 (defun harness-ui-popout-quit ()
   "Close this popout.
-As C-g, with a region, completion or minibuffer to quit, quit that instead."
+\\<harness-ui-popout-mode-map>As \\[harness-ui-popout-quit], with a region,
+completion or minibuffer to quit, quit that instead."
   (interactive)
   (if (or (region-active-p) (bound-and-true-p completion-in-region-mode) (active-minibuffer-window))
       (let ((command (or (command-remapping 'keyboard-quit nil (current-global-map)) #'keyboard-quit)))

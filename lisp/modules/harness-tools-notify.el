@@ -107,9 +107,9 @@ sent `harness-tools-notify--rate-limit' notifications already."
          (providers (harness-tools-notify--provider-names (plist-get input :providers)))
          (url (harness-tools-notify--text (plist-get input :url))))
     (cond
-     ((null message) (harness-tool-error "Missing message: say what the user should know."))
+     ((null message) (harness-tool-error "Missing message: say what the user should know"))
      ((not (harness-method-exists-p 'notification/send))
-      (harness-tool-error "Notifications are not available: the notifications module is not loaded."))
+      (harness-tool-error "Notifications are not available: the notifications module is not loaded"))
      (t
       (let ((wait (harness-tools-notify--throttle sid)))
         (if wait
@@ -164,7 +164,7 @@ sent `harness-tools-notify--rate-limit' notifications already."
 (defun harness-tools-notify--providers (_input _ctx)
   "Handler of the notification_providers tool."
   (if (not (harness-method-exists-p 'notification/providers))
-      (harness-tool-error "Notifications are not available: the notifications module is not loaded.")
+      (harness-tool-error "Notifications are not available: the notifications module is not loaded")
     (let ((providers (harness-call 'notification/providers)))
       (harness-tool-ok
        (if (null providers)

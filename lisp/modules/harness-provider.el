@@ -80,9 +80,9 @@
                               :doc "Model for everyday work: capable, at a fair price."))
            (:frontier (string :tag "Frontier" :value "opus"
                               :doc "The most capable model, for the hardest work."))))
-  "Customize type of the models a provider names for the common tiers
-\(see `harness-provider-tier-model').  A model name or id regexp of
-the provider's catalogue, e.g. \"haiku\"; `:tiers' in
+  "Customize type of the models a provider names for the common tiers.
+See `harness-provider-tier-model'.  Each is a model name or id regexp
+of the provider's catalogue, e.g. \"haiku\"; `:tiers' in
 `harness-define-provider' and in a provider's endpoints takes the same.")
 
 (defun harness-provider-model-type (&rest options)
@@ -172,8 +172,9 @@ changes, so estimates follow what the other providers list.")
 Forgotten whenever the catalogue changes, as the estimate may change too.")
 
 (defvar harness-provider--estimate-index nil
-  "What estimates are drawn from, made once per catalogue: see
-`harness-provider--estimate-index'.  Nil until needed after a change.")
+  "What estimates are drawn from, made once per catalogue.
+See the function `harness-provider--estimate-index'.  Nil until needed
+after a change.")
 
 (defvar harness-provider--warned (make-hash-table :test 'equal)
   "Keys of the estimates the log has already told about.")

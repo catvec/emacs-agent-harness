@@ -282,18 +282,23 @@ the model is told about exists when it reads about it."
     (harness-run-filter 'agent/system-prompt base session)))
 
 (defun harness-agent--vision-p (session)
+  "Non-nil when SESSION's model reads images.
+That is when `provider/model' lists \"image\" in its `:input-modalities'."
   (member "image" (plist-get (and (harness-method-exists-p 'provider/model)
                                   (harness-call 'provider/model (plist-get session :model)))
                              :input-modalities)))
 
 (defun harness-agent--file-base64 (path)
+  "Return the bytes of file PATH encoded in base64, on one line."
   (with-temp-buffer
     (set-buffer-multibyte nil)
     (insert-file-contents-literally path)
     (base64-encode-string (buffer-string) t)))
 
 (defun harness-agent--prepare-block (block session)
-  "Return BLOCK ready for a provider: images inlined, files described."
+  "Return BLOCK ready for SESSION's provider: images inlined, files described.
+An image file is inlined only when SESSION's model reads images; else a
+text block names it."
   (pcase (plist-get block :type)
     ("image"
      (cond ((plist-get block :data) block)
@@ -334,6 +339,8 @@ which image each one means."
           blocks))
 
 (defun harness-agent--prepare-messages (session messages)
+  "Return MESSAGES with the content of each user message ready for SESSION.
+See `harness-agent--prepare-content'."
   (mapcar (lambda (m)
             (if (eq (plist-get m :role) 'user)
                 (list :role 'user
@@ -363,6 +370,7 @@ does."
                " ")))
 
 (defun harness-agent--only-text-p (blocks)
+  "Non-nil when every block of BLOCKS is a text block."
   (cl-every (lambda (b) (equal (plist-get b :type) "text")) blocks))
 
 (defun harness-agent--blank-p (block)
@@ -899,6 +907,7 @@ Whitespace held back for a node that never got visible text is dropped."
       (setf (harness-agent-turn-text-node turn) nil (harness-agent-turn-text-buf turn) nil))))
 
 (defun harness-agent--finalize-live (turn)
+  "Write the live thinking and assistant nodes of TURN for good."
   (harness-agent--finalize turn 'thinking)
   (harness-agent--finalize turn 'assistant))
 
@@ -912,6 +921,10 @@ loop reads it in the content, a native one with its next request."
       content)))
 
 (defun harness-agent--tool-call (turn ev)
+  "Run the call EV of a harness tool for TURN; record it and its result.
+The result, with any steering waiting, goes back to the provider through
+EV's `:respond' when it runs a hosted loop.  Then the turn ends, if the
+tool asked it to (`:end-turn'), or decides what follows."
   (let* ((sid (harness-agent-turn-session-id turn))
          (name (plist-get ev :name)) (input (plist-get ev :input))
          (call-id (or (plist-get ev :id) (harness-short-id)))
@@ -1127,7 +1140,7 @@ REASON is why the provider stopped (`cancelled', say)."
 (defun harness-agent--finish-turn (turn)
   "End TURN cleanly as a tool asked, and stop its provider.
 The provider may still be streaming when a tool hands the work in
-(`:end-turn' on its result): the turn ends with `end-turn' as if the
+\(`:end-turn' on its result): the turn ends with `end-turn' as if the
 model had stopped itself, and no further step follows.  The provider
 is cancelled first, so it drops whatever it kept for a next step -- a
 scripted provider's remaining script -- which this turn will not take;
@@ -1140,7 +1153,7 @@ everything recorded so far."
   (harness-agent--end turn 'end-turn))
 
 (defun harness-agent--maybe-continue (turn)
-  "Decide what happens once the provider is done and no tools are running."
+  "Decide what happens to TURN once its provider is done and no tool runs."
   (when (and (harness-agent-turn-waiting-done turn)
              (not (harness-agent-turn-ending turn))
              (zerop (harness-agent-turn-pending turn)))
@@ -1201,6 +1214,12 @@ the turn was cancelled, it ends with `error'."
            (harness-agent--end turn 'error error)))))))
 
 (defun harness-agent--end (turn reason &optional error)
+  "End TURN with stop REASON, and ERROR when it failed.
+Only the session's current turn ends: the built-in calls still running
+get a result, an open session goes idle, or blocked when something
+waits on the user, `agent/turn-ended' is emitted and the turn's promise
+resolves.  A turn that ends with `end-turn' sends the session's queued
+messages next."
   (let ((sid (harness-agent-turn-session-id turn)))
     (when (eq (gethash sid harness-agent--turns) turn)
       ;; A turn cancelled before its provider was done.
