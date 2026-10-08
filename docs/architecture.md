@@ -14,7 +14,7 @@ module needs something more, add it here first.
                                  when `harness-process' is nil)
  State          session, agent, config, project, store, usage, insights, fallback,
                 naming, compaction, handoff, worktree, merge, tasks, tasks-notify,
-                skills, perms, sandbox, notifications
+                supervisor, seed, skills, perms, sandbox, notifications
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval,
@@ -217,12 +217,22 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
  :provider-state PLIST                 ; owned by the provider it names: (:cli-session-id … :provider "claude")
  :provider-node nil|"node-id"          ; the node that provider conversation reached
  :move nil|(:cwd "/abs/new/" :project "/abs/root/" :keep-old-dir BOOL))  ; a move waiting for the turn to end
+ :ext nil|PLIST                        ; settings other modules keep: (:supervisor t :supervisor-plans (…))
 ```
 
 `:provider-state` is opaque to everyone but the provider that wrote it,
 which it names as `:provider` (see "provider", Provider state): only
 that provider's models continue it, and `session/provider-state` says
 whether a given model can.
+
+`:ext` is what modules that are not the session's own keep about it, a
+plist of keyword to value (`session/set-ext`): the supervisor module's
+`:supervisor`, `:supervisor-plans` and `:supervisor-write-up`, say.  A
+value must come back from the record's JSON as it went in (`t`, `:false`
+for an explicit off, a string, a number, or a list or plist of those) to
+survive a restart.  It is stored with the record and never copied to a
+fork: each module sets up its own forks.  Every change is announced as
+`session/ext-changed`.
 
 `:usage :context` is the input size of the last request (prompt tokens
 incl. cache) and `:last-output` what that request wrote, which the next
@@ -440,8 +450,11 @@ option and not only the layered ones, and no layer changes it.  Variables are
 `harness-permission-mode`, `harness-thinking`, `harness-btw-thinking`
 (the level BTWs start at, default "low"; nil for the session's),
 `harness-allowed-directories`, `harness-sandbox-policy`,
-`harness-non-interactive`.  `harness-budget` has a global value only:
-it is one budget for all sessions together (see usage).
+`harness-non-interactive`, `harness-supervisor`.  A module defines some
+of them, `harness-supervisor` the supervisor module: until it is loaded
+the key takes part in nothing, and every reader of the layers skips it
+(`harness-config--layered-keys`).  `harness-budget` has a global value
+only: it is one budget for all sessions together (see usage).
 
 The other harness options (the `harness` customize group, less the
 ones that decide how the harness starts or reaches the UI:
@@ -468,12 +481,13 @@ be removed.  A key that names a value type the value does not fit is
 refused on save, where a free-form plist would have taken it.
 
 `harness-config-sections` names the options most people change, in
-sections by what they are for (new sessions, files and safety, task
-board, notifications, models and services); `config/describe` lists
-them first, each with its `:section`, then the advanced ones.  A
-setting a page should not lead with but must keep working stays a
-global `defcustom` and is advanced; what only the harness's own code
-has an opinion about is a `defconst`/`defvar` named `MODULE--thing`.
+sections by what they are for (new sessions, supervisor mode, files and
+safety, task board, notifications, models and services);
+`config/describe` lists them first, each with its `:section`, then the
+advanced ones.  A setting a page should not lead with but must keep
+working stays a global `defcustom` and is advanced; what only the
+harness's own code has an opinion about is a `defconst`/`defvar` named
+`MODULE--thing`.
 See docs/configuration-audit.md for the rule and the audit behind it.
 
 - `config/get KEY CWD` → value for a session at CWD (KEY is the symbol
@@ -581,11 +595,17 @@ its sender, and the hint says so (`harness-session--requeue`).
   :permission-mode :thinking :kind :parent-id :host :worktree`,
   `:context-window` to set the session's own window and
   `:context-window-limit` to cap its model's window at a number of
-  tokens (see the compaction section).  Fills
+  tokens (see the compaction section), `:ext` to give it the settings of
+  modules that keep some (see `session/set-ext`).  Fills
   project, defaults from `config/get`.  A `btw` session without
   `:thinking` takes `harness-btw-thinking` when its model offers that
   level (the catalogue lists it in `:thinking-levels`), else
-  `harness-thinking`.  → session.  Event `session/created`.
+  `harness-thinking`.  → session.  Event `session/created ID SESSION`
+  fires once the record is stored.  A subscriber may change the session
+  meanwhile (the supervisor module sets its `:ext`), so `session/create`
+  announces (`session/changed`) and returns the session as the
+  `session/created` subscribers left it, not as it was when they were
+  told: its maker and the UIs see what they set, from the start.
 - Settings a policy fixes ([policy.md](policy.md)): when the policy sets
   `harness-model`, `harness-permission-mode`, `harness-thinking` or
   `harness-non-interactive`, every session's copy is the policy's value
@@ -755,6 +775,15 @@ its sender, and the hint says so (`harness-session--requeue`).
   none, or one with `:cache-reset` (a compaction), clears them (see
   "Session").  Event `session/usage ID USAGE-TOTAL RECORD`.
 - `session/set-todos ID TODOS`, `session/set-plan ID TEXT`.
+- `session/set-ext ID KEY VALUE &optional HINT` → session plist: sets the
+  setting KEY of ID's `:ext`.  KEY is a keyword, or a symbol or a string
+  naming one (what a client over the wire sends).  VALUE nil removes KEY;
+  `:false` is stored as it is and means an explicit off; a value that
+  would not survive the JSON store (see "Session") is kept in memory but
+  logged.  A string HINT joins the transcript as a hint.  The change is
+  saved and announced like any other (`session/changed`), and the event
+  `session/ext-changed ID KEY VALUE` says which setting changed, KEY
+  being the keyword and VALUE nil once it was removed.
 - `session/messages ID` → provider messages (content blocks) built
   from the path, tool calls paired with results.  A steering message
   marked `:delivered-after NODE-ID` stands after that node (and the
@@ -1524,12 +1553,15 @@ Async filter `permission/decide`: value is a DECISION
 args are the REQUEST `(:session SESSION :tool NAME :input PLIST :kind KIND
 :paths (…))`.  Chain (priority): 5 dir-request, 6 away-request, 6
 session-move (the session tools: the user confirms every
-`session_move`), 7 sandbox-guard, 10 jail, 20 mode, 25 write-up (the
-tasks module: a backlog write-up only reads), 30 auto (LLM judge), 40
-non-interactive, 90 ask-user (turns `ask` into a pending request and
-resolves when answered).  A judge denial reaches 90 as an `ask` in an
-interactive session, so the user answers it; in a non-interactive
-session it stays a denial.
+`session_move`), 7 sandbox-guard, 8 supervisor (the supervisor module,
+a plugin's stage: a session in supervisor mode is denied, for good, a
+call to any tool off its allowlist, in every permission mode; see
+supervisor), 10 jail, 20 mode, 25 write-up (the tasks module: a backlog
+write-up only reads), 30 auto (LLM judge), 40 non-interactive, 90
+ask-user (turns `ask` into a pending request and resolves when
+answered).  A judge denial reaches 90 as an `ask` in an interactive
+session, so the user answers it; in a non-interactive session it stays a
+denial.
 
 - The away-request stage owns the decision of the `set_non_interactive`
   tool (tools-sessions), as the dir-request stage owns
@@ -2023,13 +2055,22 @@ session it stays a denial.
 
 ### sandbox
 
-- `sandbox/wrap CWD COMMAND-LIST &optional (:network t :writable (…) :readable (…))` →
+- `sandbox/wrap CWD COMMAND-LIST &optional (:network t :writable (…) :readable (…) :read-only nil)` →
   command list (bwrap / systemd-run / plain).  `sandbox/status` →
   `(:backend bwrap|systemd|none :available (…) :policy …)`.  Fails closed
   when `harness-sandbox-policy` is `required` and no backend exists.
   Without the sandbox module the bash tool fails closed for `required`
   too (`harness-tools-shell--wrap`), rather than running the command
   unconfined.
+- `:read-only`, for a caller that needs a command to change nothing (a
+  supervising session's shell, which only looks), mounts the working
+  directory, the git directories and every `:writable` entry read-only
+  as well, so the command writes nothing but the sandbox's private
+  /tmp.  It fails closed whatever the policy: where the command would
+  run unconfined, with the `off` policy, in a remote CWD or with no
+  backend, `sandbox/wrap` signals `harness-sandbox-unavailable` instead
+  of returning COMMAND.  `sandbox/confined-p CWD` says beforehand
+  whether it can be had.
 - `$HOME`: bwrap keeps its path, covered by an empty tmpfs (after the
   one on /tmp, which may hold it, and before every bind), so `~/x`
   names the same path inside as outside and shows only what is mounted
@@ -2144,6 +2185,31 @@ session it stays a denial.
   the message (nil leaves it as it was); the tasks module sends a task
   waiting for review back this way when the user wrote the message,
   and opens another session's with a note that it is no review.
+- Async filter `agent/stop` (value `(:stop t)`, args the session plist),
+  asked when the model stopped on its own (`end-turn`) with no steering
+  waiting and the turn not cancelled.  A handler that answers `(:stop nil
+  :message TEXT :from SENDER)` sends the model on: TEXT is recorded as a
+  message of the harness's (`(harness-sender-system "harness")`, or
+  `:from` when that names a sender), marked as steering like a message
+  sent mid-turn, and the turn takes one more step, which delivers it
+  (asked of `agent/step`, as any step is).  At most
+  `harness-agent--max-stop-continues` (3) times a turn; the filter is
+  not asked after that.  Any other answer ends the turn `end-turn`, and
+  with no handler on the filter it ends at once, without asking, as it
+  did before the filter existed.  A handler that fails is logged and
+  leaves the answer as it was, and a message sent to the turn meanwhile
+  gets its step even when the answer is to stop.  The supervisor
+  module's stop rule is such a handler.
+- `agent/outstanding SESSION-ID` → a short text, or nil: what runs for
+  the session outside its own turn, such as a supervisor plan's workers.
+  A module that started work which goes on without the turn reports it
+  to the sync filter `agent/outstanding`, whose value starts at nil and
+  whose argument is SESSION-ID.  A handler with nothing to report
+  returns the value unchanged; one that reports returns its own text, or
+  appends it to the text before it, separated by "; ".  A value that is
+  not a text with words in it counts as nothing outstanding.  The tasks
+  module keeps the task of a session whose turn ended active while this
+  says something (see tasks).
 - Sync filter `agent/system-prompt` (value string, args session); sync
   filter `agent/tools`; sync filter `agent/builtin-tools` (see
   `tools/builtin`); async filter `agent/before-turn` (value
@@ -2962,6 +3028,7 @@ Task mode: one session per task.  TASK =
 :backlog BOOL :note "the words a backlog task was written up from" :refined F
 :priority low|medium|high
 :session SID :outcome nil|end-turn|error|cancelled|duplicate|merge-failed|merged|…
+:waiting nil|"what the session started runs outside its turn"
 :error "…" :duplicate-of ID :main-tree BOOL :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
 :merge-queued F :conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
 :verified BOOL :verified-at F :feedback ((:text "..." :at F) ...))`.
@@ -3117,6 +3184,16 @@ record from before priorities reads `medium` without being rewritten.
   queue; others, or more than `harness-tasks--merge-attempts`, set
   `:outcome merge-failed`.  Outside git, and in the main tree
   (`:main-tree`), `end-turn` makes it `done`.
+- Outstanding work.  A turn ending `end-turn` is not the end of the work
+  while something the session started still runs outside it, a
+  supervisor plan's workers say.  The tasks module asks `agent/outstanding
+  SESSION-ID` (see agent; `harness-tasks--outstanding`) and, when it
+  answers a text, leaves the task `active` with the text as its
+  `:waiting`: it goes neither to `review` nor to the merge queue.  A
+  change of `:state` ends the wait (`harness-tasks--set` drops
+  `:waiting` unless the same change sets it), and the turn the session
+  takes when that work reports back, or any turn that ends with nothing
+  outstanding, ends the task as above.  Only a clean `end-turn` is asked.
 - Review (`harness-tasks-require-verification`, default t): finished
   work is not done until the user has looked at it.  A turn ending
   `end-turn` puts the task in `review` instead, and emits `task/review
@@ -3544,6 +3621,215 @@ TITLE is the session's name, else the prompt's first line without its
 leading `#`, at most 80 characters; PROJECT is `project/name` of the
 task's project.
 
+### supervisor
+
+Supervisor mode: a top-level session on an expensive model plans and
+coordinates while workers on cheaper models make the changes, and the
+harness enforces it (DESIGN.md, "Supervisor Mode").  A plugin (requires
+`session`, `agent`, `tools`) that uses only the generic hooks of the
+other modules; without it, and `ui-supervisor`, everything works as
+before.  Whether a session supervises is its `:ext` `:supervisor`: `t`,
+`:false` (hands-on: the user switched it off) or absent, for a session
+the module does not govern (a sub-agent, a side conversation, one older
+than the module).  It is set when the session is created
+(`session/created`), so the header shows it from the start: a `main`
+session with no parent takes `harness-supervisor` as `config/get` has it
+at its directory, a fork its parent's value, and a setting its maker gave
+in `:ext` stays; the merge session of the tasks module is never
+governed.  The session of a task takes `harness-supervisor-tasks`
+(`task/changed`, once, while it has no message and the task was not
+adopted); the session that writes a backlog task up only reads, so it
+has no setting and `:ext` `:supervisor-write-up` t until the task
+starts.  Only the user changes it later.
+
+- `supervisor/set SESSION-ID ON` → session plist: ON `t` for on, `:false`
+  or nil for off, stored as `:false`, never removed.  Adds the hint
+  "Supervisor mode on" or "Supervisor mode off" and emits
+  `supervisor/changed SESSION-ID ON` (`t` or `:false`).  Nothing else
+  changes it: there is no tool.  `supervisor/get SESSION-ID` → `t`,
+  `:false` or nil; `supervisor/active-p SESSION-ID` → non-nil when it
+  supervises (nil for a session that is not there).  On takes effect at
+  the next tool call, since the permission stage reads the live session,
+  off at the next step, for the tool list.
+- Settings: `harness-supervisor` (t; layered like `harness-model`, see
+  config), `harness-supervisor-tasks` (t), `harness-supervisor-tiers`
+  (nil: an alist from `mundane`, `standard` or `hard` to a model id) and
+  `harness-supervisor-step-budget` (80), in the settings section
+  "Supervisor mode".
+- Enforcement, in order.  Filter `agent/tools` (90) offers a supervising
+  session only an allowlist: the reading tools (`read_file grep glob
+  list_dir file_info`, the `session_*` and `task_*` that only look,
+  `skill_search skill_load notification_providers`, `emacs_buffers
+  emacs_windows emacs_buffer emacs_describe emacs_find_definition
+  emacs_messages emacs_open`), `web_fetch web_search`, the coordination
+  tools (`ask_user todo_write hand_in notify session_control
+  session_send session_move set_non_interactive task_control
+  task_submit`), the tool that asks for a directory
+  (`harness-perms-dir-tool`) and `harness-supervisor-tools`
+  (`no_plan_needed submit_plan retry_step`), plus `bash` when
+  `sandbox/confined-p` says its directory is confined.  Any other
+  session loses `harness-supervisor-tools`; the catalogue (no session)
+  stays whole.  `permission/decide` stage 8 (before the jail, the mode
+  and the judge) denies a supervising session's call to anything else
+  for good: `(:behavior deny :final t :reason "supervisor mode: …"
+  :hint …)`, the hint pointing to a plan step or to the user switching
+  the mode off.  No permission mode, rule or answer lets it through,
+  and it holds when the model still has an old tool list.  It fails
+  closed: a call it cannot check is denied.  It allows `no_plan_needed`,
+  which only records a decision, where the call would ask.  Filter
+  `tools/sandbox-options` (90) adds `(:read-only t :network nil)` to the
+  commands of a supervising session, and the same when it fails.
+- Turns.  The decision tools are `harness-supervisor-decision-tools`
+  (`no_plan_needed submit_plan retry_step hand_in task_submit
+  task_control session_send session_control`); a call is noted from
+  `agent/tool-call`, and a result that is an error takes it back out
+  (`tools/finished`), since it decided nothing.  The async filter
+  `agent/stop` (see agent) answers a supervising session's stop with no
+  decision in its turn by `(:stop nil :message REMINDER :from
+  (harness-sender-system "supervisor"))`, twice at most in a turn; after
+  that the turn ends and the hint "The turn ended without a decision"
+  joins the transcript.  Every tool call of a supervising turn is
+  counted (`agent/tool-call`; `agent/turn-started` resets it), and when
+  the count reaches `harness-supervisor-step-budget`, and every half
+  budget after (80, 120, 160…), the session is steered by an
+  `agent/prompt` from the same sender to submit its plan: a nudge, never
+  a stop.  `no_plan_needed reason` (`reason` required) records the
+  decision and a hint "No plan needed: REASON", and does not end the
+  turn.  The sync filter `agent/system-prompt` (900) puts
+  `harness-supervisor-prompt-section` in place of the Planning section
+  (`harness-tools-agent-planning-section`; else at the end), the same
+  text on every call, as the prompt is part of the cache.
+- Plans are the session's `:ext` `:supervisor-plans`, oldest first, in
+  the JSON the store keeps, so they survive a restart; each change of a
+  step is `session/ext-changed ID :supervisor-plans PLANS`.  Plan:
+  `(:id "p-…" :title :summary :node :call-id :created F :steps (STEP…))`,
+  `:node` and `:call-id` being the call that submitted it, which every
+  fork step forks the supervisor at.  Step: `(:id :title :prompt :tier
+  :reason :context :after (ID…) :model :state :session :attempts N
+  :result :error)`: `:tier` mundane|standard|hard, `:context`
+  fork|fresh, `:state` pending|running|done|failed|interrupted|
+  cancelled|superseded, `:session` the worker, `:result` its last reply.
+  A new plan supersedes the earlier plans' steps that have not started;
+  their running steps finish as usual.
+- `submit_plan summary steps &optional title`, `steps` being `{id, title,
+  prompt, tier, reason, context, after}`, is refused whole, every
+  problem named, for an id used twice, an `after` naming no step, a
+  cycle, an unknown tier or context or a blank prompt.  Otherwise it
+  records the plan, sets the session's plan (`session/set-plan`) to the
+  summary, adds a `plan` node and the hint "Plan submitted: N steps",
+  starts the ready steps and ends the turn (`:end-turn t`).
+  `retry_step step reason &optional plan tier prompt` runs a failed,
+  interrupted or cancelled step again on a new worker (`plan` defaults
+  to the latest that has the step, `tier` moves it to that tier's model,
+  `prompt` adds notes to its prompt) and does not end the turn.  Both are
+  kind meta.
+- Models.  A step runs on `harness-supervisor-tiers` for its tier, else
+  the model of the supervisor's provider that ranks alike
+  (`provider/tier-model` cheap, balanced, frontier for mundane,
+  standard, hard), else the supervisor's own, with a hint.
+- Workers.  A step whose `:after` steps are all done starts: a worker
+  session of kind `subagent` named "Step ID: TITLE" is made, with
+  `:context-window-limit` from `harness-tools-agent-context-limit`.  A
+  fork step forks the supervisor (`session/fork`) at the plan's `:node`
+  and `:call-id`, through `seed/fork` when the plan has two or more fork
+  steps on the step's model, so that the context is written to that
+  model's cache once.  A fresh step is a `session/create` in the
+  supervisor's directory, worktree and host, with the supervisor as its
+  parent and the supervisor's permission mode, thinking level,
+  non-interactive switch and allowed directories.  The worker gets one
+  `agent/prompt`, from the supervisor session: the `:preamble` of
+  `seed/fork`, an opening that tells a fork it is a worker now, the step,
+  what the steps before it reported (each cut to 2000 characters) and a
+  closing.  Workers carry no `:supervisor`: they have every tool.  A
+  worker's turn ending `end-turn` or `max-tokens` makes the step done;
+  any other end, or no worker, makes it failed.
+- Reports are messages of the harness's `(harness-sender-system
+  "supervisor")` through `agent/prompt`: an idle session starts a turn,
+  a running one is steered.  A step done is a hint ("Step ID done on
+  MODEL") and starts the steps that waited.  A step that failed, was
+  interrupted or was cancelled (its worker session deleted) is a message
+  of its own: the step, tier, model and attempt, why, the worker's last
+  reply, the steps held on it and those running, and the ways on
+  (`retry_step`, a new plan, `ask_user`).  When no step is left but done
+  or superseded ones, a message lists each step's result and asks to
+  check the work and decide (`hand_in` in a task).  A report that comes
+  while the turn that submitted the plan is ending would be lost with
+  it, so it is held until `agent/turn-ended`, and queued for the user's
+  next message when that turn ended any other way than `end-turn`.
+- Filter `agent/outstanding` reports "Supervisor plan: N steps running,
+  M waiting, a report to deliver" while steps run, pending steps can
+  still start or a report is held; a step held behind one that did not
+  get done is not counted, the supervisor having been told.  The tasks
+  module keeps the task of the session active, waiting, meanwhile.
+- Restarts and deletion.  Workers die with the harness: once every
+  module is up (`harness-run-soon`), the steps stored as running that
+  this process has no worker for are `interrupted` and reported as a
+  failure is, to the session of a task as a message, so the task carries
+  on (and its ready steps start again), to any other session queued
+  (`agent/prompt` `:queue t`), to go with the user's next message instead
+  of starting an expensive turn unasked.  A reload hooks in again and
+  starts nothing.  Deleting a supervisor cancels its running workers,
+  deleting a worker cancels its step, and switching the mode off lets
+  the workers carry on.
+- Events.  Emits `supervisor/changed SESSION-ID ON`, and
+  `session/ext-changed` through `session/set-ext` for the setting and
+  for every change of a plan's steps.  Subscribes to `session/created`,
+  `task/changed`, `agent/turn-started`, `agent/tool-call`,
+  `tools/finished`, `agent/turn-ended` and `session/deleted`.
+
+### seed
+
+Seed sessions (module `seed`, requires `session`, `agent`): forks onto a
+model that share one warm prompt cache.  A provider's cache serves only
+the model that wrote it and only a request that starts with the very
+prefix the writing request had, the tools, then the system prompt, then
+the messages, word for word.  Forking a long session onto a cheaper
+model makes each fork write the whole context into that model's cache,
+and two forks never share a prefix, since a session's system prompt
+names its own working and temporary directories.
+
+- `seed/fork SOURCE-ID MODEL &rest PLIST` → promise of the new fork's
+  session plist plus `:seed`, the id of the seed it was forked from, and
+  `:preamble`, a string or nil.  PLIST: `:node` (default SOURCE-ID's head;
+  the seed, and so the cache, belongs to (SOURCE-ID, NODE, MODEL), so a
+  caller forking one turn several times gives the same node each time,
+  the head moving), `:call-id` (as for `session/fork`), `:seed-name`
+  (default "Shared context for SOURCE (MODEL)") and any `session/fork`
+  key of the fork (`:name :cwd :worktree :kind`, default `subagent`,
+  `:id`…); a nil MODEL is SOURCE-ID's own.  The steps: find or make the
+  seed, a `subagent` fork of SOURCE-ID at NODE onto MODEL that is sent
+  `harness-seed-prime-message` and whose turn is waited for; warm it,
+  sending `harness-seed-warm-message` when `session/get` gives it no
+  `:cache` or one that lapses within `harness-seed-warm-margin` (30)
+  seconds; fork the seed at its head with PLIST.  Calls for one key at
+  the same time share the first two steps.  A seed turn that does not end
+  well, or a fork that cannot be made, rejects the promise, and the
+  caller may fork SOURCE-ID directly; errors of the call itself reject
+  it too, since it always returns a promise.
+- Frozen prompts.  The sync filter `agent/system-prompt` (1000, after
+  every other section) records each seed's final prompt, and a fork made
+  here sends it, as it was when the fork was made, in place of the one it
+  would assemble.  It names the seed's directories, so `:preamble` is a
+  text for the fork's first message that names the fork's own (nil when
+  nothing differs).  The records are in memory only: after a restart a
+  resumed fork assembles its own prompt, which is right, just uncached,
+  and the next call makes a new seed.
+- The seed's messages are the harness's (sender "seed") and leave the
+  seed as it is, its transcript being the prefix the forks share and its
+  model the one whose cache they read: the `agent/before-turn` stage at
+  5 sends such a message through the stages from 21 on only, leaving out
+  the ones that would change either, fallback and handoff (10), the
+  cold-cache question (cowboy, 15) and compaction (20).  The budgets
+  (from 30) still apply.
+- `seed/list &optional SOURCE-ID` → seeds, newest first, `(:id :source
+  :node :model :cache)`, for diagnostics and the UI; kept in memory, so
+  one made before a restart is not listed, though its session remains.
+- A seed is an ordinary session of kind `subagent`, in the session list
+  and readable, deleted with `session/delete`; nothing deletes one.  Its
+  forks are children of the seed, not of SOURCE-ID, so whatever is keyed
+  on `:parent-id` (the merge queue, say) sees the seed as their parent.
+  The supervisor module forks its workers this way.
+
 ### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval, tools-web, tools-agent, tools-sessions, tools-notify, tools-handin
 
 Tool names, labels and inputs (all paths relative to cwd or absolute;
@@ -3598,6 +3884,9 @@ TRAMP prefixes come from the session host):
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
 | `notification_providers` | Notification providers | (none) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `merge_done` | Finish merge | none | meta (merge module) |
+| `no_plan_needed` | No plan needed | reason | meta (supervisor module; offered to a session in supervisor mode only; records the turn's decision and does not end the turn) |
+| `submit_plan` | Submit plan | summary, steps (`{id, title, prompt, tier, reason, context, after}`), title | meta (supervisor module; supervising sessions only; ends the turn; in Ask mode the user answers its permission prompt) |
+| `retry_step` | Retry step | step, reason, plan, tier, prompt | meta (supervisor module; supervising sessions only; does not end the turn) |
 
 The tools of kind read that take a path (`read_file`, `list_dir`,
 `glob`, `grep`, `file_info`, `emacs_open`) may read the harness itself
@@ -3634,6 +3923,38 @@ FOCUS` does the same for the UI (focus raises the frame); Open harness
 in the menu of a task board's review card calls it, and the tool
 is in `harness-perms--auto-allow-tools', so the agent needs no approval
 to use it.
+
+`bash` (tools-shell) lets a module confine a session's commands further
+through the sync filter `tools/sandbox-options`, run before each command
+with the value nil and the session id as its argument.  A handler returns
+the plist it was given with its own `sandbox/wrap` options set over it,
+such as `(:read-only t :network nil)`, so a later handler's options win
+over an earlier one's; a value that is no plist of options signals an
+error, so that a faulty handler cannot let a command run with fewer
+restrictions than it meant.  The options go to `sandbox/wrap` with the
+directories the session may use; the handler's own `:writable` and
+`:readable` join those lists, and with `:read-only` every one of them goes
+as `:readable` and none as `:writable`, so the command looks at what its
+session may touch and changes none of it.  Options ask for the sandbox:
+a command that cannot have it (no `sandbox/wrap` method, whatever the
+policy, or a remote directory) fails with an error instead of running
+unconfined.  With no handler the command runs as it always did.  The
+supervisor module makes the commands of a supervising session read-only
+and offline this way.
+
+`spawn_agent` (tools-agent) runs its child on a deliberately shorter
+context window: `harness-subagent-context-limit` (128000 tokens; nil for
+no cap) is the most a sub-agent adds of its own.
+`harness-tools-agent-context-limit PARENT-ID FORK` → the
+`:context-window-limit` for a sub-agent of session PARENT-ID, or nil
+without a cap.  A fresh sub-agent (FORK nil or `:false`) gets the cap
+itself, and a fork the context it inherits (the parent's `:usage`
+`:context` plus `:last-output`, 0 before the parent ran) plus the cap, so
+that it does not compact at once; neither is above the parent's own
+`:context-window-limit`, when it has one, so sub-agents of sub-agents do
+not grow, nor above the model's window.  `spawn_agent` and the
+supervisor's workers pass the result to `session/create` or
+`session/fork`; without a cap a fork keeps its parent's limit.
 
 Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an
@@ -3941,10 +4262,18 @@ is none, or the file is gone or larger than
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `fallback/`, `worktree/`, `merge/`,
 `config/`, `skills/`, `permission/`, `question/`, `compaction/`, `handoff/`, `naming/`, `task/`,
-`notification/`, `sandbox/status`, `harness-dev/`, `harness/api`, `harness/version`, `harness/reload`, `acp/remote-` is callable as `_harness/NAME` with a
+`notification/`, `sandbox/status`, `harness-dev/`, `harness/api`, `harness/version`, `harness/reload`, `acp/remote-`, `supervisor/`, `seed/` is callable as `_harness/NAME` with a
 params object whose keys become the plist arguments (`{"id": …}` →
 `:id`).  Methods take a single plist argument on the wire; the ACP
-layer maps positional bus signatures through a small table.
+layer maps positional bus signatures through a small table.  The
+supervisor module's methods are `_harness/supervisor/set {sessionId, on}`
+(the UI's `harness-toggle-supervisor`), `.../get` and `.../active-p`,
+and the seed module's `_harness/seed/fork` and `.../list`.  The bus
+events in `harness-acp--forwarded-events` go to every client verbatim as
+`_harness/event {event, args}` notifications; among them
+`session/ext-changed` (a setting a module keeps on a session changed,
+each change of a plan's step included) and `supervisor/changed` (the
+user switched supervisor mode); see session and supervisor.
 
 Harness → UI requests for chores any client may do go through the bus
 method `client/request METHOD PARAMS` → promise of the first client's
@@ -4493,6 +4822,25 @@ or queued from its box (the text as typed, and the attachments),
 its header line, leaving the session's own segments as they are, and the
 buffer-local `harness-chat-placeholder` replaces the empty box's usual
 hint.
+
+Supervisor mode (`harness-ui-supervisor`, module `ui-supervisor`, which
+requires `ui` and `ui-chat`): a session the supervisor module governs
+says so in its `:ext` `:supervisor`, `t` while it supervises and
+`:false` once the user turned that off, and the chat's header line then
+starts with the state, before the status icon, through
+`harness-chat-header-functions`: "supervisor" in `harness-supervisor-face`,
+or "hands-on" in `harness-dim-face`.  A session with no `:supervisor`
+(a sub-agent, a side conversation) shows nothing.  A click on the
+segment, and `V` in the harness keys (`C-c h V`,
+`harness-toggle-supervisor`), toggle the mode: they ask for the opposite
+with `_harness/supervisor/set {sessionId, on}` and say what changed
+("Supervisor mode on", "Supervisor mode off (hands-on)"), and the header
+follows the session as the harness sends it.  The command takes the
+buffer's setting target like the other session settings, so it refuses a
+task that has no session yet, a session the harness has not sent, and
+one the plugin does not govern; a harness without the supervisor module
+does not know the method, which is said plainly ("Supervisor mode is not
+available") rather than as a failure.
 
 Compose box (`harness-ui-compose`): the editable box shared by chat
 buffers and the task board.  A host calls `harness-compose-setup`
