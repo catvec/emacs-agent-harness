@@ -21,7 +21,9 @@ OpenAI-compatible APIs and AWS Bedrock.
   buffer, saving it, documentation, `*Messages*`, and debugging its
   Lisp: describing symbols, finding definitions, tracing functions
   and variables), Emacs Lisp
-  evaluation in a separate background Emacs, web search and fetch,
+  evaluation in a separate background Emacs (and in your own Emacs,
+  for code a judge model expects to return at once, unless you turn
+  `harness-emacs-eval` off), web search and fetch,
   sub-agents and skills, plus tools that let an agent inspect and
   drive other sessions and tasks.
 - **Remote hosts.** Agents work on other machines through TRAMP: a

@@ -88,10 +88,15 @@ reaching a custom file."
       (should (eq t (plist-get (plist-get d :files) :project-exists)))
       ;; The settings of the sections come first, in their order, here
       ;; the layered ones and the Budget: no other module is loaded.
+      ;; `harness-emacs-eval' too once lisp/harness-emacs-endpoint.el
+      ;; is, as the UI client of another test loads it.
       (let ((placed (cl-loop for (_ . props) in harness-config-sections
                              append (cl-remove-if-not #'boundp (plist-get props :keys)))))
         (should (equal (sort (copy-sequence placed) #'string<)
-                       (sort (cons 'harness-budget (copy-sequence harness-config-keys)) #'string<)))
+                       (sort (append (list 'harness-budget)
+                                     (and (boundp 'harness-emacs-eval) (list 'harness-emacs-eval))
+                                     harness-config-keys)
+                             #'string<)))
         (should (equal (mapcar #'symbol-name placed)
                        (mapcar (lambda (s) (plist-get s :key))
                                (seq-take (plist-get d :settings) (length placed))))))
@@ -251,6 +256,8 @@ reaching a custom file."
       (should (equal (list 'harness-config-test-api-key nil 'global sub) (car events))))))
 
 (ert-deftest harness-config-describe-puts-common-settings-in-sections ()
+  ;; A library both sides load, as `harness-start' does.
+  (require 'harness-emacs-endpoint)
   (harness-config-test-with
     (let* ((d (harness-call 'config/describe sub))
            (settings (plist-get d :settings))
@@ -263,6 +270,8 @@ reaching a custom file."
       (should (equal "sessions" (funcall section "harness-model")))
       (should (equal "spending" (funcall section "harness-budget")))
       (should (equal "safety" (funcall section "harness-sandbox-policy")))
+      ;; Letting agents evaluate in the user's Emacs is a safety matter.
+      (should (equal "safety" (funcall section "harness-emacs-eval")))
       ;; The tasks module is not loaded, so its settings and section are absent.
       (should (null (funcall section "harness-tasks-model")))
       ;; Everything else is advanced: no section, after every sectioned one.
