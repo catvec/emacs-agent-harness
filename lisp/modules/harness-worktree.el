@@ -281,12 +281,32 @@ this call locked it.  Emits `worktree/locked'."
             (harness-emit 'worktree/locked root path)
             t)))))))
 
+(defun harness-worktree--lift-lock (root path)
+  "Lift the lock of the worktree at PATH of ROOT; return a promise.
+It resolves to t when this call lifted the lock, and to nil when
+somebody else lifted it between the look that found it locked and
+this call: the merge queue unlocks a task's worktree once its branch
+merged, while an archive of the task may be removing that worktree.
+It rejects with git's error when the worktree is still locked.  git's
+message is not matched, as it may come in the user's language: the
+worktree is looked at again instead."
+  (harness-catch
+   (harness-then (harness-worktree--on root "unlock" path) (lambda (_) t))
+   (lambda (err)
+     (harness-then
+      (harness-worktree--find root path)
+      (lambda (wt)
+        (if (harness-json-true-p (plist-get wt :locked))
+            (harness-rejected err)
+          nil))))))
+
 (harness-defmethod worktree/unlock (root path &optional any)
   "Unlock the worktree at PATH of the repository at ROOT; return a promise.
 Only a lock the harness made, its reason starting with
 `harness-worktree-lock-prefix', is lifted, unless ANY: a lock somebody
 else put on a worktree stays.  The promise resolves to non-nil when this
-call unlocked it.  Emits `worktree/unlocked'."
+call unlocked it, and to nil when somebody else lifted the lock first.
+Emits `worktree/unlocked'."
   (let ((path (file-name-as-directory (expand-file-name path))))
     (harness-then
      (harness-worktree--find root path)
@@ -295,28 +315,34 @@ call unlocked it.  Emits `worktree/unlocked'."
                  (harness-json-true-p (plist-get wt :locked))
                (harness-worktree-harness-lock-p wt))
          (harness-then
-          (harness-worktree--on root "unlock" path)
-          (lambda (_)
-            (harness-emit 'worktree/unlocked root path)
-            t)))))))
+          (harness-worktree--lift-lock root path)
+          (lambda (lifted)
+            (when lifted
+              (harness-emit 'worktree/unlocked root path)
+              t))))))))
 
 (defun harness-worktree--remove-unlocking (root path wt)
   "Remove worktree WT at PATH of ROOT, lifting the harness's lock first.
 When git still refuses (the worktree has local changes), the lock goes
-back on before the promise rejects with git's error."
+back on before the promise rejects with git's error.  A lock somebody
+else lifted meanwhile, as the merge queue does once a task's branch
+merged, is no failure: the worktree goes all the same, and should git
+refuse, it stays unlocked as they left it."
   (harness-then
-   (harness-worktree--on root "unlock" path)
-   (lambda (_)
-     (harness-catch
-      (harness-worktree--on root "remove" path)
-      (lambda (err)
-        (harness-then
-         (harness-catch
-          (harness-worktree--on root "lock" path "--reason" (plist-get wt :lock-reason))
-          (lambda (e)
-            (harness-log 'warn "worktree: could not lock %s again: %s" path (harness-error-message e))
-            nil))
-         (lambda (_) (harness-rejected err))))))))
+   (harness-worktree--lift-lock root path)
+   (lambda (lifted)
+     (if (not lifted)
+         (harness-worktree--on root "remove" path)
+       (harness-catch
+        (harness-worktree--on root "remove" path)
+        (lambda (err)
+          (harness-then
+           (harness-catch
+            (harness-worktree--on root "lock" path "--reason" (plist-get wt :lock-reason))
+            (lambda (e)
+              (harness-log 'warn "worktree: could not lock %s again: %s" path (harness-error-message e))
+              nil))
+           (lambda (_) (harness-rejected err)))))))))
 
 (harness-defmethod worktree/remove (root path &optional force)
   "Remove the worktree at PATH from the repository at ROOT.
