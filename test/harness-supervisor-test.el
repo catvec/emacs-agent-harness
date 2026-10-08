@@ -562,7 +562,7 @@ The demo provider plays the model through the script of the test."
     "web_fetch" "web_search"
     "ask_user" "todo_write" "hand_in" "notify" "session_control" "session_send" "session_move"
     "set_non_interactive" "task_control" "task_submit"
-    "no_plan_needed")
+    "no_plan_needed" "submit_plan" "retry_step")
   "The tools a supervising session is offered, bash apart: the contract.")
 
 (defconst harness-supervisor-test-dropped
@@ -616,8 +616,12 @@ The demo provider plays the model through the script of the test."
            (hands-on (harness-supervisor-test-session :ext '(:supervisor :false)))
            (ungoverned (harness-supervisor-test-session :kind 'subagent)))
       (should (member "no_plan_needed" everything))
+      (should (member "submit_plan" everything))
+      (should (member "retry_step" everything))
       (dolist (sid (list hands-on ungoverned))
-        (should (equal (harness-supervisor-test-sorted (remove "no_plan_needed" everything))
+        (should (equal (harness-supervisor-test-sorted
+                        (cl-set-difference everything '("no_plan_needed" "submit_plan" "retry_step")
+                                           :test #'equal))
                        (harness-supervisor-test-sorted (harness-supervisor-test-tool-names sid))))
         (should (member "write_file" (harness-supervisor-test-tool-names sid)))
         (should (member "bash" (harness-supervisor-test-tool-names sid)))))))
@@ -985,7 +989,9 @@ The demo provider plays the model through the script of the test."
                        "session_send" "session_control")
                      harness-supervisor-decision-tools))
       (dolist (name harness-supervisor-decision-tools)
-        (unless (harness-tool-get name)
+        ;; The plan engine's own tools want a real plan: stand in for them,
+        ;; this test is about the decision being a decision.
+        (unless (and (harness-tool-get name) (not (member name '("submit_plan" "retry_step"))))
           (harness-define-tool name :label name :description "A decision." :kind 'meta
                                :handler (lambda (&rest _) (harness-tool-ok "ok"))))
         (ert-info (name)
