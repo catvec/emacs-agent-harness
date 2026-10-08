@@ -8,6 +8,8 @@
 ;; decision:
 ;;
 ;;    5 dir-request      request_directory_access: the user's answer decides
+;;    6 away-request     set_non_interactive: turning it on, the user's
+;;                       answer decides; turning it off needs none
 ;;    7 sandbox-guard    shell commands the sandbox would make destructive
 ;;                       (`git worktree prune' and the like) are refused
 ;;   10 jail             every path must lie inside an allowed root, or,
@@ -122,11 +124,29 @@
 ;; skill_search and skill_load: nobody is asked about a skills
 ;; directory.
 ;;
+;; An agent can also ask for non-interactive mode, for its own session,
+;; another one or every current session and task, with the
+;; set_non_interactive tool (when the user asks it to, say, before
+;; leaving).  Turning it on takes the user out of every decision, so the
+;; away-request stage owns that decision the way the first stage owns a
+;; directory request: in every mode the user is asked, with no answer
+;; for the session or for always, and neither the judge nor a rule ever
+;; sees the call.  A non-interactive session cannot ask, so its request
+;; to turn it on is denied at once.  Turning it off only brings the user
+;; back in, and is allowed without asking.
+;;
 ;; Switching a session that is waiting on a prompt into yolo mode answers
 ;; the prompt: the call was open only because the old mode asked, and
 ;; yolo would have allowed it.  A standing rule still decides, and a
 ;; directory prompt keeps waiting, because yolo does not grant
 ;; directories; nor does a confirmation, which only the user gives.
+;; Switching it to non-interactive likewise hands its waiting prompts to
+;; the judge: each is decided as a new call of a non-interactive session
+;; would be, by the stages between the jail and the prompt (the mode and
+;; its rules, the judge, the denial of what got no verdict), and a denial
+;; steers the agent as usual.  The prompts only the user answers keep
+;; waiting: those about directories, confirmations and those asking to
+;; turn non-interactive mode on.
 ;;
 ;; A policy (see harness-policy.el and docs/policy.md) holds here too.
 ;; A permission mode or non-interactive switch it sets is every
@@ -296,7 +316,14 @@ for the rest of the turn it asked in; they are dropped when a turn of
 the session ends or starts (see `harness-perms--grant-for-turn').")
 
 (defvar harness-perms--waiting (make-hash-table :test 'equal)
-  "Pending id -> plist (:session-id :request :next) awaiting an answer.")
+  "Pending id -> plist (:session-id :request :next) awaiting an answer.
+A prompt about a directory has `:dir'; one only the user may answer,
+whatever the session's mode, has `:user-only' too (see
+`harness-perms--user-only-p').")
+
+(defvar harness-perms--judging (make-hash-table :test 'equal)
+  "Pending ids of waiting prompts the judge decides again right now.
+See `harness-perms--judge-waiting'.")
 
 (defvar harness-perms--steered nil
   "Recent call ids whose denial already steered a non-interactive session.")
@@ -325,6 +352,16 @@ as in `harness-perms-dir-options'.  There is no single call to allow,
 so `allow-once' grants the pattern until the session's turn ends: the
 agent can do what it asked for, and nothing is remembered (see
 `harness-perms--turn-dirs').")
+
+(defconst harness-perms-away-tool "set_non_interactive"
+  "Tool through which an agent turns non-interactive mode on or off.
+Turning it on is decided by the user alone; see
+`harness-perms--away-request'.")
+
+(defconst harness-perms-away-options '(allow-once deny-once)
+  "Answer options offered when an agent asks to turn non-interactive mode on.
+Each request is the user's to confirm, so no answer is remembered: no
+rule may approve the next one.")
 
 ;;;; Small helpers
 
@@ -1524,6 +1561,80 @@ CTX names the session."
   :subject (lambda (input) (plist-get input :path))
   :handler #'harness-perms--dir-request-result)
 
+;;;; Requests to turn non-interactive mode on
+
+(defun harness-perms--away-target (input)
+  "Return what a call of `harness-perms-away-tool' with INPUT changes, as text."
+  (let ((ref (plist-get input :session_id)))
+    (cond ((harness-json-true-p (plist-get input :all))
+           "every current session and task, of every project")
+          ((and (stringp ref) (not (harness-string-blank-p ref)))
+           (format "session %s" (string-trim ref)))
+          (t "this session"))))
+
+(defun harness-perms--away-request (decision next request)
+  "Decide a call to `harness-perms-away-tool' as only the user may.
+REQUEST is the call; any other goes on with DECISION, handed to NEXT
+as it is.  Turning non-interactive mode off brings the user back in,
+so it is allowed at once.  Turning it on takes the user out of every
+decision, so the decision handed to NEXT is final, and the mode, the
+standing rules and the auto-mode judge never see it: the call is
+denied when nobody can answer (a non-interactive session is denied at
+once), and otherwise waits for the user, whose answer holds for this
+call alone."
+  (if (not (equal (plist-get request :tool) harness-perms-away-tool))
+      (funcall next decision)
+    (let* ((session (plist-get request :session))
+           (input (plist-get request :input))
+           (away (harness-perms--non-interactive-p session))
+           (target (harness-perms--away-target input)))
+      (cond
+       ((not (harness-json-true-p (plist-get input :enabled)))
+        (funcall next (list :behavior 'allow :final t
+                            :reason "turning non-interactive mode off only brings the user back in")))
+       ((or away (not (harness-method-exists-p 'session/pending-add)))
+        (funcall next (list :behavior 'deny :final t
+                            :reason (format "nobody can confirm turning non-interactive mode on for %s: %s"
+                                            target
+                                            (if away "this session is non-interactive and the user is away"
+                                              "no user is available"))
+                            :hint "Only the user can turn non-interactive mode on. Do not ask again: carry on as you are, and say in your answer that the user can turn it on with M-x harness-set-non-interactive-all.")))
+       (t
+        (let* ((sid (plist-get session :id))
+               (why (plist-get input :reason))
+               (pending (list :kind 'permission
+                              :payload (list :tool (plist-get request :tool)
+                                             :input (plist-get request :input)
+                                             :kind (plist-get request :kind)
+                                             :call-id (plist-get request :call-id)
+                                             :title (format "Turn non-interactive mode on for %s" target)
+                                             :reason (concat
+                                                      (if (and (stringp why) (not (harness-string-blank-p why)))
+                                                          (format "The agent asks: %s.  "
+                                                                  (string-remove-suffix "." (string-trim why)))
+                                                        "")
+                                                      "Nobody is asked anything there until it is turned off again: the auto-mode judge decides what would ask you.")
+                                             :options harness-perms-away-options)))
+               (pid (harness-call 'session/pending-add sid pending)))
+          (puthash pid (list :session-id sid :request request :next next :user-only t)
+                   harness-perms--waiting)
+          (harness-emit 'permission/requested sid (plist-put (copy-sequence pending) :id pid))))))))
+
+(defun harness-perms--answer-user-only (session-id pending-id waiting answer)
+  "Answer the prompt WAITING (PENDING-ID of SESSION-ID) only the user answers.
+ANSWER decides this call and nothing else: whatever its scope, no rule
+is recorded.  Return the final decision."
+  (let* ((answer (harness-perms--parse-answer answer))
+         (allow (eq (plist-get answer :behavior) 'allow))
+         (decision (append (list :behavior (if allow 'allow 'deny) :final t
+                                 :reason (or (plist-get answer :reason)
+                                             (if allow "the user confirmed it" "the user refused it")))
+                           (unless allow
+                             (list :hint "Do not ask again; carry on as you are.")))))
+    (harness-perms--resolve session-id pending-id answer)
+    (funcall (plist-get waiting :next) decision)
+    decision))
+
 ;;;; Commands the sandbox makes destructive
 
 (defun harness-perms--sandbox-guard (decision next request)
@@ -2294,8 +2405,12 @@ it goes out once per call, and only while a turn runs to take it."
 This is the `permission/decided' handler: in a non-interactive session
 every denial, whoever made it (a rule, the jail, the judge...), is
 followed by a steering message telling the agent to find another way
-instead of waiting for the user."
+instead of waiting for the user.  A refused request to turn
+non-interactive mode on is the exception: only the user turns it on,
+so there is no other way to look for, and its hint already tells the
+agent to carry on as it is."
   (when (and (not (eq (plist-get decision :behavior) 'allow))
+             (not (equal (plist-get request :tool) harness-perms-away-tool))
              (harness-perms--non-interactive-p (harness-perms--session session-id)))
     (harness-perms--steer session-id request)))
 
@@ -2381,7 +2496,9 @@ for this call alone.
 Resolves the pending request, records session or standing rules (for
 a directory prompt: grants the pattern to the session or, with
 `always', to every session, or denies it) and lets the tool call
-continue.  This is the only way a directory prompt is granted.  Return
+continue.  This is the only way a directory prompt is granted, and the
+only way an agent's request to turn non-interactive mode on is allowed;
+that one records no rule (see `harness-perms--away-request').  Return
 the final decision, or `continue' when a jail prompt hands the call on."
   (let ((waiting (gethash pending-id harness-perms--waiting)))
     (unless waiting
@@ -2392,6 +2509,8 @@ the final decision, or `continue' when a jail prompt hands the call on."
       (let ((answer (harness-perms--parse-answer answer)))
         (harness-perms--resolve session-id pending-id answer)
         (harness-perms--answer-dir session-id waiting answer)))
+     ((plist-get waiting :user-only)
+      (harness-perms--answer-user-only session-id pending-id waiting answer))
      ((plist-get waiting :confirm)
       (harness-perms--answer-confirm session-id pending-id waiting answer))
      (t (harness-perms--answer-tool session-id pending-id waiting answer)))))
@@ -2495,7 +2614,15 @@ recorded, whatever scope ANSWER names."
     (funcall (plist-get waiting :next) decision)
     decision))
 
-;;;; Switching to yolo with a prompt waiting
+;;;; Switching to yolo or non-interactive with a prompt waiting
+
+(defun harness-perms--user-only-p (waiting)
+  "Non-nil when only the user may answer the waiting prompt WAITING.
+That is a prompt about a directory (the jail's, or an agent's own
+request), a confirmation (`harness-perms-confirm') and an agent's
+request to turn non-interactive mode on.  Neither a switch to yolo nor
+one to non-interactive answers them."
+  (or (plist-get waiting :dir) (plist-get waiting :confirm) (plist-get waiting :user-only)))
 
 (defun harness-perms--accept-yolo (session-id)
   "Answer SESSION-ID's waiting prompts that yolo would have allowed.
@@ -2505,7 +2632,8 @@ without asking, so the prompt is answered allow-once and the call runs.
 Only what the mode stage now allows is answered, so a standing deny
 rule still decides, and a directory prompt keeps waiting: not even yolo
 grants a directory without the user's answer.  Nor does it confirm what
-only the user confirms (`harness-perms-confirm')."
+only the user confirms (`harness-perms-confirm'), or answer an agent's
+request to turn non-interactive mode on."
   (let ((session (harness-perms--session session-id)) pids)
     (when (eq (harness-perms--mode-of session) 'yolo)
       (maphash
@@ -2515,8 +2643,7 @@ only the user confirms (`harness-perms-confirm')."
                   ;; The request holds the session as it was when the
                   ;; prompt was made; the mode stage must see the new one.
                   (fresh (plist-put (copy-sequence request) :session session)))
-             (when (and (not (plist-get waiting :dir))
-                        (not (plist-get waiting :confirm))
+             (when (and (not (harness-perms--user-only-p waiting))
                         (eq 'allow (plist-get (harness-perms--mode-decision nil fresh) :behavior)))
                (push pid pids)))))
        harness-perms--waiting)
@@ -2528,12 +2655,83 @@ only the user confirms (`harness-perms-confirm')."
           (error (harness-log 'warn "perms: could not accept %s for yolo mode: %s"
                               pid (harness-error-message err))))))))
 
+(defconst harness-perms--redecided-stages '(11 . 89)
+  "Priorities of the stages a waiting prompt goes through again.
+They are the `permission/decide' stages after the jail (10) and before
+the prompt (90): the mode and its standing rules, the stages other
+modules add there, the auto-mode judge and the denial of what it gave
+no verdict on.  The earlier ones decided where the call may reach,
+which the switch to non-interactive does not change; see
+`harness-perms--judge-waiting'.")
+
+(defun harness-perms--decide-waiting (session-id pid waiting)
+  "Decide the waiting prompt WAITING, PID of SESSION-ID, as a new call.
+The prompt's request goes through `harness-perms--redecided-stages'
+with the session as it is now.  A verdict resolves the prompt and
+hands the call on, so it runs or is refused as the verdict says, and
+`permission/decided' steers the agent after a denial as after any.  A
+prompt answered meanwhile, or still undecided (the session turned
+interactive again while the judge thought), keeps waiting."
+  (let ((request (plist-put (copy-sequence (plist-get waiting :request))
+                            :session (harness-perms--session session-id)))
+        (done (lambda () (remhash pid harness-perms--judging))))
+    (puthash pid t harness-perms--judging)
+    (harness-then
+     (harness-run-filter-async-between 'permission/decide
+                                       (car harness-perms--redecided-stages)
+                                       (cdr harness-perms--redecided-stages)
+                                       (list :behavior 'ask) request)
+     (lambda (decision)
+       (funcall done)
+       (let ((behavior (plist-get decision :behavior)))
+         (when (and (memq behavior '(allow deny))
+                    (eq (gethash pid harness-perms--waiting) waiting))
+           (remhash pid harness-perms--waiting)
+           (harness-perms--resolve session-id pid
+                                   (list :behavior behavior :scope 'once
+                                         :reason (plist-get decision :reason)))
+           (funcall (plist-get waiting :next) (plist-put (copy-sequence decision) :final t)))))
+     (lambda (err)
+       (funcall done)
+       (harness-log 'warn "perms: deciding prompt %s again failed: %s" pid (harness-error-message err))))))
+
+(defun harness-perms--judge-waiting (session-id)
+  "Have SESSION-ID's waiting prompts decided now that its user is away.
+A prompt waits for the user because the session's mode left its call
+undecided, or because the judge objected while the user could still
+overrule it.  Once the session is non-interactive nobody answers it, so
+each is decided as a new call of the session would be (see
+`harness-perms--decide-waiting'): the judge decides in the user's
+place.  The prompts only the user answers keep waiting
+\(`harness-perms--user-only-p'): no switch grants a directory, confirms
+what only the user confirms or turns non-interactive mode on."
+  (let ((session (harness-perms--session session-id))
+        (todo nil))
+    (when (harness-perms--non-interactive-p session)
+      (maphash (lambda (pid waiting)
+                 (when (and (equal (plist-get waiting :session-id) session-id)
+                            (not (harness-perms--user-only-p waiting))
+                            (not (gethash pid harness-perms--judging)))
+                   (push (cons pid waiting) todo)))
+               harness-perms--waiting)
+      (dolist (entry (nreverse todo))
+        (condition-case err
+            (harness-perms--decide-waiting session-id (car entry) (cdr entry))
+          (error (remhash (car entry) harness-perms--judging)
+                 (harness-log 'warn "perms: could not decide prompt %s again: %s"
+                              (car entry) (harness-error-message err))))))))
+
 (defun harness-perms--on-session-updated (session-id changes)
-  "Accept SESSION-ID's waiting prompts when it switches to yolo.
-The prompts are answered from the command loop, after the switch
-returns.  See `harness-perms--accept-yolo'."
+  "Settle SESSION-ID's waiting prompts when it switches to yolo or non-interactive.
+CHANGES are the session's changed fields.  In yolo, what the mode now
+allows is answered (see `harness-perms--accept-yolo'); in
+non-interactive mode the judge decides the prompts (see
+`harness-perms--judge-waiting').  Either runs from the command loop,
+after the switch returns."
   (when (eq (harness-perms--sym (plist-get changes :permission-mode)) 'yolo)
-    (harness-run-soon #'harness-perms--accept-yolo session-id)))
+    (harness-run-soon #'harness-perms--accept-yolo session-id))
+  (when (harness-json-true-p (plist-get changes :non-interactive))
+    (harness-run-soon #'harness-perms--judge-waiting session-id)))
 
 ;;;; Methods for UIs and the agent
 
@@ -2689,6 +2887,7 @@ only reads may read (see `harness-perms-inspection-dirs' and
 Grants until a turn ends are dropped from here on when it ends.  Safe
 to call again."
   (harness-add-filter 'permission/decide #'harness-perms--dir-request 5)
+  (harness-add-filter 'permission/decide #'harness-perms--away-request 6)
   (harness-add-filter 'permission/decide #'harness-perms--sandbox-guard 7)
   (harness-add-filter 'permission/decide #'harness-perms--jail 10)
   (harness-add-filter 'permission/decide #'harness-perms--mode 20)
@@ -2704,7 +2903,8 @@ to call again."
 
 (defun harness-perms--shutdown ()
   "Remove the `permission/decide' chain and the steering after denials."
-  (dolist (fn '(harness-perms--dir-request harness-perms--sandbox-guard harness-perms--jail harness-perms--mode
+  (dolist (fn '(harness-perms--dir-request harness-perms--away-request harness-perms--sandbox-guard
+                harness-perms--jail harness-perms--mode
                 harness-perms--auto harness-perms--non-interactive harness-perms--ask))
     (harness-remove-filter 'permission/decide fn))
   (harness-off (cons 'permission/decided #'harness-perms--on-decided))

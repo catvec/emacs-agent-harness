@@ -17,8 +17,9 @@ module needs something more, add it here first.
                 skills, perms, sandbox, notifications
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
- Tool calls     tools, tools-fs, tools-shell, tools-ssh, tools-emacs, tools-web,
-                tools-agent, tools-sessions, tools-notify, tools-handin, tools-dev
+ Tool calls     tools, tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval,
+                tools-web, tools-agent, tools-sessions, tools-notify, tools-handin,
+                tools-dev
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE,
@@ -87,13 +88,19 @@ default) the layers above are split across two Emacs processes:
   `initialize`), and the harness sends that one Emacs the small, fixed
   set of `_harness/emacs/*` requests of lisp/harness-emacs-endpoint.el
   through `emacs/request` (see the tools and acp sections).  The
-  `emacs_*` tools ask it for plain data and a few bounded actions
-  (show a buffer, insert text, save one, trace a function or a
-  variable); none evaluates code.  The
-  `elisp` tool evaluates in a child `emacs --batch'
-  (lisp/harness-elisp.el), never in the lent Emacs: model-written Lisp
-  does not run there at all, since a blocking call would freeze it
-  beyond recovery, and no setting or request changes that.
+  `emacs_*` tools of tools-emacs ask it for plain data and a few
+  bounded actions (show a buffer, insert text, save one, trace a
+  function or a variable); none evaluates code.  The `elisp` tool
+  evaluates in a child `emacs --batch` (lisp/harness-elisp.el), never
+  in the lent Emacs.  Model-written Lisp reaches the lent Emacs only
+  through `emacs_eval` (tools-emacs-eval), which the user can turn off
+  with `harness-emacs-eval` (on by default): the code runs on the UI's
+  only thread, where a blocking call freezes typing and redisplay,
+  so a judge model must expect it to return at once, the permission
+  chain must allow the call as it would a bash command, and the lent
+  Emacs runs it guarded (the user's next key or C-g stops it; it may
+  not prompt; it is stopped once it has waited two seconds).  The lent
+  Emacs checks the setting itself, so it has the last word.
 - Chores of the UI, which any client may do, are asked for with
   `client/request` (below): saving user options to `custom-file`
   (`harness-save-user-option`), reverting buffers after a tool
@@ -136,6 +143,10 @@ local connection.
 Async filter gotcha: `harness-run-filter-async` adopts any promise a
 handler returns and calls NEXT with its value.  A handler that stores
 NEXT to call later (merge holds, budget prompts) must return nil.
+`harness-run-filter-async-between NAME FROM TO VALUE &rest ARGS` runs
+only the handlers whose priority lies between FROM and TO, inclusive
+(the perms module re-decides a waiting prompt through the stages after
+the jail with it).
 
 An error signalled inside a `harness-then` handler rejects the derived
 promise *and* is logged (with a backtrace when `harness-log-level` is
@@ -489,6 +500,25 @@ See docs/configuration-audit.md for the rule and the audit behind it.
   :listed :defined) ...))`: every option the policy sets, in its order,
   with whether the page lists it (corporate mode is not listed) and
   whether this harness defines it at all.
+- `config/overrides KEY &key value printed dirs` → `(:key :value :tasks
+  :files)`: what keeps a global value of layered KEY (VALUE, printed
+  when `:printed`, by default the global value itself) from applying.
+  `:files` lists the `.dir-locals.el` files, as `(:file :scope
+  project|directory :dir :project :value)`, that set KEY to another
+  value, at the project or the directory layer of where work goes on
+  now: the active sessions, the current tasks and their sessions
+  (`session/select` with `:tasks`), and DIRS (a task board's, say).
+  A linked git worktree's file (a task's, say) that sets KEY as the
+  file at the same place in its main checkout
+  (`harness-files-main-checkout`) does is the project's checked-in
+  copy: the entry names the main checkout's file and project, the one
+  to change, once for all the tasks.  A worktree whose file says
+  something else, a task's edit, say, is named itself.
+  `:tasks` is the task default that wins over KEY for new tasks
+  (`harness-tasks-model` for `harness-model`, and so on) when it is set
+  to another value, else nil.  Remote and missing directories are
+  skipped, values are printed, and nothing is ever written: the
+  all-sessions commands report it after changing a default.
 - Event `config/changed KEY VALUE SCOPE CWD` after a set or unset;
   after an unset VALUE is the value now in effect at CWD, and for a
   secret it is nil.
@@ -578,13 +608,23 @@ gone.
   model's window at N tokens, nil the model's again, a
   `:context-window' set for the session winning over it.  Event
   `session/updated ID CHANGES`.
+- `session/select &optional FILTER` → the session plists FILTER selects,
+  newest first: `session/list`'s filter plus `:except` ids, and `:tasks`
+  non-nil to add the sessions of the current tasks of every project
+  (`task/session-ids`), even an inactive one a task goes on in.  It is
+  the selection of `session/set-all`, `handoff/check-all` and
+  `handoff/switch-all`.
 - `session/set-all SETTINGS &optional FILTER` — the same change on every
-  session FILTER selects (`session/list`'s filter plus `:except` ids);
-  returns the ids that changed, newest first.  A session already holding
-  the value is skipped, and each one changed gets the same event and hint
-  as `session/update`.  This is what `harness-set-model-all` uses to move
+  session FILTER selects (`session/select`); returns the ids that
+  changed, newest first.  A session already holding the value is
+  skipped, compared by `harness-setting-equal-p` (in harness-util: a
+  false or absent `:non-interactive` is off, a permission mode's name
+  is the mode), and each one changed gets the same event and hint as
+  `session/update`.  This is what `harness-set-model-all` uses to move
   every session to another model or provider at once, when no session
-  would lose its conversation (else `handoff/switch-all`).
+  would lose its conversation (else `handoff/switch-all`), and what
+  `harness-set-thinking-all`, `harness-set-non-interactive-all` and the
+  `set_non_interactive` tool use, with `(:active t :tasks t)`.
 - `session/move ID DIR &rest OPTIONS` — moves ID to the working
   directory DIR, and with it to DIR's project, which the session list
   files it under: for a session started in one directory that works on
@@ -1467,13 +1507,33 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
 Async filter `permission/decide`: value is a DECISION
 `(:behavior allow|deny|ask :reason "…" :input UPDATED :final BOOL)`,
 args are the REQUEST `(:session SESSION :tool NAME :input PLIST :kind KIND
-:paths (…))`.  Chain (priority): 5 dir-request, 6 session-move (the
-session tools: the user confirms every `session_move`), 7 sandbox-guard, 10 jail,
-20 mode, 25 write-up (the tasks module: a backlog write-up only reads),
-30 auto (LLM judge), 40 non-interactive, 90 ask-user (turns `ask` into a
-pending request and resolves when answered).  A judge denial reaches 90
-as an `ask` in an interactive session, so the user answers it; in a
-non-interactive session it stays a denial.
+:paths (…))`.  Chain (priority): 5 dir-request, 6 away-request, 6
+session-move (the session tools: the user confirms every
+`session_move`), 7 sandbox-guard, 10 jail, 20 mode, 25 write-up (the
+tasks module: a backlog write-up only reads), 30 auto (LLM judge), 40
+non-interactive, 90 ask-user (turns `ask` into a pending request and
+resolves when answered).  A judge denial reaches 90 as an `ask` in an
+interactive session, so the user answers it; in a non-interactive
+session it stays a denial.
+
+- The away-request stage owns the decision of the `set_non_interactive`
+  tool (tools-sessions), as the dir-request stage owns
+  `request_directory_access`'s: always final, so the mode, standing
+  rules, `harness-perms--auto-allow-tools` and the judge never see it.
+  Turning the mode off (`enabled` false) only brings the user back in
+  and is allowed at once.  Turning it on asks the user, in every mode,
+  auto and yolo included: a `permission` prompt titled "Turn
+  non-interactive mode on for TARGET" (this session, session REF, or
+  every current session and task of every project) with the agent's
+  reason and the options `harness-perms-away-options` (allow-once,
+  deny-once).  Its `harness-perms--waiting` entry is `:user-only`, so
+  `permission/answer` decides that call alone and records no rule
+  whatever the scope (`harness-perms--answer-user-only`), and neither a
+  switch to yolo nor one to non-interactive answers it.  A
+  non-interactive session, or a harness without sessions to ask in, is
+  denied at once with a hint not to ask again, and the agent gets no
+  steering message after it (see non-interactive below): there is no
+  other way to reach that goal.
 
 - The sandbox guard asks `sandbox/check-command` about every `exec` call
   whose input has a `:command` (the bash tool), passing the directory it
@@ -1584,7 +1644,8 @@ non-interactive session it stays a denial.
   for the agent after a no): a `permission` prompt whose payload has
   `:confirm t` and offers allow-once and deny-once only
   (`harness-perms-confirm-options`).  The answer is final and records no
-  rule, whatever scope it names; switching to yolo does not answer it;
+  rule, whatever scope it names; switching to yolo or to
+  non-interactive does not answer it;
   a non-interactive session, or one nobody can answer for, is denied at
   once with a hint to say in the answer what the agent wanted done.
   `session_move` is such a call (stage 6, `harness-tools-sessions--move-gate`):
@@ -1873,13 +1934,29 @@ non-interactive session it stays a denial.
   message (`harness-perms-steering-text`), once per call and only while
   a turn runs to take it, marked as from
   `harness-sender-system "non-interactive mode"`: the user is away, so
-  respect the denial and reach the goal another way.
+  respect the denial and reach the goal another way.  A refused
+  `set_non_interactive` call is the exception: only the user turns the
+  mode on, so there is no other way, and its hint says to carry on.
   The session's own `:non-interactive` switch decides, off as much as
   on.  It starts from `harness-non-interactive` when the session is
   created (an explicit false turns it off whatever the setting says);
   forks and sub-agents start with their parent's.  Changing the setting
   later leaves the sessions that exist alone.  The setting decides by
   itself only for a request without a session record.
+  Switching a session to non-interactive (`session/updated` with a true
+  `:non-interactive`, from `C-c h i`, the board, `C-c h I` or the
+  tool) hands its waiting prompts to the judge from the command loop
+  (`harness-perms--judge-waiting`): each prompt's request goes again
+  through the stages from 11 to 89 (`harness-perms--redecided-stages`,
+  with `harness-run-filter-async-between`), with the session as it is
+  now, so it is decided as a new call of that session would be; an
+  allow or a deny resolves the prompt and hands the call on, and a
+  denial steers the agent as above.  The jail and the dir-request
+  stage are not run again, and the prompts only the user answers
+  (`harness-perms--user-only-p`: a directory, a confirmation, or
+  turning non-interactive mode on) keep waiting.  A prompt answered meanwhile,
+  or still undecided because the session turned interactive again,
+  stays as it is.
 - A policy ([policy.md](policy.md)) holds here too.  A permission mode
   or non-interactive switch it sets is every session's, whatever the
   session record says (`harness-perms--mode-of`,
@@ -2492,7 +2569,8 @@ so switching to either loses nothing.
   (see "Session"): whether the old model's prompt cache still lasts,
   which is what makes it cheap for that model to summarise.
 - `handoff/check-all MODEL &optional FILTER` → the checks of the
-  sessions `session/set-all` would change.
+  sessions `session/set-all` would change (FILTER is `session/select`'s,
+  so `:tasks` takes in the sessions of current tasks).
 - `handoff/switch SESSION-ID MODEL &optional MODE` → promise of `(:id
   :model :from :lossy :mode :summarizer :context :deferred :file :node
   :fallback :error)`.
@@ -2525,8 +2603,9 @@ so switching to either loses nothing.
   a cache rather than reading one; a switch that loses nothing keeps
   reporting the old model's cache, which the new model cannot read (see
   "Session").
-- `handoff/switch-all MODEL &optional FILTER MODE` → the ids switched;
-  MODE applies to the lossy ones.
+- `handoff/switch-all MODEL &optional FILTER MODE` → the ids switched,
+  of the sessions `handoff/check-all` checks; MODE applies to the lossy
+  ones.
 - A handoff must land in the trailing user messages.  An idle
   session's starts at once and a turn started meanwhile waits for it;
   a running session's waits for the turn's next step: the
@@ -2962,8 +3041,18 @@ record from before priorities reads `medium` without being rewritten.
   with null) every task keeps its own, and a bad one is refused before
   any task changes; FILTER is `:columns'
   (default `harness-tasks-bulk-columns': running, pending and blocked),
-  `:ids', `:except' and `:cwd', and review, done and archived tasks are
-  never touched; this is the board's bulk edit), `task/prompt ID TEXT &optional ATTACHMENTS OPTS` (follow-up or
+  `:ids', `:except' and `:cwd' (without it, every project), and review,
+  done and archived tasks are never touched; a task already set so is
+  skipped, non-interactive counting as what the task would start with
+  (`harness-tasks--non-interactive-p`: its own setting, else
+  `harness-tasks-non-interactive`, else its directory's
+  `harness-non-interactive`), and its session is sent only the
+  settings it lacks, so one `session/set-all` changed first gets no
+  second hint; this is the board's bulk edit, and the all-sessions
+  commands' and `set_non_interactive`'s reach into tasks),
+  `task/session-ids &optional FILTER` (the sessions of the tasks FILTER
+  selects, whatever their status: `session/select`'s `:tasks`),
+  `task/prompt ID TEXT &optional ATTACHMENTS OPTS` (follow-up or
   steering; reopens; OPTS `:from` is the sender, as `agent/prompt` takes it; in review the
   user's sends the task back and another session's does not, as above), `task/refine ID &optional TEXT`,
   `task/merge ID` (retry; not in review), `task/retry ID` (have a task
@@ -3314,7 +3403,7 @@ TITLE is the session's name, else the prompt's first line without its
 leading `#`, at most 80 characters; PROJECT is `project/name` of the
 task's project.
 
-### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-web, tools-agent, tools-sessions, tools-notify, tools-handin
+### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval, tools-web, tools-agent, tools-sessions, tools-notify, tools-handin
 
 Tool names, labels and inputs (all paths relative to cwd or absolute;
 TRAMP prefixes come from the session host):
@@ -3339,6 +3428,7 @@ TRAMP prefixes come from the session host):
 | `emacs_describe` | Describe symbol | symbol, buffer | read (needs no approval: `harness-perms--inspection-tools`) |
 | `emacs_find_definition` | Find definition | symbol, type (function/variable/face) | read (needs no approval: `harness-perms--inspection-tools`; the file of a definition it shows becomes readable, `permission/reveal-file`) |
 | `emacs_trace` | Trace symbol | action (start/stop/list), symbol, type (function/variable), callers, limit | write |
+| `emacs_eval` | Evaluate in Emacs | code | exec (tools-emacs-eval; offered only while `harness-emacs-eval` is on, as it is by default; a judge model must call the code fast first) |
 | `web_search` | Web search | query, count | net |
 | `web_fetch` | Fetch page | url, max_chars | net |
 | `emacs_messages` | Emacs messages | count | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -3355,6 +3445,7 @@ TRAMP prefixes come from the session host):
 | `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
 | `session_move` | Move session | directory, session_id (default: this session), keep_old_directory, reason | meta (the user confirms every call, in every mode; see perms, Confirmations, and `session/move`) |
+| `set_non_interactive` | Non-interactive mode | enabled, session_id (default: this session) or all (every current session and task of every project), reason | meta (perms module's away-request stage: turning it on is decided only by the user's answer, in every mode, and denied at once in a non-interactive session; turning it off is allowed at once) |
 | `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_list` | List tasks | column (pending/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: the order waiting tasks start in) | meta |
@@ -3562,12 +3653,50 @@ harness on its `load-path', the working directory as its
 `default-directory', a timeout, and the process tree killed when it
 overruns (lisp/harness-elisp.el); its result comes back as JSON, in the
 shape `harness-elisp-payload` describes (value, output, messages or
-error).  It never runs in the lent Emacs, and no request of
-lisp/harness-emacs-endpoint.el evaluates code: model-written Lisp does
-not run in the user's Emacs at all, whatever anyone configures.  A call
-that asks for the user's Emacs (the old `emacs` input) is refused with
-that explanation; the `emacs_*` tools are the whole of what a model may
-do to the live Emacs.
+error).  It never runs in the lent Emacs.  A call that asks for the
+user's Emacs (the old `emacs` input) is refused with that explanation,
+naming `emacs_eval` unless that is off.
+
+`emacs_eval` (tools-emacs-eval) is the one tool that evaluates
+model-written Lisp in the lent Emacs, so a model can change the Emacs
+the user works in: define or fix a function, set a variable, adjust a
+buffer.  It is on by default, and the user can turn it off with
+`harness-emacs-eval` (in the safety section of the settings page): code
+there runs on the UI's only thread, and code that never waits, such as
+a loop the judge misjudged, holds it until it returns or the user stops
+it.  While it is off the `agent/tools` filter leaves the tool out of every
+session (the catalogue, with no session, still lists it), and a call
+that names it anyway is refused without asking anyone.  A call passes
+three gates before its code runs, in order:
+
+1. The permission chain decides it as any call of kind exec, in every
+   mode (the same approval as bash).
+2. The handler asks a judge model, as the auto-mode permission judge
+   is asked: one `:ephemeral` `provider/complete` on the cheap tier of
+   the session's model (`provider/tier-model MODEL 'cheap`, else the
+   model itself), no tools, no thinking, 200 output tokens and once
+   more with 2048 when those ran out, at most 30 s in all.  It reads
+   the very code that would run, fenced by a tag of the call's own, and
+   rules on performance and blocking only, answering one JSON line
+   `{"verdict": "fast"|"slow"|"blocking"|"unsure", "reason": ...}`.
+   Only `fast` runs the code, and only when every verdict in the reply
+   says so; any other verdict, no verdict, a failed request or a judge
+   that takes too long refuses the call with the judge's reason and
+   points to the `elisp` tool.  Code longer than 12000 characters, code
+   that does not read and a harness with no Emacs lent are refused
+   before the judge is asked.
+3. The harness sends `eval` (below) with a two-second limit and a
+   deadline, and waits five seconds for the answer; an Emacs that has
+   not answered by then is reported as not responding, maybe still
+   running the code, and the model is told to leave it alone.  The lent
+   Emacs evaluates only while its own `harness-emacs-eval` is on, so
+   the Emacs that would freeze has the last word.
+
+The result reads as the `elisp` tool's (`=> VALUE`, then the output and
+the messages), with `:meta` `(:emacs "user" :verdict V :reason R)`;
+code that signals is an error result, and code the lent Emacs stopped
+(its time limit, the user's key, C-g) is an error result that says it
+ran partway.
 
 ### acp
 
@@ -3667,7 +3796,7 @@ claims an Emacs is not asked.  It rejects at once when none is
 attached, with the Emacs's message when it refuses, and when it
 disconnects first.  `emacs/attached` lists the lent Emacsen, the one
 asked first at the head.  Neither is callable over ACP.  Requests, all
-answered with plain data or one bounded action
+but `eval` answered at once with plain data or one bounded action
 (lisp/harness-emacs-endpoint.el):
 `buffers {}` → `{buffers: [{name, mode, modified, size, file}]}`;
 `windows {}` → `{windows: [{frame, selected, name, mode, width, height,
@@ -3684,9 +3813,40 @@ type, name, aliases, kind, advised, loaded, native, autoload, file,
 visiting, modified, line, endLine, lines, truncated, printed, note}`;
 `trace {action, symbol, type, limit, callers}` → `{started: {symbol,
 type, count, limit, callers}, line, stopped: [...], traces: [...],
-buffer, lines}`; `messages {count}` → `{text}`.  There is no `eval`
-request: a lent Emacs never evaluates model-written code, so nothing
-that asks it can freeze it.
+buffer, lines}`; `messages {count}` → `{text}`.
+
+`eval {code, timeout, deadline, host, maxChars}` → `{value, output,
+messages, error, stopped, seconds}` is the one request that evaluates
+model-written code, emacs_eval's, and the lent Emacs refuses it while
+its own `harness-emacs-eval` is off (on by default; the global value
+counts, a buffer-local one does not).  It is answered once the code ran
+(`harness-emacs-endpoint--deferred-methods`), and runs it guarded:
+
+- The code is read whole first, so code that does not read runs not at
+  all; it is evaluated form by form with lexical binding.
+- It never starts while the user is typing or while another evaluation
+  runs (code that waits lets requests in, and evaluations never nest):
+  it looks again every 0.05 s, and fails, having run nothing, once
+  `deadline` is near.  `deadline` is by the harness's clock, so it
+  counts only when `host` names this Emacs's `system-name`; elsewhere
+  `timeout` from the request's arrival stands in for it.
+- It runs under `while-no-input` with quitting allowed: the user's next
+  key stops it (`stopped: "input"`), and so does C-g (`"quit"`), whose
+  `quit-flag` is cleared after so nothing else quits.  Requests arrive
+  in a process filter or a timer, where quitting is inhibited; this is
+  the only place it is allowed.
+- A timer of its own, under a tag of the call's own that no `catch` or
+  `with-timeout` in the code can take, stops it once it has waited
+  `timeout` seconds (default 2, at most 10) or what is left until
+  `deadline` (`"timeout"`).
+- It may not prompt (`inhibit-interaction`) or enter the debugger, and
+  its messages are logged, not shown.  The value, the output and the
+  messages are each cut at `maxChars`.
+
+Code that never waits (a loop that does not yield) can still hold the
+Emacs until it returns or the user stops it: nothing preempts Lisp on
+its thread.  Keeping such code out is the judge's work; a user who
+would rather not take the risk turns `harness-emacs-eval` off.
 
 The server writes its address to `<state>/acp-address` and, when
 `harness-acp-token` is set (always, for the harness process), the token
@@ -4391,6 +4551,32 @@ id, or a settings plist with its setter -- and otherwise the current
 session.  The menu's `i` entry says whether that is non-interactive
 ("Non-interactive: on"), and has no state where the command would
 ask for a session.
+
+The all-sessions commands, `harness-set-model-all`,
+`harness-set-thinking-all` and `harness-set-non-interactive-all`
+(`C-c h M` `H` `A`, the menu's "Session settings" column), reach every
+project.  They change the sessions first, every active one and those of
+the current tasks (`harness-ui--everything-filter`, `(:active t :tasks
+t)`, through `session/set-all`, or `handoff/switch-all` for a model so
+no lossy switch escapes the handoff), then the current tasks of every
+project (`task/set-all` without `:cwd`), whose sessions hold the value
+by then and so are not changed or told twice
+(`harness-ui--apply-everywhere`).  `harness-ui-set-all-functions` lets
+what starts later follow, and returns the directories it changed
+something for: the task board's `harness-ui-tasks--set-all` sets the
+new-task settings of every open board -- for a model or a thinking
+level only when the default changes, for non-interactive always.
+Unless a prefix argument says otherwise the value becomes the global
+default (`config/set` `:scope global`; for non-interactive only after
+the tasks changed, since a task without a setting of its own follows the
+default and is compared with how it would have started).  Then they say
+how many sessions and tasks changed and, from `config/overrides` (with
+the boards' directories), what keeps new work from following: the
+projects whose `.dir-locals.el` sets the key otherwise, at the project
+or the directory layer, and the task default that wins over it.  A
+model or a thinking level reports that when the default changed;
+non-interactive also whenever it is turned off.  None of them rewrites
+a `.dir-locals.el`.
 
 A model switch asks the harness first (`handoff/check`, or
 `handoff/check-all` for `harness-set-model-all`, which asks once for the

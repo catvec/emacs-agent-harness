@@ -516,6 +516,84 @@ only; a bad one is refused before any task changes."
           (should (equal '(high high medium high) (priorities))))
         (harness-call 'task/cancel running)))))
 
+(defun harness-tasks-test--count-hints (sid text)
+  "How many hints of session SID say TEXT."
+  (cl-count text (harness-tasks-test-hints sid) :test #'equal))
+
+(ert-deftest harness-tasks-set-all-reaches-every-project-once ()
+  "What the all-sessions commands send reaches every project, once.
+`session/set-all' with `:tasks' takes the sessions of the current tasks
+besides the active ones, one closed meanwhile included, and
+`task/set-all' without `:cwd' then the current tasks of every project.
+A task's session the first changed is not changed a second time, so
+each change adds exactly one hint, whichever comes first."
+  (harness-tasks-test-with
+    (let ((harness-provider-demo--delay 5)          ; keep the started ones running
+          (harness-tasks-max-running 0)
+          (harness-tasks-non-interactive nil)
+          (other (harness-test-temp-dir))
+          (everything '(:active t :tasks t))
+          (sorted (lambda (ids) (sort (copy-sequence ids) #'string<))))
+      (let* ((here (harness-tasks-test-submit "running here"))
+             (there (harness-tasks-test-submit "running there" other))
+             (waiting (harness-tasks-test-submit "waiting there" other))
+             (plain (plist-get (harness-call 'session/create :cwd other :model "demo:scripted") :id)))
+        (harness-call 'task/start here)
+        (harness-call 'task/start there)
+        (let ((here-sid (plist-get (harness-tasks-test-task here) :session))
+              (there-sid (plist-get (harness-tasks-test-task there) :session)))
+          ;; The task over there goes on in a session closed meanwhile.
+          (harness-call 'session/deactivate there-sid)
+          (should-not (member there-sid (harness-tasks-test--ids (harness-call 'session/list '(:active t)))))
+          (should (equal (funcall sorted (list here-sid there-sid))
+                         (funcall sorted (harness-call 'task/session-ids))))
+          (should (equal (funcall sorted (list here-sid there-sid plain))
+                         (funcall sorted (harness-tasks-test--ids (harness-call 'session/select everything)))))
+          ;; Sessions first, then the tasks: three sessions and three tasks.
+          (should (equal (funcall sorted (list here-sid there-sid plain))
+                         (funcall sorted (harness-call 'session/set-all '(:non-interactive t) everything))))
+          (should (equal (list here there waiting) (harness-call 'task/set-all '(:non-interactive t))))
+          (dolist (id (list here there waiting))
+            (should (eq t (plist-get (harness-tasks-test-task id) :non-interactive))))
+          (dolist (sid (list here-sid there-sid plain))
+            (should (plist-get (harness-call 'session/get sid) :non-interactive))
+            (should (= 1 (harness-tasks-test--count-hints sid "non-interactive on"))))
+          ;; Asked again, nothing changes.
+          (should-not (harness-call 'session/set-all '(:non-interactive t) everything))
+          (should-not (harness-call 'task/set-all '(:non-interactive t)))
+          ;; The tasks first, then the sessions: still one hint each.
+          (should (equal (list here there waiting) (harness-call 'task/set-all '(:non-interactive :false))))
+          (should (equal (list plain) (harness-call 'session/set-all '(:non-interactive :false) everything)))
+          (dolist (sid (list here-sid there-sid plain))
+            (should-not (plist-get (harness-call 'session/get sid) :non-interactive))
+            (should (= 1 (harness-tasks-test--count-hints sid "non-interactive off"))))
+          (dolist (id (list here there waiting))
+            (should (eq :false (plist-get (harness-tasks-test-task id) :non-interactive)))))
+        (dolist (id (list here there)) (harness-call 'task/cancel id))))))
+
+(ert-deftest harness-tasks-set-all-off-reaches-tasks-the-defaults-turn-on ()
+  "Turning non-interactive off reaches a task with no setting of its own
+that would start non-interactive all the same: the task default, or its
+directory, turns it on.  It then has its own false.  A task that would
+start interactive anyway is left alone, and turning it on reaches it."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-tasks-non-interactive t))
+      (let ((id (harness-tasks-test-submit "waiting")))
+        (should-not (plist-member (harness-tasks-test-task id) :non-interactive))
+        (should (equal (list id) (harness-call 'task/set-all '(:non-interactive :false))))
+        (should (eq :false (plist-get (harness-tasks-test-task id) :non-interactive)))
+        (should-not (harness-call 'task/set-all '(:non-interactive :false)))
+        (harness-call 'task/cancel id)))
+    (let ((harness-tasks-max-running 0)
+          (harness-tasks-non-interactive nil))
+      (let ((id (harness-tasks-test-submit "waiting")))
+        (should-not (harness-call 'task/set-all '(:non-interactive :false)))
+        (should-not (plist-member (harness-tasks-test-task id) :non-interactive))
+        (should (equal (list id) (harness-call 'task/set-all '(:non-interactive t))))
+        (should (eq t (plist-get (harness-tasks-test-task id) :non-interactive)))
+        (harness-call 'task/cancel id)))))
+
 (ert-deftest harness-tasks-stopped-turn-stays-active ()
   (harness-tasks-test-with
     (let ((harness-provider-demo-script-override

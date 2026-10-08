@@ -281,8 +281,10 @@ init file, `harness-server-init-file`, a patched copy of the harness)
 can do anything, as it can for any package: the file system, which
 keeps the policy file out of the user's reach, is the boundary.  The
 harness process runs no code from the user's configuration beyond what
-it always did, and agents cannot evaluate Lisp in either process (the
-`elisp` tool runs in a separate `emacs --batch`).
+it always did, and agents cannot evaluate Lisp in it (the `elisp` tool
+runs in a separate `emacs --batch`).  In the user's Emacs they can,
+through `emacs_eval`, unless `harness-emacs-eval` is off: a policy that
+sets `(harness-emacs-eval . nil)` keeps them out of it too.
 
 Kept out of the first version, to keep it small:
 

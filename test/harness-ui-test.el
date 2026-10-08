@@ -238,6 +238,12 @@ The menu groups BODY gives the test modes are taken back afterwards."
                   (push (cons mode group) groups))))
     groups))
 
+(defun harness-ui-test--suffix-plist (suffix)
+  "Return the properties of SUFFIX, a suffix of a transient layout.
+Transient 0.8 and later write it (CLASS . PLIST), earlier ones (LEVEL
+CLASS PLIST)."
+  (if (keywordp (cadr suffix)) (cdr suffix) (car (last suffix))))
+
 (defun harness-ui-test-menu (&optional keys)
   "Open `harness-menu' here and return its text, then type KEYS in it.
 KEYS default to C-g, which closes the menu."
@@ -1241,7 +1247,11 @@ once, and a change made with `setopt' reaches it."
       (should (equal "harness-model" (plist-get config :key)))
       (should (equal "deepseek:deepseek-flash" (plist-get config :value)))
       (should (equal "global" (plist-get config :scope)))
-      (should (equal "deepseek:deepseek-flash" (plist-get (plist-get bulk :settings) :model))))))
+      (should (equal "deepseek:deepseek-flash" (plist-get (plist-get bulk :settings) :model)))
+      (should (equal '(:active t :tasks t) (plist-get bulk :filter)))
+      ;; The current tasks of every project: no `:cwd'.
+      (should (equal '(:settings (:model "deepseek:deepseek-flash")) (cdr (assoc "_harness/task/set-all" calls))))
+      (should (assoc "_harness/config/overrides" calls)))))
 
 (ert-deftest harness-ui-set-model-all-prefix-leaves-the-default-alone ()
   "A prefix argument switches the sessions but keeps the new-session default."
@@ -1258,7 +1268,203 @@ once, and a change made with `setopt' reaches it."
       (harness-set-model-all t))
     (should-not (assoc "_harness/config/set" calls))
     (should (equal "deepseek:deepseek-flash"
-                   (plist-get (plist-get (cdr (assoc "_harness/session/set-all" calls)) :settings) :model)))))
+                   (plist-get (plist-get (cdr (assoc "_harness/session/set-all" calls)) :settings) :model)))
+    (should (equal '(:settings (:model "deepseek:deepseek-flash")) (cdr (assoc "_harness/task/set-all" calls))))
+    ;; No new default, so nothing to say about what overrides it.
+    (should-not (assoc "_harness/config/overrides" calls))))
+
+(defmacro harness-ui-test-with-all (answers &rest body)
+  "Run BODY with the harness answering every request from ANSWERS.
+ANSWERS maps a method to its result.  BODY sees CALLS, the requests
+made, newest first; SAID, the messages said, newest first; and SET, the
+arguments of the calls of `harness-ui-set-all-functions', which stands
+for two open boards, of /p/ and /q/."
+  (declare (indent 1))
+  `(let ((calls nil) (said nil) (set nil))
+     (let ((harness-ui-set-all-functions
+            (list (lambda (key value) (push (list key value) set) (list "/p/" "/q/")))))
+       (cl-letf (((symbol-function 'harness-ui-call)
+                  (lambda (method params &optional callback _on-error)
+                    (push (cons method params) calls)
+                    (when callback (funcall callback (cdr (assoc method ,answers))))))
+                 ((symbol-function 'message)
+                  (lambda (format-string &rest args)
+                    (when format-string (push (apply #'format format-string args) said)))))
+         ,@body))))
+
+(ert-deftest harness-ui-set-non-interactive-all-changes-everything ()
+  "C-c h I, beside C-c h i for one session as M is beside m, turns
+non-interactive on or off, offering on first, for every session and
+current task of every project, for the open boards' next tasks and as
+the default for new sessions.  It says how many sessions and tasks
+changed, and what keeps the new default from new work: here a
+project's .dir-locals.el and a directory's."
+  (should (eq 'harness-set-non-interactive-all (lookup-key harness-ui-map (kbd "I"))))
+  (should (eq 'harness-set-non-interactive-all (lookup-key harness-global-mode-map (kbd "C-c h I"))))
+  (should (eq 'harness-toggle-non-interactive (lookup-key harness-global-mode-map (kbd "C-c h i"))))
+  ;; Beside i in the menu's session settings, as M is beside m.
+  (let* ((column (transient-get-suffix 'harness-menu '(0 1)))
+         (keys (mapcar (lambda (suffix) (plist-get (harness-ui-test--suffix-plist suffix) :key))
+                       (aref column (1- (length column))))))
+    (should (equal "Session settings" (plist-get (aref column (- (length column) 2)) :description)))
+    (should (equal '("i" "I") (seq-take (member "i" keys) 2)))
+    (should (equal '("m" "M") (seq-take (member "m" keys) 2))))
+  (harness-ui-test-with-all
+      (list (cons "_harness/session/set-all" '("s1" "s2" "s3"))
+            (cons "_harness/task/set-all" '("t1"))
+            (cons "_harness/config/overrides"
+                  '(:key "harness-non-interactive" :value "t"
+                    :files ((:file "/p/.dir-locals.el" :scope "project" :dir "/p/" :project "p" :value "nil")
+                            (:file "/q/sub/.dir-locals.el" :scope "directory" :dir "/q/sub/" :project "q"
+                             :value "nil")))))
+    (let (offered)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt table _pred require _initial _hist def)
+                   (setq offered (list (all-completions "" table)
+                                       (completion-metadata-get (completion-metadata "" table nil)
+                                                                'display-sort-function)
+                                       require def))
+                   def)))
+        (call-interactively #'harness-set-non-interactive-all))
+      (should (equal '(("on" "off") identity t "on") offered)))
+    (should (equal '((:non-interactive t)) set))
+    ;; Sessions, then tasks (whose sessions have it already), then the default.
+    (should (equal '("_harness/session/set-all" "_harness/task/set-all"
+                     "_harness/config/set" "_harness/config/overrides")
+                   (reverse (mapcar #'car calls))))
+    (should (equal '(:settings (:non-interactive t) :filter (:active t :tasks t))
+                   (cdr (assoc "_harness/session/set-all" calls))))
+    (should (equal '(:settings (:non-interactive t)) (cdr (assoc "_harness/task/set-all" calls))))
+    (should (equal '(:key "harness-non-interactive" :value "t" :printed t :scope "global")
+                   (cdr (assoc "_harness/config/set" calls))))
+    (should (equal '(:key "harness-non-interactive" :value "t" :printed t :dirs ("/p/" "/q/"))
+                   (cdr (assoc "_harness/config/overrides" calls))))
+    (should (equal (list (concat "Non-interactive on for 3 sessions and 1 task, and for new sessions"
+                                 " and the open boards' new tasks.  But new sessions in p start interactive"
+                                 " (harness-non-interactive in /p/.dir-locals.el), new sessions in /q/sub/"
+                                 " start interactive (harness-non-interactive in /q/sub/.dir-locals.el);"
+                                 " M-x harness-settings changes them."))
+                   said)))
+  ;; Off, when nothing overrides it: just the counts.
+  (harness-ui-test-with-all
+      (list (cons "_harness/session/set-all" '("s1"))
+            (cons "_harness/task/set-all" '("t1" "t2"))
+            (cons "_harness/config/overrides" '(:key "harness-non-interactive" :value "nil")))
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "off")))
+      (harness-set-non-interactive-all))
+    (should (equal '((:non-interactive nil)) set))
+    (should (equal '(:settings (:non-interactive :false) :filter (:active t :tasks t))
+                   (cdr (assoc "_harness/session/set-all" calls))))
+    (should (equal "nil" (plist-get (cdr (assoc "_harness/config/set" calls)) :value)))
+    (should (equal '("Non-interactive off for 1 session and 2 tasks, and for new sessions and the open boards' new tasks")
+                   said))))
+
+(ert-deftest harness-ui-set-non-interactive-all-prefix-leaves-the-default-alone ()
+  "With a prefix argument C-c h I leaves the default for new sessions alone.
+The boards' next tasks still change.  Turned on, there is no new default
+to say anything about; turned off, what still turns new work on is said
+all the same."
+  (harness-ui-test-with-all
+      (list (cons "_harness/session/set-all" '("s1"))
+            (cons "_harness/task/set-all" nil))
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "on")))
+      (harness-set-non-interactive-all t))
+    (should (equal '("_harness/session/set-all" "_harness/task/set-all") (reverse (mapcar #'car calls))))
+    (should (equal '((:non-interactive t)) set))
+    (should (equal '("Non-interactive on for 1 session and 0 tasks, and for the open boards' new tasks") said)))
+  (harness-ui-test-with-all
+      (list (cons "_harness/session/set-all" '("s1" "s2"))
+            (cons "_harness/task/set-all" '("t1" "t2"))
+            (cons "_harness/config/overrides"
+                  '(:key "harness-non-interactive" :value "nil"
+                    :tasks (:option "harness-tasks-non-interactive" :value "t"))))
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "off")))
+      (harness-set-non-interactive-all t))
+    (should-not (assoc "_harness/config/set" calls))
+    (should (equal '((:non-interactive nil)) set))
+    (should (equal '(:key "harness-non-interactive" :value "nil" :printed t :dirs ("/p/" "/q/"))
+                   (cdr (assoc "_harness/config/overrides" calls))))
+    (should (equal (list (concat "Non-interactive off for 2 sessions and 2 tasks, and for the open boards'"
+                                 " new tasks.  But new tasks start non-interactive"
+                                 " (harness-tasks-non-interactive); M-x harness-settings changes them."))
+                   said))))
+
+(ert-deftest harness-ui-set-thinking-all-reaches-every-project ()
+  "C-c h H sets a thinking level on every session and current task of
+every project, the open boards' next tasks and new sessions, and says
+what keeps the new default from new work.  With a prefix argument the
+default and the boards stay as they were."
+  (should (eq 'harness-set-thinking-all (lookup-key harness-ui-map (kbd "H"))))
+  (harness-ui-test-with-all
+      (list (cons "_harness/session/set-all" '("s1" "s2"))
+            (cons "_harness/task/set-all" '("t1" "t2" "t3"))
+            (cons "_harness/config/overrides"
+                  '(:key "harness-thinking" :value "\"high\""
+                    :tasks (:option "harness-tasks-thinking" :value "\"low\"")
+                    :files ((:file "/p/.dir-locals.el" :scope "project" :dir "/p/" :project "p" :value "nil")))))
+    (cl-letf (((symbol-function 'harness-ui-choose-thinking)
+               (lambda (callback &rest _) (funcall callback "high" "high"))))
+      (harness-set-thinking-all))
+    (should (equal '((:thinking "high")) set))
+    (should (equal '(:key "harness-thinking" :value "\"high\"" :printed t :scope "global")
+                   (cdr (assoc "_harness/config/set" calls))))
+    (should (equal '(:settings (:thinking "high") :filter (:active t :tasks t))
+                   (cdr (assoc "_harness/session/set-all" calls))))
+    (should (equal '(:settings (:thinking "high")) (cdr (assoc "_harness/task/set-all" calls))))
+    (should (equal '(:key "harness-thinking" :value "\"high\"" :printed t :dirs ("/p/" "/q/"))
+                   (cdr (assoc "_harness/config/overrides" calls))))
+    (should (equal (list (concat "Thinking → high for 2 sessions and 3 tasks, and for new sessions and the open"
+                                 " boards' new tasks.  But new sessions in p think at the model's default"
+                                 " (harness-thinking in /p/.dir-locals.el), new tasks think at low"
+                                 " (harness-tasks-thinking); M-x harness-settings changes them."))
+                   said)))
+  (harness-ui-test-with-all
+      (list (cons "_harness/session/set-all" '("s1"))
+            (cons "_harness/task/set-all" '("t1")))
+    (cl-letf (((symbol-function 'harness-ui-choose-thinking)
+               (lambda (callback &rest _) (funcall callback nil "default"))))
+      (harness-set-thinking-all t))
+    (should-not set)
+    (should-not (assoc "_harness/config/set" calls))
+    (should-not (assoc "_harness/config/overrides" calls))
+    (should (equal '(:settings (:thinking nil)) (cdr (assoc "_harness/task/set-all" calls))))
+    (should (equal '("Thinking → default for 1 session and 1 task") said))))
+
+(ert-deftest harness-ui-set-all-empty-answer-changes-nothing ()
+  "An empty answer at the model or thinking prompt, which a required
+match still lets through, chooses nothing: C-c h M and C-c h H change
+no session, task, board or default, where they once set the model to
+nil and the level to \"\" everywhere."
+  (dolist (command '(harness-set-model-all harness-set-thinking-all))
+    (harness-ui-test-with-all nil
+      (cl-letf (((symbol-function 'harness-ui-refresh-models)
+                 (lambda (&optional callback)
+                   (funcall callback (list (list :id "deepseek:deepseek-flash" :label "DeepSeek V4.1 Flash"
+                                                 :provider-label "DeepSeek" :context-window 1048576)))))
+                ((symbol-function 'completing-read) (lambda (&rest _) "")))
+        (call-interactively command))
+      (should-not calls)
+      (should-not set)
+      (should (equal (list (if (eq command 'harness-set-model-all) "No model chosen" "No thinking level chosen"))
+                     said)))))
+
+(ert-deftest harness-ui-set-all-without-task-mode-or-overrides ()
+  "A harness without task mode, or without `config/overrides', still has
+the all-sessions commands change every session and say how many."
+  (let ((calls nil) (said nil))
+    (let ((harness-ui-set-all-functions nil))
+      (cl-letf (((symbol-function 'harness-ui-call)
+                 (lambda (method params &optional callback on-error)
+                   (push (cons method params) calls)
+                   (if (member method '("_harness/task/set-all" "_harness/config/overrides"))
+                       (when on-error (funcall on-error '(:message "Method not found")))
+                     (when callback (funcall callback (and (equal method "_harness/session/set-all") '("s1")))))))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args) (push (apply #'format format-string args) said)))
+                ((symbol-function 'completing-read) (lambda (&rest _) "on")))
+        (harness-set-non-interactive-all)))
+    (should (assoc "_harness/config/set" calls))
+    (should (equal '("Non-interactive on for 1 session and 0 tasks, and for new sessions") said))))
 
 ;;;; Switches that lose the conversation
 
@@ -1421,12 +1627,21 @@ ever; the other choices always do."
         (should (string-match-p (concat "^  s2 +" from " +- +120k tokens: \\$0\\.60 to write, \\$0\\.02 to read$")
                                 help)))
       (should (string-match-p "The choice applies to each session listed; the others just switch" help)))
-    (should (equal '(:model "claude:claude-opus-5-5" :filter (:active t))
+    ;; Every project's sessions, those of the current tasks included, are
+    ;; checked and switched with the handoff; then the tasks' records,
+    ;; whose sessions have switched already.
+    (should (equal '(:model "claude:claude-opus-5-5" :filter (:active t :tasks t))
                    (cdr (assoc "_harness/handoff/check-all" calls))))
-    (should (equal '(:model "claude:claude-opus-5-5" :filter (:active t) :mode "compact")
+    (should (equal '(:model "claude:claude-opus-5-5" :filter (:active t :tasks t) :mode "compact")
                    (cdr (assoc "_harness/handoff/switch-all" calls))))
+    (should (equal '(:settings (:model "claude:claude-opus-5-5")) (cdr (assoc "_harness/task/set-all" calls))))
+    (should (< (cl-position "_harness/task/set-all" calls :key #'car :test #'equal)
+               (cl-position "_harness/handoff/switch-all" calls :key #'car :test #'equal)))
     (should-not (assoc "_harness/session/set-all" calls))
-    (should (equal "claude:claude-opus-5-5" (plist-get (cdr (assoc "_harness/config/set" calls)) :value))))
+    (should (equal "claude:claude-opus-5-5" (plist-get (cdr (assoc "_harness/config/set" calls)) :value)))
+    ;; Then what overrides the new default is looked up.
+    (should (equal '(:key "harness-model" :value "\"claude:claude-opus-5-5\"" :printed t :dirs nil)
+                   (cdr (assoc "_harness/config/overrides" calls)))))
   ;; Cancelled: nothing changes, not even the default for new sessions.
   (harness-ui-test-with-switch
       (list (cons "_harness/handoff/check-all" (list (harness-ui-test--lossy-check "s1" "Fix the parser"))))
