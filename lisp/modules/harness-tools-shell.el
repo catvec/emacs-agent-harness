@@ -9,8 +9,8 @@
 ;;   directory or a subdirectory of it.  When the sandbox module is
 ;;   loaded and the directory is local, the command line is wrapped
 ;;   with `sandbox/wrap' so it runs confined; a `required' policy
-;;   without a backend turns into a tool error rather than an
-;;   unconfined run.  The session's own temporary directory
+;;   without a backend, or without the sandbox module, turns into a
+;;   tool error rather than an unconfined run.  The session's own temporary directory
 ;;   (`session/tmp-dir') is writable in there too, at its real path:
 ;;   the sandbox's /tmp is private and empty for every command, so
 ;;   that directory is where commands leave files for later ones and
@@ -146,13 +146,28 @@ among the grants names no directory, and the sandbox leaves it out."
                             sid (harness-error-message err))
                nil)))))
 
+(defun harness-tools-shell--sandbox-required-p (cwd)
+  "Non-nil when `harness-sandbox-policy' is `required' for a command in CWD.
+The config module's value for CWD decides, and the option's when there
+is no config module."
+  (let ((policy (or (and (harness-method-exists-p 'config/get)
+                          (ignore-errors (harness-call 'config/get 'harness-sandbox-policy cwd)))
+                     (and (boundp 'harness-sandbox-policy) (symbol-value 'harness-sandbox-policy)))))
+    (equal (format "%s" policy) "required")))
+
 (defun harness-tools-shell--wrap (cwd command &optional writable readable)
   "Return COMMAND wrapped by the sandbox for CWD when the sandbox module is loaded.
 WRITABLE lists other directories the command may write to, READABLE
-directories it may read."
-  (if (and (harness-method-exists-p 'sandbox/wrap) (not (file-remote-p cwd)))
-      (harness-call 'sandbox/wrap cwd command :writable writable :readable readable)
-    command))
+directories it may read.  Without the sandbox module a `required'
+`harness-sandbox-policy' signals an error rather than letting COMMAND
+run unconfined, as the sandbox does when it has no backend."
+  (cond
+   ((file-remote-p cwd) command)
+   ((harness-method-exists-p 'sandbox/wrap)
+    (harness-call 'sandbox/wrap cwd command :writable writable :readable readable))
+   ((harness-tools-shell--sandbox-required-p cwd)
+    (error "The sandbox is required (harness-sandbox-policy), but the sandbox module is not loaded"))
+   (t command)))
 
 (defun harness-tools-shell--format-output (r timeout)
   "Format the result plist R of `harness-run-command' run with TIMEOUT seconds."

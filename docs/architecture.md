@@ -22,7 +22,7 @@ module needs something more, add it here first.
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE,
-                binary bodies)
+                binary bodies), harness-policy (settings an administrator fixes)
 ```
 
 The core never shows UI and never calls a model.  UI modules never
@@ -57,7 +57,10 @@ default) the layers above are split across two Emacs processes:
   (`harness-server--tramp-variables`: default methods, users and hosts,
   proxies, `tramp-remote-path`, connection sharing), plus
   `harness-server-forward-variables`; `harness-server-init-file` covers
-  anything else (hooks, bus filters).
+  anything else (hooks, bus filters).  The policy (an administrator's
+  file, see [policy.md](policy.md)) is not forwarded: each process
+  reads `/etc/harness/policy.el` itself, which overrides the user's
+  values there too, and `harness-policy-file` stays behind.
 - The child announces `HARNESS-ACP-ADDRESS host:port` and its log lines on
   stderr (batch Emacs buffers stdout); the parent copies the log into
   `*harness-log*`.  Its stdin is closed, so a stray prompt fails rather
@@ -394,7 +397,10 @@ these keys on either side of ACP.
 ### config
 
 Layered settings: directory `.dir-locals.el` (most specific) →
-project-root `.dir-locals.el` → customize default.  Variables are
+project-root `.dir-locals.el` → customize default.  Above them all is
+the policy (lisp/harness-policy.el, [policy.md](policy.md)): an option
+an administrator's policy file sets has the policy's value, for every
+option and not only the layered ones, and no layer changes it.  Variables are
 `defcustom`s with `:safe` predicates so dir-locals never prompt:
 `harness-model` (default "claude:claude-fable-5-1"),
 `harness-permission-mode`, `harness-thinking`, `harness-btw-thinking`
@@ -409,7 +415,8 @@ ones that decide how the harness starts or reaches the UI:
 `harness-server-*` and `harness-acp-*` options, minor modes, and less
 `harness-corporate-mode`) have a global value only.  `config/set` and
 `config/unset` refuse the ones of `harness-config-hidden-options`,
-`harness-corporate-mode` among them, as set in the init file only.
+`harness-corporate-mode` among them, as set in the init file only (or
+by a policy, which is how an administrator forces corporate mode on).
 Options named `...-api-key`, `-token`, `-secret` or `-password` are
 secrets: their values never leave the harness and never go to a
 `.dir-locals.el`.
@@ -436,7 +443,8 @@ has an opinion about is a `defconst`/`defvar` named `MODULE--thing`.
 See docs/configuration-audit.md for the rule and the audit behind it.
 
 - `config/get KEY CWD` → value for a session at CWD (KEY is the symbol
-  or its name; layered settings only).
+  or its name; layered settings only); the policy's when it sets KEY,
+  whatever the dir-locals files say.
 - `config/set KEY VALUE &key scope cwd printed` — scope
   `directory|project|global`; default: project if a project is found,
   else directory, and global for an option that does not layer.
@@ -446,20 +454,30 @@ See docs/configuration-audit.md for the rule and the audit behind it.
   predicate.  Persists with `add-dir-local-variable` (no backup file
   is left behind), or for `global` with `harness-save-user-option`,
   which asks the UI's Emacs to `customize-save-variable` (its custom
-  file).
+  file).  An option the policy sets is refused at every scope ("KEY is
+  set by policy (FILE) and cannot be changed"), and nothing is written.
 - `config/unset KEY &key scope cwd` — removes KEY from that layer: a
   `project` or `directory` scope deletes it from the `.dir-locals.el`
   (and the file once nothing is left in it); `global` sets the option
-  back to its standard value.
-- `config/layers CWD` → `((global . V) (project . V) (directory . V))` for display.
+  back to its standard value.  Refused as `config/set` refuses.
+- `config/layers CWD` → `((policy . V) (global . V) (project . V)
+  (directory . V))` for display; `policy` lists the keys the policy
+  sets, and the dir-locals layers what their files say, even where the
+  policy overrides it.
 - `config/describe CWD` → `(:cwd :root :project :in-project :files
-  :modules :settings)` for a settings page: every option, layered ones
+  :policy :modules :settings)` for a settings page: every option, layered ones
   first, each with its doc, customize `:type`, module, `:standard`,
   `:global`, `:project`, `:directory` and effective `:value` with the
   `:source` layer it comes from, plus the layers whose value does not
   fit the type (`:invalid`).  Types and values are printed (`read`
   them back), so they survive JSON; an unset layer is null, one set
   to nil is `"nil"`.  A secret has `:has-value` instead of values.
+  A setting the policy sets is `:locked`, its `:source` is `policy`,
+  its `:value` the policy's, and it is not `:editable`.  `:policy` is
+  null without a policy, else `(:file FILE :settings ((:key :value
+  :listed :defined) ...))`: every option the policy sets, in its order,
+  with whether the page lists it (corporate mode is not listed) and
+  whether this harness defines it at all.
 - Event `config/changed KEY VALUE SCOPE CWD` after a set or unset;
   after an unset VALUE is the value now in effect at CWD, and for a
   secret it is nil.
@@ -512,6 +530,18 @@ gone.
   `:thinking` takes `harness-btw-thinking` when its model offers that
   level (the catalogue lists it in `:thinking-levels`), else
   `harness-thinking`.  → session.  Event `session/created`.
+- Settings a policy fixes ([policy.md](policy.md)): when the policy sets
+  `harness-model`, `harness-permission-mode`, `harness-thinking` or
+  `harness-non-interactive`, every session's copy is the policy's value
+  (`harness-session--policy-options`; a BTW's thinking aside, which
+  follows `harness-btw-thinking`).  `session/create` and `session/fork`
+  give it whatever PLIST asks for, a record loaded from disk gets it,
+  and a reload (`harness/reloaded`) brings every session in line with
+  the policy as it is then, with `session/updated`.
+  `session/update`, `session/set-all` and the task board refuse another
+  value with "OPTION is set by policy (FILE) and cannot be changed",
+  changing nothing; `harness-session-check-policy` is the check, which
+  also refuses a model `harness-allowed-models` does not allow.
 - `session/get ID`, `session/list &optional FILTER` (`:project :status
   :kind :parent-id :active`), `session/delete ID` (its temporary
   directory goes too).
@@ -975,6 +1005,16 @@ process now, so the answer comes sooner; a failure is only logged) and
 session id of a request that is not a session of its own, such as a task
 board's search; the CLI kills its process).  The model used when nothing
 more specific is configured is `harness-model`.
+
+`harness-allowed-models` keeps the harness to some models: glob
+patterns of model ids (`"claude:*"`; one without a colon names a
+provider), nil for any; an administrator's policy may set it
+([policy.md](policy.md)).  `provider/complete` refuses a request for
+another model before any provider sees it, with a `done` event of
+`:stop-reason error` that says why (`harness-provider-model-refusal`),
+so it holds for every request, the judge's, naming's and compaction's
+included.  `provider/warm` does not warm one, `provider/models` lists
+only the models allowed, and `provider/tier-model` chooses among them.
 
 Billing and quota: `provider/quota` (PROVIDER-ID a symbol or its name;
 REFRESH asks for fresh data first) returns a promise of QUOTA, nil when
@@ -1820,6 +1860,18 @@ non-interactive session it stays a denial.
   forks and sub-agents start with their parent's.  Changing the setting
   later leaves the sessions that exist alone.  The setting decides by
   itself only for a request without a session record.
+- A policy ([policy.md](policy.md)) holds here too.  A permission mode
+  or non-interactive switch it sets is every session's, whatever the
+  session record says (`harness-perms--mode-of`,
+  `harness-perms--non-interactive-p`).  When it sets
+  `harness-perms-rules`, those rules are weighed before the session's
+  own (`harness-perms--rules`), so no answer overrides them; prompts
+  offer no allow-always or deny-always, and an answer for always given
+  anyway holds for the session (`harness-perms--scope-allowed`).  When
+  it sets `harness-allowed-directories`, no directory prompt offers
+  allow-always, `permission/allow-dir` with SCOPE `always` is refused,
+  and the global entries are not `:revocable`; grants for the session
+  or the turn, which a person answering makes, stay as they are.
 
 ### sandbox
 
@@ -1827,6 +1879,9 @@ non-interactive session it stays a denial.
   command list (bwrap / systemd-run / plain).  `sandbox/status` →
   `(:backend bwrap|systemd|none :available (…) :policy …)`.  Fails closed
   when `harness-sandbox-policy` is `required` and no backend exists.
+  Without the sandbox module the bash tool fails closed for `required`
+  too (`harness-tools-shell--wrap`), rather than running the command
+  unconfined.
 - `$HOME`: bwrap keeps its path, covered by an empty tmpfs (after the
   one on /tmp, which may hold it, and before every bind), so `~/x`
   names the same path inside as outside and shows only what is mounted
@@ -3644,7 +3699,9 @@ Methods (callable as `_harness/acp/remote-*`): `acp/remote-status` →
 :addresses ((:address :interface :kind lan|vpn|other) ...) :ws-url
 :code-expires :devices (... :connected N) :clients)`,
 `acp/remote-start` and `acp/remote-stop` (save `harness-acp-remote`;
-stopping drops the clients, the code and every pairing),
+stopping drops the clients, the code and every pairing; a policy that
+sets `harness-acp-remote` the other way refuses either before anything
+listens or stops),
 `acp/remote-pair`, `acp/remote-forget-code`, `acp/remote-revoke ID`,
 `acp/remote-set-address ADDRESS` (saves `harness-acp-remote-address`,
 "" detects; drops the code).  Event `acp/remote-changed (:what
@@ -4234,6 +4291,14 @@ deletes a project value, [Reset to default] a customized global one.
 Secrets show as set or not and are set through `read-passwd`; long
 texts open in `string-edit`.  The page reloads on `config/changed`,
 keeping edits not saved yet, point, and the records left open.
+A setting the policy sets ([policy.md](policy.md), `:locked` in
+`config/describe`) is drawn with its value, a lock and "Locked", and
+"set by policy in FILE" under its doc, in both scopes: no widget, no
+[Remove override] or [Reset to default], and the commands that would
+change it (`C-c C-c`, `d`) refuse with the reason.  A banner under the
+scope lists everything `:policy` sets, options the page does not show
+included ("not on this page"), and Advanced's count of changed
+settings leaves locked ones out.
 
 Session settings: `harness-set-model`, `-thinking`, `-permission-mode`
 and `harness-toggle-non-interactive` (`C-c h m` `T` `p` `i`) change what

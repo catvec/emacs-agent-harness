@@ -2259,6 +2259,41 @@ Its tool calls are logged with the permission decisions they took."
   (harness-media--view (lambda () (harness-settings harness-media-project 'project)) nil 42)
   (harness-media--capture "settings"))
 
+(defvar harness-policy-file)
+(declare-function harness-policy-load "harness-policy")
+(declare-function harness-policy-apply "harness-policy" (&optional final))
+(declare-function harness-policy-clear "harness-policy")
+
+(defconst harness-media--policy
+  ";; The harness policy of this machine, deployed by IT.
+((harness-corporate-mode . t)
+ (harness-permission-mode . ask)
+ (harness-sandbox-policy . required)
+ (harness-allowed-models . (\"claude:*\")))
+"
+  "The policy the settings-policy picture is taken under: what a company fixes.")
+
+(defun harness-media-shot-settings-policy ()
+  "The settings page under an administrator's policy: four settings locked.
+The policy is a file of the scratch HOME, read and applied as
+`harness-reload' does; the page names it /etc/harness/policy.el, where
+an administrator puts it (`directory-abbrev-alist').  The policy is
+lifted again afterwards, and the settings it fixed get their values back."
+  (let* ((dir (expand-file-name "~/policy/"))
+         (harness-policy-file (expand-file-name "policy.el" dir))
+         (directory-abbrev-alist (cons (cons (concat "\\`" (regexp-quote dir)) "/etc/harness/")
+                                       directory-abbrev-alist)))
+    (make-directory dir t)
+    (with-temp-file harness-policy-file (insert harness-media--policy))
+    (unwind-protect
+        (progn
+          (harness-policy-load)
+          (harness-policy-apply t)
+          (harness-media--view (lambda () (harness-settings harness-media-project 'global)) nil 46)
+          (harness-media--capture "settings-policy"))
+      (delete-file harness-policy-file)
+      (harness-policy-clear))))
+
 (defun harness-media-shot-btw ()
   "A BTW side conversation under the rate-limit session's chat."
   (harness-media--code-layout (plist-get harness-media--world :ratelimit))
@@ -2411,6 +2446,7 @@ afterwards."
     ("usage-worktrees" . harness-media-shot-usage-worktrees)
     ("worktrees" . harness-media-shot-worktrees)
     ("settings" . harness-media-shot-settings)
+    ("settings-policy" . harness-media-shot-settings-policy)
     ("btw" . harness-media-shot-btw)
     ("menu" . harness-media-shot-menu)
     ("remote" . harness-media-shot-remote)
@@ -2450,6 +2486,9 @@ afterwards."
     (setenv (car pair) (cdr pair)))
   (add-to-list 'load-path harness-media-root)
   (setq harness-state-directory (expand-file-name "~/.emacs.d/harness/")
+        ;; No policy of this machine's (/etc/harness/policy.el) reaches the
+        ;; pictures; the settings-policy picture brings its own.
+        harness-policy-file nil
         harness-process nil
         ;; Every agent is scripted, so recaps are seeded for the pictures
         ;; instead (`harness-media--seed-recaps').

@@ -1684,5 +1684,74 @@ as the session loads again."
       (should-not (harness-call 'session/exists-p id))
       (should-not (file-exists-p (harness-store-path (format "sessions/%s.nodes.jsonl" id)))))))
 
+;;;; A policy
+
+(defvar harness-model)
+(defvar harness-permission-mode)
+(defvar harness-thinking)
+(defvar harness-allowed-models)
+
+(ert-deftest harness-session-policy-fixes-the-settings-of-every-session ()
+  "A model, permission mode or non-interactive switch the policy sets is
+every session's: one created asking for another, one saved before the
+policy came, one running when it came.  Another value is refused."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (old (plist-get (harness-call 'session/create :cwd cwd :permission-mode 'yolo
+                                         :model "deepseek:deepseek-flash")
+                           :id))
+           (saved (plist-get (harness-call 'session/create :cwd cwd :permission-mode 'yolo) :id))
+           (events nil))
+      (harness-session-flush)
+      (harness-on 'session/updated (lambda (id changes) (push (cons id changes) events)))
+      (harness-test-with-policy '((harness-permission-mode . ask) (harness-model . "claude:opus")
+                                  (harness-non-interactive . t))
+        (let* ((s (harness-call 'session/create :cwd cwd :permission-mode 'yolo
+                                :model "deepseek:deepseek-flash" :non-interactive nil))
+               (id (plist-get s :id)))
+          (should (eq 'ask (plist-get s :permission-mode)))
+          (should (equal "claude:opus" (plist-get s :model)))
+          (should (eq t (plist-get s :non-interactive)))
+          ;; Another value is refused, and nothing else of the update happens.
+          (let ((err (should-error (harness-call 'session/update id :name "Renamed" :permission-mode 'yolo))))
+            (should (string-match-p "harness-permission-mode is set by policy" (cadr err))))
+          (should-not (equal "Renamed" (plist-get (harness-call 'session/get id) :name)))
+          (should-error (harness-call 'session/update id :model "deepseek:deepseek-flash"))
+          (should-error (harness-call 'session/update id :non-interactive nil))
+          (should-error (harness-call 'session/set-all (list :permission-mode 'yolo)))
+          ;; The policy's own value changes nothing, and the rest goes through.
+          (harness-call 'session/update id :name "Renamed" :permission-mode "ask")
+          (should (equal "Renamed" (plist-get (harness-call 'session/get id) :name)))
+          ;; Thinking is not fixed: the policy does not set it.
+          (harness-call 'session/update id :thinking "high")
+          (should (equal "high" (plist-get (harness-call 'session/get id) :thinking))))
+        ;; A session running when the policy came takes it at the reload
+        ;; that reads it, and says so.
+        (harness-emit 'harness/reloaded)
+        (let ((s (harness-call 'session/get old)))
+          (should (eq 'ask (plist-get s :permission-mode)))
+          (should (equal "claude:opus" (plist-get s :model)))
+          (should (eq t (plist-get s :non-interactive))))
+        (should (assoc old events))
+        ;; One saved before takes it as it is read.
+        (clrhash harness-sessions)
+        (harness-session--load-all)
+        (let ((s (harness-call 'session/get saved)))
+          (should (eq 'ask (plist-get s :permission-mode)))
+          (should (equal "claude:opus" (plist-get s :model))))))))
+
+(ert-deftest harness-session-policy-refuses-a-model-it-does-not-allow ()
+  "A model `harness-allowed-models' leaves out is refused to a session."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                       :model "claude:opus")
+                         :id)))
+      (harness-test-with-policy '((harness-allowed-models "claude"))
+        (harness-call 'session/update id :model "claude:sonnet")
+        (let ((err (should-error (harness-call 'session/update id :model "deepseek:deepseek-flash"))))
+          (should (string-match-p "deepseek:deepseek-flash is not allowed" (cadr err)))
+          (should (string-match-p "set by policy" (cadr err))))
+        (should (equal "claude:sonnet" (plist-get (harness-call 'session/get id) :model)))))))
+
 (provide 'harness-session-test)
 ;;; harness-session-test.el ends here
