@@ -221,6 +221,122 @@ A task's project is its `:project', else its `:cwd'."
         (harness-tasks-test-wait-state id 'done)
         (should-error (harness-call 'task/start id))))))
 
+(declare-function harness-tasks--holds-slot-p "harness-tasks")
+(declare-function harness-tasks--put "harness-tasks")
+(declare-function harness-provider-demo--last-user-text "harness-provider-demo")
+
+(defun harness-tasks-test--record (state sid &optional project)
+  "Return a task record in STATE worked on by session SID, in PROJECT."
+  (list :id (concat "t-" (harness-short-id 8)) :project (or project default-directory)
+        :cwd default-directory :prompt "already at it" :state state :session sid
+        :merge-status (and (eq state 'merging) 'conflict) :created (float-time)))
+
+(ert-deftest harness-tasks-slot-held-by-top-level-session-at-work ()
+  "Only a task's own top-level session at work on it takes a slot.
+A task holds one while it starts, and while it is active with that
+session running or blocked mid-turn.  A session another one started --
+a sub-agent, a fork, a merge-conflict resolver -- holds none, even made
+a task, and nor does a task in the merge queue, whatever its session
+does; nor review, done, refining or pending."
+  (harness-tasks-test-with
+    (let* ((top (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted") :id))
+           (sub (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted"
+                                         :kind 'subagent :parent-id top)
+                           :id)))
+      (dolist (status '(running blocked))
+        (dolist (sid (list top sub)) (harness-call 'session/set-status sid status))
+        (should (harness-tasks--holds-slot-p (harness-tasks-test--record 'active top)))
+        (should-not (harness-tasks--holds-slot-p (harness-tasks-test--record 'active sub)))
+        (dolist (state '(merging pending refining review done))
+          (should-not (harness-tasks--holds-slot-p (harness-tasks-test--record state top)))))
+      ;; Idle: it stopped, or waits for a follow-up.
+      (harness-call 'session/set-status top 'idle)
+      (should-not (harness-tasks--holds-slot-p (harness-tasks-test--record 'active top)))
+      ;; Starting holds one before there is a session at all.
+      (let ((starting (harness-tasks-test--record 'active nil)))
+        (should-not (harness-tasks--holds-slot-p starting))
+        (puthash (plist-get starting :id) t harness-tasks--starting)
+        (should (harness-tasks--holds-slot-p starting))))))
+
+(ert-deftest harness-tasks-schedule-counts-top-level-sessions-only ()
+  "The scheduler fills a project's slots counting top-level task sessions only.
+Of two slots, a task whose own session runs takes one.  A task in the
+merge queue, its session at work on the conflicts, and a sub-agent made
+a task, at work too, take none: the oldest waiting task starts in the
+free slot, and the next one waits for it."
+  (harness-tasks-test-with
+    (let (first second)
+      (let ((harness-tasks-max-running 0))
+        (setq first (harness-tasks-test-submit "first waiting")
+              second (harness-tasks-test-submit "second waiting")))
+      (let* ((project (plist-get (harness-tasks-test-task first) :project))
+             (running (lambda (&rest opts)
+                        (let ((sid (plist-get (apply #'harness-call 'session/create
+                                                     :cwd dir :model "demo:scripted" opts)
+                                              :id)))
+                          (harness-call 'session/set-status sid 'running)
+                          sid)))
+             (worker (funcall running))
+             (merger (funcall running))
+             (helper (funcall running :kind 'subagent :parent-id worker))
+             (harness-tasks-max-running 2))
+        (harness-tasks--put (harness-tasks-test--record 'active worker project))
+        (harness-tasks--put (harness-tasks-test--record 'merging merger project))
+        (harness-tasks--put (harness-tasks-test--record 'active helper project))
+        (should (= 1 (harness-tasks--free-slots project)))
+        (harness-tasks--schedule)
+        (should (eq 'active (harness-tasks-test-state first)))
+        (should (eq 'pending (harness-tasks-test-state second)))
+        (should (= 0 (harness-tasks--free-slots project)))
+        ;; Its slot is free again once it is done.
+        (harness-tasks-test-wait-state first 'done)
+        (harness-tasks-test-wait-state second 'done)
+        (should (>= (plist-get (harness-tasks-test-task second) :started)
+                    (plist-get (harness-tasks-test-task first) :finished)))
+        (dolist (sid (list worker merger helper)) (harness-call 'session/set-status sid 'idle))))))
+
+(ert-deftest harness-tasks-sub-agent-takes-no-slot ()
+  "A task's sub-agent at work takes no slot: the task holds one, through
+its own session, which waits on the sub-agent.  With two slots, while a
+task's sub-agent runs, another task starts at once."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-agent)
+    (harness-tasks-test--hang-tool)
+    (let* ((harness-tasks-max-running 2)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (cond ((plist-get (plist-get request :session) :parent-id)
+                     ;; The sub-agent: its first call hangs.
+                     '((:type tool-call :id "h1" :name "hang" :input (:path "x"))
+                       (:type done :stop-reason end-turn)))
+                    ((string-match-p "delegate" (harness-provider-demo--last-user-text request))
+                     '((:type tool-call :id "s1" :name "spawn_agent" :input (:prompt "dig in" :name "helper"))
+                       (:type text :delta "Delegated.")
+                       (:type done :stop-reason end-turn)))
+                    (t harness-tasks-test-script))))
+           (a (harness-tasks-test-submit "delegate the work"))
+           (sid (plist-get (harness-tasks-test-task a) :session))
+           (project (plist-get (harness-tasks-test-task a) :project))
+           (helper (harness-test-wait
+                    (lambda ()
+                      (cl-find-if (lambda (s)
+                                    (harness-tasks-test--node (plist-get s :id)
+                                                              (lambda (n) (equal (plist-get n :tool) "hang"))))
+                                  (harness-call 'session/list (list :parent-id sid))))
+                    10 "the sub-agent at work")))
+      ;; Two sessions at work, and one slot taken: the task's own.
+      (should (eq 'subagent (plist-get helper :kind)))
+      (should (eq 'running (plist-get (harness-call 'session/get (plist-get helper :id)) :status)))
+      (should (eq 'running (plist-get (harness-tasks-test-session a) :status)))
+      (should (eq 'active (harness-tasks-test-state a)))
+      (should (= 1 (harness-tasks--free-slots project)))
+      (let ((b (harness-tasks-test-submit "something else")))
+        (should (eq 'active (harness-tasks-test-state b)))
+        (harness-tasks-test-wait-state b 'done))
+      ;; The sub-agent stops; its task finishes.
+      (harness-call 'agent/cancel (plist-get helper :id))
+      (harness-tasks-test-wait-state a 'done))))
+
 (ert-deftest harness-tasks-edit-and-cancel-pending ()
   (harness-tasks-test-with
     (let ((harness-tasks-max-running 0))
@@ -1706,6 +1822,59 @@ commits from call `harness-tasks-test--commit-on-call' on."
         (harness-tasks-test-wait-state id 'done)
         (should (= 2 harness-tasks-test--calls))
         (should (equal "two\n" (harness-tasks-test--main-text root)))))))
+
+(defvar harness-merge-conflict-resolver)
+
+(ert-deftest harness-tasks-git-merge-work-takes-no-slot ()
+  "A task in the merge queue holds no slot while its conflicts are resolved,
+whoever resolves them: a fresh session, a sub-agent of the task's, or
+the task's own session.  With one slot, the next task starts meanwhile."
+  (dolist (resolver '(fresh child))
+    (harness-tasks-test-with-git
+      (harness-tasks-test--hang-tool)
+      (let ((harness-merge-conflict-resolver resolver)
+            (harness-tasks-require-verification t)
+            (harness-tasks-max-running 1)
+            ;; Resolving the conflicts hangs; any other work changes the file.
+            (harness-provider-demo-script-override
+             (lambda (request)
+               (if (string-match-p "conflict" (harness-provider-demo--last-user-text request))
+                   '((:type tool-call :id "h1" :name "hang" :input (:path "x"))
+                     (:type done :stop-reason end-turn))
+                 '((:type tool-call :id "c1" :name "change_shared" :input (:text "two"))
+                   (:type text :delta "Changed it.")
+                   (:type done :stop-reason end-turn)))))
+            (hanging-p (lambda (sid)
+                         (harness-tasks-test--node sid (lambda (n) (equal (plist-get n :tool) "hang"))))))
+        (let* ((a (harness-tasks-test-submit "Change the shared file"))
+               (project (plist-get (harness-tasks-test-task a) :project))
+               (sid (progn (harness-tasks-test-wait-state a 'review)
+                           (plist-get (harness-tasks-test-task a) :session))))
+          ;; The main checkout moves on: the task's branch conflicts with it now.
+          (with-temp-file (expand-file-name "shared.txt" root) (insert "three\n"))
+          (harness-tasks-test--git root "commit" "-q" "-am" "main moves on")
+          (harness-call 'task/verify a)
+          (let ((resolving
+                 (harness-test-wait
+                  (lambda ()
+                    (cl-find-if hanging-p (cons sid (mapcar (lambda (s) (plist-get s :id))
+                                                            (harness-call 'session/list (list :parent-id sid))))))
+                  30 (format "the conflicts to be resolved (%s)" resolver))))
+            (if (eq resolver 'child)
+                (should (equal sid resolving))
+              (should (equal sid (plist-get (harness-call 'session/get resolving) :parent-id))))
+            (should (eq 'running (plist-get (harness-call 'session/get resolving) :status)))
+            (should (eq 'merging (harness-tasks-test-state a)))
+            (should (eq 'conflict (plist-get (harness-tasks-test-task a) :merge-status)))
+            (should (= 1 (harness-tasks--free-slots project)))
+            (let ((b (harness-tasks-test-submit "Change it in another task")))
+              (should (eq 'active (harness-tasks-test-state b)))
+              (harness-tasks-test-wait-state b 'review))
+            ;; Give up on the merge, which stops the resolution.
+            (harness-call 'merge/cancel sid)
+            (harness-call 'agent/cancel resolving)
+            (harness-test-wait (lambda () (not (harness-call 'agent/running resolving))) 10
+                               "the resolution to stop")))))))
 
 (ert-deftest harness-tasks-git-refined-task-moves-into-its-worktree ()
   "A backlog task is written up at the root; starting moves its session into a worktree."
