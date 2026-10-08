@@ -36,7 +36,9 @@ case "$cmd" in
   restart) "$0" stop; sleep 0.5; "$0" start ;;
   status) if alive; then echo "running"; else echo "not running"; exit 1; fi ;;
   eval) ec --eval "$*" ;;
-  keys) ec --eval "(harness-dev-keys $(printf '%q' "$*" | sed 's/^/"/;s/$/"/'))" ;;
+  # An Elisp string: only \ and " are escaped.  The shell's quoting of
+  # printf %q would not do, as Lisp drops the backslash before a space.
+  keys) ec --eval "(harness-dev-keys \"$(printf '%s' "$*" | sed 's/[\\"]/\\&/g')\")" ;;
   shot) out=${1:-$DEVDIR/shot.png}; ec --eval "(harness-dev-shot \"$out\")" >/dev/null && echo "$out" ;;
   show) ec --eval "(harness-dev-show \"$1\")" ;;
   errors) ec --eval '(harness-dev-errors)' | sed 's/^"//;s/"$//' | sed 's/\\n/\n/g;s/\\"/"/g' ;;

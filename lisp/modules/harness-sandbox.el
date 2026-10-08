@@ -280,6 +280,9 @@ there."
   "Git common dir -> (NAME . EMAIL) as the host's git config gives them.")
 
 (defun harness-sandbox--read-file-line (file)
+  "Return the text of FILE with surrounding whitespace trimmed.
+FILE holds one line, as a worktree's .git file and the commondir file
+of its git directory do."
   (with-temp-buffer (insert-file-contents file) (string-trim (buffer-string))))
 
 (defun harness-sandbox--worktree-git (cwd)

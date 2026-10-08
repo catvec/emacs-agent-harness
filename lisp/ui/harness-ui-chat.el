@@ -1025,7 +1025,7 @@ transcript it points the new model at."
   "Block kinds the agent produces; a run of them is one agent turn.")
 
 (defun harness-chat--head-p (kind previous)
-  "Non-nil when a KIND block after a PREVIOUS-kind block starts an agent turn.
+  "Non-nil when a KIND block after one of kind PREVIOUS starts an agent turn.
 Pass the kinds `harness-chat--turn-kind' gives."
   (and (member kind harness-chat--agent-kinds)
        (not (member previous harness-chat--agent-kinds))))
@@ -2047,17 +2047,19 @@ edits the same request the same way."
   (harness-ui-pending-edit-pattern pid))
 
 (defun harness-chat-next-diagram (&optional n)
-  "Show the diagram of the next option of the question waiting with diagrams."
+  "Show the diagram of the next option of the question waiting with diagrams.
+With prefix argument N, move N options on; a negative N moves back."
   (interactive "p")
   (harness-ui-pending-next-diagram n))
 
 (defun harness-chat-previous-diagram (&optional n)
-  "Show the diagram of the previous option of the question waiting with diagrams."
+  "Show the diagram of the previous option of the question waiting with diagrams.
+With prefix argument N, move N options back."
   (interactive "p")
   (harness-ui-pending-previous-diagram n))
 
 (defun harness-chat--on-pending-changed (sid)
-  "Mirror SESSION-ID's requests and redraw the tail showing them.
+  "Mirror the requests of session SID and redraw the tail showing them.
 On `harness-ui-pending-changed-hook'."
   (when-let* ((buf (harness-chat--buffer-for sid)))
     (with-current-buffer buf
@@ -2712,10 +2714,11 @@ A function of TEXT and ATTACHMENTS, called in the chat buffer with what
 the box held, after it is emptied.  It sends them wherever they belong
 instead of prompting the session, for a module showing something of its
 own in the buffer (see `harness-chat-panel-functions').  An answer to a
-waiting question still goes to the question, and C-c C-q queues and
-C-c C-k cancels as usual.  A task in review is no such thing: the
-harness takes any message the user sends its session for the feedback
-that sends it back (`harness-tasks--on-message').")
+waiting question still goes to the question, and\\<harness-chat-mode-map>
+\\[harness-chat-queue] queues and \\[harness-chat-cancel] cancels as usual.
+A task in review is no such thing: the harness takes any message the
+user sends its session for the feedback that sends it back
+\(`harness-tasks--on-message').")
 
 (defvar harness-chat-send-functions nil
   "Functions run with the TEXT and ATTACHMENTS of each message sent.

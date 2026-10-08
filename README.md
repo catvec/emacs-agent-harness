@@ -52,8 +52,9 @@ OpenAI-compatible APIs and AWS Bedrock.
 - **Remote control.** The harness speaks the Agent Client Protocol
   (ACP), so another Emacs or any ACP client can drive it, including one
   on your phone, paired by scanning a QR code.
-- **Modular and reloadable.** Every feature is a module, and the whole
-  harness reloads in place without losing running sessions.
+- **Modular and reloadable.** Every feature is a module, modules of
+  your own load beside them, and the whole harness reloads in place
+  without losing running sessions.
 - **A companion pet.** Hatch a small creature of a random species and
   rarity. It sits by the compose box of your chats and of the task
   board, and now and then has a word to say about your work. One switch
@@ -1820,6 +1821,89 @@ ACP, so it works the same with a local or a remote harness.
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-ssh` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
 | User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` |
+
+### Modules of your own
+
+Your own modules load beside the harness's, from the directories you
+list in `harness-extra-module-directories`. Each directory is absolute
+or relative to `user-emacs-directory`:
+
+```elisp
+(setq harness-extra-module-directories '("harness-modules"))
+```
+
+As in the harness's own tree, each file named `harness-NAME.el` there
+is a module called `NAME`, which `harness-enabled-modules` and
+`harness-disabled-modules` name like any other. Other files are not
+modules, but a module can `require` them: the directories are on
+`load-path`.
+
+The name also decides where a module runs:
+
+- `ui` and `ui-NAME` (in `harness-ui-NAME.el`) are UI modules and
+  load in your Emacs.
+- Any other module loads in the harness process, or in your Emacs too
+  when `harness-process` is off.
+
+A module whose name the harness already has is left out, with a
+warning in the log (`C-c h L`).
+
+Your modules are handled like the harness's own:
+
+- The harness compiles them, and `harness-reload` (`C-c h R`) and
+  `harness-update` reload them.
+- `harness-auto-reload-mode` watches their directories.
+- `M-x harness-describe-modules` lists the modules of your Emacs and of
+  the harness process, with the file of each of yours.
+- The options of a module in the harness process show on the settings
+  page, under Advanced, by module.
+
+The harness process reads the list of directories when it starts, so
+run `M-x harness-restart` after changing it.
+
+A minimal pair: a method in the harness process, and a command in
+your Emacs that calls it.
+
+```elisp
+;;; harness-modules/harness-hello.el  -*- lexical-binding: t; -*-
+(require 'harness-core)
+
+(defcustom harness-hello-greeting "Hello"
+  "How `hello/greet' greets."
+  :type 'string :group 'harness)
+
+(harness-defmethod hello/greet (name)
+  "Greet NAME."
+  (format "%s, %s!" harness-hello-greeting name))
+
+;; Clients, your Emacs among them, may call it as `_harness/hello/greet'.
+(defvar harness-acp-extra-method-prefixes)
+(with-eval-after-load 'harness-acp
+  (add-to-list 'harness-acp-extra-method-prefixes "hello/"))
+
+(harness-define-module 'hello :doc "Says hello.")
+(provide 'harness-hello)
+```
+
+```elisp
+;;; harness-modules/harness-ui-hello.el  -*- lexical-binding: t; -*-
+(require 'harness-ui)
+
+(defun harness-hello (name)
+  "Have the harness greet NAME."
+  (interactive "sName: ")
+  (harness-ui-call "_harness/hello/greet" (list :name name)
+                   (lambda (greeting) (message "%s" greeting))))
+
+(harness-define-module 'ui-hello :doc "Asks hello to greet." :requires '(ui))
+(provide 'harness-ui-hello)
+```
+
+The harness process receives every `harness-` variable you set, so
+`(setq harness-hello-greeting "Hi")` in your init file reaches the
+module.
+[docs/architecture.md](docs/architecture.md#modules-of-your-own) has
+the rest of the contract, such as how a module's events reach the UI.
 
 Further documentation:
 

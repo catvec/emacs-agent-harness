@@ -67,6 +67,7 @@
 ;;;; Inline rendering
 
 (defun harness-ui-markdown--add-face (string face)
+  "Return a copy of STRING with FACE added to the faces of all of it."
   (let ((s (copy-sequence string)))
     (add-face-text-property 0 (length s) face t s)
     s))
@@ -242,6 +243,9 @@ The string may be shared with other renderings: change a copy of it."
     (error code)))
 
 (defun harness-ui-markdown--code-block (code lang)
+  "Render fenced block CODE, in language LANG (a string or nil), as text.
+The code is fontified for LANG where possible and indented, under a
+line naming LANG when it is given."
   (let* ((body (harness-ui-markdown--fontify-code (string-trim-right code) lang))
          (label (if (and lang (not (string-empty-p lang)))
                     (propertize (concat lang "\n") 'face 'harness-md-code-lang)

@@ -44,8 +44,9 @@
   "File extensions a video evidence may have.")
 
 (defun harness-tools-handin--invalid (format-string &rest args)
-  "Return the error result for a malformed call."
-  (apply #'harness-tool-error (format format-string args)))
+  "Return the error result for a malformed call.
+Its message is FORMAT-STRING formatted with ARGS, as by `format'."
+  (harness-tool-error (apply #'format format-string args)))
 
 (defun harness-tools-handin--session-plist (sid)
   "Return the session plist of SID, or a minimal stand-in."
@@ -89,7 +90,7 @@ when it is none of that."
      (t (list :kind kind :path path :extension extension)))))
 
 (defun harness-tools-handin--call (sid ref number)
-  "Return the evidence plist of tool call REF of SESSION-ID, the NUMBERth item.
+  "Return the evidence plist of tool call REF of session SID, the NUMBERth item.
 REF is the call id as the transcript shows it.  The newest call whose
 call id or node id is REF is copied: what the task view shows is a
 snapshot of the same call the session shows.  Return an error string
@@ -156,7 +157,8 @@ ITEM is a string (a note), or an object with exactly one of `:image',
           (format "Evidence %d says nothing: give it an image, a video, a file, code, a note or a tool_call" number))
          ((cdr kinds)
           (format "Evidence %d gives %s: give it exactly one of image, video, file, code, note or tool_call"
-                  number (mapconcat #'identity kinds " and ")))
+                  number (mapconcat (lambda (kind) (if (eq kind 'tool-call) "tool_call" (symbol-name kind)))
+                                    kinds " and ")))
          ((eq (car kinds) 'image) (funcall one (or (harness-tools-handin--file image "image" number ctx)
                                                    (format "Evidence %d: %s is not an image" number image))))
          ((eq (car kinds) 'video) (funcall one (or (harness-tools-handin--file video "video" number ctx)
@@ -178,7 +180,8 @@ ITEM is a string (a note), or an object with exactly one of `:image',
 
 (defun harness-tools-handin--hand-in (input ctx)
   "Handler of the hand_in tool: record the report of INPUT and end the turn.
-A malformed call returns an error saying what to fix, and ends nothing."
+The report goes on the task of the session in CTX.  A malformed call
+returns an error saying what to fix, and ends nothing."
   (let* ((sid (plist-get ctx :session-id))
          (summary (let ((s (plist-get input :summary)))
                     (and (stringp s) (not (harness-string-blank-p s)) (string-trim s))))

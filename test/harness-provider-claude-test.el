@@ -2327,6 +2327,7 @@ what a user would see."
   ;; Earlier tests point the program at the fixture; use the real CLI here.
   (setq harness-provider-claude-program
         (eval (car (get 'harness-provider-claude-program 'standard-value)) t))
+  (skip-unless (executable-find harness-provider-claude-program))
   (clrhash harness-provider-claude--sessions)
   (let* ((calls nil)
          (request (harness-provider-claude-test--request

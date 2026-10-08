@@ -342,6 +342,172 @@ behind, and the harness process has TRAMP's own defaults."
         (should (string-search "(customize-set-variable 'tramp-default-method '\"sshx\")" config))
         (should (string-search "(customize-set-variable 'tramp-remote-path '(tramp-own-remote-path " config))))))
 
+(ert-deftest harness-server-forwards-extra-module-directories ()
+  "`harness-extra-module-directories' reaches the harness process, made absolute.
+That process starts from `emacs -Q', whose `user-emacs-directory', which
+a relative directory is relative to, may not be this Emacs's."
+  (harness-test-with-temp-state
+    (let ((harness-extra-module-directories nil))
+      (should-not (assq 'harness-extra-module-directories (harness-server--forwarded))))
+    (let* ((user-emacs-directory (harness-test-temp-dir))
+           (harness-extra-module-directories '("my-modules" "/srv/harness-modules/"))
+           (expected (list (expand-file-name "my-modules" user-emacs-directory) "/srv/harness-modules"))
+           (file (expand-file-name "server-config.el" harness-state-directory)))
+      (should (equal (list (cons 'harness-extra-module-directories expected))
+                     (cl-remove 'harness-extra-module-directories (harness-server--forwarded)
+                                :key #'car :test-not #'eq)))
+      (harness-server--write-config file)
+      (should (string-search (format "(customize-set-variable 'harness-extra-module-directories '%S)" expected)
+                             (harness-read-file file)))
+      (delete-directory user-emacs-directory t))))
+
+(ert-deftest harness-server-leaves-the-options-of-the-ui-behind ()
+  "An option a UI module defines stays in the UI; another module's goes.
+In the harness's lisp/ui as in `harness-extra-module-directories', a
+module loads compiled from the state directory, so only its file's name
+tells a UI module: ui or ui-NAME, as its options' names need not."
+  (harness-test-with-temp-state
+    (let ((dir (harness-test-temp-dir)))
+      (unwind-protect
+          (progn
+            (with-temp-file (expand-file-name "harness-ui-zzhello.el" dir)
+              (insert ";;; -*- lexical-binding: t -*-\n"
+                      "(defcustom harness-zzhello-width 40 \"Width.\" :type 'integer :group 'harness)\n"))
+            (with-temp-file (expand-file-name "harness-zzhello.el" dir)
+              (insert ";;; -*- lexical-binding: t -*-\n"
+                      "(defcustom harness-zzhello-greeting \"hello\" \"Greeting.\" :type 'string :group 'harness)\n"))
+            (harness-load-compiled (expand-file-name "harness-ui-zzhello.el" dir))
+            (harness-load-compiled (expand-file-name "harness-zzhello.el" dir))
+            (should (string-prefix-p harness-state-directory (symbol-file 'harness-zzhello-width 'defvar)))
+            (setq harness-zzhello-width 80
+                  harness-zzhello-greeting "hi")
+            (let ((forwarded (harness-server--forwarded)))
+              (should (equal "hi" (cdr (assq 'harness-zzhello-greeting forwarded))))
+              (should-not (assq 'harness-zzhello-width forwarded))))
+        (dolist (sym '(harness-zzhello-width harness-zzhello-greeting))
+          (makunbound sym)
+          (unintern (symbol-name sym) obarray))
+        (delete-directory dir t)))))
+
+(defun harness-server-test--write-elisp (file &rest forms)
+  "Write FORMS to FILE, a file of lexical Emacs Lisp."
+  (make-directory (file-name-directory file) t)
+  (with-temp-file file
+    (insert ";;; -*- lexical-binding: t -*-\n")
+    (dolist (form forms)
+      (prin1 form (current-buffer))
+      (insert "\n"))))
+
+(defun harness-server-test--hello (fmt)
+  "Forms of hello, a module of the user's own that greets with FMT.
+It runs in the harness process: its method `hello/greet' and its event
+`hello/greeted' reach the UI."
+  `((require 'harness-core)
+    (defcustom harness-hello-greeting "hello" "How to greet." :type 'string :group 'harness)
+    (defvar harness-acp-extra-method-prefixes)
+    (defvar harness-acp-extra-events)
+    (with-eval-after-load 'harness-acp
+      (add-to-list 'harness-acp-extra-method-prefixes "hello/")
+      (add-to-list 'harness-acp-extra-events 'hello/greeted))
+    (harness-defmethod hello/greet (name)
+      "Greet NAME, saying from which process."
+      (harness-emit 'hello/greeted name)
+      (list :text (format ,fmt harness-hello-greeting name) :pid (emacs-pid)))
+    (harness-define-module 'hello :doc "Says hello.")
+    (provide 'harness-hello)))
+
+(defun harness-server-test--ui-hello (transform)
+  "Forms of ui-hello, the UI of hello, which passes names through TRANSFORM."
+  `((require 'harness-ui)
+    (defvar harness-ui-hello-greeted nil "Whom the harness greeted, newest first.")
+    (defun harness-ui-hello--on-event (event args)
+      (when (equal event "hello/greeted")
+        (push (car args) harness-ui-hello-greeted)))
+    (add-hook 'harness-ui-event-functions #'harness-ui-hello--on-event)
+    (defun harness-ui-hello-greet (name)
+      "Have the harness greet NAME; return a promise of its answer."
+      (harness-ui-request "_harness/hello/greet" (list :name (,transform name))))
+    (harness-define-module 'ui-hello :doc "The UI of hello." :requires '(ui))
+    (provide 'harness-ui-hello)))
+
+(defvar harness-ui-hello-greeted)
+(declare-function harness-ui-hello-greet "harness-ui-hello")
+
+(ert-deftest harness-server-loads-extra-modules-on-each-side ()
+  "Modules of `harness-extra-module-directories' load where they belong.
+The UI module in this Emacs, the other in the harness process, which
+gets the directory as an absolute one.  They talk over ACP as the
+harness's own do; the harness process's settings and module list name
+the module of its own; `harness-reload' reloads both sides."
+  (let* ((config (harness-test-temp-dir))
+         (mine (expand-file-name "my-modules/" config))
+         (hello (expand-file-name "harness-hello.el" mine))
+         (ui-hello (expand-file-name "harness-ui-hello.el" mine))
+         (user-emacs-directory config)
+         (harness-extra-module-directories '("my-modules"))
+         (load-path load-path))
+    (apply #'harness-server-test--write-elisp hello (harness-server-test--hello "%s, %s"))
+    (apply #'harness-server-test--write-elisp ui-hello (harness-server-test--ui-hello 'identity))
+    ;; Set as an init file sets it, where the module is not loaded.
+    (set 'harness-hello-greeting "hi")
+    (unwind-protect
+        (harness-server-test-with-process
+          ;; The UI module is in this Emacs, the other is not.
+          (should (harness-module-ready-p 'ui-hello))
+          (should-not (harness-module-get 'hello))
+          (should-not (harness-method-exists-p 'hello/greet))
+          ;; The other answers from the harness process, set as this Emacs says.
+          (let ((r (harness-test-await (harness-ui-hello-greet "you") 30)))
+            (should (equal "hi, you" (plist-get r :text)))
+            (should (equal (process-id harness-ui--server) (plist-get r :pid)))
+            (should-not (equal (emacs-pid) (plist-get r :pid))))
+          ;; Its event reached the UI module.
+          (harness-test-wait (lambda () harness-ui-hello-greeted) 10 "the event")
+          (should (equal '("you") harness-ui-hello-greeted))
+          ;; The harness process lists it, with its source.
+          (let* ((modules (harness-test-await (harness-ui-request "_harness/harness/modules") 30))
+                 (find (lambda (name) (cl-find name modules :key (lambda (m) (plist-get m :name))
+                                                :test #'equal))))
+            (should (equal "ready" (plist-get (funcall find "hello") :state)))
+            (should (equal hello (plist-get (funcall find "hello") :file)))
+            (should-not (funcall find "ui-hello")))
+          ;; Its option is among the settings, under its name.
+          (let* ((d (harness-test-await (harness-ui-request "_harness/config/describe" (list :cwd config)) 30))
+                 (setting (cl-find "harness-hello-greeting" (plist-get d :settings)
+                                   :key (lambda (s) (plist-get s :key)) :test #'equal)))
+            (should (equal "hello" (plist-get setting :module)))
+            (should (member "hello" (mapcar (lambda (m) (plist-get m :name)) (plist-get d :modules)))))
+          ;; The module list shows both sides, and the files of both.
+          (harness-describe-modules)
+          (with-current-buffer harness--modules-buffer-name
+            (harness-test-wait (lambda () (not (string-search "…" (buffer-string)))) 30 "the process's modules")
+            (let ((text (buffer-string)))
+              (should (string-match-p (concat "^  ui-hello +ready +The UI of hello\\.\n +"
+                                              (regexp-quote (abbreviate-file-name ui-hello)) "$")
+                                      text))
+              (should (string-match-p (concat "^Modules of the harness process\n\\(?:.*\n\\)*"
+                                              "  hello +ready +Says hello\\.\n +"
+                                              (regexp-quote (abbreviate-file-name hello)) "$")
+                                      text))))
+          (kill-buffer harness--modules-buffer-name)
+          ;; `harness-reload' reloads both sides.
+          (apply #'harness-server-test--write-elisp hello (harness-server-test--hello "%s and %s"))
+          (apply #'harness-server-test--write-elisp ui-hello (harness-server-test--ui-hello 'upcase))
+          (should (harness-reload))
+          ;; The UI's at once, the process's once it has heard and done it.
+          (harness-test-wait (lambda ()
+                               (equal "hi and YOU"
+                                      (plist-get (harness-test-await (harness-ui-hello-greet "you") 60) :text)))
+                             60 "the harness process to reload")
+          (harness-server-test--settle))
+      (remove-hook 'harness-ui-event-functions 'harness-ui-hello--on-event)
+      (fmakunbound 'harness-ui-hello-greet)
+      (fmakunbound 'harness-ui-hello--on-event)
+      (makunbound 'harness-ui-hello-greeted)
+      (makunbound 'harness-hello-greeting)
+      (setq features (delq 'harness-ui-hello features))
+      (delete-directory config t))))
+
 (ert-deftest harness-server-restarts-after-a-crash ()
   (harness-server-test-with-process
     (harness-test-await (harness-ui-request "_harness/session/list") 30)

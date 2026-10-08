@@ -172,6 +172,9 @@ and a callback that waits synchronously cannot deadlock the rest."
       (harness--promise-dispatch promise cb))))
 
 (defun harness--promise-settle (promise state value)
+  "Settle PROMISE in STATE, resolved or rejected, with VALUE; return PROMISE.
+Its callbacks run in the order they were added.  A promise already
+settled is left as it is."
   (when (eq (harness-promise-state promise) 'pending)
     (setf (harness-promise-state promise) state
           (harness-promise-value promise) value)
@@ -182,6 +185,10 @@ and a callback that waits synchronously cannot deadlock the rest."
   promise)
 
 (defun harness--promise-dispatch (promise cb)
+  "Call the half of CB that fits settled PROMISE with the promise's value.
+CB is (ON-RESOLVED . ON-REJECTED); a nil half does nothing.  An error
+the callback signals is logged, with its backtrace when debugging, and
+goes no further."
   (let ((fn (if (eq (harness-promise-state promise) 'resolved) (car cb) (cdr cb))))
     (when fn
       (condition-case err
@@ -480,7 +487,8 @@ number of subscribers notified."
     n))
 
 (defun harness-emit-later (event &rest args)
-  "Like `harness-emit' but from the command loop, after the caller returns."
+  "Emit EVENT with ARGS as `harness-emit' does, but from the command loop.
+The subscribers run after the caller returns."
   (apply #'harness-run-soon #'harness-emit event args))
 
 (defun harness-events ()
@@ -582,6 +590,12 @@ See `harness-run-filter-async'.  Return a promise of the final value."
 (defvar harness--defining-module nil
   "Bound to the module name while its file is loading.")
 
+(defvar harness--defining-file nil
+  "Bound to the source file of the module loading, or nil.
+The loader loads a compiled copy kept elsewhere (`load-file-name'), so
+it names the source that the module `harness--defining-module' records
+as its file.")
+
 (defvar harness-module-init-hook nil
   "Hook run with the module name after each module initialises.")
 
@@ -592,16 +606,20 @@ first.  INIT is called once when the harness starts (or when the module
 is enabled later); SHUTDOWN when it stops.  Re-evaluating a definition
 while the module is ready keeps it ready and just refreshes the
 metadata, which is what a hot reload needs."
-  (let ((existing (gethash name harness--modules)))
+  (let ((existing (gethash name harness--modules))
+        ;; Not a module another file defines as this one requires it.
+        (file (if (and harness--defining-file (eq name harness--defining-module))
+                  harness--defining-file
+                load-file-name)))
     (if existing
         (setf (harness-module-doc existing) doc
               (harness-module-requires existing) requires
               (harness-module-init-fn existing) init
               (harness-module-shutdown-fn existing) shutdown
-              (harness-module-file existing) (or load-file-name (harness-module-file existing)))
+              (harness-module-file existing) (or file (harness-module-file existing)))
       (puthash name (make-harness-module :name name :doc doc :requires requires
                                          :init-fn init :shutdown-fn shutdown
-                                         :file load-file-name
+                                         :file file
                                          :feature (intern (format "harness-%s" name)))
                harness--modules)))
   name)
@@ -689,28 +707,105 @@ Return the list of module names that are ready."
         (ignore-errors (funcall (harness-module-shutdown-fn m))))
       (setf (harness-module-state m) 'disabled))))
 
+(defun harness-module-descriptions ()
+  "Describe every registered module, sorted by name.
+Each description is (:name NAME :state STATE :doc DOC :file FILE
+:error ERROR): FILE is the source the module was loaded from, or nil,
+and ERROR says what failed it, or is nil."
+  (mapcar (lambda (m)
+            (let ((err (harness-module-error m)))
+              (list :name (harness-module-name m)
+                    :state (harness-module-state m)
+                    :doc (harness-module-doc m)
+                    :file (harness-module-file m)
+                    :error (cond ((null err) nil)
+                                 ((stringp err) err)
+                                 (t (error-message-string err))))))
+          (harness-modules)))
+
+(defvar harness-describe-modules-functions nil
+  "Functions adding the modules of another Emacs to `harness-describe-modules'.
+Each is called with no argument and returns nil, or (TITLE . PROMISE):
+PROMISE resolves to the modules to list under TITLE, described as
+`harness-module-descriptions' describes them.  The UI adds the modules
+of the harness it is connected to this way, when that harness runs in
+another process.")
+
+(defconst harness--modules-buffer-name "*harness-modules*"
+  "Name of the buffer of `harness-describe-modules'.")
+
+(defvar harness-directory)
+(declare-function harness-error-message "harness-util" (err))
+
+(defun harness--insert-modules (modules)
+  "Insert a line for each of MODULES.
+They are described as `harness-module-descriptions' describes them.  A
+module from outside the harness's tree, such as one of
+`harness-extra-module-directories', names its file on a line of its
+own, and a failed one what failed it."
+  (if (null modules)
+      (insert "  none\n")
+    (dolist (m modules)
+      (let ((file (plist-get m :file))
+            (err (plist-get m :error)))
+        (insert (format "  %-22s %-10s %s\n" (plist-get m :name) (plist-get m :state)
+                        (or (plist-get m :doc) "")))
+        (when (and (stringp file)
+                   (not (and (bound-and-true-p harness-directory)
+                             (string-prefix-p (file-name-as-directory harness-directory) file))))
+          (insert (format "  %-22s %-10s %s\n" "" "" (abbreviate-file-name file))))
+        (when (and err (not (equal err "")))
+          (insert (format "  %-22s %-10s error: %s\n" "" "" err)))))))
+
+(defun harness--fill-modules (marker insert)
+  "Call INSERT in place of the placeholder line at MARKER, if its buffer lives."
+  (when (buffer-live-p (marker-buffer marker))
+    (with-current-buffer (marker-buffer marker)
+      (let ((inhibit-read-only t))
+        (save-excursion
+          (goto-char marker)
+          (delete-region (point) (line-beginning-position 2))
+          (funcall insert))))))
+
 (defun harness-describe-modules ()
-  "Describe every module and its state in a help buffer."
+  "Describe every module and its state in a help buffer.
+The modules of this Emacs come first.  When the harness runs in
+another Emacs, its own process say, its modules follow as they arrive
+\(see `harness-describe-modules-functions').  A module from outside the
+harness's tree names the file it was loaded from."
   (interactive)
-  (with-help-window "*harness-modules*"
-    (dolist (m (harness-modules))
-      (princ (format "%-14s %-10s %s\n" (harness-module-name m)
-                     (harness-module-state m)
-                     (or (harness-module-doc m) "")))
-      (when (harness-module-error m)
-        (princ (format "               error: %S\n" (harness-module-error m)))))))
+  (let ((others (delq nil (mapcar #'funcall harness-describe-modules-functions)))
+        (slots nil))
+    (with-help-window harness--modules-buffer-name
+      (with-current-buffer standard-output
+        (insert "Modules of this Emacs\n\n")
+        (harness--insert-modules (harness-module-descriptions))
+        (dolist (other others)
+          (insert "\n" (car other) "\n\n")
+          (push (cons (cdr other) (copy-marker (point))) slots)
+          (insert "  …\n"))))
+    (dolist (slot (nreverse slots))
+      (let ((marker (cdr slot)))
+        (harness-then (car slot)
+                      (lambda (modules)
+                        (harness--fill-modules marker (lambda () (harness--insert-modules modules)))
+                        nil)
+                      (lambda (err)
+                        (harness--fill-modules
+                         marker (lambda ()
+                                  (insert (format "  They could not be listed: %s\n"
+                                                  (harness-error-message err)))))
+                        nil))))))
 
 ;;;; Introspection
 
 (defun harness-describe-api ()
-  "Return a plist describing the whole bus: methods, events and filters."
+  "Return a plist describing the whole bus: methods, events and filters.
+And modules, as `harness-module-descriptions' describes them."
   (list :methods (harness-methods)
         :events (mapcar (lambda (e) (list :name (car e) :doc (cdr e))) (harness-events))
         :filters (harness-filters)
-        :modules (mapcar (lambda (m) (list :name (harness-module-name m)
-                                           :state (harness-module-state m)
-                                           :doc (harness-module-doc m)))
-                         (harness-modules))))
+        :modules (harness-module-descriptions)))
 
 (provide 'harness-core)
 ;;; harness-core.el ends here
