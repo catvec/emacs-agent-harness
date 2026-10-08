@@ -786,6 +786,7 @@ which `mwheel-scroll' needs to stop, and C-v moves point there when
                   ((symbol-function 'window-vscroll) (lambda (&rest _) vscroll))
                   ((symbol-function 'harness-chat--snap-start) #'ignore)
                   ((symbol-function 'harness-chat--point-into-view) #'ignore)
+                  ((symbol-function 'harness-chat--hold-tall-start) #'ignore)
                   ((symbol-function 'harness-chat--scroll-pixels)
                    (lambda (pixels forward)
                      (push (if forward pixels (- pixels)) steps)
@@ -929,7 +930,50 @@ the last line of text at the top."
             (should (equal (scroll 1000 t) '(6 0)))
             (should (equal (scroll 18 t) '(6 0)))
             ;; Far back: the first line.
-            (should (equal (scroll 1000 nil) '(1 0)))))))))
+            (should (equal (scroll 1000 nil) '(1 0)))
+            ;; From the line before the image scrolled out of view
+            ;; (`harness-chat--hold-tall-start'): into the image, or
+            ;; back into that line.
+            (setq start 2 vscroll 18)
+            (should (equal (scroll 18 t) '(3 18)))
+            (setq start 2 vscroll 18)
+            (should (equal (scroll 10 nil) '(2 8)))))))))
+
+(ert-deftest harness-ui-chat-scroll-holds-tall-start ()
+  "A line taller than the window, shown from its top with point on it, holds.
+Redisplay recentered on point there once the window's start was no
+longer forced, so the window starts at the line before instead,
+scrolled out of view: it leaves a window with a vscroll alone."
+  (harness-ui-chat-test-with
+    (with-temp-buffer
+      (insert "abcdefghij")
+      ;; Screen lines start at 1 to 4, the third an image 400 high, in
+      ;; a window 187 high.
+      (let ((heights (copy-tree '((1 . 18) (2 . 18) (3 . 400) (4 . 18))))
+            start vscroll forced)
+        (cl-letf (((symbol-function 'window-start) (lambda (&rest _) start))
+                  ((symbol-function 'window-vscroll) (lambda (&rest _) vscroll))
+                  ((symbol-function 'window-text-height) (lambda (&rest _) 187))
+                  ((symbol-function 'set-window-start)
+                   (lambda (_w pos &optional noforce) (setq start pos forced (not noforce))))
+                  ((symbol-function 'set-window-vscroll) (lambda (_w v &rest _) (setq vscroll v)))
+                  ((symbol-function 'harness-chat--line-height) (lambda (pos) (cdr (assq pos heights))))
+                  ((symbol-function 'harness-chat--line-before) (lambda (pos) (and (> pos 1) (1- pos)))))
+          (cl-flet ((hold (from vs pt)
+                      (setq start from vscroll vs forced 'unset)
+                      (goto-char pt)
+                      (harness-chat--hold-tall-start)
+                      (list start vscroll forced (point))))
+            ;; The image at the top, point on it: the line before, out of
+            ;; view, its start not forced; point stays.
+            (should (equal (hold 3 0 3) '(2 18 nil 3)))
+            ;; Scrolled into the image already, point elsewhere, a line
+            ;; that fits, or nothing before it: left alone.
+            (should (equal (hold 3 40 3) '(3 40 unset 3)))
+            (should (equal (hold 3 0 4) '(3 0 unset 4)))
+            (should (equal (hold 2 0 2) '(2 0 unset 2)))
+            (setf (alist-get 1 heights) 400)
+            (should (equal (hold 1 0 1) '(1 0 unset 1)))))))))
 
 (ert-deftest harness-ui-chat-scroll-shown-whole ()
   "A line shows whole when all of it is in the window.

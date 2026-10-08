@@ -354,7 +354,8 @@ Knows the chat's own `harness-chat-action' buttons and the shared
 ;; goes by a line's height at a time like the text around it, and stays
 ;; whole: nothing about it is measured or changed when it is drawn.  The
 ;; window still starts at a whole line of text; only an image is left
-;; partly scrolled at the top.
+;; partly scrolled at the top, or, when one taller than the window shows
+;; from its top, the line above it scrolled out of view.
 
 (defvar mwheel-scroll-up-function)
 (defvar mwheel-scroll-down-function)
@@ -480,6 +481,23 @@ and point stays on it only when no line shows whole (see
               (setq pos after))))
         (goto-char pos)))))
 
+(defun harness-chat--hold-tall-start ()
+  "Keep a line taller than the selected window at its top, point on it.
+That line fills the window, so point can be on no other, and redisplay
+keeps point on a line that runs past the window's bottom only while the
+window's start is forced, which lasts one redisplay.  The next, after
+any change, would recenter on point and undo the scroll.  It leaves a
+window with a vscroll alone, so the window starts at the line before
+instead, scrolled out of view by the vscroll.  The window looks the
+same, and its start holds."
+  (let ((start (window-start)))
+    (when (and (= (point) start)
+               (zerop (window-vscroll nil t))
+               (> (harness-chat--line-height start) (window-text-height nil t)))
+      (when-let* ((before (harness-chat--line-before start)))
+        (set-window-start nil before t)
+        (set-window-vscroll nil (harness-chat--line-height before) t t)))))
+
 (defun harness-chat--scroll (lines forward)
   "Scroll the selected window LINES lines' height, FORWARD toward the end or back.
 LINES nil is the window's height less `next-screen-context-lines'
@@ -506,6 +524,7 @@ by lines."
         (set-window-vscroll nil 0 t t)
         (set-window-start nil (harness-chat--line-start (1- (point-max)))))
       (harness-chat--point-into-view)
+      (harness-chat--hold-tall-start)
       (when (equal before (cons (window-start) (window-vscroll nil t)))
         (signal (if forward 'end-of-buffer 'beginning-of-buffer) nil))))))
 
