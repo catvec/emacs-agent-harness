@@ -511,10 +511,11 @@ POSITION, as `harness-sessions' has it."
 (defun harness-ui-sessions-open (&optional position)
   "Open the session at point, in its project.
 The session's project becomes the current one first, as switching
-project does (in Doom Emacs, its workspace; see
+project does (in Doom Emacs, its workspace, as you left it; see
 `harness-ui-switch-project-function').  A session shown there already
 gets its window selected; any other opens in POSITION, by default
-replacing the list, or after a switch where sessions open."
+replacing the list, or after a switch where sessions open -- in the
+window of a workspace that shows nothing yet, a new one."
   (interactive (list (and current-prefix-arg (harness-ui-read-position))))
   (harness-ui-visit-session (harness-ui-sessions--id) position))
 

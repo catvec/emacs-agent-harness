@@ -403,9 +403,14 @@ to settle it there: `[Allow]` and `[Deny]` for a permission request,
 which `y` and `n` press too, and `[Answer…]` for a question, which pops
 it out.
 `RET` or a click on a session opens it in its project: with Doom
-Emacs's workspaces, the project's workspace becomes current first, as
-switching project does, and a session already showing there gets its
-window selected instead of opening again
+Emacs's workspaces, the project's workspace becomes current first, with
+the windows and buffers you left in it, and a session already showing
+there gets its window selected instead of opening again. The project's
+workspace is the one named after the project, or one that records the
+project's directory (as some forks of Doom do); of two, the one with
+the project's files open. A project without a workspace gets a new one,
+as switching project makes it but without asking for a file, and the
+session takes its window instead of opening beside Doom's dashboard
 (`harness-ui-switch-project-function`, nil to never switch). `b`, or
 the banner's `[Show all]`, shows every session again. With nobody
 waiting, the click opens the session list as usual.
