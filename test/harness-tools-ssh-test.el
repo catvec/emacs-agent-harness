@@ -16,7 +16,8 @@
 (require 'tramp-sh)
 
 (defvar harness-tools-ssh--methods)
-(defvar harness-tools-ssh--setup-hint)
+(defvar harness-tools-remote-setup-hint)
+(defvar tramp-use-connection-share)
 (defvar harness-tools-corporate-hint)
 (defvar harness-corporate-mode)
 (defvar harness-allowed-directories)
@@ -286,14 +287,12 @@ output reaches the call's progress report as it comes."
       (should (plist-get r :is-error))
       (should (equal "No directory /mock:localhost:/no/such/dir/ on the host" (plist-get r :content)))
       (should (eq t (plist-get (plist-get r :meta) :connected))))
-    ;; A host that cannot be reached: no ssh to ask why (mockfail does
-    ;; not log in with ssh), so the error says how to set a host up.
+    ;; A host that cannot be reached.  mockfail does not log in with
+    ;; ssh, so there is no ssh to ask why, nor an ssh login to set up.
     (let ((r (harness-tools-ssh-test--call :host "/mockfail:localhost:" :cwd "/tmp" :command "true")))
       (should (plist-get r :is-error))
-      (should (string-prefix-p "Could not connect to /mockfail:localhost:" (plist-get r :content)))
-      (should (string-suffix-p (concat "\n" harness-tools-ssh--setup-hint) (plist-get r :content)))
-      (should-not (string-search "BatchMode=yes says" (plist-get r :content)))
-      (should (eq nil (plist-get (plist-get r :meta) :connected))))))
+      (should (equal "Could not connect to /mockfail:localhost:." (plist-get r :content)))
+      (should (equal '(:host "/mockfail:localhost:" :connected nil) (plist-get r :meta))))))
 
 (ert-deftest harness-tools-ssh-explains-failed-connections ()
   "A failed connection is explained by ssh in batch mode, which says
@@ -301,23 +300,26 @@ what it would have asked or why it failed."
   (harness-tools-ssh-test--setup)
   ;; The command that asks, for every way of naming a host.
   (should (equal '("ssh" "-o" "BatchMode=yes" "-o" "ConnectTimeout=10" "--" "box" "true")
-                 (harness-tools-ssh--batch-command "/ssh:box:")))
+                 (harness-tools--ssh-batch-command "/ssh:box:")))
   (should (equal '("ssh" "-o" "BatchMode=yes" "-o" "ConnectTimeout=10" "-p" "2222" "-l" "noah" "--" "box" "true")
-                 (harness-tools-ssh--batch-command "/scp:noah@box#2222:")))
+                 (harness-tools--ssh-batch-command "/scp:noah@box#2222:")))
   (should (equal '("ssh" "-o" "BatchMode=yes" "-o" "ConnectTimeout=10" "-J" "j1,u@[::1]:22" "--" "box" "true")
-                 (harness-tools-ssh--batch-command "/ssh:j1|ssh:u@[::1]#22|ssh:box:")))
+                 (harness-tools--ssh-batch-command "/ssh:j1|ssh:u@[::1]#22|ssh:box:")))
   (harness-tools-ssh-test--enable-mock)
-  (should-not (harness-tools-ssh--batch-command "/mock:box:"))
+  (should-not (harness-tools--ssh-batch-command "/mock:box:"))
+  (should-not (harness-tools--ssh-batch-command "/sudo:root@localhost:"))
   ;; What TRAMP signalled, said plainly.
   (should (string-match-p "asked for a password, a passphrase or a host key confirmation"
-                          (harness-tools-ssh--reason '(end-of-file "Error reading from stdin"))))
-  (should-not (harness-tools-ssh--reason
+                          (harness-tools--remote-reason '(end-of-file "Error reading from stdin"))))
+  (should-not (harness-tools--remote-reason
                '(file-error "Tramp failed to connect.  If this happens repeatedly, try\n    `M-x tramp-cleanup-this-connection'")))
-  (should (equal "Login failed" (harness-tools-ssh--reason '(error "Login failed\nmore"))))
+  (should (equal "Login failed" (harness-tools--remote-reason '(error "Login failed\nmore"))))
+  (should (equal "Timeout reached" (harness-tools--remote-reason
+                                    '(remote-file-error "Timeout reached, see buffer `*tramp/ssh box*' for details"))))
   ;; A connection busy with another call did not fail: no ssh is asked.
-  (let ((r (harness-tools-ssh--connection-error "/ssh:box:" '(remote-file-error "Forbidden reentrant call of Tramp"))))
+  (let ((r (harness-tools-remote-failure "/ssh:box:" '(remote-file-error "Forbidden reentrant call of Tramp"))))
     (should (plist-get r :is-error))
-    (should (equal "TRAMP was busy with another call on /ssh:box:; run the command again." (plist-get r :content))))
+    (should (equal "TRAMP was busy with another call on /ssh:box:; make this call again." (plist-get r :content))))
   ;; An ssh of our own, which says what a real one would.
   (let* ((bin (harness-test-temp-dir))
          (ssh (expand-file-name "ssh" bin))
@@ -327,25 +329,31 @@ what it would have asked or why it failed."
       (insert "#!/bin/sh\necho \"$*\" > \"$(dirname \"$0\")/args\"\n"
               "echo 'noah@box: Permission denied (publickey).' >&2\nexit 255\n"))
     (set-file-modes ssh #o755)
-    (let ((r (harness-await (harness-tools-ssh--connection-error
+    (let ((r (harness-await (harness-tools-remote-failure
                              "/ssh:noah@box:"
                              '(file-error "Tramp failed to connect.  If this happens repeatedly, try"))
                             30)))
       (should (plist-get r :is-error))
       (should (equal (concat "Could not connect to /ssh:noah@box:.\n"
                              "ssh -o BatchMode=yes says: noah@box: Permission denied (publickey).\n"
-                             harness-tools-ssh--setup-hint)
+                             harness-tools-remote-setup-hint)
                      (plist-get r :content)))
       (should (equal "-o BatchMode=yes -o ConnectTimeout=10 -l noah -- box true\n"
                      (with-temp-buffer (insert-file-contents (expand-file-name "args" bin)) (buffer-string)))))
     ;; ssh gets in where TRAMP did not: TRAMP could not start its shell.
     (with-temp-file ssh (insert "#!/bin/sh\nexit 0\n"))
-    (let ((r (harness-await (harness-tools-ssh--connection-error "/ssh:box:" '(end-of-file "Error reading from stdin"))
+    (let ((r (harness-await (harness-tools-remote-failure "/ssh:box:" '(end-of-file "Error reading from stdin"))
                             30)))
       (should (string-prefix-p
-               (concat "Could not connect to /ssh:box: (ssh asked for a password, a passphrase or a host key confirmation, which the harness cannot answer).\n"
+               (concat "Could not connect to /ssh:box: (the login asked for a password, a passphrase or a host key confirmation, which the harness cannot answer).\n"
                        "ssh -o BatchMode=yes says: nothing: it connects")
-               (plist-get r :content))))))
+               (plist-get r :content))))
+    ;; No ssh to ask at all.
+    (delete-file ssh)
+    (let* ((exec-path (list bin))
+           (r (harness-await (harness-tools-remote-failure "/ssh:box:" '(remote-file-error "Login failed")) 30)))
+      (should (equal (concat "Could not connect to /ssh:box: (Login failed).\n" harness-tools-remote-setup-hint)
+                     (plist-get r :content))))))
 
 (ert-deftest harness-tools-ssh-remote-command-falls-back-to-sh ()
   "On a host without bash, the command runs with sh."
@@ -497,6 +505,50 @@ so another tool can take them."
           (should (string-match-p "new.txt" (plist-get r :content)))
           (should-not (plist-get (plist-get r :meta) :sandboxed)))))))
 
+(ert-deftest harness-tools-ssh-file-tools-explain-failed-connections ()
+  "Any tool that cannot reach the host its path is on says why, as the
+ssh tool does; a file error on a host TRAMP is connected to stays an
+error about that file."
+  (harness-tools-ssh-test--with-session (id :permission-mode 'yolo)
+    (let ((harness-allowed-directories '("/mock:localhost:/" "/mockfail:localhost:/" "/ssh:box:/")))
+      (cl-flet ((run (name input) (harness-await (harness-tools-ssh-test--run id name input) 60)))
+        ;; A host nothing answers on, which ssh does not log in to.
+        (dolist (call '(("read_file" :path "/mockfail:localhost:/etc/hostname")
+                        ("list_dir" :path "/mockfail:localhost:/tmp")
+                        ("grep" :pattern "x" :path "/mockfail:localhost:/tmp")
+                        ("bash" :command "true" :cwd "/mockfail:localhost:/tmp")))
+          (let ((r (run (car call) (cdr call))))
+            (should (plist-get r :is-error))
+            (should (equal "Could not connect to /mockfail:localhost:." (plist-get r :content)))
+            (should (equal '(:host "/mockfail:localhost:" :connected nil) (plist-get r :meta)))))
+        ;; A host ssh logs in to, through an ssh of our own, which TRAMP
+        ;; runs too: ssh in batch mode says why.
+        (let* ((bin (harness-test-temp-dir))
+               (ssh (expand-file-name "ssh" bin))
+               (exec-path (cons bin exec-path))
+               (process-environment (cons (concat "PATH=" bin path-separator (getenv "PATH")) process-environment))
+               (tramp-use-connection-share nil))
+          (with-temp-file ssh
+            (insert "#!/bin/sh\necho 'noah@box: Permission denied (publickey).' >&2\nexit 255\n"))
+          (set-file-modes ssh #o755)
+          (let ((r (run "read_file" (list :path "/ssh:box:/etc/hostname"))))
+            (should (plist-get r :is-error))
+            (should (string-match-p "\\`Could not connect to /ssh:box:\\(?: (.*)\\)?\\.\n" (plist-get r :content)))
+            (should (string-suffix-p (concat "\nssh -o BatchMode=yes says: noah@box: Permission denied (publickey).\n"
+                                             harness-tools-remote-setup-hint)
+                                     (plist-get r :content)))))
+        ;; On a host TRAMP is connected to, a file error is about a file.
+        (unless (zerop (user-uid))
+          (let* ((remote (harness-test-temp-dir))
+                 (ro (expand-file-name "ro" remote)))
+            (make-directory ro)
+            (set-file-modes ro #o555)
+            (unwind-protect
+                (let ((r (run "write_file" (list :path (concat "/mock:localhost:" ro "/x.txt") :content "x\n"))))
+                  (should (plist-get r :is-error))
+                  (should (string-prefix-p "Tool write_file failed: " (plist-get r :content))))
+              (set-file-modes ro #o755))))))))
+
 ;;;; Over real ssh
 
 (ert-deftest harness-tools-ssh-real-host ()
@@ -505,9 +557,9 @@ ssh-agent or one without a passphrase and be a known host."
   (let ((host (getenv "HARNESS_TEST_SSH_HOST")))
     (skip-unless (and host (not (string-empty-p host))))
     (harness-tools-ssh-test--setup)
-    (let ((r (harness-tools-ssh-test--call :host host :command "echo \"hello from $(hostname)\"; cat; echo $0")))
+    (let ((r (harness-tools-ssh-test--call :host host :command "echo \"hello from $(hostname)\"; cat; echo $0; echo oops >&2")))
       (should-not (plist-get r :is-error))
-      (should (string-match-p "\\`hello from .*\nbash\nexit 0 in /ssh:" (plist-get r :content))))
+      (should (string-match-p "\\`hello from .*\nbash\noops\nexit 0 in /ssh:" (plist-get r :content))))
     (let ((r (harness-tools-ssh-test--call :host host :cwd "/" :command "pwd")))
       (should (string-prefix-p "/\nexit 0 in /ssh:" (plist-get r :content))))
     ;; A name no resolver knows: ssh says so.

@@ -1334,6 +1334,19 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
 - Context bomb: outputs over `harness-tools-max-output-chars` (30000) are
   saved to `harness-state-directory/outputs/CALL-ID.txt` and replaced
   by the head plus an instruction to range-read that file.
+- A handler that signals, or whose promise rejects, fails the call
+  with "Tool NAME failed: MESSAGE" -- unless TRAMP could not reach the
+  host the call is about (the first of its `:paths` on another host,
+  else the session's cwd): a file error, or the end of input TRAMP met
+  reading the answer to a prompt, while TRAMP has no connection to
+  that host.  Then `harness-tools-remote-failure PREFIX ERR`, which the
+  ssh tool uses for its own connections too, says why: "Could not
+  connect to /ssh:box: (REASON)." with what `ssh -o BatchMode=yes` says
+  run once more (no such host, a refused key, an unknown host key, a
+  passphrase prompt) and, for a host ssh logs in to on every hop, how
+  to set the host up; `:meta` is `(:host PREFIX :connected nil)`.  A
+  connection TRAMP refused because another call was using it is
+  reported as busy, to be made again (`:meta` `(:host PREFIX :busy t)`).
 - Denied calls return `(:is-error t :denied t :content "Denied: REASON. HINT")`.
   The agent keeps `:denied t` in the `:meta` of the call's tool-result
   node, so a view can tell a call the permission system refused, which
@@ -2874,11 +2887,11 @@ host's root, so the first call to a host asks for it, and a grant of
 is an error before the command runs.  The result is what the command
 printed, standard error mixed in, then its status and the directory it
 ran in, as a TRAMP path (`exit 0 in /ssh:box:/srv/app/`); `:meta` has
-`:exit :host :cwd :duration`.  A connection that fails is explained by
-`ssh -o BatchMode=yes` run once more (no such host, a refused key, an
-unknown host key, a passphrase prompt), and the error says how to set
-the host up; a connection TRAMP is still using for another call is
-reported as busy, to be retried.
+`:exit :host :cwd :duration`.  A connection that fails is explained as
+any tool's is (`harness-tools-remote-failure`, see tools): by `ssh -o
+BatchMode=yes` run once more, with how to set the host up; a
+connection TRAMP is still using for another call is reported as busy,
+to be retried.
 
 `read_file` returns an image or a video as an `:attachments` entry the
 chat shows the user: the picture of an image (an SVG is read as text

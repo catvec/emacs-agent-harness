@@ -36,9 +36,10 @@
 ;;
 ;; The harness has no terminal: a connection that needs a password, a
 ;; key passphrase or a host key confirmation fails.  Then ssh is asked
-;; once more, in batch mode, why (`harness-tools-ssh--diagnose'), and
-;; the error carries its answer and how to set the host up.  The command
-;; runs with bash, or sh on a host without bash, its standard input
+;; once more, in batch mode, why, and the error carries its answer and
+;; how to set the host up (`harness-tools-remote-failure', which
+;; explains the other tools' failed connections too).  The command runs
+;; with bash, or sh on a host without bash, its standard input
 ;; /dev/null (see `harness-tools-shell-remote-command').
 
 ;;; Code:
@@ -52,7 +53,6 @@
 
 (declare-function tramp-dissect-file-name "tramp" (name &optional nodefault))
 (declare-function tramp-tramp-file-p "tramp" (name))
-(declare-function tramp-get-method-parameter "tramp" (vec param &optional default))
 (declare-function tramp-file-name-method "tramp" (vec))
 (declare-function tramp-file-name-user "tramp" (vec))
 (declare-function tramp-file-name-domain "tramp" (vec))
@@ -79,13 +79,6 @@ The first character is no dash, which ssh would read as an option.")
   "Regexp of an ssh destination: [ssh://][USER@]HOST[:PORT].
 HOST may be an IPv6 address in brackets; the port may follow a # as in
 a TRAMP name.  The parts are checked one by one afterwards.")
-
-(defconst harness-tools-ssh--diagnose-timeout 20
-  "Seconds the batch-mode ssh that explains a failed connection may take.")
-
-(defconst harness-tools-ssh--setup-hint
-  "The harness connects without a terminal, so nothing can answer a password, key passphrase or host key prompt: the host must accept a key from ssh-agent (or one without a passphrase) and be in ~/.ssh/known_hosts. `ssh -o BatchMode=yes HOST true' in a terminal shows whether it is set up. That is for the user to set up; do not try to work around it."
-  "What the error about a failed connection says about setting a host up.")
 
 ;;;; Hosts
 
@@ -204,95 +197,6 @@ no good has none; it fails before it connects."
         (list (concat prefix (if (string-prefix-p "/" local) local "/"))))
     (error nil)))
 
-;;;; Connection errors
-
-(defun harness-tools-ssh--reason (err)
-  "Return what went wrong for ERR, an error TRAMP signalled while connecting.
-Nil when TRAMP says no more than that it could not connect."
-  (let ((message (harness-error-message err)))
-    (cond
-     ;; TRAMP read an answer to a prompt from the harness's closed stdin.
-     ((eq (car-safe err) 'end-of-file)
-      "ssh asked for a password, a passphrase or a host key confirmation, which the harness cannot answer")
-     ((string-match-p "Tramp failed to connect" message) nil)
-     (t (string-trim (car (split-string message "\n")))))))
-
-(defun harness-tools-ssh--jump (vec)
-  "Return VEC, a dissected hop, as ssh's -J option writes a jump host."
-  (let ((host (tramp-file-name-host vec))
-        (user (tramp-file-name-user vec))
-        (port (tramp-file-name-port vec)))
-    (concat (if user (concat user "@") "")
-            (if (string-search ":" host) (concat "[" host "]") host)
-            (if port (concat ":" port) ""))))
-
-(defun harness-tools-ssh--batch-command (prefix)
-  "Return the ssh command that connects to PREFIX's host in batch mode, or nil.
-Nil when a hop does not log in with ssh (such as TRAMP's mock method)."
-  (require 'tramp)
-  (let ((vecs (mapcar (lambda (hop) (tramp-dissect-file-name (concat "/" hop ":")))
-                      (split-string (substring prefix 1 -1) "|" t))))
-    (when (and vecs (cl-every (lambda (v) (equal (tramp-get-method-parameter v 'tramp-login-program) "ssh"))
-                              vecs))
-      (let* ((target (car (last vecs)))
-             (jumps (butlast vecs))
-             (user (tramp-file-name-user target))
-             (port (tramp-file-name-port target)))
-        (append (list "ssh" "-o" "BatchMode=yes" "-o" "ConnectTimeout=10")
-                (and jumps (list "-J" (mapconcat #'harness-tools-ssh--jump jumps ",")))
-                (and port (list "-p" port))
-                (and user (list "-l" user))
-                (list "--" (tramp-file-name-host target) "true"))))))
-
-(defun harness-tools-ssh--diagnose (prefix)
-  "Return a promise of what ssh says connecting to PREFIX's host, or nil.
-TRAMP only says that the connection failed; ssh in batch mode, which
-fails where it would ask, says why: no such host, a refused key, an
-unknown host key.  The promise resolves to nil when there is nothing
-to ask (no ssh login) or nothing was learnt."
-  (let ((command (condition-case nil (harness-tools-ssh--batch-command prefix) (error nil))))
-    (if (not command)
-        (harness-resolved nil)
-      (harness-then
-       (harness-run-command command :cwd temporary-file-directory
-                            :timeout harness-tools-ssh--diagnose-timeout :name "harness-ssh-check")
-       (lambda (r)
-         (let ((exit (plist-get r :exit))
-               (said (string-trim (plist-get r :stderr))))
-           (cond
-            ((eql exit 0)
-             "nothing: it connects, so TRAMP could not set up its shell on the host (a login script that prints or prompts?)")
-            ((eq exit 'timeout) (format "nothing within %ss" harness-tools-ssh--diagnose-timeout))
-            ((string-empty-p said) (format "exit %s" exit))
-            (t (harness-truncate-end (string-join (last (split-string said "\n" t) 3) "\n") 600)))))
-       (lambda (_err) nil)))))
-
-(defun harness-tools-ssh--busy-p (err)
-  "Non-nil when ERR is TRAMP refusing a call on a connection in use.
-TRAMP serves one call at a time on a connection, and the harness may
-make another one while it waits on the host for the first."
-  (and (string-search "Forbidden reentrant call of Tramp" (harness-error-message err)) t))
-
-(defun harness-tools-ssh--connection-error (prefix err)
-  "Return the tool error for a failed connection to PREFIX's host, or its promise.
-ERR is what TRAMP signalled.  A connection in use is not one that
-failed: the call can be made again."
-  (if (harness-tools-ssh--busy-p err)
-      (harness-tool-error (format "TRAMP was busy with another call on %s; run the command again." prefix)
-                          :meta (list :host prefix :busy t))
-    (harness-log 'info "ssh: could not connect to %s: %s" prefix (harness-error-message err))
-    (harness-then
-     (harness-tools-ssh--diagnose prefix)
-     (lambda (said)
-       (let ((reason (harness-tools-ssh--reason err)))
-         (harness-tool-error
-          (concat (format "Could not connect to %s" prefix)
-                  (if reason (format " (%s)" reason) "")
-                  "."
-                  (if said (format "\nssh -o BatchMode=yes says: %s" said) "")
-                  "\n" harness-tools-ssh--setup-hint)
-          :meta (list :host prefix :connected nil)))))))
-
 ;;;; The tool
 
 (defun harness-tools-ssh--dir (prefix local)
@@ -327,7 +231,7 @@ is expanded on the host, which connects, and so does the check."
                    (started (float-time))
                    (dir (harness-tools-ssh--dir prefix local)))
         (pcase dir
-          (`(:failed ,err) (harness-tools-ssh--connection-error prefix err))
+          (`(:failed ,err) (harness-tools-remote-failure prefix err))
           (`(:missing ,missing)
            (harness-tool-error (format "No directory %s on the host" missing)
                                :meta (list :host prefix :connected t)))
@@ -343,7 +247,7 @@ is expanded on the host, which connects, and so does the check."
                          (format "%s in %s" (harness-tools-shell--format-output r timeout) dir)
                          :meta (list :exit exit :host prefix :cwd dir
                                      :duration (- (float-time) started)))))
-            (lambda (err) (harness-tools-ssh--connection-error prefix err))))))))))
+            (lambda (err) (harness-tools-remote-failure prefix err))))))))))
 
 (defun harness-tools-ssh--subject (input)
   "Return what a call of the ssh tool with INPUT is about: host and command."
