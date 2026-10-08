@@ -36,6 +36,51 @@ may reach the user's real `harness-state-directory'.")
 ;; /tmp/harness-UID, which the user's own harness hands out.
 (setq harness-session--tmp-root (expand-file-name "session-tmp/" harness-test-state-root))
 
+(defvar harness-policy-file)
+;; No test reads the machine's policy (/etc/harness/policy.el), which
+;; would change what the suites see.  Tests of the policy bind it to a
+;; file of their own.
+(setq harness-policy-file nil)
+
+(declare-function harness-policy-load "harness-policy")
+(declare-function harness-policy-apply "harness-policy" (&optional final))
+(declare-function harness-policy-clear "harness-policy")
+
+(defun harness-test-write-policy (file alist)
+  "Write ALIST to FILE as an administrator writes a policy file."
+  (with-temp-file file
+    (insert ";; A policy written by a test.\n")
+    (let ((print-length nil) (print-level nil))
+      (prin1 alist (current-buffer)))
+    (insert "\n")))
+
+(defmacro harness-test-with-policy (alist &rest body)
+  "Run BODY with the policy ALIST in force, read from a temporary policy file.
+`policy-file' is bound to the file in BODY.  The policy is applied to
+the options defined by then, and to those defined in BODY as they are.
+Afterwards it is cleared, and each option it set has the value it had
+before, so no other test sees it."
+  (declare (indent 1))
+  `(progn
+     (require 'harness-policy)
+     (let* ((policy-file (make-temp-file "harness-policy-" nil ".el"))
+            (harness-policy-file policy-file)
+            (policy-alist ,alist)
+            (policy-before (mapcar (lambda (e) (cons (car e) (and (default-boundp (car e))
+                                                                   (list (default-value (car e))))))
+                                   policy-alist)))
+       (ignore policy-file)
+       (unwind-protect
+           (progn
+             (harness-test-write-policy policy-file policy-alist)
+             (harness-policy-load)
+             (harness-policy-apply)
+             ,@body)
+         (harness-policy-clear)
+         (dolist (cell policy-before)
+           (when (cdr cell) (set-default (car cell) (cadr cell))))
+         (delete-file policy-file)))))
+
 (defvar harness-provider-claude-api-key)
 ;; No test lists the models of the real Anthropic API, with whatever key
 ;; the environment holds.  Tests of that listing bind it to a test key.

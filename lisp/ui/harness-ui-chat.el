@@ -1252,22 +1252,39 @@ and the note changes when the harness updates it."
 (defun harness-chat--render-compaction (block)
   "Return the body of compaction BLOCK.
 A summary made to hand the conversation over to a model of another
-provider says which (see `harness-node-handoff')."
+provider says which (see `harness-node-handoff').  Otherwise the header
+says what kind of compaction it was (`harness-node-compaction-kind'): a
+brief summary names the model that wrote it, and a transcript file
+offers to open the file."
   (let* ((id (harness-chat-block-id block))
          (node (harness-chat-block-node block))
          (content (or (plist-get node :content) ""))
          (handoff (harness-node-handoff node))
+         (kind (harness-node-compaction-kind node))
+         (meta (plist-get node :meta))
+         (file (and (equal kind "transcript") (plist-get meta :file)))
          (header (concat (harness-chat--fold-button (harness-chat-block-collapsed block)
                                                     (lambda () (interactive) (harness-chat-toggle-block id)))
                          " "
                          (propertize (format "%s context compacted%s (%d words)"
                                              (harness-ui-icon 'harness-chat-icon-compaction)
-                                             (if handoff
-                                                 (format " to hand over to %s"
-                                                         (harness-ui-model-label (plist-get handoff :to)))
-                                               "")
+                                             (cond
+                                              (handoff
+                                               (format " to hand over to %s"
+                                                       (harness-ui-model-label (plist-get handoff :to))))
+                                              ((equal kind "brief")
+                                               (format " into a brief summary by %s"
+                                                       (harness-ui-model-label (plist-get meta :model))))
+                                              ((equal kind "transcript") " into a transcript file")
+                                              (t ""))
                                              (harness-chat--words content))
                                      'face 'harness-summary-face)
+                         (if (and (stringp file) (not (string-empty-p file)))
+                             (concat "  "
+                                     (harness-chat--button "[open the transcript]"
+                                                           (lambda () (find-file-other-window file))
+                                                           :help (format "Open %s" file)))
+                           "")
                          "\n"))
          (body (harness-chat--foldable
                 (harness-chat--face (harness-chat--ensure-newline (harness-ui-markdown-render content))
@@ -2702,6 +2719,27 @@ them.  An answer to a question is not a message.  A function that
 signals stops neither the message nor the other functions.  The BTW
 module names a side conversation after its first message this way.")
 
+(defvar harness-chat-commands nil
+  "Commands a chat's message box runs instead of sending: (NAME . FUNCTION).
+A message that is only /NAME, maybe followed by words on its line, with
+nothing attached, calls FUNCTION in the chat buffer with the words after
+the name (\"\" when none) rather than going to the session; the box is
+emptied once FUNCTION returns, and kept if it signals.  A skill of the
+same name wins: /NAME then expands it as usual.  / completion in the
+box offers the names with the skills.  Modules add their commands: the
+`ui-compact' module adds /compact.")
+
+(defun harness-chat--command (text)
+  "Return (FUNCTION . ARGS) when TEXT, a whole message, is a chat command.
+See `harness-chat-commands'."
+  (let ((case-fold-search nil))
+    (when (string-match "\\`/\\([[:alnum:]_-]+\\)\\(?:[ \t]+\\([^\n]*\\)\\)?\\'" text)
+      (let ((name (match-string 1 text))
+            (args (string-trim (or (match-string 2 text) ""))))
+        (when-let* ((fn (cdr (assoc name harness-chat-commands))))
+          (unless (member name harness-compose--skills)
+            (cons fn args)))))))
+
 (defun harness-chat--run-send-functions (text atts)
   "Run `harness-chat-send-functions' with TEXT and ATTS, demoting errors."
   (run-hook-wrapped 'harness-chat-send-functions
@@ -2754,6 +2792,13 @@ A module showing something of its own in this buffer
         (pcase-let ((`(,text . ,atts) (harness-chat--take-message)))
           (harness-chat--clear-compose)
           (funcall send text atts))))
+     ;; /compact and the like run here instead of going to the session.
+     ((and (null harness-compose-attachments) (harness-chat--command typed))
+      (when harness-chat--dead (user-error "This session was deleted"))
+      (pcase-let ((`(,fn . ,args) (harness-chat--command typed))
+                  (buf (current-buffer)))
+        (funcall fn args)
+        (with-current-buffer buf (harness-chat--clear-compose))))
      (t
       (pcase-let ((`(,text . ,atts) (harness-chat--take-message))
                   (buf (current-buffer))
@@ -3292,7 +3337,8 @@ the box, to reply to it; from the box, the agent's last message.
                          :placeholder #'harness-chat--placeholder
                          :redraw #'harness-chat--render-tail
                          :bottom t)
-  (setq-local harness-compose-quote-function #'harness-chat--quote-at-point)
+  (setq-local harness-compose-quote-function #'harness-chat--quote-at-point
+              harness-compose-commands (mapcar #'car harness-chat-commands))
   (add-hook 'post-command-hook #'harness-chat--post-command nil t)
   (add-hook 'window-buffer-change-functions #'harness-chat--on-window-buffer-change nil t)
   (add-hook 'window-scroll-functions #'harness-chat--schedule-history nil t)

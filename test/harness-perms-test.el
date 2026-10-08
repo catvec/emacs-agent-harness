@@ -4,6 +4,7 @@
 (require 'harness-test-helpers)
 
 (defvar harness-providers)
+(defvar harness-allowed-directories)
 
 (defvar harness-perms-test--session nil
   "Plist returned by the fake `session/get'.")
@@ -3514,6 +3515,105 @@ for the session is noted too, but one granted until the turn ends is not."
                          (harness-node-permission note)))
           (should (eq 'undone (car (harness-perms-test--undo sid note))))
           (should-not (plist-get (harness-call 'session/get sid) :allowed-dirs)))))))
+
+;;;; A policy
+
+(ert-deftest harness-perms-policy-mode-and-non-interactive-are-every-sessions ()
+  "A permission mode or non-interactive switch the policy sets wins over
+what a session record says."
+  (harness-perms-test--setup :permission-mode 'yolo :non-interactive nil)
+  (harness-perms-test--install-pending)
+  (let ((file (expand-file-name "x.txt" (plist-get harness-perms-test--session :cwd))))
+    (should (eq 'allow (harness-perms-test--behavior "write_file" 'write file)))
+    (harness-test-with-policy '((harness-permission-mode . ask) (harness-non-interactive . t))
+      (should (eq 'ask (harness-perms--mode-of harness-perms-test--session)))
+      (should (harness-perms--non-interactive-p harness-perms-test--session))
+      (should (eq 'ask (plist-get (harness-call 'permission/rules "s1") :mode))))
+    (harness-test-with-policy '((harness-permission-mode . ask))
+      ;; The write asks now, as the session were in ask mode.
+      (let ((s (harness-perms-test--start "write_file" 'write file)))
+        (should-not (plist-get (plist-get (cdr s) :payload) :dir))
+        (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) "deny-once")
+        (should (eq 'deny (plist-get (harness-test-await (car s)) :behavior)))))
+    (should (eq 'allow (harness-perms-test--behavior "write_file" 'write file)))))
+
+(ert-deftest harness-perms-policy-rules-come-first-and-answers-stay-in-the-session ()
+  "Standing rules the policy sets come before a session's own, so no
+answer overrides them; the prompts offer no answer for always, and one
+given anyway holds for the session."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let ((saved nil)
+        (cwd (plist-get harness-perms-test--session :cwd)))
+    (cl-letf (((symbol-function 'harness-save-user-option)
+               (lambda (sym value) (push (cons sym value) saved))))
+      (harness-perms-add-rule "s1" '(:tool "bash" :behavior allow) 'session)
+      (should (eq 'allow (harness-perms-test--behavior "bash" 'exec)))
+      (harness-test-with-policy '((harness-perms-rules (:tool "bash" :behavior deny)))
+        (let ((d (harness-perms-test--decide (harness-perms-test--request "bash" 'exec))))
+          (should (eq 'deny (plist-get d :behavior)))
+          (should (string-match-p "standing rule" (plist-get d :reason))))
+        (should (equal '(allow-once allow-session deny-once) (harness-perms--tool-options)))
+        (let ((s (harness-perms-test--start "write_file" 'write (expand-file-name "f" cwd))))
+          (should (equal '(allow-once allow-session deny-once)
+                         (plist-get (plist-get (cdr s) :payload) :options)))
+          (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) "allow-always")
+          (should (eq 'allow (plist-get (harness-test-await (car s)) :behavior))))
+        ;; The answer holds for this session only.
+        (should (equal '((:tool "bash" :behavior deny)) harness-perms-rules))
+        (should (cl-find "write_file" (gethash "s1" harness-perms--session-rules)
+                         :key (lambda (r) (plist-get r :tool)) :test #'equal))
+        (harness-perms-add-rule "s1" '(:tool "elisp" :behavior deny) 'always)
+        (should (equal '((:tool "bash" :behavior deny)) harness-perms-rules))
+        ;; A directory prompt keeps deny-always only while the rules are free.
+        (should (equal '(allow-once allow-session allow-always deny-once)
+                       (harness-perms--dir-prompt-options harness-perms-dir-options))))
+      (should-not saved)
+      ;; Without the policy, the session's own rules come first again.
+      (should (eq 'allow (harness-perms-test--behavior "bash" 'exec))))))
+
+(ert-deftest harness-perms-policy-allowed-directories-are-not-added-to ()
+  "Allowed directories the policy sets are what every session reaches
+besides its own: no prompt offers allow-always, an answer for always
+grants to the session, and none of them is revoked."
+  (let ((saved nil)
+        (fixed (harness-test-temp-dir))
+        (outside (harness-test-temp-dir))
+        (harness-allowed-directories nil))
+    (harness-test-with-temp-state
+      (harness-perms-test--setup :permission-mode 'ask)
+      (harness-perms-test--install-pending)
+      (cl-letf (((symbol-function 'harness-save-user-option)
+                 (lambda (sym value) (set sym value) (push (cons sym value) saved))))
+        (harness-test-with-policy `((harness-allowed-directories ,fixed))
+          (should (member fixed (harness-call 'permission/allowed-dirs "s1")))
+          (let ((s (harness-perms-test--start "read_file" 'read (expand-file-name "f" outside))))
+            (should (equal '(allow-once allow-session deny-once deny-always)
+                           (plist-get (plist-get (cdr s) :payload) :options)))
+            (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) "allow-always")
+            (should (eq 'allow (plist-get (harness-test-await (car s)) :behavior))))
+          ;; Granted to the session, not added to the policy's list.
+          (should (member outside (harness-call 'permission/allowed-dirs "s1")))
+          (should (equal (list fixed) harness-allowed-directories))
+          (should-not saved)
+          (should (string-match-p "set by policy"
+                                  (cadr (should-error (harness-call 'permission/allow-dir "s1"
+                                                                    (harness-test-temp-dir) 'always)))))
+          (should-error (harness-call 'permission/revoke-dir "s1" fixed))
+          (let ((entries (harness-call 'permission/dirs "s1")))
+            (should-not (plist-get (cl-find 'config entries :key (lambda (e) (plist-get e :source)))
+                                   :revocable))
+            (should (plist-get (cl-find 'session entries :key (lambda (e) (plist-get e :source)))
+                               :revocable)))
+          ;; An agent's own request is answered the same way.
+          (let* ((wanted (harness-test-temp-dir))
+                 (s (harness-perms-test--start-request wanted "Read the docs")))
+            (should-not (memq 'allow-always (plist-get (plist-get (cdr s) :payload) :options)))
+            (let ((d (harness-call 'permission/answer "s1" (plist-get (cdr s) :id) "allow-always")))
+              (should (eq 'allow (plist-get d :behavior)))
+              (should (string-match-p "to this session" (plist-get d :reason)))))
+          (should (equal (list fixed) harness-allowed-directories))
+          (should-not saved))))))
 
 (provide 'harness-perms-test)
 ;;; harness-perms-test.el ends here
