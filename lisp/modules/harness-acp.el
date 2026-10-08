@@ -91,7 +91,7 @@ is never used for any other failure.")
   '("session/" "agent/" "provider/" "tools/list" "usage/" "fallback/" "worktree/" "merge/"
     "config/" "skills/" "permission/" "compaction/" "handoff/" "naming/" "sandbox/status"
     "harness/api" "harness/version" "harness/reload" "harness-dev/" "question/" "project/" "task/"
-    "notification/" "acp/remote-" "pet/" "version/")
+    "notification/" "acp/remote-" "pet/" "version/" "insights/")
   "Bus method name prefixes callable as `_harness/NAME'.")
 
 (defconst harness-acp--enum-keys

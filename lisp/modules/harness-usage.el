@@ -345,12 +345,15 @@ A missing `:list-cost' is the cost; `:billing' is stored as a string."
 (defun harness-usage--row-matches-p (row opts)
   "Non-nil when ROW satisfies the filters in OPTS.
 Filters: `:since' (inclusive), `:until' (exclusive), `:project',
-`:session', `:model' and `:billing' (\"\" selects rows without one)."
+`:projects' (a list of roots, any of which matches), `:session',
+`:model' and `:billing' (\"\" selects rows without one)."
   (let ((ts (plist-get row :ts)))
     (and (or (null (plist-get opts :since)) (>= ts (plist-get opts :since)))
          (or (null (plist-get opts :until)) (< ts (plist-get opts :until)))
          (or (null (plist-get opts :project))
              (equal (harness-usage--root (plist-get opts :project)) (plist-get row :project)))
+         (or (null (plist-get opts :projects))
+             (member (plist-get row :project) (plist-get opts :projects)))
          (or (null (plist-get opts :session)) (equal (plist-get opts :session) (plist-get row :session)))
          (or (null (plist-get opts :model)) (equal (plist-get opts :model) (plist-get row :model)))
          (or (null (plist-get opts :billing))
@@ -366,6 +369,9 @@ Filters: `:since' (inclusive), `:until' (exclusive), `:project',
     (when-let* ((v (plist-get opts :since))) (push "ts >= ?" where) (push v args))
     (when-let* ((v (plist-get opts :until))) (push "ts < ?" where) (push v args))
     (when-let* ((v (plist-get opts :project))) (push "project = ?" where) (push (harness-usage--root v) args))
+    (when-let* ((v (plist-get opts :projects)))
+      (push (format "project IN (%s)" (string-join (make-list (length v) "?") ", ")) where)
+      (dolist (root v) (push root args)))
     (when-let* ((v (plist-get opts :session))) (push "session = ?" where) (push v args))
     (when-let* ((v (plist-get opts :model))) (push "model = ?" where) (push v args))
     (mapcar (lambda (values)
@@ -381,11 +387,17 @@ Filters: `:since' (inclusive), `:until' (exclusive), `:project',
 
 (defun harness-usage--rows (&rest opts)
   "Return usage rows matching OPTS, oldest first.
-OPTS: `:since' `:until' (floats) `:project' ROOT `:session' ID `:model' ID
-`:billing' NAME.
+OPTS: `:since' `:until' (floats) `:project' ROOT `:projects' ROOTS
+`:session' ID `:model' ID `:billing' NAME.  `:projects' selects the rows
+of any of ROOTS, a list; an empty list is no filter.
 Rows come from SQLite when available, else from the JSONL log; the
 Lisp filter applies to both."
-  (let* ((db (harness-usage--db))
+  (let* ((roots (plist-get opts :projects))
+         (opts (if roots
+                   (plist-put (copy-sequence opts) :projects
+                              (delete-dups (mapcar #'harness-usage--root roots)))
+                 opts))
+         (db (harness-usage--db))
          (rows (if db (harness-usage--rows-sqlite db opts) (harness-usage--rows-jsonl opts)))
          (rows (cl-remove-if-not (lambda (r) (harness-usage--row-matches-p r opts)) rows)))
     (sort rows (lambda (a b) (< (plist-get a :ts) (plist-get b :ts))))))
@@ -653,7 +665,9 @@ here in the harness, so the UI never reads the disk for it."
   "Return usage aggregated by OPTS `:group-by'.
 The grouping is project, model, day, session, hour or billing.
 Other OPTS filter rows: `:since' `:until' (floats, until exclusive)
-`:project' ROOT `:session' ID `:model' ID `:billing' NAME.  Each row is
+`:project' ROOT `:projects' ROOTS (a list: the rows of any of them, as
+a project and its git worktrees) `:session' ID `:model' ID `:billing'
+NAME.  Each row is
 \(:key STRING :input N :output N :cache-read N :cache-write N :cost F
 :list-cost F :calls N), cost being what was billed and list cost the
 same usage at API prices; billing keys are \"api\", \"subscription\",

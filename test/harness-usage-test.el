@@ -132,6 +132,33 @@ Return (PROJECT-A PROJECT-B)."
         (should-not (plist-member all :key)))
       (should (= 0 (plist-get (harness-call 'usage/totals :project "/nowhere/") :calls))))))
 
+(ert-deftest harness-usage-filters-by-several-projects ()
+  "`:projects' selects the rows of any of its roots, as given or not
+normalised, from SQLite and from the JSONL log alike; nil is no filter."
+  (harness-usage-test-with
+    (pcase-let ((`(,pa ,pb) (harness-usage-test-seed))
+                (pc "/tmp/harness-usage-c/"))
+      (harness-call 'usage/record (list :ts (harness-usage-test-ts 2026 9 2) :session "s3" :project pc
+                                        :model "demo:scripted" :cost 16.0))
+      (let ((check
+             (lambda ()
+               (should (= 7.0 (plist-get (harness-call 'usage/totals :projects (list pa pb)) :cost)))
+               (should (= 20.0 (plist-get (harness-call 'usage/totals :projects (list "/tmp/harness-usage-b" pc))
+                                          :cost)))
+               (should (= 23.0 (plist-get (harness-call 'usage/totals :projects nil) :cost)))
+               (should (= 0 (plist-get (harness-call 'usage/totals :projects (list "/nowhere/")) :calls)))
+               (should (equal (list pc pa)
+                              (mapcar (lambda (r) (plist-get r :key))
+                                      (harness-call 'usage/summary :group-by 'project :projects (list pa pc)))))
+               (should (= 2.0 (plist-get (harness-call 'usage/totals :projects (list pa) :model "demo:other")
+                                         :cost))))))
+        (funcall check)
+        (cl-letf (((symbol-function 'harness-method/store/sqlite) (lambda () nil)))
+          (harness-usage-test-seed)
+          (harness-call 'usage/record (list :ts (harness-usage-test-ts 2026 9 2) :session "s3" :project pc
+                                            :model "demo:scripted" :cost 16.0))
+          (funcall check))))))
+
 (defun harness-usage-test--git (dir &rest args)
   "Run git ARGS in DIR; signal on failure."
   (with-temp-buffer

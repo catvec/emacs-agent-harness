@@ -12,9 +12,9 @@ module needs something more, add it here first.
                                  the harness process (see Processes).
  ------------------------------- ACP (JSON-RPC over loopback TCP; in-process lisp objects
                                  when `harness-process' is nil)
- State          session, agent, config, project, store, usage, fallback, naming,
-                compaction, handoff, worktree, merge, tasks, tasks-notify, skills,
-                perms, sandbox, notifications
+ State          session, agent, config, project, store, usage, insights, fallback,
+                naming, compaction, handoff, worktree, merge, tasks, tasks-notify,
+                skills, perms, sandbox, notifications
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-emacs, tools-web, tools-agent,
@@ -1766,6 +1766,96 @@ non-interactive session it stays a denial.
     measured session's rate, each with `:session`. Each new rate
     triggers `usage/rate-updated SID RATE`, which ACP forwards.
 
+### insights
+
+The Insights report: how a period of work with the agents went, after
+Claude Code's `/insights`, from the harness's own records only
+(transcripts, the usage database, the task board, its own permission
+decision log), so it is the same for every provider.  Methods are
+`_harness/insights/...` over ACP.
+
+- `insights/compute &key since until project period` → promise of the
+  REPORT.  SINCE and UNTIL are float times (SINCE nil: all time; UNTIL
+  nil: now); PROJECT a directory, normalised to its main checkout
+  (`harness-files-owning-checkout`), its git worktrees with it, nil every
+  project; PERIOD names the period for the summary's cache.  A compute
+  of the same period and project already running is shared, and a
+  report is memoised for `harness-insights--memo-age` seconds.
+- The transcripts are read by a child `emacs --batch` loading this
+  module (`harness-insights-scan-main`, input and output as JSON files
+  named by `HARNESS_INSIGHTS_INPUT`/`HARNESS_INSIGHTS_OUTPUT`), so the
+  harness process never waits on them; it is killed after
+  `harness-insights--scan-timeout`.  The sessions it reads are those
+  `session/list` says lived in the period.  A node is counted in the log
+  of the session that made it (`:session`), so a fork's copy of its
+  parent's history is not counted twice; a fork's settling results
+  (`:meta :forked`) are not activity.  A failed scan leaves a REPORT
+  with `:scan-error` and empty session figures; usage and tasks stand.
+- REPORT = `(:since :until :project :period :generated :scan :scan-error
+  :sessions :session-list :busiest-sessions :tools :tool-totals
+  :permissions :activity :projects :usage :tasks :narrative
+  :narrative-mode)`:
+  - `:sessions (:active :turns :messages :active-seconds :by-kind)`.
+    MESSAGES are the user nodes with no sender (`:meta :from`), the
+    user's own; TURNS the user nodes that are not steering;
+    ACTIVE-SECONDS add the gaps between a session's nodes up to
+    `harness-insights--idle-gap` (600 s).
+  - `:session-list`/`:busiest-sessions` rows `(:id :name :kind :project
+    :main :model :prompt :turns :messages :tools :errors :denied :active
+    :first :last :task)`, by active time.
+  - `:tools ((:tool :calls :errors :denied :interrupted :seconds
+    :unanswered))`, most called first, from tool-result nodes:
+    `:meta :denied`, `:meta :interrupted`, `:is-error`, and
+    `:meta :duration` for SECONDS; calls the harness made for a user
+    (`:meta :from`) are left out.
+  - `:permissions (:decisions :allowed :denied :asked :asked-allowed
+    :asked-denied :first :tools)` from the decision log (below).
+  - `:activity (:hours :weekdays :active-days :longest-streak
+    :longest-streak-end :current-streak :busiest-day)`: the user's
+    messages by local hour (24) and by weekday from Monday (7), the days
+    with any, and the busiest, `(:day "YYYY-MM-DD" :messages N)`.
+  - `:usage (:totals :by-model :by-provider :projects :series :bucket)`:
+    `usage/totals`, `usage/summary` and `usage/series` with the same
+    SINCE and UNTIL as the usage dashboard asks, a PROJECT as
+    `:projects`, the roots `usage/summary :group-by project` says
+    belong to it, so the figures are the dashboard's.
+  - `:tasks (:submitted :completed :merged :first-try :sent-back
+    :feedback-rounds :failed :cancelled :duplicates :conflicted
+    :mean-time :median-time :open :notable)`: from `task/list`, every
+    task loaded, archived ones included (a PROJECT's repository store is
+    read first, as its board would).  CONFLICTED counts merges the merge queue told about
+    a conflict (its messages to the task's session); OPEN the board's
+    columns now, `((:column :count))`; NOTABLE at most ten
+    `(:id :title :session :state :column :outcome :why :feedback
+    :conflict :created :done-at)`, WHY one of failed, sent-back, review,
+    done.
+- `insights/projects` → the main checkouts of every session's and
+  task's project, sorted: what the report can be narrowed to.
+- `insights/narrative &key since until project period refresh` →
+  promise of `(:summary :themes :patterns :friction :suggestions :model
+  :at :stale)`, or `(:skipped TEXT [:error t])`.  A model of the user's
+  provider (`harness-insights-model`, `auto` the cheap tier of
+  `harness-model` as configured for the project) gets a digest of the
+  REPORT (figures, and each session's kind, name and first request,
+  at most `harness-insights--prompt-chars` characters) and answers in
+  JSON.  One `provider/complete` call, `:ephemeral t`, `:no-thinking t`,
+  in `insights/` under the state directory, cancelled after
+  `harness-insights--narrative-timeout`; its cost is recorded with
+  `usage/record` under the project, or none.  Summaries are kept in
+  `insights/narratives.json` by period and project
+  (`harness-insights--narratives-kept`); a kept one younger than
+  `harness-insights-narrative-max-age` is returned unless REFRESH.  A
+  failure is not retried for `harness-insights--narrative-retry`
+  seconds unless REFRESH.  `harness-insights-narrative` nil skips it,
+  and the REPORT says so in `:narrative-mode`.
+- The decision log: `permission/requested` notes when a call was asked
+  about, and `permission/decided` appends `(:ts :session :tool :behavior
+  :asked)` to `insights/permissions-YYYY-MM.jsonl` (store), when
+  `harness-insights-record-permissions`.  Months older than
+  `harness-insights--permission-months` are deleted at init.
+- The demo provider writes the summary from the digest, so the tests
+  and the dev daemon run offline.
+
 ### fallback
 
 When a provider runs out of quota or money, its sessions carry on with
@@ -3275,7 +3365,7 @@ would copy here while the UI waits; on a text terminal's frame a press
 is a plain press.
 
 Views share positions with sessions: the task board, session list,
-usage dashboard, worktree list, conversation tree and log open through
+usage dashboard, Insights report, worktree list, conversation tree and log open through
 `harness-ui-display-view`, replacing the session in their position (and
 returning to the position they had last); a session opened from a view
 (`harness-ui-session-opener`) replaces the view.  Menus, help and the
@@ -3606,7 +3696,17 @@ worktrees, its tasks' and sub-agents', fold by their `:main` into one
 line with their sum and count, folded until TAB, RET or a click unfolds
 it, `w` or `[show worktrees]` every project, the main checkout's own
 usage first, then each worktree's; a redraw keeps every window's start
-and point lines), worktrees (`harness-ui-worktree`), notifier
+and point lines), Insights report (`harness-ui-insights`:
+`*harness insights*`, a read-only view with a placeholder until
+`_harness/insights/compute` answers, then the totals, the written
+summary (`_harness/insights/narrative`, asked for once the figures
+are in), activity, usage (the dashboard's chart and meters), projects,
+sessions, tools, permissions and tasks; its periods and their `:since`
+are the dashboard's (`harness-ui-usage--since`), so its usage figures
+are too; `t` the period, `p` the project, `n` the summary again, `g`
+all again, RET a session or task line's session; a redraw keeps every
+window's start and point lines), worktrees (`harness-ui-worktree`),
+notifier
 (`harness-ui-notify`: global mode-line segment with blocked/running/idle
 counts, clickable), BTW side window (`harness-ui-btw`: a new, empty
 session listed under the session it is opened over but sharing nothing

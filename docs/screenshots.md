@@ -65,6 +65,8 @@ The pictures, by the name `scripts/media.sh` takes:
 | `btw` | A BTW under the rate-limit session's chat, `acme/ratelimit.py` beside it | `harness-media-shot-btw` |
 | `menu` | The menu, opened from that chat | `harness-media-shot-menu` |
 | `version` | The version page of a harness straight.el installed from GitHub, behind GitHub and its development checkout: the commits it lacks and how to pull them | `harness-media-shot-version` |
+| `insights` | The Insights report over 30 days of every project: the totals, the summary the scripted model wrote, the messages by hour and weekday | `harness-media-shot-insights` |
+| `insights-activity` | The same report further down: the busiest sessions, the tools, the permission decisions and the tasks | `harness-media-shot-insights-activity` |
 
 ## How the pictures are made
 
@@ -136,6 +138,15 @@ calls a model or the network.
 - `harness-media--age` moves the times of the tasks, the sessions and
   the tree's nodes back, so the pictures read "done 2h ago" and "took
   14m" rather than "just now".
+- `harness-media--seed-history` writes a month of earlier chats for
+  the Insights pictures. The report reads transcripts from disk, where
+  the world's nodes all date from today; `harness-media--age` moves
+  them in memory only. Day by day back from yesterday, it writes chats
+  in the three projects at working hours, with their tool calls,
+  failures and denials, and the permission decisions those calls took.
+  The first Insights shot does it, and those shots come last, so the
+  other pictures never show these chats. The scripted model answers
+  the report's request with `harness-media--insights-summary`.
 
 The random generator is seeded, so runs look alike, though times
 follow the clock, and ids drawn while turns run side by side can come

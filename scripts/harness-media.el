@@ -64,6 +64,7 @@ layout: half the frame keeps the board's cards whole.")
 (defvar harness-media-project nil "Root of the demo project.")
 (defvar harness-media-failures nil "Shots that failed, as (NAME . ERROR).")
 (defvar harness-media--world nil "Plist naming the sessions and tasks of the world.")
+(defvar harness-media--insights-summary)
 
 ;; Harness variables set or read here.
 (defvar harness-state-directory)
@@ -113,6 +114,12 @@ layout: half the frame keeps the board's cards whole.")
 (declare-function harness-ui-usage-set-group "harness-ui-usage")
 (declare-function harness-ui-usage-toggle-worktrees "harness-ui-usage")
 (defvar harness-ui-usage--unfolded)
+(declare-function harness-insights "harness-ui-insights")
+(declare-function harness-insights--permissions-name "harness-insights")
+(defvar harness-ui-insights--buffer-name)
+(defvar harness-ui-insights--data)
+(defvar harness-ui-insights--loading)
+(defvar harness-ui-insights--writing)
 (declare-function harness-worktrees "harness-ui-worktree")
 (declare-function harness-settings "harness-ui-config")
 (declare-function harness-tasks--set "harness-tasks")
@@ -1196,6 +1203,9 @@ a toast and an [Undo]."
      ;; The task board's search: answer in JSON, as the prompt asks.
      ((string-prefix-p "You are the search box" system)
       (list (harness-media--say (harness-media--search-answer newest))))
+     ;; The Insights report's summary, in JSON too.
+     ((string-prefix-p "You write the Insights report" system)
+      (list (harness-media--say (harness-json-encode-text harness-media--insights-summary))))
      (t (let ((entry (cl-find-if (lambda (e) (string-match-p (car e) newest)) harness-media--scripts)))
           (if entry
               (funcall (cdr entry) request)
@@ -2053,6 +2063,182 @@ Every project starts folded, whatever an earlier shot unfolded."
   (harness-media--usage-by-project t)
   (harness-media--capture "usage-worktrees"))
 
+;;;; The Insights report
+
+;; The report reads the transcripts on disk, where the world's sessions
+;; are all from today: a month of earlier chats is written for it, in
+;; the three projects the usage history covers, on working days and
+;; hours, with the permission decisions their tool calls took.  They are
+;; made when the first Insights picture is taken, after the others, so
+;; the session list and the other pictures do not show them.
+
+(defconst harness-media--history
+  '((api "Add an index on orders.created_at" "Listing orders by date scans the whole table; add an index and a migration.")
+    (web "Fix the checkout form validation" "The checkout form accepts a quantity of 0. Validate it on the client and show why.")
+    (api "Why is the catalogue endpoint slow?" "GET /products takes 900 ms with 2,000 products. Why?")
+    (infra "Nightly database backups" "Back the orders database up to S3 every night and keep 30 days.")
+    (api "Validate order quantities" "Reject orders with a quantity under 1 or over 500, with a 422 and the field.")
+    (web "Order history page" "Add an order history page: the customer's orders, newest first, 20 a page.")
+    (api "Review the auth module" "Read acme/auth.py and tell me what you would change.")
+    (infra "Cache pip in CI" "CI spends two minutes installing packages. Cache them between runs.")
+    (api "Return 404 for unknown products" "GET /products/999 raises a KeyError and answers 500. Answer 404.")
+    (web "Dark mode for the dashboard" "Give the admin dashboard a dark mode that follows the system setting.")
+    (api "Test the webhook sender" "Write tests for acme/webhooks.py: a subscriber that times out, one that answers 500.")
+    (infra "Terraform for the staging database" "Plan a staging copy of the orders database in Terraform, smaller than production.")
+    (api "Explain the orders schema" "Explain the orders tables to someone joining the team.")
+    (web "Bundle size went up" "The JavaScript bundle grew by 300 kB last week. Find out why.")
+    (api "Soft-delete orders" "Deleting an order should keep it for accounting: add deleted_at and filter on it.")
+    (api "Move to SQLAlchemy 2" "Upgrade SQLAlchemy to 2.0 and fix what breaks.")
+    (web "Format prices in the customer's locale" "Prices show as 1234.5; format them for the customer's locale and currency.")
+    (infra "Alert on 5xx rates" "Alert when more than 1% of requests answer 5xx over five minutes.")
+    (api "Idempotency keys for POST /orders" "A retried POST /orders makes a second order. Accept an Idempotency-Key header.")
+    (api "Profile the order listing" "Profile GET /orders with 10,000 orders and say where the time goes.")
+    (web "Flaky Cypress login test" "The login test fails one run in five on CI. Make it reliable.")
+    (api "Typed responses" "Describe the JSON our endpoints answer with dataclasses, and use them.")
+    (infra "Rotate the database password" "Rotate the database password without downtime.")
+    (api "Clean up the settings module" "settings.py reads the environment in three places; read it in one."))
+  "Chats of the month before: (PROJECT NAME PROMPT).")
+
+(defconst harness-media--history-tools
+  '((api ("read_file" . 30) ("grep" . 14) ("edit_file" . 22) ("bash" . 24) ("write_file" . 6) ("glob" . 4))
+    (web ("read_file" . 28) ("edit_file" . 24) ("bash" . 22) ("grep" . 12) ("web_fetch" . 6) ("emacs_buffer" . 8))
+    (infra ("read_file" . 24) ("bash" . 36) ("edit_file" . 20) ("web_search" . 10) ("write_file" . 10)))
+  "The tools the chats of each project call, weighted.")
+
+(defconst harness-media--history-failing
+  '(("bash" . 17) ("edit_file" . 6) ("web_fetch" . 10) ("glob" . 0) ("grep" . 2))
+  "Percent of the calls of each tool that fail; 3 when not named.")
+
+(defconst harness-media--insights-summary
+  '(:summary "A month of steady work on the Acme orders API, with a quieter stream of front-end and infrastructure changes beside it. Chats carried the questions and the investigations, tasks the changes that were clear from the start; nearly every task was accepted the first time, and the one sent back was missing a unit."
+    :themes ["Rate limiting for the orders API: token buckets, then a sliding-window log tried in a fork"
+             "Paging, profiling and timing GET /orders, and the catalogue endpoint's slowness"
+             "Webhooks: telling subscribers about new orders, testing the sender and pooling its connections"
+             "acme-web: checkout validation, the order history page and a flaky login test"
+             "infra: backups, CI caching and alerts on 5xx rates"]
+    :patterns ["You start most work mid-morning and again after lunch, rarely at weekends."
+               "Open questions go to chats and clear changes to tasks; a design with two good answers gets a fork."]
+    :friction ["bash fails more than any other tool, mostly test runs: the flaky order and login tests account for many of them."
+               "One task was sent back to say which unit its threshold was in; its prompt left it open."]
+    :suggestions ["Say units and limits in task prompts, as in \"500 ms\" or \"50 by default, at most 200\": the task sent back lacked one."
+                  "Fix the flaky test_creates_an_order once: it is behind a good share of the failed bash calls."
+                  "Put the project's habits, such as how to run the tests, in its instructions file, so every session starts with them."])
+  "The summary the scripted model writes for the Insights report.")
+
+(defun harness-media--history-project (key)
+  "Return the directory of history project KEY."
+  (pcase key
+    ('api harness-media-project)
+    ('web (expand-file-name "~/src/acme-web/"))
+    (_ (expand-file-name "~/src/infra/"))))
+
+(defun harness-media--history-input (tool project)
+  "Return a plausible input of a TOOL call in PROJECT, a history key."
+  (pcase tool
+    ("bash" (list :command (pcase project
+                             ('api "python -m pytest -q") ('web "npm test -- --run")
+                             (_ "terraform plan -out plan.tfplan"))))
+    ((or "grep" "glob") (list :pattern "orders"))
+    ((or "web_fetch" "web_search") (list :query "release notes"))
+    ("emacs_buffer" (list :name "*compilation*"))
+    (_ (list :path (pcase project ('api "acme/orders.py") ('web "src/checkout.ts") (_ "main.tf"))))))
+
+(defun harness-media--history-chat (entry day-start)
+  "Write the chat ENTRY, (PROJECT NAME PROMPT), as held on the day at DAY-START.
+Its tool calls are logged with the permission decisions they took."
+  (pcase-let* ((`(,project ,name ,prompt) entry)
+               (id (harness-media--new-session :name name :cwd (harness-media--history-project project)
+                                               :model (harness-media--pick '(("claude:claude-fable-5-1" . 6)
+                                                                             ("claude:claude-sonnet-5" . 3)
+                                                                             ("openrouter:openai/gpt-5" . 1)))))
+               (tools (cdr (assq project harness-media--history-tools)))
+               (ts (+ day-start (* 3600 (harness-media--pick '((9 . 3) (10 . 6) (11 . 5) (12 . 1) (13 . 2) (14 . 5)
+                                                               (15 . 5) (16 . 4) (17 . 2) (20 . 1) (21 . 1))))
+                      (* 60 (random 50))))
+               (created ts)
+               (turns (harness-media--pick '((1 . 3) (2 . 4) (3 . 3) (4 . 1)))))
+    (dotimes (turn turns)
+      (harness-call 'session/append id (list :kind 'user :ts ts
+                                             :content (if (zerop turn) prompt "Good. Now the tests for it, please.")))
+      (dotimes (_ (+ 2 (random (if (zerop turn) 6 3))))
+        (cl-incf ts (+ 8 (random 50)))
+        (let* ((tool (harness-media--pick tools))
+               (call-id (format "history-%d" (cl-incf harness-media--call-count)))
+               (asked (and (member tool '("bash" "write_file" "web_fetch")) (< (random 100) 45)))
+               (denied (and (equal tool "bash") (< (random 100) 6)))
+               (failed (and (not denied)
+                            (< (random 100) (or (cdr (assoc tool harness-media--history-failing)) 3))))
+               (took (if (equal tool "bash") (+ 4 (random 70)) (+ 1 (random 3)))))
+          (harness-call 'session/append id (list :kind 'tool-call :ts ts :tool tool :call-id call-id
+                                                 :input (harness-media--history-input tool project)))
+          (harness-call 'store/append (harness-insights--permissions-name ts)
+                        (list :ts ts :session id :tool tool :behavior (if denied "deny" "allow")
+                              :asked (if (or asked denied) t :false)))
+          (cl-incf ts took)
+          (harness-call 'session/append id (append (list :kind 'tool-result :ts ts :call-id call-id
+                                                         :output (cond (denied "The user denied this call.")
+                                                                       (failed "Exit status 1")
+                                                                       (t "ok")))
+                                                   (and (or denied failed) (list :is-error t))
+                                                   (list :meta (if denied (list :denied t :duration 0)
+                                                                 (list :duration took)))))))
+      (cl-incf ts (+ 20 (random 90)))
+      (harness-call 'session/append id (list :kind 'assistant :ts ts :content "Done: the change and its tests."))
+      (cl-incf ts (* 60 (+ 3 (random 25)))))
+    (harness-call 'session/deactivate id)
+    (when-let* ((s (gethash id harness-sessions)))
+      (aset s (cl-struct-slot-offset 'harness-session 'created) created)
+      (aset s (cl-struct-slot-offset 'harness-session 'updated) ts))))
+
+(defun harness-media--seed-history ()
+  "Write the month of chats before the pictures, once."
+  (unless (plist-get harness-media--world :history)
+    ;; The same month whichever pictures were taken before.
+    (random "harness-media-history")
+    (let ((entries harness-media--history)
+          (count 0))
+      ;; From yesterday back, as long as there are chats.
+      (cl-loop for days-ago from 1 to 29
+               for start = (harness-media--day-start (- (float-time) (* days-ago 86400)))
+               for weekday = (string-to-number (format-time-string "%u" start))
+               for chats = (pcase weekday (6 (if (zerop (random 3)) 1 0)) (7 0) (_ (if (zerop (random 4)) 2 1)))
+               do (dotimes (_ chats)
+                    (when entries
+                      (harness-media--history-chat (pop entries) start)
+                      (cl-incf count))))
+      (harness-ui-refresh-sessions)
+      (setq harness-media--world (append (list :history count) harness-media--world))
+      (harness-media--log "wrote %d chats of history" count))))
+
+(defun harness-media--insights ()
+  "Show the Insights report over 30 days, of every project, its summary written."
+  (harness-media--seed-history)
+  (harness-media--view #'harness-insights
+                       (lambda ()
+                         (harness-media--wait (lambda () (and harness-ui-insights--data
+                                                              (not harness-ui-insights--loading)
+                                                              (not harness-ui-insights--writing)))
+                                              90 "the Insights report")
+                         (harness-media--settle 1)
+                         (goto-char (point-min)))))
+
+(defun harness-media-shot-insights ()
+  "The Insights report: the figures, the summary the model wrote and the usage."
+  (harness-media--insights)
+  (harness-media--capture "insights"))
+
+(defun harness-media-shot-insights-activity ()
+  "The Insights report further down: sessions, tools, tasks and activity."
+  (harness-media--insights)
+  (let ((window (get-buffer-window harness-ui-insights--buffer-name)))
+    (with-current-buffer harness-ui-insights--buffer-name
+      (goto-char (point-min))
+      (re-search-forward "^ Sessions")
+      (set-window-start window (line-beginning-position 0))
+      (set-window-point window (point))))
+  (harness-media--settle 0.5)
+  (harness-media--capture "insights-activity"))
+
 (defun harness-media-shot-worktrees ()
   "The worktrees of the demo project."
   (harness-media--view (lambda () (harness-worktrees harness-media-project)))
@@ -2220,7 +2406,10 @@ afterwards."
     ("btw" . harness-media-shot-btw)
     ("menu" . harness-media-shot-menu)
     ("remote" . harness-media-shot-remote)
-    ("version" . harness-media-shot-version))
+    ("version" . harness-media-shot-version)
+    ;; Last: they write a month of chats the other pictures must not show.
+    ("insights" . harness-media-shot-insights)
+    ("insights-activity" . harness-media-shot-insights-activity))
   "Every picture, as (NAME . FUNCTION), in the order they are taken.")
 
 ;;;; Entry point
