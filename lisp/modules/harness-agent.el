@@ -243,6 +243,16 @@ permission is decided and `:detail', its latest progress, and
 `agent/activity-changed'."
   (gethash session-id harness-agent--activities))
 
+(harness-defmethod agent/note-activity (session-id activity)
+  "Announce ACTIVITY as what SESSION-ID's turn does, before the turn starts.
+For an `agent/before-turn' gate that works first, such as the cold
+cache's compaction (harness-cowboy.el): ACTIVITY is a plist as
+`agent/activity' returns, say (:phase compacting).  Nothing happens
+when SESSION-ID has no turn; the turn's own activity replaces it once
+it starts, and its end clears it."
+  (harness-agent--update-activity session-id activity)
+  nil)
+
 ;;;; Prompt assembly
 
 (defconst harness-agent--tmp-dir-line
@@ -681,25 +691,34 @@ FROM, when non-nil, is who sent the message (see `agent/prompt')."
     (remhash session-id harness-agent--retries)
     ;; The provider conversation follows the head first, then the gate
     ;; runs, so that an automatic compaction lands before the user's new
-    ;; message, never after it.
+    ;; message, never after it.  The gate's value carries the message
+    ;; (:text TEXT :from FROM), for a gate that asks about it.
     (harness-then
      (harness-then (harness-agent--follow-head session-id)
                    (lambda (_)
-                     (harness-run-filter-async 'agent/before-turn (list :proceed t)
+                     (harness-run-filter-async 'agent/before-turn
+                                               (list :proceed t
+                                                     :message (list :text (harness-agent--blocks-text blocks)
+                                                                    :from from))
                                                (if (harness-call 'session/exists-p session-id)
                                                    (harness-call 'session/get session-id)
                                                  session))))
      (lambda (gate)
        (when (harness-call 'session/exists-p session-id)
          (harness-call 'session/append session-id node))
-       (if (not (plist-get gate :proceed))
-           (progn
-             (when (plist-get gate :reason)
-               (harness-call 'session/hint session-id (format "Turn not started: %s" (plist-get gate :reason))))
-             (harness-agent--end turn 'blocked (plist-get gate :reason)))
+       (cond
+        ;; Cancelled while a gate held it (one asking the user, say): the
+        ;; message stays, the turn is over, or ends now.
+        ((not (harness-agent--current-p turn)) nil)
+        ((harness-agent-turn-cancelled turn) (harness-agent--end turn 'cancelled))
+        ((not (plist-get gate :proceed))
+         (when (plist-get gate :reason)
+           (harness-call 'session/hint session-id (format "Turn not started: %s" (plist-get gate :reason))))
+         (harness-agent--end turn 'blocked (plist-get gate :reason)))
+        (t
          (harness-call 'session/set-status session-id 'running)
          (harness-emit 'agent/turn-started session-id)
-         (harness-agent--step turn))))
+         (harness-agent--step turn)))))
     promise))
 
 ;;;; Steps
@@ -1245,12 +1264,16 @@ a running turn, the queued messages would steer it."
 ;;;; Cancel and queue
 
 (harness-defmethod agent/cancel (session-id)
-  "Cancel the running turn of SESSION-ID, if any."
+  "Cancel the running turn of SESSION-ID, if any.
+`agent/cancelling' tells whatever holds a turn up before it starts, a
+gate asking the user say, to let it go: the turn then ends as soon as
+its gate settles, rather than after the grace period."
   (let ((turn (gethash session-id harness-agent--turns)))
     (when turn
       (setf (harness-agent-turn-cancelled turn) t)
       (let ((cancel (plist-get (harness-agent-turn-handle turn) :cancel)))
         (when cancel (ignore-errors (funcall cancel))))
+      (harness-emit 'agent/cancelling session-id)
       (run-at-time harness-agent--cancel-grace nil
                    (lambda () (when (eq (gethash session-id harness-agent--turns) turn)
                                 (harness-agent--finalize-live turn)
@@ -1288,6 +1311,8 @@ item is, else from the first item's sender."
     (let (out) (maphash (lambda (k _) (push k out)) harness-agent--turns) out)))
 
 (dolist (ev '((agent/turn-started . "(SESSION-ID)") (agent/turn-ended . "(SESSION-ID REASON)")
+              (agent/cancelling
+               . "(SESSION-ID) when the running turn is cancelled, before it ends: a gate holding the turn up lets it go")
               (agent/step-started . "(SESSION-ID STEP)")
               (agent/stream . "(SESSION-ID NODE-ID KIND DELTA)")
               (agent/tool-call . "(SESSION-ID NODE)") (agent/tool-result . "(SESSION-ID NODE)")

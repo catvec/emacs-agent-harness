@@ -1859,8 +1859,9 @@ never made it (`harness-outside-node-p')."
           ('user (user n))
           ('compaction (flush)
                        (add 'user (list :type "text"
-                                        :text (if (equal (harness-node-compaction-kind n) "transcript")
-                                                  ;; A note pointing at the file, no summary.
+                                        :text (if (member (harness-node-compaction-kind n) '("transcript" "fresh"))
+                                                  ;; A note pointing at the file, or saying
+                                                  ;; nothing was carried over: no summary.
                                                   (plist-get n :content)
                                                 (concat "Summary of the conversation so far:\n\n"
                                                         (plist-get n :content))))))
@@ -1965,17 +1966,34 @@ into a transcript both write theirs here."
 
 (defun harness-session--interrupted-text (pending)
   "Describe what a session stopped mid-turn was doing.
-PENDING is the list of requests it was saved waiting on."
+PENDING is the list of requests it was saved waiting on.  A question
+that held a message back (its payload's `:waiting-message', see
+`harness-session--requeue') says the message is queued again."
   (let* ((item (car pending))
          (kind (plist-get item :kind))
          (payload (plist-get item :payload)))
     (concat "Interrupted: the harness stopped "
             (pcase (if (stringp kind) (intern kind) kind)
+              ((guard (plist-get payload :waiting-message))
+               "before you said what goes first, the prompt cache being cold; the message that waited is back in the queue")
               ('question (format "while waiting for an answer to: %s"
                                  (harness-first-line (plist-get payload :question) 200)))
               ('permission (format "while waiting for permission: %s"
                                    (or (plist-get payload :title) (plist-get payload :tool) "a tool call")))
               (_ "during this turn")))))
+
+(defun harness-session--requeue (id pending)
+  "Queue again the messages PENDING held back from a turn of session ID.
+A question asked before a turn starts (the cowboy module's, about a
+cold prompt cache) keeps the message that waits for its answer in its
+payload's `:waiting-message', (:text TEXT :from FROM): the turn that
+would have appended it ended with the process, so the message goes back
+in the queue, to be sent when the user is ready.  Only its text
+survives."
+  (dolist (item pending)
+    (let ((message (plist-get (plist-get item :payload) :waiting-message)))
+      (when (and message (not (harness-string-blank-p (plist-get message :text))))
+        (harness-call 'session/queue id (plist-get message :text) nil (plist-get message :from))))))
 
 (defun harness-session--settle (s pending)
   "Close the turn of S that a stopped harness left unfinished.
@@ -1986,7 +2004,8 @@ unanswered call -- and a hint says what the session was doing.  So does
 a call the harness recorded in S's parent for S (`harness-outside-node-p'
 with S as its `:child-id'), which nothing else would answer: the parent
 need not have been running.  The requests themselves are gone: the turn
-that would read their answers ended with the process."
+that would read their answers ended with the process.  A message one
+held back goes back in the queue (`harness-session--requeue')."
   (let* ((id (harness-session-id s))
          (parent (gethash (harness-session-parent-id s) harness-sessions))
          (interrupted (lambda (_call)
@@ -2002,6 +2021,7 @@ that would read their answers ended with the process."
                                              (equal (plist-get (plist-get call :meta) :child-id) id)))
                          (harness-session--unanswered (harness-session--path parent)))
        interrupted))
+    (harness-session--requeue id pending)
     (harness-call 'session/hint id (harness-session--interrupted-text pending))
     ;; Saved inactive now, so the next start does not settle it again.
     (harness-session--save id)))

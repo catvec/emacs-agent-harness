@@ -224,6 +224,40 @@ temporary directory and asks with one per option, as a model is told to."
         (should-not (harness-call 'question/answer sid (car ids) "again")))
       (should (eq 'idle (plist-get (harness-call 'session/get sid) :status))))))
 
+(ert-deftest harness-tools-agent-question-ask-for-the-harness ()
+  "`question/ask' asks the user a question with no tool call behind it:
+the session is blocked on it, its payload carries what the caller adds,
+and the caller hears the answer, or that it was dismissed."
+  (harness-tools-agent-test-with
+    (let* ((sid (harness-tools-agent-test-session))
+           (heard nil)
+           (asked nil)
+           (pid (progn
+                  (harness-on 'question/asked (lambda (s item) (push (cons s (plist-get item :id)) asked)))
+                  (harness-call 'question/ask sid
+                                '(:question "Which way?" :options ["Left" "Right"] :extra (:a 1))
+                                (lambda (text dismissed) (push (list text dismissed) heard))))))
+      (should (equal (list (cons sid pid)) asked))
+      (should (eq 'blocked (plist-get (harness-call 'session/get sid) :status)))
+      (let ((payload (plist-get (car (harness-call 'question/pending sid)) :payload)))
+        (should (equal "Which way?" (plist-get payload :question)))
+        (should (equal '("Left" "Right") (plist-get payload :options)))
+        (should (eq t (plist-get payload :allow-free-text)))
+        (should (equal '(:a 1) (plist-get payload :extra)))
+        (should-not (plist-get payload :call-id)))
+      (should (harness-call 'question/answer sid pid '(:answer "Right")))
+      (should (equal '(("Right" nil)) heard))
+      (should-not (harness-call 'question/pending sid))
+      (should (eq 'idle (plist-get (harness-call 'session/get sid) :status)))
+      ;; Asked again, then dismissed; free text off.
+      (let ((pid (harness-call 'question/ask sid '(:question "Sure?" :allow-free-text nil)
+                               (lambda (text dismissed) (push (list text dismissed) heard)))))
+        (should-not (plist-get (plist-get (car (harness-call 'question/pending sid)) :payload) :allow-free-text))
+        (should (harness-call 'question/cancel sid pid))
+        (should (equal '("The user dismissed the question" t) (car heard)))
+        (should-not (harness-call 'question/answer sid pid "late"))
+        (should (= 2 (length heard)))))))
+
 (ert-deftest harness-tools-agent-ask-user-inside-a-turn ()
   "The demo `ask' script calls ask_user; the turn blocks until the UI answers."
   (harness-tools-agent-test-with

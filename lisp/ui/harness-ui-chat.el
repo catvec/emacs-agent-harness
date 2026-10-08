@@ -1254,8 +1254,9 @@ and the note changes when the harness updates it."
 A summary made to hand the conversation over to a model of another
 provider says which (see `harness-node-handoff').  Otherwise the header
 says what kind of compaction it was (`harness-node-compaction-kind'): a
-brief summary names the model that wrote it, and a transcript file
-offers to open the file."
+brief summary names the model that wrote it, a transcript file offers
+to open the file, and a fresh start says so.  One made because a
+message met a cold prompt cache (harness-cowboy.el) says that too."
   (let* ((id (harness-chat-block-id block))
          (node (harness-chat-block-node block))
          (content (or (plist-get node :content) ""))
@@ -1266,7 +1267,7 @@ offers to open the file."
          (header (concat (harness-chat--fold-button (harness-chat-block-collapsed block)
                                                     (lambda () (interactive) (harness-chat-toggle-block id)))
                          " "
-                         (propertize (format "%s context compacted%s (%d words)"
+                         (propertize (format "%s context compacted%s%s (%d words)"
                                              (harness-ui-icon 'harness-chat-icon-compaction)
                                              (cond
                                               (handoff
@@ -1276,7 +1277,11 @@ offers to open the file."
                                                (format " into a brief summary by %s"
                                                        (harness-ui-model-label (plist-get meta :model))))
                                               ((equal kind "transcript") " into a transcript file")
+                                              ((equal kind "fresh") " to start afresh")
                                               (t ""))
+                                             (if (consp (plist-get meta :cowboy))
+                                                 ", the prompt cache being cold"
+                                               "")
                                              (harness-chat--words content))
                                      'face 'harness-summary-face)
                          (if (and (stringp file) (not (string-empty-p file)))

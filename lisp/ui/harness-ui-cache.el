@@ -36,7 +36,10 @@
 ;; shows.  While the switch banner asks how to hand over
 ;; (harness-ui-switch.el), the panel stays away: what the next request
 ;; sends depends on the answer, and the banner says what the cache
-;; means for each.
+;; means for each.  So it does while a message sent to the session
+;; waits on the question of what goes first, the cache being cold
+;; (harness-cowboy.el, drawn by harness-ui-cowboy.el), and while the
+;; compaction chosen there runs, the session running its turn.
 ;;
 ;; The panel comes on its own: each chat buffer has one timer, for the
 ;; moment its session's cache lapses, which draws the tail again then
@@ -66,6 +69,7 @@
 (declare-function harness-compose-redraw "harness-ui-compose" ())
 (declare-function harness-chat--button "harness-ui-chat" (label action &rest props))
 (declare-function harness-chat--kbd "harness-ui-chat" (key))
+(declare-function harness-ui-cowboy-waiting-p "harness-ui-cowboy" (session-id))
 
 (defgroup harness-ui-cache nil
   "Telling when a session's prompt cache has expired." :group 'harness-ui)
@@ -135,12 +139,24 @@ changes nothing the panel says does not draw it again."
             :from from
             :blocked (equal status "blocked")))))
 
+(defun harness-ui-cache--asked-p (session)
+  "Non-nil while SESSION waits on the question about its cold cache.
+That is a pending question with a `:cowboy' (harness-cowboy.el), in
+SESSION's own pending list or among the requests the UI knows of."
+  (or (cl-some (lambda (item) (plist-get (plist-get item :payload) :cowboy))
+               (append (plist-get session :pending) nil))
+      (and (fboundp 'harness-ui-cowboy-waiting-p)
+           (harness-ui-cowboy-waiting-p (or (plist-get session :id) harness-ui-session-id)))))
+
 (defun harness-ui-cache--current (session &optional now)
   "Return what this buffer's cache panel shows of SESSION at NOW, or nil.
 That is `harness-ui-cache--state', save while the switch banner asks
-how to hand over: what the next request sends depends on the answer,
-and the banner says what the cache means for each."
-  (unless (bound-and-true-p harness-ui-switch--prompt)
+how to hand over, or while a message waits on the question about the
+cold cache (`harness-ui-cache--asked-p'): what the next request sends
+depends on the answer, and the banner or the question says what the
+cache means for each."
+  (unless (or (bound-and-true-p harness-ui-switch--prompt)
+              (harness-ui-cache--asked-p session))
     (harness-ui-cache--state session now)))
 
 (defun harness-ui-cache--duration (seconds)
@@ -310,8 +326,7 @@ an answer is running a turn, which no compaction interrupts: nil."
   (cond
    ((plist-get state :blocked) nil)
    (harness-ui-cache--compacting
-    (propertize (format "   Compacting the conversation into a %s…\n"
-                        (nth 2 (assq harness-ui-cache--compacting harness-ui-compact-kinds)))
+    (propertize (format "   %s\n" (harness-ui-compact-doing harness-ui-cache--compacting))
                 'face 'harness-dim-face))
    (t
     (let* ((buffer (current-buffer))

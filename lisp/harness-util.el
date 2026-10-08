@@ -405,8 +405,9 @@ model of another provider holds (:mode transcript|compact :file PATH
 (defun harness-node-compaction-kind (node)
   "Return the kind of compaction NODE is, as a string, or nil for no compaction.
 That is its `:meta' `:compaction': \"summary\", \"brief\" (a summary of
-only the first and last messages) or \"transcript\" (a note pointing at
-the conversation written to the file of its `:meta' `:file').  A
+only the first and last messages), \"transcript\" (a note pointing at
+the conversation written to the file of its `:meta' `:file') or
+\"fresh\" (a note saying nothing of the conversation was carried over).  A
 compaction node from before there were kinds is a \"summary\"; so is
 one a handoff's old model wrote, while the new model's is \"brief\".
 NODE's kind may be the symbol or, as a client hears it, its name."

@@ -198,7 +198,7 @@ these tools.")
 
 (defconst harness-perms--inspection-tools
   '("emacs_buffers" "emacs_buffer" "emacs_windows" "emacs_describe" "emacs_find_definition" "emacs_messages"
-    "session_info" "session_list" "session_read" "session_search" "session_wait"
+    "session_info" "session_list" "session_read" "session_search" "session_history" "session_wait"
     "task_list" "task_wait" "notification_providers")
   "Tools that only inspect the harness itself or the user's live Emacs.
 Inspecting its own harness is one of the things that make the harness

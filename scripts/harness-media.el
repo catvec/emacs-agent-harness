@@ -125,6 +125,8 @@ layout: half the frame keeps the board's cards whole.")
 (declare-function harness-worktrees "harness-ui-worktree")
 (declare-function harness-settings "harness-ui-config")
 (declare-function harness-tasks--set "harness-tasks")
+(declare-function harness-ui-cowboy-waiting-p "harness-ui-cowboy")
+(declare-function harness-sender-session "harness-util")
 (declare-function transient-quit-all "transient")
 
 ;;;; Small helpers
@@ -1785,6 +1787,45 @@ and the review banner."
   (harness-media--chat-shot (plist-get harness-media--world :question) "acme/app.py")
   (harness-media--capture "chat-question"))
 
+(defun harness-media-shot-chat-cowboy ()
+  "A chat whose prompt cache went cold overnight, a message waiting on it.
+The session talked pagination yesterday; today another session's agent
+writes to it, and the message waits on what goes first.  The session is
+made here and deleted after, so no other picture shows it, and the
+picture is taken last, so its usage counts in none of theirs."
+  (let* ((id (harness-media--new-session :name "Paginate the orders list" :model "claude:claude-opus-5-5"
+                                         :permission-mode 'accept-edits))
+         (sender (harness-media--session (plist-get harness-media--world :ratelimit))))
+    (dolist (node `((:kind user :content "GET /orders sends every order in one response, and the mobile app times out on big accounts. How should we paginate it?")
+                    (:kind assistant :content ,(concat "Two ways fit `list_orders` in `acme/orders.py`:\n\n"
+                                                       "- **Page numbers** (`?page=2&per_page=50`): simple, and a client can jump to a page, but an order created while someone reads shifts every page after it.\n"
+                                                       "- **A cursor** (`?after=<id>&limit=50`): stable while orders arrive, since ids only grow, but no jumping.\n\n"
+                                                       "`ORDERS` only ever grows, with increasing ids, so a cursor costs one comparison. I'd take the cursor."))
+                    (:kind user :content "Let's sleep on it and pick it up tomorrow.")
+                    (:kind assistant :content "Sure. Nothing is changed yet: say which when you're back, and I'll implement it with tests.")))
+      (harness-call 'session/append id node))
+    (harness-call 'session/usage-add id (list :input 200 :output 900 :cache-read 36000 :cache-write 2000 :context 38200
+                                             :cache-at (harness-media--ago (* 60 27))))
+    (harness-media--set-times id (* 60 28) (* 60 27))
+    (harness-media--age-nodes id (* 60 27))
+    (harness-call 'agent/prompt id
+                  (format "[Message from session %s %S]\n\n%s" (plist-get sender :id) (plist-get sender :name)
+                          (concat "Go with the cursor: my limiter counts GET /orders per key, and ?after=<id> lets a"
+                                  " client walk every order without page drift. Can you implement it?"))
+                  (list :from (harness-sender-session sender)))
+    (harness-media--wait (lambda () (and (harness-call 'cowboy/asking id) (harness-ui-cowboy-waiting-p id)))
+                         15 "the cold-cache question")
+    (let ((buffer (harness-media--chat-shot id "acme/orders.py")))
+      (harness-media--wait (lambda () (with-current-buffer buffer
+                                        (text-property-not-all (point-min) (point-max) 'harness-ui-cowboy-panel nil)))
+                           15 "the cold-cache panel")
+      ;; Fitted again, the panel drawn.
+      (harness-media--chat-shot id "acme/orders.py"))
+    (harness-media--capture "chat-cowboy")
+    (harness-call 'agent/cancel id)
+    (harness-media--wait (lambda () (not (harness-call 'agent/running id))) 15 "the turn to end")
+    (harness-call 'session/delete id)))
+
 (defun harness-media--text-lines (window)
   "Return how many lines the text of WINDOW's buffer takes in WINDOW.
 Images taller than a line count as they are drawn; the padding that
@@ -2453,7 +2494,9 @@ afterwards."
     ("version" . harness-media-shot-version)
     ;; Last: they write a month of chats the other pictures must not show.
     ("insights" . harness-media-shot-insights)
-    ("insights-activity" . harness-media-shot-insights-activity))
+    ("insights-activity" . harness-media-shot-insights-activity)
+    ;; After every picture of usage: its session's usage would count there.
+    ("chat-cowboy" . harness-media-shot-chat-cowboy))
   "Every picture, as (NAME . FUNCTION), in the order they are taken.")
 
 ;;;; Entry point
