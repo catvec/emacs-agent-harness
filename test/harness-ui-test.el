@@ -370,8 +370,11 @@ leave free.  None is left out by the menu."
   (should-not (harness-ui--menu-key-taken-p "."))
   (pcase-dolist (`(,mode ,_title . ,columns) (harness-ui-test-menu-groups))
     (let ((maps (delq nil (list (let ((map (intern (format "%s-map" mode)))) (and (boundp map) (symbol-value map)))
-                                ;; Keys on a view's content, outside its box.
+                                ;; Keys on a view's content, outside its box,
+                                ;; and the session list's on the lines of a
+                                ;; session waiting on a tool call.
                                 (and (eq mode 'harness-ui-tasks-mode) harness-ui-tasks-board-map)
+                                (and (eq mode 'harness-ui-sessions-mode) harness-ui-sessions-permission-map)
                                 (and (eq mode 'harness-ui-popout-mode) harness-ui-popout-content-map))))
           (keys nil))
       (dolist (column columns)
@@ -1233,6 +1236,39 @@ made, newest first, and ASKED, the arguments of each question asked."
       (should (equal '(:sessionId "s1" :model "claude:claude-opus-5-5") check))
       (should (equal '(:sessionId "s1" :model "claude:claude-opus-5-5" :mode "transcript") switch)))
     (should-not (assoc "session/set_model" calls))))
+
+(ert-deftest harness-ui-handoff-choices-say-when-the-cache-is-cold ()
+  "Summarising on the current model is cheap while that model's cache is
+warm, so the choice says when it is not: it lapsed, or it is another
+model's.  Where nothing is known, or every cache is warm, it reads as
+ever; the other choices always do."
+  (let* ((now 10000.0)
+         (warm '(:from "a:m" :cache (:at 9900.0 :ttl 300 :expires 10200.0 :model "a:m")))
+         (expired '(:from "a:m" :cache (:at 9000.0 :ttl 300 :expires 9300.0 :model "a:m")))
+         (other '(:from "a:m" :cache (:at 9900.0 :ttl 300 :expires 10200.0 :model "b:m")))
+         (unknown '(:from "a:m"))
+         (usual (nth 3 (assq ?c harness-ui--handoff-choices)))
+         (describe (lambda (&rest checks) (nth 3 (assq ?c (harness-ui--handoff-choices-for checks now))))))
+    (should (equal "warm cache; summary from the whole conversation" usual))
+    (should (equal usual (funcall describe warm)))
+    (should (equal usual (funcall describe unknown)))
+    (should (equal usual (funcall describe warm unknown)))
+    (should (equal (format "cache expired at %s: re-reads it all uncached" (harness-ui-format-clock 9300.0 now))
+                   (funcall describe expired)))
+    (should (equal "cache cold: re-reads it all uncached" (funcall describe other)))
+    (should (equal "caches expired: re-reads them all uncached" (funcall describe expired other)))
+    (should (equal "re-reads it all uncached where the cache lapsed (1 of 3)"
+                   (funcall describe warm expired unknown)))
+    (dolist (key '(?n ?t ?s ?q))
+      (should (equal (assq key harness-ui--handoff-choices)
+                     (assq key (harness-ui--handoff-choices-for (list expired) now)))))
+    ;; The minibuffer question says so too.
+    (let ((help (harness-ui--handoff-text (list (append (list :id "s1" :name "Fix it") expired))
+                                          "Hosted M" 1)))
+      (should (string-match-p (format "^  c  current model summarises +cache expired at %s: re-reads it all uncached$"
+                                      (regexp-quote (harness-ui-format-clock 9300.0)))
+                              help))
+      (should-not (string-match-p "warm cache" help)))))
 
 (ert-deftest harness-ui-set-model-compacts-with-the-new-model ()
   "The advanced choice has the new model summarise a limited context."

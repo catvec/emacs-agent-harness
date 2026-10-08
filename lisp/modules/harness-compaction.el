@@ -9,7 +9,16 @@
 ;; appends it as a `compaction' node and lets `session/messages' restart
 ;; the transcript from there.  The earlier nodes stay in the DAG (the
 ;; node's `:meta' points at the compacted head) so nothing is lost for
-;; the tree view or for search.
+;; the tree view or for search.  What the provider cached of the old
+;; transcript is of no use to the new one, so the session's prompt cache
+;; stamp goes too (`:cache-reset' to `session/usage-add'), whichever
+;; model summarised: a new conversation has nothing cached to lose.
+;; That is every compaction the harness makes on its own: automatic ones
+;; run only where the provider is sent the transcript, and a handoff's
+;; lands on a provider that holds nothing of the session.  A hosted loop
+;; compacted while it holds the session's conversation goes on with that
+;; conversation, the summary joining it, so a summary it made on a fork
+;; of it stamps the cache as any request does.
 ;;
 ;; Automatic compaction hangs on the `agent/before-turn' filter: when
 ;; the last request's context exceeds window minus reserve, the turn
@@ -247,12 +256,15 @@ message of text, since only the newest user messages ever reach it."
                         (and (stringp (plist-get b :content)) (plist-get b :content))
                         "")))))))
 
-(defun harness-compaction--finish (session-id summary old-head model usage input-tokens trailing context)
+(defun harness-compaction--finish (session-id summary old-head model usage input-tokens trailing context
+                                               &optional goes-on)
   "Record SUMMARY for SESSION-ID and return the compaction node.
 OLD-HEAD is the head that was compacted, MODEL the summariser, USAGE
 its usage event, INPUT-TOKENS the size of what was compacted, TRAILING
 the unanswered user nodes to carry over, and CONTEXT what the
-summariser was given (see `compaction/compact')."
+summariser was given (see `compaction/compact').  GOES-ON non-nil means
+the session's provider goes on with the conversation MODEL summarised
+\(see `harness-compaction--request'), so its prompt cache stands."
   (let ((node (harness-call 'session/append session-id
                             (list :kind 'compaction :content summary
                                   :meta (list :compacted-head old-head :model model
@@ -265,11 +277,21 @@ summariser was given (see `compaction/compact')."
       (harness-call 'session/append session-id
                     (list :kind 'user :content (plist-get u :content) :blocks (plist-get u :blocks)
                           :meta (plist-put (copy-sequence (plist-get u :meta)) :carried-from (plist-get u :id)))))
+    ;; The conversation starts over from the summary: whatever the
+    ;; summariser's request cached, the next request reads none of it.
+    ;; One that goes on instead had its cache read, and kept warm, by
+    ;; the summariser's request, as by any other.
     (harness-call 'session/usage-add session-id
-                  (list :input (plist-get usage :input) :output (plist-get usage :output)
-                        :cache-read (plist-get usage :cache-read) :cache-write (plist-get usage :cache-write)
-                        :cost (plist-get usage :cost)
-                        :context (harness-estimate-tokens summary)))
+                  (append (list :input (plist-get usage :input) :output (plist-get usage :output)
+                                :cache-read (plist-get usage :cache-read)
+                                :cache-write (plist-get usage :cache-write)
+                                :cost (plist-get usage :cost)
+                                :context (harness-estimate-tokens summary)
+                                :model model)
+                          (if goes-on
+                              (list :cache-at (plist-get usage :cache-at)
+                                    :cache-ttl (plist-get usage :cache-ttl))
+                            (list :cache-reset t))))
     (harness-emit 'compaction/done session-id node)
     node))
 
@@ -294,8 +316,13 @@ MODEL gets the transcript as messages."
 (defun harness-compaction--request (session-id session model state promise context)
   "Ask MODEL for the summary of SESSION-ID, whose record is SESSION.
 STATE is the provider state to send it with, CONTEXT what it is given
-(`full' or `sample'), and PROMISE settles with the compaction node."
+\(`full' or `sample'), and PROMISE settles with the compaction node.
+A summariser that is the session's own model and works on a fork of the
+session's provider state (STATE) summarises the very conversation the
+session's provider goes on with: a hosted loop keeps its own, and the
+summary only joins it.  Any other summary starts the conversation over."
   (let* ((old-head (plist-get session :head))
+         (goes-on (and state (equal model (plist-get session :model))))
          (path (harness-call 'session/nodes session-id))
          (trailing (harness-compaction--trailing-user-nodes path))
          (messages (harness-compaction--context-messages session-id model state context))
@@ -334,7 +361,7 @@ STATE is the provider state to send it with, CONTEXT what it is given
                               (and (plist-get usage :input)
                                    (+ (plist-get usage :input) (or (plist-get usage :cache-read) 0)))
                               estimate)
-                          trailing context))
+                          trailing context goes-on))
                       (error (harness-compaction--fail session-id promise err))))))
                (_ nil)))))))
 

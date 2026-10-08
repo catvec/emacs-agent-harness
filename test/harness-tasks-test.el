@@ -136,6 +136,77 @@ leaves it whole too."
         (harness-tasks-test-wait-state b 'done)
         (should (plist-get (harness-tasks-test-task b) :session))))))
 
+(declare-function harness-tasks--free-slots "harness-tasks")
+(declare-function harness-tasks--slot-project "harness-tasks")
+(declare-function harness-tasks--schedule "harness-tasks")
+
+(ert-deftest harness-tasks-limit-is-per-project ()
+  "Every project has `harness-tasks-max-running' slots of its own.
+With one slot each, a project's first task starts at once, however busy
+another project is, and its second waits only for its own first one."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 1)
+          (other (harness-test-temp-dir)))
+      (let* ((a1 (harness-tasks-test-submit "here, first"))
+             (a2 (harness-tasks-test-submit "here, second"))
+             (b1 (harness-tasks-test-submit "there, first" other))
+             (b2 (harness-tasks-test-submit "there, second" other)))
+        (should-not (equal (plist-get (harness-tasks-test-task a1) :project)
+                           (plist-get (harness-tasks-test-task b1) :project)))
+        ;; This project's slot is taken; the other's first task gets its own.
+        (should (eq 'active (harness-tasks-test-state a1)))
+        (should (eq 'pending (harness-tasks-test-state a2)))
+        (should (eq 'active (harness-tasks-test-state b1)))
+        (should (eq 'pending (harness-tasks-test-state b2)))
+        (should-not (plist-get (harness-tasks-test-task a2) :session))
+        (should-not (plist-get (harness-tasks-test-task b2) :session))
+        (dolist (id (list a1 a2 b1 b2)) (harness-tasks-test-wait-state id 'done))
+        ;; Each second task started once its own project's first one was done.
+        (should (>= (plist-get (harness-tasks-test-task a2) :started)
+                    (plist-get (harness-tasks-test-task a1) :finished)))
+        (should (>= (plist-get (harness-tasks-test-task b2) :started)
+                    (plist-get (harness-tasks-test-task b1) :finished)))))))
+
+(ert-deftest harness-tasks-schedule-gives-each-project-its-slots ()
+  "One scheduling pass starts the oldest queued tasks of every project.
+The queue is oldest first across projects: a project out of slots
+leaves its later tasks waiting and the walk goes on to the next one."
+  (harness-tasks-test-with
+    (let ((other (harness-test-temp-dir))
+          a1 a2 b1 b2)
+      ;; Queued while nothing may run: here, here, there, there.
+      (let ((harness-tasks-max-running 0))
+        (setq a1 (harness-tasks-test-submit "here, first")
+              a2 (harness-tasks-test-submit "here, second")
+              b1 (harness-tasks-test-submit "there, first" other)
+              b2 (harness-tasks-test-submit "there, second" other)))
+      (dolist (id (list a1 a2 b1 b2)) (should (eq 'pending (harness-tasks-test-state id))))
+      (let ((harness-tasks-max-running 1))
+        (harness-tasks--schedule)
+        (should (eq 'active (harness-tasks-test-state a1)))
+        (should (eq 'pending (harness-tasks-test-state a2)))
+        (should (eq 'active (harness-tasks-test-state b1)))
+        (should (eq 'pending (harness-tasks-test-state b2)))
+        (dolist (id (list a1 a2 b1 b2)) (harness-tasks-test-wait-state id 'done))))))
+
+(ert-deftest harness-tasks-free-slots-count-per-project ()
+  "A project's free slots count its own working tasks only.
+A task's project is its `:project', else its `:cwd'."
+  (harness-tasks-test-with
+    (let ((harness-provider-demo--delay 5)          ; keep the started one running
+          (harness-tasks-max-running 2)
+          (other (harness-test-temp-dir)))
+      (let* ((id (harness-tasks-test-submit "here"))
+             (here (plist-get (harness-tasks-test-task id) :project)))
+        (should (equal here (harness-tasks--slot-project (harness-tasks-test-task id))))
+        (should (= 1 (harness-tasks--free-slots here)))
+        (should (= 2 (harness-tasks--free-slots other)))
+        (let ((harness-tasks-max-running nil))
+          (should (= most-positive-fixnum (harness-tasks--free-slots here))))
+        (harness-call 'task/cancel id))
+      (should (equal "/p/" (harness-tasks--slot-project '(:project "/p/" :cwd "/p/sub/"))))
+      (should (equal "/c/" (harness-tasks--slot-project '(:cwd "/c/")))))))
+
 (ert-deftest harness-tasks-start-ignores-limit ()
   (harness-tasks-test-with
     (let ((harness-tasks-max-running 0))

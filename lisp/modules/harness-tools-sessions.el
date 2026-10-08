@@ -55,6 +55,11 @@
 (defconst harness-tools-sessions--grep-program "grep"
   "Program `session_search' runs over the transcript logs.")
 
+(defconst harness-tools-sessions--piece 50000
+  "Length of the pieces of a long text a regexp is run over one at a time.
+A regexp like `a.*b' overflows the matcher over a line of a megabyte,
+but not over a piece this long; see `harness-tools-sessions--locate'.")
+
 ;;;; Formatting
 
 (defun harness-tools-sessions--short (id)
@@ -253,27 +258,70 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
   (let ((s (json-serialize text)))
     (substring s 1 -1)))
 
+(defun harness-tools-sessions--locate (text query regexp)
+  "Return (START . END) of the first match of QUERY in TEXT, or nil.
+QUERY is literal text, or a regexp when REGEXP is non-nil; case is
+ignored.  Literal text is found by one linear scan, however long TEXT
+is.  A regexp that overflows the matcher over the whole of TEXT, as
+`a.*b' does over a line of a megabyte, runs over overlapping pieces of
+`harness-tools-sessions--piece' characters instead; a regexp Emacs
+cannot read finds nothing."
+  (let ((re (if regexp query (regexp-quote query)))
+        (case-fold-search t))
+    (condition-case nil
+        (and (string-match re text) (cons (match-beginning 0) (match-end 0)))
+      (invalid-regexp nil)
+      (error
+       (let ((len (length text))
+             (piece harness-tools-sessions--piece))
+         ;; Each piece overlaps the next by half, so a match up to half a
+         ;; piece long lies whole in one of them.
+         (cl-loop for at from 0 below len by (/ piece 2)
+                  for part = (substring text at (min len (+ at piece)))
+                  when (ignore-errors (string-match re part))
+                  return (cons (+ at (match-beginning 0)) (+ at (match-end 0)))))))))
+
+(defun harness-tools-sessions--squeeze (text)
+  "Return TEXT with each run of whitespace made one space."
+  (replace-regexp-in-string "[ \t\n\r]+" " " text t t))
+
 (defun harness-tools-sessions--snippet (text query regexp)
-  "Return the part of TEXT around the first match of QUERY (a REGEXP when non-nil)."
-  (let* ((case-fold-search t)
-         (text (replace-regexp-in-string "[ \t\n\r]+" " " text))
-         (pos (ignore-errors (string-match (if regexp query (regexp-quote query)) text))))
-    (if (not pos)
-        (harness-truncate-end text 160)
-      (let ((from (max 0 (- pos 70)))
-            (to (min (length text) (+ (match-end 0) 90))))
-        (concat (if (> from 0) "…" "") (substring text from to) (if (< to (length text)) "…" ""))))))
+  "Return the part of TEXT around the first match of QUERY (a REGEXP when non-nil).
+The snippet is one line, its whitespace squeezed: up to 70 characters
+before the match, the match and up to 90 after it, cut 300 characters
+after the start of a long match.  Only a window of TEXT around the
+match is read, so a node of megabytes costs no more than a short one."
+  (let ((len (length text))
+        (match (harness-tools-sessions--locate text query regexp)))
+    (if (not match)
+        (let ((head (harness-tools-sessions--squeeze (substring text 0 (min len 2000)))))
+          (harness-truncate-end (if (> len 2000) (concat head "…") head) 160))
+      (let* ((start (car match))
+             (end (cdr match))
+             ;; Squeezing shortens whitespace, so read more than is shown.
+             (from (max 0 (- start 400)))
+             (to (min len (+ end 400) (+ start 2000)))
+             (upto (lambda (pos) (harness-tools-sessions--squeeze (substring text from pos))))
+             (window (funcall upto to))
+             (s (length (funcall upto start)))
+             (e (length (funcall upto (min end to))))
+             (b (max 0 (- s 70)))
+             (a (min (length window) (+ e 90) (+ s 300))))
+        (concat (if (or (> from 0) (> b 0)) "…" "")
+                (substring window b a)
+                (if (or (< to len) (< a (length window))) "…" ""))))))
 
 (defun harness-tools-sessions--parse-hits (stdout)
-  "Return ((SESSION-ID . NODE) …) from grep STDOUT, in output order."
+  "Return ((SESSION-ID . NODE) …) from grep STDOUT, in output order.
+A line of STDOUT holds a whole node, which can be megabytes long:
+`harness-grep-hit' splits it without a regexp."
   (let (hits)
     (dolist (line (split-string stdout "\n" t))
-      (when (string-match "\\`\\(?:.*/\\)?\\([^/:]+\\)\\.nodes\\.jsonl:\\(.*\\)\\'" line)
-        (let ((sid (match-string 1 line))
-              (node (ignore-errors (harness-json-parse (match-string 2 line)))))
+      (when-let* ((hit (harness-grep-hit line ".nodes.jsonl")))
+        (let ((node (ignore-errors (harness-json-parse (cdr hit)))))
           (when (stringp (plist-get node :kind))
             (setq node (plist-put node :kind (intern (plist-get node :kind)))))
-          (when node (push (cons sid node) hits)))))
+          (when node (push (cons (car hit) node) hits)))))
     (nreverse hits)))
 
 (defun harness-tools-sessions--search (input ctx)
@@ -321,8 +369,7 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
                           (memq (plist-get node :kind) '(user assistant thinking tool-call tool-result plan compaction))
                           ;; A literal can match the JSON escapes of a line but not its text.
                           (or regexp
-                              (let ((case-fold-search t))
-                                (string-match-p (regexp-quote query) (harness-tools-sessions--node-text node)))))
+                              (harness-tools-sessions--locate (harness-tools-sessions--node-text node) query nil)))
                  (unless (gethash sid grouped) (push sid order))
                  (puthash sid (append (gethash sid grouped) (list node)) grouped))))
            (dolist (s name-hits)
@@ -758,7 +805,7 @@ line says \"(this task)\"."
 
 (harness-define-tool "task_submit"
   :label "Submit task"
-  :description "Add a task to the task board. The task runs in its own session (in a git project, in a fresh worktree whose branch is merged back through the merge queue) with the task defaults for permissions; it starts when a slot is free. By default finished work waits in review until the user verifies it (task_control verify) or sends it back (task_control reject). With refine=true it goes to the backlog instead: an agent briefly writes it up, read-only, and it waits in pending until someone starts it (task_control start), which is how to record work for later. With main_tree=true it works in the project's main checkout instead of a worktree: no branch, nothing merges, and its changes take effect in the checkout itself -- for work that has to touch it, such as cleaning up uncommitted changes. Returns the task id; follow it with task_wait or task_list."
+  :description "Add a task to the task board. The task runs in its own session (in a git project, in a fresh worktree whose branch is merged back through the merge queue) with the task defaults for permissions; it starts when its project has a free slot (the limit on running tasks applies to each project separately). By default finished work waits in review until the user verifies it (task_control verify) or sends it back (task_control reject). With refine=true it goes to the backlog instead: an agent briefly writes it up, read-only, and it waits in pending until someone starts it (task_control start), which is how to record work for later. With main_tree=true it works in the project's main checkout instead of a worktree: no branch, nothing merges, and its changes take effect in the checkout itself -- for work that has to touch it, such as cleaning up uncommitted changes. Returns the task id; follow it with task_wait or task_list."
   :schema '(:type "object"
             :properties (:prompt (:type "string" :description "What the task should do; self-contained, the task does not see this conversation.")
                          :cwd (:type "string" :description "Project directory (default: this session's).")

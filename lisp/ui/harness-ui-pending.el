@@ -250,13 +250,14 @@ answer holds for (nil for a prompt about the call itself, which has none)."
     ("deny-always" (if shown (format "Always denied %s" shown) "Always denied"))
     (_ "Denied")))
 
-(defun harness-ui-pending-answer-permission (session-id pid option)
+(defun harness-ui-pending-answer-permission (session-id pid option &optional on-error)
   "Answer permission request PID of SESSION-ID with OPTION.
 OPTION is an option id such as \"allow-once\".  A pattern the user
 edited goes with the answer (see `harness-ui-pending-edit-pattern').
 An ACP request is answered through the function that holds it; one only
 known from the session's pending list goes over
-`_harness/permission/answer'."
+`_harness/permission/answer', and ON-ERROR, when given, is called with
+the error should that fail (else the echo area says so)."
   (when-let* ((r (harness-ui-pending-record session-id pid)))
     (let ((edited (plist-get r :edited-pattern))
           (shown (harness-ui-pending--permission-pattern r)))
@@ -266,16 +267,17 @@ known from the session's pending list goes over
         (harness-ui-call "_harness/permission/answer"
                          (list :session-id session-id :pending-id pid
                                :answer (if edited (list :option option :pattern edited) option))
-                         #'ignore))
+                         #'ignore on-error))
       (harness-ui-pending-remove session-id pid)
       (message "%s" (harness-ui-pending--message-for option (plist-get r :dir) shown)))))
 
-(defun harness-ui-pending-answer-question (session-id pid answer)
-  "Answer question PID of SESSION-ID with ANSWER."
+(defun harness-ui-pending-answer-question (session-id pid answer &optional on-error)
+  "Answer question PID of SESSION-ID with ANSWER.
+ON-ERROR is as for `harness-ui-pending-answer-permission'."
   (when-let* ((r (harness-ui-pending-record session-id pid)))
     (unless (harness-ui-pending--respond r (list :answer answer))
       (harness-ui-call "_harness/question/answer"
-                       (list :session-id session-id :pid pid :answer answer) #'ignore))
+                       (list :session-id session-id :pid pid :answer answer) #'ignore on-error))
     (harness-ui-pending-remove session-id pid)))
 
 (defun harness-ui-pending--respond (r value)
@@ -1085,6 +1087,90 @@ request is first seen when no chat is open for its session."
   (when-let* ((session-id (and harness-ui-session-at-point-function
                                (harness-ui-session-at-point t))))
     (when (harness-ui-pending-popout session-id) t)))
+
+;;;; Answering from a view
+;;
+;; A view of many sessions offers what a blocked one waits on right
+;; beside it, without opening it: the task board on the card of a task
+;; that requires your input, the session list under the row of a blocked
+;; session.  Both draw the same buttons -- [Allow] and [Deny] for a
+;; permission request, [Answer…] for a question, which pops it out to be
+;; read and answered whole -- from `harness-ui-pending-view-actions', each
+;; in its own style, and their keys answer through the same functions, so
+;; a request is answered the same from either, and as a chat or a popout
+;; of it would answer it.
+
+(defun harness-ui-pending-first (session-id)
+  "Return the request SESSION-ID waits on first, as a record, or nil.
+The store knows a request as soon as it arrives, and is asked first.
+The session's own pending list may lag a round trip behind, but it is
+all there is for a session no chat or popout has drawn; an item of it
+answered here just now is passed over."
+  (or (car (harness-ui-pending-items session-id))
+      (when-let* ((item (cl-find-if-not
+                         (lambda (i) (harness-ui-pending--answered-p session-id (plist-get i :id)))
+                         (append (plist-get (harness-ui-session session-id) :pending) nil))))
+        (harness-ui-pending--record-of-item item))))
+
+(defun harness-ui-pending--first-of-kind (session-id kind)
+  "Return the request SESSION-ID waits on first, from the store, if of KIND.
+The session's own pending list is brought into the store first, so the
+request is answered as a chat or a popout of it would answer it.
+Signal a user error when it waits on no request of KIND first."
+  (unless session-id (user-error "No session here"))
+  (harness-ui-pending-sync-session session-id)
+  (let ((r (harness-ui-pending-first session-id)))
+    (unless (equal (plist-get r :kind) kind)
+      (user-error (if (equal kind "question") "No question is waiting" "No permission request is waiting")))
+    r))
+
+(defun harness-ui-pending-answer-first-permission (session-id option &optional on-error)
+  "Answer the permission request SESSION-ID waits on first with OPTION.
+OPTION is an option id such as \"allow-once\".  ON-ERROR, when given, is
+called with the error should the answer fail; else the echo area says
+so.  Signal a user error when it waits on no permission request."
+  (let ((r (harness-ui-pending--first-of-kind session-id "permission")))
+    (harness-ui-pending-answer-permission session-id (plist-get r :id) option on-error)))
+
+(defun harness-ui-pending-answer-first-question (session-id answer &optional on-error)
+  "Answer the question SESSION-ID waits on first with ANSWER.
+ON-ERROR is as for `harness-ui-pending-answer-first-permission'.  Signal
+a user error when it waits on no question."
+  (let ((r (harness-ui-pending--first-of-kind session-id "question")))
+    (harness-ui-pending-answer-question session-id (plist-get r :id) answer on-error)
+    (message "Answered: %s" answer)))
+
+(defun harness-ui-pending-view-actions (session-id &optional on-error)
+  "Return what a view offers for the request SESSION-ID waits on first.
+That is nil when it waits on nothing, else a list of (LABEL ACTION
+HELP), ACTION a function of no arguments, which the view draws as
+buttons in its own style: [Allow] and [Deny] for a permission request,
+answering it once, and [Answer…] for a question, which pops it out to
+be read and answered whole (`harness-ui-pending-popout').  ON-ERROR is
+as for `harness-ui-pending-answer-first-permission'.  The views bind
+the same keys: y and n answer, SPC pops the request out."
+  (pcase (plist-get (harness-ui-pending-first session-id) :kind)
+    ("permission"
+     (list (list "[Allow]"
+                 (lambda () (harness-ui-pending-answer-first-permission session-id "allow-once" on-error))
+                 "Allow the tool call it waits on, once (y)")
+           (list "[Deny]"
+                 (lambda () (harness-ui-pending-answer-first-permission session-id "deny-once" on-error))
+                 "Deny the tool call it waits on (n)")))
+    ("question"
+     (list (list "[Answer…]"
+                 (lambda ()
+                   (unless (harness-ui-pending-popout session-id)
+                     (user-error "No question is waiting")))
+                 "Read the question and answer it (SPC)")))))
+
+(defun harness-ui-pending-subject (r &optional max)
+  "Return what request record R is about, on one line of at most MAX characters.
+For a permission request that is the title of the tool call, styled as
+its panel's; for a question, the question."
+  (if (equal (plist-get r :kind) "question")
+      (propertize (harness-first-line (or (plist-get r :question) "") max) 'face 'bold)
+    (harness-ui-tool-title-string (plist-get r :tool) (plist-get r :title) max)))
 
 ;;;; Module
 

@@ -1081,6 +1081,13 @@ account does; calls recorded without a billing stay as recorded."
                                     (format-time-string "%H:%M" time)))
             (t (format-time-string "%a %b %-d, %H:%M" time))))))
 
+(defun harness-ui-format-clock (time &optional now)
+  "Return TIME as a clock time, \"14:05\", with its day unless that is NOW's.
+NOW defaults to the current time."
+  (if (equal (format-time-string "%F" time) (format-time-string "%F" (or now (float-time))))
+      (format-time-string "%H:%M" time)
+    (format-time-string "%b %-d, %H:%M" time)))
+
 (defun harness-ui-format-window (window)
   "Return \"5h 9%\" for quota WINDOW, coloured by how much of it is used."
   (let ((used (or (plist-get window :used) 0)))
@@ -1942,6 +1949,95 @@ window selected now even when another frame is selected by then."
   "Read a position name with completion."
   (intern (completing-read "Position: " (mapcar (lambda (p) (symbol-name (car p))) harness-ui-positions) nil t)))
 
+;;;; Visiting a session in its project
+;;
+;; A view listing the sessions of every project -- the session list the
+;; mode line's notifier opens on the sessions waiting for you -- opens a
+;; session where it belongs: it switches to the session's project first,
+;; as switching project would (Doom Emacs's workspaces), and then shows
+;; the session, unless it shows there already, in which case its window
+;; is selected.
+
+(defvar +workspaces-switch-project-function)
+(declare-function +workspaces-switch-to-project-h "ext:workspaces")
+(declare-function +workspace-current-name "ext:workspaces")
+(declare-function doom-project-name "ext:doom-projects")
+(declare-function doom-project-p "ext:doom-projects")
+
+(defcustom harness-ui-switch-project-function #'harness-ui-switch-project-workspace
+  "Function switching to a project before a session of it shows, or nil.
+It is called with the project's root directory when a session is
+visited (`harness-ui-visit-session'), from the session list say, and
+returns non-nil when it switched; when that project is current already
+it does nothing and returns nil.  The root is the main checkout of the
+session's project: a task's git worktree belongs to its repository's.
+The default switches workspaces where there are any; nil never
+switches."
+  :type '(choice (const :tag "Never switch" nil)
+                 (function-item harness-ui-switch-project-workspace)
+                 function)
+  :group 'harness-ui)
+
+(defun harness-ui-switch-project-workspace (root)
+  "Switch to the workspace of the project at ROOT, if there are workspaces.
+That is Doom Emacs's workspaces, on with `persp-mode': the project's
+workspace becomes current, made when it has none, as switching project
+makes it, but without asking for a file to open.  Return non-nil when
+the workspace changed.  Without workspaces this does nothing: a buffer
+belongs to no project.  Nor does a ROOT that is no project, a scratch
+directory say, which would only get a workspace of its own."
+  (when (and (bound-and-true-p persp-mode)
+             (fboundp '+workspaces-switch-to-project-h)
+             (fboundp '+workspace-current-name)
+             (fboundp 'doom-project-name)
+             (fboundp 'doom-project-p)
+             (doom-project-p root)
+             (not (equal (+workspace-current-name) (doom-project-name root))))
+    (let ((+workspaces-switch-project-function #'ignore))
+      (+workspaces-switch-to-project-h root))
+    t))
+
+(defun harness-ui-session-project (session)
+  "Return the main checkout of SESSION's project, or nil.
+A task's git worktree belongs to its repository's main checkout (see
+`harness-files-owning-checkout').  A remote project gives nil, and so
+does one missing from this machine, as a remote harness's may be."
+  (let ((root (or (plist-get session :project) (plist-get session :cwd))))
+    (when (and (stringp root) (not (string-empty-p root)) (not (file-remote-p root)))
+      (let ((main (harness-files-owning-checkout root)))
+        (and main (file-directory-p main) main)))))
+
+(defun harness-ui-switch-to-session-project (id)
+  "Switch to the project of session ID; return non-nil when it switched.
+See `harness-ui-switch-project-function'.  A switch that fails is
+logged, and leaves things as they are."
+  (when-let* ((fn harness-ui-switch-project-function)
+              (root (harness-ui-session-project (harness-ui-session id))))
+    (harness-ignore-errors-logged (format "switching to the project %s" root)
+      (funcall fn root))))
+
+(defun harness-ui-visit-session (id &optional position)
+  "Show session ID in its project, and return its buffer.
+First switch to its project (`harness-ui-switch-to-session-project'),
+then show the session: a window of the selected frame -- of the
+project's workspace, after a switch -- that shows it already is
+selected, and otherwise it opens in POSITION.  POSITION defaults to the
+current buffer's own, as `harness-ui-session-opener' has it, and after a
+switch, which leaves the current buffer's window behind, to where
+sessions open (`harness-ui-default-position')."
+  (unless harness-ui-open-session-function
+    (user-error "No chat module loaded"))
+  (let* ((here (or position
+                   (and (harness-ui--fullscreen-layout) 'fullscreen)
+                   harness-ui-position
+                   harness-ui-default-position))
+         (position (if (harness-ui-switch-to-session-project id) position here))
+         (buffer (funcall harness-ui-open-session-function id))
+         (window (get-buffer-window buffer)))
+    (if (window-live-p window)
+        (progn (select-window window) buffer)
+      (harness-ui-display-buffer buffer position))))
+
 ;;;; Fullscreen layout
 ;;
 ;; An overview -- the task board, the session list -- can take the whole
@@ -2345,11 +2441,59 @@ available is offered."
   "What a model switch that loses the conversation offers.
 Each entry is (KEY NAME CHOICE DESCRIPTION); CHOICE is a mode of
 `handoff/switch', or `cancel'.  The names are short so the minibuffer
-prompt stays readable; the descriptions are one line each.")
+prompt stays readable; the descriptions are one line each.  The one of
+`compact' holds while the cache is warm; `harness-ui--handoff-choices-for'
+says otherwise once it is not.")
 
-(defun harness-ui--handoff-choice-text ()
-  "Return the handoff choices as a short, aligned list, easy to scan."
-  (let* ((choices harness-ui--handoff-choices)
+(defun harness-ui--handoff-cache (check now)
+  "Return how CHECK's session finds the cache of the model it switches from.
+`warm' while the prompt cache its requests last used is that model's
+and lasts at NOW, `expired' once it lapsed, `other' when it is another
+model's (the session switched since), nil when nothing is known.  See
+`handoff/check''s `:cache'."
+  (let* ((cache (plist-get check :cache))
+         (expires (plist-get cache :expires))
+         (from (plist-get check :from)))
+    (when (numberp expires)
+      (cond ((not (equal (or (plist-get cache :model) from) from)) 'other)
+            ((< now expires) 'warm)
+            (t 'expired)))))
+
+(defun harness-ui--handoff-compact-text (checks &optional now)
+  "Describe summarising on the current model for the sessions of CHECKS.
+That reads each conversation back from the model's prompt cache, cheap
+while the cache lasts; once it lapsed, or is another model's, the whole
+conversation is paid for again uncached.  Return the description when
+a cache is cold at NOW (default the current time), else nil: the usual
+one holds."
+  (let* ((now (or now (float-time)))
+         (states (mapcar (lambda (c) (harness-ui--handoff-cache c now)) checks))
+         (cold (cl-count-if (lambda (s) (memq s '(expired other))) states))
+         (n (length checks)))
+    (cond
+     ((= cold 0) nil)
+     ((< cold n) (format "re-reads it all uncached where the cache lapsed (%d of %d)" cold n))
+     ((> n 1) "caches expired: re-reads them all uncached")
+     ((eq (car states) 'other) "cache cold: re-reads it all uncached")
+     (t (format "cache expired at %s: re-reads it all uncached"
+                (harness-ui-format-clock (plist-get (plist-get (car checks) :cache) :expires) now))))))
+
+(defun harness-ui--handoff-choices-for (checks &optional now)
+  "Return `harness-ui--handoff-choices' as they read for CHECKS at NOW.
+A warm cache is what makes summarising on the current model cheap, so
+its description says when the cache is cold instead (see
+`harness-ui--handoff-compact-text')."
+  (let ((compact (harness-ui--handoff-compact-text checks now)))
+    (mapcar (lambda (c)
+              (if (and compact (eq (nth 2 c) 'compact))
+                  (list (nth 0 c) (nth 1 c) (nth 2 c) compact)
+                c))
+            harness-ui--handoff-choices)))
+
+(defun harness-ui--handoff-choice-text (&optional choices)
+  "Return the handoff CHOICES as a short, aligned list, easy to scan.
+CHOICES default to `harness-ui--handoff-choices'."
+  (let* ((choices (or choices harness-ui--handoff-choices))
          (width (apply #'max (mapcar (lambda (c) (string-width (nth 1 c))) choices)))
          (fmt (format "  %%c  %%-%ds  %%s" width)))
     (mapconcat (lambda (c)
@@ -2466,7 +2610,7 @@ shown before the question, not prose."
      "\n\n"
      (harness-ui--handoff-heading "HAND OVER") "\n"
      "  lossy; the new model is told to re-investigate\n\n"
-     (harness-ui--handoff-choice-text)
+     (harness-ui--handoff-choice-text (harness-ui--handoff-choices-for checks))
      (if one "" "\n\nThe choice applies to each session listed; the others just switch.")
      "\n")))
 
@@ -2480,7 +2624,8 @@ their number).  The risks show before the question.  Return a mode of
   (let* ((total (or total (length checks)))
          (answer (read-multiple-choice
                   (format "Switch to %s" label)
-                  (mapcar (lambda (c) (list (nth 0 c) (nth 1 c) (nth 3 c))) harness-ui--handoff-choices)
+                  (mapcar (lambda (c) (list (nth 0 c) (nth 1 c) (nth 3 c)))
+                          (harness-ui--handoff-choices-for checks))
                   (harness-ui--handoff-text checks label total)
                   "*Harness model switch*")))
     (nth 2 (assq (car answer) harness-ui--handoff-choices))))

@@ -11,6 +11,14 @@
 ;; context, hand the whole transcript over as a file, switch without a
 ;; handoff, or cancel.
 ;;
+;; Summarising on the current model is the cheap choice while that
+;; model's prompt cache is warm, as it reads the conversation back from
+;; it; once the cache lapsed (or is another model's) it reads all of it
+;; again uncached, and the option says so instead (see
+;; `harness-ui--handoff-choices-for').  The cache panel
+;; (harness-ui-cache.el) stays away while the banner asks, and draws the
+;; tail again when the cache lapses, which brings the banner up to date.
+;;
 ;; The banner's options work as a question's do: each names its key, the
 ;; keys answer while point is on the banner, and a click answers from
 ;; anywhere.  Choosing runs `handoff/switch' (`handoff/switch-all' for a
@@ -198,8 +206,11 @@ itself, not under its label."
 
 (defun harness-ui-switch--options (buffer prompt)
   "Return the options of the switch banner for PROMPT, answered in BUFFER.
-Each names its key, so the banner answers like a question's options."
-  (let* ((choices harness-ui--handoff-choices)
+Each names its key, so the banner answers like a question's options.
+Summarising on the current model says whether its cache is still warm
+\(`harness-ui--handoff-choices-for'), as of when the banner is drawn:
+the cache panel draws it again the moment the cache lapses."
+  (let* ((choices (harness-ui--handoff-choices-for (plist-get prompt :checks)))
          (width (apply #'max (mapcar (lambda (c) (string-width (nth 1 c))) choices))))
     (mapconcat
      (lambda (choice)

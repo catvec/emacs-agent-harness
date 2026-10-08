@@ -881,6 +881,146 @@ and so does a queued one; the searchable transcript says who sent it."
         (should (= 1500 (plist-get u :context)))
         (should (= 1 (plist-get u :turns)))))))
 
+(defvar harness-cache-ttl)
+(defvar harness-cache-ttl-overrides)
+
+(ert-deftest harness-session-usage-stamps-the-prompt-cache ()
+  "A request that read or wrote the prompt cache stamps when, and the
+lifetime its provider reported; the session's `:cache' says when the
+cache lapses, and survives a restart.  A record without tokens leaves
+the stamp; a request that used no cache drops it."
+  (harness-session-test-with
+    (let* ((harness-cache-ttl 300)
+           (harness-cache-ttl-overrides nil)
+           (id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (m (plist-get (harness-call 'session/get id) :model))
+           (cache (lambda () (plist-get (harness-call 'session/get id) :cache))))
+      ;; A new session knows of no cache.
+      (should-not (funcall cache))
+      ;; A request that did not use one stamps nothing.
+      (harness-call 'session/usage-add id '(:input 100 :output 10 :context 110))
+      (should-not (funcall cache))
+      ;; One that read it did so now, as the clock says, and the
+      ;; provider said nothing of a lifetime: the default's.
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 1000.0)))
+        (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 900 :context 920)))
+      (should (equal `(:at 1000.0 :ttl 300 :expires 1300.0 :model ,m) (funcall cache)))
+      ;; The time and lifetime the provider reported win.
+      (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-write 50 :context 980
+                                             :cache-at 2000.0 :cache-ttl 3600))
+      (should (equal `(:at 2000.0 :ttl 3600 :expires 5600.0 :model ,m) (funcall cache)))
+      ;; A turn counted is no request.
+      (harness-call 'session/usage-add id '(:turns 1))
+      (should (equal `(:at 2000.0 :ttl 3600 :expires 5600.0 :model ,m) (funcall cache)))
+      ;; It is kept with the session.
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (equal `(:at 2000.0 :ttl 3600 :expires 5600.0 :model ,m) (funcall cache)))
+      ;; A request without a lifetime of its own has the default's again.
+      (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 990 :context 1000
+                                             :cache-at 3000.0))
+      (should (equal `(:at 3000.0 :ttl 300 :expires 3300.0 :model ,m) (funcall cache)))
+      ;; A request that used no cache: nothing is cached to lose.
+      (harness-call 'session/usage-add id '(:input 1000 :output 10 :context 1010))
+      (should-not (funcall cache))
+      (should-not (plist-member (plist-get (harness-call 'session/get id) :usage) :cache-at))
+      (should-not (plist-member (plist-get (harness-call 'session/get id) :usage) :cache-model)))))
+
+(ert-deftest harness-session-cache-needs-context ()
+  "A session whose usage says no context has nothing cached to lose."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-call 'session/usage-add id '(:input 0 :output 0 :cache-read 10 :cache-at 1000.0))
+      (should (plist-get (plist-get (harness-call 'session/get id) :usage) :cache-at))
+      (should-not (plist-get (harness-call 'session/get id) :cache)))))
+
+(defmacro harness-session-test-with-loop (&rest body)
+  "Run BODY in `harness-session-test-with' with providers `test-api' and `test-loop'.
+`test-api' (models a and b) is sent the whole conversation at every
+request; `test-loop' (model l) keeps a conversation of its own, a
+hosted loop."
+  (declare (indent 0))
+  `(harness-session-test-with
+     (unwind-protect
+         (progn
+           (harness-define-provider 'test-api :complete #'ignore
+             :models (lambda () (harness-resolved (list (list :name "a") (list :name "b")))))
+           (harness-define-provider 'test-loop :complete #'ignore
+             :capabilities '(:hosted-loop t)
+             :models (lambda () (harness-resolved (list (list :name "l")))))
+           ,@body)
+       (dolist (p '(test-api test-loop))
+         (remhash p harness-providers)
+         (harness-provider--forget p)))))
+
+(ert-deftest harness-session-cache-is-the-models-own ()
+  "A cache serves the model whose request wrote it.
+Switched to another model, the session still reports the old model's
+cache, with that model's lifetime: the new model reads none of it, and
+switched back while it lasts, it is the session's own again.  A
+request still sent to the old model stamps that model's cache."
+  (harness-session-test-with-loop
+    (let* ((harness-cache-ttl 300)
+           (harness-cache-ttl-overrides '(("\\`test-api:a\\'" . 600)))
+           (id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "test-api:a") :id))
+           (cache (lambda () (plist-get (harness-call 'session/get id) :cache))))
+      (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 900 :context 920 :cache-at 1000.0))
+      (should (equal '(:at 1000.0 :ttl 600 :expires 1600.0 :model "test-api:a") (funcall cache)))
+      (harness-call 'session/update id :model "test-api:b" :silent t)
+      (should (equal '(:at 1000.0 :ttl 600 :expires 1600.0 :model "test-api:a") (funcall cache)))
+      ;; A step a began ends after the switch: a's cache, used later.
+      (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 920 :context 940
+                                             :cache-at 1100.0 :model "test-api:a"))
+      (should (equal '(:at 1100.0 :ttl 600 :expires 1700.0 :model "test-api:a") (funcall cache)))
+      (harness-call 'session/update id :model "test-api:a" :silent t)
+      (should (equal '(:at 1100.0 :ttl 600 :expires 1700.0 :model "test-api:a") (funcall cache)))
+      ;; b's first request caches the conversation for b.
+      (harness-call 'session/update id :model "test-api:b" :silent t)
+      (harness-call 'session/usage-add id '(:input 940 :output 10 :cache-write 940 :context 950
+                                             :cache-at 1200.0 :model "test-api:b"))
+      (should (equal '(:at 1200.0 :ttl 300 :expires 1500.0 :model "test-api:b") (funcall cache)))
+      ;; It is kept with the session.
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (equal '(:at 1200.0 :ttl 300 :expires 1500.0 :model "test-api:b") (funcall cache))))))
+
+(ert-deftest harness-session-cache-goes-when-the-conversation-starts-over ()
+  "Nothing is cached once the conversation starts over.
+A compaction replaces it with a summary (`:cache-reset'), whatever the
+summariser's own request cached.  A hosted loop that holds none of
+the session's conversation starts one of its own, sent none of the old
+one; one that holds it carries it on, uncached for its model."
+  (harness-session-test-with-loop
+    (let* ((harness-cache-ttl 300)
+           (harness-cache-ttl-overrides nil)
+           (id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "test-api:a") :id))
+           (cache (lambda () (plist-get (harness-call 'session/get id) :cache)))
+           (stamp (lambda (at)
+                    (harness-call 'session/usage-add id (list :input 10 :output 10 :cache-read 900
+                                                              :context 920 :cache-at at)))))
+      (funcall stamp 1000.0)
+      (should (funcall cache))
+      (let ((u (harness-call 'session/usage-add id '(:input 900 :output 200 :cache-read 900 :context 200
+                                                      :cache-reset t))))
+        (should-not (plist-member u :cache-at))
+        (should-not (plist-member u :cache-model))
+        (should (= 1800 (plist-get u :cache-read)))
+        (should (= 200 (plist-get u :context))))
+      (should-not (funcall cache))
+      ;; A hosted loop with none of the session's conversation.
+      (funcall stamp 2000.0)
+      (harness-call 'session/update id :model "test-loop:l" :silent t)
+      (should-not (funcall cache))
+      ;; Back on a, the cache is a's again.
+      (harness-call 'session/update id :model "test-api:a" :silent t)
+      (should (equal '(:at 2000.0 :ttl 300 :expires 2300.0 :model "test-api:a") (funcall cache)))
+      ;; A hosted loop holding the session's conversation carries it on.
+      (harness-call 'session/set-provider-state id (harness-tag-provider-state '(:conv "c1") "test-loop:l"))
+      (harness-call 'session/update id :model "test-loop:l" :silent t)
+      (should (equal '(:at 2000.0 :ttl 300 :expires 2300.0 :model "test-api:a") (funcall cache))))))
+
 (ert-deftest harness-session-messages-merge-rules ()
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))

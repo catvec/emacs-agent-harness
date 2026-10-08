@@ -362,7 +362,7 @@ promise resolves once it answered or failed."
         :flavor 'deepseek
         :models-fn #'harness-deepseek--list-models
         :tiers harness-deepseek-tiers
-        :capabilities '(:thinking t)))
+        :capabilities (list :thinking t :cache-ttl harness-openai-deepseek-cache-ttl)))
 
 ;;;; Registration
 

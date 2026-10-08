@@ -309,7 +309,8 @@ widget library ignore the property."
             (goto-char (match-beginning 0))
             (let* ((form (read (current-buffer)))
                    (type (eval (plist-get (nthcdr 4 form) :type) t)))
-              ;; A switch, as whether to list a server's models, holds none.
+              ;; A switch named after models, such as whether to list
+              ;; them (`harness-deepseek-list-models'), holds none.
               (unless (eq type 'boolean)
                 (push (nth 1 form) found)
                 (should (memq :names (flatten-tree type)))
