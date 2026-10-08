@@ -377,6 +377,22 @@ A `message_delta' counts the message's output so far; the part not
 reported yet goes out as a `call-usage' event, for the output rate.
 Kept beside the session records, as `harness-provider-claude--blocks' is.")
 
+(defvar harness-provider-claude--cache-at (make-hash-table :test 'equal)
+  "Harness session id -> when the turn's main conversation last used the cache.
+That is the time of the `message_start' of its last request that read
+or wrote the prompt cache, which keeps the cache from then on; it goes
+out with the turn's `usage' event as `:cache-at'.  A sub-agent's
+requests use a cache of their own and leave it.  Kept beside the
+session records, as `harness-provider-claude--blocks' is.")
+
+(defvar harness-provider-claude--cache-ttl (make-hash-table :test 'equal)
+  "Harness session id -> the lifetime its cache writes last asked for.
+3600 for the one-hour cache, 300 for the five-minute one, as the usage
+of the main conversation's last request that wrote the cache says (see
+`harness-provider-claude--cache-ttl-of').  It outlives the turn: a
+request that only reads keeps what was written with it.  Kept beside
+the session records, as `harness-provider-claude--blocks' is.")
+
 (defvar harness-provider-claude--side-count 0
   "Counter that keeps the ids of side requests' CLI processes unique.")
 
@@ -429,6 +445,7 @@ resumes the CLI session in a new one."
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--turn-failure)
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--call-checkpoints)
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--call-output)
+    (remhash (harness-provider-claude-session-id entry) harness-provider-claude--cache-at)
     (let ((fn (harness-provider-claude-session-on-event entry)))
       (setf (harness-provider-claude-session-active entry) nil
             (harness-provider-claude-session-cancel-timer entry) nil
@@ -1012,15 +1029,55 @@ yet goes out as a `call-usage' event, for the output rate.  The turn's
       (puthash sid output harness-provider-claude--call-output)
       (harness-provider-claude--emit entry (list :type 'call-usage :output (- output reported))))))
 
+(defun harness-provider-claude--tokens (value)
+  "Return VALUE when it is a number of tokens, else 0."
+  (if (numberp value) value 0))
+
+(defun harness-provider-claude--cache-ttl-of (usage)
+  "Return the cache lifetime the writes of Anthropic USAGE asked for, or nil.
+USAGE breaks its cache writes down by lifetime in `cache_creation':
+3600 when it wrote to the one-hour cache, 300 when only to the
+five-minute one, nil when it wrote nothing or does not say."
+  (let ((creation (plist-get usage :cache_creation)))
+    (cond ((not (listp creation)) nil)
+          ((> (harness-provider-claude--tokens (plist-get creation :ephemeral_1h_input_tokens)) 0) 3600)
+          ((> (harness-provider-claude--tokens (plist-get creation :ephemeral_5m_input_tokens)) 0) 300))))
+
+(defun harness-provider-claude--note-cache (entry usage)
+  "Note what a request of ENTRY's main conversation, with USAGE, did to the cache.
+USAGE is its `message_start''s: a request that read or wrote the cache
+keeps it from now on, for the lifetime its writes asked for."
+  (let ((sid (harness-provider-claude-session-id entry)))
+    (when (> (+ (harness-provider-claude--tokens (plist-get usage :cache_read_input_tokens))
+                (harness-provider-claude--tokens (plist-get usage :cache_creation_input_tokens)))
+             0)
+      (puthash sid (float-time) harness-provider-claude--cache-at))
+    (when-let* ((ttl (harness-provider-claude--cache-ttl-of usage)))
+      (puthash sid ttl harness-provider-claude--cache-ttl))))
+
+(defun harness-provider-claude--cache-fields (entry usage)
+  "Return the prompt cache fields of the `usage' event ENTRY's turn ends with.
+USAGE is the result's.  `:cache-at' is when the turn's main
+conversation last used the cache, if a request said so as it started;
+`:cache-ttl' the lifetime its last writes asked for, else the one the
+turn's writes did (see `harness-provider-claude--cache-ttl-of')."
+  (let* ((sid (harness-provider-claude-session-id entry))
+         (at (gethash sid harness-provider-claude--cache-at))
+         (ttl (or (gethash sid harness-provider-claude--cache-ttl)
+                  (harness-provider-claude--cache-ttl-of usage))))
+    (append (and at (list :cache-at at))
+            (and ttl (list :cache-ttl ttl)))))
+
 (defun harness-provider-claude--handle-stream (entry event &optional sub-agent)
   "Handle an Anthropic streaming EVENT on ENTRY.
 SUB-AGENT is non-nil for the stream of a sub-agent's message (its
 `parent_tool_use_id'), whose usage the main conversation's output rate
-leaves out."
+leaves out, as its cache does."
   (pcase (plist-get event :type)
     ("message_start"
      (unless sub-agent
-       (remhash (harness-provider-claude-session-id entry) harness-provider-claude--call-output))
+       (remhash (harness-provider-claude-session-id entry) harness-provider-claude--call-output)
+       (harness-provider-claude--note-cache entry (plist-get (plist-get event :message) :usage)))
      (when-let* ((ctx (harness-provider-claude--usage-context
                        (plist-get (plist-get event :message) :usage))))
        (setf (harness-provider-claude-session-context entry) ctx)))
@@ -1718,6 +1775,7 @@ It is no longer the probe: whoever needs one next starts another."
                          :cache-read cache-read :cache-write cache-write
                          :context (or (harness-provider-claude-session-context entry)
                                       (+ input cache-read cache-write)))
+                   (harness-provider-claude--cache-fields entry usage)
                    (harness-provider-claude--billing-fields
                     entry (harness-provider-claude--turn-cost entry msg))))
     (when (harness-provider-claude--stale-p)
@@ -2781,6 +2839,7 @@ session's (`harness-provider-claude--complete')."
     (remhash session-id harness-provider-claude--sessions)
     (remhash session-id harness-provider-claude--spawns)
     (remhash session-id harness-provider-claude--call-checkpoints)
+    (remhash session-id harness-provider-claude--cache-ttl)
     t))
 
 (defun harness-provider-claude-close-all ()

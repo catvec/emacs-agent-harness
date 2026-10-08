@@ -29,6 +29,9 @@
 (declare-function harness-provider-claude--forget-listing "harness-provider-claude")
 (declare-function harness-provider--forget "harness-provider")
 (defvar harness-provider-claude--call-output)
+(defvar harness-provider-claude--cache-at)
+(defvar harness-provider-claude--cache-ttl)
+(declare-function harness-provider-claude--cache-ttl-of "harness-provider-claude")
 (declare-function harness-provider-claude--handle-stream "harness-provider-claude")
 (declare-function harness-provider-claude--finish "harness-provider-claude")
 (declare-function harness-provider-claude-close "harness-provider-claude")
@@ -1996,6 +1999,43 @@ is back and the CLI searches no more."
       (should (equal "ANTHROPIC_API_KEY" (plist-get q :auth)))
       (should-not (plist-get q :windows)))
     (harness-provider-claude-close "api1")))
+
+(ert-deftest harness-provider-claude-cache-ttl-of-usage ()
+  "The lifetime cache writes asked for, from how usage breaks them down."
+  (should (= 3600 (harness-provider-claude--cache-ttl-of
+                   '(:cache_creation (:ephemeral_1h_input_tokens 5 :ephemeral_5m_input_tokens 9)))))
+  (should (= 300 (harness-provider-claude--cache-ttl-of
+                  '(:cache_creation (:ephemeral_1h_input_tokens 0 :ephemeral_5m_input_tokens 9)))))
+  (should-not (harness-provider-claude--cache-ttl-of
+               '(:cache_creation (:ephemeral_1h_input_tokens 0 :ephemeral_5m_input_tokens 0))))
+  (should-not (harness-provider-claude--cache-ttl-of '(:cache_read_input_tokens 50)))
+  (should-not (harness-provider-claude--cache-ttl-of nil)))
+
+(ert-deftest harness-provider-claude-usage-says-when-the-cache-was-used ()
+  "A turn's usage says when its last request used the prompt cache, as
+that request started rather than when the turn ended, and the lifetime
+its writes asked for: the hour Claude Code asks for on a subscription,
+five minutes with an API key."
+  (harness-provider-claude-test--setup)
+  (pcase-dolist (`(,auth . ,ttl) '(("subscription" . 3600) ("api" . 300)))
+    (let* ((process-environment (append (list (concat "HARNESS_FAKE_CLAUDE_AUTH=" auth)
+                                              "HARNESS_FAKE_CLAUDE_PAUSE=1")
+                                        process-environment))
+           (sid (concat "cache-" auth))
+           (before (float-time))
+           ;; The reply streams with a pause of a second after the request started.
+           (events (car (harness-provider-claude-test--run
+                         (harness-provider-claude-test--request sid "slow-text"))))
+           (after (float-time))
+           (u (harness-provider-claude-test--find events 'usage)))
+      (should (= ttl (plist-get u :cache-ttl)))
+      (should (<= before (plist-get u :cache-at) after))
+      (should (>= (- after (plist-get u :cache-at)) 0.9))
+      ;; The turn's time goes with it; the lifetime stays for the session.
+      (should-not (gethash sid harness-provider-claude--cache-at))
+      (should (= ttl (gethash sid harness-provider-claude--cache-ttl)))
+      (harness-provider-claude-close sid)
+      (should-not (gethash sid harness-provider-claude--cache-ttl)))))
 
 (ert-deftest harness-provider-claude-resume-counts-only-new-spend ()
   "A resumed CLI session restores its earlier spend; only the new turn counts."

@@ -1081,6 +1081,13 @@ account does; calls recorded without a billing stay as recorded."
                                     (format-time-string "%H:%M" time)))
             (t (format-time-string "%a %b %-d, %H:%M" time))))))
 
+(defun harness-ui-format-clock (time &optional now)
+  "Return TIME as a clock time, \"14:05\", with its day unless that is NOW's.
+NOW defaults to the current time."
+  (if (equal (format-time-string "%F" time) (format-time-string "%F" (or now (float-time))))
+      (format-time-string "%H:%M" time)
+    (format-time-string "%b %-d, %H:%M" time)))
+
 (defun harness-ui-format-window (window)
   "Return \"5h 9%\" for quota WINDOW, coloured by how much of it is used."
   (let ((used (or (plist-get window :used) 0)))
@@ -2434,11 +2441,59 @@ available is offered."
   "What a model switch that loses the conversation offers.
 Each entry is (KEY NAME CHOICE DESCRIPTION); CHOICE is a mode of
 `handoff/switch', or `cancel'.  The names are short so the minibuffer
-prompt stays readable; the descriptions are one line each.")
+prompt stays readable; the descriptions are one line each.  The one of
+`compact' holds while the cache is warm; `harness-ui--handoff-choices-for'
+says otherwise once it is not.")
 
-(defun harness-ui--handoff-choice-text ()
-  "Return the handoff choices as a short, aligned list, easy to scan."
-  (let* ((choices harness-ui--handoff-choices)
+(defun harness-ui--handoff-cache (check now)
+  "Return how CHECK's session finds the cache of the model it switches from.
+`warm' while the prompt cache its requests last used is that model's
+and lasts at NOW, `expired' once it lapsed, `other' when it is another
+model's (the session switched since), nil when nothing is known.  See
+`handoff/check''s `:cache'."
+  (let* ((cache (plist-get check :cache))
+         (expires (plist-get cache :expires))
+         (from (plist-get check :from)))
+    (when (numberp expires)
+      (cond ((not (equal (or (plist-get cache :model) from) from)) 'other)
+            ((< now expires) 'warm)
+            (t 'expired)))))
+
+(defun harness-ui--handoff-compact-text (checks &optional now)
+  "Describe summarising on the current model for the sessions of CHECKS.
+That reads each conversation back from the model's prompt cache, cheap
+while the cache lasts; once it lapsed, or is another model's, the whole
+conversation is paid for again uncached.  Return the description when
+a cache is cold at NOW (default the current time), else nil: the usual
+one holds."
+  (let* ((now (or now (float-time)))
+         (states (mapcar (lambda (c) (harness-ui--handoff-cache c now)) checks))
+         (cold (cl-count-if (lambda (s) (memq s '(expired other))) states))
+         (n (length checks)))
+    (cond
+     ((= cold 0) nil)
+     ((< cold n) (format "re-reads it all uncached where the cache lapsed (%d of %d)" cold n))
+     ((> n 1) "caches expired: re-reads them all uncached")
+     ((eq (car states) 'other) "cache cold: re-reads it all uncached")
+     (t (format "cache expired at %s: re-reads it all uncached"
+                (harness-ui-format-clock (plist-get (plist-get (car checks) :cache) :expires) now))))))
+
+(defun harness-ui--handoff-choices-for (checks &optional now)
+  "Return `harness-ui--handoff-choices' as they read for CHECKS at NOW.
+A warm cache is what makes summarising on the current model cheap, so
+its description says when the cache is cold instead (see
+`harness-ui--handoff-compact-text')."
+  (let ((compact (harness-ui--handoff-compact-text checks now)))
+    (mapcar (lambda (c)
+              (if (and compact (eq (nth 2 c) 'compact))
+                  (list (nth 0 c) (nth 1 c) (nth 2 c) compact)
+                c))
+            harness-ui--handoff-choices)))
+
+(defun harness-ui--handoff-choice-text (&optional choices)
+  "Return the handoff CHOICES as a short, aligned list, easy to scan.
+CHOICES default to `harness-ui--handoff-choices'."
+  (let* ((choices (or choices harness-ui--handoff-choices))
          (width (apply #'max (mapcar (lambda (c) (string-width (nth 1 c))) choices)))
          (fmt (format "  %%c  %%-%ds  %%s" width)))
     (mapconcat (lambda (c)
@@ -2555,7 +2610,7 @@ shown before the question, not prose."
      "\n\n"
      (harness-ui--handoff-heading "HAND OVER") "\n"
      "  lossy; the new model is told to re-investigate\n\n"
-     (harness-ui--handoff-choice-text)
+     (harness-ui--handoff-choice-text (harness-ui--handoff-choices-for checks))
      (if one "" "\n\nThe choice applies to each session listed; the others just switch.")
      "\n")))
 
@@ -2569,7 +2624,8 @@ their number).  The risks show before the question.  Return a mode of
   (let* ((total (or total (length checks)))
          (answer (read-multiple-choice
                   (format "Switch to %s" label)
-                  (mapcar (lambda (c) (list (nth 0 c) (nth 1 c) (nth 3 c))) harness-ui--handoff-choices)
+                  (mapcar (lambda (c) (list (nth 0 c) (nth 1 c) (nth 3 c)))
+                          (harness-ui--handoff-choices-for checks))
                   (harness-ui--handoff-text checks label total)
                   "*Harness model switch*")))
     (nth 2 (assq (car answer) harness-ui--handoff-choices))))

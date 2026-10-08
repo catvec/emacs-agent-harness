@@ -748,7 +748,10 @@ is that model's provider's, whatever the session's model is by now."
                              :cache-read (plist-get ev :cache-read) :cache-write (plist-get ev :cache-write)
                              :cost (plist-get ev :cost) :list-cost (plist-get ev :list-cost)
                              :billing (plist-get ev :billing) :plan (plist-get ev :plan)
-                             :context (plist-get ev :context))))
+                             :context (plist-get ev :context)
+                             ;; The cache the request used is this model's.
+                             :model model
+                             :cache-at (plist-get ev :cache-at) :cache-ttl (plist-get ev :cache-ttl))))
         ;; A model call of a hosted loop's turn, which the turn's `usage'
         ;; counts: announced for the output rate, recorded nowhere.
         ('call-usage

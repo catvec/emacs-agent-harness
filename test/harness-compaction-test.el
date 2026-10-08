@@ -111,6 +111,26 @@
                  (plist-get (plist-get (harness-call 'session/get id) :usage) :context)))
       (should (zerop (hash-table-count harness-compaction--running))))))
 
+(ert-deftest harness-compaction-starts-the-cache-over ()
+  "A compaction leaves nothing cached: the conversation goes on from its summary.
+What the summariser's request read from the cache is counted, but it
+stamps no cache, and the old one's stamp goes: the next request sends
+the summary uncached, and none of what was cached before."
+  (harness-compaction-test-with
+    (let* ((id (harness-compaction-test-session))
+           (harness-provider-demo-script-override
+            '((:type text :delta "SUMMARY")
+              (:type usage :input 20 :output 5 :cache-read 400 :cache-at 2000.0 :cache-ttl 3600)
+              (:type done :stop-reason end-turn))))
+      (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 400 :context 420
+                                             :cache-at 1000.0))
+      (should (plist-get (harness-call 'session/get id) :cache))
+      (harness-await (harness-call 'compaction/compact id))
+      (let ((s (harness-call 'session/get id)))
+        (should-not (plist-get s :cache))
+        (should (= 800 (plist-get (plist-get s :usage) :cache-read)))
+        (should-not (plist-member (plist-get s :usage) :cache-at))))))
+
 (ert-deftest harness-compaction-hosted-summary-on-a-fork ()
   "A summariser that keeps the conversation itself works on a fork of the session's.
 A hosted loop is sent only the newest user messages, so without the
@@ -149,6 +169,45 @@ provider is never forked."
         (harness-await (harness-call 'compaction/compact id))
         (should-not forks)
         (should-not (plist-get (car requests) :provider-state))))))
+
+(ert-deftest harness-compaction-hosted-conversation-keeps-its-cache ()
+  "A hosted loop that summarises a fork of its own conversation keeps that cache.
+The session's provider goes on with the conversation, which the summary
+only joins, so the summariser's request stamps the cache as any request
+does.  Summarised from a sample, or by another model, the conversation
+starts over instead, and the stamp goes."
+  (harness-compaction-test-with
+    (harness-define-provider 'forky
+      :complete (lambda (req)
+                  (let ((on-event (plist-get req :on-event)))
+                    (run-at-time 0.005 nil
+                                 (lambda ()
+                                   (funcall on-event '(:type text :delta "SUMMARY"))
+                                   (funcall on-event '(:type usage :input 20 :output 5 :cache-read 400
+                                                             :cache-at 2000.0 :cache-ttl 3600))
+                                   (funcall on-event '(:type done :stop-reason end-turn)))))
+                  (list :cancel #'ignore))
+      :fork (lambda (_model state)
+              (harness-resolved (list :conv (plist-get state :conv) :fork-pending t)))
+      :capabilities '(:hosted-loop t :fork t :compaction hosted))
+    (let ((id (harness-compaction-test-session))
+          (stamp (lambda (id)
+                   (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 400 :context 420
+                                                          :cache-at 1000.0 :cache-ttl 3600)))))
+      (harness-call 'session/update id :model "forky:m" :silent t)
+      (harness-call 'session/set-provider-state id '(:conv "c9" :provider "forky"))
+      (funcall stamp id)
+      (harness-await (harness-call 'compaction/compact id))
+      (should (equal '(:at 2000.0 :ttl 3600 :expires 5600.0 :model "forky:m")
+                     (plist-get (harness-call 'session/get id) :cache)))
+      ;; A sample: the summariser had none of the conversation.
+      (funcall stamp id)
+      (harness-await (harness-call 'compaction/compact id (list :context "sample")))
+      (should-not (plist-get (harness-call 'session/get id) :cache))
+      ;; Another model, though on a fork of the same provider's state.
+      (funcall stamp id)
+      (harness-await (harness-call 'compaction/compact id (list :model "forky:n")))
+      (should-not (plist-get (harness-call 'session/get id) :cache)))))
 
 (ert-deftest harness-compaction-sample-keeps-the-start-and-the-end ()
   "A `sample' context sends only the first and last messages, and says what it left out."

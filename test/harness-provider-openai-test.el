@@ -272,8 +272,9 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
       (should (equal "max" (plist-get body :reasoning_effort)))
       (should-not (plist-get body :reasoning))
       (should-not (plist-get body :usage)))
-    ;; A DeepSeek endpoint does not claim vision for every model.
-    (should (equal '(:thinking t)
+    ;; A DeepSeek endpoint does not claim vision for every model, and
+    ;; its cache lasts hours.
+    (should (equal (list :thinking t :cache-ttl harness-openai-deepseek-cache-ttl)
                    (harness-openai--capabilities harness-openai-test-deepseek-endpoint)))))
 
 (ert-deftest harness-provider-openai-deepseek-effort-ladder ()

@@ -120,6 +120,29 @@ them.  Such a window is an estimate: the model says so with
 `:context-window-estimated', and the harness logs it."
   :type '(integer :tag "Tokens") :group 'harness)
 
+(defcustom harness-cache-ttl 300
+  "Seconds a provider keeps a session's prompt cache after its last use.
+Once a session has been idle for longer, its next request sends the
+whole conversation again uncached, which costs more and takes longer,
+and the chat warns above the compose box.  Five minutes is what
+Anthropic's and OpenAI's caches keep by default.  This is the
+fallback: a lifetime the provider reports for the request is believed
+first (Claude Code says when it wrote to its one-hour cache), then
+`harness-cache-ttl-overrides', then the `:cache-ttl' capability of
+the model or its provider (see `harness-provider-cache-ttl')."
+  :type '(integer :tag "Seconds") :group 'harness)
+
+(defcustom harness-cache-ttl-overrides nil
+  "Prompt cache lifetimes of particular providers or models.
+Each entry is (REGEXP . SECONDS): a model whose id, \"provider:name\",
+matches REGEXP keeps its cache SECONDS, whatever its provider
+declares; the first entry that matches wins.  (\"\\\\`bedrock:\" .
+3600), say, for Bedrock models asked for the one-hour cache.  A
+lifetime the provider reports for a request still wins over these."
+  :type '(alist :key-type (regexp :tag "Model id")
+                :value-type (integer :tag "Seconds"))
+  :group 'harness)
+
 ;;;; Model catalogue cache
 
 (defvar harness-provider--models nil
@@ -592,6 +615,41 @@ silent small one."
 (harness-defmethod provider/capabilities (model-id)
   "Return the capability plist for MODEL-ID."
   (plist-get (harness-call 'provider/model model-id) :capabilities))
+
+;;;; Prompt cache lifetime
+
+(defun harness-provider--seconds (value)
+  "Return VALUE when it is a positive number of seconds, else nil."
+  (and (numberp value) (> value 0) value))
+
+(defun harness-provider-cache-ttl (model-id &optional reported)
+  "Return the seconds MODEL-ID's provider keeps a prompt cache after its use.
+REPORTED is the lifetime the provider reported for the request that
+last used the cache, and wins when it is a positive number.  Else the
+first entry of `harness-cache-ttl-overrides' matching MODEL-ID gives
+it, else the `:cache-ttl' capability of the model or its provider,
+else `harness-cache-ttl'."
+  (or (harness-provider--seconds reported)
+      (and (stringp model-id)
+           (harness-provider--seconds
+            (cdr (cl-find-if (lambda (entry)
+                               (and (consp entry) (stringp (car entry))
+                                    (condition-case nil (string-match-p (car entry) model-id)
+                                      (invalid-regexp nil))))
+                             harness-cache-ttl-overrides))))
+      (and (stringp model-id)
+           (harness-provider--seconds
+            (condition-case err
+                (plist-get (harness-call 'provider/capabilities model-id) :cache-ttl)
+              (error (harness-log 'debug "provider: no cache lifetime for %s: %S" model-id err)
+                     nil))))
+      harness-cache-ttl))
+
+(harness-defmethod provider/cache-ttl (model-id &optional reported)
+  "Return the seconds MODEL-ID keeps a prompt cache after its use.
+REPORTED is the lifetime the provider reported for the last request;
+see `harness-provider-cache-ttl'."
+  (harness-provider-cache-ttl model-id reported))
 
 ;;;; Model tiers
 

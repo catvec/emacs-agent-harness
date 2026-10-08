@@ -409,6 +409,48 @@ make no difference to the caller."
       (harness-define-provider 'test-warm :complete #'ignore)
       (should-not (harness-call 'provider/warm '(:model "test-warm:m"))))))
 
+;;;; Prompt cache lifetime
+
+(defvar harness-cache-ttl)
+(defvar harness-cache-ttl-overrides)
+
+(ert-deftest harness-provider-cache-ttl-resolves-in-order ()
+  "How long a model keeps its prompt cache: what its provider reported
+for the request, else the first override matching its id, else the
+`:cache-ttl' capability of the model or its provider, else
+`harness-cache-ttl'."
+  (harness-provider-test-with (test-cache test-plain)
+    (let ((harness-cache-ttl 300)
+          (harness-cache-ttl-overrides nil))
+      (harness-define-provider 'test-cache
+        :complete #'ignore :capabilities '(:cache-ttl 10800)
+        :models (lambda ()
+                  (harness-resolved (list (list :name "long" :context-window 1000)
+                                          (list :name "short" :context-window 1000
+                                                :capabilities '(:cache-ttl 60))))))
+      (harness-provider-test-static 'test-plain '(("m" . 1000)))
+      ;; Nothing said: the default, also for a model nobody knows.
+      (should (= 300 (harness-call 'provider/cache-ttl "test-plain:m")))
+      (should (= 300 (harness-call 'provider/cache-ttl "nobody:m")))
+      (should (= 300 (harness-call 'provider/cache-ttl nil)))
+      ;; The provider's capability, which a model's own wins over.
+      (should (= 10800 (harness-call 'provider/cache-ttl "test-cache:long")))
+      (should (= 60 (harness-call 'provider/cache-ttl "test-cache:short")))
+      ;; The first override that matches wins over both; a broken regexp
+      ;; is passed over.
+      (let ((harness-cache-ttl-overrides '(("[" . 5) ("\\`test-cache:" . 3600) ("long" . 7))))
+        (should (= 3600 (harness-call 'provider/cache-ttl "test-cache:long")))
+        (should (= 3600 (harness-call 'provider/cache-ttl "test-cache:short")))
+        (should (= 300 (harness-call 'provider/cache-ttl "test-plain:m")))
+        ;; What the provider reported for the request wins over all.
+        (should (= 900 (harness-call 'provider/cache-ttl "test-cache:long" 900)))
+        ;; Unless it reported nothing usable.
+        (should (= 3600 (harness-call 'provider/cache-ttl "test-cache:long" 0)))
+        (should (= 3600 (harness-call 'provider/cache-ttl "test-cache:long" "1h"))))
+      ;; The default follows the option.
+      (let ((harness-cache-ttl 2))
+        (should (= 2 (harness-call 'provider/cache-ttl "test-plain:m")))))))
+
 ;;;; Forks at a checkpoint and replayed transcripts
 
 (defvar harness-provider-history-limit)

@@ -309,10 +309,13 @@ widget library ignore the property."
             (goto-char (match-beginning 0))
             (let* ((form (read (current-buffer)))
                    (type (eval (plist-get (nthcdr 4 form) :type) t)))
-              (push (nth 1 form) found)
-              (should (memq :names (flatten-tree type)))
-              ;; The type takes the option's value as before.
-              (should (harness-test-fits-p type (eval (nth 2 form) t))))))))
+              ;; A switch named after models, such as whether to list
+              ;; them (`harness-deepseek-list-models'), holds none.
+              (unless (eq type 'boolean)
+                (push (nth 1 form) found)
+                (should (memq :names (flatten-tree type)))
+                ;; The type takes the option's value as before.
+                (should (harness-test-fits-p type (eval (nth 2 form) t)))))))))
     (dolist (key '(harness-model harness-tasks-model harness-tasks-refine-model harness-tasks-recap-model
                    harness-tasks-search-model harness-perms-auto-model harness-fallback-models
                    harness-provider-copilot-default-model))

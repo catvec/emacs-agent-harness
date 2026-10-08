@@ -68,7 +68,7 @@ short line, which the cheapest model does well.  nil uses that model
 itself, and a PROVIDER:NAME forces one."
   :type '(choice (const :tag "The provider's cheap model" auto)
                  (const :tag "The session's model" nil)
-                 (string :tag "Model"))
+                 (string :tag "Model" :names model))
   :group 'harness)
 
 (defcustom harness-pet-chance 0.3
