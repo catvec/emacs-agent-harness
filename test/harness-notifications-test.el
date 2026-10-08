@@ -3,16 +3,21 @@
 ;;; Commentary:
 
 ;; The desktop backends (harness-notifications-desktop.el) run against
-;; fake notify-send scripts and stubbed D-Bus calls, the notifications
-;; module against fake providers, Gotify against a local HTTP server
-;; reached through curl, and the system provider against an in-process
-;; client standing in for the UI.  Nothing here shows a real
-;; notification or reaches the network.
+;; fake notify-send and terminal-notifier scripts, stubbed D-Bus calls
+;; and a stubbed AppleScript, the notifications module against fake
+;; providers, Gotify against a local HTTP server reached through curl,
+;; and the system provider against an in-process client standing in for
+;; the UI.  Nothing here shows a real notification or reaches the
+;; network.  The macOS backends run with `system-type' bound to darwin,
+;; and a terminal-notifier click runs for real: the command the
+;; notification carries goes through /bin/sh and the real emacsclient
+;; to a server in the Emacs running the tests.
 
 ;;; Code:
 
 (require 'harness-test-helpers)
 (require 'harness-notifications-desktop)
+(require 'server)
 
 (defvar harness-notifications-providers)
 (defvar harness-notifications--providers)
@@ -34,10 +39,11 @@
 
 ;;;; Fake programs
 
-(defun harness-notifications-test--script (dir body)
+(defun harness-notifications-test--script (dir body &optional name)
   "Write an executable shell script running BODY in DIR; return its path.
-The script finds DIR in $D; it writes its arguments to $D/args."
-  (let ((path (expand-file-name "notify-send" dir)))
+It is called NAME, notify-send by default.  The script finds DIR in $D;
+it writes its arguments to $D/args."
+  (let ((path (expand-file-name (or name "notify-send") dir)))
     (with-temp-file path
       (insert "#!/bin/sh\nD=" (shell-quote-argument (directory-file-name dir)) "\n" body "\n"))
     (set-file-modes path #o755)
@@ -238,6 +244,465 @@ The script finds DIR in $D; it writes its arguments to $D/args."
       (should (equal '(:timeout 2000) (seq-take (nthcdr 5 call) 2)))
       ;; Nothing would hear a click.
       (should (equal '(:array :signature "s") (nth 17 call))))))
+
+;;;; Desktop: terminal-notifier (macOS)
+
+(defmacro harness-notifications-test-with-terminal-notifier (script &rest body)
+  "Run BODY with terminal-notifier a fake running SCRIPT, as the backend.
+`dir' is the script's directory, and `args' reads the arguments it got.
+The backend works on macOS only: bind `system-type' to darwin around
+what shows a notification.  No click action, application, Emacs
+server or warning carries over from elsewhere, and this Emacs runs
+from no application."
+  (declare (indent 1))
+  `(let* ((dir (harness-test-temp-dir))
+          (harness-notifications-desktop--terminal-notifier
+           (harness-notifications-test--script dir ,script "terminal-notifier"))
+          (harness-notifications-desktop--macos-bin-directories nil)
+          (harness-notifications-desktop-backend 'terminal-notifier)
+          (harness-notifications-desktop-macos-app nil)
+          (harness-notifications-desktop-unknown-click-function nil)
+          (harness-notifications-desktop--actions nil)
+          (harness-notifications-desktop--bundle-id nil)
+          (harness-notifications-desktop--click-warned nil)
+          (process-environment (cl-remove-if (lambda (e) (string-prefix-p "__CFBundleIdentifier=" e))
+                                             process-environment))
+          (server-process nil))
+     (cl-flet ((args () (split-string (or (harness-read-file (expand-file-name "args" dir)) "") "\n" t)))
+       (unwind-protect (progn ,@body)
+         (ignore-errors (delete-directory dir t))))))
+
+(defmacro harness-notifications-test-with-server (tcp &rest body)
+  "Run BODY with this Emacs's server running, on TCP when TCP is non-nil.
+Otherwise it listens on a local socket.  Either is in a fresh
+directory, `server-dir', and goes when BODY ends."
+  (declare (indent 1))
+  `(let* ((server-dir (harness-test-temp-dir))
+          (server-socket-dir (directory-file-name server-dir))
+          (server-auth-dir server-dir)
+          (server-name "harness-test")
+          (server-use-tcp ,tcp)
+          (server-host nil)
+          (server-process nil))
+     (set-file-modes server-dir #o700)
+     (unwind-protect
+         (progn
+           (server-start)
+           (should (process-live-p server-process))
+           ,@body)
+       (when (process-live-p server-process) (delete-process server-process))
+       (ignore-errors (delete-directory server-dir t)))))
+
+(defun harness-notifications-test--click (command)
+  "Run COMMAND as macOS runs a clicked notification's, with /bin/sh.
+Wait for it to end; return its exit status."
+  (let* ((buffer (generate-new-buffer " *harness-test-click*"))
+         (proc (make-process :name "harness-test-click" :buffer buffer
+                             :command (list "/bin/sh" "-c" command)
+                             :connection-type 'pipe :noquery t)))
+    (unwind-protect
+        (progn
+          (harness-test-wait (lambda () (not (process-live-p proc))) 10 "the click's command")
+          (unless (eq 0 (process-exit-status proc))
+            (message "click command %S said: %s" command
+                     (with-current-buffer buffer (buffer-string))))
+          (process-exit-status proc))
+      (kill-buffer buffer))))
+
+(ert-deftest harness-notifications-desktop-terminal-notifier-arguments ()
+  (let ((harness-notifications-desktop--app-name "App"))
+    ;; Each value behind a backslash, which terminal-notifier drops: one
+    ;; starting with `[' or `-' stays text, not a list or an option.
+    (should (equal '("-title" "\\[x] Needs you" "-message" "\\-y \"z\""
+                     "-activate" "\\org.gnu.Emacs" "-execute" "\\/bin/emacsclient --eval '(f)'")
+                   (harness-notifications-desktop--terminal-notifier-args
+                    '(:title "[x] Needs you" :body "-y \"z\"")
+                    "org.gnu.Emacs" "/bin/emacsclient --eval '(f)'")))
+    ;; A message is required: a title alone is the message, under the
+    ;; harness's name.
+    (should (equal '("-title" "\\App" "-message" "\\T")
+                   (harness-notifications-desktop--terminal-notifier-args '(:title "T" :body ""))))
+    (should (equal '("-title" "\\App" "-message" "\\B")
+                   (harness-notifications-desktop--terminal-notifier-args '(:body "B"))))
+    (should (equal '("-title" "\\App" "-message" "\\App")
+                   (harness-notifications-desktop--terminal-notifier-args nil)))))
+
+(ert-deftest harness-notifications-desktop-terminal-notifier-click-command ()
+  "The command a click runs is for /bin/sh: each word quoted, whatever it holds."
+  (let* ((dir (harness-test-temp-dir))
+         (bin (file-name-as-directory (expand-file-name "it's an \"app\" $HOME" dir)))
+         (client (progn (make-directory bin t)
+                        (harness-notifications-test--script
+                         bin harness-notifications-test--record-args "emacsclient")))
+         (socket (concat "--socket-name=" bin "server")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'harness-notifications-desktop--emacsclient) (lambda () client))
+                  ((symbol-function 'harness-notifications-desktop--server-options)
+                   (lambda () (list socket))))
+          (let ((command (harness-notifications-desktop--click-command "n1\"2")))
+            (should (equal 0 (harness-notifications-test--click command)))
+            (let ((got (split-string (harness-read-file (expand-file-name "args" bin)) "\n" t)))
+              (should (equal (list socket "--alternate-editor=false" "--eval"
+                                   (concat "(and (fboundp 'harness-notifications-desktop-clicked)"
+                                           " (harness-notifications-desktop-clicked \"n1\\\"2\"))"))
+                             got))
+              ;; The expression names the key, read back as it was.
+              (should (equal "n1\"2" (nth 1 (nth 2 (car (read-from-string (nth 3 got))))))))
+            ;; No server here, or no emacsclient: nothing to run.
+            (cl-letf (((symbol-function 'harness-notifications-desktop--server-options) #'ignore))
+              (should-not (harness-notifications-desktop--click-command "k")))
+            (cl-letf (((symbol-function 'harness-notifications-desktop--emacsclient) #'ignore))
+              (should-not (harness-notifications-desktop--click-command "k")))))
+      (delete-directory dir t))))
+
+(ert-deftest harness-notifications-desktop-server-options ()
+  "emacsclient reaches this Emacs's server through its socket, or a TCP one through its address file."
+  (let ((server-process nil))
+    (should-not (harness-notifications-desktop--server-options)))
+  (harness-notifications-test-with-server nil
+    (should (equal (list (concat "--socket-name=" (expand-file-name "harness-test" server-dir)))
+                   (harness-notifications-desktop--server-options))))
+  (harness-notifications-test-with-server t
+    (should (equal (list (concat "--server-file=" (expand-file-name "harness-test" server-dir)))
+                   (harness-notifications-desktop--server-options)))))
+
+(defun harness-notifications-test--round-trip (tcp)
+  "Show a clickable notification with a fake terminal-notifier and click it.
+The click runs the command the notification carries, which reaches
+this Emacs's server: on TCP when TCP is non-nil, else on a socket."
+  (harness-notifications-test-with-terminal-notifier harness-notifications-test--record-args
+    (harness-notifications-test-with-server tcp
+      (let* ((clicks 0)
+             (unknown 0)
+             (harness-notifications-desktop-unknown-click-function (lambda () (cl-incf unknown)))
+             (harness-notifications-desktop-macos-app "org.gnu.Emacs"))
+        (should (equal '(:backend terminal-notifier)
+                       (harness-test-await
+                        (let ((system-type 'darwin))
+                          (harness-notifications-desktop-notify
+                           :title "Needs you: [x]" :body "-y" :on-action (lambda () (cl-incf clicks))))
+                        5)))
+        (let* ((got (args))
+               (execute (car (last got)))
+               (command (substring execute 1))
+               (words (split-string-shell-command command)))
+          (should (equal '("-title" "\\Needs you: [x]" "-message" "\\-y"
+                           "-activate" "\\org.gnu.Emacs" "-execute")
+                         (butlast got)))
+          (should (string-prefix-p "\\" execute))
+          ;; It goes to this Emacs's server, and never starts an Emacs.
+          (should (equal (harness-notifications-desktop--emacsclient) (car words)))
+          (should (equal (concat (if tcp "--server-file=" "--socket-name=")
+                                 (expand-file-name "harness-test" server-dir))
+                         (nth 1 words)))
+          (should (equal "--alternate-editor=false" (nth 2 words)))
+          (should (= 1 (length harness-notifications-desktop--actions)))
+          ;; Clicked: the action runs, once, and is forgotten.
+          (should (equal 0 (harness-notifications-test--click command)))
+          (harness-test-wait (lambda () (= clicks 1)) 10 "the click")
+          (should-not harness-notifications-desktop--actions)
+          ;; Clicked again, in the Notification Center say: the fallback.
+          (should (equal 0 (harness-notifications-test--click command)))
+          (harness-test-wait (lambda () (= unknown 1)) 10 "the fallback")
+          (should (= 1 clicks)))))))
+
+(ert-deftest harness-notifications-desktop-terminal-notifier-click-through-socket ()
+  "A click runs the action in this Emacs: emacsclient asks it through the server's socket."
+  (skip-unless (and (file-executable-p "/bin/sh") (harness-notifications-desktop--emacsclient)))
+  (harness-notifications-test--round-trip nil))
+
+(ert-deftest harness-notifications-desktop-terminal-notifier-click-through-tcp ()
+  "A click runs the action in this Emacs through a TCP server too."
+  (skip-unless (and (file-executable-p "/bin/sh") (harness-notifications-desktop--emacsclient)))
+  (harness-notifications-test--round-trip t))
+
+(ert-deftest harness-notifications-desktop-terminal-notifier-without-server ()
+  "Without the Emacs server a click only brings Emacs forward; the log says why, once."
+  (harness-notifications-test-with-terminal-notifier harness-notifications-test--record-args
+    (let ((harness-notifications-desktop-macos-app "org.gnu.Emacs")
+          (logged nil))
+      (cl-letf (((symbol-function 'harness-log)
+                 (lambda (_level fmt &rest args) (push (apply #'format fmt args) logged))))
+        (dotimes (_ 2)
+          (should (equal '(:backend terminal-notifier)
+                         (harness-test-await
+                          (let ((system-type 'darwin))
+                            (harness-notifications-desktop-notify :title "T" :body "B" :on-action #'ignore))
+                          5)))))
+      (should (equal '("-title" "\\T" "-message" "\\B" "-activate" "\\org.gnu.Emacs") (args)))
+      (should-not harness-notifications-desktop--actions)
+      (should (= 1 (cl-count-if (lambda (m) (string-match-p "M-x server-start" m)) logged))))))
+
+(ert-deftest harness-notifications-desktop-terminal-notifier-plain ()
+  "A notification about nothing to open just shows; from no application, a click brings nothing forward."
+  (harness-notifications-test-with-terminal-notifier harness-notifications-test--record-args
+    (should (equal '(:backend terminal-notifier)
+                   (harness-test-await (let ((system-type 'darwin))
+                                         (harness-notifications-desktop-notify :title "Test notification"))
+                                       5)))
+    (should (equal (list "-title" (concat "\\" harness-notifications-desktop--app-name)
+                         "-message" "\\Test notification")
+                   (args)))
+    (should-not harness-notifications-desktop--click-warned)))
+
+(ert-deftest harness-notifications-desktop-terminal-notifier-failure ()
+  (harness-notifications-test-with-terminal-notifier
+      "echo 'first line' >&2\necho 'No permission to show notifications' >&2\nexit 3"
+    (cl-letf (((symbol-function 'harness-notifications-desktop--click-command)
+               (lambda (key) (concat "true " key))))
+      (let ((err (should-error (harness-test-await
+                                (let ((system-type 'darwin))
+                                  (harness-notifications-desktop-notify :title "T" :on-action #'ignore))
+                                5))))
+        (should (equal "terminal-notifier failed: No permission to show notifications"
+                       (error-message-string err)))
+        ;; Its click action is not kept.
+        (should-not harness-notifications-desktop--actions))))
+  (harness-notifications-test-with-terminal-notifier "exit 4"
+    (should (equal "terminal-notifier failed (exit 4)"
+                   (error-message-string
+                    (should-error (harness-test-await
+                                   (let ((system-type 'darwin))
+                                     (harness-notifications-desktop-notify :title "T"))
+                                   5)))))))
+
+(ert-deftest harness-notifications-desktop-click-actions ()
+  "Click actions run once, from the command loop; the oldest go past the limit."
+  (let ((harness-notifications-desktop--actions nil)
+        (harness-notifications-desktop-max-actions 3)
+        (harness-notifications-desktop-unknown-click-function nil)
+        (ran nil))
+    (dotimes (i 4)
+      (harness-notifications-desktop--remember-action (format "k%d" i) (lambda () (push i ran))))
+    (should (equal '("k3" "k2" "k1") (mapcar #'car harness-notifications-desktop--actions)))
+    ;; Not from the server's process filter that hears the click.
+    (should-not (harness-notifications-desktop-clicked "k2"))
+    (should-not ran)
+    (harness-test-wait (lambda () ran) 2 "the action")
+    (should (equal '(2) ran))
+    (should (equal '("k3" "k1") (mapcar #'car harness-notifications-desktop--actions)))
+    ;; Forgotten or unknown, with no fallback: nothing runs.
+    (harness-notifications-desktop-clicked "k0")
+    (harness-notifications-desktop-clicked "k2")
+    (accept-process-output nil 0.05)
+    (should (equal '(2) ran))
+    ;; With one, it runs instead.
+    (let* ((unknown 0)
+           (harness-notifications-desktop-unknown-click-function (lambda () (cl-incf unknown))))
+      (harness-notifications-desktop-clicked "k0")
+      (harness-notifications-desktop-clicked nil)
+      (harness-test-wait (lambda () (= unknown 2)) 2 "the fallback"))
+    ;; An action that fails is logged, not raised into the server.
+    (harness-notifications-desktop--remember-action "bad" (lambda () (error "Boom")))
+    (should-not (harness-notifications-desktop-clicked "bad"))
+    (accept-process-output nil 0.05)
+    (should (equal '("k3" "k1") (mapcar #'car harness-notifications-desktop--actions)))))
+
+;;;; Desktop: AppleScript in this Emacs (macOS)
+
+(ert-deftest harness-notifications-desktop-applescript-source ()
+  (should (equal "\"a \\\"b\\\" \\\\ c\\nd\\te\\r\""
+                 (harness-notifications-desktop--applescript-string "a \"b\" \\ c\nd\te\r")))
+  (should (equal "\"\"" (harness-notifications-desktop--applescript-string nil)))
+  (should (equal "display notification \"Body\" with title \"Needs you: \\\"x\\\"\""
+                 (harness-notifications-desktop--applescript-source
+                  '(:title "Needs you: \"x\"" :body "Body")))))
+
+(ert-deftest harness-notifications-desktop-applescript-in-this-emacs ()
+  "A graphical Emacs on macOS runs the AppleScript itself, from the command loop."
+  (let ((ran nil)
+        (harness-notifications-desktop-backend 'applescript))
+    (cl-letf (((symbol-function 'harness-notifications-desktop--macos-gui-p) (lambda () t))
+              ((symbol-function 'ns-do-applescript) (lambda (script) (push script ran) nil)))
+      (let ((shown (let ((system-type 'darwin) (noninteractive nil))
+                     (harness-notifications-desktop-notify :title "T" :body "B" :on-action #'ignore))))
+        (should-not ran)
+        (should (equal '(:backend applescript) (harness-test-await shown 2)))
+        (should (equal '("display notification \"B\" with title \"T\"") ran)))
+      ;; An AppleScript error rejects.
+      (cl-letf (((symbol-function 'ns-do-applescript) (lambda (_) (error "AppleScript error -1743"))))
+        (should (equal "AppleScript error -1743"
+                       (error-message-string
+                        (should-error (harness-test-await
+                                       (let ((system-type 'darwin) (noninteractive nil))
+                                         (harness-notifications-desktop-notify :title "T"))
+                                       2))))))
+      ;; The Mac port's function does as well.
+      (cl-letf (((symbol-function 'ns-do-applescript) nil)
+                ((symbol-function 'mac-osa-script) #'ignore))
+        (let ((noninteractive nil))
+          (should (eq 'mac-osa-script (harness-notifications-desktop--applescript-function)))))
+      ;; A batch Emacs, or one without a graphical frame, has none.
+      (let ((noninteractive t))
+        (should-not (harness-notifications-desktop--applescript-function)))
+      (cl-letf (((symbol-function 'harness-notifications-desktop--macos-gui-p) #'ignore))
+        (let ((noninteractive nil))
+          (should-not (harness-notifications-desktop--applescript-function)))))))
+
+;;;; Desktop: macOS, choosing and finding
+
+(ert-deftest harness-notifications-desktop-backend-choice-on-macos ()
+  "On macOS `auto' takes terminal-notifier, then AppleScript, then osascript.
+Elsewhere the order is what it was, and the macOS backends never work."
+  (let* ((dir (harness-test-temp-dir))
+         (harness-notifications-desktop-backend 'auto)
+         (harness-notifications-desktop--macos-bin-directories nil)
+         (harness-notifications-desktop--notify-send "harness-test-no-such-program")
+         (harness-notifications-desktop--terminal-notifier "harness-test-no-such-program")
+         (exec-path (list dir)))
+    (cl-letf (((symbol-function 'harness-notifications-desktop--dbus-session-p) #'ignore))
+      (unwind-protect
+          (let ((system-type 'darwin))
+            (should (equal '(terminal-notifier applescript osascript notify-send dbus w32)
+                           (harness-notifications-desktop--auto-backends)))
+            (should-not (harness-notifications-desktop-backend))
+            (should (string-match-p "brew install terminal-notifier"
+                                    (harness-notifications-desktop--missing-message)))
+            ;; osascript is the last resort,
+            (harness-notifications-test--script dir "exit 0" "osascript")
+            (should (eq 'osascript (harness-notifications-desktop-backend)))
+            ;; a graphical Emacs shows its own (never in batch),
+            (should-not (harness-notifications-desktop--usable-p 'applescript))
+            (cl-letf (((symbol-function 'harness-notifications-desktop--applescript-function)
+                       (lambda () #'ignore)))
+              (should (eq 'applescript (harness-notifications-desktop-backend)))
+              ;; and terminal-notifier, when installed, comes first.
+              (let ((harness-notifications-desktop--terminal-notifier
+                     (harness-notifications-test--script dir "exit 0" "terminal-notifier")))
+                (should (eq 'terminal-notifier (harness-notifications-desktop-backend)))))
+            (let ((harness-notifications-desktop-backend 'terminal-notifier))
+              (should-not (harness-notifications-desktop-backend))
+              (should (string-match-p "no harness-test-no-such-program program"
+                                      (harness-notifications-desktop--missing-message))))
+            (let ((harness-notifications-desktop-backend 'applescript))
+              (should (string-match-p "graphical Emacs only"
+                                      (harness-notifications-desktop--missing-message)))))
+        (delete-directory dir t))
+      (let ((system-type 'gnu/linux)
+            (harness-notifications-desktop--terminal-notifier "sh")
+            (exec-path (default-value 'exec-path)))
+        (should (equal harness-notifications-desktop--backends (harness-notifications-desktop--auto-backends)))
+        (should (eq 'notify-send (car (harness-notifications-desktop--auto-backends))))
+        (dolist (backend '(terminal-notifier applescript osascript))
+          (should-not (harness-notifications-desktop--usable-p backend)))
+        (let ((harness-notifications-desktop-backend 'terminal-notifier))
+          (should (string-match-p "macOS only" (harness-notifications-desktop--missing-message))))))))
+
+(ert-deftest harness-notifications-desktop-macos-program ()
+  "A program off the path is looked for where Homebrew puts it.
+An Emacs started from the Dock has only the system's directories on
+its path."
+  (let* ((dir (harness-test-temp-dir))
+         (exec-path nil)
+         (harness-notifications-desktop--macos-bin-directories (list "/nonexistent" dir)))
+    (unwind-protect
+        (progn
+          (should-not (harness-notifications-desktop--macos-program "terminal-notifier"))
+          (let ((program (harness-notifications-test--script dir "exit 0" "terminal-notifier")))
+            (should (equal program (harness-notifications-desktop--macos-program "terminal-notifier"))))
+          (make-directory (expand-file-name "emacsclient" dir))
+          (should-not (harness-notifications-desktop--macos-program "emacsclient"))
+          (should-not (harness-notifications-desktop--macos-program ""))
+          (should-not (harness-notifications-desktop--macos-program nil)))
+      (delete-directory dir t))))
+
+(ert-deftest harness-notifications-desktop-macos-bundle-id ()
+  "The application this Emacs runs from is read from its Info.plist, once."
+  (let* ((dir (harness-test-temp-dir))
+         (app (expand-file-name "Emacs.app" dir))
+         (macos (expand-file-name "Contents/MacOS/" app))
+         (plist (expand-file-name "Contents/Info.plist" app)))
+    (make-directory macos t)
+    (unwind-protect
+        (progn
+          (let ((invocation-directory "/usr/bin/")
+                (harness-notifications-desktop--bundle-id 'unknown))
+            (should-not (harness-notifications-desktop--app-bundle))
+            (should-not (harness-notifications-desktop--bundle-id)))
+          (write-region (concat "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                                "<plist version=\"1.0\">\n<dict>\n"
+                                "\t<key>CFBundleExecutable</key>\n\t<string>Emacs</string>\n"
+                                "\t<key>CFBundleIdentifier</key>\n\t<string>org.gnu.Emacs.test</string>\n"
+                                "</dict>\n</plist>\n")
+                        nil plist nil 'silent)
+          (let ((invocation-directory macos)
+                (harness-notifications-desktop--bundle-id 'unknown))
+            (should (equal app (harness-notifications-desktop--app-bundle)))
+            (should (equal "org.gnu.Emacs.test" (harness-notifications-desktop--bundle-id)))
+            ;; Kept: not read again.
+            (delete-file plist)
+            (should (equal "org.gnu.Emacs.test" (harness-notifications-desktop--bundle-id))))
+          ;; A program further in, as some builds keep theirs.
+          (let ((invocation-directory (expand-file-name "libexec/" macos)))
+            (should (equal app (harness-notifications-desktop--app-bundle))))
+          ;; A binary property list, or none: GNU Emacs's own.
+          (let ((coding-system-for-write 'no-conversion))
+            (write-region "bplist00\324\1\2\3" nil plist nil 'silent))
+          (let ((invocation-directory macos)
+                (harness-notifications-desktop--bundle-id 'unknown))
+            (should (equal "org.gnu.Emacs" (harness-notifications-desktop--bundle-id)))))
+      (delete-directory dir t))))
+
+(ert-deftest harness-notifications-desktop-macos-activate-id ()
+  "A click brings forward the user's choice, else this Emacs's application, else its terminal."
+  (let ((harness-notifications-desktop--bundle-id "org.gnu.Emacs")
+        (harness-notifications-desktop-macos-app nil)
+        (process-environment (cons "__CFBundleIdentifier=com.apple.Terminal" process-environment)))
+    ;; The harness process: the application its program is in.
+    (let ((noninteractive t))
+      (should (equal "org.gnu.Emacs" (harness-notifications-desktop--activate-id))))
+    (let ((noninteractive nil))
+      ;; A graphical Emacs: its own.
+      (cl-letf (((symbol-function 'harness-notifications-desktop--macos-gui-p) (lambda () t)))
+        (should (equal "org.gnu.Emacs" (harness-notifications-desktop--activate-id))))
+      ;; One in a terminal: the terminal.
+      (cl-letf (((symbol-function 'harness-notifications-desktop--macos-gui-p) #'ignore))
+        (should (equal "com.apple.Terminal" (harness-notifications-desktop--activate-id)))))
+    ;; The user's choice comes first.
+    (let ((harness-notifications-desktop-macos-app "com.googlecode.iterm2"))
+      (should (equal "com.googlecode.iterm2" (harness-notifications-desktop--activate-id))))
+    ;; Nothing known: nothing.
+    (let ((harness-notifications-desktop--bundle-id nil)
+          (process-environment (cdr process-environment))
+          (noninteractive t))
+      (setenv "__CFBundleIdentifier" nil)
+      (should-not (harness-notifications-desktop--activate-id)))))
+
+(ert-deftest harness-notifications-desktop-macos-emacsclient ()
+  "The emacsclient of this Emacs is found where macOS builds of Emacs keep it."
+  (let* ((dir (harness-test-temp-dir))
+         (app (expand-file-name "Emacs.app" dir))
+         (macos (expand-file-name "Contents/MacOS/" app))
+         (invocation-directory macos)
+         (exec-path nil)
+         (harness-notifications-desktop--macos-bin-directories nil))
+    (cl-flet ((client (file)
+                (make-directory (file-name-directory file) t)
+                (write-region "" nil file nil 'silent)
+                (set-file-modes file #o755)
+                file))
+      (make-directory macos t)
+      (unwind-protect
+          (progn
+            (should-not (harness-notifications-desktop--emacsclient))
+            ;; Each found in turn comes before the ones found before it:
+            ;; Homebrew's bin/ beside the application,
+            (should (equal (client (expand-file-name "bin/emacsclient" dir))
+                           (harness-notifications-desktop--emacsclient)))
+            ;; Emacs.app's own bin-ARCH/ and bin/,
+            (should (equal (client (expand-file-name "bin-x86_64-apple-darwin/emacsclient" macos))
+                           (harness-notifications-desktop--emacsclient)))
+            (should (equal (client (expand-file-name "bin/emacsclient" macos))
+                           (harness-notifications-desktop--emacsclient)))
+            ;; and beside this Emacs's program.
+            (should (equal (client (expand-file-name "emacsclient" macos))
+                           (harness-notifications-desktop--emacsclient)))
+            ;; Else on the path, by its full name.
+            (let ((invocation-directory "/nonexistent/")
+                  (exec-path (list (expand-file-name "bin" dir))))
+              (should (equal (expand-file-name "bin/emacsclient" dir)
+                             (harness-notifications-desktop--emacsclient)))))
+        (delete-directory dir t)))))
 
 ;;;; The module
 

@@ -2816,8 +2816,9 @@ fills in `:id` and `:ts`.
   both sides): `harness-notifications-desktop-notify &rest (:title :body
   :urgency :on-action)` -> promise of `(:backend NAME :id ID)`.
   `harness-notifications-desktop-backend` is `auto` (the first that
-  works of `notify-send`, `dbus`, `osascript`, `w32`), one of those, or
-  a function of that plist.  notify-send runs as an asynchronous process
+  works of `notify-send`, `dbus`, `terminal-notifier`, `applescript`,
+  `osascript`, `w32`; on macOS the three macOS ones first), one of
+  those, or a function of that plist.  notify-send runs as an asynchronous process
   with `--print-id` (an id says the server took it) and, with
   `:on-action`, `--action=default=Open`: the process then waits and
   prints `default` when the notification is clicked (at most
@@ -2827,7 +2828,41 @@ fills in `:id` and `:ts`.
   ActionInvoked in an interactive Emacs; a batch Emacs, which reads no
   D-Bus events, calls it synchronously with a 2 s timeout and hears no
   clicks.  The body is escaped for markup (`&`, `<`, `>`); the title is
-  never markup.
+  never markup.  terminal-notifier (macOS; looked for on `exec-path`,
+  then in `/opt/homebrew/bin`, `/usr/local/bin` and `/opt/local/bin`)
+  gets `-title`, `-message` (required: a lone title is the message,
+  under the harness's name), `-activate BUNDLE-ID` and, with
+  `:on-action`, `-execute COMMAND`, every value behind a backslash
+  (terminal-notifier reads options through NSUserDefaults, which takes
+  a value starting with `[`, `(`, `{` or `"` for a property list and one
+  starting with `-` for an option, and drops one leading backslash).
+  It exits once the notification shows; on a click macOS starts it
+  again, and it activates the application and runs the command with
+  /bin/sh.  The bundle id is `harness-notifications-desktop-macos-app`,
+  else that of the application this Emacs's program is in (read from
+  its Info.plist, `org.gnu.Emacs` when that cannot be read) for a
+  graphical Emacs or the harness process, else the terminal's
+  (`__CFBundleIdentifier`).  The command is
+  `emacsclient --socket-name=SOCKET` (or `--server-file=FILE` for a TCP
+  server) `--alternate-editor=false --eval "(and (fboundp
+  'harness-notifications-desktop-clicked)
+  (harness-notifications-desktop-clicked KEY))"`, each word quoted for
+  /bin/sh, with emacsclient's full name (found beside this Emacs's
+  program, in Emacs.app's `Contents/MacOS/bin[-ARCH]/`, in the `bin/`
+  beside the application, then on the path).  The `:on-action` is kept
+  under KEY (at most `harness-notifications-desktop-max-actions`, the
+  oldest dropped) and runs once, from the command loop; an unknown KEY
+  (clicked after a restart, from the Notification Center) runs
+  `harness-notifications-desktop-unknown-click-function`.  Without a
+  running server (`server-process`) or an emacsclient there is no
+  `-execute`, and the log (and the echo area, interactively) says so
+  once.  `applescript` runs `display notification` inside a graphical
+  Emacs on macOS (`ns-do-applescript`, or the Mac port's
+  `mac-osa-script`), from the command loop: the notification is Emacs's
+  own, so a click activates Emacs, but no click is heard.  `osascript`
+  runs the same in the osascript program, whose notifications macOS
+  gives to Script Editor (a click opens Script Editor): the last resort
+  on macOS, for a terminal Emacs or the harness process.
 - `gotify`: `POST URL/message` through harness-http, the application
   token in `X-Gotify-Key` (so never on a command line), with `title`,
   `message` (the title when there is no body), `priority` (from
@@ -3781,7 +3816,12 @@ a graphical frame of this Emacs to the front and runs
 returns non-nil has shown what it is about), else opens its session.
 The task board's function opens the board of the notification's
 `:project` with point on the task's card, once the board shows it
-(within 10 s).  `harness-test-notifications` (menu `N`) sends a test
+(within 10 s).  A click on a terminal-notifier notification this Emacs
+no longer knows (`harness-notifications-desktop-unknown-click-function`,
+set by `harness-ui--init` unless already set) brings a graphical frame
+to the front and lists the sessions waiting for the user
+(`harness-ui-notify-show-waiting`), else the session list.
+`harness-test-notifications` (menu `N`) sends a test
 notification through `_harness/notification/send` and says in the
 echo area what each provider did with it.
 

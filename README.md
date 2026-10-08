@@ -93,7 +93,8 @@ Optional dependencies:
 | An AWS profile or `AWS_BEARER_TOKEN_BEDROCK` | Models on AWS Bedrock |
 | `BRAVE_API_KEY` | Web search with any model; until it is set, Claude Code and Copilot sessions use the CLI's own web search (`harness-websearch-builtin`) |
 | `ffmpeg`, `mpv` | Audio recording and playback, video posters (playing videos, and the thumbnails and durations shown; `ffprobe` comes with `ffmpeg`) |
-| `notify-send` (libnotify), or Emacs with D-Bus support | Desktop notifications on GNU/Linux; macOS uses `osascript` |
+| `notify-send` (libnotify), or Emacs with D-Bus support | Desktop notifications on GNU/Linux |
+| `terminal-notifier` 3 or later (`brew install terminal-notifier`) | Desktop notifications on macOS that open what they are about when clicked ([Notifications](#notifications)) |
 | A [Gotify](https://gotify.net) server | Notifications on your phone |
 
 ## Installation
@@ -754,8 +755,8 @@ when a task is done, so you can leave it working:
 
 - A desktop notification, shown by your Emacs. Clicking it opens the
   task board on that task. It uses `notify-send` on GNU/Linux (or
-  Emacs's D-Bus support) and `osascript` on macOS; set
-  `harness-notifications-desktop-backend` to choose.
+  Emacs's D-Bus support) and `terminal-notifier` on macOS (see below);
+  set `harness-notifications-desktop-backend` to choose.
 - A push through [Gotify](https://gotify.net), for your phone, once it
   is set up. Create an application in Gotify and give the harness its
   address and token:
@@ -780,6 +781,34 @@ test notification and says what each provider did with it.
 - Agents can notify you with the `notify` tool, for example when long
   work you asked for has finished. Clicking such a notification opens
   the session.
+
+On macOS, a click opens what the notification is about when two things
+are in place:
+
+- [terminal-notifier](https://github.com/julienXX/terminal-notifier):
+  `brew install terminal-notifier`. The first notification asks whether
+  terminal-notifier may show notifications; allow it (System Settings >
+  Notifications > terminal-notifier).
+- The Emacs server, which the click reaches through `emacsclient`:
+  `(server-start)` in your init file, or `M-x server-start`. Doom Emacs
+  starts it already.
+
+A click then brings Emacs to the front and opens the session, or the
+task board on the task. A notification clicked after Emacs restarted,
+from the Notification Center, lists the sessions waiting for you, as
+clicking the mode line's notifier does. Without the server a click only
+brings Emacs to the front; Emacs says so once, in the echo area and in
+the log (`M-x harness-show-log`).
+
+Without terminal-notifier, a graphical Emacs shows the notification as
+its own, through AppleScript: a click brings Emacs to the front, but
+cannot tell which notification it was. Only a terminal Emacs falls back
+to `osascript`, whose notifications macOS gives to Script Editor, so a
+click opens Script Editor. A click brings forward the Emacs
+application, or for Emacs in a terminal, the terminal. Set
+`harness-notifications-desktop-macos-app` to a bundle id
+(`"org.gnu.Emacs"`, `"com.googlecode.iterm2"`) when that finds the
+wrong one.
 
 ### Insights
 
