@@ -3596,7 +3596,8 @@ diagram shown, so the chat and the popout agree, and point stays on
 the toggle through the redraw.  A module hosted by a chat buffer can
 put a read-only panel of its own above the box with
 `harness-chat-panel-functions` (the companion pet's figure goes there
-too) and take the box's message with `harness-chat-send-function`.
+too; a function cannot move point, where its panel goes) and take the
+box's message with `harness-chat-send-function`.
 Prompt cache warning (`harness-ui-cache`, module `ui-cache`): once the
 session's `:cache :expires` has passed while it is idle, closed or
 blocked, a panel above the box says so ("Prompt cache expired at
@@ -4092,12 +4093,18 @@ Other modules add to the board's header line through
 they return join into one segment ([Search]).  A `(TEXT PRIORITY MIN)`
 becomes a segment of its own, which the board separates from the rest
 and which makes room as PRIORITY says (the companion pet's face and
-name, at 15, before [Add session]).  Lines of their own go above the
-compose label through `harness-ui-tasks-tail-functions`: each returns
-whole lines or nil, called whenever the lines between the cards and the
-compose box are drawn, and the board fits its cards to the room they
-leave.  `harness-ui-tasks-redraw-tail-lines` draws those lines again,
-the box left alone, when a module's would change (the companion pet's
+name, at 15, before [Add session]).  A module can draw at the right of
+the lines between the cards and the compose box (the error, the compose
+label, the bulk banner, the settings) through
+`harness-ui-tasks-corner-functions`.  Each function is called whenever
+those lines are drawn, with the columns they have and the columns each
+takes whole, and cannot move point.  The first that answers returns
+`(:beside ROWS :reserve COLUMNS :above LINES)`: ROWS end the first
+lines, which are fitted to the room left after COLUMNS, and LINES go
+whole above them all.  The lines stay together above the box, and the
+board fits its cards to the room they leave.
+`harness-ui-tasks-redraw-tail-lines` draws those lines again, the box
+left alone, when a module's corner would change (the companion pet's
 figure).
 Boards reload after any
 task, merge, turn, status, worktree, budget or reload event.  New tasks show at
@@ -4152,36 +4159,52 @@ The places besides, those `harness-ui-pet-places` names (`chat` and
 `board` by default), show only while the pet is on and hatched, and
 their hooks are set only then (`harness-ui-pet--wire`):
 
-- `chat`: the whole creature (`harness-ui-pet--figure`) at the right
-  above a chat's compose box (`harness-chat-panel-functions`), its name
-  below it, the art's blank lines and margin trimmed; not in BTW chats.
-  Its lines, padded to one width, are right-aligned by a space whose
-  `:align-to` is `(- right (PIXELS))`, PIXELS a line as drawn and a
-  column for its newline, so the figure ends a column short of the
-  window's edge whatever the font or text scale, its newline taking that
-  column (`harness-ui-pet--pixels`: measured in a window showing the
-  buffer, without selecting it, so a timer run with a daemon's terminal
-  frame selected measures right and point stays where the chat draws).
-  Every line has `harness-pet-figure-face` (fixed pitch) and `default`
-  under its own faces, so the chat's panel colour does not show behind
-  it; and as nothing is past its lines' ends, where the panel's
-  `:extend` would show it, not there either.  What it last said about
-  the session goes in a speech bubble (`harness-ui-pet--bubble`,
-  box-drawing characters when the font has them all, else ASCII):
-  beside it, joined to it on the row of its eyes; above it when there is
-  no room beside; or nowhere (`harness-ui-pet--fit`: at most
-  `harness-ui-pet--bubble-width` columns of words a line, and a place
-  only with `harness-ui-pet--bubble-min` of them, or all the words).
-  The room is the narrowest and shortest of the windows showing the
-  buffer; with fewer than `harness-ui-pet--min-lines` lines (20) or no
-  room for the creature itself, the figure stays away.  Words show until
-  the session's next `agent/turn-started` or for
-  `harness-ui-pet--saying-lifetime` (15 minutes), and not while the pet
-  is muted.  Hovering over the creature names it, a click shows the
-  buffer; hovering over the words says when and about which session.
-- `board`: the same figure above the task board's compose box, from
-  `harness-ui-tasks-tail-functions`, with what it said last about
-  anything.
+- `chat`: its figure in the bottom right corner of a chat, right above
+  the compose box (`harness-chat-panel-functions`), as Claude Code's
+  companion sits beside its prompt; not in BTW chats.  The whole
+  creature (`harness-ui-pet--sprite`, the art's blank lines and margin
+  trimmed, its lines padded to one width) is as many lines as it is
+  tall, its name beside its eyes in bold, in its rarity's colour (gold
+  when shiny).  What it last said about the session replaces the name: a
+  speech bubble on its left (`harness-ui-pet--bubble`, box-drawing
+  characters when the font has them all, else ASCII), its words centred
+  on the creature's eyes.  The bubble is joined to the creature (`├─`) at
+  the line of words nearest the eyes (`harness-ui-pet--rows`).  The words
+  take `harness-ui-pet--bubble-width` columns (30) a line, more up to
+  `harness-ui-pet--bubble-max` (60) so the bubble is no taller than the
+  creature, and at most `harness-ui-pet--bubble-lines` (4) lines, the
+  last cut short with an ellipsis.  Hovering over the bubble says all the
+  words, when and about which session, on one line.  Each row is
+  right-aligned by a space whose `:align-to` is `(- right (PIXELS))`,
+  PIXELS the row as drawn and a column for its newline.  So the figure
+  ends a column short of the window's edge whatever the font or text
+  scale, its newline taking that column (`harness-ui-pet--pixels`:
+  measured in a window showing the buffer, without selecting it, so a
+  timer run with a daemon's terminal frame selected measures right and
+  point stays where the chat draws).  Every row has
+  `harness-pet-figure-face` (fixed pitch) and `default` under its own
+  faces, so the chat's panel colour does not show behind it; and as
+  nothing is past its lines' ends, where the panel's `:extend` would show
+  it, not there either.  How it fits is `harness-ui-pet--fit`, from the
+  narrowest and shortest of the windows showing the buffer.  A window
+  narrower than `harness-ui-pet--whole-columns` (40) or shorter than
+  `harness-ui-pet--min-lines` (20) gets the pet's face on one line
+  instead (`harness-ui-pet--face-row`), with its name, or the first of
+  its words in quotes (`harness-ui-pet--quip-width`, 28 columns, cut at
+  a space), as Claude Code's narrow terminals do.  So does every window
+  with `harness-ui-pet-figure` set to `face`.  Only a window too narrow
+  for even the face goes without.  Words show until the session's next
+  `agent/turn-started` or for `harness-ui-pet--saying-lifetime` (15
+  minutes), and not while the pet is muted.  Hovering over the creature
+  names it, a click shows the buffer.
+- `board`: the same figure in the task board's bottom right corner, from
+  `harness-ui-tasks-corner-functions` (`harness-ui-pet--board-corner`),
+  with what it said last about anything.  Its bottom rows end the first
+  lines above the compose box, those that leave it room (the label, then
+  the settings), as many as save lines.  So the creature takes only the
+  lines it is taller than they are, and its bubble goes beside its upper
+  rows.  The rows on the board's lines have `harness-pet-figure-face`
+  alone, so the band of a box that messages a session shows through.
 - `chat-header`: its face on one line (`harness-ui-pet-face SPECIES EYE
   BLINK`, after Claude Code's, `(·>` for a duck) in its rarity's colour,
   from `harness-chat-header-end-functions` at priority 2, so it goes

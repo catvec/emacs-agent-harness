@@ -210,15 +210,27 @@ MIN), as `harness-ui-fit-header' takes it, is a segment of its own with
 that priority.  The search shows its [Search] the first way, the
 companion pet its face the second.")
 
-(defvar harness-ui-tasks-tail-functions nil
-  "Functions putting lines of their own above a board's compose box.
-Each is called without arguments in the board's buffer whenever the
-lines between the board and the box are drawn -- with the box, and as a
-window showing the board changes size -- and returns whole lines, a
-string ending in a newline, or nil for none.  They go first, in order,
-above the compose label, and the board fits its cards to the room they
-leave.  `harness-ui-tasks-redraw-tail-lines' draws them again when they
-would say something else.  The companion pet sits there this way.")
+(defvar harness-ui-tasks-corner-functions nil
+  "Functions drawing something at the right of the lines above the compose box.
+The lines between the board and the box -- the error, the compose
+label, the bulk banner and the settings -- narrow for it, as Claude
+Code's prompt narrows for its companion, rather than the board giving
+it lines of its own.  Each function is called in the board's buffer
+whenever those lines are drawn -- with the box, and as a window showing
+the board changes size -- with ROOM, the columns the lines have, and
+WIDTHS, the columns each of them takes whole, top first; the first to
+return non-nil draws, and it returns a plist:
+
+- `:beside', the strings ending the first lines, top first, each
+  starting with the space that aligns it to the window's edge;
+- `:reserve', the columns the lines `:beside' ends leave free for it;
+- `:above', whole lines, a string ending in a newline, going above all
+  the lines: what does not fit beside them.
+
+The lines stay together, above the box they are about.  The board fits
+its cards to the room they leave, and
+`harness-ui-tasks-redraw-tail-lines' draws them again when a function
+would draw something else.  The companion pet sits there this way.")
 
 (defun harness-ui-tasks--board-p (buffer)
   "Non-nil when BUFFER is a live task board.
@@ -1536,73 +1548,99 @@ writes it up, with settings of its own, so it counts as not started."
           (plist-get task :session)
         (list harness-ui-tasks--new #'harness-ui-tasks--set-new)))))
 
-(defun harness-ui-tasks--insert-tail-extras ()
-  "Insert the lines `harness-ui-tasks-tail-functions' return, in order.
-Each function's lines are named after it, so a redraw keeps point on
-them (`harness-ui-tasks--anchor')."
-  (run-hook-wrapped 'harness-ui-tasks-tail-functions
-                    (lambda (fn)
-                      (when-let* ((text (ignore-errors (funcall fn))))
-                        (when (and (stringp text) (not (string-empty-p text)))
-                          (let ((start (point)))
-                            (insert text)
-                            (unless (bolp) (insert "\n"))
-                            (put-text-property start (point) 'harness-task-tail
-                                               (if (symbolp fn) fn 'extra)))))
-                      nil)))
+(defun harness-ui-tasks--label-line (room messaging bar)
+  "The compose label, fitted to ROOM columns: what the box does, and the
+Submit / Refine toggle or [cancel].  MESSAGING is non-nil when the box
+sends to a session, BAR what starts the line."
+  (let* ((cancel (if harness-ui-tasks--target
+                     (concat "  " (harness-ui-tasks--button
+                                   "[cancel]" #'harness-ui-tasks-compose-reset
+                                   (if (eq (car harness-ui-tasks--target) 'answer)
+                                       "Back to a new task (C-g); the question stays waiting"
+                                     "Back to a new task (C-g)")
+                                   'harness-ui-tasks-compose-reset))
+                   ""))
+         (toggle (if harness-ui-tasks--target "" (concat "   " (harness-ui-tasks--mode-toggle))))
+         (icon (if messaging (concat (harness-ui-icon 'harness-icon-message) " ") ""))
+         (body (concat icon (harness-ui-tasks--compose-label)))
+         (label (harness-ui-tasks--fit (concat bar body)
+                                       (- room (string-width cancel) (string-width toggle)))))
+    ;; The bar, the icon and the label each keep their own look: the
+    ;; band behind them all, the accent on bar and icon, the label face
+    ;; on the text.
+    (let ((head (if messaging (+ (length bar) (length icon)) 0)))
+      (add-face-text-property head (length label) 'harness-label-face t label)
+      (when messaging
+        (add-face-text-property (length bar) (length label) 'harness-compose-message-accent-face t label)))
+    ;; Fitted again as a whole: the label shrinks to a minimum, the toggle not.
+    (harness-ui-tasks--fit (concat label toggle cancel) room)))
+
+(defun harness-ui-tasks--tail-lines (messaging band bar)
+  "The lines between the board and the compose box: (KEY FIT BAND) each.
+Top first: the error, the compose label, the bulk banner and the
+settings, those there are.  KEY names the line for redraws, FIT returns
+it fitted to the columns it is called with, BAND is the face behind it
+or nil.  MESSAGING and BAR are as `harness-ui-tasks--label-line' takes
+them."
+  (let ((lines nil))
+    (when harness-ui-tasks--error
+      (let ((text (propertize (concat "  " harness-ui-tasks--error) 'face 'harness-tool-error-face)))
+        (push (list 'error (lambda (room) (harness-ui-tasks--fit text room)) band) lines)))
+    (push (list 'label (lambda (room) (harness-ui-tasks--label-line room messaging bar)) band) lines)
+    (unless harness-ui-tasks--target
+      (when harness-ui-tasks--bulk
+        (let ((text (harness-ui-tasks--bulk-banner)))
+          (push (list 'bulk (lambda (room) (harness-ui-tasks--fit text room)) nil) lines)))
+      (let ((text (harness-ui-tasks--new-settings-line)))
+        (unless (string-empty-p text)
+          (push (list 'settings (lambda (room) (harness-ui-tasks--fit text room)) nil) lines))))
+    (nreverse lines)))
+
+(defun harness-ui-tasks--corner (room lines)
+  "What `harness-ui-tasks-corner-functions' draw beside LINES, or nil.
+LINES are as `harness-ui-tasks--tail-lines' returns them, ROOM the
+columns they have.  The functions cannot move point, where the lines
+go: they may measure text in a window, which takes the window's point."
+  (let ((widths (mapcar (lambda (line) (string-width (funcall (nth 1 line) most-positive-fixnum)))
+                        lines)))
+    (run-hook-wrapped 'harness-ui-tasks-corner-functions
+                      (lambda (fn) (ignore-errors (save-excursion (funcall fn room widths)))))))
+
+(defun harness-ui-tasks--insert-corner (text)
+  "Insert TEXT, whole lines of `harness-ui-tasks-corner-functions'.
+They are named for redraws, as the lines below them are."
+  (when (and (stringp text) (not (string-empty-p text)))
+    (let ((start (point)))
+      (insert text)
+      (unless (bolp) (insert "\n"))
+      (put-text-property start (point) 'harness-task-tail 'corner))))
 
 (defun harness-ui-tasks--insert-tail-head ()
   "Insert the error line, the compose label, the settings and the attachments.
-Other modules' lines go first (`harness-ui-tasks-tail-functions').
 Each line is fitted to the window, like the board's: the buffer wraps
 for the compose box, so a longer line would take two.  A new task's
 label carries the Submit / Refine toggle, which the label makes room
 for.  A box that sends to a session wears its message colours here too,
 the label, bar and band around it, so what submitting will do is plain
-before a key is pressed."
+before a key is pressed.  What `harness-ui-tasks-corner-functions'
+draw sits at the right of the lines, which narrow for it, and above
+them."
   (let* ((room (1- (harness-ui-tasks--width)))
          (messaging (harness-ui-tasks--messaging-p))
          (band (and messaging 'harness-compose-message-face))
          (bar (if messaging
                   (harness-compose-bar 'harness-compose-message-accent-face 'harness-compose-message-face)
-                " ")))
-    (harness-ui-tasks--insert-tail-extras)
-    (when harness-ui-tasks--error
-      (harness-ui-tasks--insert-tail-line
-       'error (harness-ui-tasks--fit (propertize (concat "  " harness-ui-tasks--error)
-                                                 'face 'harness-tool-error-face)
-                                     room)
-       band))
-    (let* ((cancel (if harness-ui-tasks--target
-                       (concat "  " (harness-ui-tasks--button
-                                     "[cancel]" #'harness-ui-tasks-compose-reset
-                                     (if (eq (car harness-ui-tasks--target) 'answer)
-                                         "Back to a new task (C-g); the question stays waiting"
-                                       "Back to a new task (C-g)")
-                                     'harness-ui-tasks-compose-reset))
-                     ""))
-           (toggle (if harness-ui-tasks--target "" (concat "   " (harness-ui-tasks--mode-toggle))))
-           (icon (if messaging (concat (harness-ui-icon 'harness-icon-message) " ") ""))
-           (body (concat icon (harness-ui-tasks--compose-label)))
-           (label (harness-ui-tasks--fit (concat bar body)
-                                         (- room (string-width cancel) (string-width toggle)))))
-      ;; The bar, the icon and the label each keep their own look: the
-      ;; band behind them all, the accent on bar and icon, the label face
-      ;; on the text.
-      (let ((head (if messaging (+ (length bar) (length icon)) 0)))
-        (add-face-text-property head (length label) 'harness-label-face t label)
-        (when messaging
-          (add-face-text-property (length bar) (length label) 'harness-compose-message-accent-face t label)))
-      ;; Fitted again as a whole: the label shrinks to a minimum, the toggle not.
-      (harness-ui-tasks--insert-tail-line 'label (harness-ui-tasks--fit (concat label toggle cancel) room)
-                                          band))
-    (unless harness-ui-tasks--target
-      (when harness-ui-tasks--bulk
-        (harness-ui-tasks--insert-tail-line
-         'bulk (harness-ui-tasks--fit (harness-ui-tasks--bulk-banner) room)))
-      (let ((line (harness-ui-tasks--new-settings-line)))
-        (unless (string-empty-p line)
-          (harness-ui-tasks--insert-tail-line 'settings (harness-ui-tasks--fit line room)))))
+                " "))
+         (lines (harness-ui-tasks--tail-lines messaging band bar))
+         (corner (harness-ui-tasks--corner room lines))
+         (beside (plist-get corner :beside))
+         (reserve (or (plist-get corner :reserve) 0)))
+    (harness-ui-tasks--insert-corner (plist-get corner :above))
+    (cl-loop for (key fit band) in lines
+             for i from 0
+             for right = (nth i beside)
+             do (harness-ui-tasks--insert-tail-line
+                 key (if right (concat (funcall fit (- room reserve)) right) (funcall fit room)) band))
     (let ((start (point)))
       ;; The bar down every attachment's line.
       (harness-compose-insert-attachments (and messaging bar))
@@ -1642,7 +1680,7 @@ and point on those lines stays there."
 (defun harness-ui-tasks-redraw-tail-lines (&optional buffers)
   "Draw the lines above the compose box of BUFFERS again, the box left alone.
 BUFFERS are boards, every board by default.  For a module whose
-`harness-ui-tasks-tail-functions' would return something else now: each
+`harness-ui-tasks-corner-functions' would draw something else now: each
 board then fits its cards to the room the lines leave."
   (dolist (buffer (or buffers (harness-ui-tasks--buffers)))
     (when (harness-ui-tasks--board-p buffer)

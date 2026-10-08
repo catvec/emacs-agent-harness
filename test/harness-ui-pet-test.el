@@ -68,7 +68,13 @@
 (defvar harness-compose-start)
 (defvar harness-compose-end)
 (defvar harness-ui-tasks-header-functions)
-(defvar harness-ui-tasks-tail-functions)
+(defvar harness-ui-tasks-corner-functions)
+(defvar harness-ui-pet-figure)
+(defvar harness-ui-pet--whole-columns)
+(defvar harness-ui-pet--bubble-max)
+(defvar harness-ui-pet--quip-width)
+(defvar harness-compose-overlay)
+(defvar harness-ui-tasks--list-end)
 (defvar harness-ui-tasks--loading)
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
@@ -84,16 +90,21 @@
 (declare-function harness-ui-pet--board-header "harness-ui-pet")
 (declare-function harness-ui-pet--saying-for "harness-ui-pet")
 (declare-function harness-ui-pet--seen "harness-ui-pet")
-(declare-function harness-ui-pet--figure "harness-ui-pet")
 (declare-function harness-ui-pet--figure-art "harness-ui-pet")
-(declare-function harness-ui-pet--figure-width "harness-ui-pet")
+(declare-function harness-ui-pet--sprite "harness-ui-pet")
+(declare-function harness-ui-pet--rows "harness-ui-pet")
+(declare-function harness-ui-pet--draw "harness-ui-pet")
+(declare-function harness-ui-pet--quip "harness-ui-pet")
+(declare-function harness-ui-pet--chat-buffer-p "harness-ui-pet")
 (declare-function harness-ui-pet--fit "harness-ui-pet")
 (declare-function harness-ui-pet--wrap "harness-ui-pet")
 (declare-function harness-ui-pet--spec "harness-ui-pet")
 (declare-function harness-ui-pet--speech "harness-ui-pet")
 (declare-function harness-ui-pet--rarity-face "harness-ui-pet")
 (declare-function harness-ui-pet--panel "harness-ui-pet")
-(declare-function harness-ui-pet--board-tail "harness-ui-pet")
+(declare-function harness-ui-pet--board-corner "harness-ui-pet")
+(declare-function harness-ui-tasks--refit-tail "harness-ui-tasks")
+(declare-function harness-ui-tasks-redraw-tail-lines "harness-ui-tasks")
 (declare-function harness-ui-pet--sync-panels "harness-ui-pet")
 (declare-function harness-ui-pet--init "harness-ui-pet")
 (declare-function harness-ui-pet-toggle-enabled "harness-ui-pet")
@@ -432,59 +443,123 @@ and the prose is filled to the window."
   "Where this Emacs told the harness it shows the pet: t, session ids, or nil."
   (gethash (harness-ui-pet--client-id) harness-pet--watchers))
 
-(defun harness-ui-pet-test--figure (buffer)
-  "The pet's figure above BUFFER's compose box: (TEXT . START), or nil.
-TEXT is the figure as plain text, START where it begins."
+(defun harness-ui-pet-test--figure-rows (buffer)
+  "The rows of the pet's figure in BUFFER, top first, as plain text.
+\(ROW START ALIGN LINE) each: ROW the figure's part of a line after the
+space aligning it, START where that space is, ALIGN its `:align-to', and
+LINE the whole line, the host's part of it included."
   (with-current-buffer buffer
-    (when-let* ((start (text-property-any (point-min) (point-max) 'harness-ui-pet-figure t)))
-      (cons (buffer-substring-no-properties
-             start (or (text-property-not-all start (point-max) 'harness-ui-pet-figure t) (point-max)))
-            start))))
+    (let ((pos (point-min)) (rows nil))
+      (while (setq pos (text-property-any pos (point-max) 'harness-ui-pet-figure t))
+        (let* ((eol (save-excursion (goto-char pos) (line-end-position)))
+               (end (min eol (or (text-property-not-all pos (point-max) 'harness-ui-pet-figure t) (point-max)))))
+          (push (list (buffer-substring-no-properties (1+ pos) end)
+                      pos
+                      (plist-get (cdr (get-text-property pos 'display)) :align-to)
+                      (buffer-substring-no-properties (save-excursion (goto-char pos) (line-beginning-position))
+                                                      eol))
+                rows)
+          (setq pos (min (point-max) (1+ eol)))))
+      (nreverse rows))))
+
+(defun harness-ui-pet-test--figure (buffer)
+  "The pet's figure by BUFFER's compose box: (TEXT . START), or nil.
+TEXT is its rows as plain text, a line each, START where it begins."
+  (when-let* ((rows (harness-ui-pet-test--figure-rows buffer)))
+    (cons (mapconcat (lambda (row) (concat (car row) "\n")) rows "")
+          (nth 1 (car rows)))))
 
 (defun harness-ui-pet-test--figure-text (buffer)
-  "The pet's figure above BUFFER's compose box as plain text, or \"\"."
+  "The pet's figure by BUFFER's compose box as plain text, or \"\"."
   (or (car (harness-ui-pet-test--figure buffer)) ""))
 
+(defun harness-ui-pet-test--tail (text width)
+  "The last WIDTH columns of TEXT."
+  (let ((wide (string-width text)))
+    (truncate-string-to-width text wide (max 0 (- wide width)))))
+
+(defun harness-ui-pet-test--bare (line)
+  "LINE of the creature without the blanks around it, nor a line to a bubble."
+  (string-trim line "[ ─-]+" " +"))
+
 (defun harness-ui-pet-test--check-figure (buffer)
-  "Check the pet's figure in BUFFER is whole, fits its window and is the pet's.
-Every line of the creature and its name, all as wide, each right-aligned
-by a space that ends where the line, as drawn, ends a column short of the
-window's edge; in its rarity's colour on the window's own background,
-hovering names it and a click shows it."
+  "Check the pet's figure in BUFFER: once, whole, fitting its window, the pet's.
+Its rows on lines one after another above the compose box, the
+creature's lines ending the last of them, in order, and nothing of it
+the others; each row right-aligned by a space that ends where the row,
+as drawn, ends a column short of the window's edge; in its rarity's
+colour, on the window's own background in a chat; hovering names it
+and a click shows it."
   (pcase-let* ((view harness-ui-pet--current)
-               (`(,text . ,start) (harness-ui-pet-test--figure buffer))
-               (lines (split-string text "\n" t))
+               (sprite (mapcar #'substring-no-properties (car (harness-ui-pet--sprite view))))
+               (width (string-width (car sprite)))
+               (rows (harness-ui-pet-test--figure-rows buffer))
+               (ends (mapcar (lambda (row) (harness-ui-pet-test--tail (car row) width)) rows))
                (window (get-buffer-window buffer)))
-    (should text)
-    (dolist (line (car (harness-ui-pet--figure-art view)))
-      (should (string-search (string-trim line) text)))
-    (should (string-search (plist-get view :name) text))
-    (should (= 1 (length (delete-dups (mapcar #'string-width lines)))))
+    (should rows)
+    ;; The whole creature once, ending the bottom rows -- where its bubble
+    ;; joins it, a line runs up to it -- and blanks above it.
+    (should (equal (mapcar #'harness-ui-pet-test--bare sprite)
+                   (mapcar #'harness-ui-pet-test--bare (last ends (length sprite)))))
+    (should (cl-every #'string-blank-p (butlast ends (length sprite))))
     (with-current-buffer buffer
-      (save-excursion
-        (goto-char start)
-        (dolist (line lines)
-          ;; In batch a pixel is a column: the line, then its newline.
-          (let ((align (plist-get (cdr (get-text-property (point) 'display)) :align-to)))
-            (should (equal (list '- 'right (list (1+ (string-width (substring line 1))))) align)))
-          (should (< (string-width line) (window-body-width window)))
-          (forward-line 1)))
-      (goto-char start)
-      (search-forward (string-trim (car (last (car (harness-ui-pet--figure-art view))))))
-      (let ((faces (flatten-tree (get-text-property (match-beginning 0) 'face))))
+      (let ((first (line-number-at-pos (nth 1 (car rows)))))
+        (cl-loop for row in rows
+                 for line from first
+                 do
+                 ;; Lines one after another, above the compose box.
+                 (should (= line (line-number-at-pos (nth 1 row))))
+                 (should (< (nth 1 row) harness-compose-start))
+                 ;; In batch a pixel is a column: the row, then the newline's.
+                 (should (equal (list '- 'right (list (1+ (string-width (car row))))) (nth 2 row)))
+                 (should (< (string-width (nth 3 row)) (window-body-width window)))))
+      (should-not (text-property-any harness-compose-start (point-max) 'harness-ui-pet-figure t))
+      ;; Where the creature's last line starts: the pet's own colours and props.
+      (let* ((row (car (last rows)))
+             (last-line (car (last sprite)))
+             (at (+ (nth 1 row) 1 (- (length (car row)) (length last-line))
+                    (- (length last-line) (length (string-trim-left last-line)))))
+             (faces (flatten-tree (get-text-property at 'face))))
         (should (eq (harness-ui-pet--rarity-face (plist-get view :rarity)) (car faces)))
         (should (memq 'harness-pet-figure-face faces))
-        ;; The window's own background, over whatever the host puts behind.
-        (should (equal 'default (car (last (cl-remove 'harness-chat-panel-face faces))))))
-      (should (eq #'harness-ui-pet--face-help (get-text-property (match-beginning 0) 'help-echo)))
-      (should (keymapp (get-text-property (match-beginning 0) 'keymap))))))
+        (when (harness-ui-pet--chat-buffer-p buffer)
+          ;; The window's own background, over the panel colour behind.
+          (should (equal 'default (car (last (cl-remove 'harness-chat-panel-face faces))))))
+        (should (eq #'harness-ui-pet--face-help (get-text-property at 'help-echo)))
+        (should (keymapp (get-text-property at 'keymap)))))))
+
+(defun harness-ui-pet-test--joined (buffer)
+  "The row of the pet's figure in BUFFER where its bubble joins it, or nil.
+Check it is the bubble's line of words nearest the creature's eyes."
+  (pcase-let* ((view harness-ui-pet--current)
+               (`(,sprite . ,eyes) (harness-ui-pet--sprite view))
+               (sprite (mapcar #'substring-no-properties sprite))
+               (width (string-width (car sprite)))
+               (rows (mapcar #'car (harness-ui-pet-test--figure-rows buffer)))
+               (top (- (length rows) (length sprite)))
+               ;; The bubble's lines of words beside the creature...
+               (words (cl-loop for row in rows for i from 0
+                               when (and (>= i top) (> (string-width row) width)
+                                         (string-match-p "\\`[│|] " row))
+                               collect i))
+               ;; ...and the one a line runs from to the creature.
+               (joined (cl-loop for row in rows for i from 0
+                                when (and (>= i top) (> (string-width row) width)
+                                          (let* ((pet (string-trim-left (nth (- i top) sprite)))
+                                                 (before (- (length row) (length pet) 1)))
+                                            (and (>= before 0) (memq (aref row before) '(?─ ?-)))))
+                                return i)))
+    (when joined
+      (should (eql joined (car (sort words (lambda (a b) (< (abs (- a top eyes)) (abs (- b top eyes)))))))))
+    (and joined (nth joined rows))))
 
 (ert-deftest harness-ui-pet-shows-in-a-chat ()
-  "Hatched, the whole pet sits at the right above a chat's compose box, its
-name below it.  What it says about the session shows beside it, in a
-bubble joined to it at its eyes, until the session's next turn.  Its face
-can end the chat's header line too, the first thing to go when it is
-narrow, blinking while the session works."
+  "Hatched, the whole pet sits at the bottom right of a chat, right above
+its compose box, its name beside its eyes.  What it says about the
+session shows on its left instead, in a bubble joined to it at its eyes,
+until the session's next turn.  A short window gets its face on one line.
+Its face can end the chat's header line too, the first thing to go when
+it is narrow, blinking while the session works."
   (harness-ui-pet-test-with
     (harness-test-load-module 'ui-chat)
     (let* ((sid (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted" :name "Parser work") :id))
@@ -503,10 +578,13 @@ narrow, blinking while the session works."
             (should-not (harness-ui-pet-test--watching))
             (should-not (harness-ui-pet-test--figure buf))
             (harness-ui-pet-test--hatch-elsewhere)
-            ;; The whole creature, above the compose box.
+            ;; The whole creature, right above the compose box, named.
             (harness-test-wait (lambda () (harness-ui-pet-test--figure buf)) 5 "the pet above the compose box")
             (harness-ui-pet-test--check-figure buf)
-            (should (< (cdr (harness-ui-pet-test--figure buf)) (with-current-buffer buf harness-compose-start)))
+            (should (string-search (plist-get harness-ui-pet--current :name) (harness-ui-pet-test--figure-text buf)))
+            (with-current-buffer buf
+              (should (= (line-number-at-pos harness-compose-start)
+                         (1+ (line-number-at-pos (nth 1 (car (last (harness-ui-pet-test--figure-rows buf)))))))))
             ;; Not in the header line, unless asked for.
             (let* ((view harness-ui-pet--current)
                    (face (harness-ui-pet-face (plist-get view :species) (plist-get view :eye))))
@@ -548,19 +626,30 @@ narrow, blinking while the session works."
             (harness-test-wait (lambda () (string-search "Tokenizer? Bold" (harness-ui-pet-test--figure-text buf)))
                                5 "its words beside it")
             (harness-ui-pet-test--check-figure buf)
+            ;; In a bubble joined to it, no taller than it unless its words
+            ;; need more lines than it has even at their widest: its name
+            ;; makes way.
+            (should (harness-ui-pet-test--joined buf))
+            (pcase-let* ((`(whole . ,width) (nth 2 (buffer-local-value 'harness-ui-pet--panel-shown buf)))
+                         (words (harness-ui-pet--speech (plist-get (nth 1 (buffer-local-value
+                                                                           'harness-ui-pet--panel-shown buf))
+                                                                   :text)))
+                         (wrapped (length (harness-ui-pet--wrap words width))))
+              (should (= (max (length (car (harness-ui-pet--sprite harness-ui-pet--current)))
+                              (+ 2 (min wrapped 4)))
+                         (length (harness-ui-pet-test--figure-rows buf)))))
+            (should-not (string-search (plist-get harness-ui-pet--current :name)
+                                       (harness-ui-pet-test--figure-text buf)))
             (with-current-buffer buf
               (save-excursion
                 (goto-char (cdr (harness-ui-pet-test--figure buf)))
                 (let ((words (search-forward "Tokenizer? Bold")))
                   (should (< words harness-compose-start))
-                  ;; On the line of the pet's eyes, joined to them.
-                  (pcase-let ((`(,art . ,eyes) (harness-ui-pet--figure-art harness-ui-pet--current))
-                              (line (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
-                    (should (string-search (string-trim (nth eyes art)) line))
-                    (should (string-match-p "[├|][─-]+ " line)))
-                  ;; Hovering says when, and about which session.
-                  (should (string-search "about Parser work"
-                                         (funcall (get-text-property (1- words) 'help-echo)))))))
+                  ;; Hovering says it all, when, and about which session, on one line.
+                  (let ((help (funcall (get-text-property (1- words) 'help-echo))))
+                    (should (string-search "about Parser work" help))
+                    (should (string-search "Tokenizer? Bold" help))
+                    (should-not (string-search "\n" help))))))
             ;; The session's next turn takes them away; the pet stays.
             (harness-ui-pet--on-event "agent/turn-started" (list sid))
             (should-not (string-search "Tokenizer? Bold" (harness-ui-pet-test--figure-text buf)))
@@ -577,13 +666,19 @@ narrow, blinking while the session works."
                 (should-not (harness-ui-pet--saying-for "s9" now)))
               (let ((harness-ui-pet-places '(chat-header)))
                 (should-not (harness-ui-pet--saying-for "s9" now))))
-            ;; A window too short for it: it leaves, and comes back with the room.
+            ;; A window too short for it: its face on one line, and the
+            ;; whole creature back with the room.
             (with-current-buffer buf
               (let ((harness-ui-pet--min-lines 1000))
                 (harness-ui-pet--sync-panels)
-                (should-not (harness-ui-pet-test--figure buf)))
+                (let ((rows (harness-ui-pet-test--figure-rows buf))
+                      (view harness-ui-pet--current))
+                  (should (= 1 (length rows)))
+                  (should (string-prefix-p (harness-ui-pet-face (plist-get view :species) (plist-get view :eye))
+                                           (car (car rows))))
+                  (should (string-search (plist-get view :name) (car (car rows))))))
               (harness-ui-pet--sync-panels)
-              (should (harness-ui-pet-test--figure buf)))
+              (harness-ui-pet-test--check-figure buf))
             ;; Drawn for a window that is not the selected one, its point at the
             ;; top: still below the transcript, right above the compose box.
             (let ((harness-ui-pet--min-lines 1)
@@ -625,10 +720,12 @@ narrow, blinking while the session works."
         (kill-buffer other)))))
 
 (ert-deftest harness-ui-pet-shows-on-the-board ()
-  "Hatched, the whole pet sits above the board's compose box, saying what it
-said last about anything: the board on screen lets it speak.  Its face
-and name can show in the board's header line too; a narrower board loses
-its name first, then its face."
+  "Hatched, the whole pet sits at the bottom right of the board, saying
+what it said last about anything: the board on screen lets it speak.
+The lines above the compose box narrow for its bottom rows, so it takes
+few lines of its own, and it shows once however often they are drawn
+again.  Its face and name can show in the board's header line too; a
+narrower board loses its name first, then its face."
   (harness-ui-pet-test-with
     (let ((harness-acp--server-enabled nil))
       (harness-test-load-module 'tasks))
@@ -643,15 +740,53 @@ its name first, then its face."
             (harness-test-wait (lambda () (not (buffer-local-value 'harness-ui-tasks--loading board)))
                                5 "the board to load")
             (harness-ui-pet-test--know-the-pet)
-            (should-not (harness-ui-pet-test--own-hooks 'harness-ui-tasks-tail-functions))
+            (should-not (harness-ui-pet-test--own-hooks 'harness-ui-tasks-corner-functions))
             (should-not (harness-ui-pet-test--figure board))
             (harness-ui-pet-test--hatch-elsewhere)
-            ;; The whole creature, above the compose label.
+            ;; The whole creature, its bottom rows ending the compose label
+            ;; and the settings below it: two lines fewer of its own.
             (harness-test-wait (lambda () (harness-ui-pet-test--figure board)) 5 "the pet on the board")
             (harness-ui-pet-test--check-figure board)
-            (with-current-buffer board
-              (goto-char (cdr (harness-ui-pet-test--figure board)))
-              (should (search-forward "New task" nil t)))
+            (let* ((rows (harness-ui-pet-test--figure-rows board))
+                   (sprite (car (harness-ui-pet--sprite harness-ui-pet--current)))
+                   (keys (with-current-buffer board
+                           (mapcar (lambda (row) (get-text-property (nth 1 row) 'harness-task-tail)) rows))))
+              ;; As tall as the creature, named beside its eyes.
+              (should (= (length sprite) (length rows)))
+              (should (string-search (plist-get harness-ui-pet--current :name)
+                                     (harness-ui-pet-test--figure-text board)))
+              (should (equal '(label settings) (last keys 2)))
+              (should (cl-every (lambda (key) (eq key 'corner)) (butlast keys 2)))
+              (should (string-prefix-p " New task" (nth 3 (car (last rows 2)))))
+              (with-current-buffer board
+                (should (= (line-number-at-pos harness-compose-start)
+                           (1+ (line-number-at-pos (nth 1 (car (last rows)))))))))
+            ;; Drawn again and again for a window that is not the selected
+            ;; one, its point in the compose box: once still, the box left be.
+            (let ((harness-ui-pet--min-lines 1)
+                  (window (split-window))
+                  (other (get-buffer-create " *harness-ui-pet-test other*")))
+              (unwind-protect
+                  (progn
+                    (set-window-buffer window board)
+                    (switch-to-buffer other)
+                    (with-current-buffer board
+                      (let ((inhibit-read-only t))
+                        (goto-char harness-compose-start)
+                        (insert "half a task"))
+                      (set-window-point window (1+ harness-compose-start))
+                      (dotimes (_ 3)
+                        (setq harness-ui-pet--panel-shown nil)
+                        (harness-ui-tasks-redraw-tail-lines (list board))
+                        (harness-ui-tasks--refit-tail))
+                      (harness-ui-pet-test--check-figure board)
+                      (should (equal "half a task"
+                                     (buffer-substring-no-properties harness-compose-start harness-compose-end)))
+                      (let ((inhibit-read-only t))
+                        (delete-region harness-compose-start harness-compose-end))))
+                (delete-window window)
+                (switch-to-buffer board)
+                (kill-buffer other)))
             ;; The board on screen lets it speak about anything, and it shows.
             (harness-test-wait (lambda () (eq t (harness-ui-pet-test--watching))) 5 "the board's watch")
             (should-not (harness-ui-pet-test--own-hooks 'harness-ui-tasks-header-functions))
@@ -659,6 +794,7 @@ its name first, then its face."
             (harness-test-wait (lambda () (string-search "Yes. That." (harness-ui-pet-test--figure-text board)))
                                5 "its words on the board")
             (harness-ui-pet-test--check-figure board)
+            (should (harness-ui-pet-test--joined board))
             ;; Muted, its words leave the board; the pet stays.
             (harness-call 'pet/set-muted t)
             (harness-test-wait (lambda () (not (string-search "Yes. That." (harness-ui-pet-test--figure-text board))))
@@ -691,72 +827,110 @@ its name first, then its face."
                   (progn
                     (customize-set-variable 'harness-ui-pet-places '(chat))
                     (should-not (harness-ui-pet-test--figure board))
-                    (should-not (harness-ui-pet-test--own-hooks 'harness-ui-tasks-tail-functions)))
+                    (should-not (harness-ui-pet-test--own-hooks 'harness-ui-tasks-corner-functions)))
                 (customize-set-variable 'harness-ui-pet-places places)))
             (should (harness-ui-pet-test--figure board)))
         (kill-buffer board)))))
 
-(defun harness-ui-pet-test--draw (view saying room)
-  "VIEW's figure with SAYING, fitted to ROOM columns: its lines, or nil."
+(defun harness-ui-pet-test--draw (view saying room &optional lines)
+  "VIEW's figure with SAYING, fitted to ROOM columns and LINES (default 40).
+Its rows, top first, as `harness-ui-pet--draw' draws them, or nil."
   (with-temp-buffer
-    (cl-letf (((symbol-function 'harness-ui-pet--room) (lambda () (list room 40 1))))
+    (cl-letf (((symbol-function 'harness-ui-pet--room) (lambda () (list room (or lines 40) 1))))
       (let* ((harness-ui-pet--current view)
              (spec (harness-ui-pet--spec saying)))
-        (and spec (split-string (harness-ui-pet--figure view (nth 1 spec) (nth 2 spec)) "\n" t))))))
+        (and spec (split-string (harness-ui-pet--draw spec) "\n" t))))))
 
 (ert-deftest harness-ui-pet-figure-fits-its-room ()
-  "Every species, in every hat, whole and right-aligned in the room it has:
-its bubble beside it, joined at its eyes, with room; above it with less;
-left out with less still; and no figure where even the pet does not fit."
+  "Every species, in every hat, whole and right-aligned in the room it has,
+its name beside its eyes or its bubble on its left, joined to it and no
+taller than it; its face on one line, with its name or the first of its
+words, in a window too narrow or too short for it, or when asked for;
+no figure where not even its face fits."
   (require 'harness-pet)
   (require 'harness-ui-pet)
-  ;; Where the bubble goes.
-  (should (eq 'none (harness-ui-pet--fit 10 12 nil)))
-  (should-not (harness-ui-pet--fit 80 12 nil))
-  (should (equal '(beside . 40) (harness-ui-pet--fit 80 12 (make-string 60 ?a))))
-  (should (equal '(beside . 5) (harness-ui-pet--fit 80 12 "Hello")))
-  (should (equal '(above . 24) (harness-ui-pet--fit 30 12 (make-string 60 ?a))))
-  (should-not (harness-ui-pet--fit 11 7 (make-string 60 ?a)))
-  (should (eq 'none (harness-ui-pet--fit 13 12 "Hello")))
+  (let* ((duck (list :species "duck" :eye "o" :hat "none" :rarity "rare" :name "Fennel"))
+         (face (string-width (harness-ui-pet-face "duck" "o")))
+         (long (string-join (make-list 40 "word") " ")))
+    ;; How it fits: whole, with the columns its words take on a line...
+    (should (equal '(whole . 0) (harness-ui-pet--fit duck 100 40 nil)))
+    (should (equal '(whole . 5) (harness-ui-pet--fit duck 100 40 "Hello")))
+    (should (equal '(whole . 30) (harness-ui-pet--fit duck 100 40 (make-string 50 ?a))))
+    ;; ...more, so the bubble is no taller than the creature, up to a most...
+    (should (equal (cons 'whole harness-ui-pet--bubble-max) (harness-ui-pet--fit duck 100 40 long)))
+    (should (equal '(whole . 54) (harness-ui-pet--fit duck 69 40 long)))
+    ;; ...or its face, with its name or its first words beside it.
+    (should (equal '(face . 6) (harness-ui-pet--fit duck 39 40 nil)))
+    (should (equal '(face . 6) (harness-ui-pet--fit duck 100 19 nil)))
+    (should (equal (cons 'face harness-ui-pet--quip-width) (harness-ui-pet--fit duck 100 19 long)))
+    (should (equal (cons 'face (- 20 2 face 1)) (harness-ui-pet--fit duck 20 40 long)))
+    (let ((harness-ui-pet-figure 'face))
+      (should (equal '(face . 6) (harness-ui-pet--fit duck 100 40 nil))))
+    (should-not (harness-ui-pet--fit duck (+ face 1) 40 nil))
+    ;; Cut short at a space, where there is one.
+    (should (equal "one two…" (harness-ui-pet--quip "one two three" 10)))
+    (should (equal "abcdefghi…" (harness-ui-pet--quip "abcdefghijklmnop" 10)))
+    (should (equal "short" (harness-ui-pet--quip "short" 10))))
   ;; Words wrap at spaces; a word longer than a line is cut.
   (should (equal '("one two" "three") (harness-ui-pet--wrap "one two  three" 7)))
   (should (equal '("a" "veryl" "ongwo" "rdind" "eed b") (harness-ui-pet--wrap "a verylongwordindeed b" 5)))
   (should (eq 'bold (get-text-property 0 'face (car (harness-ui-pet--wrap (propertize "hi there" 'face 'bold) 20)))))
-  (let ((said (list :text "*tilts head* Tokenizer? Bold. I like it, and the tests will too." :ts (float-time))))
+  (let ((said (list :text "*tilts head* Tokenizer? Bold. I like it, and the tests will too." :ts (float-time)))
+        (rambling (list :text (string-join (make-list 60 "chatter") " ") :ts (float-time))))
     (dolist (species harness-pet-species)
       (dolist (hat harness-pet-hats)
-        (let* ((view (list :species (symbol-name species) :eye "o" :hat (symbol-name hat)
-                           :rarity "rare" :name "Fennel"))
-               (art (harness-ui-pet--figure-art view)))
-          (dolist (room '(100 40 24 14))
-            (dolist (saying (list nil said))
-              (let ((lines (harness-ui-pet-test--draw view saying room))
-                    (text nil))
-                (should lines)
-                (setq text (string-join lines "\n"))
-                ;; Whole, named, right-aligned and within the room.
-                (dolist (line (car art))
-                  (should (string-search (string-trim line) text)))
-                (should (string-search "Fennel" text))
-                (dolist (line lines)
-                  (should (eq 'space (car (get-text-property 0 'display line))))
-                  (should (<= (string-width (substring line 1)) (- room 2))))
-                (should (= 1 (length (delete-dups (mapcar #'string-width lines)))))
-                (when saying
-                  (pcase (car (harness-ui-pet--fit room (harness-ui-pet--figure-width (car art) "Fennel")
-                                                   (harness-ui-pet--speech (plist-get saying :text))))
-                    ('beside
-                     (should (string-search "Tokenizer?" text))
-                     ;; Its first words on the line of its eyes.
-                     (let ((joined (cl-find-if (lambda (line) (string-search "├" line)) lines)))
-                       (should joined)
-                       (should (string-search (string-trim (nth (cdr art) (car art))) joined))))
-                    ('above
-                     (should (string-search "Tokenizer?" text))
-                     (should (string-search "╰" (nth (1- (- (length lines) (length (car art)) 1)) lines))))
-                    (_ (should-not (string-search "Tokenizer?" text)))))))))))
-    ;; A room too narrow for the pet: no figure at all.
-    (should-not (harness-ui-pet-test--draw (list :species "chonk" :eye "o" :hat "none" :name "Fennel") said 8))))
+        (pcase-let* ((view (list :species (symbol-name species) :eye "o" :hat (symbol-name hat)
+                                 :rarity "rare" :name "Fennel"))
+                     (`(,art . ,eyes) (harness-ui-pet--figure-art view))
+                     (face (harness-ui-pet-face (symbol-name species) "o")))
+          (dolist (room '(120 60 40 30 14))
+            (dolist (saying (list nil said rambling))
+              (dolist (lines '(40 10))
+                (let* ((rows (harness-ui-pet-test--draw view saying room lines))
+                       (text (string-join rows "\n"))
+                       (whole (and (>= room 40) (>= lines 20))))
+                  (should rows)
+                  ;; Right-aligned, within the room.
+                  (dolist (row rows)
+                    (should (eq 'space (car (get-text-property 0 'display row))))
+                    (should (<= (string-width (substring row 1)) (- room 2))))
+                  (if whole
+                      (progn
+                        ;; The whole creature once, ending its bottom rows.
+                        (should (equal (mapcar #'harness-ui-pet-test--bare art)
+                                       (mapcar #'harness-ui-pet-test--bare
+                                               (last (mapcar (lambda (row)
+                                                               (harness-ui-pet-test--tail
+                                                                row (apply #'max (mapcar #'string-width art))))
+                                                             rows)
+                                                     (length art)))))
+                        (if (null saying)
+                            (progn
+                              (should (= (length art) (length rows)))
+                              ;; Its name beside its eyes.
+                              (should (string-search "Fennel" (nth eyes rows))))
+                          (should-not (string-search "Fennel" text))
+                          ;; Its words beside it, joined to it; no taller than
+                          ;; it, unless they would be wider than the most, and
+                          ;; at most a few lines of them, the last cut short.
+                          (should (string-search (if (eq saying said) "Tokenizer?" "chatter") text))
+                          (should (cl-find-if (lambda (row) (string-match-p "[├|][─-]+" row)) rows))
+                          (pcase-let* ((words (harness-ui-pet--speech (plist-get saying :text)))
+                                       (`(whole . ,width) (harness-ui-pet--fit view room lines words))
+                                       (wrapped (length (harness-ui-pet--wrap words width))))
+                            (should (= (max (length art) (+ 2 (min wrapped 4))) (length rows)))
+                            (when (eq saying said)
+                              (should (or (= (length art) (length rows))
+                                          (= width (min harness-ui-pet--bubble-max
+                                                        (- room 2 (apply #'max (mapcar #'string-width art)) 5))))))
+                            (should (eq (> wrapped 4) (and (string-search "…" text) t))))))
+                    ;; Its face on one line, its name or the first of its words.
+                    (should (= 1 (length rows)))
+                    (should (string-search face text))
+                    (when (>= room 30)
+                      (should (string-search (if saying "“" "Fennel") text))))))))))
+      ;; A room too narrow even for its face: no figure at all.
+      (should-not (harness-ui-pet-test--draw (list :species "chonk" :eye "o" :hat "none" :name "Fennel") said 6)))))
 
 (ert-deftest harness-ui-pet-places-are-optional ()
   "`harness-ui-pet-places' says where the pet shows; nothing is wired for the rest."
@@ -764,7 +938,7 @@ left out with less still; and no figure where even the pet does not fit."
     (harness-ui-pet-test--know-the-pet)
     (harness-ui-pet-test--hatch-elsewhere)
     ;; By default by the compose boxes of chats and the board, not in header lines.
-    (dolist (hook '(harness-chat-panel-functions harness-ui-tasks-tail-functions
+    (dolist (hook '(harness-chat-panel-functions harness-ui-tasks-corner-functions
                     window-size-change-functions text-scale-mode-hook))
       (should (harness-ui-pet-test--own-hooks hook)))
     (dolist (hook '(harness-chat-header-end-functions harness-ui-tasks-header-functions))
@@ -775,23 +949,23 @@ left out with less still; and no figure where even the pet does not fit."
             (customize-set-variable 'harness-ui-pet-places '(chat-header board-header))
             (dolist (hook '(harness-chat-header-end-functions harness-ui-tasks-header-functions))
               (should (harness-ui-pet-test--own-hooks hook)))
-            (dolist (hook '(harness-chat-panel-functions harness-ui-tasks-tail-functions
+            (dolist (hook '(harness-chat-panel-functions harness-ui-tasks-corner-functions
                             window-size-change-functions text-scale-mode-hook))
               (should-not (harness-ui-pet-test--own-hooks hook)))
             (should (harness-ui-pet--chat-header))
             (should (harness-ui-pet--board-header))
             (should-not (harness-ui-pet--panel))
-            (should-not (harness-ui-pet--board-tail)))
+            (should-not (harness-ui-pet--board-corner 80 '(20 40))))
         (customize-set-variable 'harness-ui-pet-places places)))
     (should (harness-ui-pet-test--own-hooks 'harness-chat-panel-functions))
     (should-not (harness-ui-pet--board-header))
     ;; The module stopped, the pet leaves every place.
     (harness-ui-pet--shutdown)
     (dolist (hook '(harness-chat-header-end-functions harness-chat-panel-functions
-                    harness-ui-tasks-header-functions harness-ui-tasks-tail-functions
+                    harness-ui-tasks-header-functions harness-ui-tasks-corner-functions
                     window-buffer-change-functions window-size-change-functions text-scale-mode-hook))
       (should-not (harness-ui-pet-test--own-hooks hook)))
-    (should-not (harness-ui-pet--board-tail))
+    (should-not (harness-ui-pet--board-corner 80 '(20 40)))
     (should-not (harness-ui-pet--board-header))))
 
 (ert-deftest harness-ui-pet-turned-off-shows-nowhere ()
@@ -807,21 +981,21 @@ only to turn it on; that is saved, and turned on it is back as it was."
       (harness-ui-pet-test--hatch)
       (let ((name (plist-get harness-ui-pet--current :name)))
         (should (harness-ui-pet-test--own-hooks 'harness-chat-panel-functions))
-        (should (harness-ui-pet-test--own-hooks 'harness-ui-tasks-tail-functions))
+        (should (harness-ui-pet-test--own-hooks 'harness-ui-tasks-corner-functions))
         (with-current-buffer buf (harness-ui-pet-toggle-enabled))
         (harness-ui-pet-test--wait-text (regexp-quote (format "%s is asleep" name)))
         (should-not harness-pet-enabled)
         (should (eq :false (plist-get harness-ui-pet--current :enabled)))
         ;; Nowhere else, and nothing wired for it but the buffer's watch.
         (dolist (hook '(harness-chat-header-end-functions harness-chat-panel-functions
-                        harness-ui-tasks-header-functions harness-ui-tasks-tail-functions
+                        harness-ui-tasks-header-functions harness-ui-tasks-corner-functions
                         window-size-change-functions text-scale-mode-hook))
           (should-not (harness-ui-pet-test--own-hooks hook)))
         (let ((harness-ui-pet-places '(chat board chat-header board-header)))
           (should-not (harness-ui-pet--chat-header))
           (should-not (harness-ui-pet--board-header))
           (should-not (harness-ui-pet--panel))
-          (should-not (harness-ui-pet--board-tail)))
+          (should-not (harness-ui-pet--board-corner 80 '(20 40))))
         ;; Its buffer offers to turn it on, and nothing else.
         (let ((header (format "%s" (with-current-buffer buf (harness-ui-pet--header)))))
           (should (string-match-p "Turn on" header))

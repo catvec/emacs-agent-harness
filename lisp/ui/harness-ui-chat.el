@@ -2140,10 +2140,12 @@ redefines it.  The task module shows its review banner this way.")
 (defun harness-chat--insert-panels ()
   "Insert what `harness-chat-panel-functions' return, in order.
 Each string gets the panel background, which its own properties may
-override, as the pending panel's do."
+override, as the pending panel's do.  A function cannot move point,
+where its panel goes: it may measure text in a window, which takes the
+window's point."
   (run-hook-wrapped 'harness-chat-panel-functions
                     (lambda (fn)
-                      (when-let* ((text (funcall fn)))
+                      (when-let* ((text (save-excursion (funcall fn))))
                         (unless (string-empty-p text)
                           (insert (harness-chat--face text 'harness-chat-panel-face))))
                       nil)))

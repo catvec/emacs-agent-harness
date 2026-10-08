@@ -941,15 +941,23 @@ provider names it and gives it a personality.
 
 Once it hatched, it keeps you company in other places too:
 
-- **Chats.** The whole creature sits at the right above the compose
-  box, in its rarity's colour, with its name below it. What it last said
-  about the session shows in a speech bubble beside it, or above it in a
-  narrow window, until the session's next turn starts. Hovering names
-  it, and a click opens its buffer. In a window too small for it, it
-  stays away. Side conversations (BTW) go without it.
-- **The task board.** It sits above the board's compose box in the same
-  way, with the last thing it said about anything. Each task that gets
-  done gives it experience.
+- **Chats.** The whole creature sits in the bottom right corner, right
+  above the compose box, as Claude Code's companion sits beside its
+  prompt. It is drawn in its rarity's colour, with its name beside its
+  eyes, and takes only as many lines as it is tall. What it last said
+  about the session shows in a speech bubble on its left, joined to it,
+  until the session's next turn starts. The bubble widens rather than
+  grow taller than the creature. Hovering names the pet, and a click
+  opens its buffer. Side conversations (BTW) go without it.
+- **The task board.** It sits in the board's bottom right corner in the
+  same way, with the last thing it said about anything. The compose
+  label and settings lines narrow to make room for its bottom rows, so
+  it adds only a few lines of its own. Each task that gets done gives it
+  experience.
+- **Small windows.** A window narrower than 40 columns or shorter than
+  20 lines shows its face on one line instead, as in `(·>`. The face
+  comes with its name or the first few of its words. Set
+  `harness-ui-pet-figure` to `face` to get that everywhere.
 - **Header lines, if you want them.** Its face on one line, as in `(·>`,
   can end each chat's header line (`chat-header`), where it blinks now
   and then while the session works. Its face and name can also show in
@@ -958,7 +966,8 @@ Once it hatched, it keeps you company in other places too:
 
 `harness-ui-pet-places` chooses among these places: `chat` and `board`
 by default, `chat-header` and `board-header` too if you add them. nil
-keeps the pet to its own buffer.
+keeps the pet to its own buffer. `harness-ui-pet-figure` chooses how it
+shows by the compose boxes: `whole` (the default) or `face`.
 
 While it is on screen (its buffer, the task board, or a chat whose
 session it would talk about), it now and then says a line. It may
