@@ -297,7 +297,7 @@ event.  Multi-line data fields are joined with newlines per the spec."
 (defun harness-http-clean-url (url)
   "Return URL without the junk a drop or a clipboard can carry.
 Control characters, NULs, byte order marks and the invisible spaces
-\\(no-break space, soft hyphen, zero width and bidi marks, ideographic
+\(no-break space, soft hyphen, zero width and bidi marks, ideographic
 space) make curl read an address differently from how it prints -- a
 link that looks whole can come back as \"URL rejected: No host
 present\" -- and browsers strip tabs and newlines from URLs

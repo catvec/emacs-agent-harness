@@ -492,8 +492,8 @@ whose item is settled (a question answered) drops it."
 
 (defun harness-ui-popout-quit ()
   "Close this popout.
-\\<harness-ui-popout-mode-map>As \\[harness-ui-popout-quit], with a region,
-completion or minibuffer to quit, quit that instead."
+With a region, completion or minibuffer to quit, quit that instead, as
+`keyboard-quit' would."
   (interactive)
   (if (or (region-active-p) (bound-and-true-p completion-in-region-mode) (active-minibuffer-window))
       (let ((command (or (command-remapping 'keyboard-quit nil (current-global-map)) #'keyboard-quit)))

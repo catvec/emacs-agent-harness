@@ -323,7 +323,7 @@ Return nil when VALUE names none of them."
      ((not (stringp name)) (harness-tool-error "Missing name"))
      ((not (stringp text)) (harness-tool-error "Missing text"))
      ((and raw-position (not position))
-      (harness-tool-error (format "position must be point, start or end, not %S" raw-position)))
+      (harness-tool-error (format "The position must be point, start or end, not %S" raw-position)))
      ((> (length text) harness-tools-emacs--insert-max-chars)
       (harness-tool-error
        (format "Text is %d characters, over the %d the emacs_insert limit allows"

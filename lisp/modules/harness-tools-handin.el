@@ -46,7 +46,7 @@
 (defun harness-tools-handin--invalid (format-string &rest args)
   "Return the error result for a malformed call.
 Its message is FORMAT-STRING formatted with ARGS, as by `format'."
-  (apply #'harness-tool-error (format format-string args)))
+  (harness-tool-error (apply #'format format-string args)))
 
 (defun harness-tools-handin--session-plist (sid)
   "Return the session plist of SID, or a minimal stand-in."
@@ -157,7 +157,8 @@ ITEM is a string (a note), or an object with exactly one of `:image',
           (format "Evidence %d says nothing: give it an image, a video, a file, code, a note or a tool_call" number))
          ((cdr kinds)
           (format "Evidence %d gives %s: give it exactly one of image, video, file, code, note or tool_call"
-                  number (mapconcat #'identity kinds " and ")))
+                  number (mapconcat (lambda (kind) (if (eq kind 'tool-call) "tool_call" (symbol-name kind)))
+                                    kinds " and ")))
          ((eq (car kinds) 'image) (funcall one (or (harness-tools-handin--file image "image" number ctx)
                                                    (format "Evidence %d: %s is not an image" number image))))
          ((eq (car kinds) 'video) (funcall one (or (harness-tools-handin--file video "video" number ctx)

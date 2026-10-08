@@ -416,7 +416,7 @@ it makes until their branch is merged."
     (if (not (harness-json-true-p (plist-get wt :locked)))
         (harness-ui-call "_harness/worktree/lock" (list :root root :path path)
                          (lambda (_) (funcall reload "Locked %s")))
-      (when (yes-or-no-p (format "Unlock worktree %s%s, which a prune that cannot see its directory would then drop? "
+      (when (yes-or-no-p (format "Unlock worktree %s%s, letting a prune that cannot see its directory drop it? "
                                  (abbreviate-file-name path)
                                  (if (stringp (plist-get wt :lock-reason))
                                      (format " (locked: %s)" (plist-get wt :lock-reason))

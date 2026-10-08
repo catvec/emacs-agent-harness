@@ -248,7 +248,7 @@ REPORT, what TASK handed in drawn in full (`harness-ui-review--report'),
 goes between what verifying does and the buttons: the work is read
 before it is verified or sent back.  IN-REPORT is non-nil when the banner
 is drawn at the end of TASK's report popout
-\\(`harness-ui-report-panel-functions'): it speaks of the task then, and
+\(`harness-ui-report-panel-functions'): it speaks of the task then, and
 leaves [Review] out, the report being the window it is drawn in."
   (let* ((in-report (or in-report (and (fboundp 'harness-ui-report-task)
                                        (harness-ui-report-task))))
