@@ -591,18 +591,23 @@ its transcript; one made at its parent's head goes on."
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :name "old") :id))
            (s (gethash id harness-sessions))
-           ;; Made before the last two slots, provider-node and move.
-           (old (apply #'record (cl-loop for i below (- (length s) 2) collect (aref s i)))))
+           ;; Made before the last three slots: provider-node, move and ext.
+           (old (apply #'record (cl-loop for i below (- (length s) 3) collect (aref s i)))))
       (puthash id old harness-sessions)
       (should-error (harness-session-provider-node old))
       (should-error (harness-session-move old))
+      (should-error (harness-session-ext old))
       (harness-session--upgrade-records)
       (let ((new (gethash id harness-sessions)))
         (should (= (length s) (length new)))
         (should (equal "old" (harness-session-name new)))
         (should-not (harness-session-provider-node new))
         (should-not (harness-session-move new))
-        (should (equal "old" (plist-get (harness-call 'session/get id) :name)))))))
+        (should-not (harness-session-ext new))
+        (should (equal "old" (plist-get (harness-call 'session/get id) :name)))
+        ;; The slot is there to use.
+        (harness-call 'session/set-ext id :supervisor t)
+        (should (equal '(:supervisor t) (harness-session-ext (gethash id harness-sessions))))))))
 
 (defun harness-session-test-kinds (id)
   (mapcar (lambda (n) (plist-get n :kind)) (harness-call 'session/nodes id)))
@@ -1253,6 +1258,164 @@ itself is left alone."
       (should (equal '(user tool-call tool-call user tool-result assistant user tool-result tool-call
                             tool-result tool-result)
                      (harness-session-test-kinds id))))))
+
+;;;; Settings that modules keep for a session (ext)
+
+(defconst harness-session-test--ext
+  '(:supervisor t :off :false :tier "cheap" :budget 12 :ratio 0.5
+    :tiers (:fast "demo:fast" :deep "demo:deep") :models ("a" "b"))
+  "An ext plist with every kind of value the JSON store of a record keeps.")
+
+(defun harness-session-test--ext-of (id)
+  "Return the ext plist of session ID."
+  (plist-get (harness-call 'session/get id) :ext))
+
+(ert-deftest harness-session-ext-sets-and-gets ()
+  "A setting is set to a value, an explicit off is a value, and nil removes it."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (should-not (harness-session-test--ext-of id))
+      ;; The session plist comes back, with the setting in it.
+      (should (equal '(:supervisor t) (plist-get (harness-call 'session/set-ext id :supervisor t) :ext)))
+      (should (equal id (plist-get (harness-call 'session/set-ext id :tier "cheap") :id)))
+      (should (equal '(:supervisor t :tier "cheap") (harness-session-test--ext-of id)))
+      (let ((before (harness-session-test--ext-of id)))
+        ;; An explicit off is stored as it is, in its place.
+        (harness-call 'session/set-ext id :supervisor :false)
+        (should (equal '(:supervisor :false :tier "cheap") (harness-session-test--ext-of id)))
+        ;; Whoever held the plist before keeps what it saw.
+        (should (equal '(:supervisor t :tier "cheap") before)))
+      ;; nil removes the setting; one removed twice, or never set, is no error.
+      (harness-call 'session/set-ext id :supervisor nil)
+      (should (equal '(:tier "cheap") (harness-session-test--ext-of id)))
+      (harness-call 'session/set-ext id :supervisor nil)
+      (harness-call 'session/set-ext id :nothing nil)
+      (should (equal '(:tier "cheap") (harness-session-test--ext-of id)))
+      (harness-call 'session/set-ext id :tier nil)
+      (should-not (harness-session-test--ext-of id))
+      ;; Every kind of value.
+      (cl-loop for (k v) on harness-session-test--ext by #'cddr
+               do (harness-call 'session/set-ext id k v))
+      (should (equal harness-session-test--ext (harness-session-test--ext-of id)))
+      (should-error (harness-call 'session/set-ext "no-such-session" :supervisor t)))))
+
+(ert-deftest harness-session-ext-key-may-be-a-name ()
+  "A client on the wire names a setting with a string, with or without the colon."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (dolist (key (list :a 'b "c" ":d"))
+        (harness-call 'session/set-ext id key t))
+      (should (equal '(:a t :b t :c t :d t) (harness-session-test--ext-of id)))
+      (harness-call 'session/set-ext id "a" nil)
+      (harness-call 'session/set-ext id ":b" :false)
+      (should (equal '(:b :false :c t :d t) (harness-session-test--ext-of id)))
+      (dolist (key (list nil t "" 7))
+        (should-error (harness-call 'session/set-ext id key t) :type 'harness-error))
+      (should (equal '(:b :false :c t :d t) (harness-session-test--ext-of id))))))
+
+(ert-deftest harness-session-ext-survives-the-store ()
+  "The settings are stored with the record and read back as they were."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (cl-loop for (k v) on harness-session-test--ext by #'cddr
+               do (harness-call 'session/set-ext id k v))
+      ;; The record, as JSON writes it and `harness-session--from-plist' reads it.
+      (let* ((record (harness-session-plist (gethash id harness-sessions)))
+             (stored (harness-json-parse (harness-json-encode record))))
+        (should (equal harness-session-test--ext (harness-session-ext (harness-session--from-plist stored)))))
+      ;; And from the store itself, after the harness exited and started again.
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (equal harness-session-test--ext (harness-session-test--ext-of id)))
+      ;; A setting that was removed is gone for good.
+      (harness-call 'session/set-ext id :supervisor nil)
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should-not (plist-member (harness-session-test--ext-of id) :supervisor))
+      (should (eq :false (plist-get (harness-session-test--ext-of id) :off))))))
+
+(ert-deftest harness-session-ext-reads-only-a-plist ()
+  "A stored value that is no plist reads as no settings, and a key set to null as none."
+  (harness-session-test-with
+    (dolist (junk (list "junk" 7 t :false '("a" "b") '(:a) '(1 2)))
+      (should-not (harness-session-ext (harness-session--from-plist (list :id "x" :cwd "/tmp/" :ext junk)))))
+    (should-not (harness-session-ext (harness-session--from-plist (list :id "x" :cwd "/tmp/"))))
+    (should (equal '(:a 1) (harness-session-ext
+                            (harness-session--from-plist (list :id "x" :cwd "/tmp/" :ext '(:a 1 :b nil))))))))
+
+(ert-deftest harness-session-create-takes-initial-ext ()
+  "`session/create' accepts the settings a session starts with."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (s (harness-call 'session/create :cwd cwd :ext '(:supervisor t :off :false :unset nil))))
+      (should (equal '(:supervisor t :off :false) (plist-get s :ext)))
+      (should (equal '(:supervisor t :off :false) (harness-session-test--ext-of (plist-get s :id))))
+      (should-not (plist-get (harness-call 'session/create :cwd cwd) :ext))
+      (should-not (plist-get (harness-call 'session/create :cwd cwd :ext "junk") :ext)))))
+
+(ert-deftest harness-session-fork-does-not-copy-ext ()
+  "A fork, a sub-agent and a BTW start without their parent's settings.
+A module that wants its fork to have some gives them when it forks."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                       :ext '(:supervisor t :tier "cheap"))
+                         :id)))
+      (dolist (kind '(fork subagent))
+        (let ((child (harness-await (harness-call 'session/fork id :kind kind))))
+          (should-not (plist-get child :ext))
+          (should-not (harness-session-test--ext-of (plist-get child :id)))))
+      (should-not (plist-get (harness-call 'session/btw id) :ext))
+      (let ((child (harness-await (harness-call 'session/fork id :kind 'fork :ext '(:supervisor :false)))))
+        (should (equal '(:supervisor :false) (plist-get child :ext))))
+      (should (equal '(:supervisor t :tier "cheap") (harness-session-test--ext-of id))))))
+
+(ert-deftest harness-session-ext-change-is-announced ()
+  "A change emits `session/ext-changed' once the session holds it, and `session/changed' too."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+          (events nil)
+          (changed nil))
+      (harness-on 'session/ext-changed
+                  (lambda (sid key value)
+                    (push (list sid key value (plist-get (harness-session-test--ext-of sid) key)) events)))
+      (harness-on 'session/changed (lambda (_sid session) (push (plist-get session :ext) changed)))
+      (harness-call 'session/set-ext id :supervisor t)
+      (harness-call 'session/set-ext id "tier" "cheap")
+      (harness-call 'session/set-ext id :supervisor nil)
+      ;; The key is the keyword, the value what was asked, and the session
+      ;; already held it when the event came.
+      (should (equal (list (list id :supervisor t t) (list id :tier "cheap" "cheap") (list id :supervisor nil nil))
+                     (reverse events)))
+      (should (equal '((:supervisor t) (:supervisor t :tier "cheap") (:tier "cheap"))
+                     (reverse changed))))))
+
+(ert-deftest harness-session-ext-hint-is-added ()
+  "A hint that is a string lands in the transcript as a hint, any other does not."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-call 'session/set-ext id :supervisor t "Supervisor mode on")
+      (let ((node (car (last (harness-call 'session/nodes id)))))
+        (should (eq 'hint (plist-get node :kind)))
+        (should (equal "Supervisor mode on" (plist-get node :content))))
+      (harness-call 'session/set-ext id :supervisor :false)
+      (harness-call 'session/set-ext id :tier "x" nil)
+      (harness-call 'session/set-ext id :tier "y" 5)
+      (should (equal '(hint) (harness-session-test-kinds id)))
+      (should (equal '(:supervisor :false :tier "y") (harness-session-test--ext-of id))))))
+
+(ert-deftest harness-session-ext-warns-of-a-value-the-store-would-change ()
+  "A value JSON does not keep as it is (a symbol, say) is kept, and logged."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-call 'session/set-ext id :mode 'auto)
+      (should (eq 'auto (plist-get (harness-session-test--ext-of id) :mode)))
+      (with-current-buffer (get-buffer-create harness-log-buffer-name)
+        (should (string-match-p "ext :mode would not survive the JSON store" (buffer-string))))
+      (should (harness-session--ext-json-p harness-session-test--ext))
+      (dolist (bad (list 'auto [1 2] (lambda () 1) '(:a auto) '("a" auto) '(:a 1 :b)))
+        (should-not (harness-session--ext-json-p bad))))))
 
 ;;;; Context windows
 

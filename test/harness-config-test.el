@@ -90,12 +90,17 @@ reaching a custom file."
       ;; the layered ones and the Budget: no other module is loaded.
       ;; `harness-emacs-eval' too once lisp/harness-emacs-endpoint.el
       ;; is, as the UI client of another test loads it.
-      (let ((placed (cl-loop for (_ . props) in harness-config-sections
-                             append (cl-remove-if-not #'boundp (plist-get props :keys)))))
+      ;; Those no module defines are not there: the supervisor's, until
+      ;; its plugin is loaded.  One that two sections name is there once.
+      (let ((placed (delete-dups (cl-loop for (_ . props) in harness-config-sections
+                                          append (cl-remove-if-not #'boundp (plist-get props :keys))))))
         (should (equal (sort (copy-sequence placed) #'string<)
                        (sort (append (list 'harness-budget)
                                      (and (boundp 'harness-emacs-eval) (list 'harness-emacs-eval))
-                                     harness-config-keys)
+                                     (cl-remove-if-not #'boundp harness-config-keys)
+                                     (cl-remove-if-not #'boundp '(harness-supervisor-tasks
+                                                                  harness-supervisor-tiers
+                                                                  harness-supervisor-step-budget)))
                              #'string<)))
         (should (equal (mapcar #'symbol-name placed)
                        (mapcar (lambda (s) (plist-get s :key))
@@ -410,6 +415,88 @@ something else, a task's edit, is named itself."
       ;; Internal constants are no settings at all.
       (should-not (cl-some (lambda (s) (string-search "--" (plist-get s :key))) settings)))))
 
+(ert-deftest harness-config-leaves-out-what-no-module-defines ()
+  "The supervisor's layered key and its section's options name nothing
+before its plugin is loaded: the layers, the description and the methods
+that take a key all leave them out, as they would without the key."
+  (skip-unless (executable-find "git"))
+  (skip-unless (not (boundp 'harness-supervisor)))
+  (harness-config-test-with
+    (harness-config-test--write root '((nil . ((harness-supervisor . t) (harness-permission-mode . yolo)))))
+    (should (memq 'harness-supervisor harness-config-keys))
+    (let ((layers (harness-call 'config/layers sub)))
+      (dolist (layer '(policy global project directory))
+        (should-not (plist-member (cdr (assq layer layers)) 'harness-supervisor)))
+      ;; The others are there, global lists every key that is defined.
+      (should (eq 'yolo (plist-get (cdr (assq 'project layers)) 'harness-permission-mode)))
+      (should (equal (remq 'harness-supervisor harness-config-keys)
+                     (cl-loop for (key _) on (cdr (assq 'global layers)) by #'cddr collect key))))
+    (let* ((d (harness-call 'config/describe sub))
+           (keys (mapcar (lambda (s) (plist-get s :key)) (plist-get d :settings))))
+      (should (member "harness-permission-mode" keys))
+      (should-not (cl-some (lambda (key) (string-prefix-p "harness-supervisor" key)) keys))
+      (should-not (member "supervisor" (mapcar (lambda (s) (plist-get s :name)) (plist-get d :sections)))))
+    ;; The key is unknown, not a variable with no value.
+    (dolist (call (list (lambda () (harness-call 'config/get 'harness-supervisor sub))
+                        (lambda () (harness-call 'config/get "harness-supervisor" sub))
+                        (lambda () (harness-call 'config/set 'harness-supervisor t :scope 'project :cwd sub))
+                        (lambda () (harness-call 'config/unset 'harness-supervisor :scope 'project :cwd sub))
+                        (lambda () (harness-call 'config/overrides 'harness-supervisor))))
+      (should (equal "Unknown config key harness-supervisor" (cadr (should-error (funcall call))))))
+    (should (equal '((nil . ((harness-supervisor . t) (harness-permission-mode . yolo))))
+                   (harness-config-test--read root)))))
+
+(ert-deftest harness-config-describes-the-supervisor-options-once-defined ()
+  "Once a module defines them, `harness-supervisor' layers like the other
+sessions' settings and shows once, in the first section that names it,
+and the supervisor's section follows `sessions' with its own options."
+  (skip-unless (executable-find "git"))
+  (skip-unless (not (boundp 'harness-supervisor)))
+  (harness-config-test-with
+    (unwind-protect
+        (progn
+          ;; As the plugin defines them: a layered switch and a global option.
+          (set 'harness-supervisor nil)
+          (set 'harness-supervisor-tiers nil)
+          (put 'harness-supervisor-tiers 'standard-value '(nil))
+          (harness-config-test--write root '((nil . ((harness-supervisor . t)))))
+          (let ((layers (harness-call 'config/layers sub)))
+            (should (plist-member (cdr (assq 'global layers)) 'harness-supervisor))
+            (should (null (plist-get (cdr (assq 'global layers)) 'harness-supervisor)))
+            (should (eq t (plist-get (cdr (assq 'project layers)) 'harness-supervisor)))
+            (should-not (plist-member (cdr (assq 'global layers)) 'harness-supervisor-tiers)))
+          (should (eq t (harness-call 'config/get 'harness-supervisor sub)))
+          (should (null (harness-call 'config/get 'harness-supervisor (harness-test-temp-dir))))
+          (let* ((d (harness-call 'config/describe sub))
+                 (settings (plist-get d :settings))
+                 (keys (mapcar (lambda (s) (plist-get s :key)) settings))
+                 (switch (harness-config-test--setting d "harness-supervisor"))
+                 (tiers (harness-config-test--setting d "harness-supervisor-tiers")))
+            ;; Once, in the first section, right after the setting it follows.
+            (should (= 1 (cl-count "harness-supervisor" keys :test #'equal)))
+            (should (equal "harness-non-interactive" (nth (1- (cl-position "harness-supervisor" keys :test #'equal)) keys)))
+            (should (equal "sessions" (plist-get switch :section)))
+            (should (eq t (plist-get switch :layered)))
+            (should (equal "t" (plist-get switch :value)))
+            (should (equal "project" (plist-get switch :source)))
+            (should (equal "supervisor" (plist-get tiers :section)))
+            (should (eq :false (plist-get tiers :layered)))
+            ;; Its section comes after `sessions', with the title and text it was given.
+            (let ((sections (plist-get d :sections)))
+              (should (equal '("sessions" "supervisor" "spending" "safety")
+                             (mapcar (lambda (s) (plist-get s :name)) sections)))
+              (should (equal "Supervisor mode" (plist-get (cadr sections) :title)))
+              (should (string-match-p "delegate" (plist-get (cadr sections) :doc)))))
+          ;; It is set and unset like any layered setting.
+          (should (equal (cons 'project (expand-file-name ".dir-locals.el" root))
+                         (harness-call 'config/set 'harness-supervisor :false :scope 'project :cwd sub)))
+          (should (eq :false (harness-call 'config/get 'harness-supervisor sub)))
+          (harness-call 'config/unset 'harness-supervisor :scope 'project :cwd sub)
+          (should (null (harness-call 'config/get 'harness-supervisor sub))))
+      (makunbound 'harness-supervisor)
+      (makunbound 'harness-supervisor-tiers)
+      (put 'harness-supervisor-tiers 'standard-value nil))))
+
 (ert-deftest harness-config-sections-name-real-options ()
   "Every option `harness-config-sections' names is a `defcustom' of the harness.
 A misspelt name would quietly drop a setting from the settings page."
@@ -421,9 +508,16 @@ A misspelt name would quietly drop a setting from the settings page."
           (goto-char (point-min))
           (while (re-search-forward "^(defcustom \\(harness-[^ \n]+\\)" nil t)
             (push (intern (match-string 1)) defined)))))
-    (dolist (section harness-config-sections)
-      (dolist (key (plist-get (cdr section) :keys))
-        (should (memq key defined))))
+    ;; The supervisor's options are defined by its plugin, a file of its
+    ;; own; they name nothing before it is there.
+    (let ((undefined-yet (unless (file-exists-p (expand-file-name "lisp/modules/harness-supervisor.el"
+                                                                  harness-test-root))
+                           '(harness-supervisor harness-supervisor-tasks harness-supervisor-tiers
+                             harness-supervisor-step-budget))))
+      (dolist (section harness-config-sections)
+        (dolist (key (plist-get (cdr section) :keys))
+          (unless (memq key undefined-yet)
+            (should (memq key defined))))))
     ;; Every layered setting is shown in a section.
     (dolist (key harness-config-keys)
       (should (cl-some (lambda (section) (memq key (plist-get (cdr section) :keys)))
