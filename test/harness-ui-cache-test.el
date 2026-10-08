@@ -183,6 +183,69 @@ banner says it did."
         (harness-ui-cache--lapse (current-buffer)))
       (should (= 1 drawn)))))
 
+(ert-deftest harness-ui-cache-cost-when-writes-cost-nothing ()
+  "A provider that does not charge for cache writes (DeepSeek, priced 0
+for them) charges the input for what is sent again uncached."
+  (let ((harness-ui--models (make-hash-table :test 'equal)))
+    (puthash "test:ds" '(:id "test:ds" :pricing (:input 0.15 :output 0.6 :cache-read 0.003 :cache-write 0.0))
+             harness-ui--models)
+    (should (string-match-p "^   Your next message re-sends ~84\\.0k tokens uncached: about \\$0\\.013 instead of \\$0\\.0003, at list prices\\.$"
+                            (harness-ui-cache-test--banner
+                             (harness-ui-cache-test--session
+                              :model "test:ds" :cache '(:at 1000.0 :ttl 300 :expires 1300.0 :model "test:ds"))
+                             2000.0)))))
+
+(defconst harness-ui-cache-test--estimate
+  '(:context 84000 :model "test:m" :model-label "Big" :cached nil :carry-on 0.315 :compacting nil
+    :kinds ((:kind "summary" :model "test:m" :model-label "Big" :input 84041 :output 2000
+                   :cached nil :cost 0.462705 :after 2000)
+            (:kind "brief" :model "test:small" :model-label "Small" :input 725 :output 2000
+                   :cached nil :cost 0.01090625 :after 2000)
+            (:kind "transcript" :cost 0.0 :after 84)))
+  "What compacting costs, as `compaction/estimate' answers over ACP.")
+
+(ert-deftest harness-ui-cache-offers-to-compact ()
+  "Below what the next message costs, the panel offers to compact the
+conversation first: a button for each kind, the cheap brief summary
+first, with what it costs as the harness estimates it, and its key on
+that line.  Before the estimate comes the buttons only name the kinds.
+A session blocked inside a turn is offered nothing; while a compaction
+the panel started runs, the line says so."
+  (require 'harness-ui-chat)
+  (with-temp-buffer
+    (let ((state (harness-ui-cache--state (harness-ui-cache-test--session) 2000.0))
+          (case-fold-search nil)
+          (chosen nil))
+      ;; Nobody to ask (no session here): the kinds, and the free one's cost.
+      (should (equal "   Compact it first   b  Brief summary   s  Summary   t  Transcript file (free)\n"
+                     (substring-no-properties (harness-ui-cache--offer state))))
+      (setq harness-ui-cache--estimate (cons state harness-ui-cache-test--estimate))
+      (let ((line (harness-ui-cache--offer state)))
+        (should (equal (concat "   Compact it first   b  Brief summary (~$0.011)   s  Summary (~$0.463)"
+                               "   t  Transcript file (free)\n")
+                       (substring-no-properties line)))
+        ;; Each key on the line compacts as its kind, and so does a click.
+        (cl-letf (((symbol-function 'harness-ui-cache--compact) (lambda (_buffer kind) (push kind chosen))))
+          (dolist (key '("b" "s" "t"))
+            (funcall (lookup-key (get-text-property 0 'keymap line) key)))
+          (funcall (get-text-property (string-match "Summary" line) 'harness-chat-action line)))
+        (should (equal '(summary transcript summary brief) chosen))
+        ;; A button's tooltip says what it does.
+        (should (string-prefix-p "Brief summary (~$0.011): Small reads only the first and last messages"
+                                 (get-text-property (string-match "Brief summary" line) 'help-echo line)))
+        ;; Last on the panel, which it is part of.
+        (let ((banner (harness-ui-cache--banner state 2000.0 line)))
+          (should (string-suffix-p (substring-no-properties line) (substring-no-properties banner)))
+          (should (get-text-property (1- (length banner)) 'harness-ui-cache-panel banner))
+          (should (string-match-p "lapsed at" (get-text-property 0 'help-echo banner)))
+          (should (string-prefix-p "Summary (~$0.463): Big reads"
+                                   (get-text-property (string-match "Summary" banner) 'help-echo banner)))))
+      ;; Blocked on an answer: the turn is not over.
+      (should-not (harness-ui-cache--offer (plist-put (copy-sequence state) :blocked t)))
+      (setq harness-ui-cache--compacting 'brief)
+      (should (equal "   Compacting the conversation into a brief summary…\n"
+                     (substring-no-properties (harness-ui-cache--offer state)))))))
+
 (ert-deftest harness-ui-cache-duration-in-words ()
   "Cache lifetimes read as words."
   (should (equal "5 minutes" (harness-ui-cache--duration 300)))
@@ -381,6 +444,42 @@ for it, and the panel goes for good."
       (harness-ui-cache-test--send buffer "on the other model")
       (should-not (harness-ui-cache-test--shows-p buffer))
       (should (equal "demo:other" (plist-get (plist-get (harness-ui-session sid) :cache) :model))))))
+
+(ert-deftest harness-ui-cache-panel-compacts-the-conversation ()
+  "Once the cache lapsed, the panel offers to compact the conversation,
+saying what each kind costs once the harness has estimated it.  A key on
+that line compacts it: the panel says so while it runs, and goes once
+the conversation is compacted, as nothing of it is cached any more."
+  (harness-ui-cache-test-with
+    (harness-test-load-module 'compaction)
+    (harness-test-load-module 'ui-compact)
+    (let* ((harness-cache-ttl 1)
+           (sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted")
+                           :id))
+           (buffer (harness-ui-cache-test--open sid)))
+      (harness-ui-cache-test--send buffer "first")
+      (harness-test-wait (lambda () (harness-ui-cache-test--shows-p buffer)) 10 "the cache panel")
+      ;; The demo model is priced: the estimate gives both summaries a cost.
+      (harness-test-wait (lambda () (string-match-p "Brief summary (~\\$" (harness-ui-cache-test--text buffer)))
+                         5 "the costs")
+      (should (string-match-p (concat "\n   Compact it first   b  Brief summary (~\\$[0-9.]+)   s  Summary (~\\$[0-9.]+)"
+                                      "   t  Transcript file (free)\n")
+                              (harness-ui-cache-test--text buffer)))
+      (with-current-buffer buffer
+        (goto-char (point-min))
+        (search-forward "Compact it first")
+        (execute-kbd-macro "t")
+        (should (string-match-p "\n   Compacting the conversation into a transcript file…\n"
+                                (harness-ui-cache-test--text buffer))))
+      (harness-test-wait (lambda () (not (harness-ui-cache-test--shows-p buffer))) 5 "the panel to go")
+      (should (equal "transcript"
+                     (harness-node-compaction-kind
+                      (cl-find 'compaction (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind))))))
+      (should-not (plist-get (harness-ui-session sid) :cache))
+      (with-current-buffer buffer (should-not harness-ui-cache--compacting))
+      (harness-test-wait (lambda () (string-match-p "context compacted into a transcript file"
+                                                    (harness-ui-cache-test--text buffer)))
+                         5 "the compaction in the chat"))))
 
 (ert-deftest harness-ui-cache-timer-goes-with-the-buffer ()
   "Killing a chat buffer stops its cache timer."

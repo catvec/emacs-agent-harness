@@ -241,9 +241,10 @@ cache lasts the session finds it warm again.  A step still sent to the
 old model after a switch stamps that model's cache (the agent passes
 the step's model).  Some changes start the conversation over instead,
 so the next request sends none of the old one, cached or not, and
-`:cache` is nil: a compaction, whose summary replaces the transcript
-(its usage record carries `:cache-reset`, which drops the stamp
-whichever model summarised, a handoff's summary included), and a model
+`:cache` is nil: a compaction, whose summary or transcript note
+replaces the transcript (its usage record carries `:cache-reset`, which
+drops the stamp whichever model summarised, a handoff's summary
+included), and a model
 whose provider keeps a conversation of its own and holds none of the
 session's (a hosted loop it was switched to, lossily:
 `session/provider-state` gives nothing for it), which is sent only the
@@ -634,6 +635,18 @@ gone.
   back between a call and its result.  The transcript itself is not
   changed, and a message that needs no change comes out as it is.
 - `session/transcript-text ID` → searchable plain text.
+- `session/write-transcript ID &optional OPTS` → `(:file :lines)`:
+  writes `session/transcript-text` to a new Markdown file named after
+  the session and the time, in OPTS `:directory` relative to the
+  session's directory (`harness-session-transcript-directory`,
+  `.harness/transcripts/`, by default), under a heading (`:title`), the
+  session's name and id, a line on why (`:about`), its working
+  directory and a legend of the entries.  The session's directory is
+  where its tools read without asking and a provider's prompt cache
+  holds what the model reads, unlike the state directory; a
+  `.gitignore` of `*` there keeps git out.  Signals when the directory
+  does not exist.  A handoff (`.harness/handoff/`) and a compaction
+  into a transcript write theirs with it.
 - Event `session/changed ID SESSION` fires after any of the above (for UIs
   that just want to redraw).
 
@@ -2095,36 +2108,79 @@ and hinted.
 
 ### compaction
 
-- `compaction/compact SESSION-ID &optional OPTS` → promise; summarises
-  the transcript with the session's model (OPTS `:model` another),
-  appends a `compaction` node whose `:meta` points at the compacted
-  head, records the summariser (`:model`), what it was given
-  (`:context`) and the size compacted, sets it as head, hints
-  before/after.  `session/messages` starts at the node, as a user
-  message ("Summary of the conversation so far: ..."), followed by the
-  unanswered user messages carried over after it.  OPTS `:context` is
-  `full` (the default) or `sample`, which keeps only the first and last
-  few messages (`harness-compaction--sample-head`/`-tail`) with a user
-  message saying how many were left out: a bound on what a summariser
-  sent the conversation as text costs.  A summariser whose provider
-  keeps the conversation and can fork it (a hosted loop) works on a
-  fork of the session's provider state, so it summarises the real
-  conversation and leaves the session's own alone; one whose provider
-  is sent the transcript anyway (an API provider) gets it as messages.
-  A summariser that keeps the conversation and has no state of this
-  session (the target of a switch) is sent only the newest user
-  messages, so the context goes inside one message as structured text.
-  The summary's usage record carries `:cache-reset`: the conversation
-  starts over from the summary, so the prompt cache of the old one, the
-  summariser's included, is no use to the next request and the session
-  reports none (see "Session").  That holds for every compaction the
-  harness starts itself (automatic ones run only where the provider is
-  sent the transcript; a handoff's lands on a provider holding nothing
-  of the session).  A hosted loop compacted while it holds the
-  session's conversation goes on with it, the summary joining it, so a
-  summary its own model made on a fork of that conversation stamps the
-  cache like any request; one from a sample or another model resets it.
-- Auto: `agent/before-turn` compacts when the context comes within
+- `compaction/compact SESSION-ID &optional OPTS` → promise of the
+  `compaction` node, which stands in for the conversation from then on:
+  `session/messages` starts at it, as a user message, followed by the
+  unanswered user messages carried over after it.  OPTS `:kind` (one of
+  `harness-compaction-kinds`) says what it holds:
+  - `summary` (the default): the session's model (OPTS `:model`
+    another) summarises the conversation, and the message reads
+    "Summary of the conversation so far: ...".  OPTS `:context` is
+    `full` (the default) or `sample`, which keeps only the first and
+    last few messages (`harness-compaction--sample-head`/`-tail`) with a
+    user message saying how many were left out: a bound on what a
+    summariser sent the conversation as text costs.  A summary of a
+    sample is a brief one.
+  - `brief`: a summary of a sample, written by OPTS `:model`, else
+    `harness-compaction-brief-model` (`auto`, the default: the cheap
+    tier of the session's provider, `provider/tier-model`, else the
+    session's model; nil: the session's model; or a model named), and
+    ending in a note that it was written from only the first and last
+    messages and may lack what came between
+    (`harness-compaction--brief-caveat`; OPTS `:caveat` replaces it, nil
+    for none).  It costs cents however long the conversation.  A
+    handoff's `compact-new` is one, written by the new model.
+  - `transcript`: no request.  `session/write-transcript` writes the
+    conversation to a file in the session's directory, and the node
+    holds a note, sent as it is, saying where the file is and how long,
+    and to read its end and its start before answering, then what it
+    needs of the rest.
+  The node's `:meta` points at the compacted head and records the kind
+  (`:compaction`, read back by `harness-node-compaction-kind`), the
+  writer (`:model`, the session's for a transcript), what it was given
+  (`:context`), the size compacted, a transcript's `:file` and OPTS
+  `:meta` (a handoff's `:handoff`); hints say it began and what it
+  became.  A summariser whose provider keeps the conversation and can
+  fork it (a hosted loop) works on a fork of the session's provider
+  state, so it summarises the real conversation and leaves the
+  session's own alone; one whose provider is sent the transcript anyway
+  (an API provider) gets it as messages.  A summariser that keeps the
+  conversation and has no state of this session (the target of a
+  switch, a cheap model's side request) is sent the context inside one
+  message as structured text.  Every compaction starts the
+  conversation over (`harness-compaction--start-over`): its usage
+  record carries `:cache-reset`, so the session reports no prompt
+  cache (see "Session"), and the provider state of the session's model
+  goes (`session/set-provider-state` nil, which closes a hosted loop's
+  process), so a hosted loop's next request opens a new conversation
+  with the compaction instead of adding it to the old one, whose
+  context is what compacting was for.  The state of another provider,
+  left by a handoff, stays.  One compaction runs per session at a time,
+  a second call returning the running promise; OPTS `:idle` refuses a
+  session running a turn (`agent/running`), whose turn would go on
+  writing after the conversation it replaces, as compacting by hand
+  does.
+- `compaction/estimate SESSION-ID` → `(:context :model :model-label
+  :cached :carry-on :carry-on-cached :compacting :kind :kinds)`: the
+  context the next message sends, whether the prompt cache still lasts
+  for the session's model, what that message costs as things are and
+  read from the cache, whether a compaction runs, and the configured
+  kind; `:kinds` has `(:kind :model :model-label :input :output :cached
+  :cost :after)` per kind, at list prices (`usage/price`, so a
+  time-of-day price applies; nil without one).  A summary reads the
+  whole context, from the cache only on a fork of a hosted conversation
+  whose cache is warm, else at the uncached rate: the higher of the
+  cache-write and the input price, as a provider that does not charge
+  for writes (DeepSeek, priced 0) still charges the input.  A brief
+  summary reads the system prompt, the sample and the ask; either
+  writes up to the summary's budget
+  (`harness-compaction--summary-output`).  A transcript costs nothing
+  and leaves the note (`:after`) in place of the context.
+- Settings (section "Compaction"): `harness-compaction-kind`, the kind
+  automatic compaction makes (`summary`), and
+  `harness-compaction-brief-model`.
+- Auto: `agent/before-turn` compacts, as `harness-compaction-kind`
+  says, when the context comes within
   `harness-compaction--context-reserve` of the window unless the provider
   reports `:compaction hosted`.  The window is the session's
   (`:context-window' override, else its model's, capped by its
@@ -2170,15 +2226,17 @@ so switching to either loses nothing.
   which reads the conversation from its prompt cache while the cache
   lasts and pays for it all uncached once it lapsed (`:cache`), and
   `compact-new` has the *new* model summarise instead,
-  from a bounded context (`:context sample`: the first and last few
-  messages): use it when the old provider cannot answer -- its plan ran
-  out, it is down -- or to keep the job small.  The compaction node,
+  from a bounded context (`compaction/compact` `:kind brief` with
+  `:model`: the first and last few messages): use it when the old
+  provider cannot answer -- its plan ran out, it is down -- or to keep
+  the job small.  The compaction node,
   marked `:handoff` with the mode, summariser and context, opens the new
   conversation, ending in a harness note that the handoff is lossy and
   the model should re-investigate rather than trust it.  When no summary
   can be made (the summariser fails or its plan ran out) the transcript
-  goes over instead (`:fallback` says why).  `transcript` writes
-  `session/transcript-text` to `CWD/.harness/handoff/ID-TIME.md` -- in
+  goes over instead (`:fallback` says why).  `transcript` writes the
+  transcript (`session/write-transcript`) to
+  `CWD/.harness/handoff/ID-TIME.md` -- in
   the session's directory, which its tools may read and the new
   provider's prompt cache holds as it reads, unlike the state directory,
   and kept out of git by a `.gitignore` of `*` there -- and appends a
@@ -3608,8 +3666,20 @@ redraws the box and whatever panel is above it (`harness-compose-redraw`);
 a session update (a new request stamps a new `:cache-at`) reschedules
 it, and the panel goes as soon as the session runs.  Its text names
 clock times only, never "idle for", so nothing in it goes stale between
-redraws.  It informs only: it has no buttons, and a session without
-context or cache use never shows it.
+redraws.  A session without context or cache use never shows it.  Its
+last line offers to compact the conversation first, so the next
+message sends only what stands in for it: a button per kind
+(`harness-ui-compact-kinds`), the brief summary first -- the cheap way
+out of a long conversation gone cold -- then the summary and the
+transcript file, each with its key on that line (b, s, t, through a
+keymap composed under the buttons' own, `harness-ui-with-keymap`) and
+what it costs (`compaction/estimate`, asked once per state the panel
+shows, `harness-ui-cache--estimate`, and drawn when it comes; the
+buttons only name the kinds until then, a transcript being free).
+Pressing one runs `compaction/compact` (`harness-ui-compact-run`); the
+line says so while it runs, and the panel goes once the compaction
+resets the cache.  A session blocked on an answer is in the middle of a
+turn: its panel offers nothing.
 Tools go by their labels everywhere: a tool block's header shows the
 label in `harness-tool-title-face` and what the call is about after it
 in `harness-tool-subject-face` (the faces stand in for the colon of the
@@ -4274,7 +4344,13 @@ and a key per way to hand over, falling back to the minibuffer question
 when no chat buffer shows; see "Switching model or provider"), the
 prompt cache warning of a session (`harness-ui-cache`: the chat panel
 that says the cache lapsed and what the next message re-sends, drawn
-by a timer at the moment it lapses; see "Chat buffer"), and the
+by a timer at the moment it lapses, with buttons that compact the
+conversation first; see "Chat buffer"), compacting by hand
+(`harness-ui-compact`: `harness-compact`, `C-c h C` and "C" in the
+menu, asks which kind with `read-multiple-choice`, the help buffer a
+table of each kind's writer, cost and effect and what carrying on
+costs, from `compaction/estimate`; refuses a session running a turn;
+registers /compact, /compact KIND, in `harness-chat-commands`), and the
 handed-in report (`harness-ui-report`: the summary as markdown and the
 evidence -- images as wide as the popout and up to
 `harness-ui-report-image-max-height` of the frame high, the popout
