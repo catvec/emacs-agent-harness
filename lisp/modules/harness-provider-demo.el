@@ -502,6 +502,12 @@ happened, or remarks on the longest word of the user's last message."
     ("start" "start"))
   "Words that order an action in a search, by action, for the demo's answers.")
 
+(defconst harness-provider-demo--search-priorities
+  '(("high" "prioritize" "prioritise" "urgent" "high priority")
+    ("low" "deprioritize" "deprioritise" "low priority")
+    ("medium" "medium priority" "normal priority"))
+  "Words of a search that give a priority, by priority, for the demo's answers.")
+
 (defconst harness-provider-demo--search-states
   '(("error\\|fail\\|stopped" "errored" "failed" "failing" "broken" "stopped")
     ("^needs input" "blocked" "stuck" "waiting" "need me" "needs me")
@@ -519,9 +525,10 @@ happened, or remarks on the longest word of the user's last message."
 
 (defun harness-provider-demo--search (request)
   "Answer a task board search from REQUEST's board, as a scripted model would.
-No model: words of the query that order an action pick it, words that
-name a state keep the tasks in that state, and the other words keep the
-tasks whose lines hold them all (or, when none does, the most of them)."
+No model: words of the query that order an action pick it (or, failing
+that, words that give a priority), words that name a state keep the
+tasks in that state, and the other words keep the tasks whose lines
+hold them all (or, when none does, the most of them)."
   (let* ((text (harness-provider-demo--last-user-text request))
          (query (downcase (if (string-match "^Query: \\(.*\\)$" text) (match-string 1 text) "")))
          (entries nil))
@@ -535,11 +542,16 @@ tasks whose lines hold them all (or, when none does, the most of them)."
     (let* ((action (car (cl-find-if (lambda (verbs) (cl-some (lambda (w) (string-match-p (concat "\\b" (regexp-quote w) "\\b") query))
                                                               (cdr verbs)))
                                     harness-provider-demo--search-verbs)))
+           (priority (and (not action)
+                          (car (cl-find-if (lambda (words) (cl-some (lambda (w) (string-match-p (concat "\\b" (regexp-quote w) "\\b") query))
+                                                                     (cdr words)))
+                                           harness-provider-demo--search-priorities))))
            (state (car (cl-find-if (lambda (states) (cl-some (lambda (w) (string-match-p (concat "\\b" (regexp-quote w) "\\b") query))
                                                               (cdr states)))
                                    harness-provider-demo--search-states)))
            (noise (append harness-provider-demo--search-stopwords
                           (split-string (string-join (apply #'append (mapcar #'cdr harness-provider-demo--search-verbs)) " "))
+                          (split-string (string-join (apply #'append (mapcar #'cdr harness-provider-demo--search-priorities)) " "))
                           (split-string (string-join (apply #'append (mapcar #'cdr harness-provider-demo--search-states)) " "))))
            (words (cl-remove-if (lambda (w) (or (< (length w) 2) (member w noise)))
                                 (split-string query "[^[:alnum:]]+" t)))
@@ -554,9 +566,13 @@ tasks whose lines hold them all (or, when none does, the most of them)."
                                 ((> best 0) (cl-remove-if-not (lambda (s) (= (car s) best)) scored)))))
            (answer (format "{\"show\":[%s],\"do\":[%s]}"
                            (mapconcat (lambda (id) (format "%S" id)) shown ",")
-                           (if action
-                               (mapconcat (lambda (id) (format "{\"task\":%S,\"action\":%S}" id action)) shown ",")
-                             ""))))
+                           (cond (action
+                                  (mapconcat (lambda (id) (format "{\"task\":%S,\"action\":%S}" id action)) shown ","))
+                                 (priority
+                                  (mapconcat (lambda (id) (format "{\"task\":%S,\"action\":\"priority\",\"text\":%S}"
+                                                                  id priority))
+                                             shown ","))
+                                 (t "")))))
       `((:type text :delta ,answer)
         (:type usage :input ,(/ (length text) 4) :output ,(/ (length answer) 4) :cost 0.0004 :context ,(/ (length text) 4))
         (:type done :stop-reason end-turn)))))

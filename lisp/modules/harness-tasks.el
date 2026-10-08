@@ -79,6 +79,14 @@
 ;; changes, say -- and nothing merges when its turn ends.  A refined
 ;; task keeps the declaration for when it starts.
 ;;
+;; Priority: every task has one of `harness-tasks-priorities', low,
+;; medium (the default) or high, given at submission (`:priority') and
+;; changed at any time (`task/set-priority').  It orders the queue: when
+;; `harness-tasks-max-running' holds a project's tasks back, a free slot
+;; goes to the highest priority waiting, the oldest of those first.  It
+;; never stops a task at work, and backlog tasks still wait for someone
+;; to start them.
+;;
 ;; Duplicates: the agent first looks for related tasks on the board
 ;; (task_list).  When one already asks for exactly the same change it
 ;; refuses: its final reply is `Duplicate of ID' and a message for the
@@ -93,8 +101,9 @@
 ;;             when `harness-tasks-max-running' limits how many of a
 ;;             project's tasks run at once: each project has slots of
 ;;             its own, and only the tasks' own top-level sessions take
-;;             them, never their sub-agents or the merge queue's work),
-;;             or a backlog task waiting for someone to start it
+;;             them, never their sub-agents or the merge queue's work;
+;;             higher priority first, then oldest first), or a backlog
+;;             task waiting for someone to start it
 ;;   refining  an agent is writing a backlog task up, or stopped part
 ;;             way (`:outcome' says why: error, cancelled, duplicate…)
 ;;   active    its session is working on it, or stopped part way
@@ -176,8 +185,14 @@ and the merge queue's conflict resolvers -- and neither does the merge
 queue's work: a task whose branch is queued, merging or having its
 conflicts resolved holds no slot, even while its own session commits
 or resolves them.  `task/start' starts a task whatever the limit.
-nil (the default) means no limit."
+nil (the default) means no limit.  Waiting tasks start by priority,
+then oldest first (see `harness-tasks-priorities')."
   :type '(choice (const :tag "No limit" nil) integer) :group 'harness)
+
+(defconst harness-tasks-priorities '(low medium high)
+  "The priorities a task may have, lowest first; `medium' is the default.
+When `harness-tasks-max-running' makes a project's tasks wait, a free
+slot goes to the highest priority waiting, the oldest of those first.")
 
 (defcustom harness-tasks-require-verification t
   "When non-nil, finished work waits for the user to review it.
@@ -444,7 +459,7 @@ interrupted carries on.")
 (defconst harness-tasks--backup-suffix ".bak"
   "Suffix of the copy of the global store from before records moved out of it.")
 
-(defconst harness-tasks--symbol-keys '(:state :outcome :merge-status)
+(defconst harness-tasks--symbol-keys '(:state :outcome :merge-status :priority)
   "Keys whose values are symbols in memory and strings on disk.")
 
 (defvar harness-tasks--table (make-hash-table :test 'equal)
@@ -557,6 +572,33 @@ to touch the main checkout itself, such as cleaning up uncommitted
 changes: the task runs where the project is checked out, on no branch,
 and nothing merges when its turn ends."
   (harness-json-true-p (plist-get task :main-tree)))
+
+(defun harness-tasks--read-priority (value)
+  "Return VALUE as one of `harness-tasks-priorities', or signal.
+VALUE is a symbol or a string in any case, \"med\" meaning medium, so
+a priority can come from JSON, a tool or a person.  nil is medium."
+  (let ((name (downcase (string-trim (cond ((null value) "medium")
+                                           ((symbolp value) (symbol-name value))
+                                           ((stringp value) value)
+                                           (t (format "%s" value)))))))
+    (or (car (memq (intern (if (equal name "med") "medium" name)) harness-tasks-priorities))
+        (error "Unknown priority %s; it is low, medium or high" value))))
+
+(defun harness-tasks--priority (task)
+  "Return TASK's priority: one of `harness-tasks-priorities', medium unless set."
+  (let ((value (plist-get task :priority)))
+    (or (car (memq (if (stringp value) (intern value) value) harness-tasks-priorities))
+        'medium)))
+
+(defun harness-tasks--start-order (tasks)
+  "Return TASKS in the order they get slots (destructively).
+That is the highest priority first, the oldest first among equals."
+  (sort tasks (lambda (a b)
+                (let ((pa (cl-position (harness-tasks--priority a) harness-tasks-priorities))
+                      (pb (cl-position (harness-tasks--priority b) harness-tasks-priorities)))
+                  (if (= pa pb)
+                      (< (plist-get a :created) (plist-get b :created))
+                    (> pa pb))))))
 
 (defun harness-tasks--refinement-p (task)
   "Non-nil when a turn of TASK's session refines it rather than doing it.
@@ -870,8 +912,12 @@ user, whose answer the queue then waits for too."
                (t 'active))))))
 
 (defun harness-tasks--view (task)
-  "Return TASK as methods and events show it: with its `:column'."
-  (append task (list :column (harness-tasks--column task))))
+  "Return TASK as methods and events show it: with its `:column'.
+Its `:priority' is always there: a record from before priorities shows
+the default, medium."
+  ;; `append' copies TASK, so `plist-put' changes only the view.
+  (plist-put (append task (list :column (harness-tasks--column task)))
+             :priority (harness-tasks--priority task)))
 
 ;;;; Git
 
@@ -1244,6 +1290,8 @@ listed under it (`session/btw'), so only the board's have no parent."
 ;; `harness-tasks-max-running' limits each project on its own: every
 ;; project has that many slots, and its queued tasks wait only for its
 ;; own working tasks, so a busy board never holds up another project's.
+;; Queued tasks take free slots by priority, the oldest first among
+;; equals (`harness-tasks--start-order').
 ;;
 ;; Only top-level sessions take slots (`harness-tasks--holds-slot-p'): a
 ;; task holds one while its own session, which no other session started,
@@ -1312,12 +1360,14 @@ sub-agent or the merge queue.  `most-positive-fixnum' without a limit."
        (not (plist-get task :archived))))
 
 (defun harness-tasks--schedule ()
-  "Start the oldest queued tasks of every project while it has slots free.
-Projects have slots of their own (`harness-tasks--free-slots'): the walk
-keeps what is left of each one's, so a project at its limit holds up
-only its own tasks.  Backlog tasks wait for `task/start' instead."
+  "Start the queued tasks of every project while it has slots free.
+They go by priority, highest first, the oldest first among equals
+\(`harness-tasks--start-order').  Projects have slots of their own
+\(`harness-tasks--free-slots'): the walk keeps what is left of each
+one's, so a project at its limit holds up only its own tasks.  Backlog
+tasks wait for `task/start' instead."
   (let ((free (make-hash-table :test 'equal)))
-    (dolist (task (harness-tasks--sorted #'harness-tasks--queued-p))
+    (dolist (task (harness-tasks--start-order (harness-tasks--sorted #'harness-tasks--queued-p)))
       (let* ((project (harness-tasks--slot-project task))
              (left (or (gethash project free) (harness-tasks--free-slots project))))
         (when (> left 0)
@@ -1430,13 +1480,17 @@ the global `harness-non-interactive' stands for it."
   "Non-nil when SETTINGS would change TASK.
 Non-interactive is compared with what the task would start with, so
 turning it off reaches a task that has no setting of its own but would
-start non-interactive all the same."
+start non-interactive all the same.  A `:priority' of nil is no
+priority given: it changes nothing."
   (cl-some (lambda (k)
              (let ((want (plist-get settings k)) (have (plist-get task k)))
-               (if (eq k :non-interactive)
-                   (not (eq (and (harness-json-true-p want) t)
-                            (and (harness-tasks--non-interactive-p task) t)))
-                 (not (equal want have)))))
+               (pcase k
+                 (:non-interactive
+                  (not (eq (and (harness-json-true-p want) t)
+                           (and (harness-tasks--non-interactive-p task) t))))
+                 (:priority
+                  (and want (not (eq (harness-tasks--read-priority want) (harness-tasks--priority task)))))
+                 (_ (not (equal want have))))))
            (harness-plist-keys settings)))
 
 (declare-function harness-session-check-policy "harness-session" (settings &optional kind))
@@ -1449,15 +1503,20 @@ sent only the settings it does not have yet: each `session/update'
 adds a hint to it, so a session something else already changed (`all'
 commands change sessions and tasks alike) is not told twice.  A
 setting the policy fixes for every session is refused before anything
-changes (see `harness-session-check-policy').  Return TASK's view."
+changes (see `harness-session-check-policy').  A `:priority' is the
+task's own, never its session's: it orders the queue.  Return TASK's
+view."
   (let* ((id (plist-get task :id))
          (prefs (cl-loop for k in harness-tasks-pref-keys
                          when (plist-member settings k)
-                         append (list k (plist-get settings k)))))
+                         append (list k (plist-get settings k))))
+         (priority (and (plist-get settings :priority)
+                        (list :priority (harness-tasks--read-priority (plist-get settings :priority))))))
     (when (and prefs (fboundp 'harness-session-check-policy))
       (harness-session-check-policy prefs))
+    (when (or prefs priority)
+      (apply #'harness-tasks--set id (append prefs priority)))
     (when prefs
-      (apply #'harness-tasks--set id prefs)
       (let* ((session (harness-tasks--session task))
              (changes (and session
                            (cl-loop for (k v) on prefs by #'cddr
@@ -2166,8 +2225,10 @@ Last, the tasks without a title are named."
 It starts at once when its project has a slot free, otherwise it waits
 as pending: `harness-tasks-max-running' limits each project on its own.
 OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode',
-`:thinking', `:non-interactive' (an explicit false turns it off) and
-`:main-tree' (work in the project's main checkout, with no worktree,
+`:thinking', `:non-interactive' (an explicit false turns it off),
+`:priority' (low, medium or high, as a symbol or a string; medium by
+default: waiting tasks start by priority, see `harness-tasks-priorities')
+and `:main-tree' (work in the project's main checkout, with no worktree,
 no branch and nothing to merge; for work that has to touch the checkout
 itself, such as cleaning up uncommitted changes); missing ones come
 from the `harness-tasks-' defaults, else from what the directory
@@ -2185,6 +2246,7 @@ session takes it."
   (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
          (refine (harness-json-true-p (plist-get opts :refine)))
          (main-tree (and (harness-json-true-p (plist-get opts :main-tree)) t))
+         (priority (harness-tasks--read-priority (plist-get opts :priority)))
          (task (list :id (concat "t-" (harness-short-id 8))
                      :project (harness-tasks--project cwd) :cwd cwd
                      :prompt (string-trim prompt)
@@ -2193,6 +2255,7 @@ session takes it."
                      :permission-mode (let ((m (plist-get opts :permission-mode)))
                                         (if (stringp m) (intern m) m))
                      :thinking (plist-get opts :thinking)
+                     :priority priority
                      :state 'pending :created (float-time))))
     (when (plist-member opts :non-interactive)
       (setq task (plist-put task :non-interactive
@@ -2332,19 +2395,27 @@ nil, which JSON could not tell from a harness that does not say):
 
 (harness-defmethod task/set-all (settings &optional filter)
   "Apply SETTINGS to every current task FILTER selects; return the ids changed.
-SETTINGS is a plist of `:model', `:thinking', `:permission-mode' and
-`:non-interactive' (an explicit false turns it off).  A started task's
-session gets the change too, so its next turn uses it; a pending task
-keeps it for when it starts.  FILTER: `:columns' (default
-`harness-tasks-bulk-columns', the running, pending and blocked tasks),
-`:ids' to name tasks outright, `:except' ids to leave alone, and `:cwd'
-to stay inside one project; without it the tasks of every project are
-selected.  Review, done and archived tasks are history and are never
-touched.  A task already set so is left alone (non-interactive counts
-as what the task would start with, see `harness-tasks--prefs-differ-p'),
-and a session already holding a value is not sent it again, so a
-session `session/set-all' changed first gets no second hint.  Return
-the ids that changed, oldest first."
+SETTINGS is a plist of `:model', `:thinking', `:permission-mode',
+`:non-interactive' (an explicit false turns it off) and `:priority'
+\(low, medium or high, as `task/set-priority' reads it).  Only the
+settings given change: without `:priority' (or with nil) every task
+keeps its own, so a bulk edit sets priorities only when asked to.  A
+started task's session gets the session settings too, so its next turn
+uses them; a pending task keeps them for when it starts.  A priority is
+the task's own and orders the queue (it starts nothing).  FILTER:
+`:columns' (default `harness-tasks-bulk-columns', the running, pending
+and blocked tasks), `:ids' to name tasks outright, `:except' ids to
+leave alone, and `:cwd' to stay inside one project; without it the
+tasks of every project are selected.  Review, done and archived tasks
+are history and are never touched.  A task already set so is left
+alone (non-interactive counts as what the task would start with, see
+`harness-tasks--prefs-differ-p'), and a session already holding a value
+is not sent it again, so a session `session/set-all' changed first gets
+no second hint.  Return the ids that changed, oldest first."
+  ;; A bad priority is refused before any task changes.
+  (when (plist-get settings :priority)
+    (setq settings (plist-put (copy-sequence settings) :priority
+                              (harness-tasks--read-priority (plist-get settings :priority)))))
   (let (changed)
     (dolist (task (harness-tasks--bulk-selected filter))
       (when (harness-tasks--prefs-differ-p task settings)
@@ -2388,6 +2459,21 @@ the prompt it has), but not one an agent is writing up right now."
       (error "Task %s is still being written up; wait for it or stop it" id))
     (harness-tasks--start task)
     (harness-call 'task/get id)))
+
+(harness-defmethod task/set-priority (id priority)
+  "Give task ID priority PRIORITY: low, medium or high; return the task.
+PRIORITY is a symbol or a string, \"med\" meaning medium.  Priority
+orders the tasks waiting for a slot of their project, highest first
+\(see `harness-tasks-priorities'), so raising a pending task moves it
+up the queue and lowering it lets the others by.  It changes nothing
+else: a task at work keeps its slot, a backlog task still waits for
+`task/start', and a task that waits again later (after a restart)
+waits with its priority."
+  (let ((task (harness-tasks--get id))
+        (priority (harness-tasks--read-priority priority)))
+    (if (eq priority (harness-tasks--priority task))
+        (harness-tasks--view task)
+      (harness-tasks--set id :priority priority))))
 
 (harness-defmethod task/update (id prompt &optional attachments)
   "Replace the prompt of pending task ID with PROMPT and its ATTACHMENTS.
@@ -2688,7 +2774,7 @@ up again, merges in flight are queued again and waiting tasks start."
 (harness-declare-event 'task/done "(TASK HOW) when a task becomes done; HOW is merged, finished, verified or completed.")
 
 (harness-define-module 'tasks
-  :doc "Task mode: one session per task on a shorter context, from backlog write-up or worktree through your review to merged, with a concurrency limit per project."
+  :doc "Task mode: one session per task on a shorter context, from backlog write-up or worktree through your review to merged, with a concurrency limit per project that starts waiting tasks by priority."
   :requires '(store project session agent)
   :init #'harness-tasks--init
   :shutdown #'harness-tasks--shutdown)

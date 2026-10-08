@@ -1185,6 +1185,178 @@ box alone again."
     (let ((task (car (harness-call 'task/list default-directory))))
       (should (harness-json-true-p (plist-get task :main-tree))))))
 
+(declare-function harness-ui-tasks-raise-priority "harness-ui-tasks")
+(declare-function harness-ui-tasks-lower-priority "harness-ui-tasks")
+(declare-function harness-ui-tasks-cycle-new-priority "harness-ui-tasks")
+(declare-function harness-ui-tasks--meta "harness-ui-tasks")
+(declare-function harness-ui-tasks--actions "harness-ui-tasks")
+
+(defun harness-ui-tasks-test--priority-actions (board text)
+  "The priority entries of the actions of BOARD's card showing TEXT."
+  (harness-ui-tasks-test--goto-card board text)
+  (with-current-buffer board
+    (seq-filter (lambda (label) (string-match-p "priority" label))
+                (mapcar #'car (harness-ui-tasks--actions (harness-ui-tasks--task))))))
+
+(ert-deftest harness-ui-tasks-pending-in-priority-order ()
+  "Pending lists the waiting tasks as they will start: by priority, then oldest first.
+A high or low card has an arrow before its title and says so among its
+facts; medium goes without saying.  + and - on a card move its priority
+a step, and the card moves with it; off a card they type."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (harness-call 'task/submit default-directory "Alpha, low" (list :priority "low"))
+      (harness-call 'task/submit default-directory "Bravo, medium")
+      (harness-call 'task/submit default-directory "Charlie, high" (list :priority "high"))
+      (harness-ui-tasks-test--wait-text board "Pending  3\\(.\\|\n\\)*Charlie\\(.\\|\n\\)*Bravo\\(.\\|\n\\)*Alpha")
+      (should (string-match-p "↑ Charlie, high" (harness-ui-tasks-test--card-text board "Charlie")))
+      (should (string-match-p "↓ Alpha, low" (harness-ui-tasks-test--card-text board "Alpha")))
+      (should-not (string-match-p "[↑↓]" (harness-ui-tasks-test--card-text board "Bravo")))
+      (with-current-buffer board
+        (let ((facts (lambda (title)
+                       (harness-ui-tasks--meta (cl-find title harness-ui-tasks--tasks
+                                                        :key (lambda (task) (plist-get task :prompt))
+                                                        :test #'equal)
+                                               'pending nil))))
+          (should (string-prefix-p "high priority · queued" (funcall facts "Charlie, high")))
+          (should (string-prefix-p "low priority · queued" (funcall facts "Alpha, low")))
+          (should (string-prefix-p "queued" (funcall facts "Bravo, medium")))))
+      ;; The place in line is the place it starts in.
+      (harness-ui-tasks-test--show-subtitle board "Charlie")
+      (harness-ui-tasks-test--show-subtitle board "Alpha")
+      (should (string-match-p "#1 in line" (harness-ui-tasks-test--card-text board "Charlie")))
+      (should (string-match-p "#3 in line" (harness-ui-tasks-test--card-text board "Alpha")))
+      ;; The menu offers the steps there are.
+      (should (equal '("Raise priority to high" "Lower priority to low")
+                     (harness-ui-tasks-test--priority-actions board "Bravo")))
+      (should (equal '("Lower priority to medium") (harness-ui-tasks-test--priority-actions board "Charlie")))
+      (should (equal '("Raise priority to medium") (harness-ui-tasks-test--priority-actions board "Alpha")))
+      ;; + raises Bravo to high: older than Charlie, it goes first now.
+      (with-current-buffer board
+        (should (eq board (window-buffer (selected-window))))
+        (harness-ui-tasks-test--goto-card board "Bravo")
+        (should (eq 'harness-ui-tasks-raise-priority (key-binding (kbd "+"))))
+        (should (eq 'harness-ui-tasks-lower-priority (key-binding (kbd "-"))))
+        (execute-kbd-macro "+"))
+      (harness-ui-tasks-test--wait-text board "Pending  3\\(.\\|\n\\)*Bravo\\(.\\|\n\\)*Charlie\\(.\\|\n\\)*Alpha")
+      (should (eq 'high (plist-get (harness-call 'task/get (harness-ui-tasks-test--card-id board "Bravo"))
+                                   :priority)))
+      (should (string-match-p "↑ Bravo" (harness-ui-tasks-test--card-text board "Bravo")))
+      ;; Nothing above high, nothing below low.
+      (harness-ui-tasks-test--goto-card board "Bravo")
+      (with-current-buffer board (should-error (harness-ui-tasks-raise-priority) :type 'user-error))
+      (harness-ui-tasks-test--goto-card board "Alpha")
+      (with-current-buffer board (should-error (harness-ui-tasks-lower-priority) :type 'user-error))
+      ;; - takes Charlie down to medium, after Bravo still, its arrow gone.
+      (with-current-buffer board
+        (harness-ui-tasks-test--goto-card board "Charlie")
+        (execute-kbd-macro "-"))
+      (harness-test-wait (lambda ()
+                           (with-current-buffer board (harness-ui-tasks--render))
+                           (not (string-match-p "[↑↓]" (harness-ui-tasks-test--card-text board "Charlie"))))
+                         5 "Charlie's arrow to go")
+      (should (eq 'medium (plist-get (harness-call 'task/get (harness-ui-tasks-test--card-id board "Charlie"))
+                                     :priority)))
+      (should (string-match-p "Pending  3\\(.\\|\n\\)*Bravo\\(.\\|\n\\)*Charlie\\(.\\|\n\\)*Alpha"
+                              (harness-ui-tasks-test--board-text board)))
+      ;; Off a card the keys type, into the compose box.
+      (with-current-buffer board
+        (harness-compose-set "")
+        (goto-char (point-min))
+        (search-forward "nothing working")
+        (should-not (get-text-property (point) 'harness-task-id))
+        (execute-kbd-macro "+")
+        (execute-kbd-macro "-")
+        (should (equal "+-" (harness-compose-text)))))))
+
+(ert-deftest harness-ui-tasks-new-task-priority ()
+  "The button beside Submit sets the next task's priority; each click moves it on."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (with-current-buffer board
+        (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
+        (should (string-match-p "Submit +medium priority\n" (harness-ui-tasks-test--tail-text board)))
+        (push-button (save-excursion (goto-char harness-ui-tasks--list-end)
+                                     (search-forward "medium priority")
+                                     (match-beginning 0)))
+        (should (string-match-p "Submit +high priority\n" (harness-ui-tasks-test--tail-text board))))
+      (harness-ui-tasks-test--type-and-submit board "Urgent fix")
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*↑ Urgent fix")
+      (should (eq 'high (plist-get (car (harness-call 'task/list default-directory)) :priority)))
+      ;; It stays for the tasks after, like the other settings, until changed.
+      (with-current-buffer board
+        (harness-ui-tasks-cycle-new-priority)
+        (should (string-match-p "Submit +low priority\n" (harness-ui-tasks-test--tail-text board)))
+        (harness-ui-tasks-cycle-new-priority)
+        (should (string-match-p "Submit +medium priority\n" (harness-ui-tasks-test--tail-text board))))
+      (harness-ui-tasks-test--type-and-submit board "Whenever")
+      (harness-ui-tasks-test--wait-text board "Pending  2\\(.\\|\n\\)*↑ Urgent fix\\(.\\|\n\\)*Whenever")
+      (should (eq 'medium (plist-get (cadr (harness-call 'task/list default-directory)) :priority))))))
+
+(declare-function harness-ui-tasks-bulk-priority "harness-ui-tasks")
+(declare-function harness-ui-tasks-toggle-bulk "harness-ui-tasks")
+
+(defun harness-ui-tasks-test--tail-button (board text)
+  "Where BOARD's button showing TEXT is, below the board."
+  (with-current-buffer board
+    (save-excursion
+      (goto-char harness-ui-tasks--list-end)
+      (search-forward text)
+      (match-beginning 0))))
+
+(ert-deftest harness-ui-tasks-bulk-edit-priority ()
+  "Bulk mode gives the current tasks a priority only when its button is used.
+The button is on the settings line, in place of the next task's beside
+Submit; the other bulk settings leave each task's priority alone, and
+the next task keeps its own."
+  (harness-ui-tasks-test-with
+    (let* ((harness-tasks-max-running 0)
+           (alpha (plist-get (harness-call 'task/submit default-directory "Alpha") :id))
+           (bravo (plist-get (harness-call 'task/submit default-directory "Bravo" (list :priority "low"))
+                             :id))
+           (priorities (lambda ()
+                         (mapcar (lambda (id) (plist-get (harness-call 'task/get id) :priority))
+                                 (list alpha bravo)))))
+      (harness-ui-tasks-test--wait-text board "Pending  2")
+      (with-current-buffer board
+        (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
+        (should-error (harness-ui-tasks-bulk-priority "high") :type 'user-error)
+        (harness-ui-tasks-toggle-bulk)
+        (let ((tail (harness-ui-tasks-test--tail-text board)))
+          (should-not (string-match-p "Submit +medium priority" tail))
+          (should (string-match-p "· mixed priority" tail)))
+        ;; Another setting leaves their priorities as they are.
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "YOLO")))
+          (harness-set-permission-mode)))
+      (harness-test-wait (lambda () (equal "yolo" (format "%s" (plist-get (harness-call 'task/get bravo)
+                                                                          :permission-mode))))
+                         5 "the tasks' mode to change")
+      (should (equal '(medium low) (funcall priorities)))
+      ;; The priority button asks; no answer is no change.
+      (with-current-buffer board
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "")))
+          (push-button (harness-ui-tasks-test--tail-button board "mixed priority"))))
+      (should (equal '(medium low) (funcall priorities)))
+      ;; An answer goes to them all.
+      (with-current-buffer board
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "high")))
+          (push-button (harness-ui-tasks-test--tail-button board "mixed priority"))))
+      (harness-test-wait (lambda () (equal '(high high) (funcall priorities))) 5 "both to be high")
+      (harness-test-wait (lambda ()
+                           (with-current-buffer board
+                             (harness-ui-tasks--render-tail)
+                             (string-match-p "· high priority" (harness-ui-tasks-test--tail-text board))))
+                         5 "the button to say high")
+      (with-current-buffer board
+        (should (eq 'harness-task-priority-high-face
+                    (get-text-property (harness-ui-tasks-test--tail-button board "high priority") 'face)))
+        ;; The next task keeps its own, beside Submit again once bulk mode is off.
+        (should (equal "medium" (harness-ui-tasks--priority harness-ui-tasks--new)))
+        (harness-ui-tasks-toggle-bulk)
+        (let ((tail (harness-ui-tasks-test--tail-text board)))
+          (should (string-match-p "Submit +medium priority\n" tail))
+          (should-not (string-match-p "high priority" tail)))))))
+
 (defun harness-ui-tasks-test--show-subtitle (board text)
   "Show the subtitle of BOARD's card whose title shows TEXT, and render.
 Cards are one line by default (see `harness-ui-tasks-toggle-subtitle');
@@ -1204,8 +1376,8 @@ tests that check a card's detail line show it first."
       (with-current-buffer board
         (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
         (should-not harness-ui-tasks--refine)
-        ;; The toggle shows only the current mode.
-        (should (string-match-p "New task +. Submit\n" (harness-ui-tasks-test--tail-text board)))
+        ;; The toggle shows only the current mode, then the next task's priority.
+        (should (string-match-p "New task +. Submit +medium priority\n" (harness-ui-tasks-test--tail-text board)))
         (should (equal '("Submit") (harness-ui-tasks-test--modes-shown board)))
         (goto-char harness-compose-end)
         (should (eq 'harness-ui-tasks-toggle-refine (key-binding (kbd "C-c C-t"))))

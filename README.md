@@ -34,7 +34,8 @@ OpenAI-compatible APIs and AWS Bedrock.
   sandbox for tool processes (bubblewrap or `systemd-run`).
 - **Task board.** Run tasks in parallel, each in its own session and git
   worktree, review the results, and merge them back through a merge
-  queue.
+  queue. A per-project limit on running tasks starts the waiting ones
+  by priority (low, medium, high).
 - **Notifications.** A desktop notification, and a push to your phone
   through Gotify once you set it up, when a task waits for your review
   or is done. Agents can notify you too.
@@ -797,13 +798,14 @@ your checkout itself can be submitted to the **main tree** instead (the
 - `harness-tasks-max-running` limits how many of a project's tasks work
   at once (nil, the default, means no limit; the compose box notes it as
   `N at a time`). Every project has that many slots of its own; a task
-  submitted while they are all taken waits in *Pending* and starts,
-  oldest first, when one frees up, or at once with `s`. Only top-level
-  sessions are limited: a task takes a slot while its own session works
-  on it, running or waiting for your answer mid-turn. The sessions
-  working for it -- its sub-agents and forks, and the sessions resolving
-  its merge conflicts -- never take one, and neither does a task in
-  *Merging*, so the merge queue never holds up the next task.
+  submitted while they are all taken waits in *Pending* and starts, by
+  priority and then oldest first, when one frees up, or at once with
+  `s`. Only top-level sessions are limited: a task takes a slot while
+  its own session works on it, running or waiting for your answer
+  mid-turn. The sessions working for it -- its sub-agents and forks, and
+  the sessions resolving its merge conflicts -- never take one, and
+  neither does a task in *Merging*, so the merge queue never holds up
+  the next task.
 - Each card is one line, with a subtitle that recaps the task: what it is
   doing or has done so far, written by a short model call and refreshed
   at the first of so many turns, seconds or tool calls since the last
@@ -828,6 +830,21 @@ your checkout itself can be submitted to the **main tree** instead (the
   as cleaning up uncommitted changes; those tasks show `main tree` on
   their card, and a refined task keeps the choice for when you start it.
   An agent can ask for the same thing with `task_submit`'s `main_tree`.
+- Every task has a **priority**: low, medium (the default) or high. It
+  matters when `harness-tasks-max-running` limits how many of a
+  project's tasks work at once: the others wait in *Pending*, and a
+  free slot goes to the highest priority waiting, the oldest of those
+  first, which is also the order *Pending* lists them in. A priority
+  never stops a task at work, and a backlog task still waits for you to
+  start it. The `medium priority` button beside the Submit / Refine
+  switch sets the next task's (a click cycles it through high and low);
+  `+` and `-` on a card raise and lower that task's, to reorder the
+  queue, and bulk edit (`B`) has a priority button that sets every
+  current task's at once, only when you click it. A high task shows `↑`
+  before its title and a low one `↓`. An
+  agent sets it with `task_submit`'s `priority` and `task_control`'s
+  `priority` action, and the board's search understands "do the docs
+  task first".
 - Task sessions run on at most 256k tokens of context
   (`harness-tasks-context-limit`): they compact sooner than interactive
   sessions, so a long task works from a smaller transcript between
@@ -921,7 +938,8 @@ your checkout itself can be submitted to the **main tree** instead (the
   tasks, archived ones included, under a banner that says what it shows;
   `C-g` or `[Clear]` shows every task again. An order that is easily
   undone or does no harm -- archive of a task not at work, restore,
-  retry, start -- runs at once and the banner says so, with `[Undo]`;
+  retry, start, a new priority -- runs at once and the banner says so,
+  with `[Undo]`;
   one that interrupts work, merges it or sends words to an agent --
   stop, archive of a working task, verify, mark done, message, send
   back -- is offered instead, and an empty `/` then `RET` runs it. The
@@ -1437,7 +1455,11 @@ nothing and does not ask.
 The task board has the same thing scoped to its tasks: turn on bulk edit
 (`B`, or `[Bulk edit: N tasks]` in the board's header) and the model,
 thinking, permission-mode and interactivity buttons then change every
-running, pending and blocked task at once. A conspicuous `EDITING N
+running, pending and blocked task at once. A priority button joins them
+(`high priority`, or `mixed priority` while the tasks differ): click it
+and pick low, medium or high to give them all that priority. Each
+button changes only its own setting, so the tasks keep their
+priorities unless you click that one. A conspicuous `EDITING N
 CURRENT TASKS` banner shows while it is on, and review, done and
 archived tasks are history and are left alone.
 
