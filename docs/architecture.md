@@ -2589,7 +2589,10 @@ record from before priorities reads `medium` without being rewritten.
   `task/update ID PROMPT` (not started only; writes a stopped write-up by
   hand; a task named from its prompt is named again), `task/set-all SETTINGS &optional FILTER` (apply `:model',
   `:thinking', `:permission-mode' and `:non-interactive' to every task
-  FILTER selects and, when started, its session; FILTER is `:columns'
+  FILTER selects and, when started, its session, and `:priority' to the
+  task alone; only the settings given change, so without `:priority' (or
+  with null) every task keeps its own, and a bad one is refused before
+  any task changes; FILTER is `:columns'
   (default `harness-tasks-bulk-columns': running, pending and blocked),
   `:ids', `:except' and `:cwd', and review, done and archived tasks are
   never touched; this is the board's bulk edit), `task/prompt ID TEXT &optional ATTACHMENTS` (follow-up or
@@ -4078,8 +4081,16 @@ writes it up anyway, `m` takes what makes it another task than the one
 it duplicates.  Beside the Submit / Refine toggle, the priority button
 (`medium priority`, `harness-ui-tasks-cycle-new-priority`) cycles the
 next task's priority through high and low and back; it is a setting of
-the board like the others, sent as `task/submit`'s `:priority`, never
-bulk.  `+` and `-` on a card raise and lower its task's priority
+the board like the others, sent as `task/submit`'s `:priority`.  Bulk
+edit (`B`) turns the setting buttons on every running, pending and
+blocked task (`task/set-all` with the one setting a button changes, so
+the others stay each task's own), and puts the current tasks' priority
+among them: the settings line gains `high priority`, or `mixed
+priority` when they differ, in place of the next task's beside the
+toggle.  A click reads low, medium or high
+(`harness-ui-tasks-bulk-priority`; no answer changes nothing) and sends
+`task/set-all` with `:priority` alone; it is the only bulk change that
+touches priorities, and the next task keeps its own.  `+` and `-` on a card raise and lower its task's priority
 (`harness-ui-tasks-raise-priority` / `-lower-priority`, through
 `task/set-priority`; a completed task refuses, as it no longer waits),
 and so do the card's menu entries while the task has not started.  A

@@ -638,7 +638,9 @@ your checkout itself can be submitted to the **main tree** instead (the
   start it. The `medium priority` button beside the Submit / Refine
   switch sets the next task's (a click cycles it through high and low);
   `+` and `-` on a card raise and lower that task's, to reorder the
-  queue. A high task shows `↑` before its title and a low one `↓`. An
+  queue, and bulk edit (`B`) has a priority button that sets every
+  current task's at once, only when you click it. A high task shows `↑`
+  before its title and a low one `↓`. An
   agent sets it with `task_submit`'s `priority` and `task_control`'s
   `priority` action, and the board's search understands "do the docs
   task first".
@@ -1238,7 +1240,11 @@ nothing and does not ask.
 The task board has the same thing scoped to its tasks: turn on bulk edit
 (`B`, or `[Bulk edit: N tasks]` in the board's header) and the model,
 thinking, permission-mode and interactivity buttons then change every
-running, pending and blocked task at once. A conspicuous `EDITING N
+running, pending and blocked task at once. A priority button joins them
+(`high priority`, or `mixed priority` while the tasks differ): click it
+and pick low, medium or high to give them all that priority. Each
+button changes only its own setting, so the tasks keep their
+priorities unless you click that one. A conspicuous `EDITING N
 CURRENT TASKS` banner shows while it is on, and review, done and
 archived tasks are history and are left alone.
 

@@ -1385,25 +1385,34 @@ done and archived tasks are history and are left alone.")
   "Session settings a task carries until its next start.")
 
 (defun harness-tasks--prefs-differ-p (task settings)
-  "Non-nil when SETTINGS would change TASK."
+  "Non-nil when SETTINGS would change TASK.
+A `:priority' of nil is no priority given: it changes nothing."
   (cl-some (lambda (k)
              (let ((want (plist-get settings k)) (have (plist-get task k)))
-               (if (eq k :non-interactive)
-                   (not (eq (and (harness-json-true-p want) t)
-                            (and (harness-json-true-p have) t)))
-                 (not (equal want have)))))
+               (pcase k
+                 (:non-interactive
+                  (not (eq (and (harness-json-true-p want) t)
+                           (and (harness-json-true-p have) t))))
+                 (:priority
+                  (and want (not (eq (harness-tasks--read-priority want) (harness-tasks--priority task)))))
+                 (_ (not (equal want have))))))
            (harness-plist-keys settings)))
 
 (defun harness-tasks--apply-prefs (task settings)
   "Merge SETTINGS into TASK and, when it has a session, into that session.
 TASK's record carries what a later start would use; a started task's
-session is what its next turn uses, so both change.  Return TASK's view."
+session is what its next turn uses, so both change.  A `:priority' is
+the task's own, never its session's: it orders the queue.  Return
+TASK's view."
   (let* ((id (plist-get task :id))
          (prefs (cl-loop for k in harness-tasks-pref-keys
                          when (plist-member settings k)
-                         append (list k (plist-get settings k)))))
+                         append (list k (plist-get settings k))))
+         (priority (and (plist-get settings :priority)
+                        (list :priority (harness-tasks--read-priority (plist-get settings :priority))))))
+    (when (or prefs priority)
+      (apply #'harness-tasks--set id (append prefs priority)))
     (when prefs
-      (apply #'harness-tasks--set id prefs)
       (let ((session (harness-tasks--session task)))
         (when (and session (harness-method-exists-p 'session/update))
           (apply #'harness-call 'session/update (plist-get session :id) prefs))))
@@ -2217,15 +2226,23 @@ nil, which JSON could not tell from a harness that does not say):
 
 (harness-defmethod task/set-all (settings &optional filter)
   "Apply SETTINGS to every current task FILTER selects; return the ids changed.
-SETTINGS is a plist of `:model', `:thinking', `:permission-mode' and
-`:non-interactive' (an explicit false turns it off).  A started task's
-session gets the change too, so its next turn uses it; a pending task
-keeps it for when it starts.  FILTER: `:columns' (default
-`harness-tasks-bulk-columns', the running, pending and blocked tasks),
-`:ids' to name tasks outright, `:except' ids to leave alone, and `:cwd'
-to stay inside one project.  Review, done and archived tasks are
-history and are never touched.  Return the ids that changed, oldest
-first."
+SETTINGS is a plist of `:model', `:thinking', `:permission-mode',
+`:non-interactive' (an explicit false turns it off) and `:priority'
+\(low, medium or high, as `task/set-priority' reads it).  Only the
+settings given change: without `:priority' (or with nil) every task
+keeps its own, so a bulk edit sets priorities only when asked to.  A
+started task's session gets the session settings too, so its next turn
+uses them; a pending task keeps them for when it starts.  A priority is
+the task's own and orders the queue (it starts nothing).  FILTER:
+`:columns' (default `harness-tasks-bulk-columns', the running, pending
+and blocked tasks), `:ids' to name tasks outright, `:except' ids to
+leave alone, and `:cwd' to stay inside one project.  Review, done and
+archived tasks are history and are never touched.  Return the ids that
+changed, oldest first."
+  ;; A bad priority is refused before any task changes.
+  (when (plist-get settings :priority)
+    (setq settings (plist-put (copy-sequence settings) :priority
+                              (harness-tasks--read-priority (plist-get settings :priority)))))
   (let* ((columns (mapcar (lambda (c) (if (stringp c) (intern c) c))
                           (or (plist-get filter :columns) harness-tasks-bulk-columns)))
          (project (and (plist-get filter :cwd) (harness-tasks--project (plist-get filter :cwd))))

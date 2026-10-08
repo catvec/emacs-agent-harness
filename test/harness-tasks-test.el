@@ -359,6 +359,47 @@ A task's project is its `:project', else its `:cwd'."
       (should (null (harness-call 'task/set-all (list :model "demo:other"))))
       (should-not (plist-get (harness-tasks-test-task id) :model)))))
 
+(ert-deftest harness-tasks-set-all-sets-priority-only-when-given ()
+  "task/set-all changes priorities only when its settings carry one.
+Without `:priority' (or with nil) every task keeps its own; with one,
+the tasks that differ take it, a started one too, on their records
+only; a bad one is refused before any task changes."
+  (harness-tasks-test-with
+    (let ((harness-provider-demo--delay 5)          ; keep the started one running
+          (harness-tasks-max-running 0))
+      (let* ((running (harness-tasks-test-submit-at "running" "low"))
+             (low (harness-tasks-test-submit-at "low" "low"))
+             (high (harness-tasks-test-submit-at "high" "high"))
+             (plain (harness-tasks-test-submit "medium"))
+             (all (list running low high plain)))
+        (harness-call 'task/start running)
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task running) :session))
+                           5 "the started task's session")
+        (cl-flet ((priorities ()
+                    (mapcar (lambda (id) (plist-get (harness-tasks-test-task id) :priority)) all)))
+          ;; Other settings leave every priority as it was.
+          (should (seq-set-equal-p all (harness-call 'task/set-all (list :model "demo:other"))))
+          (should (equal '(low low high medium) (priorities)))
+          ;; A nil priority is none.
+          (should-not (harness-call 'task/set-all (list :priority nil)))
+          (should-not (harness-call 'task/set-all (list :model "demo:other" :priority nil)))
+          (should (equal '(low low high medium) (priorities)))
+          ;; A bad one is refused, and nothing changes, not even the other settings.
+          (should-error (harness-call 'task/set-all (list :model "demo:third" :priority "urgent")))
+          (should (equal '(low low high medium) (priorities)))
+          (should (equal "demo:other" (plist-get (harness-tasks-test-task low) :model)))
+          ;; Given, it changes the tasks that differ, the started one too...
+          (should (seq-set-equal-p (list running low plain)
+                                   (harness-call 'task/set-all (list :priority "High"))))
+          (should (equal '(high high high high) (priorities)))
+          ;; ...on their records: the session keeps its settings, and nothing starts.
+          (should (equal "demo:other" (plist-get (harness-tasks-test-session running) :model)))
+          (dolist (id (list low high plain)) (should (eq 'pending (harness-tasks-test-state id))))
+          (should (equal (list high) (harness-call 'task/set-all (list :priority 'med)
+                                                   (list :ids (list high)))))
+          (should (equal '(high high medium high) (priorities))))
+        (harness-call 'task/cancel running)))))
+
 (ert-deftest harness-tasks-stopped-turn-stays-active ()
   (harness-tasks-test-with
     (let ((harness-provider-demo-script-override

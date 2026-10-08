@@ -46,7 +46,9 @@
 ;; the project's slots are full (`harness-tasks-max-running'), a higher
 ;; priority starts first, oldest first among equals.  + and - on a card
 ;; raise and lower its priority, the card's facts say high or low, and
-;; the button beside the Submit / Refine toggle sets the next task's.
+;; the button beside the Submit / Refine toggle sets the next task's.  In
+;; bulk mode (B) a priority button on the settings line gives every
+;; current task one; the other bulk settings leave priorities alone.
 ;;
 ;; Review can be turned off (V, or the [Review: on] switch in the header
 ;; line): finished tasks then merge and complete by themselves, and Ready
@@ -1510,16 +1512,21 @@ Review, done and archived tasks are history and are left alone.")
     (and values (cl-every (lambda (v) (equal v (car values))) values) (car values))))
 
 (defun harness-ui-tasks--bulk-values ()
-  "Return the values the bulk-edited tasks agree on, for the setting commands."
+  "Return the values the bulk-edited tasks agree on, for the setting commands.
+`:priority' is theirs too: \"low\", \"medium\" or \"high\", nil when they differ."
   (let ((tasks (harness-ui-tasks--bulk-tasks)))
     (list :model (harness-ui-tasks--bulk-common tasks :model)
           :thinking (harness-ui-tasks--bulk-common tasks :thinking)
           :permission-mode (harness-ui-tasks--bulk-common tasks :permission-mode)
-          :non-interactive (harness-ui-tasks--bulk-common tasks :non-interactive))))
+          :non-interactive (harness-ui-tasks--bulk-common tasks :non-interactive)
+          :priority (let ((priorities (delete-dups (mapcar #'harness-ui-tasks--priority tasks))))
+                      (and (null (cdr priorities)) (car priorities))))))
 
 (defun harness-ui-tasks--set-bulk (key value)
   "Apply KEY VALUE to every current task on this board.
-The new-task settings take it too, so a task submitted next matches."
+The new-task settings take it too, so a task submitted next matches.
+Only KEY goes to the harness: every other setting of the tasks, their
+priority included, stays as it is."
   (setq harness-ui-tasks--new (plist-put (copy-sequence harness-ui-tasks--new) key value))
   (let ((ids (mapcar (lambda (task) (plist-get task :id)) (harness-ui-tasks--bulk-tasks))))
     (harness-ui-call "_harness/task/set-all"
@@ -1528,12 +1535,86 @@ The new-task settings take it too, so a task submitted next matches."
                      (lambda (_) (harness-ui-tasks--render-tail))
                      (lambda (e) (message "Bulk update failed: %s" (harness-error-message e))))))
 
+(defun harness-ui-tasks--bulk-priority-p ()
+  "Non-nil when the priority button sets the priority of the current tasks.
+That is in bulk mode, while there are tasks for it to change; it is then
+on the settings line with the other bulk settings, and the next task's
+priority waits until bulk mode is off."
+  (and harness-ui-tasks--bulk (harness-ui-tasks--bulk-tasks) t))
+
+(defun harness-ui-tasks--bulk-priority-button (priority)
+  "The bulk editor's priority button, showing PRIORITY, nil when they differ.
+A click asks for the priority to give every current task
+\(`harness-ui-tasks-bulk-priority'); until one is chosen, each task
+keeps its own."
+  (propertize
+   (harness-ui-tasks--button
+    (concat (or priority "mixed") " priority")
+    (lambda () (call-interactively #'harness-ui-tasks-bulk-priority))
+    (concat "Priority of the current tasks"
+            (if priority "" ", which differ")
+            ": click to give them all one; other bulk changes leave it alone")
+    'harness-ui-tasks-bulk-priority)
+   'face (harness-ui-tasks--priority-button-face priority)))
+
+(defun harness-ui-tasks--read-bulk-priority (n current)
+  "Read the priority to give N tasks, CURRENT now (nil when they differ).
+Return \"low\", \"medium\" or \"high\", or nil for an empty answer."
+  (let* ((choices (reverse harness-ui-tasks--priorities))
+         (choice (completing-read
+                  (format "Priority of %d task%s (%s now): " n (if (= 1 n) "" "s") (or current "mixed"))
+                  (lambda (string pred action)
+                    ;; Keep the highest-first order.
+                    (if (eq action 'metadata)
+                        '(metadata (display-sort-function . identity)
+                                   (cycle-sort-function . identity))
+                      (complete-with-action action choices string pred)))
+                  nil t)))
+    (car (member choice harness-ui-tasks--priorities))))
+
+(defun harness-ui-tasks-bulk-priority (&optional priority)
+  "Give every current task on this board PRIORITY: \"low\", \"medium\" or \"high\".
+It is the priority button of bulk editing (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-bulk]), and changes the
+running, pending and blocked tasks, as the other bulk settings do.
+Interactively it asks which; an empty answer changes nothing, and
+neither does quitting.  It is the only way a bulk edit changes
+priorities: the other settings leave each task its own.  The next task
+keeps its own priority too, as a priority only means something against
+the others'."
+  (interactive)
+  (unless harness-ui-tasks--bulk
+    (user-error "Bulk editing is off; %s turns it on"
+                (substitute-command-keys "\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-bulk]")))
+  (let* ((tasks (or (harness-ui-tasks--bulk-tasks)
+                    (user-error "No running, pending or blocked task to change")))
+         (n (length tasks))
+         (priority (or priority
+                       (harness-ui-tasks--read-bulk-priority
+                        n (plist-get (harness-ui-tasks--bulk-values) :priority))))
+         (buffer (current-buffer)))
+    (cond
+     ((null priority) (message "Priorities unchanged"))
+     ((not (member priority harness-ui-tasks--priorities))
+      (user-error "Unknown priority %s; it is low, medium or high" priority))
+     (t
+      (harness-ui-call "_harness/task/set-all"
+                       (list :settings (list :priority priority)
+                             :filter (list :ids (mapcar (lambda (task) (plist-get task :id)) tasks)
+                                           :cwd harness-ui-tasks--dir))
+                       (lambda (_)
+                         (when (buffer-live-p buffer)
+                           (with-current-buffer buffer (harness-ui-tasks--render-tail))))
+                       (lambda (e) (message "Bulk update failed: %s" (harness-error-message e))))
+      (message "Priority → %s (for %d task%s)" priority n (if (= 1 n) "" "s"))))))
+
 (defun harness-ui-tasks-toggle-bulk ()
   "Switch bulk editing of the current tasks on or off.
-While on, the model, effort, permission-mode and non-interactive buttons
-change every running, pending or blocked task, not just the new task or
-the one at point.  Review, done and archived tasks are history and are
-left alone."
+While on, the model, effort, permission-mode, non-interactive and
+priority buttons change every running, pending or blocked task, not
+just the new task or the one at point.  Each changes only its own
+setting, when it is used: a task's other settings, its priority among
+them, stay as they are.  Review, done and archived tasks are history
+and are left alone."
   (interactive)
   (setq harness-ui-tasks--bulk (not harness-ui-tasks--bulk))
   (harness-ui-tasks--render-tail)
@@ -1554,8 +1635,9 @@ left alone."
 
 (defun harness-ui-tasks--new-settings-line ()
   "The settings line: each setting as a button.
-In bulk mode the values are the current tasks' and the buttons change
-them all; otherwise they are the new task's."
+In bulk mode the values are the current tasks', their priority too, and
+a button changes its one setting of them all; otherwise they are the
+new task's."
   (let* ((bulk harness-ui-tasks--bulk)
          (values (if bulk (harness-ui-tasks--bulk-values) harness-ui-tasks--new))
          (s harness-ui-tasks--settings)
@@ -1580,6 +1662,10 @@ them all; otherwise they are the new task's."
                     (harness-ui-tasks--setting-button
                      (harness-ui-non-interactive-label (plist-get values :non-interactive))
                      #'harness-toggle-non-interactive (format "Non-interactive mode of %s" scope))
+                    ;; The next task's priority is beside Submit; the
+                    ;; current tasks' is here, changed only when clicked.
+                    (and (harness-ui-tasks--bulk-priority-p)
+                         (harness-ui-tasks--bulk-priority-button (plist-get values :priority)))
                     ;; A task that starts cannot change where it works, so
                     ;; this one is only about the next task, never bulk.
                     (and (harness-json-true-p (plist-get s :worktrees))
@@ -1647,7 +1733,10 @@ before a key is pressed."
                      ""))
            (toggle (if harness-ui-tasks--target ""
                      (concat "   " (harness-ui-tasks--mode-toggle)
-                             "   " (harness-ui-tasks--priority-toggle))))
+                             ;; Bulk editing has the current tasks' priority
+                             ;; on its settings line instead.
+                             (if (harness-ui-tasks--bulk-priority-p) ""
+                               (concat "   " (harness-ui-tasks--priority-toggle))))))
            (icon (if messaging (concat (harness-ui-icon 'harness-icon-message) " ") ""))
            (body (concat icon (harness-ui-tasks--compose-label)))
            (label (harness-ui-tasks--fit (concat bar body)
@@ -1725,10 +1814,17 @@ to the other mode, as `harness-ui-tasks-toggle-refine' does."
         'harness-ui-tasks-toggle-refine)
        'face 'harness-task-choice-face))))
 
+(defun harness-ui-tasks--priority-button-face (priority)
+  "The face of a button showing PRIORITY: a card's for high and low.
+Medium, or nil for none in particular, is dim like the other settings."
+  (if (member priority '("high" "low")) (harness-ui-tasks--priority-face priority) 'harness-dim-face))
+
 (defun harness-ui-tasks--priority-toggle ()
   "The button beside the Submit / Refine toggle: the next task's priority.
 It wears the face a card's priority fact has, and a click moves it on,
-as `harness-ui-tasks-cycle-new-priority' does."
+as `harness-ui-tasks-cycle-new-priority' does.  In bulk mode the
+current tasks' priority takes its place, on the settings line
+\(`harness-ui-tasks--bulk-priority-button')."
   (let ((priority (harness-ui-tasks--priority harness-ui-tasks--new)))
     (propertize
      (harness-ui-tasks--button
@@ -1736,10 +1832,7 @@ as `harness-ui-tasks-cycle-new-priority' does."
       #'harness-ui-tasks-cycle-new-priority
       "Priority of the next task: while the project's slots are full, high starts before medium, medium before low (click to change)"
       'harness-ui-tasks-cycle-new-priority)
-     'face (pcase priority
-             ("high" 'harness-task-priority-high-face)
-             ("low" 'harness-task-priority-low-face)
-             (_ 'harness-dim-face)))))
+     'face (harness-ui-tasks--priority-button-face priority))))
 
 (defun harness-ui-tasks--set-refine (refine)
   "Refine new tasks from the compose box when REFINE, else submit them."
@@ -1922,7 +2015,7 @@ WIDTH is as `harness-ui-fit-header' takes it."
                     (format "[Bulk: editing %d task%s]" n (if (= 1 n) "" "s"))
                   (format "[Bulk edit: %d task%s]" n (if (= 1 n) "" "s")))
                 #'harness-ui-tasks-toggle-bulk
-                "Bulk edit: apply the model, effort, permission mode and interactivity to every running, pending and blocked task"))
+                "Bulk edit: apply the model, effort, permission mode, interactivity or priority you change to every running, pending and blocked task"))
          (sep "   ")
          (gap (lambda () (prog1 sep (setq sep "  ")))))
     (harness-ui-fit-header

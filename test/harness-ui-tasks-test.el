@@ -1083,6 +1083,70 @@ a step, and the card moves with it; off a card they type."
       (harness-ui-tasks-test--wait-text board "Pending  2\\(.\\|\n\\)*↑ Urgent fix\\(.\\|\n\\)*Whenever")
       (should (eq 'medium (plist-get (cadr (harness-call 'task/list default-directory)) :priority))))))
 
+(declare-function harness-ui-tasks-bulk-priority "harness-ui-tasks")
+(declare-function harness-ui-tasks-toggle-bulk "harness-ui-tasks")
+
+(defun harness-ui-tasks-test--tail-button (board text)
+  "Where BOARD's button showing TEXT is, below the board."
+  (with-current-buffer board
+    (save-excursion
+      (goto-char harness-ui-tasks--list-end)
+      (search-forward text)
+      (match-beginning 0))))
+
+(ert-deftest harness-ui-tasks-bulk-edit-priority ()
+  "Bulk mode gives the current tasks a priority only when its button is used.
+The button is on the settings line, in place of the next task's beside
+Submit; the other bulk settings leave each task's priority alone, and
+the next task keeps its own."
+  (harness-ui-tasks-test-with
+    (let* ((harness-tasks-max-running 0)
+           (alpha (plist-get (harness-call 'task/submit default-directory "Alpha") :id))
+           (bravo (plist-get (harness-call 'task/submit default-directory "Bravo" (list :priority "low"))
+                             :id))
+           (priorities (lambda ()
+                         (mapcar (lambda (id) (plist-get (harness-call 'task/get id) :priority))
+                                 (list alpha bravo)))))
+      (harness-ui-tasks-test--wait-text board "Pending  2")
+      (with-current-buffer board
+        (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
+        (should-error (harness-ui-tasks-bulk-priority "high") :type 'user-error)
+        (harness-ui-tasks-toggle-bulk)
+        (let ((tail (harness-ui-tasks-test--tail-text board)))
+          (should-not (string-match-p "Submit +medium priority" tail))
+          (should (string-match-p "· mixed priority" tail)))
+        ;; Another setting leaves their priorities as they are.
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "YOLO")))
+          (harness-set-permission-mode)))
+      (harness-test-wait (lambda () (equal "yolo" (format "%s" (plist-get (harness-call 'task/get bravo)
+                                                                          :permission-mode))))
+                         5 "the tasks' mode to change")
+      (should (equal '(medium low) (funcall priorities)))
+      ;; The priority button asks; no answer is no change.
+      (with-current-buffer board
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "")))
+          (push-button (harness-ui-tasks-test--tail-button board "mixed priority"))))
+      (should (equal '(medium low) (funcall priorities)))
+      ;; An answer goes to them all.
+      (with-current-buffer board
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "high")))
+          (push-button (harness-ui-tasks-test--tail-button board "mixed priority"))))
+      (harness-test-wait (lambda () (equal '(high high) (funcall priorities))) 5 "both to be high")
+      (harness-test-wait (lambda ()
+                           (with-current-buffer board
+                             (harness-ui-tasks--render-tail)
+                             (string-match-p "· high priority" (harness-ui-tasks-test--tail-text board))))
+                         5 "the button to say high")
+      (with-current-buffer board
+        (should (eq 'harness-task-priority-high-face
+                    (get-text-property (harness-ui-tasks-test--tail-button board "high priority") 'face)))
+        ;; The next task keeps its own, beside Submit again once bulk mode is off.
+        (should (equal "medium" (harness-ui-tasks--priority harness-ui-tasks--new)))
+        (harness-ui-tasks-toggle-bulk)
+        (let ((tail (harness-ui-tasks-test--tail-text board)))
+          (should (string-match-p "Submit +medium priority\n" tail))
+          (should-not (string-match-p "high priority" tail)))))))
+
 (defun harness-ui-tasks-test--show-subtitle (board text)
   "Show the subtitle of BOARD's card whose title shows TEXT, and render.
 Cards are one line by default (see `harness-ui-tasks-toggle-subtitle');
