@@ -13,9 +13,10 @@
 ;; on `harness-emacs-eval' (off by default), and a call passes three
 ;; gates before its code runs:
 ;;
-;; 1. The permission chain decides it as any tool of kind exec: in each
-;;    mode the user (or, in auto mode, the permission judge) approves it
-;;    as they would a bash command.  Nothing here changes that.
+;; 1. The permission chain decides it as any tool of kind exec, as it
+;;    would a bash command: the user approves it, or the permission
+;;    judge in auto mode, or nobody in yolo mode.  Nothing here changes
+;;    that.
 ;; 2. A judge model rules on performance alone: will the code return
 ;;    within a fraction of a second, waiting on no input, network or
 ;;    subprocess, with no unbounded loop and no huge buffer?  It is asked
@@ -98,7 +99,7 @@ responding (`harness-tools-ask-emacs').")
 
 (defconst harness-tools-emacs-eval--headless-message
   "No Emacs is attached to the harness (it runs headless, or none of its clients is an Emacs), so there is no user's Emacs to evaluate in. Evaluate Lisp in a background Emacs with the elisp tool."
-  "What the model is told when it calls emacs_eval with no Emacs lent to the harness.")
+  "What the model is told when no Emacs is lent to the harness.")
 
 (defconst harness-tools-emacs-eval--elsewhere-hint
   "Evaluate it in a background Emacs with the elisp tool instead, where nothing can freeze the user's Emacs; or, when it must run in the user's Emacs, make it quick and bounded (no waiting, no prompts, no unbounded loops) and call emacs_eval again."

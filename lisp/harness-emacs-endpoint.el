@@ -1411,33 +1411,23 @@ As many as the `:count' of PARAMS says, 50 by default."
 
 (defcustom harness-emacs-eval nil
   "Non-nil lets agents evaluate Emacs Lisp in this Emacs, while you use it.
-With it on, sessions get the emacs_eval tool, which runs a model's code
-in your Emacs rather than in a background one, so the code can change
-it: define a function, set a variable, fix up a buffer.  That code runs
-on this Emacs's only thread, where code that blocks freezes typing and
-redisplay, so every call is checked twice before it runs and guarded
-while it does:
+Sessions then get the emacs_eval tool, which runs a model's code here
+rather than in a background Emacs, so it can change this one: define a
+function, set a variable, fix up a buffer.  Each call passes the
+permission checks a shell command does, then a judge model must expect
+the code to return within a fraction of a second; the code may not
+prompt, stops at your next key (\\[keyboard-quit] included), and is
+stopped once it has waited two seconds.
 
-- A judge model reads the code first, and only code it expects to
-  return within a fraction of a second, waiting on no input, network
-  or subprocess, runs.  Any other verdict refuses the call.
-- The call needs your approval as any tool that runs code does, in
-  each permission mode.
-- The code may not prompt, stops at your next key (\\[keyboard-quit]
-  included), and is stopped once it has waited a few seconds; the
-  harness stops waiting for it soon after.
+Off by default: the code runs on this Emacs's only thread, and code
+that never waits, such as a loop the judge misjudged, holds it until it
+returns or you stop it.  The elisp tool evaluates in a background
+Emacs, and the other emacs_* tools read and drive this one, without
+that risk.
 
-Code that never waits, such as a loop the judge misjudged, can still
-hold this Emacs until it returns or you stop it.  That is why this is
-off by default: the elisp tool evaluates in a background Emacs, which
-nothing a model writes can freeze, and the other emacs_* tools read
-and drive this one without evaluating anything.
-
-The harness offers the tool only while this is on in its process, and
-this Emacs evaluates only while it is on here, so the Emacs that would
-freeze has the last word.  The settings page sets both; set from the
-init file, it reaches the harness process when that starts.  Only the
-global value counts, never a buffer-local one."
+Set it on the settings page, or in your init file before the harness
+starts.  Only the global value counts, and this Emacs refuses to
+evaluate while it is off here, whatever the harness asks."
   :type 'boolean :group 'harness)
 
 (defun harness-emacs-eval-p ()
