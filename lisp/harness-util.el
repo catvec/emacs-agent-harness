@@ -391,6 +391,35 @@ model of another provider holds (:mode transcript|compact :file PATH
   (let ((h (plist-get (plist-get node :meta) :handoff)))
     (and (consp h) h)))
 
+;;;; Notes of lasting permission answers
+;;
+;; An answer to a permission request that holds beyond the call (for
+;; the session, or always) records a rule or grants a directory.  The
+;; harness then writes a hint into the session's transcript, which the
+;; chat shows under the call, and which says in its `:meta'
+;; `:permission' what the answer recorded, so that it can be undone
+;; (`permission/undo').
+
+(defun harness-node-permission (node)
+  "Return what the lasting permission answer NODE notes recorded, or nil.
+NODE is the hint the harness writes after an answer for the session
+or always.  Its `:meta' `:permission' holds (:scope session|always
+:rule RULE) for a rule (see `harness-perms-rules'), or (:scope
+session|always :dir DIR) for a directory granted, DIR as the grant
+keeps it.  `:undo' is `offered' while the answer can still be undone,
+then how its undo went, `undone', `changed' or `gone', with `:result'
+saying so in a sentence; there is none when the answer recorded
+nothing new.  Symbols may have travelled as strings."
+  (let ((p (plist-get (plist-get node :meta) :permission)))
+    (and (consp p) p)))
+
+(defun harness-permission-undo-state (record)
+  "Return the `:undo' of RECORD, a symbol, or nil.
+RECORD is what `harness-node-permission' returns."
+  (let ((u (and (consp record) (plist-get record :undo))))
+    (cond ((and (stringp u) (not (string-empty-p u))) (intern u))
+          ((and u (symbolp u) (not (memq u '(t :false :null)))) u))))
+
 ;;;; Paths
 
 (defun harness-path-normalize (path)

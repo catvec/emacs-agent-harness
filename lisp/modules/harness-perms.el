@@ -197,7 +197,8 @@ and where it runs.  The first matching rule wins.  Rules are added
 here when a permission request is answered with scope `always': a tool
 prompt's answer holds for its tool, and \"Always deny\" for a path
 outside the allowed directories holds for the prompt's pattern,
-whatever the tool."
+whatever the tool.  The note the session's transcript gets then can
+take such a rule back (`permission/undo')."
   :type '(repeat
           (plist
            :tag "Rule"
@@ -1092,8 +1093,10 @@ DECISION and NEXT continue the chain once `permission/answer' arrives."
   "Continue the chain for WAITING of SESSION-ID after the user's ANSWER.
 The answer is for its pattern (`harness-perms--answered-pattern'): an
 allow grants it, `DIR/**' as the directory DIR/; a deny for the
-session or always records a rule denying it to every tool.  A jail
-prompt goes on through the jail; an agent's own request (see
+session or always records a rule denying it to every tool.  What an
+answer for the session or always records is noted in the session's
+transcript, where it can be undone (`harness-perms--note-recorded').
+A jail prompt goes on through the jail; an agent's own request (see
 `harness-perms--dir-request') ends with the answer.  Return the final
 decision, or `continue' when the chain goes on."
   (let* ((request (plist-get waiting :request))
@@ -1106,7 +1109,7 @@ decision, or `continue' when the chain goes on."
     (cond
      ((not (eq (plist-get answer :behavior) 'allow))
       (when (memq scope '(session always))
-        (harness-perms-add-rule session-id (list :path pattern :behavior 'deny) scope))
+        (harness-perms--add-rule-noted session-id (list :path pattern :behavior 'deny) scope))
       (let ((d (list :behavior 'deny :final t
                      :reason (or (plist-get answer :reason)
                                  (format "the user denied access to %s"
@@ -1121,11 +1124,10 @@ decision, or `continue' when the chain goes on."
         (funcall next d)
         d))
      (t
-      (pcase scope
-        ('session (harness-call 'permission/allow-dir session-id grant))
-        ('always (harness-call 'permission/allow-dir session-id grant 'always))
-        (_ (setq request (plist-put (copy-sequence request) :jail-once
-                                    (cons grant (plist-get request :jail-once))))))
+      (if (memq scope '(session always))
+          (harness-perms--allow-dir-noted session-id grant scope)
+        (setq request (plist-put (copy-sequence request) :jail-once
+                                 (cons grant (plist-get request :jail-once)))))
       ;; Check again with the fresh session: other paths may lie
       ;; elsewhere, or outside a narrower pattern than the prompt's.
       (harness-perms--jail (plist-get waiting :decision) next
@@ -1226,15 +1228,15 @@ grants a directory."
   "Grant GRANT to SESSION-ID as the user allowed it; return the decision.
 This is the answer to an agent's own request.  GRANT is a directory or
 a glob pattern.  SCOPE `always' adds it to `harness-allowed-directories',
-`session' grants it to the session, and `once' grants it until the
+`session' grants it to the session (both noted in the transcript, see
+`harness-perms--allow-dir-noted'), and `once' grants it until the
 session's turn ends (`harness-perms--grant-for-turn').  The tool gets
 INPUT's path with `:granted' GRANT, so it can tell the agent."
   (condition-case err
       (progn
-        (pcase scope
-          ('always (harness-call 'permission/allow-dir session-id grant 'always))
-          ('session (harness-call 'permission/allow-dir session-id grant))
-          (_ (harness-perms--grant-for-turn session-id grant)))
+        (if (memq scope '(session always))
+            (harness-perms--allow-dir-noted session-id grant scope)
+          (harness-perms--grant-for-turn session-id grant))
         (list :behavior 'allow :final t
               :input (list :path (plist-get input :path) :granted grant)
               :reason (format "the user granted %s %s" (abbreviate-file-name grant)
@@ -1412,22 +1414,40 @@ deny rule also stops it for a path it names inside them."
                     request)))
     (cl-find-if (lambda (r) (harness-perms--rule-matches-p r request)) rules)))
 
-(defun harness-perms--rule-decision (rule)
-  "Return the decision RULE makes, with a reason that names what it is for."
+(defun harness-perms--rule-subject (rule)
+  "Return what RULE is for, in a few words: its tool, its path, or both."
   (let* ((tool (plist-get rule :tool))
          (path (plist-get rule :path))
-         (path (and (stringp path) (not (harness-string-blank-p path)) (abbreviate-file-name path)))
-         (what (cond ((and tool path) (format "%s in %s" tool path))
-                     ((or tool path))
-                     (t "every tool"))))
+         (path (and (stringp path) (not (harness-string-blank-p path)) (abbreviate-file-name path))))
+    (cond ((and tool path) (format "%s in %s" tool path))
+          ((or tool path))
+          (t "every tool"))))
+
+(defun harness-perms--rule-decision (rule)
+  "Return the decision RULE makes, with a reason that names what it is for."
+  (let ((what (harness-perms--rule-subject rule)))
     (if (eq (harness-perms--sym (plist-get rule :behavior)) 'deny)
         (list :behavior 'deny :reason (format "denied by a standing rule for %s" what)
               :hint "Do not retry this call; choose a different approach.")
       (list :behavior 'allow :reason (format "allowed by a standing rule for %s" what)))))
 
+(defun harness-perms--announce-option (symbol)
+  "Tell the views that option SYMBOL was saved here, as `config/set' does.
+An answer or its undo saves `harness-perms-rules' or
+`harness-allowed-directories' without the settings page: its
+`config/changed' brings an open page the value now saved, so that
+saving the page later does not put back what it showed before."
+  (harness-emit 'config/changed symbol (default-value symbol) 'global nil))
+
 (defun harness-perms--save-rules ()
-  "Persist `harness-perms-rules' in the user's custom file."
-  (harness-save-user-option 'harness-perms-rules harness-perms-rules))
+  "Persist `harness-perms-rules' in the user's custom file, and announce it."
+  (harness-save-user-option 'harness-perms-rules harness-perms-rules)
+  (harness-perms--announce-option 'harness-perms-rules))
+
+(defun harness-perms--save-dirs (dirs)
+  "Make DIRS the global `harness-allowed-directories', saved and announced."
+  (harness-save-user-option 'harness-allowed-directories dirs)
+  (harness-perms--announce-option 'harness-allowed-directories))
 
 (defun harness-perms-add-rule (session-id rule scope)
   "Record RULE for SESSION-ID with SCOPE (`session' or `always')."
@@ -1440,6 +1460,24 @@ deny rule also stops it for a path it names inside them."
      (setq harness-perms-rules (cons rule (cl-remove rule harness-perms-rules :test #'equal)))
      (harness-perms--save-rules)))
   rule)
+
+(defun harness-perms--scope-rules (session-id scope)
+  "Return the rules SCOPE keeps: SESSION-ID's, or with `always' the saved ones."
+  (if (eq scope 'always)
+      harness-perms-rules
+    (gethash session-id harness-perms--session-rules)))
+
+(defun harness-perms--add-rule-noted (session-id rule scope)
+  "Record RULE for SESSION-ID with SCOPE as an answer does, and note it.
+See `harness-perms-add-rule'.  The note in the session's transcript
+\(`harness-perms--note-recorded') offers to undo the rule when the
+answer added it: a rule equal to it that is already there (another
+prompt for the same tool was answered first) is no new rule.  Return
+RULE."
+  (let ((new (not (member rule (harness-perms--scope-rules session-id scope)))))
+    (harness-perms-add-rule session-id rule scope)
+    (harness-perms--note-recorded session-id (list :scope scope :rule rule) new)
+    rule))
 
 (defun harness-perms--mode-decision (decision request)
   "Return the decision for REQUEST from the mode and the standing rules.
@@ -1957,10 +1995,12 @@ the final decision, or `continue' when a jail prompt hands the call on."
 
 (defun harness-perms--answer-tool (session-id pending-id waiting answer)
   "Answer the tool permission WAITING (PENDING-ID of SESSION-ID) with ANSWER.
-Record session or standing rules and let the tool call continue.  The
-prompt offered no pattern (see `harness-perms--ask'), so a rule holds
-for every call of the tool, a `:pattern' in ANSWER notwithstanding;
-the jail still decides where each call may reach."
+Record session or standing rules, noted in the session's transcript
+where they can be undone (`harness-perms--note-recorded'), and let the
+tool call continue.  The prompt offered no pattern (see
+`harness-perms--ask'), so a rule holds for every call of the tool, a
+`:pattern' in ANSWER notwithstanding; the jail still decides where
+each call may reach."
   (let* ((answer (harness-perms--parse-answer answer))
          (request (plist-get waiting :request))
          (behavior (plist-get answer :behavior))
@@ -1970,10 +2010,216 @@ the jail still decides where each call may reach."
                                      (if (eq behavior 'allow) "allowed by the user"
                                        "denied by the user")))))
     (when (memq scope '(session always))
-      (harness-perms-add-rule session-id (list :tool (plist-get request :tool) :behavior behavior) scope))
+      (harness-perms--add-rule-noted session-id (list :tool (plist-get request :tool) :behavior behavior) scope))
     (harness-perms--resolve session-id pending-id answer)
     (funcall (plist-get waiting :next) decision)
     decision))
+
+;;;; Notes of lasting answers, and their undo
+;;
+;; An answer for the session or always records a rule, or grants a
+;; directory, beyond the call it answers.  Right after, a note in the
+;; session's transcript says what it recorded: a hint (the model never
+;; gets it), written before the call goes on, so the chat shows it
+;; under the call, whichever view the answer came from.  Its `:meta'
+;; `:permission' holds the record (see `harness-node-permission'), and
+;; `permission/undo' removes what it names, but only that, and only
+;; while it is still as the answer left it.  The call's own decision
+;; stands either way.  Rules have no identity of their own, so what a
+;; note names is told apart by what it says (`harness-perms--rule-key').
+
+(defun harness-perms--recorded-what (record)
+  "Return what lasting answer RECORD holds for, as its note words it."
+  (let ((dir (plist-get record :dir))
+        (rule (plist-get record :rule)))
+    (if (stringp dir)
+        (abbreviate-file-name dir)
+      (let* ((tool (plist-get rule :tool))
+             (path (plist-get rule :path))
+             (path (and (stringp path) (not (harness-string-blank-p path)) (abbreviate-file-name path))))
+        (cond ((and tool path) (format "%s calls in %s" tool path))
+              (tool (format "every %s call" tool))
+              (path (format "%s to every tool" path))
+              (t "every call"))))))
+
+(defun harness-perms--recorded-text (record)
+  "Return the note that says what lasting answer RECORD does.
+RECORD is as `harness-node-permission' describes.  The note reads
+\"Always allowing every bash call, in every session\", say, or
+\"Allowing ~/src/other/ for this session\"."
+  (let ((verb (if (and (not (stringp (plist-get record :dir)))
+                       (eq (harness-perms--sym (plist-get (plist-get record :rule) :behavior)) 'deny))
+                  "denying"
+                "allowing"))
+        (what (harness-perms--recorded-what record)))
+    (if (eq (harness-perms--sym (plist-get record :scope)) 'always)
+        (format "Always %s %s, in every session" verb what)
+      (format "%s %s for this session" (capitalize verb) what))))
+
+(defun harness-perms--note-recorded (session-id record new)
+  "Write into SESSION-ID's transcript what a lasting answer recorded.
+RECORD is (:scope SCOPE :rule RULE) or (:scope SCOPE :dir DIR), which
+the note keeps in its `:meta' `:permission' (see
+`harness-node-permission').  NEW non-nil means the answer added it, so
+the note offers to undo it (`permission/undo'); otherwise it was there
+already and the note only says so.  Without the session module there
+is no transcript, and nothing is written; a note that cannot be written
+is logged, and the answer goes on.  Return the note, or nil."
+  (when (harness-method-exists-p 'session/append)
+    (condition-case err
+        (harness-call 'session/append session-id
+                      (list :kind 'hint
+                            :content (concat (harness-perms--recorded-text record)
+                                             (if new "" " (already so: nothing new to undo)"))
+                            :meta (list :permission (if new (append record (list :undo 'offered)) record))))
+      (error (harness-log 'warn "perms: could not note the answer in %s: %s"
+                          session-id (harness-error-message err))
+             nil))))
+
+(defun harness-perms--allow-dir-noted (session-id grant scope)
+  "Grant GRANT to SESSION-ID with SCOPE as an answer does, and note it.
+SCOPE is `session' or `always' (see `permission/allow-dir').  The note
+in the session's transcript (`harness-perms--note-recorded') offers to
+undo the grant when it is new: a directory already granted the same
+way, by another prompt answered first, is no new grant."
+  (let* ((session (harness-perms--session session-id))
+         (dir (harness-perms--expand-dir session grant))
+         (always (eq scope 'always))
+         (new (not (member dir (if always (harness-perms--global-dirs session) (harness-perms--granted session))))))
+    (if always
+        (harness-call 'permission/allow-dir session-id grant 'always)
+      (harness-call 'permission/allow-dir session-id grant))
+    (harness-perms--note-recorded session-id (list :scope scope :dir dir) new)))
+
+(defun harness-perms--rule-key (rule)
+  "Return what RULE says, in a form rules are compared by.
+Two rules are the same when they decide the same: the order of their
+keys, symbols that came back as strings and blank values make no
+difference."
+  (let ((text (lambda (v) (and (stringp v) (not (harness-string-blank-p v)) (string-trim v)))))
+    (list (funcall text (plist-get rule :tool))
+          (harness-perms--sym (plist-get rule :kind))
+          (funcall text (plist-get rule :path))
+          (harness-perms--sym (plist-get rule :behavior)))))
+
+(defun harness-perms--rule-from-record (rule)
+  "Return RULE as a note recorded it, its symbols symbols again.
+A note read back from the node log, or sent over the wire, has
+strings instead."
+  (let (out)
+    (cl-loop for (k v) on rule by #'cddr
+             do (setq out (plist-put out k (if (memq k '(:kind :behavior)) (harness-perms--sym v) v))))
+    out))
+
+(defun harness-perms--undo-rule (session-id rule scope)
+  "Remove RULE, recorded for SESSION-ID with SCOPE, if it still says the same.
+The rule `equal' to RULE goes, else the first that says the same (see
+`harness-perms--rule-key'): from the session's rules or, with SCOPE
+`always', from the saved ones, which are saved again.  A rule for the
+same tool and path that says something else now stays as it is.
+Return (OUTCOME . MESSAGE): OUTCOME is `undone', `changed' or `gone',
+and MESSAGE says why when it is not `undone'."
+  (let* ((always (eq scope 'always))
+         (rules (harness-perms--scope-rules session-id scope))
+         (key (harness-perms--rule-key rule))
+         (subject (lambda (k) (list (nth 0 k) (nth 2 k))))
+         (pos (or (cl-position rule rules :test #'equal)
+                  (cl-position key rules :key #'harness-perms--rule-key :test #'equal))))
+    (cond
+     (pos
+      (let ((rest (append (cl-subseq rules 0 pos) (nthcdr (1+ pos) rules))))
+        (cond (always (setq harness-perms-rules rest)
+                      (harness-perms--save-rules))
+              (rest (puthash session-id rest harness-perms--session-rules))
+              (t (remhash session-id harness-perms--session-rules))))
+      (list 'undone))
+     ((cl-find (funcall subject key) rules :test #'equal
+               :key (lambda (r) (funcall subject (harness-perms--rule-key r))))
+      (cons 'changed (format "Not undone: %s for %s has changed since%s, so it stays as it is"
+                             (if always "the saved rule" "this session's rule")
+                             (harness-perms--rule-subject rule)
+                             (if always " (in Settings, say)" ""))))
+     (always
+      (cons 'gone (format "Nothing to undo: the saved rules no longer have one for %s"
+                          (harness-perms--rule-subject rule))))
+     (t
+      (cons 'gone "Nothing to undo: this session has no such rule now (session rules end when the harness restarts, and a fork starts without them)")))))
+
+(defun harness-perms--undo-dir (session-id dir scope)
+  "Withdraw DIR, granted to SESSION-ID with SCOPE, if it is still granted.
+DIR is as the grant keeps it.  The entry naming DIR goes: from the
+session's grants or, with SCOPE `always', from
+`harness-allowed-directories', which is saved again.  When no entry
+names it any more but one still covers it (changed since, on the
+settings page say), every entry stays as it is.  Return (OUTCOME
+. MESSAGE) as `harness-perms--undo-rule' does."
+  (let* ((session (harness-perms--session session-id))
+         (always (eq scope 'always))
+         (entries (if always (default-value 'harness-allowed-directories) (harness-perms--granted session)))
+         (expanded (mapcar (lambda (d) (harness-perms--expand-dir session d)) entries))
+         (pos (or (cl-position dir entries :test #'equal)
+                  (cl-position dir expanded :test #'equal)))
+         (cover (and (not pos) (cl-find-if (lambda (d) (harness-perms--within-p d dir)) expanded))))
+    (cond
+     (pos
+      (let ((rest (append (cl-subseq entries 0 pos) (nthcdr (1+ pos) entries))))
+        (if always
+            (harness-perms--save-dirs rest)
+          (harness-perms--set-granted session-id rest)))
+      (harness-emit 'permission/dir-revoked session-id dir)
+      (list 'undone))
+     (cover
+      (cons 'changed (format "Not undone: %s changed since%s, and %s still covers %s, so they stay as they are"
+                             (if always "the allowed directories" "this session's directories")
+                             (if always " (in Settings, say)" "")
+                             (abbreviate-file-name cover) (abbreviate-file-name dir))))
+     (t
+      (cons 'gone (format "Nothing to undo: %s is no longer %s" (abbreviate-file-name dir)
+                          (if always "among the allowed directories" "granted to this session")))))))
+
+(harness-defmethod permission/undo (session-id node-id)
+  "Undo the lasting answer that note NODE-ID of SESSION-ID tells of.
+The note is the hint written after an answer for the session or always
+\(`harness-perms--note-recorded'); its `:meta' `:permission' names the
+rule the answer recorded or the directory it granted (see
+`harness-node-permission').  Only that goes, from the session or from
+the saved settings, and only while it is still as the answer left it:
+a rule for the same tool or path that says something else now (edited
+on the settings page, say), or a directory another entry still covers,
+stays as it is.  The decision the answer made for its call stands
+either way.  The note then records the outcome, which the chat shows,
+and its undo is offered no more: asking again changes nothing and
+returns the same.  Return (:outcome OUTCOME :message TEXT); OUTCOME is
+`undone', `changed', `gone', or `none' for a note whose answer
+recorded nothing new, and TEXT says what happened."
+  (let* ((node (and (harness-method-exists-p 'session/node)
+                    (harness-call 'session/node session-id node-id)))
+         (record (harness-node-permission node))
+         (state (harness-permission-undo-state record)))
+    (cond
+     ((null record)
+      (signal 'harness-error (list (format "%s is no note of a permission answer" node-id))))
+     ((not (eq state 'offered))
+      (list :outcome (or state 'none)
+            :message (or (plist-get record :result) "Nothing to undo: that answer recorded nothing new")))
+     (t
+      (let* ((scope (if (eq (harness-perms--sym (plist-get record :scope)) 'always) 'always 'session))
+             (dir (plist-get record :dir))
+             (result (if (stringp dir)
+                         (harness-perms--undo-dir session-id dir scope)
+                       (harness-perms--undo-rule session-id
+                                                 (harness-perms--rule-from-record (plist-get record :rule))
+                                                 scope)))
+             (outcome (car result))
+             (message (if (eq outcome 'undone)
+                          (let ((text (harness-perms--recorded-text record)))
+                            (concat "Undone: no longer " (downcase (substring text 0 1)) (substring text 1)))
+                        (cdr result))))
+        (harness-call 'session/update-node session-id node-id
+                      :meta (plist-put (copy-sequence (plist-get node :meta)) :permission
+                                       (append (harness-plist-remove record :undo :result)
+                                               (list :undo outcome :result message))))
+        (list :outcome outcome :message message))))))
 
 ;;;; Switching to yolo with a prompt waiting
 
@@ -2043,8 +2289,7 @@ session.  Return the session's effective roots."
          (dir (harness-perms--expand-dir session dir)))
     (if (eq (harness-perms--sym scope) 'always)
         (unless (member dir (harness-perms--global-dirs session))
-          (harness-save-user-option 'harness-allowed-directories
-                                    (append (default-value 'harness-allowed-directories) (list dir))))
+          (harness-perms--save-dirs (append (default-value 'harness-allowed-directories) (list dir))))
       (let ((granted (harness-perms--granted session)))
         (unless (member dir granted)
           (harness-perms--set-granted session-id (append granted (list dir))))))
@@ -2071,8 +2316,7 @@ session's effective roots."
           (puthash session-id (remove dir turn) harness-perms--turn-dirs)
         (remhash session-id harness-perms--turn-dirs)))
      ((member dir (harness-perms--global-dirs session))
-      (harness-save-user-option
-       'harness-allowed-directories
+      (harness-perms--save-dirs
        (cl-remove-if (lambda (d) (equal dir (harness-perms--expand-dir session d))) global)))
      (t (signal 'harness-error
                 (list (format "%s is not a grant (it comes from the cwd, the worktree, the session's temporary directory or .dir-locals.el)"

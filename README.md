@@ -449,6 +449,19 @@ session*, *Always allow* and *Always deny* hold for every call of that
 tool, and a call outside the session's directories still asks for the
 directory first.
 
+An answer that lasts -- *Allow for session*, *Always allow*, *Always
+deny* -- leaves a note in the session's chat, under the call it
+answered, whether you answered in the chat, a popout, the session list
+or the task board: `Always allowing every bash call, in every session
+[Undo]`. `[Undo]` takes back what that answer recorded, the rule or
+the directory, for the session or from `harness-perms-rules` and
+`harness-allowed-directories`, and nothing else. The call it answered
+stays allowed or denied. Once undone the note is struck through. When
+the rule has changed since, edited in Settings say, `[Undo]` leaves it
+as it is, and the note says so under it; it says so too when the rule
+or the directory is gone already. An answer that recorded nothing new,
+the same rule being there already, offers no `[Undo]`.
+
 A shell command is about what its command line names, not only the
 directory it runs in. The prompt for `ls -la ~/.claude/projects/x`,
 run in the project, says `runs in: ~/proj` and, below it, `paths:

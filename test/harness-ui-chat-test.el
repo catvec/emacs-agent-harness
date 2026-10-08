@@ -16,7 +16,10 @@
 (defvar harness-provider-claude-program)
 (defvar mwheel-scroll-up-function)
 (defvar mwheel-scroll-down-function)
+(defvar harness-perms-rules)
+(defvar harness-perms--session-rules)
 (declare-function harness-provider-claude-close-all "harness-provider-claude")
+(declare-function harness-perms--add-rule-noted "harness-perms")
 
 (defvar harness-ui-chat-test-events nil "Recorded (EVENT . ARGS), newest first.")
 
@@ -1451,6 +1454,63 @@ Its Allow grants the directory until the turn ends, and says so."
           (harness-chat-push))
         (harness-test-wait (lambda () recorded) 5 "answered through the method")
         (should (equal (list sid "pre" "allow-always") (car recorded)))))))
+
+(ert-deftest harness-ui-chat-permission-note-undoes-its-answer ()
+  "The note of a lasting answer offers [Undo], which takes back what it recorded.
+The note then shows how that went: struck through when undone, the
+reason under it when the rule changed since.  Other hints have no
+button."
+  (harness-ui-chat-test-with
+    (harness-test-load-module 'perms)
+    (let ((harness-perms-rules nil)
+          (shown nil))
+      (cl-letf (((symbol-function 'harness-save-user-option) (lambda (sym value) (set sym value))))
+        (let* ((sid (harness-ui-chat-test-session))
+               (buf (harness-ui-chat-test-open sid))
+               (click (lambda (text)
+                        (with-current-buffer buf
+                          (goto-char (- (harness-ui-chat-test-find buf text) 2))
+                          (setq shown nil)
+                          (cl-letf (((symbol-function 'message)
+                                     (lambda (fmt &rest args) (when fmt (push (apply #'format fmt args) shown)))))
+                            (harness-chat-push)
+                            (harness-test-wait (lambda () shown) 5 "the echo area"))))))
+          (harness-call 'session/hint sid "Plan updated")
+          (harness-perms--add-rule-noted sid '(:tool "bash" :behavior allow) 'always)
+          (harness-perms--add-rule-noted sid '(:tool "web_fetch" :behavior deny) 'session)
+          (harness-test-wait (lambda () (harness-ui-chat-test-find buf "Denying every web_fetch call for this session  [Undo]\n"))
+                             5 "the notes")
+          (with-current-buffer buf
+            (should (harness-ui-chat-test-find buf "    Plan updated\n"))
+            (let ((pos (harness-ui-chat-test-find buf "    Always allowing every bash call, in every session  [Undo]\n")))
+              (should pos)
+              (should (harness-ui-chat-test-face-at (- pos 3) 'button))
+              (should (equal "Take back what this answer recorded; the call it answered stays allowed"
+                             (get-text-property (- pos 3) 'help-echo))))
+            (should (equal "Take back what this answer recorded; the call it answered stays denied"
+                           (get-text-property (- (harness-ui-chat-test-find buf "for this session  [Undo]") 2)
+                                              'help-echo))))
+          ;; Undone: the rule is gone, the echo area says so, the note is struck through.
+          (funcall click "in every session  [Undo]")
+          (should (member "Undone: no longer always allowing every bash call, in every session" shown))
+          (should-not harness-perms-rules)
+          (harness-test-wait (lambda () (harness-ui-chat-test-find
+                                         buf "    Always allowing every bash call, in every session  undone\n"))
+                             5 "the note redrawn")
+          (with-current-buffer buf
+            (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "Always allowing"))
+                                                  'harness-chat-undone-face))
+            (should-not (harness-ui-chat-test-find buf "in every session  [Undo]")))
+          ;; Changed since: the rule stays, and the note says why.
+          (puthash sid (list '(:tool "web_fetch" :behavior allow)) harness-perms--session-rules)
+          (funcall click "for this session  [Undo]")
+          (should (member "Not undone: this session's rule for web_fetch has changed since, so it stays as it is" shown))
+          (should (equal '((:tool "web_fetch" :behavior allow)) (gethash sid harness-perms--session-rules)))
+          (harness-test-wait (lambda () (harness-ui-chat-test-find
+                                         buf (concat "    Denying every web_fetch call for this session\n"
+                                                     "    Not undone: this session's rule for web_fetch has changed since, so it stays as it is\n")))
+                             5 "the reason")
+          (should-not (harness-ui-chat-test-find buf "[Undo]")))))))
 
 (ert-deftest harness-ui-chat-permission-pattern-is-editable ()
   "A prompt about paths shows the pattern it is answered for; e edits it, the answer carries it."
