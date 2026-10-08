@@ -238,6 +238,12 @@ The menu groups BODY gives the test modes are taken back afterwards."
                   (push (cons mode group) groups))))
     groups))
 
+(defun harness-ui-test--suffix-plist (suffix)
+  "Return the properties of SUFFIX, a suffix of a transient layout.
+Transient 0.8 and later write it (CLASS . PLIST), earlier ones (LEVEL
+CLASS PLIST)."
+  (if (keywordp (cadr suffix)) (cdr suffix) (car (last suffix))))
+
 (defun harness-ui-test-menu (&optional keys)
   "Open `harness-menu' here and return its text, then type KEYS in it.
 KEYS default to C-g, which closes the menu."
@@ -1205,13 +1211,22 @@ for two open boards, of /p/ and /q/."
          ,@body))))
 
 (ert-deftest harness-ui-set-non-interactive-all-changes-everything ()
-  "C-c h A turns non-interactive on or off, offering on first, for every
-session and current task of every project, for the open boards' next
-tasks and as the default for new sessions.  It says how many sessions
-and tasks changed, and what keeps the new default from new work: here a
+  "C-c h I, beside C-c h i for one session as M is beside m, turns
+non-interactive on or off, offering on first, for every session and
+current task of every project, for the open boards' next tasks and as
+the default for new sessions.  It says how many sessions and tasks
+changed, and what keeps the new default from new work: here a
 project's .dir-locals.el and a directory's."
-  (should (eq 'harness-set-non-interactive-all (lookup-key harness-ui-map (kbd "A"))))
-  (should (eq 'harness-set-non-interactive-all (lookup-key harness-global-mode-map (kbd "C-c h A"))))
+  (should (eq 'harness-set-non-interactive-all (lookup-key harness-ui-map (kbd "I"))))
+  (should (eq 'harness-set-non-interactive-all (lookup-key harness-global-mode-map (kbd "C-c h I"))))
+  (should (eq 'harness-toggle-non-interactive (lookup-key harness-global-mode-map (kbd "C-c h i"))))
+  ;; Beside i in the menu's session settings, as M is beside m.
+  (let* ((column (transient-get-suffix 'harness-menu '(0 1)))
+         (keys (mapcar (lambda (suffix) (plist-get (harness-ui-test--suffix-plist suffix) :key))
+                       (aref column (1- (length column))))))
+    (should (equal "Session settings" (plist-get (aref column (- (length column) 2)) :description)))
+    (should (equal '("i" "I") (seq-take (member "i" keys) 2)))
+    (should (equal '("m" "M") (seq-take (member "m" keys) 2))))
   (harness-ui-test-with-all
       (list (cons "_harness/session/set-all" '("s1" "s2" "s3"))
             (cons "_harness/task/set-all" '("t1"))
@@ -1263,7 +1278,7 @@ project's .dir-locals.el and a directory's."
                    said))))
 
 (ert-deftest harness-ui-set-non-interactive-all-prefix-leaves-the-default-alone ()
-  "With a prefix argument C-c h A leaves the default for new sessions alone.
+  "With a prefix argument C-c h I leaves the default for new sessions alone.
 The boards' next tasks still change.  Turned on, there is no new default
 to say anything about; turned off, what still turns new work on is said
 all the same."

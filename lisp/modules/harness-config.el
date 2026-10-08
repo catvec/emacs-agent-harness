@@ -49,6 +49,7 @@
 (require 'wid-edit)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-files)
 
 ;; The provider module once had a default model of its own, the same
 ;; setting under a second name.  Declared before `harness-model' so a
@@ -587,6 +588,14 @@ tasks module defines it."
   "Non-nil when A and B are the same value of layered setting KEY."
   (harness-setting-equal-p (if (eq key 'harness-non-interactive) :non-interactive key) a b))
 
+(defun harness-config--main-place (at root)
+  "Return (MAIN-AT . MAIN-ROOT): directory AT in the main checkout of ROOT.
+ROOT is AT's project root.  Return nil unless it is a linked git
+worktree, such as a task's (see `harness-files-main-checkout')."
+  (when-let* ((main (and root (ignore-errors (harness-files-main-checkout root))))
+              ((not (string= main root))))
+    (cons (file-name-as-directory (expand-file-name (file-relative-name at root) main)) main)))
+
 (harness-defmethod config/overrides (key &rest opts)
   "Return what keeps the global value of layered setting KEY from applying.
 OPTS: `:value' (printed when `:printed' is non-nil), the value to
@@ -598,8 +607,12 @@ DIRS; remote ones are skipped, and nothing is ever written.  Return
 where `:tasks' is the task default that wins over KEY for new tasks,
 nil when it is unset or the same, and each FILE is (:file PATH :scope
 project|directory :dir DIR :project NAME :value V) for a .dir-locals.el
-that sets KEY to another value for the sessions started there.  Every V
-is printed with `prin1', as `config/describe' gives them."
+that sets KEY to another value for the sessions started there.  A
+linked git worktree's file (a task's, say) that sets KEY as the file at
+the same place in its main checkout does is the project's checked-in
+copy: FILE names the main checkout's, the one to change, once for all
+the tasks.  Every V is printed with `prin1', as `config/describe' gives
+them."
   (let* ((key (harness-config--key key))
          (value (cond ((not (plist-member opts :value)) (symbol-value key))
                       ((plist-get opts :printed) (harness-config--read (plist-get opts :value)))
@@ -616,11 +629,17 @@ is printed with `prin1', as `config/describe' gives them."
           (dolist (layer (list (cons 'project root)
                                (and root (not (string= dir root)) (cons 'directory dir))))
             (when-let* ((at (cdr layer))
-                        (file (expand-file-name dir-locals-file at))
-                        ((not (member file seen))))
-              (push file seen)
-              (let ((cell (harness-config--layer-value at key)))
-                (when (and cell (not (harness-config--same-p key (cdr cell) value)))
+                        (cell (harness-config--layer-value at key))
+                        ((not (harness-config--same-p key (cdr cell) value))))
+              (pcase-let* ((main (harness-config--main-place at root))
+                           (main-cell (and main (harness-config--layer-value (car main) key)))
+                           (`(,at . ,root)
+                            (if (and main-cell (harness-config--same-p key (cdr main-cell) (cdr cell)))
+                                main
+                              (cons at root)))
+                           (file (expand-file-name dir-locals-file at)))
+                (unless (member file seen)
+                  (push file seen)
                   (push (list :file file :scope (symbol-name (car layer)) :dir at
                               :project (if (harness-method-exists-p 'project/name)
                                            (ignore-errors (harness-call 'project/name (or root at)))

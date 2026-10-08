@@ -3199,7 +3199,8 @@ either the command asks for a session, so the label has no state."
 ;; At top level, not in the `defvar', so a reload binds them in a running
 ;; Emacs too.
 (define-key harness-ui-map (kbd "i") #'harness-toggle-non-interactive)
-(define-key harness-ui-map (kbd "A") #'harness-set-non-interactive-all)
+;; I is i for every session, as M is m.
+(define-key harness-ui-map (kbd "I") #'harness-set-non-interactive-all)
 (define-key harness-ui-map (kbd "F") #'harness-fullscreen)
 
 (defvar harness-global-mode-map (make-sparse-keymap)
@@ -3487,14 +3488,14 @@ leaves the buffer's commands out, never the whole menu."
     ("M" "Model for all sessions" harness-set-model-all)
     ("T" "Thinking" harness-set-thinking)
     ("H" "Thinking for all sessions" harness-set-thinking-all)
-    ("A" "Non-interactive for all sessions" harness-set-non-interactive-all)
     ("p" "Permission mode" harness-set-permission-mode)
     ("d" "Directory access" harness-directories :if (lambda () (harness-ui--command-available-p 'harness-directories)))
     ("i" (lambda () (harness-ui--non-interactive-menu-label)) harness-toggle-non-interactive)
+    ("I" "Non-interactive for all sessions" harness-set-non-interactive-all)
     ("r" "Rename" harness-rename-session)]
    ["Tools"
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
-    ("I" "Insights" harness-insights :if (lambda () (harness-ui--command-available-p 'harness-insights)))
+    ("A" "Insights" harness-insights :if (lambda () (harness-ui--command-available-p 'harness-insights)))
     ("B" "Delete budget" harness-delete-budget :if (lambda () (harness-ui--command-available-p 'harness-delete-budget)))
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
     ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))

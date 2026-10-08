@@ -329,6 +329,54 @@ looked at, and nothing is written."
       (should (equal before (mapcar #'harness-config-test--read dirs)))
       (should-not saved))))
 
+(ert-deftest harness-config-overrides-names-a-worktree-copy-as-its-project-file ()
+  "A task's worktree carries its project's checked-in .dir-locals.el:
+`config/overrides' names the project's file, the one to change, and
+the project, once for all the tasks.  A worktree whose file says
+something else, a task's edit, is named itself."
+  (skip-unless (executable-find "git"))
+  (harness-config-test-with
+    (let* ((git (lambda (dir &rest args)
+                  (let ((default-directory dir))
+                    (should (eq 0 (apply #'call-process "git" nil nil nil
+                                         "-c" "user.name=t" "-c" "user.email=t@example.invalid"
+                                         "-c" "commit.gpgsign=false" "-c" "core.hooksPath=/dev/null"
+                                         args))))))
+           (worktree (lambda (name)
+                       (let ((wt (expand-file-name (concat ".worktrees/" name "/") root)))
+                         (funcall git root "worktree" "add" "-q" "--detach" wt)
+                         wt)))
+           (wt1 nil) (wt2 nil) (wt3 nil))
+      (harness-config-test--write root '((nil . ((harness-model . "claude:opus")))))
+      (harness-config-test--write sub '((nil . ((harness-model . "claude:sonnet")))))
+      (funcall git root "add" "-f" ".dir-locals.el" "sub/.dir-locals.el")
+      (funcall git root "commit" "-q" "--no-verify" "-m" "init")
+      (setq wt1 (funcall worktree "one") wt2 (funcall worktree "two") wt3 (funcall worktree "three"))
+      (should (equal '((nil . ((harness-model . "claude:sonnet"))))
+                     (harness-config-test--read (expand-file-name "sub" wt2))))
+      (harness-config-test--write (expand-file-name "sub" wt3) '((nil . ((harness-model . "claude:haiku")))))
+      (harness-register-method 'session/select
+        (lambda (&optional _filter)
+          (mapcar (lambda (cwd) (list :id cwd :cwd cwd))
+                  (list wt1 (expand-file-name "sub/" wt1) (expand-file-name "sub/" wt2)
+                        (expand-file-name "sub/" wt3)))))
+      (harness-register-method 'task/list (lambda (&rest _) nil))
+      (let* ((harness-tasks-model nil)
+             (found (plist-get (harness-call 'config/overrides "harness-model"
+                                             :value "\"demo:scripted\"" :printed t)
+                               :files)))
+        (should (equal (list (list (file-truename (expand-file-name ".dir-locals.el" root)) "project"
+                                   (harness-call 'project/name root) "\"claude:opus\"")
+                             (list (file-truename (expand-file-name ".dir-locals.el" sub)) "directory"
+                                   (harness-call 'project/name root) "\"claude:sonnet\"")
+                             (list (file-truename (expand-file-name "sub/.dir-locals.el" wt3)) "directory"
+                                   "three" "\"claude:haiku\""))
+                       (mapcar (lambda (f) (list (file-truename (plist-get f :file)) (plist-get f :scope)
+                                                 (plist-get f :project) (plist-get f :value)))
+                               found)))
+        (dolist (f found)
+          (should (equal (file-name-directory (plist-get f :file)) (plist-get f :dir))))))))
+
 (ert-deftest harness-config-describe-puts-common-settings-in-sections ()
   (harness-config-test-with
     (let* ((d (harness-call 'config/describe sub))

@@ -282,10 +282,10 @@ the menu's Version entry says so.
 | `C-c h H` | `harness-set-thinking-all` | Choose a thinking level and set it on every current session and task of every project |
 | `C-c h p` | `harness-set-permission-mode` | Choose the permission mode |
 | `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
-| `C-c h A` | `harness-set-non-interactive-all` | Turn non-interactive mode on or off for every current session and task of every project |
+| `C-c h I` | `harness-set-non-interactive-all` | Turn non-interactive mode on or off for every current session and task of every project |
 | `C-c h d` | `harness-directories` | Manage the directories a session may access |
 | `C-c h u` | `harness-usage` | Show the usage and cost dashboard |
-| `C-c h I` | `harness-insights` | Show the Insights report: how a period of work with the agents went |
+| `C-c h A` | `harness-insights` | Show the Insights report: how a period of work with the agents went |
 | `C-c h B` | `harness-delete-budget` | Delete a budget, chosen by name |
 | `C-c h w` | `harness-worktrees` | List the git worktrees of the project |
 | `C-c h S` | `harness-settings` | Show the settings page |
@@ -550,15 +550,16 @@ permission prompt to non-interactive hands the prompt to the judge,
 which decides it as it would a new call, denial and steering included;
 a directory prompt still waits for your answer.
 
-`C-c h A` (`harness-set-non-interactive-all`) turns non-interactive
-mode on or off at once for every current session (idle, running or
-blocked) and every current task (pending, active or needing input) of
-every project, for the next task of every open task board, and for new
-sessions too, unless a prefix argument (`C-u C-c h A`) leaves the
-default alone. It says how many sessions and tasks changed, and when it
-turns the mode off, what still turns it on for new work: a project's
-`.dir-locals.el` that sets `harness-non-interactive`, or
-`harness-tasks-non-interactive`. It changes neither.
+`C-c h I` (`harness-set-non-interactive-all`) is `C-c h i` for
+everything, as `C-c h M` is `C-c h m`: it turns non-interactive mode on
+or off at once for every current session (idle, running or blocked) and
+every current task (pending, active or needing input) of every project,
+for the next task of every open task board, and for new sessions too,
+unless a prefix argument (`C-u C-c h I`) leaves the default alone. It
+says how many sessions and tasks changed, and when it turns the mode
+off, what still turns it on for new work: a project's `.dir-locals.el`
+that sets `harness-non-interactive`, or `harness-tasks-non-interactive`.
+It changes neither.
 
 An agent can do the same when you ask it to, with its
 `set_non_interactive` tool, for itself, another session, or everything.
@@ -898,7 +899,7 @@ wrong one.
 
 ### Insights
 
-`C-c h I` (`M-x harness-insights`) opens the Insights report in a
+`C-c h A` (`M-x harness-insights`) opens the Insights report in a
 buffer of its own, `*harness insights*`. It shows how a period of your
 work with the agents went, like Claude Code's `/insights`. The report is
 built from the harness's own records: the transcripts, the usage log,

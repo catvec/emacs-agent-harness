@@ -470,6 +470,12 @@ See docs/configuration-audit.md for the rule and the audit behind it.
   value, at the project or the directory layer of where work goes on
   now: the active sessions, the current tasks and their sessions
   (`session/select` with `:tasks`), and DIRS (a task board's, say).
+  A linked git worktree's file (a task's, say) that sets KEY as the
+  file at the same place in its main checkout
+  (`harness-files-main-checkout`) does is the project's checked-in
+  copy: the entry names the main checkout's file and project, the one
+  to change, once for all the tasks.  A worktree whose file says
+  something else, a task's edit, say, is named itself.
   `:tasks` is the task default that wins over KEY for new tasks
   (`harness-tasks-model` for `harness-model`, and so on) when it is set
   to another value, else nil.  Remote and missing directories are
@@ -1714,7 +1720,7 @@ a denial.
   later leaves the sessions that exist alone.  The setting decides by
   itself only for a request without a session record.
   Switching a session to non-interactive (`session/updated` with a true
-  `:non-interactive`, from `C-c h i`, the board, `C-c h A` or the
+  `:non-interactive`, from `C-c h i`, the board, `C-c h I` or the
   tool) hands its waiting prompts to the judge from the command loop
   (`harness-perms--judge-waiting`): each prompt's request goes again
   through the stages from 11 to 89 (`harness-perms--redecided-stages`,

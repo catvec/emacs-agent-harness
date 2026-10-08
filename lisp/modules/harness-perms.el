@@ -2202,10 +2202,11 @@ non-interactive mode on."
 
 (defun harness-perms--on-session-updated (session-id changes)
   "Settle SESSION-ID's waiting prompts when it switches to yolo or non-interactive.
-In yolo, what the mode now allows is answered (see
-`harness-perms--accept-yolo'); in non-interactive mode the judge
-decides the prompts (see `harness-perms--judge-waiting').  Either runs
-from the command loop, after the switch returns."
+CHANGES are the session's changed fields.  In yolo, what the mode now
+allows is answered (see `harness-perms--accept-yolo'); in
+non-interactive mode the judge decides the prompts (see
+`harness-perms--judge-waiting').  Either runs from the command loop,
+after the switch returns."
   (when (eq (harness-perms--sym (plist-get changes :permission-mode)) 'yolo)
     (harness-run-soon #'harness-perms--accept-yolo session-id))
   (when (harness-json-true-p (plist-get changes :non-interactive))
