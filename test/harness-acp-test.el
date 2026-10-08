@@ -682,5 +682,157 @@ harness never hears it."
       (harness-test-await p)
       (should settled-inside))))
 
+;;;; Receiving: lines and slices
+
+(ert-deftest harness-acp-split-lines-joins-what-chunks-cut ()
+  "Lines come out whole and in order however the chunks cut them; blank
+lines are dropped, a \"\\r\" before a newline too, and an unended line
+waits for the chunk that ends it."
+  (let ((pending "") (lines nil))
+    (dolist (chunk '("{\"a\":" "1}\r\n\n  \n{\"b\"" ":2}\n{\"c\":3" "}\n" "{\"d\""))
+      (let ((split (harness-acp--split-lines pending chunk)))
+        (setq lines (append lines (car split))
+              pending (cdr split))))
+    (should (equal '("{\"a\":1}" "{\"b\":2}" "{\"c\":3}") lines))
+    (should (equal "{\"d\"" (apply #'concat (reverse pending))))
+    ;; What a connection made before the change holds: a string.
+    (should (equal '(("{\"d\":4}") . nil) (harness-acp--split-lines "{\"d\"" ":4}\n")))))
+
+(ert-deftest harness-acp-split-lines-costs-what-the-line-is-long ()
+  "A line in many chunks is joined once, when it ends: the text made is in
+proportion to its length.  Joining the unended line to each chunk, as
+before, made text in proportion to its length times its chunks: a
+300 KB tool result in 64 KB reads, and the tail of each read after it."
+  (let* ((n 500)
+         (chunk (make-string 2000 ?x))
+         (pending nil)
+         (before (nth 4 (memory-use-counts))))
+    (dotimes (_ n)
+      (setq pending (cdr (harness-acp--split-lines pending chunk))))
+    (let ((split (harness-acp--split-lines pending "}\n")))
+      (should (= 1 (length (car split))))
+      (should (= (1+ (* n 2000)) (length (caar split))))
+      (should-not (cdr split)))
+    ;; About the line twice over (its pieces, then itself), not 250 MB.
+    (should (< (- (nth 4 (memory-use-counts)) before) (* 4 n 2000)))))
+
+(defvar harness-acp-test-on-message #'ignore
+  "Called with the PARAMS of each message `harness-acp-test-with-inbox' handles.")
+
+(defmacro harness-acp-test-with-inbox (&rest body)
+  "Run BODY with an inbox of its own, CONN a local connection to fill it.
+CONN's handler calls `harness-acp-test-on-message' with the PARAMS of
+each message."
+  (declare (indent 0))
+  `(let* ((harness-acp--inbox nil)
+          (harness-acp--inbox-tail nil)
+          (harness-acp--inbox-timer nil)
+          (harness-acp--once-received nil)
+          (harness-acp-received-hook nil)
+          (conn (harness-acp--make-connection :kind 'local)))
+     (harness-acp-set-handler conn (lambda (_method params _respond)
+                                     (funcall harness-acp-test-on-message params)))
+     (unwind-protect (progn ,@body)
+       (when (timerp harness-acp--inbox-timer) (cancel-timer harness-acp--inbox-timer)))))
+
+(defun harness-acp-test-busy (seconds)
+  "Keep Emacs busy for SECONDS, as a slow handler would."
+  (let ((end (+ (float-time) seconds)))
+    (while (< (float-time) end))))
+
+(ert-deftest harness-acp-receiving-lets-emacs-in-between-slices ()
+  "A burst of messages is handled in order, a slice at a time, and what
+else is due runs between slices: a timer here, as redisplay and input
+do in a UI.  With a timer per message, as before, Emacs ran every
+message of the burst first: a UI that fell behind froze for as long."
+  (harness-acp-test-with-inbox
+    (let* ((harness-acp-receive-slice 0.05)
+           (seen nil) (slices 0) (ticks nil)
+           (harness-acp-test-on-message (lambda (params)
+                                          (harness-acp-test-busy 0.01)
+                                          (push (plist-get params :n) seen)))
+           (ticker nil))
+      (add-hook 'harness-acp-received-hook (lambda () (cl-incf slices)))
+      (unwind-protect
+          (progn
+            (setq ticker (run-at-time 0 0.02 (lambda () (push (float-time) ticks))))
+            ;; 60 messages taking 0.6 s, all at once.
+            (dotimes (i 60)
+              (harness-acp--enqueue conn (list :jsonrpc "2.0" :method "x" :params (list :n i))))
+            (harness-test-wait (lambda () (= 60 (length seen))) 10 "every message handled"))
+        (cancel-timer ticker))
+      (should (equal (number-sequence 0 59) (nreverse seen)))
+      (should (>= slices 6))
+      (let ((gaps (cl-loop for (a b) on (nreverse ticks) while b collect (- b a))))
+        (should (> (length gaps) 6))
+        (should (< (apply #'max gaps) 0.3))))))
+
+(ert-deftest harness-acp-receiving-parses-lines-as-it-handles-them ()
+  "A TCP connection's lines are parsed in the slice that handles them;
+one that is no JSON is logged and skipped; a closed connection's are
+dropped unread."
+  (harness-acp-test-with-inbox
+    (let* ((seen nil) (warned nil)
+           (harness-acp-test-on-message (lambda (params) (push (plist-get params :n) seen)))
+           (log (lambda (level msg) (when (eq level 'warn) (push msg warned)))))
+      (add-hook 'harness-log-hook log)
+      (unwind-protect
+          (progn
+            (harness-acp--enqueue conn "{\"jsonrpc\":\"2.0\",\"method\":\"x\",\"params\":{\"n\":1}}")
+            (harness-acp--enqueue conn "not json")
+            (harness-acp--enqueue conn "{\"jsonrpc\":\"2.0\",\"method\":\"x\",\"params\":{\"n\":2}}")
+            (harness-test-wait (lambda () (null harness-acp--inbox)) 5 "the lines handled")
+            (should (equal '(2 1) seen))
+            (should (cl-some (lambda (m) (string-match-p "unparsable line.*not json" m)) warned))
+            (harness-acp--enqueue conn "{\"jsonrpc\":\"2.0\",\"method\":\"x\",\"params\":{\"n\":3}}")
+            (setf (harness-acp-connection-open conn) nil)
+            (harness-test-wait (lambda () (null harness-acp--inbox)) 5 "the line dropped")
+            (should (equal '(2 1) seen)))
+        (remove-hook 'harness-log-hook log)))))
+
+(ert-deftest harness-acp-receiving-keeps-behind-timers-due ()
+  "A message is handled after the timers due when it came, as with a timer
+of its own: one that came while the slice for others waited got ahead
+of them, as the answers of a new connection did of the rejections of
+the requests of the one it replaced, and an error stayed on show."
+  (harness-acp-test-with-inbox
+    (let* ((order nil)
+           (harness-acp-test-on-message (lambda (params) (push (plist-get params :n) order))))
+      (harness-acp--enqueue conn (list :jsonrpc "2.0" :method "x" :params (list :n 1)))
+      (run-at-time 0 nil (lambda () (push 'timer order)))
+      (harness-acp--enqueue-all conn (list (list :jsonrpc "2.0" :method "x" :params (list :n 2))
+                                           (list :jsonrpc "2.0" :method "x" :params (list :n 3))))
+      (harness-test-wait (lambda () (= 4 (length order))) 5 "the messages and the timer")
+      (setq order (nreverse order))
+      (should (equal '(1 2 3) (remq 'timer order)))
+      (should (< (cl-position 'timer order) (cl-position 2 order)))
+      ;; One timer for all of them still.
+      (should-not harness-acp--inbox-timer)
+      ;; A timer of the inbox cancelled behind its back is started anew.
+      (harness-acp--enqueue conn (list :jsonrpc "2.0" :method "x" :params (list :n 4)))
+      (cancel-timer harness-acp--inbox-timer)
+      (harness-acp--enqueue conn (list :jsonrpc "2.0" :method "x" :params (list :n 5)))
+      (harness-test-wait (lambda () (memq 5 order)) 5 "the messages after a cancelled timer")
+      (should (equal '(5 4) (take 2 order))))))
+
+(ert-deftest harness-acp-once-received-runs-once-a-slice ()
+  "Work handlers leave for the end of the slice runs once for all of them,
+before the received hook; outside a slice it runs at once."
+  (harness-acp-test-with-inbox
+    (let* ((harness-acp-receive-slice 10)
+           (order nil)
+           (redraw (lambda () (push 'redraw order)))
+           (harness-acp-test-on-message (lambda (params)
+                                          (push (plist-get params :n) order)
+                                          (harness-acp-once-received redraw))))
+      (add-hook 'harness-acp-received-hook (lambda () (push 'hook order)))
+      (dotimes (i 3)
+        (harness-acp--enqueue conn (list :jsonrpc "2.0" :method "x" :params (list :n i))))
+      (harness-test-wait (lambda () (memq 'hook order)) 5 "the slice handled")
+      (should (equal '(0 1 2 redraw hook) (reverse order)))
+      (setq order nil)
+      (harness-acp-once-received redraw)
+      (should (equal '(redraw) order)))))
+
 (provide 'harness-acp-test)
 ;;; harness-acp-test.el ends here

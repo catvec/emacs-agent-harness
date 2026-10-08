@@ -24,7 +24,7 @@
 ;;   only the first and last messages of the session: the old provider
 ;;   may not be able to answer at all (its plan ran out, it is down),
 ;;   and a bounded context keeps the job cheap.  `transcript' writes the
-;;   whole transcript (`session/transcript-text') to a file in the
+;;   whole transcript (`session/write-transcript') to a file in the
 ;;   session's directory, which its tools may read and the new
 ;;   provider's cache holds as it reads, and leaves a user message
 ;;   telling the model to read it before answering, marked as a handoff
@@ -212,16 +212,18 @@ and pays for all of it again uncached once it lapsed."
   (harness-handoff--check (harness-call 'session/get session-id) model))
 
 (defun harness-handoff--selected (filter)
-  "Return the session plists FILTER selects, as `session/set-all' does."
-  (let ((except (plist-get filter :except)))
-    (cl-remove-if (lambda (s) (member (plist-get s :id) except))
-                  (harness-call 'session/list (harness-plist-remove filter :except)))))
+  "Return the session plists FILTER selects, as `session/set-all' does.
+That is `session/select', which with `:tasks' takes in the sessions of
+the current tasks, inactive ones too: a switch of every session must
+not leave them to a later `task/set-all', which would switch them
+without a handoff."
+  (harness-call 'session/select filter))
 
 (harness-defmethod handoff/check-all (model &optional filter)
   "Check switching every session FILTER selects to MODEL; see `handoff/check'.
-FILTER is the one of `session/set-all'.  Sessions that already use
-MODEL are left out, as `session/set-all' leaves them alone.  Return the
-checks, newest session first."
+FILTER is the one of `session/set-all' (see `session/select').
+Sessions that already use MODEL are left out, as `session/set-all'
+leaves them alone.  Return the checks, newest session first."
   (cl-loop for s in (harness-handoff--selected filter)
            unless (equal (plist-get s :model) model)
            collect (harness-handoff--check s model)))
@@ -238,37 +240,6 @@ checks, newest session first."
               (list (format "Unknown handoff mode %s (use compact, compact-new, transcript or none)"
                             mode))))
     m))
-
-(defun harness-handoff--root (session)
-  "Return SESSION's directory, as a file name this Emacs can open."
-  (let ((cwd (plist-get session :cwd))
-        (host (plist-get session :host)))
-    (file-name-as-directory (if (and host (not (file-remote-p cwd))) (concat host cwd) cwd))))
-
-(defun harness-handoff--transcript-file (session)
-  "Return a new transcript file name for SESSION, in its directory."
-  (let ((dir (expand-file-name harness-handoff--directory (harness-handoff--root session))))
-    (expand-file-name (format "%s-%s.md"
-                              (substring (plist-get session :id) 0 (min 8 (length (plist-get session :id))))
-                              (format-time-string "%Y%m%dT%H%M%S"))
-                      dir)))
-
-(defun harness-handoff--transcript-text (session plan)
-  "Return the file text handing SESSION's conversation over as PLAN says."
-  (let ((id (plist-get session :id)))
-    (concat
-     "# Conversation handoff\n\n"
-     (format "- Session: %s (%s)\n" (or (plist-get session :name) "unnamed") id)
-     (format "- Handed over from %s to %s, %s\n"
-             (plist-get plan :from) (plist-get plan :to) (format-time-string "%Y-%m-%d %H:%M %Z"))
-     (format "- Working directory: %s\n\n" (plist-get session :cwd))
-     "This is the conversation so far, oldest first, one entry per message:"
-     " [user] the user (or who sent it), [assistant] the model's replies, [thinking] its reasoning,"
-     " [tool NAME] a tool call and what it was about, [result] that call's result, [hint] notes of the"
-     " harness, [compaction] a summary that stood in for what came before it.\n\n"
-     "---\n\n"
-     (harness-call 'session/transcript-text id)
-     "\n")))
 
 (defun harness-handoff--caveat (plan &optional mode)
   "Return the note that opens PLAN's conversation on the new model.
@@ -310,23 +281,20 @@ session's host; the node's `:handoff' keeps FILE as this Emacs opens it."
 
 (defun harness-handoff--write-transcript (session-id plan)
   "Write SESSION-ID's transcript to a file and append the note pointing at it.
-PLAN is the handoff.  Return (:mode transcript :file FILE :node ID)."
-  (let* ((session (harness-call 'session/get session-id))
-         (root (harness-handoff--root session))
-         (file (harness-handoff--transcript-file session))
-         (dir (file-name-directory file))
-         (text (harness-handoff--transcript-text session plan)))
-    (unless (file-directory-p root)
-      (signal 'harness-error (list (format "the session's directory %s does not exist" root))))
-    (harness-ensure-directory dir)
-    (let ((ignore (expand-file-name ".gitignore" dir)))
-      (unless (file-exists-p ignore)
-        (harness-write-file-atomically ignore "*\n")))
-    (harness-write-file-atomically file text)
-    (let ((node (harness-call 'session/append session-id
-                              (harness-handoff--note plan file (1+ (cl-count ?\n text))))))
-      (harness-log 'info "handoff: %s handed over to %s in %s" session-id (plist-get plan :to) file)
-      (list :mode 'transcript :file (plist-get (harness-node-handoff node) :file) :node (plist-get node :id)))))
+PLAN is the handoff.  The file is the one compaction into a transcript
+writes too (`session/write-transcript'), in `harness-handoff--directory'.
+Return (:mode transcript :file FILE :node ID)."
+  (let* ((written (harness-call 'session/write-transcript session-id
+                                (list :directory harness-handoff--directory
+                                      :title "Conversation handoff"
+                                      :about (format "Handed over from %s to %s, %s"
+                                                     (plist-get plan :from) (plist-get plan :to)
+                                                     (format-time-string "%Y-%m-%d %H:%M %Z")))))
+         (file (plist-get written :file))
+         (node (harness-call 'session/append session-id
+                             (harness-handoff--note plan file (plist-get written :lines)))))
+    (harness-log 'info "handoff: %s handed over to %s in %s" session-id (plist-get plan :to) file)
+    (list :mode 'transcript :file (plist-get (harness-node-handoff node) :file) :node (plist-get node :id))))
 
 (defun harness-handoff--transcript (session-id plan &optional why)
   "Hand SESSION-ID's conversation over as a transcript file, as PLAN says.
@@ -348,23 +316,24 @@ resolves with `:error'."
 (defun harness-handoff--compact (session-id plan summarizer context)
   "Hand SESSION-ID's conversation over as a summary made on SUMMARIZER.
 CONTEXT is what SUMMARIZER is given (see `compaction/compact'):
-`full' for the old model, which has the conversation, or `sample' for
-the new one, which does not and gets only the first and last messages.
-PLAN is the handoff.  When no summary can be made, the transcript goes
-over instead.  Return a promise of the result."
+`full' for the old model, which has the conversation -- a `summary' --
+or `sample' for the new one, which does not and gets only the first and
+last messages -- a `brief' summary, as ordinary compaction makes on a
+cheap model.  The summary ends in the handoff's caveat and its node
+records the handoff (`:handoff').  PLAN is the handoff.  When no summary
+can be made, the transcript goes over instead.  Return a promise of the
+result."
   (harness-then
-   (harness-call-async 'compaction/compact session-id (list :model summarizer :context context))
+   (harness-call-async 'compaction/compact session-id
+                       (list :kind (if (eq context 'sample) 'brief 'summary)
+                             :model summarizer :context context
+                             :caveat (harness-handoff--caveat plan)
+                             :meta (list :handoff (list :mode (symbol-name (plist-get plan :mode))
+                                                        :context (symbol-name context)
+                                                        :summarizer summarizer
+                                                        :from (plist-get plan :from)
+                                                        :to (plist-get plan :to)))))
    (lambda (node)
-     (let ((caveat (harness-handoff--caveat plan)))
-       (ignore-errors
-         (harness-call 'session/update-node session-id (plist-get node :id)
-                       :content (concat (plist-get node :content) "\n\n" caveat)
-                       :meta (append (plist-get node :meta)
-                                     (list :handoff (list :mode (symbol-name (plist-get plan :mode))
-                                                          :context (symbol-name context)
-                                                          :summarizer summarizer
-                                                          :from (plist-get plan :from)
-                                                          :to (plist-get plan :to)))))))
      (list :mode (plist-get plan :mode) :summarizer summarizer :context context
            :node (plist-get node :id)))
    (lambda (err)

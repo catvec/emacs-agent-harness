@@ -375,7 +375,9 @@ beside the session records, as `harness-provider-claude--blocks' is.")
   "Harness session id -> output tokens of the streaming message reported so far.
 A `message_delta' counts the message's output so far; the part not
 reported yet goes out as a `call-usage' event, for the output rate.
-Kept beside the session records, as `harness-provider-claude--blocks' is.")
+What the turn's last message wrote goes out with its `usage' event, as
+`:last-output'.  Kept beside the session records, as
+`harness-provider-claude--blocks' is.")
 
 (defvar harness-provider-claude--cache-at (make-hash-table :test 'equal)
   "Harness session id -> when the turn's main conversation last used the cache.
@@ -1020,8 +1022,9 @@ block has ended by then, so a report never follows the call it is about."
 (defun harness-provider-claude--call-usage (entry usage)
   "Report the output that USAGE, a `message_delta''s, adds on ENTRY.
 USAGE counts the output of the message so far; what was not reported
-yet goes out as a `call-usage' event, for the output rate.  The turn's
-`usage' event, from the result, counts it with the turn's other calls."
+yet goes out as a `call-usage' event, for the output rate and the live
+token count.  The turn's `usage' event, from the result, counts it with
+the turn's other calls."
   (let* ((sid (harness-provider-claude-session-id entry))
          (output (plist-get usage :output_tokens))
          (reported (gethash sid harness-provider-claude--call-output 0)))
@@ -1075,12 +1078,17 @@ SUB-AGENT is non-nil for the stream of a sub-agent's message (its
 leaves out, as its cache does."
   (pcase (plist-get event :type)
     ("message_start"
-     (unless sub-agent
-       (remhash (harness-provider-claude-session-id entry) harness-provider-claude--call-output)
-       (harness-provider-claude--note-cache entry (plist-get (plist-get event :message) :usage)))
-     (when-let* ((ctx (harness-provider-claude--usage-context
-                       (plist-get (plist-get event :message) :usage))))
-       (setf (harness-provider-claude-session-context entry) ctx)))
+     (let ((ctx (harness-provider-claude--usage-context
+                 (plist-get (plist-get event :message) :usage))))
+       (unless sub-agent
+         (remhash (harness-provider-claude-session-id entry) harness-provider-claude--call-output)
+         (harness-provider-claude--note-cache entry (plist-get (plist-get event :message) :usage))
+         ;; The size of the prompt is known as the call starts: the live
+         ;; token count follows it from now, not from the turn's end.
+         (when ctx
+           (harness-provider-claude--emit entry (list :type 'call-usage :output 0 :context ctx))))
+       (when ctx
+         (setf (harness-provider-claude-session-context entry) ctx))))
     ("message_delta"
      (when-let* ((ctx (harness-provider-claude--usage-context (plist-get event :usage))))
        (setf (harness-provider-claude-session-context entry) ctx))
@@ -1775,6 +1783,11 @@ It is no longer the probe: whoever needs one next starts another."
                          :cache-read cache-read :cache-write cache-write
                          :context (or (harness-provider-claude-session-context entry)
                                       (+ input cache-read cache-write)))
+                   ;; The last message's output follows its prompt in
+                   ;; the conversation.
+                   (when-let* ((last (gethash (harness-provider-claude-session-id entry)
+                                              harness-provider-claude--call-output)))
+                     (list :last-output last))
                    (harness-provider-claude--cache-fields entry usage)
                    (harness-provider-claude--billing-fields
                     entry (harness-provider-claude--turn-cost entry msg))))

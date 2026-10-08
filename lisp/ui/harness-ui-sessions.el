@@ -10,6 +10,10 @@
 ;; toggles all projects; `b' shows only the sessions waiting for you;
 ;; `/' filters fuzzily; column headers sort.
 ;;
+;; m moves the session at point to another working directory, and the
+;; list then shows it under that directory's project
+;; (`harness-move-session').
+;;
 ;; RET opens the session at point in its project: the project becomes
 ;; current first, as switching project does (Doom Emacs's workspaces),
 ;; and a session showing there already gets its window selected
@@ -162,6 +166,7 @@ model, status, kind and permission mode."
            (harness-ui-model-label (plist-get s :model))
            (if-let* ((m (plist-get s :permission-mode))) (harness-ui-permission-mode-label m) "")
            (harness-ui-format-context s)
+           (or (harness-ui-format-output s t) "")
            (or (harness-ui-format-rate s t) "")
            (harness-ui-format-spend s)
            (harness-relative-time (or (plist-get s :updated) 0))
@@ -291,6 +296,14 @@ which is the session's too: RET opens it, SPC pops its request out."
     (let ((x (harness-ui-session (car a))) (y (harness-ui-session (car b))))
       (< (or (harness-plist-get-in x col) 0) (or (harness-plist-get-in y col) 0)))))
 
+(defun harness-ui-sessions--tokens< (key)
+  "Return a sorter ordering entries by their sessions' token figure KEY.
+KEY is `:context' or `:output', as `harness-ui-session-tokens' gives
+them: a running session's grow as its model streams."
+  (lambda (a b)
+    (< (plist-get (harness-ui-session-tokens (harness-ui-session (car a))) key)
+       (plist-get (harness-ui-session-tokens (harness-ui-session (car b))) key))))
+
 (defun harness-ui-sessions--rate< (a b)
   "Order entries A and B by their sessions' output rates, unmeasured first."
   (< (or (plist-get (harness-ui-session-rate (car a)) :rate) -1)
@@ -312,6 +325,7 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
     (define-key map (kbd "f") #'harness-ui-sessions-fork)
     (define-key map (kbd "d") #'harness-ui-sessions-delete)
     (define-key map (kbd "r") #'harness-ui-sessions-rename)
+    (define-key map (kbd "m") #'harness-ui-sessions-move)
     (define-key map (kbd "k") #'harness-ui-sessions-cancel)
     (define-key map (kbd "x") #'harness-ui-sessions-deactivate)
     (define-key map (kbd "T") #'harness-ui-sessions-make-task)
@@ -329,6 +343,7 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
 (define-key harness-ui-sessions-mode-map (kbd "q") #'harness-ui-quit-view)
 (define-key harness-ui-sessions-mode-map (kbd "C-c C-z") #'harness-ui-bury)
 (define-key harness-ui-sessions-mode-map (kbd "b") #'harness-ui-sessions-toggle-blocked)
+(define-key harness-ui-sessions-mode-map (kbd "m") #'harness-ui-sessions-move)
 
 (define-derived-mode harness-ui-sessions-mode tabulated-list-mode "Sessions"
   "Major mode listing harness sessions."
@@ -339,7 +354,8 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
                 (list "Kind" 9 t)
                 (list "Model" 26 t)
                 (list "Mode" 13 t)
-                (list "Context" 12 (harness-ui-sessions--number< '(:usage :context)))
+                (list "Context" 13 (harness-ui-sessions--tokens< :context))
+                (list "Output" 7 (harness-ui-sessions--tokens< :output) :right-align t)
                 (list "Tok/s" 6 #'harness-ui-sessions--rate< :right-align t)
                 (list "Cost" 10 #'harness-ui-sessions--spend<)
                 (list "Updated" 9 (harness-ui-sessions--number< '(:updated)))
@@ -364,6 +380,7 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
         (". o" "Open in position" harness-ui-sessions-open-other)
         (". f" "Fork" harness-ui-sessions-fork)
         (". r" "Rename" harness-ui-sessions-rename)
+        (". m" "Move to another directory" harness-ui-sessions-move)
         (". k" "Cancel turn" harness-ui-sessions-cancel)
         (". x" "Deactivate" harness-ui-sessions-deactivate)
         (". SPC" "View what it waits on" harness-ui-sessions-requests)
@@ -415,6 +432,44 @@ whose session is gone goes to the first row."
   "Redraw the list, which shows output rates."
   (when (get-buffer harness-ui-sessions--buffer-name)
     (harness-ui-sessions--on-changed)))
+
+(defconst harness-ui-sessions--live-interval 0.5
+  "Least seconds between two redraws of the list for growing token figures.")
+
+(defvar harness-ui-sessions--live-timer nil
+  "Timer of the redraw the list's growing token figures wait for, or nil.")
+
+(defun harness-ui-sessions--tokens-shown-p (id)
+  "Non-nil when the list shows session ID's token figures as they are.
+That is when its Context and Output cells read as they would now, or
+the list does not show the session at all."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (let ((entry (cadr (assoc id (and (listp tabulated-list-entries) tabulated-list-entries))))
+          (session (harness-ui-session id))
+          (context (cl-position "Context" tabulated-list-format :key #'car :test #'equal))
+          (output (cl-position "Output" tabulated-list-format :key #'car :test #'equal)))
+      (or (not (and entry session context output))
+          (and (equal (substring-no-properties (aref entry context))
+                      (substring-no-properties (harness-ui-format-context session)))
+               (equal (substring-no-properties (aref entry output))
+                      (substring-no-properties (or (harness-ui-format-output session t) ""))))))))
+
+(defun harness-ui-sessions--live-redraw ()
+  "Redraw the list for the token figures that grew."
+  (setq harness-ui-sessions--live-timer nil)
+  (harness-ui-sessions--redraw))
+
+(defun harness-ui-sessions--on-live (id _live)
+  "Redraw the list soon if session ID's token figures read otherwise now.
+They grow a few times a second while its turn streams; the list redraws
+for them at most every `harness-ui-sessions--live-interval' seconds, all
+the sessions that grew meanwhile at once.  ID nil, after every session's
+figures were fetched again, redraws it as well."
+  (when (and (get-buffer harness-ui-sessions--buffer-name)
+             (not (timerp harness-ui-sessions--live-timer))
+             (or (null id) (not (harness-ui-sessions--tokens-shown-p id))))
+    (setq harness-ui-sessions--live-timer
+          (run-at-time harness-ui-sessions--live-interval nil #'harness-ui-sessions--live-redraw))))
 
 ;;;; Tasks
 
@@ -511,10 +566,11 @@ POSITION, as `harness-sessions' has it."
 (defun harness-ui-sessions-open (&optional position)
   "Open the session at point, in its project.
 The session's project becomes the current one first, as switching
-project does (in Doom Emacs, its workspace; see
+project does (in Doom Emacs, its workspace, as you left it; see
 `harness-ui-switch-project-function').  A session shown there already
 gets its window selected; any other opens in POSITION, by default
-replacing the list, or after a switch where sessions open."
+replacing the list, or after a switch where sessions open -- in the
+window of a workspace that shows nothing yet, a new one."
   (interactive (list (and current-prefix-arg (harness-ui-read-position))))
   (harness-ui-visit-session (harness-ui-sessions--id) position))
 
@@ -543,6 +599,15 @@ replacing the list, or after a switch where sessions open."
   "Rename the session at point to NAME."
   (interactive (list (read-string "Name: " (plist-get (harness-ui-session (harness-ui-sessions--id)) :name))))
   (harness-rename-session name (harness-ui-sessions--id)))
+
+(defun harness-ui-sessions-move (directory &optional keep-old)
+  "Move the session at point to the working directory DIRECTORY.
+It is then listed under DIRECTORY's project.  With a prefix argument
+KEEP-OLD its old working directory stays allowed to it.  See
+`harness-move-session'."
+  (interactive (list (harness-ui-read-move-directory (harness-ui-session (harness-ui-sessions--id)))
+                     current-prefix-arg))
+  (harness-move-session directory (harness-ui-sessions--id) keep-old))
 
 (defun harness-ui-sessions-cancel ()
   "Cancel the running turn of the session at point."
@@ -646,6 +711,7 @@ the list at once, before its session says it is no longer blocked."
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-sessions--on-changed)
   (add-hook 'harness-ui-pending-changed-hook #'harness-ui-sessions--on-pending)
   (add-hook 'harness-ui-rate-functions #'harness-ui-sessions--on-rate)
+  (add-hook 'harness-ui-live-functions #'harness-ui-sessions--on-live)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-sessions--redraw)
   ;; After a reload or reconnect the tasks may be another harness's.
   (add-hook 'harness-ui-redraw-hook #'harness-ui-sessions--fetch-tasks)

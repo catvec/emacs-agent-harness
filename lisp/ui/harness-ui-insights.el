@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; One buffer, "*harness insights*" (M-x harness-insights, I in the
+;; One buffer, "*harness insights*" (M-x harness-insights, A in the
 ;; harness keys and menu): how a period of work with the agents went,
 ;; as Claude Code's /insights has it, but drawn from the harness's own
 ;; records, so it reads the same whatever the provider.  Top to bottom:
@@ -1039,7 +1039,9 @@ nil covers every project.  Interactively, read it with completion."
 (defun harness-ui-insights--init ()
   "Wire the report into the UI."
   (add-hook 'harness-ui-redraw-hook #'harness-ui-insights--redraw)
-  (define-key harness-ui-map (kbd "I") #'harness-insights))
+  ;; A, not I: I is non-interactive mode for every session, beside i
+  ;; for one.
+  (define-key harness-ui-map (kbd "A") #'harness-insights))
 
 (harness-define-module 'ui-insights
 		       :doc "The Insights report: figures and a written summary of your work with the agents, for any provider."

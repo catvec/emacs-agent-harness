@@ -50,6 +50,7 @@
 (declare-function harness-ui-tasks-submit "harness-ui-tasks")
 (declare-function harness-ui-tasks-search "harness-ui-tasks")
 (declare-function harness-ui-tasks-search--banner "harness-ui-tasks-search")
+(declare-function harness-ui-tasks-search--done-text "harness-ui-tasks-search")
 (declare-function harness-ui-tasks-search--install "harness-ui-tasks-search")
 (declare-function harness-ui-tasks-search--read "harness-ui-tasks-search")
 (declare-function harness-ui-tasks-search--shutdown "harness-ui-tasks-search")
@@ -265,6 +266,48 @@ With review on, a task that finished waits there instead of completing."
       ;; The undo is undoable too: [Undo] now archives it again.
       (should (equal (list (list :task id :action "archive"))
                      (plist-get (harness-ui-tasks-search-test--state board) :undo))))))
+
+(ert-deftest harness-ui-tasks-search-sets-priorities-and-undoes ()
+  "A new priority runs at once and reorders the waiting tasks; the banner
+names it, and [Undo] gives each task the priority it had."
+  (harness-ui-tasks-search-test-with
+    (let* ((harness-tasks-max-running 0)
+           (docs (plist-get (harness-call 'task/submit dir "Write the docs") :id))
+           (bug (plist-get (harness-call 'task/submit dir "Fix the login bug") :id))
+           (results (lambda () (plist-get (harness-ui-tasks-search-test--state board) :results)))
+           (said (lambda () (and (funcall results)
+                                 (substring-no-properties
+                                  (harness-ui-tasks-search--done-text (funcall results)))))))
+      (harness-ui-tasks-search-test--wait-text board "Fix the login bug")
+      ;; Oldest first, while they are all medium.
+      (let ((text (harness-ui-tasks-search-test--board-text board)))
+        (should (< (string-search "Write the docs" text) (string-search "Fix the login bug" text))))
+      (setq harness-ui-tasks-search-test--replies
+            (list (harness-json-encode-text
+                   (list :show (list bug docs)
+                         :do (list (list :task bug :action "priority" :text "high")
+                                   (list :task docs :action "priority" :text "low"))))))
+      (harness-ui-tasks-search-test--search board "the login bug first, the docs last")
+      (harness-ui-tasks-search-test--wait board results "the priorities to change")
+      (should (equal "Made “Fix the login bug” high priority; Made “Write the docs” low priority"
+                     (funcall said)))
+      (should (eq 'high (plist-get (harness-call 'task/get bug) :priority)))
+      (should (eq 'low (plist-get (harness-call 'task/get docs) :priority)))
+      ;; The high one waits first now.
+      (harness-ui-tasks-search-test--wait
+       board (lambda () (let ((text (harness-ui-tasks-search-test--board-text board)))
+                          (< (string-search "Fix the login bug" text) (string-search "Write the docs" text))))
+       "the login bug to wait first")
+      (with-current-buffer board
+        (should (string-match-p "\\[Undo\\]" (harness-ui-tasks-search--banner)))
+        (call-interactively #'harness-ui-tasks-search-undo))
+      ;; Both go back to medium, so the banner says it once.
+      (harness-ui-tasks-search-test--wait
+       board (lambda () (equal "Made “Fix the login bug” and “Write the docs” medium priority"
+                               (funcall said)))
+       "the undo")
+      (should (eq 'medium (plist-get (harness-call 'task/get bug) :priority)))
+      (should (eq 'medium (plist-get (harness-call 'task/get docs) :priority))))))
 
 (ert-deftest harness-ui-tasks-search-proposes-what-needs-an-ok ()
   "Verifying is offered, not done, until you say yes."

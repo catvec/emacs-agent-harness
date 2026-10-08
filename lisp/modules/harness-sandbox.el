@@ -20,16 +20,25 @@
 ;; What the sandbox sees: read-only /usr and /etc (plus the usual
 ;; /lib, /lib64, /bin, /sbin as symlinks or read-only binds), a fresh
 ;; /proc, /dev and /tmp, and the session's working directory
-;; read-write.  HOME is *not* mounted (credentials such as ~/.npmrc or
-;; ~/.aws stay out of reach) and $HOME points at an empty directory on
-;; the tmpfs; the only exception is a HOME that lies inside the working
-;; directory, which is then visible anyway.  A caller may show more
-;; directories read-only (`:readable'): the bash tool shows the skills
-;; directories, where they are named, where their symbolic links lead
-;; and at the same place under the sandbox's $HOME, so ~/.claude/skills
-;; reads the same inside as outside.  Network access stays on by
-;; default because hosted providers and most build tools need it; pass
-;; `:network nil' to cut it, which is only correct for local models.
+;; read-write.  The home directory's contents are *not* mounted
+;; (credentials such as ~/.npmrc or ~/.aws stay out of reach).  With
+;; bwrap $HOME keeps its path, but an empty tmpfs covers it, so ~/x
+;; names the same path inside as outside and only what is mounted
+;; there shows; systemd-run hides the home directories and points
+;; $HOME at the private /tmp.  The only exception is a home directory
+;; inside the working directory, which is then visible anyway.
+;;
+;; A caller shows more: `:writable' directories (or files) read-write
+;; and `:readable' directories read-only.  The bash tool shows the
+;; session's own temporary directory and every directory granted to the
+;; session read-write, so a grant reaches bash as it reaches the other
+;; tools, and the skills directories and the tool output directory
+;; read-only.  Each is shown where it is named, where its symbolic links
+;; lead and, under a $HOME that is not the real one's path (systemd-run),
+;; at the same place under it, so ~/.claude/skills reads the same
+;; inside as outside.  Network access stays on by default because
+;; hosted providers and most build tools need it; pass `:network nil'
+;; to cut it, which is only correct for local models.
 ;;
 ;; Remote working directories (TRAMP) are never wrapped: the sandbox
 ;; binaries and the mounts would have to exist on the remote host, and
@@ -79,9 +88,16 @@ Useful for toolchains that live outside /usr, such as /opt or /nix."
   :type '(repeat directory) :group 'harness)
 
 (defconst harness-sandbox--home "/tmp/harness-home"
-  "Path used as $HOME inside the sandbox.
-It lives on the sandbox's private /tmp, so it starts empty for every
-command and nothing written there survives.")
+  "Path used as $HOME inside a bwrap sandbox when the real one's path cannot be.
+That is when $HOME is unset or names a directory no empty tmpfs may
+cover (see `harness-sandbox--real-home').  It lives on the sandbox's
+private /tmp, so it starts empty for every command and nothing written
+there survives.")
+
+(defconst harness-sandbox--system-paths '("/usr" "/etc" "/proc" "/dev" "/sys")
+  "Directories a home directory must neither be, hold, nor lie in.
+The sandbox mounts its own there, so an empty tmpfs on such a home
+would hide them or be hidden by them.")
 
 (defconst harness-sandbox--system-dirs '("/lib" "/lib64" "/bin" "/sbin")
   "Top-level directories mirrored as symlinks or read-only binds.")
@@ -148,46 +164,96 @@ Return the chosen backend symbol.  Safe to call again: it refreshes
   (let ((home (getenv "HOME")))
     (and home (harness-path-within-p cwd home))))
 
-(defun harness-sandbox--readable-mounts (readable cwd home)
-  "Return the read-only mounts showing READABLE as (SOURCE . DESTINATION).
-READABLE lists directories.  Each one that exists is shown where it
-is named and where its symbolic links lead, and, when it lies under
-the real home directory, at the same place under HOME, the sandbox's
-$HOME (nil when the real one stays), so that ~/... names it inside as
-well.  A directory inside CWD is left out, since CWD is shown
-read-write anyway, and so is one that is or holds the real home
-directory, which the sandbox hides.
+(defun harness-sandbox--real-home ()
+  "Return the home directory an empty tmpfs may cover, without a slash, or nil.
+That is $HOME, absolute and local, unless it is the root directory or
+is, holds or lies in one of `harness-sandbox--system-paths': bwrap
+then keeps $HOME's path inside the sandbox, emptied, rather than
+moving it to `harness-sandbox--home'."
+  (let ((home (getenv "HOME")))
+    (when (and (stringp home) (file-name-absolute-p home) (not (file-remote-p home)))
+      (let ((home (directory-file-name (expand-file-name home))))
+        (unless (or (equal home "/")
+                    (cl-some (lambda (system)
+                               (or (harness-path-within-p system home) (harness-path-within-p home system)))
+                             harness-sandbox--system-paths))
+          home)))))
 
-A destination below another one is left out too: it shows through
-that one as it is, a symbolic link included, and bwrap refuses to
-mount on a link (a skill linked into ~/.claude/skills is one).  So is
-a destination holding CWD when symbolic links lead CWD elsewhere,
-since the working directory is mounted where it is named, after these."
+(defun harness-sandbox--mounts (readable writable cwd home)
+  "Return the mounts showing READABLE and WRITABLE as (MODE SOURCE DESTINATION).
+MODE is `ro' for READABLE, which lists directories, and `rw' for
+WRITABLE, which lists directories and files.  Each one that exists is
+shown where it is named and where its symbolic links lead, and, when
+it lies under the real home directory, at the same place under HOME,
+the sandbox's $HOME when that is not the real home's path (nil
+otherwise), so that ~/... names it inside as well.  Left out are what
+lies inside CWD, which is shown read-write anyway; a readable
+directory that is or holds the real home directory, which the sandbox
+hides (a writable one was granted, so it shows); and the root
+directory, which would cover the sandbox's own /proc, /dev and /tmp.
+
+A destination below another one is left out when it shows through
+that one as it is, a symbolic link included: below a writable one, or
+a readable one below a readable one.  bwrap refuses to mount on a link,
+and a skill linked into ~/.claude/skills is one.  A writable
+destination below a readable one stays when it is its own real path,
+with no link on the way, and is mounted after it, so a granted
+directory in a skills directory is writable.  A destination named
+both ways is writable when either list has it.  A destination holding
+CWD when symbolic links lead CWD elsewhere is left out too, since the
+working directory is mounted where it is named, after these."
   (let* ((real-home (file-name-as-directory (expand-file-name "~")))
          (cwd-dir (file-name-as-directory (expand-file-name cwd)))
          (cwd-linked (not (equal cwd-dir (file-name-as-directory (file-truename cwd-dir)))))
          (below (lambda (dir parent)
                   (let ((dir (file-name-as-directory dir)) (parent (file-name-as-directory parent)))
                     (and (not (equal dir parent)) (string-prefix-p parent dir)))))
-         (alias (lambda (dir)
-                  (and home (string-prefix-p real-home dir)
-                       (expand-file-name (substring dir (length real-home)) home))))
+         (alias (lambda (path)
+                  (and home (string-prefix-p real-home path)
+                       (not (equal (file-name-as-directory path) real-home))
+                       (expand-file-name (substring path (length real-home)) home))))
          mounts)
-    (dolist (d readable)
-      (let* ((named (and (stringp d) (not (file-remote-p d)) (file-name-as-directory (expand-file-name d))))
-             (real (and named (file-directory-p named) (file-name-as-directory (file-truename named)))))
-        (cond
-         ((or (null real) (harness-path-within-p cwd real)) nil)
-         ((harness-path-within-p real real-home)
-          (harness-log 'warn "sandbox: not showing %s, which holds the home directory" d))
-         (t
-          (dolist (dest (delq nil (list named real (funcall alias named) (funcall alias real))))
-            (let ((dest (directory-file-name dest)))
-              (unless (or (rassoc dest mounts) (and cwd-linked (funcall below cwd-dir dest)))
-                (push (cons (directory-file-name real) dest) mounts))))))))
+    (pcase-dolist (`(,mode . ,paths) (list (cons 'ro readable) (cons 'rw writable)))
+      (dolist (d paths)
+        (let* ((named (and (stringp d) (not (file-remote-p d)) (expand-file-name d)))
+               (dir (and named (file-directory-p named)))
+               (real (and named (or dir (and (eq mode 'rw) (file-exists-p named)))
+                          (funcall (if dir #'file-name-as-directory #'directory-file-name)
+                                   (file-truename named))))
+               (named (and real (funcall (if dir #'file-name-as-directory #'directory-file-name) named))))
+          (cond
+           ((or (null real) (harness-path-within-p cwd real)) nil)
+           ((equal real "/")
+            (harness-log 'warn "sandbox: not showing %s, the root directory" d))
+           ((and (eq mode 'ro) (harness-path-within-p real real-home))
+            (harness-log 'warn "sandbox: not showing %s, which holds the home directory" d))
+           (t
+            (dolist (dest (delq nil (list named real (funcall alias named) (funcall alias real))))
+              (let* ((dest (directory-file-name dest))
+                     (old (cl-find dest mounts :key #'caddr :test #'equal)))
+                (cond
+                 ((and cwd-linked (funcall below cwd-dir dest)) nil)
+                 ((null old) (push (list mode (directory-file-name real) dest) mounts))
+                 ((and (eq mode 'rw) (eq (car old) 'ro))
+                  (setcar old 'rw)
+                  (setcar (cdr old) (directory-file-name real)))))))))))
     (setq mounts (nreverse mounts))
-    (cl-remove-if (lambda (m) (cl-some (lambda (o) (funcall below (cdr m) (cdr o))) mounts))
-                  mounts)))
+    (cl-remove-if (lambda (m)
+                    (cl-some (lambda (o)
+                               (and (funcall below (nth 2 m) (nth 2 o))
+                                    (or (eq (car o) 'rw) (eq (car m) 'ro)
+                                        (not (equal (nth 1 m) (nth 2 m))))))
+                             mounts))
+                  ;; Read-only first: a writable mount covers what it holds.
+                  (append (cl-remove-if-not (lambda (m) (eq (car m) 'ro)) mounts)
+                          (cl-remove-if-not (lambda (m) (eq (car m) 'rw)) mounts)))))
+
+(defun harness-sandbox--readable-mounts (readable cwd home)
+  "Return the read-only mounts showing READABLE as (SOURCE . DESTINATION).
+See `harness-sandbox--mounts', of which these are the READABLE ones
+with no writable ones beside them; CWD and HOME are as there."
+  (mapcar (lambda (m) (cons (nth 1 m) (nth 2 m)))
+          (harness-sandbox--mounts readable nil cwd home)))
 
 (defun harness-sandbox--systemd-path-p (path)
   "Non-nil when PATH can be written in a systemd mount setting as it is.
@@ -274,34 +340,43 @@ Return (:common DIR :protected (PATH…)) or nil."
   "Build the bwrap command line running COMMAND in CWD.
 PROGRAM is the bwrap executable.  NETWORK nil unshares the network
 namespace; WRITABLE and READABLE list extra directories to expose (see
-`harness-sandbox--readable-mounts' for how READABLE ones are shown)."
-  (let ((cwd (directory-file-name (expand-file-name cwd)))
-        (home (unless (harness-sandbox--home-inside-p cwd) harness-sandbox--home)))
+`harness-sandbox--mounts' for how they are shown).
+
+$HOME keeps its path: an empty tmpfs covers the home directory, so
+~/x names the same path inside as outside and shows only what is
+mounted there.  A home directory inside CWD is shown as it is; one no
+tmpfs may cover (see `harness-sandbox--real-home') gives way to
+`harness-sandbox--home', with the directories under the real one shown
+under it too."
+  (let* ((cwd (directory-file-name (expand-file-name cwd)))
+         (inside (harness-sandbox--home-inside-p cwd))
+         (real-home (and (not inside) (harness-sandbox--real-home)))
+         (private (and (not inside) (not real-home) harness-sandbox--home)))
     (append
      (list program
            "--ro-bind" "/usr" "/usr"
            "--ro-bind" "/etc" "/etc")
      (harness-sandbox--system-dir-args)
-     (cl-loop for d in harness-sandbox-extra-read-only-dirs
-              append (harness-sandbox--dir-args d 'ro))
      (list "--proc" "/proc"
            "--dev" "/dev"
-           "--tmpfs" "/tmp"
-           "--dir" harness-sandbox--home)
-     ;; Binds come after the tmpfs so a working directory under /tmp
-     ;; is not hidden by it, and the read-only ones before the others: a
-     ;; later mount covers what an earlier one shows below it, so the
-     ;; working directory stays writable inside a read-only directory.
-     (cl-loop for (source . dest) in (harness-sandbox--readable-mounts readable cwd home)
-              append (list "--ro-bind" source dest))
+           "--tmpfs" "/tmp")
+     ;; The home directory after /tmp, which may hold it; binds after
+     ;; both, so neither hides them.
+     (cond (real-home (list "--tmpfs" real-home))
+           (private (list "--dir" private)))
+     (cl-loop for d in harness-sandbox-extra-read-only-dirs
+              append (harness-sandbox--dir-args d 'ro))
+     ;; The read-only binds before the others, and the working directory
+     ;; last: a later mount covers what an earlier one shows below it, so
+     ;; the working directory stays writable inside a read-only directory.
+     (cl-loop for (mode source dest) in (harness-sandbox--mounts readable writable cwd private)
+              append (list (if (eq mode 'rw) "--bind" "--ro-bind") source dest))
      (list "--bind" cwd cwd)
-     (cl-loop for d in writable append (harness-sandbox--dir-args d 'rw))
      (harness-sandbox--bwrap-git-args cwd)
      (list "--unshare-pid" "--unshare-ipc" "--unshare-uts"
            "--die-with-parent" "--new-session"
            "--chdir" cwd)
-     (unless (harness-sandbox--home-inside-p cwd)
-       (list "--setenv" "HOME" harness-sandbox--home))
+     (and private (list "--setenv" "HOME" private))
      (unless network (list "--unshare-net"))
      (list "--")
      command)))
@@ -314,7 +389,10 @@ are as for `harness-sandbox--bwrap-command'.
 Home directories are hidden with `ProtectHome=tmpfs' rather than
 `ProtectHome=yes': with the latter systemd cannot mount anything
 beneath /home, so a working directory in the user's home would be
-unreachable (systemd-run fails with status 200)."
+unreachable (systemd-run fails with status 200).  That tmpfs is
+read-only, so $HOME is the private /tmp, and the directories shown
+under the real home directory are shown at the same place under it
+too, so ~/x reaches them."
   (let ((cwd (directory-file-name (expand-file-name cwd))))
     (append
      (list program "--user" "--quiet" "--pipe" "--wait" "--collect"
@@ -323,15 +401,13 @@ unreachable (systemd-run fails with status 200)."
            "-p" "ProtectHome=tmpfs"
            "-p" (concat "BindPaths=" cwd)
            "-p" (concat "ReadWritePaths=" cwd))
-     (cl-loop for d in writable
-              when (file-directory-p d)
-              append (list "-p" (concat "BindPaths=" (directory-file-name (expand-file-name d)))))
      ;; systemd orders the mounts itself, a directory before what lies
      ;; in it.  A path its setting cannot hold as written is not shown.
-     (cl-loop for (source . dest) in (harness-sandbox--readable-mounts
-                                      readable cwd (unless (harness-sandbox--home-inside-p cwd) "/tmp"))
+     (cl-loop for (mode source dest) in (harness-sandbox--mounts
+                                         readable writable cwd (unless (harness-sandbox--home-inside-p cwd) "/tmp"))
               if (and (harness-sandbox--systemd-path-p source) (harness-sandbox--systemd-path-p dest))
-              append (list "-p" (concat "BindReadOnlyPaths=" source (if (equal source dest) "" (concat ":" dest))))
+              append (list "-p" (concat (if (eq mode 'rw) "BindPaths=" "BindReadOnlyPaths=")
+                                        source (if (equal source dest) "" (concat ":" dest))))
               else do (harness-log 'debug "sandbox: systemd cannot show %s at %s" source dest))
      (harness-sandbox--systemd-git-args cwd)
      (unless network (list "-p" "PrivateNetwork=yes"))
@@ -345,13 +421,14 @@ unreachable (systemd-run fails with status 200)."
 (harness-defmethod sandbox/wrap (cwd command &rest opts)
   "Return COMMAND (a list of strings) wrapped to run confined in CWD.
 OPTS: `:network' (default t; nil cuts network access), `:writable'
-\(extra directories mounted read-write) and `:readable' (extra
-read-only directories, shown where they are named, where their
-symbolic links lead and, under the sandbox's $HOME, where they are
-under the real one; see `harness-sandbox--readable-mounts').  A remote
-CWD or the `off' policy return COMMAND unchanged.  Signals
-`harness-sandbox-unavailable' when the policy is `required' and no
-backend exists."
+\(extra directories or files mounted read-write, such as the
+directories granted to a session) and `:readable' (extra read-only
+directories).  Both are shown where they are named, where their
+symbolic links lead and, under a sandbox $HOME that is not the real
+one's path, where they are under the real one; see
+`harness-sandbox--mounts'.  A remote CWD or the `off' policy return
+COMMAND unchanged.  Signals `harness-sandbox-unavailable' when the
+policy is `required' and no backend exists."
   (let ((policy (harness-sandbox--policy cwd))
         (network (if (plist-member opts :network) (plist-get opts :network) t))
         (writable (plist-get opts :writable))

@@ -432,6 +432,7 @@ initialize: one it let go of for another closes on purpose."
                     (harness-ui-refresh-models)
                     (harness-ui-refresh-quotas)
                     (harness-ui-refresh-rates)
+                    (harness-ui-refresh-live)
                     (run-hooks 'harness-ui-connected-hook))
                   (lambda (e)
                     (when (eq conn harness-ui-connection)
@@ -636,6 +637,8 @@ answered by `harness-emacs-endpoint-answer'; everything else is the UI's."
          (harness-ui--store-quota (car args) (cadr args)))
        (when (equal event "usage/rate-updated")
          (harness-ui--store-rate (car args) (cadr args)))
+       (when (equal event "usage/live-updated")
+         (harness-ui--store-live (car args) (cadr args)))
        (run-hook-with-args 'harness-ui-event-functions event args)))
     (_ (when respond (harness-acp-respond-error respond -32601 (format "unhandled %s" method))))))
 
@@ -796,10 +799,13 @@ yet: it starts after the init file, with the value set there."
 (defvar harness-ui--sessions (make-hash-table :test 'equal)
   "Session id -> latest session plist (wire shape).")
 
+(defvar harness-ui--live)               ; The live token cache, below.
+
 (defun harness-ui-cache-session (session)
   "Record SESSION (a wire plist) in the cache and notify listeners."
   (when-let* ((id (plist-get session :id)))
     (puthash id session harness-ui--sessions)
+    (harness-ui--settle-live session)
     (run-hooks 'harness-ui-sessions-changed-hook)))
 
 (defalias 'harness-ui--cache-session #'harness-ui-cache-session)
@@ -807,6 +813,7 @@ yet: it starts after the init file, with the value set there."
 (defun harness-ui--forget-session (id)
   (remhash id harness-ui--sessions)
   (harness-ui--store-rate id nil)
+  (harness-ui--store-live id nil)
   (run-hooks 'harness-ui-sessions-changed-hook))
 
 (defun harness-ui-session (id)
@@ -825,6 +832,9 @@ yet: it starts after the init file, with the value set there."
                    (lambda (sessions)
                      (clrhash harness-ui--sessions)
                      (dolist (s sessions) (puthash (plist-get s :id) s harness-ui--sessions))
+                     (maphash (lambda (id _)
+                                (harness-ui--settle-live (or (gethash id harness-ui--sessions) (list :id id))))
+                              harness-ui--live)
                      (run-hooks 'harness-ui-sessions-changed-hook)
                      (when callback (funcall callback sessions)))))
 
@@ -861,13 +871,24 @@ comes, or when naming it failed."
 (defvar harness-ui--models (make-hash-table :test 'equal)
   "Model id -> model plist from the harness catalogue.")
 
+(defvar harness-ui--models-seen nil
+  "(CONNECTION . MODELS): the catalogue last fetched, and over which connection.")
+
 (defun harness-ui-refresh-models (&optional callback)
-  "Reload the model catalogue cache, redraw, then call CALLBACK with the models."
+  "Reload the model catalogue cache, then call CALLBACK with the models.
+Every view redraws (`harness-ui-redraw-hook') when the catalogue is new:
+it changed, or it is the first over this connection.  The harness says
+the catalogue was updated (`provider/models-updated') whenever a
+provider settles, mostly with nothing new, and a redraw fetches and
+renders every chat buffer again."
   (harness-ui-call "_harness/provider/models" nil
                    (lambda (models)
-                     (clrhash harness-ui--models)
-                     (dolist (m models) (puthash (plist-get m :id) m harness-ui--models))
-                     (run-hooks 'harness-ui-redraw-hook)
+                     (let ((new (not (and (eq harness-ui-connection (car harness-ui--models-seen))
+                                          (equal models (cdr harness-ui--models-seen))))))
+                       (setq harness-ui--models-seen (cons harness-ui-connection models))
+                       (clrhash harness-ui--models)
+                       (dolist (m models) (puthash (plist-get m :id) m harness-ui--models))
+                       (when new (run-hooks 'harness-ui-redraw-hook)))
                      (when callback (funcall callback models)))
                    (unless callback #'ignore)))
 
@@ -1076,6 +1097,85 @@ as `usage/rate' returns it."
                      (run-hook-with-args 'harness-ui-rate-functions nil nil)
                      (when callback (funcall callback rates)))
                    #'ignore))
+
+;;;; Live token cache
+
+;; While a session's turn runs, the harness counts its tokens as they
+;; stream (see `usage/live' in harness-usage.el); the UI keeps each
+;; running session's latest figures, fetched on connect and then
+;; updated from `usage/live-updated' events, which come a few times a
+;; second at most.  The event that ends a turn's count can arrive before
+;; the session's new totals do (the harness pushes sessions after a
+;; short debounce), so the last figures stand in for those totals while
+;; the cache still shows the session running.
+
+(defvar harness-ui--live (make-hash-table :test 'equal)
+  "Session id -> its live token figures, the plist `usage/live' returns.
+An entry with `:ended' holds the last figures of a turn that ended, until
+the cache shows the session no longer running.")
+
+(defvar harness-ui-live-functions nil
+  "Functions called with (SESSION-ID LIVE) after live token figures change.
+LIVE is the session's new figures, nil once its turn ended.  SESSION-ID
+is nil after the whole cache was fetched again.")
+
+(defun harness-ui-session-live (id)
+  "Return the live token figures of session ID while its turn runs, or nil.
+The plist is (:context N :output N :estimated N), as `usage/live'
+returns it."
+  (let ((live (gethash id harness-ui--live)))
+    (and live (not (plist-get live :ended)) live)))
+
+(defun harness-ui--store-live (id live)
+  "Cache LIVE as session ID's live token figures; run `harness-ui-live-functions'.
+LIVE nil ends the count: the last figures stay while the cached session
+still runs, so its figures do not drop until its new totals arrive."
+  (when (stringp id)
+    (let ((last (gethash id harness-ui--live))
+          (session (gethash id harness-ui--sessions)))
+      (cond (live (puthash id live harness-ui--live))
+            ((and last (equal (plist-get session :status) "running"))
+             (puthash id (append (list :ended t) (harness-plist-remove last :ended)) harness-ui--live))
+            (t (remhash id harness-ui--live))))
+    (run-hook-with-args 'harness-ui-live-functions id live)))
+
+(defun harness-ui--settle-live (session)
+  "Forget the ended count of SESSION, a wire plist, once it no longer runs."
+  (let ((id (plist-get session :id)))
+    (when (and (plist-get (gethash id harness-ui--live) :ended)
+               (not (equal (plist-get session :status) "running")))
+      (remhash id harness-ui--live))))
+
+(defun harness-ui-refresh-live (&optional callback)
+  "Fetch the live token figures of every running session, then call CALLBACK."
+  (harness-ui-call "_harness/usage/live-all" nil
+                   (lambda (all)
+                     (clrhash harness-ui--live)
+                     (dolist (live all)
+                       (when-let* ((id (plist-get live :session)))
+                         (puthash id (harness-plist-remove live :session) harness-ui--live)))
+                     (run-hook-with-args 'harness-ui-live-functions nil nil)
+                     (when callback (funcall callback all)))
+                   #'ignore))
+
+(defun harness-ui-session-tokens (session)
+  "Return the token figures of SESSION, a wire plist.
+The value is (:context N :output N :estimated N).
+CONTEXT is the size of its conversation, the prompt of its latest
+request plus what that request wrote, and OUTPUT its output tokens.
+While its turn runs they grow as its model streams, ESTIMATED of them
+reckoned from what streamed since its provider last reported usage;
+otherwise they are its totals."
+  (let ((live (gethash (plist-get session :id) harness-ui--live)))
+    (if (and live (or (not (plist-get live :ended))
+                      (equal (plist-get session :status) "running")))
+        (list :context (or (plist-get live :context) 0)
+              :output (or (plist-get live :output) 0)
+              :estimated (or (plist-get live :estimated) 0))
+      (let ((usage (plist-get session :usage)))
+        (list :context (+ (or (plist-get usage :context) 0) (or (plist-get usage :last-output) 0))
+              :output (or (plist-get usage :output) 0)
+              :estimated 0)))))
 
 (defun harness-ui-session-billing (session)
   "Return how SESSION's calls are paid, a symbol or nil.
@@ -1381,14 +1481,46 @@ window in the frame and moves the button under the mouse until it is
 hard to click.  Build `help-echo' text from parts through this."
   (replace-regexp-in-string "[ \t\n\r]+" " " (string-trim (or text ""))))
 
+(defun harness-ui-tokens-help (tokens &optional window)
+  "Return the one-line tooltip of a session's token figures TOKENS.
+TOKENS is what `harness-ui-session-tokens' returns; WINDOW the
+session's context window, when the context is shown against it."
+  (let ((estimated (plist-get tokens :estimated)))
+    (harness-ui-one-line
+     (concat (format "Context tokens in use: %s%s; output tokens: %s."
+                     (harness-format-tokens (plist-get tokens :context))
+                     (if window (format " of a %s window" (harness-format-tokens window)) "")
+                     (harness-format-tokens (plist-get tokens :output)))
+             (if (and (numberp estimated) (> estimated 0))
+                 (format " ~%s of them estimated from what streamed since the provider last reported usage, a token for every four characters."
+                         (harness-format-tokens estimated))
+               "")))))
+
 (defun harness-ui-format-context (session)
-  "Return \"12.3k/200k\" for SESSION with the warning face applied."
-  (let* ((usage (plist-get session :usage))
-         (context (or (plist-get usage :context) 0))
+  "Return \"12.3k/200k\" for SESSION with the warning face applied.
+The tokens in use are the size of SESSION's conversation.  While it runs
+they grow as its model streams; \"~\" marks a figure partly estimated
+from what streamed since its provider last reported usage."
+  (let* ((tokens (harness-ui-session-tokens session))
+         (context (plist-get tokens :context))
          (window (plist-get session :context-window)))
-    (propertize (format "%s/%s" (harness-format-tokens context) (harness-format-tokens window))
+    (propertize (format "%s%s/%s" (if (> (plist-get tokens :estimated) 0) "~" "")
+                        (harness-format-tokens context) (harness-format-tokens window))
                 'face (harness-ui-context-face context window)
-                'help-echo "Context tokens in use / context window")))
+                'help-echo (harness-ui-tokens-help tokens window))))
+
+(defun harness-ui-format-output (session &optional bare)
+  "Return SESSION's output tokens as \"3.4k out\", or nil when it wrote none.
+BARE leaves out the unit.  While SESSION runs the figure grows as its
+model streams; \"~\" marks it partly estimated, as in
+`harness-ui-format-context'."
+  (let* ((tokens (harness-ui-session-tokens session))
+         (output (plist-get tokens :output)))
+    (when (> output 0)
+      (propertize (concat (if (> (plist-get tokens :estimated) 0) "~" "")
+                          (harness-format-tokens output)
+                          (if bare "" " out"))
+                  'help-echo (harness-ui-tokens-help tokens)))))
 
 (defun harness-ui-format-model-window (model)
   "Return the context window of catalogue entry MODEL as text: \"200k\".
@@ -1581,6 +1713,10 @@ warning colour." :group 'harness-ui)
 (defface harness-ui-key-face '((t :inherit help-key-binding))
   "Keyboard shortcut hints in panels." :group 'harness-ui)
 
+;; Its name while the chat drew the panels.  Text still carrying the old
+;; name, undefined, made each redisplay log "Invalid face reference".
+(define-obsolete-face-alias 'harness-chat-key-face 'harness-ui-key-face "3.1")
+
 (defface harness-ui-output-face '((t :inherit (fixed-pitch harness-md-code-block)))
   "Fixed-width output, such as the diagram of a question's option." :group 'harness-ui)
 
@@ -1588,11 +1724,92 @@ warning colour." :group 'harness-ui)
   "Maximum pixel height of inline images in harness views."
   :type 'integer :group 'harness-ui)
 
+(defcustom harness-ui-image-colors '("black" . "white")
+  "Colours images are drawn in: (FOREGROUND . BACKGROUND), or nil.
+BACKGROUND shows through the transparent parts of an image, and an SVG
+draws in FOREGROUND what it gives no colour of its own, such as text
+without a fill: the way a web browser shows an image file, black on
+white, which is what most drawings and mockups are made for.  It holds
+for every image the harness shows: the diagrams of a question's
+options, images in the transcript, a task's report, the image popout
+and the thumbnails of attachments.  Nil draws them in the colours of
+the text around them, where a drawing made for a white page vanishes
+under a dark theme."
+  :type '(choice (const :tag "Black on white, as a browser shows them" ("black" . "white"))
+                 (const :tag "The colours of the text around them" nil)
+                 (cons :tag "Other colours" (color :tag "Foreground") (color :tag "Background")))
+  :group 'harness-ui)
+
+(defun harness-ui-image-color-props ()
+  "Return the `create-image' properties colouring an image, or nil.
+They follow `harness-ui-image-colors'."
+  (let ((colors harness-ui-image-colors))
+    (and (consp colors)
+         (append (and (stringp (car colors)) (list :foreground (car colors)))
+                 (and (stringp (cdr colors)) (list :background (cdr colors)))))))
+
+(defun harness-ui-image-too-large (source &optional frame)
+  "Return (WIDTH . HEIGHT) of the image SOURCE when Emacs will not draw it.
+SOURCE is a file name or (:data BASE64).  Emacs loads no image larger
+than `max-image-size' allows in FRAME, ten times the frame by default,
+however small it would show it: it draws an empty box instead, and
+complains on every redisplay.  Nil when the image is not that large,
+or when its size cannot be told from its header
+\(`harness-image-pixel-size'), as for an SVG."
+  (let* ((data (and (consp source) (plist-get source :data)))
+         (size (cond
+                ;; The header is at the start: a megabyte of it will do.
+                (data (let ((bytes (ignore-errors
+                                     (base64-decode-string (substring data 0 (min (length data) 1398100))))))
+                        (and bytes (harness-image-pixel-size nil bytes))))
+                ((stringp source) (harness-image-pixel-size source))))
+         (frame (or frame (selected-frame)))
+         (limit max-image-size))
+    (when (and size
+               (cond ((integerp limit) (or (> (car size) limit) (> (cdr size) limit)))
+                     ((floatp limit) (or (> (car size) (* limit (frame-pixel-width frame)))
+                                         (> (cdr size) (* limit (frame-pixel-height frame)))))))
+      size)))
+
+(defun harness-ui-image-too-large-label (label size)
+  "Return LABEL, an image's, saying it is SIZE pixels, too large to draw.
+SIZE is (WIDTH . HEIGHT), as `harness-ui-image-too-large' returns it."
+  (format "%s: %d\N{U+00D7}%d pixels, too large to draw here (`max-image-size')]"
+          (string-remove-suffix "]" label) (car size) (cdr size)))
+
+(declare-function harness-ui-popout-open-file "harness-ui-popout" (file))
+
+(defun harness-ui-open-image-outside (file)
+  "Return a command opening the image FILE outside Emacs, which cannot draw it.
+The desktop's opener shows it (`harness-ui-popout-open-file'); without
+the popout module, FILE is visited."
+  (lambda ()
+    (interactive)
+    (if (fboundp 'harness-ui-popout-open-file)
+        (harness-ui-popout-open-file file)
+      (find-file-other-window file))))
+
 (defun harness-ui-add-face (string face)
   "Return STRING with FACE added on top of its faces."
   (let ((s (copy-sequence string)))
     (add-face-text-property 0 (length s) face t s)
     s))
+
+(defun harness-ui-with-keymap (string map)
+  "Return STRING with MAP answering under the keymaps it already carries.
+STRING is changed.  A button's own keymap stays in front, so a click
+still runs the button.  A panel's keys work this way while point is on
+it: the switch banner's, the cache panel's."
+  (let ((pos 0)
+        (len (length string)))
+    (while (< pos len)
+      (let* ((next (or (next-single-property-change pos 'keymap string len) len))
+             (existing (get-text-property pos 'keymap string)))
+        (put-text-property pos next 'keymap
+                           (if existing (make-composed-keymap (list existing map)) map)
+                           string)
+        (setq pos next))))
+  string)
 
 (defun harness-ui-ensure-newline (string)
   "Return STRING ending in exactly one newline."
@@ -1678,26 +1895,40 @@ position just after the region moves to the end of TEXT."
       (insert text))
     (harness-ui--fix-positions fix pt windows)))
 
-(defun harness-ui-image-string (source &optional mime)
+(defun harness-ui-image-string (source &optional mime &rest props)
   "Return a string displaying SOURCE (a path or a (:data BASE64) plist).
-MIME is a hint for the image type.  The image can be dragged into
-another application (`harness-ui-drag-props').  Without image support,
-and for a path on a remote host, which reading here would block on, a
-button opening the file is returned instead."
+MIME is a hint for the image type.  PROPS may hold `:max-width' and
+`:max-height', the most pixels the image takes; by default it takes at
+most 60% of the width of the window showing the buffer and half its
+height, and never more than `harness-ui-image-max-height', so a short
+window, such as a BTW's, still shows it whole with the lines around
+it.  It is drawn in `harness-ui-image-colors'.  The image can be
+dragged into another application (`harness-ui-drag-props').  Without
+image support, and for a path on a remote host, which reading here
+would block on, a button opening the file is returned instead.  An
+image too large for Emacs to draw (`harness-ui-image-too-large') is a
+line saying so, a button opening it outside Emacs."
   (let* ((path (and (stringp source) source))
          (data (and (consp source) (plist-get source :data)))
          (label (if path (format "[image %s]" (abbreviate-file-name path)) "[image]"))
          (local (and path (not (file-remote-p path))))
          (open (and path (lambda () (interactive) (find-file-other-window path))))
-         (img (and (display-images-p) (or data (and local (file-readable-p path)))
-                   (let* ((w (car (get-buffer-window-list nil nil t)))
-                          (width (floor (* 0.6 (if w (window-body-width w t) 800)))))
+         ;; The window shows the image, so its frame is the one that
+         ;; must draw images, not whichever frame happens to be selected.
+         (w (car (get-buffer-window-list nil nil t)))
+         (frame (and w (window-frame w)))
+         (drawable (and (display-images-p frame) (or data (and local (file-readable-p path)))))
+         (too-large (and drawable (harness-ui-image-too-large source frame)))
+         (img (and drawable (not too-large)
+                   (let ((width (or (plist-get props :max-width)
+                                    (floor (* 0.6 (if w (window-body-width w t) 800)))))
+                         (height (or (plist-get props :max-height)
+                                     (min harness-ui-image-max-height
+                                          (if w (/ (window-body-height w t) 2) harness-ui-image-max-height)))))
                      (condition-case nil
-                         (if data
-                             (create-image (base64-decode-string data) nil t
-                                           :max-width width :max-height harness-ui-image-max-height)
-                           (create-image path nil nil
-                                         :max-width width :max-height harness-ui-image-max-height))
+                         (apply #'create-image (if data (base64-decode-string data) path) nil (and data t)
+                                :max-width (max 1 width) :max-height (max 1 height)
+                                (harness-ui-image-color-props))
                        (error nil))))))
     (cond
      (img (concat (apply #'propertize label 'display img
@@ -1707,6 +1938,12 @@ button opening the file is returned instead."
                                 'keymap (and open (harness-ui-action-map open)))
                           path))
                   "\n"))
+     ((and too-large path)
+      (concat (harness-ui-action-button (harness-ui-image-too-large-label label too-large)
+                                        (harness-ui-open-image-outside path)
+                                        :help (format "Open %s outside Emacs" path))
+              "\n"))
+     (too-large (concat (propertize (harness-ui-image-too-large-label label too-large) 'face 'harness-dim-face) "\n"))
      (open (concat (harness-ui-action-button label open :help (format "Open %s" path)) "\n"))
      (t (concat (propertize label 'face 'harness-dim-face) "\n")))))
 
@@ -1982,10 +2219,29 @@ window selected now even when another frame is selected by then."
 ;; as switching project would (Doom Emacs's workspaces), and then shows
 ;; the session, unless it shows there already, in which case its window
 ;; is selected.
+;;
+;; The project's workspace is looked for here, not left to Doom's
+;; project switch: a fork of Doom that notes a workspace's project (its
+;; `+workspace-project') takes only a workspace noting it for the
+;; project's, and a workspace that got the project's name otherwise --
+;; the empty one a project was first opened in, which Doom renames
+;; without noting anything -- is passed over for a new, empty one beside
+;; it.  Switching to the workspace that is there brings back the windows
+;; and buffers left in it; of two, the one with the project's files open
+;; wins, not the empty one made beside it.  A project with none gets a
+;; new one from Doom, and the session then takes its window, which has
+;; nothing else to show.
 
 (defvar +workspaces-switch-project-function)
+(defvar doom-fallback-buffer-name)
 (declare-function +workspaces-switch-to-project-h "ext:workspaces")
 (declare-function +workspace-current-name "ext:workspaces")
+(declare-function +workspace-list-names "ext:workspaces")
+(declare-function +workspace-get "ext:workspaces")
+(declare-function +workspace-buffer-list "ext:workspaces")
+(declare-function +workspace-switch "ext:workspaces")
+(declare-function +workspace-message "ext:workspaces")
+(declare-function persp-parameter "ext:persp-mode")
 (declare-function doom-project-name "ext:doom-projects")
 (declare-function doom-project-p "ext:doom-projects")
 
@@ -1994,33 +2250,98 @@ window selected now even when another frame is selected by then."
 It is called with the project's root directory when a session is
 visited (`harness-ui-visit-session'), from the session list say, and
 returns non-nil when it switched; when that project is current already
-it does nothing and returns nil.  The root is the main checkout of the
-session's project: a task's git worktree belongs to its repository's.
-The default switches workspaces where there are any; nil never
-switches."
+it does nothing and returns nil.  It returns `blank' when what it
+switched to shows nothing yet, a workspace just made say: the session
+then takes the selected window instead of opening beside it.  The root
+is the main checkout of the session's project: a task's git worktree
+belongs to its repository's.  The default switches workspaces where
+there are any; nil never switches."
   :type '(choice (const :tag "Never switch" nil)
                  (function-item harness-ui-switch-project-workspace)
                  function)
   :group 'harness-ui)
 
+(defun harness-ui--workspace-of-project-p (name root project)
+  "Non-nil when NAME names a Doom workspace of the project at ROOT.
+PROJECT is the project's name, as Doom names its workspace.  A
+workspace noting the project it is for -- its `+workspace-project', as
+a fork of Doom keeps it -- is ROOT's when that is ROOT, whatever its
+name; one noting none, or a directory gone since, moved say, is ROOT's
+when it is named PROJECT.  A directory on another host than ROOT's is
+not looked at, which would connect to it."
+  (when-let* ((persp (+workspace-get name t)))
+    (let ((dir (persp-parameter '+workspace-project persp)))
+      (cond ((not (stringp dir)) (equal name project))
+            ((not (equal (file-remote-p dir) (file-remote-p root))) nil)
+            ((file-directory-p dir) (ignore-errors (file-equal-p dir root)))
+            (t (equal name project))))))
+
+(defun harness-ui--workspace-files (name root)
+  "Return how many files under ROOT the Doom workspace NAME has open.
+Remote files are not looked at."
+  (cl-count-if (lambda (buffer)
+                 (let ((file (buffer-file-name buffer)))
+                   (and file (not (file-remote-p file)) (file-in-directory-p file root))))
+               (+workspace-buffer-list (+workspace-get name))))
+
+(defun harness-ui--project-workspace (root project)
+  "Return the name of the Doom workspace of the project at ROOT, or nil.
+PROJECT is the project's name.  The workspaces that may be ROOT's (see
+`harness-ui--workspace-of-project-p') are the one named PROJECT and
+those noting ROOT under another name, which a fork of Doom makes beside
+the first; of more than one, the one with the most of the project's
+files open is ROOT's, the one named PROJECT on a tie, else the first."
+  (let ((names (cl-remove-if-not
+                (lambda (name) (harness-ui--workspace-of-project-p name root project))
+                (cons project (remove project (+workspace-list-names))))))
+    (if (cdr names)
+        (let ((files (mapcar (lambda (name) (harness-ui--workspace-files name root)) names)))
+          (nth (cl-position (apply #'max files) files) names))
+      (car names))))
+
+(defun harness-ui--workspace-blank-p ()
+  "Non-nil when the selected frame shows nothing but Doom's fallback buffer.
+That is a workspace just made: one window, on Doom's dashboard or
+scratch buffer."
+  (let ((windows (window-list nil 'never)))
+    (and (null (cdr windows))
+         (boundp 'doom-fallback-buffer-name)
+         (equal (buffer-name (window-buffer (car windows))) doom-fallback-buffer-name))))
+
 (defun harness-ui-switch-project-workspace (root)
   "Switch to the workspace of the project at ROOT, if there are workspaces.
-That is Doom Emacs's workspaces, on with `persp-mode': the project's
-workspace becomes current, made when it has none, as switching project
-makes it, but without asking for a file to open.  Return non-nil when
-the workspace changed.  Without workspaces this does nothing: a buffer
-belongs to no project.  Nor does a ROOT that is no project, a scratch
-directory say, which would only get a workspace of its own."
+That is Doom Emacs's workspaces, on with `persp-mode'.  The project's
+workspace is the one named after the project, or one noting ROOT as
+its project (see `harness-ui--project-workspace'), and switching to it
+brings back the windows and buffers left in it.  A project with none
+gets one, as switching project makes it, but without asking for a file
+to open.  Return nil when the project's workspace is current already,
+`blank' when the workspace switched to shows nothing yet but Doom's
+fallback buffer, as a new one does, and t otherwise.  Without
+workspaces this does nothing: a buffer belongs to no project.  Nor does
+a ROOT that is no project, a scratch directory say, which would only
+get a workspace of its own."
   (when (and (bound-and-true-p persp-mode)
              (fboundp '+workspaces-switch-to-project-h)
              (fboundp '+workspace-current-name)
+             (fboundp '+workspace-list-names)
+             (fboundp '+workspace-get)
+             (fboundp '+workspace-buffer-list)
+             (fboundp '+workspace-switch)
+             (fboundp 'persp-parameter)
              (fboundp 'doom-project-name)
              (fboundp 'doom-project-p)
-             (doom-project-p root)
-             (not (equal (+workspace-current-name) (doom-project-name root))))
-    (let ((+workspaces-switch-project-function #'ignore))
-      (+workspaces-switch-to-project-h root))
-    t))
+             (doom-project-p root))
+    (let ((name (harness-ui--project-workspace root (doom-project-name root))))
+      (unless (and name (equal name (+workspace-current-name)))
+        (if name
+            (progn
+              (+workspace-switch name)
+              (when (fboundp '+workspace-message)
+                (+workspace-message (format "Switched to '%s'" name) 'success)))
+          (let ((+workspaces-switch-project-function #'ignore))
+            (+workspaces-switch-to-project-h root)))
+        (if (harness-ui--workspace-blank-p) 'blank t)))))
 
 (defun harness-ui-session-project (session)
   "Return the main checkout of SESSION's project, or nil.
@@ -2049,14 +2370,19 @@ project's workspace, after a switch -- that shows it already is
 selected, and otherwise it opens in POSITION.  POSITION defaults to the
 current buffer's own, as `harness-ui-session-opener' has it, and after a
 switch, which leaves the current buffer's window behind, to where
-sessions open (`harness-ui-default-position')."
+sessions open (`harness-ui-default-position'), beside the windows of
+the project's workspace; a workspace showing nothing yet, a new one,
+has its window taken instead (`full')."
   (unless harness-ui-open-session-function
     (user-error "No chat module loaded"))
   (let* ((here (or position
                    (and (harness-ui--fullscreen-layout) 'fullscreen)
                    harness-ui-position
                    harness-ui-default-position))
-         (position (if (harness-ui-switch-to-session-project id) position here))
+         (switched (harness-ui-switch-to-session-project id))
+         (position (cond ((null switched) here)
+                         (position)
+                         ((eq switched 'blank) 'full)))
          (buffer (funcall harness-ui-open-session-function id))
          (window (get-buffer-window buffer)))
     (if (window-live-p window)
@@ -2427,7 +2753,8 @@ names who it applies to (\"for new tasks\" without one)."
 (defun harness-ui-choose-model (callback)
   "Prompt for a model from the catalogue and call CALLBACK with (ID LABEL).
 The catalogue is refreshed first, so a provider that just became
-available is offered."
+available is offered.  An empty answer chooses nothing: CALLBACK is
+not called."
   (harness-ui-refresh-models
    (lambda (models)
      (let* ((labels (mapcar (lambda (m) (harness-ui-model-label (plist-get m :id))) models))
@@ -2448,8 +2775,13 @@ available is offered."
                                (if-let* ((p (plist-get m :pricing)))
                                    (format " · $%s/$%s per M" (plist-get p :input) (plist-get p :output))
                                  ""))))))
-            (choice (completing-read "Model: " table nil t)))
-       (funcall callback (plist-get (cdr (assoc choice table)) :id) choice)))))
+            (choice (completing-read "Model: " table nil t))
+            (model (cdr (assoc choice table))))
+       ;; A required match still lets an empty answer through, which
+       ;; names no model: switching to it would clear every model.
+       (if (not model)
+           (message "No model chosen")
+         (funcall callback (plist-get model :id) choice))))))
 
 ;;;; Switching models, and handing conversations over
 
@@ -2742,53 +3074,186 @@ offers to hand it over; see `harness-ui-switch-model'."
            (harness-ui-switch-model target id label)
          (harness-ui--setting-set target :model id (format "Model → %s" label)))))))
 
+;; The commands that change every current session and task at once
+;; (`harness-set-model-all', `harness-set-thinking-all',
+;; `harness-set-non-interactive-all') share what follows.
+
+(defvar harness-ui-set-all-functions nil
+  "Functions called with KEY and VALUE when a command sets KEY everywhere.
+`harness-set-model-all', `harness-set-thinking-all' and
+`harness-set-non-interactive-all' change every current session and
+task, and run these so that what starts later takes the change too:
+KEY is `:model', `:thinking' or `:non-interactive', and VALUE the new
+value, t or nil for `:non-interactive'.  Each function returns the
+directories it changed something for, a list, where the command looks
+for a .dir-locals.el that overrides the new default.  The task board
+sets the new-task settings of every open board.")
+
+(defun harness-ui--set-everywhere (key value)
+  "Run `harness-ui-set-all-functions' with KEY and VALUE.
+Return the directories they changed something for.  A function that
+fails is logged and the others still run."
+  (let ((dirs nil))
+    (run-hook-wrapped 'harness-ui-set-all-functions
+                      (lambda (fn)
+                        (condition-case err
+                            (setq dirs (append dirs (funcall fn key value)))
+                          (error (harness-log 'warn "%s for %s failed: %s" fn key (error-message-string err))))
+                        nil))
+    (delete-dups (cl-remove-if-not #'stringp dirs))))
+
+(defun harness-ui--everything-filter ()
+  "Return the `session/set-all' filter of the commands that change everything.
+Every active session (idle, running or blocked) of every project, and
+the session of every current task whatever its status: a task's session
+may be closed, after a restart say, and still be where the task goes
+on.  Inactive sessions of no current task are history."
+  (list :active t :tasks t))
+
+(defun harness-ui--count (n word)
+  "Return N WORDs, as \"1 session\" or \"2 sessions\"."
+  (format "%d %s%s" n word (if (= n 1) "" "s")))
+
+(defun harness-ui--changed-text (sessions tasks)
+  "Return how many SESSIONS and TASKS, lists of ids, changed."
+  (format "%s and %s" (harness-ui--count (length sessions) "session")
+          (harness-ui--count (length tasks) "task")))
+
+(defun harness-ui--new-work-text (no-default boards)
+  "Return what else an all-sessions command changed, as a clause.
+NO-DEFAULT is non-nil when the default for new sessions stayed as it
+was; BOARDS when the open task boards' next tasks changed."
+  (cond ((and (not no-default) boards) ", and for new sessions and the open boards' new tasks")
+        ((not no-default) ", and for new sessions")
+        (boards ", and for the open boards' new tasks")
+        (t "")))
+
+(defun harness-ui--overrides-text (overrides show)
+  "Return what keeps the new default in OVERRIDES from applying, or nil.
+OVERRIDES is what `config/overrides' returned: the .dir-locals.el files
+of the projects at work that set the key otherwise, and the task
+default that wins over it.  SHOW turns a value into what new sessions
+do with it, such as \"start on Opus\".  Nothing is changed: the user
+decides, in `harness-settings' or in the files."
+  (let* ((key (plist-get overrides :key))
+         (value (lambda (printed)
+                  (funcall show (and (stringp printed)
+                                     (ignore-errors (car (read-from-string printed)))))))
+         (parts (append
+                 (mapcar (lambda (f)
+                           (format "new sessions in %s %s (%s in %s)"
+                                   (if (equal (plist-get f :scope) "directory")
+                                       (abbreviate-file-name (plist-get f :dir))
+                                     (or (plist-get f :project) (abbreviate-file-name (plist-get f :dir))))
+                                   (funcall value (plist-get f :value))
+                                   key (abbreviate-file-name (plist-get f :file))))
+                         (plist-get overrides :files))
+                 (when-let* ((tasks (plist-get overrides :tasks)))
+                   (list (format "new tasks %s (%s)" (funcall value (plist-get tasks :value))
+                                 (plist-get tasks :option)))))))
+    (when parts
+      (format "But %s; M-x harness-settings changes them." (string-join parts ", ")))))
+
+(defun harness-ui--report-all (text key value overrides dirs show)
+  "Say TEXT, followed by what keeps VALUE of KEY from applying to new work.
+KEY is the setting's name and VALUE the value just set everywhere.
+Unless OVERRIDES is nil, TEXT goes on with the projects at work, and
+those of DIRS besides (the open boards'), whose .dir-locals.el has
+new sessions start otherwise, and the task default that has new tasks
+do so (see `config/overrides'); SHOW is as for
+`harness-ui--overrides-text'.  A harness without `config/overrides'
+says TEXT alone."
+  (if (not overrides)
+      (message "%s" text)
+    (harness-ui-call "_harness/config/overrides"
+                     (list :key key :value (prin1-to-string value) :printed t :dirs dirs)
+                     (lambda (found)
+                       (let ((more (harness-ui--overrides-text found show)))
+                         (message "%s%s" text (if more (concat ".  " more) ""))))
+                     (lambda (_err) (message "%s" text) nil))))
+
+(defun harness-ui--apply-everywhere (settings callback)
+  "Apply SETTINGS to every current session and task, then call CALLBACK.
+The sessions first (`session/set-all' with
+`harness-ui--everything-filter'), then the records of the current tasks
+of every project (`task/set-all'), which their next start uses; a task
+session changed already is not changed, nor told, a second time.
+CALLBACK gets the ids of the sessions and of the tasks that changed."
+  (harness-ui-call "_harness/session/set-all"
+                   (list :settings settings :filter (harness-ui--everything-filter))
+                   (lambda (sessions)
+                     (harness-ui-call "_harness/task/set-all" (list :settings settings)
+                                      (lambda (tasks) (funcall callback sessions tasks))
+                                      ;; A harness without task mode has sessions only.
+                                      (lambda (_err) (funcall callback sessions nil) nil)))))
+
 (defun harness-ui--switch-all (model label mode no-default)
-  "Switch every current session to MODEL, shown as LABEL.
+  "Switch every current session and task to MODEL, shown as LABEL.
 MODE is how the sessions that would lose their conversation hand it
-over (see `handoff/switch'); `none' just switches them all.  The model
-becomes the default for new sessions too, unless NO-DEFAULT."
+over (see `handoff/switch'); `none' just switches them all.  The
+sessions switch first, task sessions included (see
+`harness-ui--everything-filter'), so none escapes the handoff; then the
+current tasks' records take MODEL, which their sessions have already.
+The model becomes the default for new sessions too, and of the open
+boards' new tasks, unless NO-DEFAULT; then what still overrides the
+default is said."
   (unless no-default
     (harness-ui-call "_harness/config/set"
                      (list :key "harness-model" :value model :scope "global")
                      (lambda (_) nil)))
-  (let ((done (lambda (ids)
-                (message "Model → %s for %s session%s%s%s"
-                         label (length ids) (if (= 1 (length ids)) "" "s")
-                         (pcase mode
-                           ('compact ", summarising the conversations that need it first")
-                           ('compact-new ", letting the new model summarise a limited context where needed")
-                           ('transcript ", handing the transcripts over where needed")
-                           (_ ""))
-                         (if no-default "" ", and for new sessions")))))
+  (let* ((dirs (unless no-default (harness-ui--set-everywhere :model model)))
+         (done (lambda (sessions)
+                 (harness-ui-call
+                  "_harness/task/set-all" (list :settings (list :model model))
+                  (lambda (tasks)
+                    (harness-ui--report-all
+                     (format "Model → %s for %s%s%s" label (harness-ui--changed-text sessions tasks)
+                             (pcase mode
+                               ('compact ", summarising the conversations that need it first")
+                               ('compact-new ", letting the new model summarise a limited context where needed")
+                               ('transcript ", handing the transcripts over where needed")
+                               (_ ""))
+                             (harness-ui--new-work-text no-default dirs))
+                     "harness-model" model (not no-default) dirs
+                     (lambda (m) (format "start on %s" (harness-ui-model-label m)))))
+                  (lambda (_err) (message "Model → %s for %s" label
+                                          (harness-ui--count (length sessions) "session"))
+                    nil)))))
     (if (eq mode 'none)
         (harness-ui-call "_harness/session/set-all"
-                         (list :settings (list :model model) :filter (list :active t))
+                         (list :settings (list :model model) :filter (harness-ui--everything-filter))
                          done)
       (harness-ui-call "_harness/handoff/switch-all"
-                       (list :model model :filter (list :active t) :mode (symbol-name mode))
+                       (list :model model :filter (harness-ui--everything-filter) :mode (symbol-name mode))
                        done))))
 
 ;;;###autoload
 (defun harness-set-model-all (&optional no-default)
-  "Choose a model and switch every current session to it.
-The choice also becomes the default for new sessions, unless a prefix
-argument says otherwise.  Use this when a plan runs out, a provider
+  "Choose a model and switch every current session and task to it.
+The choice also becomes the default for new sessions, and the model of
+the open task boards' new tasks, unless NO-DEFAULT, the prefix
+argument, says otherwise.  Use this when a plan runs out, a provider
 fails, or a cheaper model should take over work already in flight.
 Idle, running and blocked sessions of every project change, each
-recording it as a hint; inactive ones are history and are left alone,
-and no running turn is cancelled: it takes the new model at its next
-step.  When the switch would lose sessions their conversation (see
+recording it as a hint, and so do the current tasks of every project
+\(running, pending and blocked) and their sessions, even a closed one;
+other inactive sessions are history and are left alone, and no running
+turn is cancelled: it takes the new model at its next step.  When the
+switch would lose sessions their conversation (see
 `harness-ui-switch-model'), it asks once for all of them, and the
 handoff chosen applies to each of them.  A session keeps its provider
 state until another provider runs a step in it, so switching back before
-then resumes its conversation."
+then resumes its conversation.  Once the default changed, it says which
+projects still start otherwise, because their .dir-locals.el sets
+`harness-model', and whether `harness-tasks-model' does for tasks; it
+changes neither."
   (interactive "P")
   ;; The chat the command runs in, for the banner to show in.
   (let ((host (and (derived-mode-p 'harness-chat-mode) (current-buffer))))
     (harness-ui-choose-model
      (lambda (id label)
        (harness-ui-call
-        "_harness/handoff/check-all" (list :model id :filter (list :active t))
+        "_harness/handoff/check-all" (list :model id :filter (harness-ui--everything-filter))
         (lambda (checks)
           (let ((lossy (cl-remove-if-not (lambda (c) (harness-json-true-p (plist-get c :lossy))) checks)))
             (if (null lossy)
@@ -2824,7 +3289,8 @@ offers the common levels."
 (defun harness-ui-choose-thinking (callback &optional model)
   "Prompt for a thinking level and call CALLBACK with (VALUE LABEL).
 VALUE is nil for the model default.  MODEL names the levels offered;
-without one the common levels are."
+without one the common levels are.  An empty answer chooses nothing:
+CALLBACK is not called."
   (let ((choose (lambda (levels)
                   (let* ((levels (cons "default" (harness-ui--thinking-levels-for levels)))
                          (collection (lambda (string pred action)
@@ -2834,7 +3300,11 @@ without one the common levels are."
                                                       (cycle-sort-function . identity))
                                          (complete-with-action action levels string pred))))
                          (choice (completing-read "Thinking: " collection nil t)))
-                    (funcall callback (unless (equal choice "default") choice) choice)))))
+                    ;; A required match still lets an empty answer
+                    ;; through, which is no level.
+                    (if (string-empty-p choice)
+                        (message "No thinking level chosen")
+                      (funcall callback (unless (equal choice "default") choice) choice))))))
     (if (null model)
         (funcall choose nil)
       (harness-ui-call "_harness/provider/model" (list :model-id model)
@@ -2853,10 +3323,16 @@ without one the common levels are."
 
 ;;;###autoload
 (defun harness-set-thinking-all (&optional no-default)
-  "Choose a thinking level and set it on every current session.
-Idle, running and blocked sessions of every project change; inactive
-ones are history and are left alone.  The level also becomes the
-default for new sessions, unless a prefix argument says otherwise."
+  "Choose a thinking level and set it on every current session and task.
+Idle, running and blocked sessions of every project change, and so do
+the current tasks of every project (running, pending and blocked) and
+their sessions, even a closed one; other inactive sessions are history
+and are left alone.  The level also becomes the default for new
+sessions, and the level of the open task boards' new tasks, unless
+NO-DEFAULT, the prefix argument, says otherwise.  Once the default
+changed, it says which projects still start otherwise, because their
+.dir-locals.el sets `harness-thinking', and whether
+`harness-tasks-thinking' does for tasks; it changes neither."
   (interactive "P")
   (harness-ui-choose-thinking
    (lambda (value label)
@@ -2865,12 +3341,69 @@ default for new sessions, unless a prefix argument says otherwise."
                         (list :key "harness-thinking" :value (prin1-to-string value)
                               :printed t :scope "global")
                         (lambda (_) nil)))
-     (harness-ui-call "_harness/session/set-all"
-                      (list :settings (list :thinking value) :filter (list :active t))
-                      (lambda (ids)
-                        (message "Thinking → %s for %s session%s%s"
-                                 label (length ids) (if (= 1 (length ids)) "" "s")
-                                 (if no-default "" ", and for new sessions")))))))
+     (let ((dirs (unless no-default (harness-ui--set-everywhere :thinking value))))
+       (harness-ui--apply-everywhere
+        (list :thinking value)
+        (lambda (sessions tasks)
+          (harness-ui--report-all
+           (format "Thinking → %s for %s%s" label (harness-ui--changed-text sessions tasks)
+                   (harness-ui--new-work-text no-default dirs))
+           "harness-thinking" value (not no-default) dirs
+           (lambda (level) (format "think at %s" (or level "the model's default"))))))))))
+
+;;;###autoload
+(defun harness-set-non-interactive-all (&optional no-default)
+  "Turn non-interactive mode on or off for everything at once.
+It asks which, offering on first, and changes every active session
+\(idle, running or blocked) of every project, every current task of
+every project (running, pending or blocked) and its session, even a
+closed one, and the new-task settings of every open task board.  It
+becomes the default for new sessions too, unless NO-DEFAULT, the
+prefix argument, says otherwise.  It reports how many sessions and
+tasks changed: those that had the mode already are left alone.  When
+it turns the mode off, or changes the default, it also says what still
+has new work start otherwise: a project whose .dir-locals.el sets
+`harness-non-interactive', and `harness-tasks-non-interactive' when it
+still turns new tasks on; it changes neither.
+Use it on leaving, so that no session waits for you, and on coming
+back.  A non-interactive session never waits for the user: the
+auto-mode judge decides what would ask you, prompts already waiting
+included, and after a denial the agent is told to find another way;
+only directories are still yours to grant.  See
+`harness-toggle-non-interactive' for one session."
+  (interactive "P")
+  (let* ((choices '("on" "off"))
+         (choice (completing-read "Non-interactive mode for every session and task: "
+                                  (lambda (string pred action)
+                                    ;; On first, as offered.
+                                    (if (eq action 'metadata)
+                                        '(metadata (display-sort-function . identity)
+                                                   (cycle-sort-function . identity))
+                                      (complete-with-action action choices string pred)))
+                                  nil t nil nil "on"))
+         (on (not (equal choice "off"))))
+    (let ((dirs (harness-ui--set-everywhere :non-interactive on)))
+      (harness-ui--apply-everywhere
+       (list :non-interactive (if on t :false))
+       (lambda (sessions tasks)
+         ;; The default last: a task with no setting of its own follows
+         ;; it, so the tasks are compared with how they would have
+         ;; started, and get the setting for good.
+         (unless no-default
+           (harness-ui-call "_harness/config/set"
+                            (list :key "harness-non-interactive" :value (prin1-to-string on)
+                                  :printed t :scope "global")
+                            (lambda (_) nil)))
+         (harness-ui--report-all
+          (format "Non-interactive %s for %s%s" (if on "on" "off")
+                  (harness-ui--changed-text sessions tasks)
+                  (harness-ui--new-work-text no-default dirs))
+          "harness-non-interactive" on
+          ;; Turning it off says what still turns it on, whatever the
+          ;; default; turning it on, what keeps the new default off.
+          (or (not on) (not no-default))
+          dirs
+          (lambda (v) (if (harness-json-true-p v) "start non-interactive" "start interactive"))))))))
 
 ;;;###autoload
 (defun harness-set-permission-mode (&optional session-id)
@@ -2930,6 +3463,59 @@ either the command asks for a session, so the label has no state."
   (interactive (list (read-string "Session name: ")))
   (harness-ui-call "_harness/session/update" (list :id (or session-id (harness-ui-current-session-id)) :name name)
                    (lambda (_) (message "Renamed to %s" name))))
+
+(defun harness-ui-read-move-directory (session)
+  "Read the directory to move SESSION, a session plist, to.
+Completion starts in the directory that holds its working directory,
+where a sibling project is.  A remote session's directory is read as
+text, a path on its host, so that no TRAMP connection is opened."
+  (let ((cwd (plist-get session :cwd))
+        (prompt (format "Move %s to directory: " (harness-ui-session-label session))))
+    (if (or (plist-get session :host) (and cwd (file-remote-p cwd)))
+        (read-string prompt (and cwd (file-local-name cwd)))
+      (read-directory-name prompt (and cwd (file-name-directory (directory-file-name cwd))) nil t))))
+
+;;;###autoload
+(defun harness-move-session (directory &optional session-id keep-old)
+  "Move SESSION-ID to the working directory DIRECTORY, and to its project.
+For a session started in one place that works on another: it works in
+DIRECTORY from then on, and the session list shows it under
+DIRECTORY's project.  Interactively it is the current buffer's session,
+or one you choose, and with a prefix argument KEEP-OLD its old working
+directory stays allowed to it.  A session running a turn moves when the
+turn ends.  Its next turn starts a new provider conversation in
+DIRECTORY, which gets the transcript.  The harness refuses sessions in
+worktrees, task sessions and sessions merges are queued into."
+  (interactive
+   (let ((sid (harness-ui-current-session-id)))
+     (list (harness-ui-read-move-directory (harness-ui-session sid)) sid current-prefix-arg)))
+  (let* ((sid (or session-id (harness-ui-current-session-id)))
+         (session (harness-ui-session sid))
+         (remote (or (plist-get session :host) (file-remote-p (or (plist-get session :cwd) ""))))
+         ;; A remote session's path is one on its host, for the harness to
+         ;; resolve; a local one is rooted here, as for a new session.
+         (dir (if (or (not remote) (file-remote-p directory))
+                  (file-name-as-directory (expand-file-name directory))
+                directory))
+         (label (if session (harness-ui-session-label session) (substring sid 0 (min 8 (length sid))))))
+    (harness-ui-call "_harness/session/move"
+                     (append (list :id sid :dir dir :keep-old-dir (if keep-old t :false))
+                             (and (not remote) (list :project (harness-files-project-root dir))))
+                     (lambda (result)
+                       (harness-ui-cache-session result)
+                       (let ((move (plist-get result :move)))
+                         (message (cond (move "%s moves to %s when its turn ends")
+                                        ((equal (plist-get result :cwd) (plist-get session :cwd))
+                                         "%s stays in %s: the move it waited to make is cancelled")
+                                        (t "Moved %s to %s"))
+                                  label (abbreviate-file-name (or (plist-get move :cwd) (plist-get result :cwd) dir)))))
+                     (lambda (e)
+                       (unless (harness-ui-connection-replaced-p e)
+                         (message "Not moved: %s" (harness-error-message e)))
+                       nil))))
+
+;;;###autoload
+(defalias 'harness-session-move #'harness-move-session)
 
 ;;;###autoload
 (defun harness-fork-session (&optional session-id position)
@@ -2992,7 +3578,10 @@ either the command asks for a session, so the label has no state."
 ;; At top level, not in the `defvar', so a reload binds them in a running
 ;; Emacs too.
 (define-key harness-ui-map (kbd "i") #'harness-toggle-non-interactive)
+;; I is i for every session, as M is m.
+(define-key harness-ui-map (kbd "I") #'harness-set-non-interactive-all)
 (define-key harness-ui-map (kbd "F") #'harness-fullscreen)
+(define-key harness-ui-map (kbd "W") #'harness-move-session)
 
 (defvar harness-global-mode-map (make-sparse-keymap)
   "Keymap of `harness-global-mode': `harness-ui-map' under `harness-ui-prefix-key'.")
@@ -3282,10 +3871,12 @@ leaves the buffer's commands out, never the whole menu."
     ("p" "Permission mode" harness-set-permission-mode)
     ("d" "Directory access" harness-directories :if (lambda () (harness-ui--command-available-p 'harness-directories)))
     ("i" (lambda () (harness-ui--non-interactive-menu-label)) harness-toggle-non-interactive)
-    ("r" "Rename" harness-rename-session)]
+    ("I" "Non-interactive for all sessions" harness-set-non-interactive-all)
+    ("r" "Rename" harness-rename-session)
+    ("W" "Move to another directory" harness-move-session)]
    ["Tools"
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
-    ("I" "Insights" harness-insights :if (lambda () (harness-ui--command-available-p 'harness-insights)))
+    ("A" "Insights" harness-insights :if (lambda () (harness-ui--command-available-p 'harness-insights)))
     ("B" "Delete budget" harness-delete-budget :if (lambda () (harness-ui--command-available-p 'harness-delete-budget)))
     ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
     ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))

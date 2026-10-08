@@ -50,6 +50,13 @@
 ;; over the seconds the agent's activity spent streaming them (see
 ;; "Output rate" below).  They are measured here, in the harness, and
 ;; kept in memory; `usage/rate-updated' announces each new one.
+;;
+;; Live usage lets a running session's token figures, its context and
+;; its output, grow while its model streams: what streamed since the
+;; provider last reported usage is estimated, and each report replaces
+;; the estimate with real numbers (see "Live usage" below).  That too is
+;; counted here, in memory; `usage/live-updated' announces the figures
+;; a few times a second at most.
 
 ;;; Code:
 
@@ -607,11 +614,15 @@ is not measured if the turn's calls already reported their own usage."
 
 (defun harness-usage--on-call-usage (sid usage)
   "Measure a model call of SID's hosted turn: USAGE says what it wrote.
-`agent/call-usage' handler.  USAGE is a plist with `:output'."
-  (let ((seconds (harness-usage--take-seconds sid))
-        (meter (harness-usage--meter sid)))
-    (setf (plist-get meter :reported) t)
-    (harness-usage--measure sid (plist-get usage :output) seconds)))
+`agent/call-usage' handler.  USAGE is a plist with `:output'.  A report
+of no output, such as the one a call sends as it starts with the size
+of its prompt, measures nothing and leaves the meter running."
+  (let ((output (plist-get usage :output)))
+    (when (and (numberp output) (> output 0))
+      (let ((seconds (harness-usage--take-seconds sid))
+            (meter (harness-usage--meter sid)))
+        (setf (plist-get meter :reported) t)
+        (harness-usage--measure sid output seconds)))))
 
 (defun harness-usage--forget-rate (sid &rest _)
   "Forget the meter and the output rate of SID, a session that was deleted."
@@ -644,6 +655,253 @@ Each is what `usage/rate' returns for the session, with `:session' added."
   (harness-on 'agent/call-usage #'harness-usage--on-call-usage)
   (harness-on 'session/usage #'harness-usage--on-usage-rate)
   (harness-on 'session/deleted #'harness-usage--forget-rate))
+
+;;;; Live usage
+
+;; A running session's token figures grow while its model streams, not
+;; only when its provider reports usage.  Between reports the tokens
+;; are estimated from what streams in: the text and thinking of
+;; `agent/stream', a token for every four characters; the input of tool
+;; calls, as their `tool-input' activity counts its characters; and
+;; thinking whose text the provider does not stream (Claude Code's),
+;; from how long it lasts at the session's output rate.  Each report
+;; replaces the estimate with real numbers, so nothing counts twice: a
+;; hosted loop's `agent/call-usage' gives the output of a model call,
+;; and with `:context' the size of the prompt it was sent, and a
+;; `session/usage' record gives the session's totals.  The context is
+;; the latest prompt measured plus the output written since, which the
+;; next request sends back; once recorded it is the totals' `:context'
+;; plus their `:last-output', so it does not drop when the turn ends.
+;; The figures are announced as `usage/live-updated', at most every
+;; `harness-usage-live-interval' seconds a session, and as nil once the
+;; turn ended.  All of it is in memory, here in the harness.
+
+(defcustom harness-usage-live-interval 0.25
+  "Least seconds between two announcements of a session's live token figures.
+While a session's model streams, its token figures grow with what
+streams in; `usage/live-updated' announces them no more often than
+this, so the views redraw a few times a second at most."
+  :type 'number :group 'harness)
+
+(defconst harness-usage--thinking-rate 40.0
+  "Tokens per second counted for thinking whose text does not stream.
+That is until the session's output rate is measured, which counts then.")
+
+(defvar harness-usage--live (make-hash-table :test 'equal)
+  "Session id -> the live token count of its running turn, a plist.
+`:output' is the session's real output so far, `:prompt' the size of
+the latest prompt a report measured and `:after' the real output since
+that prompt.  What streamed since the last report is estimated from
+`:chars', the characters of text, thinking and tool input, and
+`:thought', the tokens of thinking without text; `:thinking' is when
+the thinking without text now open began, and `:tools' how many
+characters of each tool's input are counted.  `:last' holds the
+figures announced last, `:sent' when, and `:timer' the announcement
+held back until the interval is up.")
+
+(defun harness-usage--live-state (usage)
+  "Return a live count starting from a session's USAGE totals."
+  (list :output (harness-usage--int (plist-get usage :output))
+        :prompt (harness-usage--int (plist-get usage :context))
+        :after (harness-usage--int (plist-get usage :last-output))
+        :chars 0 :thought 0.0 :thinking nil :tools nil
+        :last nil :sent nil :timer nil))
+
+(defun harness-usage--thinking-speed (sid)
+  "Return the tokens per second SID's thinking without text counts at.
+That is SID's output rate, else `harness-usage--thinking-rate'."
+  (let ((rate (plist-get (gethash sid harness-usage--rates) :rate)))
+    (if (and (numberp rate) (> rate 0)) rate harness-usage--thinking-rate)))
+
+(defun harness-usage--live-estimate (sid state now)
+  "Return the tokens session SID streamed since its last report, at NOW.
+STATE is its live count; the estimate is what it does not know yet."
+  (let ((since (plist-get state :thinking)))
+    (+ (ceiling (plist-get state :chars) 4)
+       (round (+ (plist-get state :thought)
+                 (if since (* (max 0.0 (- now since)) (harness-usage--thinking-speed sid)) 0.0))))))
+
+(defun harness-usage--live-figures (sid state now)
+  "Return the token figures of SID's live count STATE at NOW (see `usage/live')."
+  (let ((estimate (harness-usage--live-estimate sid state now)))
+    (list :context (+ (plist-get state :prompt) (plist-get state :after) estimate)
+          :output (+ (plist-get state :output) estimate)
+          :estimated estimate)))
+
+(defun harness-usage--live-stop-thinking (sid state now)
+  "Count the thinking without text that SID's live count STATE has open.
+It is counted up to NOW, when it ends or its text starts to stream."
+  (when-let* ((since (plist-get state :thinking)))
+    (setf (plist-get state :thought)
+          (+ (plist-get state :thought) (* (max 0.0 (- now since)) (harness-usage--thinking-speed sid)))
+          (plist-get state :thinking) nil)))
+
+(defun harness-usage--live-reported (state)
+  "Drop the estimate of live count STATE: a report counted all that streamed.
+Thinking without text that goes on is counted afresh from now."
+  (setf (plist-get state :chars) 0
+        (plist-get state :thought) 0.0)
+  (when (plist-get state :thinking)
+    (setf (plist-get state :thinking) (float-time))))
+
+(defun harness-usage--live-announce (sid)
+  "Announce the live figures of session SID, unless they are unchanged.
+While SID thinks without streaming text its figures grow with time
+alone, so the next announcement is due an interval later."
+  (when-let* ((state (gethash sid harness-usage--live)))
+    (when-let* ((timer (plist-get state :timer)))
+      (cancel-timer timer)
+      (setf (plist-get state :timer) nil))
+    (let* ((now (float-time))
+           (live (harness-usage--live-figures sid state now)))
+      (unless (equal live (plist-get state :last))
+        (setf (plist-get state :last) live
+              (plist-get state :sent) now)
+        (harness-emit 'usage/live-updated sid live))
+      (when (plist-get state :thinking)
+        (setf (plist-get state :timer)
+              (run-at-time (max 0.05 harness-usage-live-interval) nil #'harness-usage--live-tick sid))))))
+
+(defun harness-usage--live-tick (sid)
+  "Announce the live figures of session SID that were held back."
+  (when-let* ((state (gethash sid harness-usage--live)))
+    (setf (plist-get state :timer) nil)
+    (harness-usage--live-announce sid)))
+
+(defun harness-usage--live-changed (sid)
+  "Announce SID's live figures now, or once `harness-usage-live-interval' is up.
+Changes within the interval go out together, when it is up."
+  (when-let* ((state (gethash sid harness-usage--live)))
+    (unless (plist-get state :timer)
+      (let* ((sent (plist-get state :sent))
+             (wait (if sent (- (+ sent harness-usage-live-interval) (float-time)) 0)))
+        (if (<= wait 0)
+            (harness-usage--live-announce sid)
+          (setf (plist-get state :timer)
+                (run-at-time wait nil #'harness-usage--live-tick sid)))))))
+
+(defun harness-usage--live-forget (sid &rest _)
+  "Forget the live count of session SID and any announcement it held back."
+  (when-let* ((state (gethash sid harness-usage--live)))
+    (when-let* ((timer (plist-get state :timer)))
+      (cancel-timer timer))
+    (remhash sid harness-usage--live)))
+
+(defun harness-usage--live-start (sid &rest _)
+  "Count the tokens of session SID live from its totals: its turn started.
+`agent/turn-started' handler."
+  (when (harness-call 'session/exists-p sid)
+    (harness-usage--live-forget sid)
+    (puthash sid (harness-usage--live-state (plist-get (harness-call 'session/get sid) :usage))
+             harness-usage--live)
+    (harness-usage--live-changed sid)))
+
+(defun harness-usage--live-end (sid &rest _)
+  "Stop counting the tokens of session SID live: its turn ended.
+`agent/turn-ended' handler.  Figures held back go out first; then nil
+says that the session's totals count the same."
+  (when (gethash sid harness-usage--live)
+    (harness-usage--live-announce sid)
+    (harness-usage--live-forget sid)
+    (harness-emit 'usage/live-updated sid nil)))
+
+(defun harness-usage--live-on-stream (sid _node-id kind delta)
+  "Count DELTA, text or thinking (KIND) that SID's model streamed.
+`agent/stream' handler.  Thinking text that starts to stream ends the
+count of thinking by the clock: its characters count from then on."
+  (when-let* ((state (gethash sid harness-usage--live)))
+    (when (and (stringp delta) (not (string-empty-p delta)))
+      (when (eq kind 'thinking)
+        (harness-usage--live-stop-thinking sid state (float-time)))
+      (setf (plist-get state :chars) (+ (plist-get state :chars) (length delta)))
+      (harness-usage--live-changed sid))))
+
+(defun harness-usage--live-on-activity (sid activity)
+  "Count what SID's turn does that streams no text: thinking, tool input.
+`agent/activity-changed' handler; ACTIVITY nil means the turn ended.
+Thinking counts by the clock until its text streams, if ever.  A tool
+call's input counts the characters its `tool-input' activity adds,
+per tool: a count lower than the one seen is a new call's."
+  (when-let* ((state (gethash sid harness-usage--live)))
+    (let ((phase (plist-get activity :phase))
+          (now (float-time)))
+      (if (eq phase 'thinking)
+          (unless (plist-get state :thinking)
+            (setf (plist-get state :thinking) now))
+        (harness-usage--live-stop-thinking sid state now))
+      (if (not (eq phase 'tool-input))
+          (setf (plist-get state :tools) nil)
+        (let ((chars (plist-get activity :chars))
+              (tool (plist-get activity :tool)))
+          (when (and (numberp chars) (>= chars 0))
+            (let* ((tools (plist-get state :tools))
+                   (cell (assoc tool tools))
+                   (seen (cdr cell)))
+              (setf (plist-get state :chars)
+                    (+ (plist-get state :chars) (if (and seen (>= chars seen)) (- chars seen) chars)))
+              (if cell
+                  (setcdr cell chars)
+                (setf (plist-get state :tools) (cons (cons tool chars) tools)))))))
+      (when activity
+        (harness-usage--live-changed sid)))))
+
+(defun harness-usage--live-on-call-usage (sid usage)
+  "Count a model call of SID's hosted turn as its USAGE reports it.
+`agent/call-usage' handler.  USAGE's `:output' replaces the estimate of
+what streamed since the last report; its `:context', when there, is the
+size of the prompt the call was sent, which the output follows."
+  (when-let* ((state (gethash sid harness-usage--live)))
+    (let ((output (harness-usage--int (plist-get usage :output)))
+          (context (plist-get usage :context)))
+      (setf (plist-get state :output) (+ (plist-get state :output) output))
+      (if (numberp context)
+          (setf (plist-get state :prompt) (harness-usage--int context)
+                (plist-get state :after) output)
+        (setf (plist-get state :after) (+ (plist-get state :after) output)))
+      (harness-usage--live-reported state)
+      (harness-usage--live-changed sid))))
+
+(defun harness-usage--live-on-usage (id totals _record)
+  "Take session ID's TOTALS, just recorded, as its real live figures.
+`session/usage' handler: the record counts all that streamed so far."
+  (when-let* ((state (gethash id harness-usage--live)))
+    (setf (plist-get state :output) (harness-usage--int (plist-get totals :output))
+          (plist-get state :prompt) (harness-usage--int (plist-get totals :context))
+          (plist-get state :after) (harness-usage--int (plist-get totals :last-output)))
+    (harness-usage--live-reported state)
+    (harness-usage--live-changed id)))
+
+(harness-defmethod usage/live (session-id)
+  "Return the token figures of SESSION-ID while its turn runs, or nil.
+The value is (:context N :output N :estimated N).  OUTPUT counts the
+session's output tokens; CONTEXT the size of its conversation, the
+prompt of the latest request measured plus the output written since.
+Both grow as the model streams: ESTIMATED of their tokens are reckoned
+from what streamed since the provider last reported usage, which each
+report replaces with real numbers.  Every change is announced as
+`usage/live-updated', at most every `harness-usage-live-interval'
+seconds, and nil once the turn ends."
+  (when-let* ((state (gethash session-id harness-usage--live)))
+    (harness-usage--live-figures session-id state (float-time))))
+
+(harness-defmethod usage/live-all ()
+  "Return the live token figures of every running session.
+Each is what `usage/live' returns for the session, with `:session' added."
+  (let ((now (float-time)) (out nil))
+    (maphash (lambda (sid state)
+               (push (append (list :session sid) (harness-usage--live-figures sid state now)) out))
+             harness-usage--live)
+    out))
+
+(defun harness-usage--watch-live ()
+  "Count the tokens of running sessions as they stream (idempotent)."
+  (harness-on 'agent/turn-started #'harness-usage--live-start)
+  (harness-on 'agent/turn-ended #'harness-usage--live-end)
+  (harness-on 'agent/stream #'harness-usage--live-on-stream)
+  (harness-on 'agent/activity-changed #'harness-usage--live-on-activity)
+  (harness-on 'agent/call-usage #'harness-usage--live-on-call-usage)
+  (harness-on 'session/usage #'harness-usage--live-on-usage)
+  (harness-on 'session/deleted #'harness-usage--live-forget))
 
 ;;;; Queries
 
@@ -1442,6 +1700,7 @@ VALUE is the gate so far, NEXT continues the chain, SESSION is the plist."
   (harness-on 'session/usage #'harness-usage--on-session-usage)
   (harness-on 'provider/quota-updated #'harness-usage--on-quota-updated)
   (harness-usage--watch-rates)
+  (harness-usage--watch-live)
   (harness-add-filter 'agent/before-turn #'harness-usage--before-turn 30))
 
 (harness-declare-event 'usage/recorded "(ROW) after a usage row is stored.")
@@ -1450,9 +1709,11 @@ VALUE is the gate so far, NEXT continues the chain, SESSION is the plist."
 (harness-declare-event 'usage/reported-changed
                        "(REPORT) when a provider reports a new amount billed, which budgets over everything count.")
 (harness-declare-event 'usage/rate-updated "(SESSION-ID RATE) after a model call of the session was measured; RATE as `usage/rate' returns it.")
+(harness-declare-event 'usage/live-updated
+                       "(SESSION-ID LIVE) while the session's turn runs, at most every `harness-usage-live-interval' seconds: its token figures as `usage/live' returns them, which grow as its model streams; LIVE is nil once the turn ended.")
 
 (harness-define-module 'usage
-  :doc "Cost accounting, usage summaries, budgets and output rates."
+  :doc "Cost accounting, usage summaries, budgets, output rates and live token counts."
   :requires '(store session provider)
   :init #'harness-usage--init
   :shutdown #'harness-usage--forget-reports)
@@ -1461,7 +1722,8 @@ VALUE is the gate so far, NEXT continues the chain, SESSION is the plist."
 ;; version added (`harness-on' adds a handler once).
 (when (harness-module-ready-p 'usage)
   (harness-on 'provider/quota-updated #'harness-usage--on-quota-updated)
-  (harness-usage--watch-rates))
+  (harness-usage--watch-rates)
+  (harness-usage--watch-live))
 
 (provide 'harness-usage)
 ;;; harness-usage.el ends here
