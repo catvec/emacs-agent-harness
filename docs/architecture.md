@@ -4040,12 +4040,13 @@ and offline this way.
 `spawn_agent` (tools-agent) runs its child on a deliberately shorter
 context window: `harness-subagent-context-limit` (128000 tokens; nil for
 no cap) is the most a sub-agent adds of its own.
-`harness-tools-agent-context-limit PARENT-ID FORK` → the
-`:context-window-limit` for a sub-agent of session PARENT-ID, or nil
-without a cap.  A fresh sub-agent (FORK nil or `:false`) gets the cap
-itself, and a fork the context it inherits (the parent's `:usage`
-`:context` plus `:last-output`, 0 before the parent ran) plus the cap, so
-that it does not compact at once; neither is above the parent's own
+`harness-tools-agent-context-limit PARENT-ID FORK &optional INHERITED`
+→ the `:context-window-limit` for a sub-agent of session PARENT-ID, or
+nil without a cap.  A fresh sub-agent (FORK nil or `:false`) gets the cap
+itself, and a fork the context it inherits (INHERITED when the caller
+knows better, else `harness-tools-agent-inherited-context PARENT-ID`: the
+parent's `:usage` `:context` plus `:last-output`, 0 before the parent
+ran) plus the cap, so that it does not compact at once; neither is above the parent's own
 `:context-window-limit`, when it has one, so sub-agents of sub-agents do
 not grow, nor above the model's window.  `spawn_agent` and the
 supervisor's workers pass the result to `session/create` or
@@ -4061,6 +4062,13 @@ own holds lower adds ", and no higher than the limit of the session that
 started it").  `spawn_agent` adds it to the child's transcript with
 `session/hint`, once the child exists and before its first message; a
 hint that cannot be added is logged and does not fail the sub-agent.
+The supervisor's workers get the same hint once the worker exists
+(`harness-supervisor--limit-hint`).  A fork worker compacted before its
+first turn (a step that starts again with no warm seed) starts with far
+less than the supervisor holds, so its limit is fitted first: the cap
+plus the context `compaction/estimate` gives the compacted fork
+(`harness-tools-agent-context-limit SUPERVISOR t CONTEXT`), set with
+`session/update` `:silent t`, as the hint that follows says it.
 
 Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an

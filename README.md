@@ -607,7 +607,10 @@ allowed the call anyway; a directory prompt still waits for your
 answer. A non-interactive session never waits for you, which suits a session you
 leave to work while you are away. Whatever would ask you for
 permission, the auto-mode judge decides instead, whatever the
-permission mode. The judge runs on the session's own provider: its
+permission mode. The one exception is a supervising session's plan:
+the judge never rules on `submit_plan` or `retry_step`, which are
+allowed (see **Approving plans** under
+[Supervisor mode](#supervisor-mode)). The judge runs on the session's own provider: its
 cheap tier (Claude Haiku, DeepSeek Flash, or the cheapest model that
 provider lists), so a session on one provider is never judged through
 another. Set `harness-perms-auto-model` to force one model. The judge
@@ -961,7 +964,9 @@ call to one anyway, in every permission mode.
   worker's transcript says so, in a hint at its start ("Context window
   capped at 128k tokens, as a sub-agent's is
   (harness-subagent-context-limit)"), as the transcript of any
-  sub-agent does.
+  sub-agent does. A worker compacted before it starts (see **Retry and
+  escalation**) is capped from the summary it starts with, not from
+  all the supervisor holds.
 - **Reports back.** Submitting the plan ends the turn: the supervisor
   does not wait or poll, and the harness reports to it in messages of
   its own (**System · supervisor**). A finished step is a hint in the

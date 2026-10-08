@@ -69,8 +69,10 @@
 ;; steps on one model they all fork through one seed (`seed/fork'), so
 ;; that the context is written to that model's prompt cache once.  A fresh
 ;; step is a new session in the supervisor's directory.  The window of both
-;; is capped as `harness-tools-agent-context-limit' says.  The worker's
-;; reply is the step's result, which the steps that wait for it are given.
+;; is capped as `harness-tools-agent-context-limit' says, and never
+;; silently: a hint in the worker's transcript says so
+;; (`harness-supervisor--limit-hint').  The worker's reply is the step's
+;; result, which the steps that wait for it are given.
 ;;
 ;; A step that starts again -- `retry_step', perhaps on a higher tier, or an
 ;; interrupted step after a restart -- decides its context by the cache.  A
@@ -748,7 +750,9 @@ still write its answer."
 ;; step that started again has `:previous', the attempt before:
 ;; (:attempt N :session SESSION :model MODEL :error TEXT).
 
-(declare-function harness-tools-agent-context-limit "harness-tools-agent" (parent-id fork))
+(declare-function harness-tools-agent-context-limit "harness-tools-agent" (parent-id fork &optional inherited))
+(declare-function harness-tools-agent-inherited-context "harness-tools-agent" (parent-id))
+(declare-function harness-tools-agent-context-limit-hint "harness-tools-agent" (limit fork &optional inherited))
 
 (defconst harness-supervisor--plans-key :supervisor-plans
   "The `:ext' key under which a session keeps its plans.")
@@ -1066,11 +1070,55 @@ They do for want of another."
   "Return the name of the session of STEP's worker."
   (harness-truncate-end (format "Step %s: %s" (plist-get step :id) (plist-get step :title)) 80))
 
-(defun harness-supervisor--context-limit (session-id fork)
+(defun harness-supervisor--context-limit (session-id fork &optional inherited)
   "Return the context window limit of a worker of SESSION-ID, or nil for none.
-FORK is non-nil for a worker that starts with the conversation."
+FORK is non-nil for a worker that starts with the conversation, and
+INHERITED, when known, the tokens of context it starts with."
   (and (fboundp 'harness-tools-agent-context-limit)
-       (harness-tools-agent-context-limit session-id fork)))
+       (harness-tools-agent-context-limit session-id fork inherited)))
+
+(defun harness-supervisor--inherited (session-id fork)
+  "Return the tokens of context a worker of SESSION-ID starts with, or nil.
+FORK is non-nil for a worker that starts with the conversation: it
+inherits what the supervisor holds.  A fresh one starts with none."
+  (and fork (fboundp 'harness-tools-agent-inherited-context)
+       (harness-tools-agent-inherited-context session-id)))
+
+(defun harness-supervisor--limit-hint (worker limit fork inherited)
+  "Say in the transcript of WORKER that its context window is capped at LIMIT.
+WORKER is the worker's session; FORK is non-nil when it started with
+the conversation, INHERITED tokens of it.  A worker is a sub-agent,
+whose window is deliberately short (`harness-subagent-context-limit'),
+and the cap is never silent.  Nothing is said without a cap, and a
+hint that cannot be added fails nothing."
+  (condition-case err
+      (when-let* ((text (and (fboundp 'harness-tools-agent-context-limit-hint)
+                             (harness-tools-agent-context-limit-hint limit fork inherited))))
+        (harness-supervisor--hint (plist-get worker :id) text))
+    (error (harness-log 'warn "supervisor: no context cap hint for %s: %s"
+                        (plist-get worker :id) (harness-error-message err)))))
+
+(defun harness-supervisor--refit-limit (session-id worker)
+  "Fit the context window limit of WORKER to its compacted conversation.
+WORKER is a fork of SESSION-ID, the supervisor.  Its limit was set when
+it was made, from all the supervisor holds; compacted, it starts with
+far less, so it gets the limit of a fork that starts with that much
+\(`harness-supervisor--context-limit'), and no window of its own beyond
+it.  The change is silent here: the hint about the cap that follows says
+it.  Return (:context-limit LIMIT :context-inherited N) once the limit
+is set, nil when nothing caps a worker or the context cannot be told."
+  (condition-case err
+      (let* ((wid (plist-get worker :id))
+             (context (and (harness-method-exists-p 'compaction/estimate)
+                           (plist-get (harness-call 'compaction/estimate wid) :context)))
+             (limit (and (numberp context)
+                         (harness-supervisor--context-limit session-id t (round context)))))
+        (when limit
+          (harness-call 'session/update wid :context-window-limit limit :silent t)
+          (list :context-limit limit :context-inherited (round context))))
+    (error (harness-log 'warn "supervisor: could not fit the context limit of %s: %s"
+                        (plist-get worker :id) (harness-error-message err))
+           nil)))
 
 (defun harness-supervisor--seeded-p (plan step)
   "Non-nil when the worker of STEP forks through a seed.
@@ -1116,8 +1164,8 @@ TEXT says what is done about it."
   (harness-supervisor--hint
    worker-id (format "No prompt cache on %s holds the supervisor's conversation: %s" model text)))
 
-(defun harness-supervisor--compact-fork (worker model)
-  "Return a promise of WORKER, a fork of the supervisor onto MODEL, compacted.
+(defun harness-supervisor--compact-fork (session-id worker model)
+  "Return a promise of WORKER, a fork of SESSION-ID onto MODEL, compacted.
 No warm prompt cache holds the conversation the fork inherited, so its
 first turn would send all of it uncached at MODEL's price.  The cowboy
 compacts it as it does a session nobody is asked about (`cowboy/compact',
@@ -1128,12 +1176,15 @@ fails nothing: the promise resolves all the same.
 
 It resolves with WORKER and, under `:context-cache', how its context
 stands: `compacted' (and `:compaction', the kind of node the worker
-made) or `whole'."
+made) or `whole'.  A compacted fork's context window limit is fitted to
+what it now holds (`harness-supervisor--refit-limit'), whose
+`:context-limit' and `:context-inherited' it then has too."
   (let* ((wid (plist-get worker :id))
          (done (lambda (&rest _)
                  (append worker
                          (if-let* ((kind (harness-supervisor--own-compaction wid)))
-                             (list :context-cache 'compacted :compaction kind)
+                             (append (list :context-cache 'compacted :compaction kind)
+                                     (harness-supervisor--refit-limit session-id worker))
                            (list :context-cache 'whole))))))
     (harness-then
      (cond
@@ -1172,12 +1223,18 @@ supervisor directly and compacts the fork before its first turn
 \(`harness-supervisor--compact-fork'), rather than send the whole
 conversation uncached.  The worker the promise resolves with then has
 `:context-cache' (`seed', `compacted' or `whole'); a first attempt and
-a fresh step never do."
+a fresh step never do.
+
+Every worker's context window is capped as a sub-agent's is
+\(`harness-supervisor--context-limit'), and once the worker exists a
+hint in its transcript says so (`harness-supervisor--limit-hint'): with
+the limit fitted to the compacted conversation for a fork compacted."
   (let* ((session (harness-call 'session/get session-id))
          (model (plist-get step :model))
          (name (harness-supervisor--worker-name step))
          (fresh (equal (plist-get step :context) "fresh"))
-         (limit (harness-supervisor--context-limit session-id (not fresh)))
+         (inherited (harness-supervisor--inherited session-id (not fresh)))
+         (limit (harness-supervisor--context-limit session-id (not fresh) inherited))
          (options (and limit (list :context-window-limit limit)))
          (seed-fork (lambda ()
                       (apply #'harness-call-async 'seed/fork session-id model
@@ -1187,28 +1244,37 @@ a fresh step never do."
                        (apply #'harness-call-async 'session/fork session-id
                               :node (plist-get plan :node) :call-id (plist-get plan :call-id)
                               :kind 'subagent :model model :name name options))))
-    (cond
-     (fresh
-      (apply #'harness-call-async 'session/create
-             :cwd (plist-get session :cwd) :worktree (plist-get session :worktree)
-             :kind 'subagent :parent-id session-id :name name :model model
-             :host (plist-get session :host)
-             :permission-mode (plist-get session :permission-mode)
-             :thinking (plist-get session :thinking)
-             ;; Off too, not left to the setting.
-             :non-interactive (if (harness-json-true-p (plist-get session :non-interactive)) t :false)
-             :allowed-dirs (plist-get session :allowed-dirs)
-             options))
-     ((harness-supervisor--restarted-p step)
-      (if (harness-supervisor--warm-seed session-id plan step)
-          (harness-then (funcall seed-fork)
-                        (lambda (worker) (append worker (list :context-cache 'seed))))
-        (harness-then (funcall plain-fork)
-                      (lambda (worker) (harness-supervisor--compact-fork worker model)))))
-     ((harness-supervisor--seeded-p plan step)
-      (funcall seed-fork))
-     (t
-      (funcall plain-fork)))))
+    (harness-then
+     (cond
+      (fresh
+       (apply #'harness-call-async 'session/create
+              :cwd (plist-get session :cwd) :worktree (plist-get session :worktree)
+              :kind 'subagent :parent-id session-id :name name :model model
+              :host (plist-get session :host)
+              :permission-mode (plist-get session :permission-mode)
+              :thinking (plist-get session :thinking)
+              ;; Off too, not left to the setting.
+              :non-interactive (if (harness-json-true-p (plist-get session :non-interactive)) t :false)
+              :allowed-dirs (plist-get session :allowed-dirs)
+              options))
+      ((harness-supervisor--restarted-p step)
+       (if (harness-supervisor--warm-seed session-id plan step)
+           (harness-then (funcall seed-fork)
+                         (lambda (worker) (append worker (list :context-cache 'seed))))
+         (harness-then (funcall plain-fork)
+                       (lambda (worker) (harness-supervisor--compact-fork session-id worker model)))))
+      ((harness-supervisor--seeded-p plan step)
+       (funcall seed-fork))
+      (t
+       (funcall plain-fork)))
+     (lambda (worker)
+       ;; A compacted fork's limit was fitted to what it holds now.
+       (harness-supervisor--limit-hint
+        worker
+        (if (plist-member worker :context-limit) (plist-get worker :context-limit) limit)
+        (not fresh)
+        (if (plist-member worker :context-inherited) (plist-get worker :context-inherited) inherited))
+       worker))))
 
 (defconst harness-supervisor--fork-opening
   "You are now a worker for one step of the supervisor's plan, not the supervisor. You have the full tool set: you can read and change files and run commands. The supervisor's rules and reminders earlier in this conversation (read-only tools, ending every turn on a decision, submit_plan and retry_step) do not apply to you. Do this one step and nothing else; other workers do the other steps."
