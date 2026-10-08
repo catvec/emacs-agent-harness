@@ -201,7 +201,8 @@ for them) charges the input for what is sent again uncached."
                    :cached nil :cost 0.462705 :after 2000)
             (:kind "brief" :model "test:small" :model-label "Small" :input 725 :output 2000
                    :cached nil :cost 0.01090625 :after 2000)
-            (:kind "transcript" :cost 0.0 :after 84)))
+            (:kind "transcript" :cost 0.0 :after 84)
+            (:kind "fresh" :cost 0.0 :after 90)))
   "What compacting costs, as `compaction/estimate' answers over ACP.")
 
 (ert-deftest harness-ui-cache-offers-to-compact ()
@@ -217,19 +218,20 @@ the panel started runs, the line says so."
           (case-fold-search nil)
           (chosen nil))
       ;; Nobody to ask (no session here): the kinds, and the free one's cost.
-      (should (equal "   Compact it first   b  Brief summary   s  Summary   t  Transcript file (free)\n"
+      (should (equal (concat "   Compact it first   b  Brief summary   s  Summary   t  Transcript file (free)"
+                             "   f  Fresh start (free)\n")
                      (substring-no-properties (harness-ui-cache--offer state))))
       (setq harness-ui-cache--estimate (cons state harness-ui-cache-test--estimate))
       (let ((line (harness-ui-cache--offer state)))
         (should (equal (concat "   Compact it first   b  Brief summary (~$0.011)   s  Summary (~$0.463)"
-                               "   t  Transcript file (free)\n")
+                               "   t  Transcript file (free)   f  Fresh start (free)\n")
                        (substring-no-properties line)))
         ;; Each key on the line compacts as its kind, and so does a click.
         (cl-letf (((symbol-function 'harness-ui-cache--compact) (lambda (_buffer kind) (push kind chosen))))
-          (dolist (key '("b" "s" "t"))
+          (dolist (key '("b" "s" "t" "f"))
             (funcall (lookup-key (get-text-property 0 'keymap line) key)))
           (funcall (get-text-property (string-match "Summary" line) 'harness-chat-action line)))
-        (should (equal '(summary transcript summary brief) chosen))
+        (should (equal '(summary fresh transcript summary brief) chosen))
         ;; A button's tooltip says what it does.
         (should (string-prefix-p "Brief summary (~$0.011): Small reads only the first and last messages"
                                  (get-text-property (string-match "Brief summary" line) 'help-echo line)))
@@ -463,7 +465,7 @@ the conversation is compacted, as nothing of it is cached any more."
       (harness-test-wait (lambda () (string-match-p "Brief summary (~\\$" (harness-ui-cache-test--text buffer)))
                          5 "the costs")
       (should (string-match-p (concat "\n   Compact it first   b  Brief summary (~\\$[0-9.]+)   s  Summary (~\\$[0-9.]+)"
-                                      "   t  Transcript file (free)\n")
+                                      "   t  Transcript file (free)   f  Fresh start (free)\n")
                               (harness-ui-cache-test--text buffer)))
       (with-current-buffer buffer
         (goto-char (point-min))

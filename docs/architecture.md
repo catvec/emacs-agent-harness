@@ -572,7 +572,10 @@ nothing else would answer; the parent need not have been running.  Only calls
 from the last compaction on count, as for forks: earlier ones reach no
 provider, so a result for one would answer nothing.  Pending
 requests are not restored: the turn that would read their answers is
-gone.
+gone.  A message one held back from a turn that had not started (its
+payload's `:waiting-message` `(:text :from)`: the cowboy module's
+question about a cold cache) goes back in the session's queue, with
+its sender, and the hint says so (`harness-session--requeue`).
 
 - `session/create &rest PLIST` — `:cwd` required; `:name :model
   :permission-mode :thinking :kind :parent-id :host :worktree`,
@@ -1848,8 +1851,8 @@ session it stays a denial.
   inspect the harness or the user's live Emacs: `emacs_buffers`,
   `emacs_buffer`, `emacs_windows`, `emacs_describe`,
   `emacs_find_definition`, `emacs_messages`, `session_info`,
-  `session_list`, `session_read`, `session_search`, `session_wait`,
-  `task_list`, `task_wait` and `notification_providers`.
+  `session_list`, `session_read`, `session_search`, `session_history`,
+  `session_wait`, `task_list`, `task_wait` and `notification_providers`.
   The model provider's own search, standing in for `web_search` (see
   `tools/builtin`), is decided as `web_search` too, so the same rules
   and the same auto-allow apply to it.
@@ -2122,7 +2125,15 @@ session it stays a denial.
   node (and on a queued item).  An empty message is refused.  An
   inactive session is resumed first (`session/resume`), so a message
   sent to a closed session brings it back; queueing leaves it closed.
-- `agent/cancel SESSION-ID`.
+- `agent/cancel SESSION-ID`.  Emits `agent/cancelling SID` at once, so
+  that a gate holding the turn before it starts (the cowboy module's
+  question) lets it go: the turn then ends `cancelled` as soon as its
+  `agent/before-turn` chain settles, with no "Turn not started" hint,
+  rather than after the grace period of a provider's cancel.
+- `agent/note-activity SESSION-ID ACTIVITY` — announces ACTIVITY (an
+  `agent/activity` value, `(:phase compacting)` say) for a turn still
+  held by its gate: the cowboy module's compaction before the message.
+  The turn sets its own when it starts and clears it when it ends.
 - `agent/send-queue SESSION-ID` — sends every queued item as one turn;
   the message is the user's when any item is, else from the first
   item's sender.
@@ -2136,8 +2147,14 @@ session it stays a denial.
 - Sync filter `agent/system-prompt` (value string, args session); sync
   filter `agent/tools`; sync filter `agent/builtin-tools` (see
   `tools/builtin`); async filter `agent/before-turn` (value
-  `(:proceed t :reason)`, args session) — budgets, merge holds and
-  compaction hook in here; async filter `agent/step` at every step
+  `(:proceed t :reason :message (:text TEXT :from FROM))`, args session)
+  — budgets, merge holds, the cold-cache question (cowboy, 15) and
+  compaction (20) hook in here.  `:message` is the message the turn
+  starts with, not yet in the transcript: the turn appends it once the
+  chain settles, so whatever a gate appends (a compaction) comes before
+  it.  A turn cancelled while the chain held it does not start;
+  `:proceed` nil ends it `blocked`, with the hint "Turn not started:
+  REASON"; async filter `agent/step` at every step
   boundary (same value shape) — merge holds pause here; async filter
   `agent/step-error` when a provider request fails (value `(:retry
   nil)`, args session and FAILURE `(:error TEXT :error-kind KIND
@@ -2148,6 +2165,7 @@ session it stays a denial.
   most `harness-agent--max-error-retries` (8) times; otherwise, and
   without a handler, the turn ends with `error` as before.
 - Events `agent/turn-started SID`, `agent/turn-ended SID REASON`,
+  `agent/cancelling SID`,
   `agent/stream SID NODE-ID KIND DELTA` (kind text|thinking),
   `agent/tool-call SID NODE`, `agent/tool-result SID NODE`,
   `agent/activity-changed SID ACTIVITY`.
@@ -2536,6 +2554,18 @@ and hinted.
     holds a note, sent as it is, saying where the file is and how long,
     and to read its end and its start before answering, then what it
     needs of the rest.
+  - `fresh`: no request and no file.  Nothing of the conversation is
+    carried over: the node holds a note saying how many messages of
+    about how many tokens came before it and that they are not carried
+    over, and telling the model to look back at what it needs with
+    session_history (`harness-compaction--fresh-note`), or, without
+    that tool, to ask the user.
+  Every kind but `fresh`, whose note says so already, ends in a line
+  pointing the model at the session_history tool
+  (`harness-compaction-history-tool`, `harness-compaction--history-note`):
+  the conversation it replaced is still on record.  The line is left
+  out when the session's model does not have the tool
+  (`harness-compaction-history-p`, from `tools/list`).
   The node's `:meta` points at the compacted head and records the kind
   (`:compaction`, read back by `harness-node-compaction-kind`), the
   writer (`:model`, the session's for a transcript), what it was given
@@ -2562,8 +2592,9 @@ and hinted.
   writing after the conversation it replaces, as compacting by hand
   does.
 - `compaction/estimate SESSION-ID` → `(:context :model :model-label
-  :cached :carry-on :carry-on-cached :compacting :kind :kinds)`: the
-  context the next message sends, whether the prompt cache still lasts
+  :messages :cached :carry-on :carry-on-cached :compacting :kind
+  :kinds)`: the context the next message sends, how many messages it
+  holds, whether the prompt cache still lasts
   for the session's model, what that message costs as things are and
   read from the cache, whether a compaction runs, and the configured
   kind; `:kinds` has `(:kind :model :model-label :input :output :cached
@@ -2575,8 +2606,9 @@ and hinted.
   for writes (DeepSeek, priced 0) still charges the input.  A brief
   summary reads the system prompt, the sample and the ask; either
   writes up to the summary's budget
-  (`harness-compaction--summary-output`).  A transcript costs nothing
-  and leaves the note (`:after`) in place of the context.
+  (`harness-compaction--summary-output`).  A transcript and a fresh
+  start cost nothing and leave their note (`:after`) in place of the
+  context.
 - Settings (section "Compaction"): `harness-compaction-kind`, the kind
   automatic compaction makes (`summary`), and
   `harness-compaction-brief-model`.
@@ -2590,6 +2622,67 @@ and hinted.
   earlier (`harness-tasks-context-limit', 256k tokens by default).
   It judges the session as it is then, read again: the fallback,
   earlier in the chain, may have moved it to another model.
+
+### cowboy
+
+What a message to a session whose prompt cache went cold does first.
+The quick compaction the switch banner offers on a switch of provider,
+made part of every turn: whoever sent the message (the user, a task's
+feedback, another session's agent, the merge queue), it is not sent
+as it is, all of the conversation uncached, without a decision.
+
+- Async filter on `agent/before-turn` at priority 15: after the
+  fallback and a handoff (10), which may change the model or start the
+  conversation over, before automatic compaction (20), which would
+  summarise on the session's model, reading it all uncached.  It reads
+  the session again and goes on untouched unless `harness-cowboy-cold-p`:
+  the `:cache` (see "Session") expired, the session has a head, and its
+  context is at least `harness-cowboy-min-context` (0).  A session with
+  no `:cache` never is.
+- The choices (`harness-cowboy-choices`): `brief`, `summary`,
+  `transcript` and `fresh` compact as `compaction/compact` does, with
+  `:meta (:cowboy (:choice C :by BY))`, before the message; `carry-on`
+  sends the conversation as it is; `hold` stops the turn (`:proceed`
+  nil, reason "not now: …"), the message staying in the transcript to
+  go with the next one.  A summary that fails falls back to `transcript`
+  (`:fallback` in the meta), and that to `carry-on`, each said in a
+  hint: the message always goes unless held.  A hint says what went
+  first and why ("as you chose", "the default for a session that does
+  not wait for you", …).  While the compaction runs the session is
+  `running` with the activity `(:phase compacting)`
+  (`agent/note-activity`).
+- Asked unless `harness-cowboy-ask` is nil or the session is
+  non-interactive (the policy's `harness-non-interactive`, else the
+  session's own `:non-interactive`, else the config, as perms decides):
+  `question/ask` puts a question pending on the session, which is
+  blocked on it.  Its payload holds the question, the options with
+  their costs (`compaction/estimate`), `:allow-free-text`, the message
+  waiting as `:waiting-message` `(:text :from)`, and `:cowboy`: `(:at
+  :ttl :expires :cache-model :model :model-label :context :messages
+  :carry-on :carry-on-cached :from :preview :default :history
+  :choices)`, each choice `(:choice :label :what :cost :cost-text :by
+  :after)`.  Clients that know it draw it (ui-cowboy); the others show
+  an ordinary question.  The answer is read by
+  `harness-cowboy-parse-answer`: a choice's name, label, option as
+  offered, number, key or words naming it, and "always" with any but
+  `hold` makes it the default and turns asking off (`config/set` of
+  `harness-cowboy-default` and `harness-cowboy-ask`).  An answer that
+  names no choice asks again; a dismissed question holds the message.
+  `session_control` refuses to answer it for another session's agent.
+- Not asked, `harness-cowboy-default` goes first (`brief`, the one
+  choice that never reads the whole conversation uncached and still
+  leaves a summary).  No model judges the choice.
+- `agent/cancelling` or `agent/turn-ended` while the question waits
+  dismisses it; `session/deleted` lets the turn go.  A harness that
+  stops while it waits loses the turn, not the message: settling the
+  session at the next start (`harness-session--settle`) queues the
+  `:waiting-message` again, with a hint saying so.
+- `cowboy/asking SESSION-ID` → the id of the question the session waits
+  on, or nil.  Events `cowboy/asked SID PID` and `cowboy/decided SID
+  CHOICE BY`, BY one of `user`, `always`, `non-interactive`, `default`
+  (asking off) and `unasked` (the question could not be asked).
+- Settings (section "Cold cache"): `harness-cowboy-ask`,
+  `harness-cowboy-default`, `harness-cowboy-min-context`.
 
 ### handoff
 
@@ -3480,7 +3573,7 @@ TRAMP prefixes come from the session host):
 | `web_search` | Web search | query, count | net |
 | `web_fetch` | Fetch page | url, max_chars | net |
 | `emacs_messages` | Emacs messages | count | read (needs no approval: `harness-perms--inspection-tools`) |
-| `ask_user` | Question | question, options (strings, or `{label, diagram}` / `{label, image}` objects: every option has a diagram or none does), allow_free_text | meta (answered with `question/answer SID PID ANSWER`; event `question/asked`) |
+| `ask_user` | Question | question, options (strings, or `{label, diagram}` / `{label, image}` objects: every option has a diagram or none does), allow_free_text | meta (answered with `question/answer SID PID ANSWER`; event `question/asked`; the harness asks its own questions the same way, with no tool call, through `question/ask`) |
 | `request_directory_access` | Request access | path, reason | meta (perms module; decided only by the user's answer to a directory prompt, in every mode) |
 | `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`) |
 | `plan` | Plan | plan | meta |
@@ -3490,8 +3583,9 @@ TRAMP prefixes come from the session host):
 | `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_read` | Read session | session_id, limit, before, kinds, max_chars | read (needs no approval: `harness-perms--inspection-tools`) |
+| `session_history` | Session history | query, regexp, node_id, before, limit, max_chars, kinds, all | read (this session's own conversation from before its last compaction or handoff; needs no approval: `harness-perms--inspection-tools`) |
 | `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
-| `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta |
+| `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta (answer refuses the harness's cold-cache question, left to the user) |
 | `session_move` | Move session | directory, session_id (default: this session), keep_old_directory, reason | meta (the user confirms every call, in every mode; see perms, Confirmations, and `session/move`) |
 | `set_non_interactive` | Non-interactive mode | enabled, session_id (default: this session) or all (every current session and task of every project), reason | meta (perms module's away-request stage: turning it on is decided only by the user's answer, in every mode, and denied at once in a non-interactive session; turning it off is allowed at once) |
 | `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -3617,10 +3711,34 @@ the harness's, and the provider's searches show as `web_search` calls.
 Corporate mode leaves both searches on and turns `web_fetch` off (see
 tools).
 
+The harness asks the user its own questions the way ask_user does, with
+no tool call behind them: `question/ask SESSION-ID REQUEST ON-ANSWER`
+(tools-agent) puts REQUEST, `(:question :options :allow-free-text .
+MORE)`, pending on the session, MORE going into the payload as it is
+for the clients that know it (the cowboy module's `:cowboy` and
+`:waiting-message`), emits `question/asked`, and returns the id.  It is
+answered with `question/answer` or dismissed with `question/cancel`
+like any question; ON-ANSWER is called once, with the answer's text and
+a flag that is non-nil when it was dismissed.  `question/pending SID`
+lists a session's pending questions.
+
 The session and task tools (`tools-sessions`) let an agent coordinate the
 rest of the harness.  Sessions are named by id, a unique id prefix or a
 unique name; a session cannot message, control or wait on itself.
 Listing and search default to the current project (worktrees included).
+`session_history` is the calling session's own `session_read` and
+`session_search` in one, over the part of its conversation that its
+context holds only as a compaction or a handoff tells of it: the nodes
+before the last compaction node, or the last handoff note when that
+comes later (`harness-tools-sessions--boundary`), or all of them with
+`all`.  Its first line says what it looks through ("The conversation
+before the summary compaction [compaction ID, DATE]: N nodes ...").
+`query` lists the matching nodes newest first with snippets, `limit`
+at a time, paging back with `before`; `node_id` shows one node whole
+(`max_chars`, 20000) with two nodes either side; with neither, the last
+nodes before the compaction, oldest first.  `kinds` filters (default:
+all but hints).  Every compaction points the model at it (see
+compaction), whatever its kind.
 `session_search` greps the `sessions/*.nodes.jsonl` logs in a subprocess,
 so transcripts are not loaded into memory to be searched.  A node is one
 line of its log and can be megabytes long, so a hit is split from its
@@ -3643,7 +3761,9 @@ condition, their timeout (`harness-tools-sessions--wait-default`, at most
 `-wait-max`) or the end of the waiting turn; a timeout is a report, not
 an error.  Nothing here grants permissions: permission requests and
 permission modes stay with the user, and `task_submit` uses the task
-defaults.  The task tools need the `tasks` module.
+defaults.  Nor does `session_control` answer the harness's question
+about a cold prompt cache (its payload's `:cowboy`): what to spend on
+another session's conversation is the user's call.  The task tools need the `tasks` module.
 
 `notify` (`tools-notify`) sends a notification through
 `notification/send` with `:source "agent"`, `:kind "agent"` and the
@@ -3803,8 +3923,10 @@ a shell command runs; `paths`: what the call is about, see perms) →
 `_harness:{pattern}` when the client answers a request about a path
 outside the allowed directories for another glob pattern than its
 `_harness.pattern` (only such a request has one, see perms),
-and `_harness/ask_user {sessionId, requestId, question, options, diagrams}` → `{answer}`.
-Its `options` are the answers' labels; `diagrams`, present when the
+and `_harness/ask_user {sessionId, requestId, question, options, diagrams, cowboy}` → `{answer}`.
+Its `options` are the answers' labels; `cowboy`, on the harness's own
+question about a cold prompt cache (see cowboy), says what each choice
+costs, for a client that draws more than the question; `diagrams`, present when the
 options have them, holds one per option, `{type: "ascii", text}` or
 `{type: "image", path, mime}`: a path on the harness's machine, never
 the image data, since the pending question is saved with the session.
@@ -4229,7 +4351,29 @@ diagram shown, so the chat and the popout agree, and point stays on
 the toggle through the redraw.  A module hosted by a chat buffer can
 put a read-only panel of its own above the box with
 `harness-chat-panel-functions` and take the box's message with
-`harness-chat-send-function`.
+`harness-chat-send-function`.  A module can draw a kind of request
+its own way: `harness-ui-pending-panel-functions` is tried first for
+every request record, in the chat and in the popout, and a function
+that inserts the panel (decorating it with
+`harness-ui-pending-decorate`, the request's id and a keymap) returns
+non-nil, so the ordinary panel is not drawn too;
+`harness-ui-pending-session` names the session of the buffer drawing.
+Cold-cache question (`harness-ui-cowboy`, module `ui-cowboy`): the
+harness's question about a cold prompt cache (see cowboy) as a panel of
+its own, in the switch banner's amber (`harness-ui-cowboy-face`): a
+heading with the clock time the cache lapsed, the model and the
+context; who sent the message that waits, with its first line; what
+carrying on costs against the cache it lost; a row per choice with its
+key, a button, its cost and what it does, the default marked, the
+tooltip naming the writer and the context after it; and a footer with
+the capitals that answer "always", a line about session_history when
+the session has it, and the typed answers.  Its keymap
+(`harness-ui-cowboy-keys`: b s t f c q, capitals for "always") has
+`harness-ui-pending-question-map` as its parent, so digits pick an
+option as on any question; answers go through
+`harness-ui-pending-answer-question` (`harness-ui-cowboy-answer`), and
+text typed in the box answers it too.  Without a `:cowboy` the ordinary
+question panel shows.
 Prompt cache warning (`harness-ui-cache`, module `ui-cache`): once the
 session's `:cache :expires` has passed while it is idle, closed or
 blocked, a panel above the box says so ("Prompt cache expired at
@@ -4246,8 +4390,9 @@ that cache.  Switched back while the cache lasts, the panel goes; the
 new model's first request stamps a cache of its own, and a switch or
 compaction that starts the conversation over reports none, so no panel
 (see "Session").  While the switch banner (`ui-switch`) asks how to
-hand over, the panel stays away: the banner's options say what the
-cache means for each.  The panel needs no input and no polling: each
+hand over, or the cold-cache question waits (`harness-ui-cache--asked-p`),
+the panel stays away: the banner's options, or the question's, say what
+the cache means for each.  The panel needs no input and no polling: each
 chat buffer holds one timer, for the moment its cache lapses, which
 redraws the box and whatever panel is above it (`harness-compose-redraw`);
 a session update (a new request stamps a new `:cache-at`) reschedules
@@ -4257,15 +4402,18 @@ redraws.  A session without context or cache use never shows it.  Its
 last line offers to compact the conversation first, so the next
 message sends only what stands in for it: a button per kind
 (`harness-ui-compact-kinds`), the brief summary first -- the cheap way
-out of a long conversation gone cold -- then the summary and the
-transcript file, each with its key on that line (b, s, t, through a
+out of a long conversation gone cold -- then the summary, the
+transcript file and a fresh start, each with its key on that line (b,
+s, t, f, through a
 keymap composed under the buttons' own, `harness-ui-with-keymap`) and
 what it costs (`compaction/estimate`, asked once per state the panel
 shows, `harness-ui-cache--estimate`, and drawn when it comes; the
 buttons only name the kinds until then, a transcript being free).
 Pressing one runs `compaction/compact` (`harness-ui-compact-run`); the
-line says so while it runs, and the panel goes once the compaction
-resets the cache.  A session blocked on an answer is in the middle of a
+line says so while it runs (`harness-ui-compact-doing`), and the panel
+goes once the compaction resets the cache.  A session the cowboy
+module compacts before a message shows as running with the activity
+`compacting` meanwhile, so the panel offers nothing then either.  A session blocked on an answer is in the middle of a
 turn: its panel offers nothing.
 Tools go by their labels everywhere: a tool block's header shows the
 label in `harness-tool-title-face` and what the call is about after it
@@ -5009,12 +5157,16 @@ when no chat buffer shows; see "Switching model or provider"), the
 prompt cache warning of a session (`harness-ui-cache`: the chat panel
 that says the cache lapsed and what the next message re-sends, drawn
 by a timer at the moment it lapses, with buttons that compact the
-conversation first; see "Chat buffer"), compacting by hand
+conversation first; see "Chat buffer"), the cold-cache question
+(`harness-ui-cowboy`: the panel that asks what goes first when a
+message meets a cold cache, through `harness-ui-pending-panel-functions`;
+see "Chat buffer"), compacting by hand
 (`harness-ui-compact`: `harness-compact`, `C-c h C` and "C" in the
 menu, asks which kind with `read-multiple-choice`, the help buffer a
 table of each kind's writer, cost and effect and what carrying on
-costs, from `compaction/estimate`; refuses a session running a turn;
-registers /compact, /compact KIND, in `harness-chat-commands`), and the
+costs, from `compaction/estimate`; the kinds are brief, summary,
+transcript and fresh; refuses a session running a turn; registers
+/compact, /compact KIND, in `harness-chat-commands`), and the
 handed-in report (`harness-ui-report`: the summary as markdown and the
 evidence -- images as wide as the popout and up to
 `harness-ui-report-image-max-height` of the frame high, the popout

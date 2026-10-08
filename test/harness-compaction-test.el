@@ -15,6 +15,7 @@
 (defvar harness-compaction--request-text)
 (defvar harness-compaction--summary-output)
 (declare-function harness-define-provider "harness-provider")
+(declare-function harness-define-tool "harness-tools")
 (declare-function harness-compaction-needed-p "harness-compaction")
 (declare-function harness-compaction-hosted-p "harness-compaction")
 
@@ -376,12 +377,43 @@ on, as it is, and an unanswered message still follows it."
       (should-not (memq 'compaction (harness-compaction-test-kinds id)))
       (should (zerop (hash-table-count harness-compaction--running))))))
 
+(ert-deftest harness-compaction-points-at-the-history ()
+  "A compaction ends in a line pointing the model at session_history, and
+a fresh start's note sends it there, when the model has the tool;
+without it there is no pointer, and the fresh note says to ask the user."
+  (harness-compaction-test-with
+    (harness-define-tool "session_history" :label "Session history" :description "history" :kind 'read
+                         :handler (lambda (_input _ctx) "nothing"))
+    (let* ((id (harness-compaction-test-session))
+           (node (harness-await (harness-call 'compaction/compact id (list :kind 'transcript)))))
+      ;; The transcript's note, then the pointer.
+      (should (string-match-p "read its end" (plist-get node :content)))
+      (should (string-suffix-p "\n\nHarness note: the conversation this stands in for is still on record.  When you need something it left out -- what was asked, decided, tried or found -- search and read it with the session_history tool rather than guessing."
+                               (plist-get node :content))))
+    (let* ((id (harness-compaction-test-session))
+           (node (harness-await (harness-call 'compaction/compact id (list :kind 'fresh))))
+           (content (plist-get node :content)))
+      (should (equal "fresh" (harness-node-compaction-kind node)))
+      (should (string-prefix-p "This conversation starts afresh, to keep the context small: the 2 messages before" content))
+      (should (string-match-p "look back at what you need of them with the session_history tool" content))
+      ;; Its note says so already: no second pointer.
+      (should-not (string-match-p "Harness note:" content)))
+    (remhash "session_history" harness-tools)
+    (let* ((id (harness-compaction-test-session))
+           (node (harness-await (harness-call 'compaction/compact id (list :kind 'transcript)))))
+      (should-not (string-match-p "session_history" (plist-get node :content))))
+    (let* ((id (harness-compaction-test-session))
+           (content (plist-get (harness-await (harness-call 'compaction/compact id (list :kind 'fresh))) :content)))
+      (should-not (string-match-p "session_history" content))
+      (should (string-match-p "ask the user for what you need of the earlier conversation" content)))))
+
 (ert-deftest harness-compaction-estimate ()
   "The estimate prices each kind of compaction against carrying on.
 A summary on an API model reads all of the context uncached, whatever
 the cache: it is a prompt of its own.  On a fork of a hosted loop's
 conversation it reads it from the cache while that lasts.  A brief one
-is the cheap model's, of a sample; a transcript costs nothing."
+is the cheap model's, of a sample; a transcript and a fresh start cost
+nothing."
   (harness-compaction-test-with
     (harness-compaction-test-tiered-provider)
     (let* ((id (harness-compaction-test-long-session))
@@ -393,8 +425,11 @@ is the cheap model's, of a sample; a transcript costs nothing."
              (kinds (plist-get e :kinds))
              (summary (cl-find 'summary kinds :key (lambda (k) (plist-get k :kind))))
              (brief (cl-find 'brief kinds :key (lambda (k) (plist-get k :kind))))
-             (transcript (cl-find 'transcript kinds :key (lambda (k) (plist-get k :kind)))))
+             (transcript (cl-find 'transcript kinds :key (lambda (k) (plist-get k :kind))))
+             (fresh (cl-find 'fresh kinds :key (lambda (k) (plist-get k :kind)))))
         (should (= 100000 (plist-get e :context)))
+        ;; The messages since the last compaction, for a question to name.
+        (should (> (plist-get e :messages) 0))
         (should (equal "tiered:big" (plist-get e :model)))
         (should (equal "Big" (plist-get e :model-label)))
         (should (eq 'summary (plist-get e :kind)))
@@ -403,7 +438,7 @@ is the cheap model's, of a sample; a transcript costs nothing."
         ;; Cache writes are the dearer: 100k at 12.5, against 1.0 read.
         (should (funcall near 1.25 (plist-get e :carry-on)))
         (should (funcall near 0.1 (plist-get e :carry-on-cached)))
-        (should (equal '(summary brief transcript) (mapcar (lambda (k) (plist-get k :kind)) kinds)))
+        (should (equal '(summary brief transcript fresh) (mapcar (lambda (k) (plist-get k :kind)) kinds)))
         (should (equal "tiered:big" (plist-get summary :model)))
         (should-not (plist-get summary :cached))
         (should (funcall near (/ (+ (* (+ 100000 ask) 12.5) (* harness-compaction--summary-output 50.0)) 1e6)
@@ -416,7 +451,11 @@ is the cheap model's, of a sample; a transcript costs nothing."
         (should (< (plist-get brief :cost) 0.02))
         (should (eql 0.0 (plist-get transcript :cost)))
         (should-not (plist-get transcript :model))
-        (should (< (plist-get transcript :after) 200)))
+        (should (< (plist-get transcript :after) 200))
+        ;; A fresh start carries a note over, nothing else.
+        (should (eql 0.0 (plist-get fresh :cost)))
+        (should-not (plist-get fresh :model))
+        (should (< (plist-get fresh :after) 200)))
       ;; While the cache lasts, carrying on reads it.  A summary on an API
       ;; model still reads none of it.
       (harness-call 'session/usage-add id (list :input 10 :output 10 :cache-read 100000 :context 100000

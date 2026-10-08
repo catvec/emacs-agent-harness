@@ -8,6 +8,9 @@
 ;; - `ask_user' blocks the turn on a pending question and resolves when
 ;;   a UI answers it through `question/answer'.  Its options may each
 ;;   have a diagram (ASCII art or an image), all of them or none.
+;;   `question/ask' asks the same kind of question for the harness
+;;   itself, with no tool call behind it (the cowboy module asks what
+;;   to do about a cold prompt cache this way).
 ;; - `plan' records a plan on the session (and adds a Planning section
 ;;   to the system prompt that explains forks, sub-agents, worktrees
 ;;   and the merge queue, so plans can use them).
@@ -32,7 +35,11 @@
 ;;;; Questions
 
 (defvar harness-tools-agent--questions (make-hash-table :test 'equal)
-  "Pending id -> (:session-id ID :resolve FN) for unanswered ask_user calls.")
+  "Pending id -> continuation of an unanswered question.
+\(:session-id ID :resolve FN) for an ask_user call, whose FN takes the
+tool result; (:session-id ID :on-answer FN) for a question the harness
+asked itself (`question/ask'), whose FN takes the answer text and
+whether it was dismissed.")
 
 (defun harness-tools-agent--pending-item (session-id pid)
   "Return the pending item PID of SESSION-ID, or nil."
@@ -173,28 +180,59 @@ saying what to fix, and asks nothing."
         ((null answer) "")
         (t (format "%s" answer))))
 
-(defun harness-tools-agent--settle-question (session-id pid answer)
+(defun harness-tools-agent--settle-question (session-id pid answer &optional dismissed)
   "Resolve pending question PID of SESSION-ID with ANSWER.
+DISMISSED non-nil says nobody answered: the question was dismissed.
 Return non-nil when a continuation was waiting."
   (let ((entry (gethash pid harness-tools-agent--questions)))
     (harness-call 'session/pending-resolve session-id pid answer)
     (when entry
       (remhash pid harness-tools-agent--questions)
-      (funcall (plist-get entry :resolve) (harness-tool-ok (harness-tools-agent--answer-text answer)))
+      (if (plist-get entry :on-answer)
+          (funcall (plist-get entry :on-answer) (harness-tools-agent--answer-text answer) dismissed)
+        (funcall (plist-get entry :resolve) (harness-tool-ok (harness-tools-agent--answer-text answer))))
       (harness-emit 'question/answered session-id pid answer)
       t)))
 
 (harness-defmethod question/answer (session-id pid answer)
   "Answer pending question PID of SESSION-ID with ANSWER.
 ANSWER is a string or a plist (:answer STRING).  The waiting ask_user
-call returns the text as its result.  Return non-nil when a question
-was waiting."
+call returns the text as its result; a question the harness asked
+\(`question/ask') gets the text.  Return non-nil when a question was
+waiting."
   (harness-tools-agent--settle-question session-id pid answer))
 
 (harness-defmethod question/cancel (session-id pid)
   "Dismiss pending question PID of SESSION-ID.
-The waiting ask_user call returns \"The user dismissed the question\"."
-  (harness-tools-agent--settle-question session-id pid "The user dismissed the question"))
+The waiting ask_user call returns \"The user dismissed the question\";
+a question the harness asked (`question/ask') is told it was dismissed."
+  (harness-tools-agent--settle-question session-id pid "The user dismissed the question" t))
+
+(harness-defmethod question/ask (session-id request on-answer)
+  "Ask the user REQUEST's question in SESSION-ID for the harness; return its id.
+This is ask_user's question without a tool call: the harness, not the
+model, wants to know something before it goes on.  REQUEST is
+\(:question TEXT :options LABELS :allow-free-text BOOL . MORE), as
+ask_user's pending payload is; MORE goes into the payload as it is,
+for the clients that know what it means (the cowboy module's `:cowboy',
+say) -- the others show an ordinary question.  The question is pending
+on SESSION-ID, which is blocked on it, and is answered as any other is,
+with `question/answer' (UIs, ACP clients) or dismissed with
+`question/cancel'.  ON-ANSWER is called once, then, with the answer's
+text and a flag that is non-nil when the question was dismissed rather
+than answered.  A question still waiting when the harness stops is gone
+with the process, as an ask_user call's is."
+  (let* ((options (append (plist-get request :options) nil))
+         (payload (append (list :question (or (plist-get request :question) "")
+                                :options options
+                                :allow-free-text (if (plist-member request :allow-free-text)
+                                                     (harness-json-true-p (plist-get request :allow-free-text))
+                                                   t))
+                          (harness-plist-remove request :question :options :allow-free-text)))
+         (pid (harness-call 'session/pending-add session-id (list :kind 'question :payload payload))))
+    (puthash pid (list :session-id session-id :on-answer on-answer) harness-tools-agent--questions)
+    (harness-emit 'question/asked session-id (harness-tools-agent--pending-item session-id pid))
+    pid))
 
 (harness-defmethod question/pending (session-id)
   "Return the pending requests of SESSION-ID whose kind is `question'."
@@ -544,7 +582,7 @@ Run INPUT's prompt in a child of the session in CTX."
 
 (harness-tools-agent--init)
 
-(harness-declare-event 'question/asked "(SESSION-ID PENDING) after ask_user added a pending question.")
+(harness-declare-event 'question/asked "(SESSION-ID PENDING) after ask_user or `question/ask' added a pending question.")
 (harness-declare-event 'question/answered "(SESSION-ID PENDING-ID ANSWER) after a question was answered or dismissed.")
 (harness-declare-event 'agent/spawned "(PARENT-ID CHILD-ID) after spawn_agent created a child session.")
 

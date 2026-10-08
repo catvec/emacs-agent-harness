@@ -72,11 +72,11 @@
 (ert-deftest harness-tools-sessions-registers-tools ()
   (harness-tools-sessions-test-with
     (let ((names (mapcar (lambda (s) (plist-get s :name)) (harness-call 'tools/list))))
-      (dolist (n '("session_list" "session_search" "session_read" "session_send" "session_control"
+      (dolist (n '("session_list" "session_search" "session_read" "session_history" "session_send" "session_control"
                    "session_move" "set_non_interactive" "session_wait" "task_list" "task_submit" "task_control"
                    "task_wait"))
         (should (member n names))))
-    (dolist (n '("session_list" "session_search" "session_read" "session_wait" "task_list" "task_wait"))
+    (dolist (n '("session_list" "session_search" "session_read" "session_history" "session_wait" "task_list" "task_wait"))
       (should (eq 'read (plist-get (harness-call 'tools/get n) :kind))))
     (dolist (n '("session_send" "session_control" "session_move" "set_non_interactive" "task_submit" "task_control"))
       (should (eq 'meta (plist-get (harness-call 'tools/get n) :kind))))))
@@ -219,6 +219,103 @@ regexp matcher\" once a line passed some hundred thousand characters."
       (let ((r (harness-tools-sessions-test-run me "session_read" '(:session_id "nope"))))
         (should (plist-get r :is-error))
         (should (string-match-p "No session matches" (plist-get r :content)))))))
+
+(ert-deftest harness-tools-sessions-history-before-a-compaction ()
+  "session_history searches and reads the session's own conversation from
+before its last compaction, the part its context holds only as the
+compaction tells of it; all=true looks through the whole of it."
+  (harness-tools-sessions-test-with
+    (let ((sid (harness-tools-sessions-test-session)))
+      (harness-call 'session/append sid '(:kind user :content "hello"))
+      (should (string-prefix-p "This conversation was never compacted: all 1 nodes are in your context already."
+                               (harness-tools-sessions-test-ok sid "session_history" nil)))
+      (dotimes (i 6)
+        (harness-call 'session/append sid (list :kind 'user :content (format "question %d about the parser" i)))
+        (harness-call 'session/append sid (list :kind 'assistant :content (format "answer %d" i))))
+      (harness-call 'session/append sid '(:kind hint :content "a hint about the parser"))
+      (let* ((compaction (harness-call 'session/append sid '(:kind compaction :content "SUMMARY of the work"
+                                                              :meta (:compaction "brief"))))
+             (cid (plist-get compaction :id)))
+        (harness-call 'session/append sid '(:kind user :content "after the parser compaction"))
+        ;; Neither query nor node: the last nodes before the compaction,
+        ;; oldest first, hints left out.
+        (let ((text (harness-tools-sessions-test-ok sid "session_history" '(:limit 3))))
+          (should (string-match-p
+                   (format (concat "\\`The conversation before the brief compaction \\[compaction %s, [^]]+\\]:"
+                                   " 14 nodes your context holds only as that node tells of them\\.")
+                           cid)
+                   text))
+          (should (string-match-p "3 of 13 nodes, oldest first; earlier ones with before=n-" text))
+          (should (string-match-p "answer 4" text))
+          (should (string-match-p "question 5 about the parser" text))
+          (should (string-match-p "answer 5" text))
+          (should-not (string-match-p "question 4" text))
+          (should-not (string-match-p "a hint" text))
+          (should-not (string-match-p "after the parser compaction" text))
+          (should (string-match-p "Read a node whole with node_id; find one with query\\.\\'" text)))
+        ;; A query: matches newest first, paging back with before.
+        (let ((text (harness-tools-sessions-test-ok sid "session_history" '(:query "PARSER" :limit 2))))
+          (should (string-match-p "6 nodes mention \"PARSER\", newest first:" text))
+          (should (string-match-p "question 5 about the parser" text))
+          (should (string-match-p "question 4 about the parser" text))
+          (should-not (string-match-p "question 3" text))
+          (should-not (string-match-p "after the parser compaction" text))
+          (should (string-match-p "… 4 older; page back with before=\\(n-[a-z0-9]+\\)" text))
+          (string-match "before=\\(n-[a-z0-9]+\\)" text)
+          (let ((older (harness-tools-sessions-test-ok sid "session_history"
+                                                       (list :query "parser" :before (match-string 1 text)))))
+            (should (string-match-p "4 nodes mention \"parser\", newest first, before n-" older))
+            (should (string-match-p "question 0 about the parser" older))
+            (should-not (string-match-p "question 4" older))))
+        (should (string-match-p "Nothing mentions \"purple\"\\."
+                                (harness-tools-sessions-test-ok sid "session_history" '(:query "purple"))))
+        ;; The whole conversation, the part since the compaction included.
+        (let ((text (harness-tools-sessions-test-ok sid "session_history" '(:query "parser" :all t))))
+          (should (string-match-p (format "\\`The whole conversation, 16 nodes, the brief compaction \\[compaction %s, " cid)
+                                  text))
+          (should (string-match-p "7 nodes mention \"parser\"" text))
+          (should (string-match-p "after the parser compaction" text)))
+        ;; Only some kinds.
+        (let ((text (harness-tools-sessions-test-ok sid "session_history" '(:kinds ["assistant"] :limit 50))))
+          (should (string-match-p "6 of 6 nodes, oldest first:" text))
+          (should-not (string-match-p "question" text)))
+        ;; One node whole, with the nodes around it.
+        (let* ((q2 (cl-find "question 2 about the parser" (harness-call 'session/nodes sid)
+                            :key (lambda (n) (plist-get n :content)) :test #'equal))
+               (text (harness-tools-sessions-test-ok sid "session_history" (list :node_id (plist-get q2 :id)))))
+          (should (string-match-p (format "\\[user %s\\]\\( ([^)]+)\\)?, the node asked for:\nquestion 2 about the parser"
+                                          (plist-get q2 :id))
+                                  text))
+          (dolist (near '("question 1" "answer 1" "answer 2" "question 3"))
+            (should (string-match-p near text)))
+          (should-not (string-match-p "answer 0" text))
+          (should-not (string-match-p "answer 3" text)))
+        (let ((r (harness-tools-sessions-test-run sid "session_history" '(:node_id "n-nope"))))
+          (should (plist-get r :is-error))
+          (should (string-match-p "No node n-nope in this session's conversation" (plist-get r :content))))
+        (let ((r (harness-tools-sessions-test-run sid "session_history" '(:before "n-nope"))))
+          (should (plist-get r :is-error)))))))
+
+(ert-deftest harness-tools-sessions-history-before-a-handoff ()
+  "A handoff from another model starts the conversation over too: what
+came before its note is what session_history looks back on."
+  (harness-tools-sessions-test-with
+    (let ((sid (harness-tools-sessions-test-session)))
+      (harness-call 'session/append sid '(:kind user :content "the old model's question"))
+      (harness-call 'session/append sid '(:kind assistant :content "the old model's answer"))
+      (harness-call 'session/append sid '(:kind compaction :content "an older summary"))
+      (harness-call 'session/append sid '(:kind user :content "after the summary"))
+      (harness-call 'session/append sid (list :kind 'user :content "Read the transcript"
+                                              :meta (list :from (harness-sender-system "handoff")
+                                                          :handoff (list :mode "transcript" :file "/tmp/t.md"
+                                                                         :from "demo:scripted" :to "demo:other"))))
+      (harness-call 'session/append sid '(:kind user :content "the new model's question"))
+      (let ((text (harness-tools-sessions-test-ok sid "session_history" nil)))
+        (should (string-match-p "\\`The conversation before the handoff from demo:scripted \\[user n-[a-z0-9]+, [^]]+\\]: 4 nodes"
+                                text))
+        (should (string-match-p "after the summary" text))
+        (should (string-match-p "the old model's answer" text))
+        (should-not (string-match-p "the new model's question" text))))))
 
 (ert-deftest harness-tools-sessions-send-and-wait-reply ()
   (harness-tools-sessions-test-with
