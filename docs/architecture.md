@@ -1451,14 +1451,43 @@ non-interactive session it stays a denial.
   names (`harness-perms--listing-tools`: list_dir, glob, file_info) may
   still look at.  Symbolic links are resolved first, out of the harness
   as much as into it.
+- Skills are read the same way.  Agents read a skill's files directly
+  (a SKILL.md whose place they know, the files `skill_load` lists), and
+  a prompt about `~/.claude/skills` used to stop an unattended task in
+  needs-input.  `harness-perms-skill-dirs` asks the skills module
+  (`skills/directories`) which directories discovery reads for the
+  session's cwd; a call of kind `read` may read the `:contained` ones
+  in every mode, with the user there or away.  The jail lets such a
+  read through (`harness-perms--skill-readable-p`) and the mode stage
+  allows it with no judge asked ("reading skills never needs
+  approval"); a standing rule still decides first, and the harness's
+  credentials stay out.  Writes, commands, sub-agents and directory
+  grants there are jailed as anywhere outside the roots, and their
+  denial says reading needs no grant.  Where reading does not fit, the
+  jail refuses at once, final in every mode and with the user there
+  too, and nobody is asked (`harness-perms--skills-refusal`): a path in
+  a skills directory as written that symbolic links lead out of what
+  may be read (a link to a file elsewhere, a project's `.claude/skills`
+  linked out of the project), a path in a remote session's skills
+  directories (its host's, not the skills the harness serves; the same
+  path as a local one, or the same place under a home directory there,
+  `~/`, `/home/USER/`, `/Users/USER/` or `/root/`), and a path in one
+  that a shell command run in the sandbox (`sandbox/confined-p`) names
+  but the sandbox does not show.  The refusal's hint
+  (`harness-perms-skills-hint`) points to `skill_search` and
+  `skill_load` (with `file` for a supporting file), which never need
+  approval, and to `request_directory_access` should the task need the
+  target directory itself.  No mode stage was added: the jail and the
+  mode stage do it, as for the harness.
 - `permission/allow-dir SESSION-ID DIR &optional SCOPE` (SCOPE `always`
   grants every session), `permission/revoke-dir SESSION-ID DIR`,
   `permission/dirs SESSION-ID` (`(:dir :source cwd|worktree|tmp|config|session|outputs
   :revocable)` plists, for the directory buffer), `permission/allowed-dirs SESSION-ID`
   (the full effective root list), `permission/rules SESSION-ID`
-  (`(:mode :non-interactive :auto-allow :session :always :roots :inspect)`:
-  `:auto-allow` holds the inspection tools too, and `:inspect` the
-  directories of the harness itself),
+  (`(:mode :non-interactive :auto-allow :session :always :roots :inspect :skills)`:
+  `:auto-allow` holds the inspection tools too, `:inspect` the
+  directories of the harness itself and `:skills` the skills
+  directories every call that only reads may read),
   `permission/pending SESSION-ID`.
 - Session directory grants are stored on the session record
   (`:allowed-dirs`), so they survive restarts and forks inherit them.
@@ -1561,7 +1590,8 @@ non-interactive session it stays a denial.
   scratch files go without stopping the session.  A path in the harness
   itself (and the agent's own request for one) adds that reading it
   needs no grant, and a read refused for reaching the credentials names
-  them (`harness-perms--inspection-hint`).
+  them (`harness-perms--inspection-hint`); a path in a skills directory
+  adds that reading it needs no grant (`harness-perms--skills-hint`).
 - Non-interactive (the user is away) is no permission policy of its
   own and refuses nothing for being unattended: the auto judge
   (stage 30, `harness-perms--judge-p`) decides what would ask the user,
@@ -1604,6 +1634,27 @@ non-interactive session it stays a denial.
   after the private tmpfs on /tmp, so a command can leave files there
   for the next command and the other tools, while the rest of /tmp
   stays private to each command.
+- The bash tool passes the skills directories every read may read (the
+  `:contained` ones of `skills/directories`) as `:readable`, so `cat
+  ~/.claude/skills/x/SKILL.md` works in the sandbox as outside it.
+  `harness-sandbox--readable-mounts` shows each one read-only where it
+  is named, where its symbolic links lead, and, for one under the real
+  home directory, at the same place under the sandbox's `$HOME`
+  (`/tmp/harness-home`, or `/tmp` for systemd-run).  Left out: one
+  inside CWD (shown read-write anyway), one that is or holds the home
+  directory, a destination below another one (it shows through that one,
+  and bwrap refuses to mount on the symbolic link it may be there: a
+  skill linked into `~/.claude/skills`), and one holding a CWD named
+  through a link.  bwrap gets the read-only binds before CWD's, since a
+  later bind covers what an earlier one shows below it, so a CWD inside
+  a skills directory stays writable; systemd-run orders its mounts
+  itself (`BindReadOnlyPaths=SRC[:DEST]`) and leaves out a path its
+  setting cannot hold as written (whitespace, colons, quotes).  Only the
+  skills directories become visible: the rest of the home directory
+  stays hidden.  `sandbox/confined-p CWD` says whether commands run in
+  CWD are confined (a backend, a policy other than `off`, a local CWD);
+  the perms module refuses a command naming a skills path the sandbox
+  does not show.
 - A CWD inside a linked git worktree also gets the repository's common
   git directory read-write (its `hooks/` and `config` stay read-only, so
   nothing planted there runs when the harness uses git unconfined; the
@@ -2137,16 +2188,45 @@ so switching to either loses nothing.
 
 ### skills
 
-- Scans `harness-skills-directories` (defaults: `~/.claude/skills`,
-  `./.claude/skills`, `~/.config/harness/skills`, `./.harness/skills`)
-  for `NAME/SKILL.md` with front matter.
+- Scans `harness-skills-directories` for `NAME/SKILL.md` with front
+  matter.  The defaults are the documented locations: Claude Code's
+  `~/.claude/skills` and `.claude/skills`, the harness's
+  `~/.config/harness/skills` and `.harness/skills`, the open Agent
+  Skills convention's `~/.agents/skills` and `.agents/skills` (which
+  Codex and GitHub Copilot CLI read too), Copilot CLI's
+  `~/.copilot/skills` and `.github/skills`
+  (`harness-skills-project-subdirectories`, under the cwd and its
+  project root), and the skills of Claude Code's plugins
+  (`harness-skills-plugin-directories`: `cache/MARKETPLACE/PLUGIN/VERSION/skills`
+  under `harness-skills-plugins-directory`, else
+  `$CLAUDE_CODE_PLUGIN_CACHE_DIR`, else `~/.claude/plugins`; newest
+  version first, none Claude Code orphaned with `.orphaned_at`).
+  Codex's deprecated `~/.codex/skills` and its admin `/etc/codex/skills`
+  are left out.  Project skills come first, then global ones, then
+  plugins' (`harness-skills--source-rank`); the first skill of a name
+  wins.  A function in the list may return `(:dir :source :within)`
+  plists instead of directories.
 - `skills/list &optional CWD`, `skills/search QUERY &optional CWD`,
   `skills/load NAME &optional CWD` → `(:name :description :content :path :source :files)`,
   `skills/refresh`, `skills/expand TEXT CWD` → `(:text EXPANDED :skills (…))`
   (explicit `/name` or `@skill:name` references get the skill content
   attached; the compose UI calls this over ACP).
-- Tools `skill_search`, `skill_load`.  Adds a short skills index to the
-  system prompt via `agent/system-prompt`.
+- `skills/directories &optional CWD` → `(:dir :source :contained)` for
+  every directory discovery reads, each followed by the skill
+  directories in it that lead elsewhere through a symbolic link (a
+  skill linked in from dotfiles).  `:contained` says it holds skills and
+  nothing else: a directory a project or a plugin provides counts only
+  while it stays inside its `:within` once links are resolved (the
+  project root; a plugin's marketplace directory, as Claude Code allows
+  links between plugins of one marketplace), and none that is or holds
+  the home directory does.  So a link committed to a repository, or
+  shipped in a plugin, opens nothing.  The perms module lets every read
+  read the contained ones, and the bash tool's sandbox shows them.
+- Tools `skill_search`, `skill_load` (`name`, and `file` for one of the
+  skill's supporting files, which must stay inside the skill's
+  directory and a contained directory once links are resolved, and be
+  text; a failure lists the files there are).  Adds a short skills index
+  to the system prompt via `agent/system-prompt`.
 
 ### worktree
 
@@ -2764,7 +2844,7 @@ TRAMP prefixes come from the session host):
 | `plan` | Plan | plan | meta |
 | `todo_write` | Todo list | todos | meta |
 | `spawn_agent` | Sub-agent | prompt, fork, model, name, cwd, worktree | meta (the jail checks `cwd`, as it checks bash's) |
-| `skill_search` / `skill_load` | Search skills / Load skill | query / name | read |
+| `skill_search` / `skill_load` | Search skills / Load skill | query / name, file (one of the skill's supporting files) | read (needs no approval: `harness-perms--auto-allow-tools`) |
 | `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_read` | Read session | session_id, limit, before, kinds, max_chars | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -2784,7 +2864,8 @@ TRAMP prefixes come from the session host):
 The tools of kind read that take a path (`read_file`, `list_dir`,
 `glob`, `grep`, `file_info`, `emacs_open`) may read the harness itself
 as well as the session's roots: its code and its state directory, its
-credentials aside (see perms).
+credentials aside (see perms).  They may read the skills directories
+too, and bash reads them in the sandbox (see perms and sandbox).
 
 `hand_in` (tools-handin) is how a task's session finishes: the tool
 records the summary and evidence on the task (`task/hand-in'`) and asks

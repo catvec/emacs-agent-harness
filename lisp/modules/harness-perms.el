@@ -11,8 +11,9 @@
 ;;    7 sandbox-guard    shell commands the sandbox would make destructive
 ;;                       (`git worktree prune' and the like) are refused
 ;;   10 jail             every path must lie inside an allowed root, or,
-;;                       for a call that only reads, in the harness itself;
-;;                       otherwise the user is asked for the directory
+;;                       for a call that only reads, in the harness itself
+;;                       or a skills directory; otherwise the user is asked
+;;                       for the directory
 ;;   20 mode             ask / accept-edits / auto / yolo, plus standing rules
 ;;                       and the tools and reads that never need approval
 ;;   30 auto             a cheap model judges what is still undecided, in
@@ -94,6 +95,16 @@
 ;; The judge's prompt says the same for the calls it sees, such as Emacs
 ;; Lisp that reads the state directory.  Standing rules still come
 ;; first, so a user's deny rule holds.
+;;
+;; Skills are read the same way (see "Skills, which every session may
+;; read"): a call that only reads may read every directory skill
+;; discovery reads (`harness-perms-skill-dirs'), in every mode, before
+;; the judge or the user is asked, and the sandbox shows them to bash
+;; read-only.  Writing there stays jailed.  Where reading one does not
+;; fit, such as a symbolic link out of a skills directory or a remote
+;; session's host, the call is refused at once and the agent pointed to
+;; skill_search and skill_load: nobody is asked about a skills
+;; directory.
 ;;
 ;; Switching a session that is waiting on a prompt into yolo mode answers
 ;; the prompt: the call was open only because the old mode asked, and
@@ -533,12 +544,13 @@ PATH is outside the session's roots.  When it lies in the harness
 itself (see `harness-perms-inspection-dirs'), a call that does more
 than read, or a request for the directory, learns that reading it
 needs no grant, and a read refused for reaching the credentials
-learns which files those are."
+learns which files those are.  Elsewhere the hint is that of a skills
+directory (`harness-perms--skills-hint')."
   (cond
    ((or (file-remote-p path)
         (not (cl-some (lambda (e) (harness-perms--within-p (plist-get e :dir) path))
                       (harness-perms-inspection-dirs))))
-    "")
+    (harness-perms--skills-hint request path))
    ((not (eq (harness-perms--sym (plist-get request :kind)) 'read))
     (if (harness-perms--inspectable-p (list :kind 'read :tool "list_dir") path)
         " It is part of the harness itself, which the tools that only read (read_file, list_dir, glob, grep, file_info) may read without a grant."
@@ -550,9 +562,11 @@ learns which files those are."
 (defun harness-perms--unreachable (request roots)
   "Return the first path of REQUEST it may not reach, or nil.
 A path is reachable when it lies inside one of ROOTS, or, for a call
-that only reads, inside the harness itself (`harness-perms--inspectable-p')."
+that only reads, inside the harness itself (`harness-perms--inspectable-p')
+or a skills directory (`harness-perms--skill-readable-p')."
   (cl-find-if (lambda (p) (and (harness-perms--outside (list p) roots)
-                               (not (harness-perms--inspectable-p request p))))
+                               (not (harness-perms--inspectable-p request p))
+                               (not (harness-perms--skill-readable-p request p))))
               (plist-get request :paths)))
 
 (defun harness-perms--reads-harness-p (request)
@@ -568,6 +582,154 @@ mode."
            (and (not (harness-perms--unreachable request roots))
                 (harness-perms--outside paths roots)
                 t)))))
+
+;;;; Skills, which every session may read
+;;
+;; Agents read skills directly as well as through skill_load: the files
+;; a loaded skill lists, a SKILL.md whose place they know.  Those
+;; directories mostly lie outside the session's roots, and a prompt
+;; about one would stop an unattended task over nothing, so a call that
+;; only reads may read every directory skill discovery reads, in every
+;; mode, as it may read the harness itself.  The skills module says
+;; which (`skills/directories'); without it there are none.  They are
+;; no roots: writing there, or running a command there, stays jailed,
+;; and the sandbox shows them to bash read-only.
+;;
+;; Where reading one does not fit, the call is refused at once, in
+;; every mode, and the user is not asked: a path in a skills directory
+;; that symbolic links lead out of it (or out of the project or plugin
+;; that provides it), the skills directories of a remote session's host,
+;; which are not the ones the harness serves, and, from bash in the
+;; sandbox, a path in one that the sandbox does not show.  The refusal
+;; points the agent to skill_search and skill_load, which read the
+;; skills on this machine and never need approval.
+
+(defconst harness-perms-skills-hint
+  "Skills have tools of their own, which never need approval: skill_search lists them, skill_load NAME returns a skill's instructions and the list of its files, and skill_load with file set to one of those returns that file."
+  "Hint attached to a refusal over a skills directory.")
+
+(defun harness-perms-skill-dirs (session)
+  "Return the skills directories of SESSION as (:dir DIR :source S :contained B).
+They are what `skills/directories' returns for SESSION's cwd, or, for
+a remote session, for no cwd at all: the skills the harness serves are
+on this machine, and the permission chain never reaches out to another
+host.  A call that only reads may read the `:contained' ones (see
+`harness-perms--skill-readable-p').  Without the skills module there
+are none."
+  (when (harness-method-exists-p 'skills/directories)
+    (let ((cwd (plist-get session :cwd)))
+      (condition-case err
+          (harness-call 'skills/directories
+                        (and (stringp cwd) (not (plist-get session :host)) (not (file-remote-p cwd)) cwd))
+        (error (harness-log 'warn "perms: could not list the skills directories: %S" err)
+               nil)))))
+
+(defun harness-perms--skill-readable-p (request path &optional dirs)
+  "Non-nil when REQUEST may read PATH because it lies in a skills directory.
+REQUEST must only read, PATH must be on this machine and lie, symbolic
+links resolved, in one of the `:contained' directories of
+`harness-perms-skill-dirs' (or of DIRS, a list of them), and the call
+must not reach the harness's credentials."
+  (and (eq (harness-perms--sym (plist-get request :kind)) 'read)
+       (stringp path)
+       (not (file-remote-p path))
+       (cl-some (lambda (e) (and (plist-get e :contained) (harness-perms--within-p (plist-get e :dir) path)))
+                (or dirs (harness-perms-skill-dirs (plist-get request :session))))
+       (not (harness-perms--private-p (plist-get request :tool) path))))
+
+(defun harness-perms--reads-skills-p (request)
+  "Non-nil when REQUEST reads skills outside the session's roots, and nothing else.
+That is a call that only reads, whose every path outside the roots
+lies in a skills directory it may read (see
+`harness-perms--skill-readable-p'); the mode stage allows it in every
+mode."
+  (let ((paths (plist-get request :paths)))
+    (and (eq (harness-perms--sym (plist-get request :kind)) 'read)
+         paths
+         (let* ((session (plist-get request :session))
+                (roots (append (harness-perms-roots session) (plist-get request :jail-once)))
+                (outside (cl-remove-if-not (lambda (p) (harness-perms--outside (list p) roots)) paths))
+                (dirs (and outside (harness-perms-skill-dirs session))))
+           (and outside
+                (cl-every (lambda (p) (harness-perms--skill-readable-p request p dirs)) outside)
+                t)))))
+
+(defun harness-perms--skills-dir-of (path dirs)
+  "Return the skills directory of DIRS that PATH lies in as written, or nil.
+DIRS are `harness-perms-skill-dirs'.  Symbolic links are not resolved:
+this is where PATH says it is.  A remote PATH names one of them,
+which are on this machine, when its local part is the same path, or
+the same place in a home directory on its host, such as
+/home/USER/.claude/skills/x for ~/.claude/skills."
+  (let* ((remote (file-remote-p path))
+         (local (file-name-as-directory (if remote (or (file-remote-p path 'localname) "/") path)))
+         (home (file-name-as-directory (expand-file-name "~"))))
+    (cl-find-if (lambda (dir)
+                  (or (string-prefix-p dir local)
+                      (and remote (string-prefix-p home dir)
+                           (string-match-p (concat "\\`\\(?:~\\|/root\\|/\\(?:home\\|Users\\)/[^/]+\\)/"
+                                                   (regexp-quote (substring dir (length home))))
+                                           local))))
+                (mapcar (lambda (e) (file-name-as-directory (plist-get e :dir))) dirs))))
+
+(defun harness-perms--confined-p (request)
+  "Non-nil when REQUEST's shell command runs in the sandbox."
+  (and (harness-method-exists-p 'sandbox/confined-p)
+       (condition-case nil
+           (harness-call 'sandbox/confined-p (harness-perms--command-dir request))
+         (error nil))))
+
+(defun harness-perms--skills-refusal (request roots)
+  "Return the decision refusing REQUEST at once over a skills directory, or nil.
+A call that only reads is refused for a path outside ROOTS that lies
+in a skills directory as written but may not be read there (see
+`harness-perms--skill-readable-p'): symbolic links lead it out, or it
+is on a remote session's host.  A shell command that runs in the
+sandbox is refused for a path it names in a skills directory that the
+sandbox does not show.  The refusal is final and points the agent to
+skill_search and skill_load (`harness-perms-skills-hint'), so nobody is
+asked about a directory the agent has a tool for."
+  (let* ((session (plist-get request :session))
+         (kind (harness-perms--sym (plist-get request :kind)))
+         (exec (and (eq kind 'exec) (harness-perms--command request) (harness-perms--confined-p request)))
+         (candidates (cond ((eq kind 'read) (plist-get request :paths))
+                           (exec (harness-perms--named-paths request))))
+         (outside (cl-remove-if-not (lambda (p) (harness-perms--outside (list p) roots)) candidates))
+         (dirs (and outside (harness-perms-skill-dirs session)))
+         (as-read (if exec (list :kind 'read :tool "read_file" :session session) request))
+         (path (cl-find-if (lambda (p) (and (harness-perms--skills-dir-of p dirs)
+                                            (not (harness-perms--inspectable-p as-read p))
+                                            (not (harness-perms--skill-readable-p as-read p dirs))))
+                           outside)))
+    (when path
+      (let* ((dir (abbreviate-file-name (harness-perms--skills-dir-of path dirs)))
+             (host (file-remote-p path))
+             (target (and (not host) (harness-path-normalize path))))
+        (list :behavior 'deny :final t
+              :reason (cond
+                       (host (format "%s is a skills directory on %s, not the skills the harness serves, which are on this machine"
+                                     path host))
+                       (exec (format "the command names %s, in the skills directory %s, but that leads to %s, which the sandbox does not show"
+                                     (abbreviate-file-name path) dir (abbreviate-file-name target)))
+                       (t (format "%s is in the skills directory %s, but leads to %s, outside what may be read without approval"
+                                  (abbreviate-file-name path) dir (abbreviate-file-name target))))
+              :hint (concat harness-perms-skills-hint
+                            (if host
+                                (format " Ask for the directory with request_directory_access only if the task is about the files of %s itself."
+                                        host)
+                              (format " If the task needs %s itself, ask for it with request_directory_access."
+                                      (abbreviate-file-name (harness-perms--dir-of target))))))))))
+
+(defun harness-perms--skills-hint (request path)
+  "Return what REQUEST's agent may still do with PATH in a skills directory, or \"\".
+PATH is outside the session's roots.  When a call that does more than
+read, or a request for the directory, is about a skills directory that
+every call that only reads may read, the agent learns so."
+  (if (and (not (eq (harness-perms--sym (plist-get request :kind)) 'read))
+           (harness-perms--skill-readable-p (list :kind 'read :tool "list_dir" :session (plist-get request :session))
+                                            path))
+      " It holds skills, which the tools that only read (read_file, list_dir, glob, grep, file_info) may read without a grant; skill_load loads one."
+    ""))
 
 (defun harness-perms--dir-of (path)
   "Return the directory to grant so that PATH becomes reachable.
@@ -845,24 +1007,29 @@ the prompt offered; nil for a prompt that offered none."
 (defun harness-perms--jail (decision next request)
   "Pass REQUEST on when its paths lie inside the session's roots.
 A call that only reads may also read the harness itself (see
-`harness-perms--inspectable-p').  Otherwise ask the user for access to
-the directory, or deny when nobody can answer or a rule denies the
-call anyway.  DECISION is the current value and NEXT continues the
-chain.  Roots in the request's `:jail-once' were allowed for this call
-only."
+`harness-perms--inspectable-p') and the skills directories (see
+`harness-perms--skill-readable-p').  Otherwise ask the user for access
+to the directory, or deny when nobody can answer or a rule denies the
+call anyway; a call about a skills directory it may not reach is
+refused at once (`harness-perms--skills-refusal').  DECISION is the
+current value and NEXT continues the chain.  Roots in the request's
+`:jail-once' were allowed for this call only."
   (let ((paths (plist-get request :paths)))
     (if (null paths)
         (funcall next decision)
       (let* ((session (plist-get request :session))
              (roots (append (harness-perms-roots session) (plist-get request :jail-once)))
              (bad (harness-perms--unreachable request roots))
-             (rule (and bad (harness-perms--find-rule request))))
+             (rule (and bad (harness-perms--find-rule request)))
+             (refusal (harness-perms--skills-refusal request roots)))
         (cond
-         ((null bad) (funcall next decision))
+         ((and (null bad) (null refusal)) (funcall next decision))
          ;; A rule denies the call (an "Always deny" of an earlier
          ;; prompt, say): no point asking for the directory.
          ((eq (harness-perms--sym (plist-get rule :behavior)) 'deny)
           (funcall next (plist-put (harness-perms--rule-decision rule) :final t)))
+         ;; The agent has tools for skills: nobody is asked.
+         (refusal (funcall next refusal))
          ((and (not (harness-perms--non-interactive-p session))
                (harness-method-exists-p 'session/pending-add))
           (harness-perms--ask-dir decision next request bad))
@@ -1245,6 +1412,10 @@ DECISION is returned unchanged when the mode leaves the question open."
      ((member tool harness-perms--inspection-tools)
       (list :behavior 'allow
             :reason (format "%s only inspects the harness or the user's Emacs, which never needs approval" tool)))
+     ;; So does reading skills, before the harness: the jail lets both
+     ;; through, and this names the reason.
+     ((harness-perms--reads-skills-p request)
+      (list :behavior 'allow :reason "reading skills never needs approval"))
      ((harness-perms--reads-harness-p request)
       (list :behavior 'allow :reason "reading the harness itself never needs approval"))
      ((eq mode 'yolo) (list :behavior 'allow :reason "yolo mode"))
@@ -1878,11 +2049,12 @@ is a session grant or comes from the global `harness-allowed-directories'."
 (harness-defmethod permission/rules (session-id)
   "Return the effective permission rules of SESSION-ID for display.
 The result is (:mode MODE :non-interactive BOOL :auto-allow TOOLS
-:session RULES :always RULES :roots DIRS :inspect DIRS).  TOOLS are
-the tools that never need approval, those that inspect the harness
-included; `:inspect' lists the directories of the harness itself,
-which every call that only reads may read (see
-`harness-perms-inspection-dirs')."
+:session RULES :always RULES :roots DIRS :inspect DIRS :skills DIRS).
+TOOLS are the tools that never need approval, those that inspect the
+harness included; `:inspect' lists the directories of the harness
+itself and `:skills' the skills directories, which every call that
+only reads may read (see `harness-perms-inspection-dirs' and
+`harness-perms-skill-dirs')."
   (let ((session (harness-perms--session session-id)))
     (list :mode (harness-perms--mode-of session)
           :non-interactive (and (harness-perms--non-interactive-p session) t)
@@ -1890,7 +2062,9 @@ which every call that only reads may read (see
           :session (gethash session-id harness-perms--session-rules)
           :always harness-perms-rules
           :roots (harness-perms-roots session)
-          :inspect (mapcar (lambda (e) (plist-get e :dir)) (harness-perms-inspection-dirs)))))
+          :inspect (mapcar (lambda (e) (plist-get e :dir)) (harness-perms-inspection-dirs))
+          :skills (delq nil (mapcar (lambda (e) (and (plist-get e :contained) (plist-get e :dir)))
+                                    (harness-perms-skill-dirs session))))))
 
 (harness-defmethod permission/pending (session-id)
   "Return the permission requests of SESSION-ID still waiting for an answer."

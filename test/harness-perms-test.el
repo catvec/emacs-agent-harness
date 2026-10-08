@@ -2182,6 +2182,255 @@ credentials."
          (should-not (string-search "s3cret-" (plist-get r :content))))
        (should (null (funcall probe 'requests)))))))
 
+;;;; Reading skills
+
+(defvar harness-skills-directories)
+(defvar harness-skills-plugins-directory)
+
+(defun harness-perms-test--write (file text)
+  "Write TEXT to FILE, making its directory."
+  (make-directory (file-name-directory file) t)
+  (with-temp-file file (insert text)))
+
+(defun harness-perms-test--call-with-skills (fn)
+  "Call FN with (SKILLS LINKED OUTSIDE), skills set up as a user has them.
+SKILLS is the user's skills directory, which `harness-skills-directories'
+names besides the project's: its skill commit has a file of its own and
+leak.txt, a link to OUTSIDE's secret.txt, and its skill linked is a
+link to LINKED, as from a dotfiles repository.  The session's project
+links its .claude/skills to OUTSIDE.  None is in the session's roots."
+  (harness-test-load-module 'skills)
+  (let* ((skills (harness-test-temp-dir))
+         (linked (expand-file-name "linked/" (harness-test-temp-dir)))
+         (outside (harness-test-temp-dir))
+         (cwd (plist-get harness-perms-test--session :cwd))
+         (harness-skills-plugins-directory (harness-test-temp-dir))
+         (harness-skills-directories (list skills #'harness-skills-project-directories)))
+    (harness-perms-test--write (expand-file-name "commit/SKILL.md" skills) "---\nname: commit\n---\nCommit.\n")
+    (harness-perms-test--write (expand-file-name "commit/reference.md" skills) "Reference.\n")
+    (harness-perms-test--write (expand-file-name "SKILL.md" linked) "Linked.\n")
+    (harness-perms-test--write (expand-file-name "secret.txt" outside) "s3cret\n")
+    (harness-perms-test--write (expand-file-name "stolen/SKILL.md" outside) "Stolen.\n")
+    (make-symbolic-link (expand-file-name "secret.txt" outside) (expand-file-name "commit/leak.txt" skills))
+    (make-symbolic-link (directory-file-name linked) (expand-file-name "linked" skills))
+    (make-directory (expand-file-name ".claude" cwd) t)
+    (make-symbolic-link (directory-file-name outside) (expand-file-name ".claude/skills" cwd))
+    (harness-call 'skills/refresh)
+    (funcall fn skills linked outside)))
+
+(ert-deftest harness-perms-reading-skills-needs-no-approval ()
+  "Every session may read the skills directories, in every mode, with
+the user there or away: no prompt, no judge, no denial.  An unattended
+task used to stop on a prompt for ~/.claude/skills, holding its slot."
+  (harness-perms-test--setup)
+  (harness-perms-test--install-pending)
+  (harness-perms-test--call-with-skills
+   (lambda (skills linked _outside)
+     (let ((probe (harness-perms-test--denying-judge))
+           (harness-perms-auto-model "judge:x")
+           (calls `(("read_file" ,(expand-file-name "commit/SKILL.md" skills))
+                    ("read_file" ,(expand-file-name "commit/reference.md" skills))
+                    ("list_dir" ,skills)
+                    ("glob" ,skills)
+                    ("grep" ,(expand-file-name "commit" skills))
+                    ("file_info" ,(expand-file-name "commit/SKILL.md" skills))
+                    ;; A skill linked in from elsewhere, by either name.
+                    ("read_file" ,(expand-file-name "linked/SKILL.md" skills))
+                    ("list_dir" ,linked))))
+       (harness-perms-test--each-mode
+        (lambda (mode away)
+          (pcase-dolist (`(,tool ,path) calls)
+            (ert-info ((format "%s %s in %s mode%s" tool path mode (if away ", user away" "")))
+              (let ((d (harness-perms-test--decide (harness-perms-test--request tool 'read path))))
+                (should (eq 'allow (plist-get d :behavior)))
+                (should (equal "reading skills never needs approval" (plist-get d :reason))))))))
+       (should (null (funcall probe 'requests)))
+       (should (null harness-perms-test--pending))
+       ;; A read of the project and a skill together is fine too.
+       (should (eq 'allow (plist-get (harness-perms-test--decide
+                                      (list :session harness-perms-test--session :tool "t_diff" :kind 'read
+                                            :paths (list (expand-file-name "a.el" (plist-get harness-perms-test--session :cwd))
+                                                         (expand-file-name "commit/SKILL.md" skills))))
+                                     :behavior)))
+       ;; The skills directories are shown with the rules, and are no
+       ;; roots of the session.
+       (should (equal (list skills (expand-file-name "linked/" skills))
+                      (plist-get (harness-call 'permission/rules "s1") :skills)))
+       (should-not (cl-intersection (list skills linked) (harness-perms-roots harness-perms-test--session)
+                                    :test #'equal))))))
+
+(ert-deftest harness-perms-skills-stay-read-only ()
+  "Reading skills opens nothing else: writing there, running a command
+there or starting a sub-agent there is jailed as before, and the agent
+learns that it may read them."
+  (harness-perms-test--setup :permission-mode 'yolo :non-interactive t)
+  (harness-perms-test--call-with-skills
+   (lambda (skills _linked _outside)
+     (let ((probe (harness-perms-test--allowing-judge))
+           (harness-perms-auto-model "judge:x"))
+       (pcase-dolist (`(,tool ,kind ,path)
+                      `(("write_file" write ,(expand-file-name "commit/SKILL.md" skills))
+                        ("edit_file" write ,(expand-file-name "linked/SKILL.md" skills))
+                        ("bash" exec ,skills)
+                        ("spawn_agent" meta ,skills)
+                        ("t_mystery" nil ,(expand-file-name "commit/SKILL.md" skills))))
+         (ert-info ((format "%s %s" tool path))
+           (let ((d (harness-perms-test--decide (harness-perms-test--request tool kind path))))
+             (should (eq 'deny (plist-get d :behavior)))
+             (should (plist-get d :final))
+             (should (string-match-p "outside the allowed directories" (plist-get d :reason)))
+             (should (string-search "It holds skills, which the tools that only read" (plist-get d :hint))))))
+       (should (null (funcall probe 'requests))))
+     ;; Nothing is granted on the way: asking for the directory waits for
+     ;; the user, who is away, and the agent hears it may read it anyway.
+     (let ((d (harness-perms-test--decide (harness-perms-test--dir-request skills "edit a skill"))))
+       (should (eq 'deny (plist-get d :behavior)))
+       (should (string-search "It holds skills" (plist-get d :hint))))
+     ;; With the user there, a write asks for the directory, as anywhere
+     ;; outside the roots.
+     (setq harness-perms-test--session (plist-put harness-perms-test--session :non-interactive nil))
+     (harness-perms-test--install-pending)
+     (let ((started (harness-perms-test--start "write_file" 'write (expand-file-name "commit/SKILL.md" skills))))
+       (should (equal (harness-perms-test--real (expand-file-name "commit" skills))
+                      (plist-get (plist-get (cdr started) :payload) :dir)))
+       (harness-call 'permission/answer "s1" (plist-get (cdr started) :id) "deny-once")
+       (should (eq 'deny (plist-get (harness-test-await (car started)) :behavior)))))))
+
+(ert-deftest harness-perms-skills-refuse-what-leads-out-at-once ()
+  "A path in a skills directory that symbolic links lead out of it, or out
+of the project that provides it, is refused at once, in every mode and
+with the user there too: nobody is asked about a directory the agent
+has tools for, and the agent is pointed to them.  A link committed to a
+repository opens nothing."
+  (harness-perms-test--setup)
+  (harness-perms-test--install-pending)
+  (harness-perms-test--call-with-skills
+   (lambda (skills _linked outside)
+     (let* ((cwd (plist-get harness-perms-test--session :cwd))
+            (probe (harness-perms-test--allowing-judge))
+            (harness-perms-auto-model "judge:x")
+            (project (expand-file-name ".claude/skills/" cwd))
+            (real (harness-perms-test--real outside))
+            ;; What is read, the skills directory it is in, where it
+            ;; leads and the directory a grant would need.
+            (cases `(("read_file" ,(expand-file-name "commit/leak.txt" skills) ,skills
+                      ,(concat real "secret.txt") ,real)
+                     ("grep" ,(expand-file-name "commit/leak.txt" skills) ,skills
+                      ,(concat real "secret.txt") ,real)
+                     ("read_file" ,(expand-file-name "stolen/SKILL.md" project) ,project
+                      ,(concat real "stolen/SKILL.md") ,(concat real "stolen/"))
+                     ("list_dir" ,project ,project ,real ,real))))
+       (harness-perms-test--each-mode
+        (lambda (mode away)
+          (pcase-dolist (`(,tool ,path ,dir ,target ,grant) cases)
+            (ert-info ((format "%s %s in %s mode%s" tool path mode (if away ", user away" "")))
+              (let ((d (harness-perms-test--decide (harness-perms-test--request tool 'read path))))
+                (should (eq 'deny (plist-get d :behavior)))
+                (should (plist-get d :final))
+                (should (equal (format "%s is in the skills directory %s, but leads to %s, outside what may be read without approval"
+                                       (abbreviate-file-name path) (abbreviate-file-name dir)
+                                       (abbreviate-file-name (harness-path-normalize target)))
+                               (plist-get d :reason)))
+                (should (string-prefix-p harness-perms-skills-hint (plist-get d :hint)))
+                (should (string-search "skill_load NAME" (plist-get d :hint)))
+                (should (string-search (format "If the task needs %s itself, ask for it with request_directory_access."
+                                               (abbreviate-file-name grant))
+                                       (plist-get d :hint))))))))
+       (should (null (funcall probe 'requests)))
+       (should (null harness-perms-test--pending))
+       ;; The project's directory is not one every call may read.
+       (should-not (member project (plist-get (harness-call 'permission/rules "s1") :skills)))))))
+
+(ert-deftest harness-perms-rules-beat-the-skills-allowance ()
+  "A standing rule still decides first: a user who denied reading a
+skills directory, or a tool, keeps it denied, refusals included."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-perms-test--call-with-skills
+   (lambda (skills _linked _outside)
+     (let ((harness-perms-rules `((:path ,(concat skills "commit/**") :behavior deny)
+                                  (:tool "file_info" :behavior deny))))
+       (dolist (call `(("read_file" ,(expand-file-name "commit/SKILL.md" skills))
+                       ("file_info" ,(expand-file-name "linked/SKILL.md" skills))
+                       ("file_info" ,(expand-file-name "commit/leak.txt" skills))))
+         (ert-info ((format "%s" call))
+           (let ((d (harness-perms-test--decide (harness-perms-test--request (car call) 'read (cadr call)))))
+             (should (eq 'deny (plist-get d :behavior)))
+             (should (string-match-p "standing rule" (plist-get d :reason))))))
+       (should (eq 'allow (harness-perms-test--behavior "read_file" 'read (expand-file-name "linked/SKILL.md" skills))))))))
+
+(ert-deftest harness-perms-remote-skills-are-refused-at-once ()
+  "A remote session's skills directories are on its host, not the ones
+the harness serves on this machine: reading them is refused at once,
+in every mode, and the agent is pointed to skill_load.  Nothing is
+looked up on the host, and the rest of the host goes on as before."
+  (let* ((home (harness-test-temp-dir))
+         (process-environment (cons (concat "HOME=" (directory-file-name home)) process-environment)))
+    (harness-perms-test--setup :permission-mode 'yolo :cwd "/home/u/proj/" :host "/ssh:u@box:")
+    (harness-perms-test--install-pending)
+    (harness-test-load-module 'skills)
+    (make-directory (expand-file-name ".claude/skills/commit" home) t)
+    (let ((harness-skills-directories '("~/.claude/skills" harness-skills-project-directories))
+          (seen nil))
+      ;; Discovery is asked about this machine only.
+      (advice-add 'harness-skills--entries :before (lambda (cwd) (push cwd seen)) '((name . harness-perms-test)))
+      (unwind-protect
+          (harness-perms-test--each-mode
+           (lambda (mode away)
+             (dolist (path (list "/ssh:u@box:/home/u/.claude/skills/commit/SKILL.md"
+                                 "/ssh:u@box:~/.claude/skills"
+                                 "/ssh:u@box:/root/.claude/skills/x/y.md"
+                                 (concat "/ssh:u@box:" home ".claude/skills/commit/SKILL.md")))
+               (ert-info ((format "%s in %s mode%s" path mode (if away ", user away" "")))
+                 (let ((d (harness-perms-test--decide (harness-perms-test--request "read_file" 'read path))))
+                   (should (eq 'deny (plist-get d :behavior)))
+                   (should (plist-get d :final))
+                   (should (equal (format "%s is a skills directory on /ssh:u@box:, not the skills the harness serves, which are on this machine"
+                                          path)
+                                  (plist-get d :reason)))
+                   (should (string-prefix-p harness-perms-skills-hint (plist-get d :hint)))
+                   (should (string-search "request_directory_access only if the task is about the files of /ssh:u@box: itself"
+                                          (plist-get d :hint))))))))
+        (advice-remove 'harness-skills--entries 'harness-perms-test))
+      (should seen)
+      (should-not (delq nil seen))
+      (should (null harness-perms-test--pending))
+      ;; Elsewhere on the host, and in the project, as before.
+      (should-not (harness-perms--skills-refusal
+                   (harness-perms-test--request "read_file" 'read "/ssh:u@box:/home/u/notes/x.md")
+                   (harness-perms-roots harness-perms-test--session)))
+      (should (eq 'allow (harness-perms-test--behavior "read_file" 'read "/ssh:u@box:/home/u/proj/.claude/skills/a/SKILL.md"))))))
+
+(ert-deftest harness-perms-bash-in-the-sandbox-is-refused-skills-it-cannot-see ()
+  "A command run in the sandbox sees the skills directories it may read,
+not where their links lead elsewhere: one naming such a path is refused
+at once with the pointer to skill_load, rather than failing in there.
+Unconfined, it sees what the user sees, and goes on as before."
+  (harness-perms-test--setup :permission-mode 'yolo)
+  (harness-perms-test--install-pending)
+  (harness-perms-test--call-with-skills
+   (lambda (skills linked outside)
+     (let ((confined t)
+           (leak (expand-file-name "commit/leak.txt" skills)))
+       (harness-register-method 'sandbox/confined-p (lambda (_cwd) confined))
+       (let ((d (harness-perms-test--decide (harness-perms-test--bash (format "cat %s ./README" leak)))))
+         (should (eq 'deny (plist-get d :behavior)))
+         (should (plist-get d :final))
+         (should (equal (format "the command names %s, in the skills directory %s, but that leads to %s, which the sandbox does not show"
+                                (abbreviate-file-name leak) (abbreviate-file-name skills)
+                                (abbreviate-file-name (harness-path-normalize (expand-file-name "secret.txt" outside))))
+                        (plist-get d :reason)))
+         (should (string-prefix-p harness-perms-skills-hint (plist-get d :hint))))
+       ;; What the sandbox shows runs.
+       (dolist (command (list (format "cat %scommit/SKILL.md" skills)
+                              (format "ls %s %s" (expand-file-name "linked" skills) linked)
+                              "git status"))
+         (should (eq 'allow (plist-get (harness-perms-test--decide (harness-perms-test--bash command)) :behavior))))
+       ;; Unconfined, the command sees the link's target as the user does.
+       (setq confined nil)
+       (should (eq 'allow (plist-get (harness-perms-test--decide (harness-perms-test--bash (format "cat %s" leak)))
+                                     :behavior)))
+       (should (null harness-perms-test--pending))))))
+
 ;;;; Commands the sandbox makes destructive
 
 (defvar harness-sandbox-policy)
