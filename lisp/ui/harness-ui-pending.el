@@ -47,6 +47,8 @@
 (declare-function harness-ui-popout-refresh "harness-ui-popout")
 (declare-function harness-ui-popout-close "harness-ui-popout")
 (declare-function harness-ui-popout-buffer "harness-ui-popout")
+(declare-function harness-ui-popout-pixel-width "harness-ui-popout" (&optional window))
+(declare-function harness-ui-popout-pixel-height "harness-ui-popout" (&optional lines))
 
 ;;;; The store
 
@@ -79,6 +81,14 @@ The session's own pending list lags an answer by a round trip; this
 keeps the request off the panels meanwhile, so answering one does not
 bring it back for a moment.")
 
+(defvar harness-ui-pending--images (make-hash-table :test 'equal)
+  "(SESSION-ID PID INDEX) -> the image of that option, fetched from the harness.
+\(loading), a list of its own for each time it is asked for, while it
+is; then (:data BASE64 :mime MIME), or (:error MESSAGE) when the
+harness could not give it.  Only for images this Emacs cannot read
+itself (`harness-ui-pending--fetch-p'); a request leaving the store
+takes its images along.")
+
 (defvar harness-ui-pending-changed-hook nil
   "Hook run with a session id after its requests change.
 The chat redraws its tail for it, an open popout its content.")
@@ -99,11 +109,13 @@ popout sets it to the session its item belongs to.")
 
 (defun harness-ui-pending--forget-all ()
   "Forget every request, its diagrams and the answers just given.
-Which requests show their input whole is forgotten too."
+Which requests show their input whole, and the images fetched for
+them, are forgotten too."
   (clrhash harness-ui-pending--requests)
   (clrhash harness-ui-pending--diagrams)
   (clrhash harness-ui-pending--expanded)
-  (clrhash harness-ui-pending--answered))
+  (clrhash harness-ui-pending--answered)
+  (clrhash harness-ui-pending--images))
 
 (defun harness-ui-pending-items (session-id)
   "Return the request records SESSION-ID waits on, oldest first."
@@ -149,7 +161,18 @@ opening it."
   (if records
       (puthash session-id records harness-ui-pending--requests)
     (remhash session-id harness-ui-pending--requests))
+  (harness-ui-pending--forget-images session-id records)
   (harness-ui-pending--changed session-id))
+
+(defun harness-ui-pending--forget-images (session-id records)
+  "Forget the images fetched for the requests of SESSION-ID not in RECORDS."
+  (let (gone)
+    (maphash (lambda (key _)
+               (when (and (equal (car key) session-id)
+                          (not (cl-find (nth 1 key) records :key (lambda (r) (plist-get r :id)) :test #'equal)))
+                 (push key gone)))
+             harness-ui-pending--images)
+    (dolist (key gone) (remhash key harness-ui-pending--images))))
 
 (defun harness-ui-pending-add (session-id record)
   "Add or replace RECORD among the requests SESSION-ID waits on.
@@ -843,6 +866,29 @@ and [Show less] buttons, run this."
 ;; it.  Answering is as without diagrams: a digit, a click on the option,
 ;; or the compose box.  The chat redraws the options and the area alone,
 ;; in place, so point, the windows and the compose box stay put.
+;;
+;; An image is drawn in `harness-ui-image-colors', black on white by
+;; default, as a browser shows the file, so a drawing made for a white
+;; page reads under a dark theme too.  It is sized to show whole with the
+;; lines around it: in a chat at most half the window's height (a BTW's
+;; side window is short), in a popout as much as the popout has left
+;; once the panel's text and the box are in, the popout growing taller
+;; than others for it (`harness-ui-pending-popout-max-height').  Its path
+;; is one on the harness's machine.  This Emacs reads it when it shares
+;; that machine's files; otherwise it asks the harness for the image
+;; (`question/image') and draws it once it comes: a harness reached at a
+;; host and port, which may run elsewhere, and a file on a remote host,
+;; which the harness process reads without blocking this Emacs.  One the
+;; harness could not give, as over a connection that broke, is asked for
+;; again once the UI connects again.
+
+(defcustom harness-ui-pending-popout-max-height 0.75
+  "Height the popout of a question with images grows to at most.
+A fraction of the frame's height: more than other popouts take
+\(`harness-ui-popout-max-height'), as a report's popout does, so the
+images show large enough to compare, whole, with the options and the
+box under them."
+  :type 'number :group 'harness-ui-pending)
 
 (defun harness-ui-pending--diagrams (r)
   "Return the diagrams of question record R, one per option, or nil.
@@ -850,6 +896,11 @@ Each is (:type \"ascii\" :text TEXT) or (:type \"image\" :path PATH :mime MIME).
   (and (equal (plist-get r :kind) "question")
        (plist-get r :options)
        (append (plist-get r :diagrams) nil)))
+
+(defun harness-ui-pending--image-question-p (r)
+  "Non-nil when request record R is a question showing images."
+  (cl-some (lambda (d) (equal (format "%s" (plist-get d :type)) "image"))
+           (harness-ui-pending--diagrams r)))
 
 (defun harness-ui-pending--shown-index (session-id pid count)
   "Return which option's diagram the panel of PID of SESSION-ID shows.
@@ -869,22 +920,134 @@ SESSION-ID is the session the request PID belongs to."
       harness-ui-pending-diagram-map
     harness-ui-pending-question-map))
 
-(defun harness-ui-pending--diagram-image (path mime)
-  "Return a line showing the image file PATH, of type MIME, of a diagram.
-A remote file is not read, which would block: a button opens it instead."
-  (if (file-remote-p path)
+(defun harness-ui-pending--text-lines (r)
+  "Return about how many lines the popout of question record R takes.
+Its image left out, that is: the heading, the question and the
+options, wrapped at the popout's width, the option shown above the
+image, the hints and the blank lines of the panel, the box under it
+and a line to spare."
+  (let* ((columns (max 20 (/ (harness-ui-popout-pixel-width) (max 1 (frame-char-width)))))
+         (lines (lambda (text indent)
+                  (apply #'+ (mapcar (lambda (line) (max 1 (ceiling (+ indent (string-width line)) (float columns))))
+                                     (split-string (format "%s" (or text "")) "\n"))))))
+    (+ 1 (funcall lines (plist-get r :question) 3)
+       1 (apply #'+ (mapcar (lambda (option) (funcall lines option 7)) (plist-get r :options)))
+       2 3 2 1)))
+
+(defun harness-ui-pending--image-box (r)
+  "Return the size an image of question record R takes here, or nil.
+In a popout that is (:max-width W :max-height H), in pixels: as wide as
+the popout, and as high as it has room for beside the rest of the panel
+and the box (`harness-ui-pending--text-lines'), so the image shows
+whole.  Elsewhere, in a chat, nil: `harness-ui-image-string' sizes it to
+the window."
+  (when (and (fboundp 'harness-ui-popout-pixel-height) (derived-mode-p 'harness-ui-popout-mode))
+    (list :max-width (max 1 (- (harness-ui-popout-pixel-width) (* 7 (frame-char-width))))
+          :max-height (max (* 4 (frame-char-height))
+                           (harness-ui-popout-pixel-height (harness-ui-pending--text-lines r))))))
+
+(defun harness-ui-pending--fetch-p (path)
+  "Non-nil when the image PATH of a question is asked of the harness.
+PATH is on the harness's machine.  A harness the UI reached at a host
+and port may run on another one, so its images are always asked for;
+so is a file on a remote host, which the harness process reads without
+blocking this Emacs.  A harness in this Emacs, or the harness process
+it started (`harness-ui-connection-address' `process'), shares its
+local files, which are read here."
+  (or (stringp harness-ui-connection-address)
+      (and harness-ui-connection-address (file-remote-p path) t)))
+
+(defun harness-ui-pending--fetched-image (session-id pid index)
+  "Return the image of option INDEX of question PID of SESSION-ID.
+It comes from the harness: the first call asks for it
+\(`question/image') and returns `loading'; once it comes, the panels
+showing the question are drawn again with it.  It is then (:data
+BASE64 :mime MIME), or (:error MESSAGE) when the harness could not
+give it, which is asked for again once the UI connects again
+\(`harness-ui-pending--retry-images').  Asking never signals: the
+panel asking is being drawn."
+  (let* ((key (list session-id pid index))
+         (got (gethash key harness-ui-pending--images)))
+    (cond
+     ((eq (car-safe got) 'loading) 'loading)
+     (got got)
+     (t
+      (let* ((asking (list 'loading))
+             (drawing t)
+             (settle (lambda (value)
+                       ;; Not once the question went, which forgot it,
+                       ;; nor once it was asked for again.
+                       (when (eq (gethash key harness-ui-pending--images) asking)
+                         (if value
+                             (puthash key value harness-ui-pending--images)
+                           (remhash key harness-ui-pending--images))
+                         ;; The panel being drawn shows it as it is.
+                         (unless drawing (harness-ui-pending--changed session-id)))
+                       nil)))
+        (puthash key asking harness-ui-pending--images)
+        (condition-case err
+            (harness-ui-call "_harness/question/image" (list :session-id session-id :pid pid :index index)
+                             (lambda (result)
+                               (funcall settle (list :data (plist-get result :data) :mime (plist-get result :mime))))
+                             (lambda (err)
+                               ;; The UI let go of the connection for another
+                               ;; on purpose: the image is asked of that one.
+                               (funcall settle (unless (harness-ui-connection-replaced-p err)
+                                                 (list :error (harness-error-message err))))))
+          ;; Connecting failed, as to a host that is not known.
+          (error (funcall settle (list :error (harness-error-message err)))))
+        (setq drawing nil)
+        (let ((now (gethash key harness-ui-pending--images)))
+          (if (or (null now) (eq now asking)) 'loading now)))))))
+
+(defun harness-ui-pending--retry-images ()
+  "Forget the images the harness could not give, and ask for them again.
+On `harness-ui-connected-hook': a connection that broke failed them,
+and the harness the UI reaches now may give them."
+  (let (failed)
+    (maphash (lambda (key value) (when (eq (car-safe value) :error) (push key failed)))
+             harness-ui-pending--images)
+    (dolist (key failed) (remhash key harness-ui-pending--images))
+    (dolist (session-id (delete-dups (mapcar #'car failed)))
+      (harness-ui-pending--changed session-id))))
+
+(defun harness-ui-pending--diagram-image (session-id r index)
+  "Return a line showing the image of option INDEX of question record R.
+R is a question of SESSION-ID.  The image is sized for where it shows
+\(`harness-ui-pending--image-box').  A file this Emacs shares with the
+harness is read here; otherwise the harness is asked for it
+\(`harness-ui-pending--fetch-p') and it shows once it comes.  A remote
+file named by a harness in this Emacs is not read, which would block:
+a button opens it instead."
+  (let* ((diagram (nth index (harness-ui-pending--diagrams r)))
+         (path (format "%s" (plist-get diagram :path)))
+         (mime (plist-get diagram :mime))
+         (box (harness-ui-pending--image-box r)))
+    (cond
+     ((harness-ui-pending--fetch-p path)
+      (let ((got (harness-ui-pending--fetched-image session-id (plist-get r :id) index)))
+        (cond ((eq got 'loading)
+               (propertize (format "[loading the image %s\N{U+2026}]\n" (file-name-nondirectory path))
+                           'face 'harness-dim-face))
+              ((plist-get got :data)
+               (apply #'harness-ui-image-string (list :data (plist-get got :data)) mime box))
+              (t (propertize (format "[image %s: %s]\n" path (plist-get got :error))
+                             'face 'harness-dim-face)))))
+     ((file-remote-p path)
       (concat (harness-ui-action-button (format "[image %s]" path) (lambda () (find-file-other-window path))
                                         :help "Open the image")
-              "\n")
-    (harness-ui-image-string path mime)))
+              "\n"))
+     (t (apply #'harness-ui-image-string path mime box)))))
 
-(defun harness-ui-pending--diagram-string (diagram)
-  "Return the lines showing DIAGRAM, one option's (see the diagrams above)."
-  (let ((indent (propertize "     " 'face 'harness-ui-panel-face)))
+(defun harness-ui-pending--diagram-string (session-id r index)
+  "Return the lines showing the diagram of option INDEX of question record R.
+R is a question of SESSION-ID; see the diagrams above."
+  (let ((diagram (nth index (harness-ui-pending--diagrams r)))
+        (indent (propertize "     " 'face 'harness-ui-panel-face)))
     (pcase (format "%s" (plist-get diagram :type))
       ("ascii" (propertize (harness-ui-ensure-newline (plist-get diagram :text))
                            'face 'harness-ui-output-face 'line-prefix indent 'wrap-prefix indent))
-      ("image" (propertize (harness-ui-pending--diagram-image (plist-get diagram :path) (plist-get diagram :mime))
+      ("image" (propertize (harness-ui-pending--diagram-image session-id r index)
                            'line-prefix indent 'wrap-prefix indent))
       (_ (propertize "     (no diagram)\n" 'face 'harness-dim-face)))))
 
@@ -914,7 +1077,7 @@ on it as the area is redrawn.  HELP is its tooltip, FACE its face."
      "  "
      (propertize (nth shown options) 'face 'bold 'wrap-prefix "   ")
      "\n"
-     (harness-ui-pending--diagram-string (nth shown (harness-ui-pending--diagrams r))))))
+     (harness-ui-pending--diagram-string session-id r shown))))
 
 (defun harness-ui-pending--option-line (session-id pid option i shown)
   "Return the line of OPTION, the Ith of question PID; SHOWN: its diagram shows."
@@ -1126,7 +1289,14 @@ non-nil shows it without selecting its window (a refresh, say)."
                    (lambda () (harness-ui-pending--popout-render session-id))
                    :compose (lambda () (harness-ui-pending--popout-submit session-id))
                    :placeholder "Type an answer…"
-                   :dir (plist-get (harness-ui-session session-id) :cwd))))
+                   :dir (plist-get (harness-ui-session session-id) :cwd)
+                   ;; Images to compare take more room than text,
+                   ;; asked on every draw: a question with images may
+                   ;; come after the popout opened.
+                   :max-height (lambda ()
+                                 (and (cl-some #'harness-ui-pending--image-question-p
+                                               (harness-ui-pending-items session-id))
+                                      harness-ui-pending-popout-max-height)))))
       (when keep-pos
         (let ((window (get-buffer-window buffer)))
           (when (window-live-p window) (set-window-point window (point)))))
@@ -1250,6 +1420,7 @@ its panel's; for a question, the question."
   "Join the UI: own ACP requests, and pop out what a session waits on."
   (add-hook 'harness-ui-permission-functions #'harness-ui-pending--on-permission)
   (add-hook 'harness-ui-question-functions #'harness-ui-pending--on-question)
+  (add-hook 'harness-ui-connected-hook #'harness-ui-pending--retry-images)
   (when (boundp 'harness-ui-popout-at-point-functions)
     (add-hook 'harness-ui-popout-at-point-functions #'harness-ui-pending-popout-at-point)))
 

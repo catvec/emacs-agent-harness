@@ -219,14 +219,18 @@ clicking it, or RET on it, shows it larger still, in a popout of its
 own, and dragging it drops the file into another application
 \(`harness-ui-drag-source').  Without image support, and for a remote
 file, which reading here would block on, a button opening the file is
-inserted instead."
+inserted instead; so it is for an image too large for Emacs to draw
+\(`harness-ui-image-too-large'), which says so."
   (let* ((label (format "[image %s]" (abbreviate-file-name path)))
          (task harness-ui-report--task)
-         (image (and (display-images-p) (not (file-remote-p path)) (file-readable-p path)
+         (readable (and (display-images-p) (not (file-remote-p path)) (file-readable-p path)))
+         (too-large (and readable (harness-ui-image-too-large path)))
+         (image (and readable (not too-large)
                      (ignore-errors
-                       (create-image path nil nil
-                                     :max-width (harness-ui-report--image-width)
-                                     :max-height (harness-ui-report--image-max-height))))))
+                       (apply #'create-image path nil nil
+                              :max-width (harness-ui-report--image-width)
+                              :max-height (harness-ui-report--image-max-height)
+                              (harness-ui-image-color-props))))))
     (if image
         (let ((view (let ((id (plist-get task :id))
                           (title (harness-ui-report--title task)))
@@ -237,7 +241,8 @@ inserted instead."
                                'keymap (harness-ui-mouse-keymap view))
                    path)
                   "\n"))
-      (harness-ui-button label (lambda () (harness-ui-report--open-file path))
+      (harness-ui-button (if too-large (harness-ui-image-too-large-label label too-large) label)
+                         (lambda () (harness-ui-report--open-file path))
                          :help "Open the image")
       (insert "\n"))))
 
