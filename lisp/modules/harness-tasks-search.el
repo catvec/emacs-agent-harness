@@ -438,12 +438,12 @@ nothing; IDS name tasks of TASKS, at most
 The node logs are searched by `harness-tasks-search--grep-program', in a
 process: transcripts are never loaded just to be searched."
   (let* ((dir (expand-file-name "sessions" harness-state-directory))
-         (by-file (make-hash-table :test 'equal))
+         (by-session (make-hash-table :test 'equal))
          (files (cl-loop for task in tasks
                          for sid = (plist-get task :session)
                          for file = (and sid (expand-file-name (format "%s.nodes.jsonl" sid) dir))
                          when (and file (file-exists-p file))
-                         do (puthash (file-name-nondirectory file) task by-file)
+                         do (puthash sid task by-session)
                          and collect file))
          ;; In a log, text sits inside JSON strings.
          (fragment (let ((json (json-serialize needle)))
@@ -458,9 +458,11 @@ process: transcripts are never loaded just to be searched."
        (lambda (r)
          (let ((hits (make-hash-table :test 'equal)) order)
            (dolist (line (split-string (or (plist-get r :stdout) "") "\n" t))
-             (when (string-match "\\`\\(?:.*/\\)?\\([^/:]+\\.nodes\\.jsonl\\):\\(.*\\)\\'" line)
-               (let ((task (gethash (match-string 1 line) by-file))
-                     (node (ignore-errors (harness-json-parse (match-string 2 line)))))
+             ;; A line holds a whole node, which can be megabytes long:
+             ;; `harness-grep-hit' splits it without a regexp.
+             (when-let* ((hit (harness-grep-hit line ".nodes.jsonl")))
+               (let ((task (gethash (car hit) by-session))
+                     (node (ignore-errors (harness-json-parse (cdr hit)))))
                  (when (and task node)
                    (let ((id (plist-get task :id)))
                      (unless (gethash id hits) (push id order))

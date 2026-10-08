@@ -132,6 +132,53 @@
       (should (string-match-p (regexp-quote b)
                               (harness-tools-sessions-test-ok me "session_search" '(:query "ZEB+RA s" :regexp t)))))))
 
+(ert-deftest harness-tools-sessions-search-very-long-line ()
+  "A node of megabytes neither fails a search nor makes a long snippet.
+grep prints the node's whole line of the log, and the regexp that split
+the file name off it backtracked over all of it: \"Stack overflow in
+regexp matcher\" once a line passed some hundred thousand characters."
+  (harness-tools-sessions-test-with
+    (let ((me (harness-tools-sessions-test-session :name "Me"))
+          (big (harness-tools-sessions-test-session :name "Big output"))
+          (small (harness-tools-sessions-test-session :name "Small")))
+      ;; The match lies deep in the node, and long runs follow it.
+      (harness-call 'session/append big
+                    (list :kind 'tool-result
+                          :output (concat (make-string 1200000 ?x) " see\n  README.md for details "
+                                          (make-string 600000 ?y))))
+      (harness-call 'session/append small '(:kind user :content "Update the README.md please"))
+      (dolist (input '((:query "README.md")
+                       ;; Regexps that overflow the matcher over the whole node.
+                       (:query "README.*details" :regexp t)
+                       (:query "README.*y" :regexp t)))
+        (let ((text (harness-tools-sessions-test-ok
+                     me "session_search" (append input '(:max_sessions 40 :max_matches 2)))))
+          (should (string-search big text))
+          (should (string-match-p "\\] …x+ see README\\.md for details y+…" text))
+          (should (< (length text) 1500))
+          (unless (plist-get input :regexp)
+            (should (string-search small text))
+            (should (string-search "Update the README.md please" text))))))))
+
+(ert-deftest harness-tools-sessions-snippet-stays-short ()
+  "A snippet shows the match where it is, on one line, cut to a few hundred characters."
+  (harness-tools-sessions-test-with
+    (let ((text (concat (make-string 1000000 ?x) " see\n\n   README.md   for\tdetails " (make-string 1000000 ?y))))
+      (should (equal (concat "…" (make-string 65 ?x) " see README.md for details " (make-string 77 ?y) "…")
+                     (harness-tools-sessions--snippet text "readme.md" nil)))
+      (should (equal (harness-tools-sessions--snippet text "readme.md" nil)
+                     (harness-tools-sessions--snippet text "R[a-z]+ME\\.md" t)))
+      ;; A long match, which overflows the matcher over the whole text, is
+      ;; cut 300 characters after its start.
+      (let ((snippet (harness-tools-sessions--snippet text "README.*y" t)))
+        (should (string-prefix-p (concat "…" (make-string 65 ?x) " see README.md for details yyy") snippet))
+        (should (= (+ 1 70 300 1) (length snippet))))
+      ;; Without a match, the start of the text.
+      (should (equal (concat (make-string 159 ?x) "…") (harness-tools-sessions--snippet text "zebra" nil)))
+      (should (equal (concat (make-string 159 ?x) "…") (harness-tools-sessions--snippet text "\\(" t)))
+      ;; A short text is shown whole.
+      (should (equal "line 3: ZEBRA stripes" (harness-tools-sessions--snippet "line 3:\nZEBRA  stripes" "zebra" nil))))))
+
 (ert-deftest harness-tools-sessions-non-ascii-tool-input ()
   ;; A tool call's input is shown as text: session_read gives it as it was
   ;; written, in a result that can go back to the model as JSON, and

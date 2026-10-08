@@ -270,6 +270,29 @@ then answers; the plan says what it looked at."
                                           (regexp-quote b))
                                   (harness-tasks-search-test--asked (car harness-tasks-search-test--requests)))))))))
 
+(ert-deftest harness-tasks-search-greps-very-long-lines ()
+  "A node of megabytes does not fail a search of the transcripts.
+grep prints the node's whole line of the log, and the regexp that split
+the file name off it backtracked over all of it: \"Stack overflow in
+regexp matcher\" once a line passed some hundred thousand characters."
+  (harness-tasks-search-test-with
+    (let ((a (harness-tasks-search-test--submit "Document the parser"))
+          (b (harness-tasks-search-test--submit "Speed up the test suite")))
+      (harness-tasks-search-test--done a b)
+      (harness-call 'session/append (plist-get (harness-tasks-search-test--task a) :session)
+                    (list :kind 'tool-result
+                          :output (concat (make-string 1000 ?x) " see README.md for details "
+                                          (make-string 1500000 ?y))))
+      (let ((plan (harness-tasks-search-test--search
+                   "which one touched the readme?"
+                   "{\"grep\":\"readme.md\"}"
+                   (format "{\"show\":[\"%s\"]}" a))))
+        (should (equal (list a) (plist-get plan :ids)))
+        (let ((text (harness-tasks-search-test--asked (car harness-tasks-search-test--requests))))
+          (should (string-match-p (format "^%s: …x+ see README\\.md for details y+…$" (regexp-quote a)) text))
+          (should-not (string-match-p (regexp-quote b) text))
+          (should (< (length text) 1000)))))))
+
 ;;;; Failures
 
 (ert-deftest harness-tasks-search-fails-without-an-answer ()

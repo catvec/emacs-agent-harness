@@ -142,6 +142,31 @@
       (should (equal outer (plist-get (harness-json-parse (harness-json-encode (list :text outer))) :text)))))
   (should (equal "{\"a\":[1,\"b\"]}" (harness-json-encode-text '(:a (1 "b"))))))
 
+(ert-deftest harness-util-json-parse-long-whitespace ()
+  "Parsing takes time linear in a long run of spaces inside the JSON.
+The check for empty input used `string-trim', whose time is quadratic in
+such a run: tens of seconds for one of 100,000."
+  (let ((json (concat "{\"s\":\"x" (make-string 100000 ?\s) "y\"}"))
+        (start (float-time)))
+    (should (= 100002 (length (plist-get (harness-json-parse json) :s))))
+    (should (< (- (float-time) start) 2)))
+  (should-not (harness-json-parse " \n\t "))
+  (should-not (harness-json-parse nil)))
+
+(ert-deftest harness-util-grep-hit ()
+  "A line of grep -H output splits at its file name, however long the line."
+  (should (equal '("abc" . "{\"a\":1}")
+                 (harness-grep-hit "/state/sessions/abc.nodes.jsonl:{\"a\":1}" ".nodes.jsonl")))
+  ;; At the first such name: the text can mention another.
+  (should (equal '("abc" . "see x.nodes.jsonl:3")
+                 (harness-grep-hit "sessions/abc.nodes.jsonl:see x.nodes.jsonl:3" ".nodes.jsonl")))
+  (should-not (harness-grep-hit "Binary file abc.nodes.jsonl matches" ".nodes.jsonl"))
+  ;; A line of megabytes, past where a backtracking regexp overflows.
+  (let* ((text (concat "{\"output\":\"" (make-string 2000000 ?x) "\"}"))
+         (hit (harness-grep-hit (concat "/state/sessions/abc.nodes.jsonl:" text) ".nodes.jsonl")))
+    (should (equal "abc" (car hit)))
+    (should (equal text (cdr hit)))))
+
 (ert-deftest harness-util-misc ()
   (should (= 36 (length (harness-uuid))))
   (should (equal "12.3k" (harness-format-tokens 12345)))
