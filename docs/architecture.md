@@ -1745,7 +1745,8 @@ non-interactive session it stays a denial.
   delivered: when it starts a turn or steers one, a queued message when
   its queue goes out, never while it waits there.  What it returns is
   the message (nil leaves it as it was); the tasks module sends a task
-  waiting for review back this way.
+  waiting for review back this way when the user wrote the message,
+  and opens another session's with a note that it is no review.
 - Sync filter `agent/system-prompt` (value string, args session); sync
   filter `agent/tools`; sync filter `agent/builtin-tools` (see
   `tools/builtin`); async filter `agent/before-turn` (value
@@ -2495,8 +2496,10 @@ verdict.
   task's own settings.  Dropping a backlog task deletes its session.
   The messages task mode composes itself (starting a written-up task,
   the restart resume, the nudge to finish a write-up) are marked as
-  from `harness-sender-system "tasks"`; the task's prompt, a
-  `task/prompt` follow-up and `task/reject` feedback are the user's.
+  from `harness-sender-system "tasks"`; the task's prompt and
+  `task/reject` feedback are the user's, and so is a `task/prompt`
+  follow-up unless its OPTS `:from` names another sender:
+  `task_control`'s message names the calling session.
 - `task/adoptable &optional CWD` lists the project's open sessions that
   are not tasks; `task/adopt SESSION-ID` makes one a task (its first
   message is the prompt; a worktree session keeps its worktree and merges
@@ -2556,15 +2559,24 @@ verdict.
   goes to the same session, in its own worktree and with its provider
   conversation, as a prompt opened by `harness-tasks--reject-message`;
   the task is `active` again and returns to `review` when that turn
-  ends.  Each round is appended to `:feedback`.  Any other message that
-  reaches the session while its task waits for review sends it back the
-  same way, with the message as the feedback: typed in its chat,
-  `task/prompt` (`task_control` message), another ACP client, another
-  session's agent (`session_send`), its queue going out once the turn
-  ended.  The tasks module's `agent/message` filter
+  ends.  Each round is appended to `:feedback`.  Any other message the
+  user sends the session while its task waits for review sends it back
+  the same way, with the message as the feedback: typed in its chat,
+  `task/prompt` from the board, another ACP client, its queue going out
+  once the turn ended.  The tasks module's `agent/message` filter
   (`harness-tasks--on-message`) makes the task active at once, keeps
-  the round and opens the message with the reject text; only the
-  harness's own messages (`:from` system) do not count.  Any other new
+  the round and opens the message with the reject text.  Only the user
+  reviews: the harness's own messages (`:from` system) are left alone,
+  and a message from another session's agent (`:from` session:
+  `session_send`, `task_control` message) is no review either.  It
+  keeps no round, its sender stays, and it opens with
+  `harness-tasks--aside-message` instead (another session sent it while
+  the task waited for review; the work goes back to review when the
+  turn ends; hand it in again if it changed, else the report stands).
+  The filter makes the task active at once (`harness-tasks--aside`), so
+  the turn starts no round (no `:reopened`) and the round's report,
+  handed in or recorded missing, stands unless a new one is handed in;
+  the task waits for review again when the turn ends.  Any other new
   turn of work (a follow-up, a message from the chat) clears the
   verification, so it is reviewed again; the merge
   queue's own steering (commit first) does not.  Only clean ends go to
@@ -2589,8 +2601,9 @@ verdict.
   FILTER selects and, when started, its session; FILTER is `:columns'
   (default `harness-tasks-bulk-columns': running, pending and blocked),
   `:ids', `:except' and `:cwd', and review, done and archived tasks are
-  never touched; this is the board's bulk edit), `task/prompt ID TEXT &optional ATTACHMENTS` (follow-up or
-  steering; reopens; in review it sends the task back, as above), `task/refine ID &optional TEXT`,
+  never touched; this is the board's bulk edit), `task/prompt ID TEXT &optional ATTACHMENTS OPTS` (follow-up or
+  steering; reopens; OPTS `:from` is the sender, as `agent/prompt` takes it; in review the
+  user's sends the task back and another session's does not, as above), `task/refine ID &optional TEXT`,
   `task/merge ID` (retry; not in review), `task/retry ID` (have a task
   that stopped carry on where it stopped: a failed merge is queued
   again, a stopped write-up is written again, a pending task starts, a
@@ -2617,9 +2630,12 @@ verdict.
   at each round of `:feedback`, and at `:reopened` (new work on a task
   in review or done); a report handed in before the round started
   speaks for earlier work, so a round that ends without a hand-in of
-  its own replaces it.  The board's button for such a report reads
-  [No report], its popout says "Not handed in", and the session's
-  review banner says so in a line.
+  its own replaces it.  A turn on another session's message while the
+  task waited for review starts no round, so it keeps the round's
+  report, a missing one too (`harness-tasks--missing-recorded-p`):
+  the reply it ends with is to that session.  The board's button for
+  a missing report reads [No report], its popout says "Not handed
+  in", and the session's review banner says so in a line.
 - Events `task/changed TASK`, `task/deleted ID`, `task/review TASK` (its
   work waits for the user's review), `task/done TASK HOW` (it became
   done; HOW is `merged` when the merge queue merged its branch,
@@ -3111,7 +3127,10 @@ prefixes the message with `[Message from session ID "NAME"]` and goes
 through `agent/prompt` (a turn, steering, or the queue) with
 `:from` naming the calling session, so that session's chat shows the
 message as coming from here rather than from the user; `session_read`
-and `session_search` tag such nodes the same way.  Waits are
+and `session_search` tag such nodes the same way.  `task_control`'s
+message does the same through `task/prompt` (its OPTS `:from`), so a
+task waiting for review takes neither for the user's review: only
+`task_control` reject sends work back (see tasks).  Waits are
 entries re-checked on session and task events, settled by their
 condition, their timeout (`harness-tools-sessions--wait-default`, at most
 `-wait-max`) or the end of the waiting turn; a timeout is a report, not
@@ -4267,8 +4286,8 @@ expanded, then [Verify] (`C-c C-v`), [Send back] (`C-c C-x`) and
 [Review] -- shown above the compose box of the task's session, a chat
 panel (`harness-chat-panel-functions`), and at the end of its report
 popout (`harness-ui-report-panel-functions`); the session's box sends
-as always and the harness takes any message to the task's session for
-the feedback that sends it back (`harness-tasks--on-message'), so
+as always and the harness takes any message the user sends the task's
+session for the feedback that sends it back (`harness-tasks--on-message'), so
 [Send back] only points at the box, while
 `harness-ui-report-compose-functions` gives the report box's text to
 `task/reject` as the feedback; `harness-ui-review-minor-mode` puts
