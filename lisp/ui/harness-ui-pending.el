@@ -394,7 +394,8 @@ all."
 ;; A permission request about a path outside the allowed directories
 ;; (the jail's, or an agent's own request for a directory) is answered
 ;; for a glob pattern rather than for one file: its `:pattern', by
-;; default everything in the directory of its paths.  The user edits
+;; default everything in a directory, the root of the repository its
+;; path lies in or the directory holding it.  The user edits
 ;; it, more or less specific, with `harness-ui-pending-edit-pattern'
 ;; (`e' on the panel, C-c C-p in the chat); the answer then carries the
 ;; edited pattern.  Any other request is about the call alone and comes
@@ -408,20 +409,33 @@ That is the one the user edited, else the request's own, abbreviated."
 
 (defun harness-ui-pending--pattern-suggestions (r)
   "Return patterns more or less specific than permission record R's own.
-The paths of the call itself, every file with one's extension in the
-directory, the directory, and its parent: what
-\\<minibuffer-local-map>\\[next-history-element] offers while editing."
+The paths of the call itself, every file with one's extension in its
+directory, that directory and each one above it up to the pattern's,
+which may be the root of a repository, then the pattern and the
+directory above its own: what
+\\<minibuffer-local-map>\\[next-history-element] offers while editing,
+narrowest first.  They are worked out from the names alone."
   (let* ((pattern (plist-get r :pattern))
          (dir (and (string-suffix-p "/**" pattern) (substring pattern 0 -2)))
          (parent (and dir (file-name-directory (directory-file-name dir))))
-         (paths (mapcar (lambda (p) (format "%s" p)) (append (plist-get r :paths) nil))))
+         (paths (mapcar (lambda (p) (format "%s" p)) (append (plist-get r :paths) nil)))
+         ;; A path's own directory and those above it, while they lie
+         ;; inside the pattern's directory.
+         (dirs (lambda (p)
+                 (let ((d (file-name-directory (directory-file-name p))) out)
+                   (while (and d dir (string-prefix-p dir d) (not (equal d dir)))
+                     (push (concat d "**") out)
+                     (setq d (file-name-directory (directory-file-name d))))
+                   (nreverse out)))))
     (delete-dups
      (mapcar #'abbreviate-file-name
              (delq nil (append paths
                                (mapcar (lambda (p)
-                                         (and dir (file-name-extension p) (equal (file-name-directory p) dir)
-                                              (concat dir "*." (file-name-extension p))))
+                                         (let ((d (file-name-directory p)))
+                                           (and dir d (file-name-extension p) (string-prefix-p dir d)
+                                                (concat d "*." (file-name-extension p)))))
                                        paths)
+                               (mapcan (lambda (p) (funcall dirs p)) paths)
                                (list pattern
                                      (and parent (not (equal parent dir)) (concat parent "**")))))))))
 
@@ -448,10 +462,11 @@ pattern line when this buffer shows it."
   "Edit the glob pattern the permission request PID is answered for.
 PID defaults to the request at point, or else the newest one with a
 pattern.  Only a request about a path outside the allowed directories
-has one: everything in the directory the path lies in.  Edit it to be
-more specific (a subdirectory, src/*.el, one file) or less (a parent
-directory).  `*' matches within a name, `**' across directories; a
-relative pattern is relative to the session's working directory.
+has one: everything in the root of the repository the path lies in,
+or else in the directory holding it.  Edit it to be more specific (a
+subdirectory, src/*.el, one file) or less (a parent directory).  `*'
+matches within a name, `**' across directories; a relative pattern
+is relative to the session's working directory.
 \\<minibuffer-local-map>\\[next-history-element] offers patterns around
 the request's own; an empty answer goes back to it."
   (interactive)

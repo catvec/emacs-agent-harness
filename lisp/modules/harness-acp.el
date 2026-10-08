@@ -21,7 +21,10 @@
 ;;
 ;; Nothing here blocks: transports use process filters, results are
 ;; promises, and every callback into a client runs from the command
-;; loop through `harness-run-soon', never inside the caller's frame.
+;; loop, never inside the caller's frame: what a client receives is
+;; queued and handled from a timer, a slice at a time, so that a burst
+;; of messages leaves Emacs time to redisplay and read input between
+;; slices (see "Client: receiving").
 ;;
 ;; The module has no requirements.  The server dispatches to whatever
 ;; bus methods exist, so it loads and the client API works even when
@@ -61,6 +64,13 @@ before any other method (except `initialize'); a TCP client made with
 `harness-acp-connect' authenticates automatically with this value.
 Local in-process connections never need it."
   :type '(choice (const :tag "None" nil) string) :group 'harness)
+
+(defcustom harness-acp-receive-slice 0.05
+  "Longest time, in seconds, a client spends on received messages in one go.
+What arrived beyond that waits until Emacs has redisplayed and read
+input, so a burst of messages (several sessions streaming at once, or a
+backlog after Emacs was busy) makes the UI pause briefly, not freeze."
+  :type 'number :group 'harness)
 
 (defvar harness-acp--server-enabled t
   "Start the TCP server when the module initialises.")
@@ -170,7 +180,7 @@ promise: once it resolves the client is authenticated; a rejection
   handler                            ; (METHOD PARAMS RESPOND)
   (next-id 0)
   (pending (make-hash-table :test 'equal)) ; id -> promise
-  (buffer "")                        ; unparsed tail of the last chunk
+  (buffer "")                        ; unended line (see `harness-acp--split-lines')
   outbox                             ; lines queued while connecting
   (open t)
   on-close)
@@ -181,7 +191,7 @@ promise: once it resolves the client is authenticated; a rejection
   kind                               ; local | tcp | another transport's symbol
   process                            ; tcp socket
   connection                         ; the `harness-acp-connection' (local only)
-  (buffer "")
+  (buffer "")                        ; unended line (see `harness-acp--split-lines')
   authenticated
   initialized
   capabilities
@@ -346,17 +356,36 @@ For example :sessionId becomes :session-id."
 
 ;;;; Line framing
 
-(defun harness-acp--split-lines (buffer chunk)
-  "Append CHUNK to BUFFER; return (LINES . REST) where REST has no newline."
-  (let* ((text (concat buffer chunk))
-         (lines nil)
-         (start 0)
-         nl)
-    (while (setq nl (string-search "\n" text start))
-      (let ((line (string-trim-right (substring text start nl) "\r")))
-        (unless (string-empty-p (string-trim line)) (push line lines)))
+(defun harness-acp--split-lines (pending chunk)
+  "Split CHUNK into lines, continuing the line PENDING began.
+PENDING is what earlier chunks left after their last newline: a string,
+or a list of strings, newest first, as this returns it.  Return (LINES
+. REST): LINES are the complete lines, in order, each without its
+newline and a \"\\r\" before it, blank ones left out; REST is the new
+PENDING, a list of strings, newest first (nil when CHUNK ends a line).
+Only CHUNK is searched and the pieces of a line are joined once, when
+it ends, so a long line costs time in proportion to its length however
+many chunks bring it."
+  (let ((parts (if (stringp pending)
+                   (and (not (string-empty-p pending)) (list pending))
+                 pending))
+        (lines nil)
+        (start 0)
+        nl)
+    (while (setq nl (string-search "\n" chunk start))
+      (let* ((tail (substring chunk start nl))
+             (line (if parts (apply #'concat (nreverse (cons tail parts))) tail))
+             (len (length line)))
+        (setq parts nil)
+        (when (and (> len 0) (eq (aref line (1- len)) ?\r))
+          (setq line (substring line 0 -1)))
+        ;; A line with something besides blanks; JSON starts with it.
+        (when (string-match-p "[^ \t\r]" line)
+          (push line lines)))
       (setq start (1+ nl)))
-    (cons (nreverse lines) (substring text start))))
+    (when (< start (length chunk))
+      (push (if (= start 0) chunk (substring chunk start)) parts))
+    (cons (nreverse lines) parts)))
 
 (defun harness-acp--parse (line)
   "Parse LINE as a JSON-RPC message plist, or return nil on failure."
@@ -373,15 +402,11 @@ For example :sessionId becomes :session-id."
     ('local
      (let ((conn (harness-acp-client-connection client)))
        (when (and conn (harness-acp-connection-open conn))
-         (harness-run-soon #'harness-acp--conn-receive conn (harness-acp--normalise msg)))))
+         (harness-acp--enqueue conn (harness-acp--normalise msg)))))
     ('tcp
      (let ((proc (harness-acp-client-process client)))
        (when (process-live-p proc)
-         (condition-case err
-             (process-send-string proc (concat (harness-json-encode msg) "\n"))
-           (error
-            (harness-log 'warn "acp: send to %s failed: %s" (process-name proc) (harness-error-message err))
-            (harness-acp--drop-client client))))))
+         (harness-acp--client-write client proc (concat (harness-json-encode msg) "\n")))))
     (kind
      (let ((writer (harness-acp--client-get client 'writer)))
        (when (and writer (memq client harness-acp--clients))
@@ -390,6 +415,32 @@ For example :sessionId becomes :session-id."
            (error
             (harness-log 'warn "acp: send to a %s client failed: %s" kind (harness-error-message err))
             (harness-acp--drop-client client))))))))
+
+(defun harness-acp--client-write (client proc line)
+  "Write LINE to PROC, the socket of CLIENT, after what waits to go out.
+A client that reads more slowly than it is sent to, such as a UI busy
+for a while, fills its socket, and `process-send-string' then waits for
+room, running the timers due and process output meanwhile.  What those
+send to the same client waits in line for the write under way: writing
+it from each of them would make each wait inside the one before, until
+Lisp nesting exceeded `max-lisp-eval-depth' and every timer failed."
+  (let ((waiting (process-get proc 'harness-acp-waiting)))
+    (if waiting
+        (push line (car waiting))
+      (let ((queue (list nil)))         ; (LINES), newest first
+        (process-put proc 'harness-acp-waiting queue)
+        (condition-case err
+            (unwind-protect
+                (while line
+                  (process-send-string proc line)
+                  ;; What came meanwhile, in one write.
+                  (setq line (and (car queue)
+                                  (apply #'concat (nreverse (car queue)))))
+                  (setcar queue nil))
+              (process-put proc 'harness-acp-waiting nil))
+          (error
+           (harness-log 'warn "acp: send to %s failed: %s" (process-name proc) (harness-error-message err))
+           (harness-acp--drop-client client)))))))
 
 (defun harness-acp--client-notify (client method params)
   "Send notification METHOD with PARAMS to CLIENT."
@@ -1376,17 +1427,127 @@ when it closed by itself, such as \"connection broken by remote peer\"."
                           (condition-case err (funcall fn)
                             (error (harness-log 'error "acp: on-close hook failed: %S" err))))))))
 
+;;;; Client: receiving
+
+;; What a client receives -- a TCP connection's lines, a local one's
+;; messages -- waits in one queue, oldest first, and a timer handles it
+;; a slice at a time: `harness-acp-receive-slice' seconds of handlers,
+;; then Emacs redisplays and reads input before the next slice.  A timer
+;; per message, as before, froze the UI for a whole burst of them: Emacs
+;; runs every timer that is due before it redisplays again, and a UI
+;; that fell behind got hundreds of messages with each read of its
+;; socket.
+
+(defvar harness-acp--inbox nil
+  "Received messages not handled yet, oldest first.
+Each is (CONN . MESSAGE), MESSAGE a line still to parse or a plist.")
+
+(defvar harness-acp--inbox-tail nil "The last cons of `harness-acp--inbox'.")
+
+(defvar harness-acp--inbox-timer nil "The timer of the next slice, or nil.")
+
+(defvar harness-acp-receiving nil
+  "Non-nil while received messages are handled, a slice at a time.
+Work a handler would repeat for every message of a burst, such as
+scrolling a window to its end, can wait for the slice's end: put it on
+`harness-acp-received-hook'.")
+
+(defvar harness-acp-received-hook nil
+  "Hook run after each slice of received messages, before Emacs redisplays.")
+
+(defvar harness-acp--once-received nil
+  "Functions left for the end of the slice, newest first.
+See `harness-acp-once-received'.")
+
+(defun harness-acp-once-received (fn)
+  "Call FN with no arguments once the received messages being handled are.
+That is at the end of their slice, before Emacs redisplays, once however
+many of them pass FN (compared with `eq'); when no messages are being
+handled, now.  For a redraw each message of a burst would repeat."
+  (if harness-acp-receiving
+      (unless (memq fn harness-acp--once-received)
+        (push fn harness-acp--once-received))
+    (funcall fn)))
+
+(defun harness-acp--enqueue (conn message)
+  "Queue MESSAGE, a line or a plist that CONN received, to be handled."
+  (harness-acp--enqueue-all conn (list message)))
+
+(defun harness-acp--enqueue-all (conn messages)
+  "Queue MESSAGES, lines or plists that CONN received, oldest first."
+  (when messages
+    (dolist (message messages)
+      (let ((cell (list (cons conn message))))
+        (if harness-acp--inbox
+            (setcdr harness-acp--inbox-tail cell)
+          (setq harness-acp--inbox cell))
+        (setq harness-acp--inbox-tail cell)))
+    (harness-acp--wake)))
+
+(defun harness-acp--wake ()
+  "Have the queued messages handled once the timers due now have run.
+As a timer of their own would have them: what comes while a slice
+waits must not get ahead of what is due by then, such as the
+rejections of the requests of a connection that closed before.  So
+the slice waiting moves behind it, and handles all of them."
+  (let ((timer harness-acp--inbox-timer))
+    (if (and timer (memq timer timer-list))
+        (progn
+          (cancel-timer timer)
+          (timer-set-time timer (current-time))
+          (timer-activate timer))
+      (setq harness-acp--inbox-timer (run-at-time 0 nil #'harness-acp--drain)))))
+
+(defun harness-acp--drain ()
+  "Handle queued messages for up to `harness-acp-receive-slice' seconds.
+What is left goes on after Emacs redisplays and reads input: from a
+timer started now, which a timer round that is under way leaves to the
+next one, after the redisplay."
+  (setq harness-acp--inbox-timer nil)
+  (let ((deadline (+ (float-time) harness-acp-receive-slice))
+        (handled nil))
+    (unwind-protect
+        (progn
+          (let ((harness-acp-receiving t))
+            (while (and harness-acp--inbox (< (float-time) deadline))
+              (setq handled t)
+              (pcase-let ((`(,conn . ,message) (pop harness-acp--inbox)))
+                (when (harness-acp-connection-open conn)
+                  (let ((msg (if (stringp message) (harness-acp--parse message) message)))
+                    (if (null msg)
+                        (harness-log 'warn "acp: unparsable line from server: %s"
+                                     (harness-truncate-end message 120))
+                      ;; As a timer of its own would: errors are reported, and
+                      ;; the buffer a handler leaves current is not the next one's.
+                      (condition-case-unless-debug err
+                          (save-current-buffer (harness-acp--conn-receive conn msg))
+                        (error (harness-log 'error "acp: handling a message failed: %S" err)))))))))
+          ;; What the slice's handlers left for its end; no longer receiving,
+          ;; so whatever this does in turn is done now.
+          (when handled
+            (let ((harness-acp-receiving nil)
+                  (once (nreverse harness-acp--once-received)))
+              (setq harness-acp--once-received nil)
+              (dolist (fn once)
+                (condition-case-unless-debug err
+                    (save-current-buffer (funcall fn))
+                  (error (harness-log 'error "acp: %S, at the end of a slice, failed: %S" fn err))))
+              (condition-case-unless-debug err
+                  (save-current-buffer (run-hooks 'harness-acp-received-hook))
+                (error (harness-log 'error "acp: `harness-acp-received-hook' failed: %S" err))))))
+      (if (null harness-acp--inbox)
+          (setq harness-acp--inbox-tail nil)
+        (unless (and harness-acp--inbox-timer (memq harness-acp--inbox-timer timer-list))
+          (setq harness-acp--inbox-timer (run-at-time 0 nil #'harness-acp--drain)))))))
+
 (defun harness-acp--conn-filter (proc chunk)
-  "Buffer CHUNK from the server socket PROC and deliver complete messages."
+  "Buffer CHUNK from the server socket PROC and queue complete messages.
+They are parsed as they are handled, a slice at a time."
   (let ((conn (process-get proc 'harness-acp-connection)))
     (when conn
       (let ((split (harness-acp--split-lines (harness-acp-connection-buffer conn) chunk)))
         (setf (harness-acp-connection-buffer conn) (cdr split))
-        (dolist (line (car split))
-          (let ((msg (harness-acp--parse line)))
-            (if msg
-                (harness-run-soon #'harness-acp--conn-receive conn msg)
-              (harness-log 'warn "acp: unparsable line from server: %s" (harness-truncate-end line 120)))))))))
+        (harness-acp--enqueue-all conn (car split))))))
 
 (defun harness-acp--conn-sentinel (proc event)
   "React to EVENT on the client socket PROC: flush on open, shut down on close."

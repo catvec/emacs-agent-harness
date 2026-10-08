@@ -854,7 +854,9 @@ compiled one has no source left."
     (if (not (interpreted-function-p fn))
         (list :note (format "No file defines %s: it was evaluated outside one, and only its compiled code is left"
                             symbol))
-      (let* ((doc (aref fn 4))
+      ;; An interpreted closure with neither docstring nor interactive
+      ;; form has only its first three slots.
+      (let* ((doc (and (> (length fn) 4) (aref fn 4)))
              (spec (interactive-form fn))
              (form `(,(if macro 'defmacro 'defun) ,symbol ,(aref fn 0)
                      ,@(and (stringp doc) (list doc))

@@ -707,6 +707,42 @@ and \"two\", `one' and `two'."
     (should (eq 'identity (cadr offered)))
     (should (equal "accept-edits" (plist-get sent :modeId)))))
 
+(ert-deftest harness-ui-models-redraw-only-when-new ()
+  "A model catalogue redraws every view only when it is new.
+The harness says the catalogue was updated each time a provider
+settles, mostly with nothing new, and each redraw fetched and rendered
+every chat buffer again.  It is new when it changed, or when it is the
+first over a connection (another harness may know other models)."
+  (let ((harness-ui--models (make-hash-table :test 'equal))
+        (harness-ui--models-seen nil)
+        (harness-ui-connection 'first)
+        (catalogue '((:id "demo:a") (:id "demo:b")))
+        (redrawn 0) (got nil)
+        (harness-ui-redraw-hook nil))
+    (add-hook 'harness-ui-redraw-hook (lambda () (cl-incf redrawn)))
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (method _params callback &rest _)
+                 (should (equal "_harness/provider/models" method))
+                 (funcall callback (copy-tree catalogue)))))
+      (harness-ui-refresh-models)
+      (should (= 1 redrawn))
+      (should (gethash "demo:b" harness-ui--models))
+      ;; The same again: nothing to redraw, the callback still called.
+      (harness-ui-refresh-models (lambda (models) (setq got models)))
+      (should (= 1 redrawn))
+      (should (equal catalogue got))
+      ;; Changed.
+      (setq catalogue '((:id "demo:a")))
+      (harness-ui-refresh-models)
+      (should (= 2 redrawn))
+      (should-not (gethash "demo:b" harness-ui--models))
+      ;; The same models, over another connection.
+      (setq harness-ui-connection 'second)
+      (harness-ui-refresh-models)
+      (should (= 3 redrawn))
+      (harness-ui-refresh-models)
+      (should (= 3 redrawn)))))
+
 (ert-deftest harness-ui-model-window-says-when-it-is-estimated ()
   "The model picker marks a window the catalogue estimated with a tilde."
   (should (equal "1.00M" (harness-ui-format-model-window '(:context-window 1000000))))
