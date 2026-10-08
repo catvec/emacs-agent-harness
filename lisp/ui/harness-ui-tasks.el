@@ -28,8 +28,8 @@
 ;; pending task (e), replies to a task's session (m) -- for a backlog
 ;; task that is feedback on its write-up (r) -- without leaving the
 ;; board, answers a task's question (m or [Answer]) and takes the
-;; feedback that sends a task back from review (R, or m: any message to
-;; a task in review sends it back); C-g leaves such a box for a new task
+;; feedback that sends a task back from review (R, or m: any message you
+;; send a task in review sends it back); C-g leaves such a box for a new task
 ;; again, the question still waiting.
 ;; RET or a click on a task opens its session in full.  F gives the board
 ;; the fullscreen layout: the board stays on the left of the frame and
@@ -2476,8 +2476,8 @@ be written by hand this way."
 For a backlog task, or one whose write-up stopped or refused it as a
 duplicate, that is feedback on its write-up, which is written again (see
 `harness-ui-tasks-refine').  For a task waiting for your review it is
-the feedback that sends it back, as any message to its session is (see
-`harness-ui-tasks-reject')."
+the feedback that sends it back, as any message you send its session is
+\(see `harness-ui-tasks-reject')."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
     (unless (plist-get task :session) (user-error "This task has not started yet"))

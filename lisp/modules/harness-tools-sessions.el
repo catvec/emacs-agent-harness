@@ -821,8 +821,13 @@ the line says \"(this task)\"."
   :subject (lambda (input) (harness-first-line (plist-get input :prompt) 60))
   :handler #'harness-tools-sessions--task-submit)
 
-(defun harness-tools-sessions--task-control (input _ctx)
-  "Handler of task_control."
+(defun harness-tools-sessions--task-control (input ctx)
+  "Handler of task_control.
+A message to a task's session is the calling session's, as
+session_send's is: it opens with the header naming that session and
+goes with it as the sender, so a task waiting for review takes it for
+no review of the user's (`harness-tasks--on-message').  Only reject
+sends work back."
   (harness-tools-sessions--tasks-p)
   (let* ((task (harness-tools-sessions--task (plist-get input :task_id)))
          (id (plist-get task :id))
@@ -834,7 +839,8 @@ the line says \"(this task)\"."
          (when (harness-string-blank-p text) (signal 'harness-error (list "message needs a message")))
          (if (eq (plist-get task :state) 'pending)
              (harness-call 'task/update id (concat (plist-get task :prompt) "\n\n" text) (plist-get task :attachments))
-           (harness-call 'task/prompt id text))))
+           (harness-call 'task/prompt id (concat (harness-tools-sessions--from ctx) text) nil
+                         (list :from (harness-tools-sessions--sender ctx))))))
       ("cancel" (harness-call 'task/cancel id))
       ("merge" (harness-call 'task/merge id))
       ("verify" (harness-call 'task/verify id))
@@ -855,7 +861,7 @@ the line says \"(this task)\"."
 
 (harness-define-tool "task_control"
   :label "Control task"
-  :description "Act on a task. start runs a pending task now; message sends a follow-up to its session (or, while pending, appends to its prompt; a message to a task in review sends it back with that feedback, as reject does); cancel drops a pending task or stops a working one's turn; merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); reject sends a task in review back to its session with the feedback in message, to work on it again; complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept)."
+  :description "Act on a task. start runs a pending task now; message sends a follow-up to its session, marked as coming from this session (while pending, it appends to the prompt instead; a task in review gets it as a message, not as a review -- only reject sends work back -- and waits for review again once that turn ends); cancel drops a pending task or stops a working one's turn; merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); reject sends a task in review back to its session with the feedback in message, to work on it again; complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept)."
   :schema '(:type "object"
             :properties (:task_id (:type "string" :description "Task id or unique prefix.")
                          :action (:type "string" :enum ("start" "message" "cancel" "merge" "verify" "reject" "complete" "archive" "restore" "delete"))

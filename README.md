@@ -649,9 +649,13 @@ your checkout itself can be submitted to the **main tree** instead (the
   its session with feedback. Any message you send to a task waiting
   for review sends it back the same way, with your message as the
   feedback, wherever you write it: in the task's session (no need to
-  press `[Send back]` first), with `m` on the board, from another
-  device, or from another session. The task goes back to work at once
-  and comes back for review when it is done.
+  press `[Send back]` first), with `m` on the board, or from another
+  device. The task goes back to work at once and comes back for review
+  when it is done. Only you review: a message another session's agent
+  sends the task (`session_send`, or `task_control`'s message) reaches
+  it as that session's, not as your feedback. The task deals with it
+  and waits for review again, its report standing unless it hands in a
+  new one; an agent sends work back only with `task_control` reject.
 - When the project is the harness itself, a card in *Ready for review*
   whose worktree is a checkout of the harness also offers
   `[Open harness]`: it opens an Emacs running that worktree's harness
