@@ -440,5 +440,195 @@ repository) and `base' (a worktree the session made inside its own)."
     (should (equal "locked\n" (harness-sandbox-test--git locked "branch" "--show-current")))
     (should-error (harness-sandbox-test--git plain "status"))))
 
+;;;; Directories shown read-only
+
+(defun harness-sandbox-test--write (file text)
+  "Write TEXT to FILE, making its directory."
+  (make-directory (file-name-directory file) t)
+  (with-temp-file file (insert text)))
+
+(defun harness-sandbox-test--call-with-skills (fn)
+  "Call FN with (HOME SKILLS DOTFILES OTHER) under a home of the test's own.
+HOME, which $HOME names while FN runs, holds the skills directory
+SKILLS (~/.claude/skills) with a skill of its own, commit, and two
+linked in from DOTFILES (~/dotfiles), linked by an absolute link and
+rel by a relative one.  ~/.agents/skills links to OTHER, outside HOME.
+HOME also holds secret.txt."
+  (let* ((home (harness-test-temp-dir))
+         (process-environment (cons (concat "HOME=" (directory-file-name home)) process-environment))
+         (skills (file-name-as-directory (expand-file-name ".claude/skills" home)))
+         (dotfiles (file-name-as-directory (expand-file-name "dotfiles" home)))
+         (other (harness-test-temp-dir)))
+    (harness-sandbox-test--write (expand-file-name "commit/SKILL.md" skills) "commit-skill\n")
+    (harness-sandbox-test--write (expand-file-name "linked/SKILL.md" dotfiles) "linked-skill\n")
+    (harness-sandbox-test--write (expand-file-name "rel/SKILL.md" dotfiles) "rel-skill\n")
+    (harness-sandbox-test--write (expand-file-name "agents/SKILL.md" other) "agents-skill\n")
+    (harness-sandbox-test--write (expand-file-name "secret.txt" home) "s3cret\n")
+    (make-symbolic-link (directory-file-name (expand-file-name "linked" dotfiles)) (expand-file-name "linked" skills))
+    (make-symbolic-link "../../dotfiles/rel" (expand-file-name "rel" skills))
+    (make-directory (expand-file-name ".agents" home))
+    (make-symbolic-link (directory-file-name other) (expand-file-name ".agents/skills" home))
+    (unwind-protect (funcall fn home skills dotfiles other)
+      (delete-directory home t)
+      (delete-directory other t))))
+
+(ert-deftest harness-sandbox-readable-dirs-show-where-they-are-named ()
+  "A readable directory is shown read-only where it is named, where its
+links lead and, for one under the home directory, at the same place
+under the sandbox's $HOME, before the working directory is mounted.
+Never the home directory itself, nor what the working directory shows
+anyway; and no mount below another one, where bwrap would find a link."
+  (harness-sandbox-test--setup)
+  (harness-sandbox-test--call-with-skills
+   (lambda (home skills dotfiles other)
+     (let* ((cwd (harness-test-temp-dir))
+            (harness-sandbox--home "/tmp/harness-sandbox-test-home")
+            (harness-sandbox-policy 'preferred)
+            (harness-sandbox-backend 'auto)
+            (real (lambda (dir) (directory-file-name (file-truename dir))))
+            (sbh (lambda (rel) (concat "/tmp/harness-sandbox-test-home/" rel)))
+            (readable (list skills (expand-file-name "linked/" skills) (expand-file-name "rel/" skills)
+                            (expand-file-name ".agents/skills" home)
+                            ;; Shown read-write anyway.
+                            (expand-file-name ".claude/skills" cwd)
+                            ;; The home directory, and what holds it.
+                            home (file-name-directory (directory-file-name home))
+                            "/var/empty-nonexistent-dir")))
+       (unwind-protect
+           (progn
+             (make-directory (expand-file-name ".claude/skills" cwd) t)
+             (should (equal
+                      (list (cons (funcall real skills) (directory-file-name skills))
+                            (cons (funcall real skills) (funcall sbh ".claude/skills"))
+                            (cons (funcall real (expand-file-name "linked" dotfiles)) (funcall real (expand-file-name "linked" dotfiles)))
+                            (cons (funcall real (expand-file-name "linked" dotfiles)) (funcall sbh "dotfiles/linked"))
+                            (cons (funcall real (expand-file-name "rel" dotfiles)) (funcall real (expand-file-name "rel" dotfiles)))
+                            (cons (funcall real (expand-file-name "rel" dotfiles)) (funcall sbh "dotfiles/rel"))
+                            (cons (funcall real other) (expand-file-name ".agents/skills" home))
+                            (cons (funcall real other) (funcall real other))
+                            (cons (funcall real other) (funcall sbh ".agents/skills")))
+                      (harness-sandbox--readable-mounts readable cwd harness-sandbox--home)))
+             ;; Without a home of its own, nothing is shown under one.
+             (should-not (cl-find-if (lambda (m) (string-prefix-p "/tmp/harness-sandbox-test-home" (cdr m)))
+                                     (harness-sandbox--readable-mounts readable cwd nil)))
+             ;; A directory holding a working directory reached through a
+             ;; link is not shown: the working directory is mounted where
+             ;; it is named, which would be a link in there.
+             (let ((work (expand-file-name "commit/work" skills)))
+               (make-symbolic-link (directory-file-name cwd) work)
+               (should-not (rassoc (directory-file-name skills) (harness-sandbox--readable-mounts readable work harness-sandbox--home)))
+               (should (rassoc (directory-file-name skills) (harness-sandbox--readable-mounts readable cwd harness-sandbox--home)))
+               (delete-file work))
+             (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+               (let* ((cmd (harness-call 'sandbox/wrap cwd '("true") :readable readable))
+                      (bind (cl-position "--bind" cmd :test #'equal)))
+                 (dolist (m (harness-sandbox--readable-mounts readable cwd harness-sandbox--home))
+                   (let ((at (cl-loop for tail on cmd for i from 0
+                                      when (equal (seq-take tail 3) (list "--ro-bind" (car m) (cdr m))) return i)))
+                     (should at)
+                     ;; Before the working directory, which stays writable.
+                     (should (< at bind))))
+                 (should (equal (list "--bind" (directory-file-name cwd) (directory-file-name cwd)) (seq-take (nthcdr bind cmd) 3)))
+                 (should-not (member (directory-file-name home) cmd))
+                 (should-not (member (harness-test-real-home) cmd))
+                 (should-not (member "/var/empty-nonexistent-dir" cmd)))))
+         (harness-sandbox-detect)
+         (delete-directory cwd t))))))
+
+(ert-deftest harness-sandbox-systemd-shows-readable-dirs ()
+  "systemd-run shows a readable directory with BindReadOnlyPaths, under
+its home tmpfs at /tmp too, and leaves out what its setting cannot
+hold as written."
+  (harness-sandbox-test--setup)
+  (harness-sandbox-test--call-with-skills
+   (lambda (home skills _dotfiles other)
+     (let* ((cwd (harness-test-temp-dir))
+            (elsewhere (harness-test-temp-dir))
+            (spaced (file-name-as-directory (expand-file-name "with space/skills" elsewhere)))
+            (harness-sandbox-policy 'preferred)
+            (harness-sandbox-backend 'auto)
+            (real (lambda (dir) (directory-file-name (file-truename dir)))))
+       (unwind-protect
+           (progn
+             (make-directory spaced t)
+             (harness-sandbox-test-with-executables '(("systemd-run" . "/usr/bin/systemd-run"))
+               (let ((cmd (harness-call 'sandbox/wrap cwd '("true")
+                                        :readable (list skills (expand-file-name ".agents/skills" home) spaced home))))
+                 (dolist (setting (list (concat "BindReadOnlyPaths=" (funcall real skills))
+                                        (concat "BindReadOnlyPaths=" (funcall real skills) ":/tmp/.claude/skills")
+                                        (concat "BindReadOnlyPaths=" (funcall real other) ":" (expand-file-name ".agents/skills" home))
+                                        (concat "BindReadOnlyPaths=" (funcall real other))
+                                        (concat "BindReadOnlyPaths=" (funcall real other) ":/tmp/.agents/skills")))
+                   (should (harness-sandbox-test--subseq-p (list "-p" setting) cmd)))
+                 (should-not (cl-find-if (lambda (a) (string-search "with space" a)) cmd))
+                 (should-not (member (concat "BindReadOnlyPaths=" (directory-file-name home)) cmd))
+                 (should (member "--setenv=HOME=/tmp" cmd)))))
+         (harness-sandbox-detect)
+         (delete-directory cwd t)
+         (delete-directory elsewhere t))))))
+
+(ert-deftest harness-sandbox-confined-p-says-when-commands-are-confined ()
+  "`sandbox/confined-p' is non-nil where a backend wraps the commands."
+  (harness-sandbox-test--setup)
+  (let ((cwd (harness-test-temp-dir))
+        (harness-sandbox-backend 'auto))
+    (unwind-protect
+        (progn
+          (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+            (let ((harness-sandbox-policy 'preferred))
+              (should (harness-call 'sandbox/confined-p cwd))
+              (should-not (harness-call 'sandbox/confined-p "/ssh:example.invalid:/srv/"))
+              (should-not (harness-call 'sandbox/confined-p nil)))
+            (let ((harness-sandbox-policy 'off))
+              (should-not (harness-call 'sandbox/confined-p cwd))))
+          (harness-sandbox-test-with-executables nil
+            (let ((harness-sandbox-policy 'preferred))
+              (should-not (harness-call 'sandbox/confined-p cwd)))))
+      (harness-sandbox-detect)
+      (delete-directory cwd t))))
+
+(ert-deftest harness-sandbox-bwrap-real-run-reads-skills ()
+  "Under the real bwrap a command reads the skills directories it is
+shown, by their own names, through their links and from ~, and writes
+none of them, while the rest of the home directory stays hidden."
+  (harness-sandbox-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (harness-sandbox-test--call-with-skills
+   (lambda (home skills _dotfiles _other)
+     (let* ((cwd (harness-test-temp-dir))
+            (harness-sandbox--home "/tmp/harness-sandbox-test-home")
+            (harness-sandbox-policy 'required)
+            (script (mapconcat
+                     #'identity
+                     (list (format "cat %scommit/SKILL.md ~/.claude/skills/commit/SKILL.md" skills)
+                           (format "cat %slinked/SKILL.md ~/.claude/skills/linked/SKILL.md" skills)
+                           (format "cat %srel/SKILL.md ~/.claude/skills/rel/SKILL.md" skills)
+                           "cat ~/.agents/skills/agents/SKILL.md"
+                           (format "cat %s 2>/dev/null || echo secret-hidden" (expand-file-name "secret.txt" home))
+                           (format "touch %snew 2>/dev/null && echo wrote || echo write-refused" skills)
+                           "touch ~/.claude/skills/new 2>/dev/null && echo wrote || echo write-refused"
+                           "touch made-here && echo cwd-writable")
+                     "; ")))
+       (unwind-protect
+           (let ((probe (harness-await (harness-run-command (harness-call 'sandbox/wrap cwd '("true"))
+                                                            :cwd cwd :timeout 20))))
+             ;; Skipped only when bwrap cannot start at all: a mount it
+             ;; refuses here is a failure.
+             (unless (eql 0 (plist-get probe :exit))
+               (ert-skip (format "bwrap cannot start here: %s" (string-trim (plist-get probe :stderr)))))
+             (let* ((cmd (harness-call 'sandbox/wrap cwd (list "sh" "-c" script)
+                                       :readable (list skills (expand-file-name "linked/" skills) (expand-file-name "rel/" skills)
+                                                       (expand-file-name ".agents/skills" home))))
+                    (r (harness-await (harness-run-command cmd :cwd cwd :timeout 20))))
+               (should (equal "" (plist-get r :stderr)))
+               (should (equal '("commit-skill" "commit-skill" "linked-skill" "linked-skill" "rel-skill" "rel-skill"
+                                "agents-skill" "secret-hidden" "write-refused" "write-refused" "cwd-writable")
+                              (split-string (plist-get r :stdout) "\n" t)))
+               (should-not (file-exists-p (expand-file-name "new" skills)))
+               (should (file-exists-p (expand-file-name "made-here" cwd)))))
+         (delete-directory cwd t))))))
+
 (provide 'harness-sandbox-test)
 ;;; harness-sandbox-test.el ends here

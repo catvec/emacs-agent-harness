@@ -190,6 +190,75 @@ find the file, while the rest of /tmp stays private to the command."
                                                :content)))
       (harness-call 'session/delete sid))))
 
+(defmacro harness-tools-shell-test-with-methods (methods &rest body)
+  "Run BODY with the bus METHODS, an alist of name to function, registered.
+Each method is restored, or removed, afterwards."
+  (declare (indent 1))
+  `(let ((saved (mapcar (lambda (m) (cons (car m) (gethash (car m) harness--methods))) ,methods)))
+     (dolist (m ,methods) (harness-register-method (car m) (cdr m)))
+     (unwind-protect (progn ,@body)
+       (dolist (m saved)
+         (if (cdr m) (puthash (car m) (cdr m) harness--methods) (remhash (car m) harness--methods))))))
+
+(ert-deftest harness-tools-shell-bash-shows-the-skills-to-the-sandbox ()
+  "bash asks the sandbox to show the skills directories every call that
+only reads may read, and no others; none without the skills module."
+  (harness-tools-shell-test--setup)
+  (let ((seen nil) (asked nil))
+    (harness-tools-shell-test-with-methods
+        (list (cons 'sandbox/wrap (lambda (cwd command &rest opts) (push (cons cwd opts) seen) command)))
+      (harness-tools-shell-test-in-dir
+        (harness-tools-shell-test-with-methods
+            (list (cons 'skills/directories
+                        (lambda (cwd)
+                          (push cwd asked)
+                          (list (list :dir "/skills/mine/" :source 'global :contained t)
+                                (list :dir "/proj/.claude/skills/" :source 'project :contained nil)
+                                (list :dir "/skills/mine/linked/" :source 'global :contained t)))))
+          (should (equal "exit 0" (plist-get (harness-tools-shell-test--call "bash" :command "true") :content)))
+          (should (equal '("/skills/mine/" "/skills/mine/linked/") (plist-get (cdar seen) :readable)))
+          ;; Asked for the session's directory.
+          (should (equal (list root) asked)))
+        (harness-tools-shell-test--call "bash" :command "true")
+        (should-not (plist-get (cdar seen) :readable))))))
+
+(ert-deftest harness-tools-shell-bash-reads-skills-in-bwrap ()
+  "Under the real bwrap a command reads a skill by the path skill_load
+gives and from ~, as outside the sandbox, but cannot change it; the
+rest of the home directory stays hidden."
+  (harness-tools-shell-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (harness-test-load-module 'project)
+  (harness-test-load-module 'config)
+  (harness-test-load-module 'sandbox)
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (harness-tools-shell-test-in-dir
+    (let* ((home (harness-test-temp-dir))
+           (process-environment (cons (concat "HOME=" (directory-file-name home)) process-environment))
+           (skills (file-name-as-directory (expand-file-name ".claude/skills" home)))
+           (harness-sandbox-policy 'required)
+           (harness-sandbox--home "/tmp/harness-tools-shell-test-home"))
+      (make-directory (expand-file-name "commit" skills) t)
+      (with-temp-file (expand-file-name "commit/SKILL.md" skills) (insert "the commit skill\n"))
+      (with-temp-file (expand-file-name "notes.txt" home) (insert "private\n"))
+      (unwind-protect
+          (harness-tools-shell-test-with-methods
+              (list (cons 'skills/directories (lambda (_cwd) (list (list :dir skills :source 'global :contained t)))))
+            ;; Skipped only when bwrap cannot start at all: a mount it
+            ;; refuses here is a failure.
+            (let ((probe (harness-await (harness-run-command (harness-call 'sandbox/wrap root '("true"))
+                                                             :cwd root :timeout 20))))
+              (unless (eql 0 (plist-get probe :exit))
+                (ert-skip (format "bwrap cannot start here: %s" (string-trim (plist-get probe :stderr))))))
+            (let ((r (harness-tools-shell-test--call
+                      "bash" :command (format "cat %scommit/SKILL.md ~/.claude/skills/commit/SKILL.md; cat %snotes.txt 2>/dev/null || echo hidden; touch ~/.claude/skills/x 2>/dev/null || echo read-only"
+                                              skills home))))
+              (should (equal "the commit skill\nthe commit skill\nhidden\nread-only\nexit 0" (plist-get r :content)))
+              (should (plist-get (plist-get r :meta) :sandboxed))
+              (should-not (file-exists-p (expand-file-name "x" skills)))))
+        (delete-directory home t)))))
+
 (defvar harness-sandbox-policy)
 
 (ert-deftest harness-tools-shell-bash-timeout-kills-the-process-tree ()
