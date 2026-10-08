@@ -3076,15 +3076,24 @@ Some commands belong to modules that may be off."
   (cl-remove-if-not (lambda (window) (eq (window-parameter window 'window-side) 'bottom))
                     (window-list nil 'nomini)))
 
-(defun harness-ui--menu-lines (buffer)
-  "Return about how many lines the menu BUFFER needs, its mode line included.
-Transient fills the buffer before it shows it and fits the window to
-it once shown, so this need only be close."
-  (with-current-buffer buffer
-    (max window-min-height
-         (+ (count-lines (point-min) (point-max))
-            (if mode-line-format 1 0)
-            (if header-line-format 1 0)))))
+(defun harness-ui--menu-height (buffer window)
+  "Return how many pixels the menu BUFFER needs in a window below WINDOW.
+That is its text, as it shows in a window as wide as WINDOW, and a
+line for each of its mode and header lines.  On a text terminal a
+pixel is a line, and so is each line of the text.  On a graphic frame
+the text is measured: transient draws the line under a menu a pixel
+high there, and counted as a whole line it would make the window too
+tall.  Transient fills the buffer before it shows it and fits the
+window to it once shown, shrinking it to its text; the pixels it gives
+up would go to WINDOW, which is to keep its height."
+  (let* ((frame (window-frame window))
+         (line (frame-char-height frame)))
+    (with-current-buffer buffer
+      (max (* window-min-height line)
+           (+ (if (display-graphic-p frame)
+                  (cdr (buffer-text-pixel-size buffer window))
+                (count-lines (point-min) (point-max)))
+              (* line (+ (if mode-line-format 1 0) (if header-line-format 1 0))))))))
 
 (defun harness-ui--display-menu-below (buffer window alist)
   "Display the menu BUFFER in a new window below WINDOW and return it.
@@ -3095,21 +3104,25 @@ come from the windows above, so WINDOW keeps its height while the menu
 shows, and `harness-ui--delete-menu-below' gives them back once the
 menu closes.  Return nil, the windows as they were, when the windows
 above cannot spare the lines.  ALIST is the action alist."
-  (let ((height (window-pixel-height window))
-        (preserved (window-parameter window 'window-preserved-size))
-        (lines (min (harness-ui--menu-lines buffer)
-                    (window-max-delta window nil window)))
-        menu)
-    (when (>= lines window-min-height)
+  (let* ((height (window-pixel-height window))
+         (preserved (window-parameter window 'window-preserved-size))
+         ;; Pixels, so that WINDOW gives the menu exactly what it took.
+         (pixels (min (harness-ui--menu-height buffer window)
+                      (window-max-delta window nil window nil nil nil t)))
+         menu)
+    (when (>= pixels (* window-min-height (frame-char-height (window-frame window))))
       (condition-case err
           (progn
-            (window-resize window lines nil window)
-            (setq menu (let ((window-combination-resize 'side)
-                             (window-combination-limit t)
-                             ;; WINDOW itself, even a Doom popup, whose
-                             ;; `split-window' splits another window.
-                             (ignore-window-parameters t))
-                         (split-window window (- lines) 'below)))
+            ;; To the pixel: rounded to whole lines, the menu would come
+            ;; out a line short of its text on a graphic frame.
+            (let ((window-resize-pixelwise t))
+              (window-resize window pixels nil window t)
+              (setq menu (let ((window-combination-resize 'side)
+                               (window-combination-limit t)
+                               ;; WINDOW itself, even a Doom popup, whose
+                               ;; `split-window' splits another window.
+                               (ignore-window-parameters t))
+                           (split-window window (- pixels) 'below t))))
             (set-window-parameter menu 'harness-ui--menu-below (list window height preserved))
             (set-window-parameter menu 'delete-window #'harness-ui--delete-menu-below)
             ;; Fixed at its height while the menu shows, so that transient
@@ -3120,8 +3133,15 @@ above cannot spare the lines.  ALIST is the action alist."
          (harness-log 'error "harness-menu: no window below %s: %s" window (error-message-string err))
          (if (window-live-p menu)
              (delete-window menu)
-           (window-resize-no-error window (- height (window-pixel-height window)) nil window t))
+           (harness-ui--resize-back window height))
          nil)))))
+
+(defun harness-ui--resize-back (window height)
+  "Make WINDOW HEIGHT pixels high again, with the lines of the windows above.
+To the pixel, as `harness-ui--display-menu-below' resized it: rounded
+to whole lines, WINDOW would come out a pixel or more off."
+  (let ((window-resize-pixelwise t))
+    (window-resize-no-error window (- height (window-pixel-height window)) nil window t)))
 
 (defun harness-ui--delete-menu-below (menu)
   "Delete MENU, a window of `harness-ui--display-menu-below', putting sizes back.
@@ -3137,7 +3157,7 @@ and the windows above get back the lines the menu took."
         (delete-window menu)
       (when (window-live-p window)
         (unless (window-live-p menu)
-          (window-resize-no-error window (- height (window-pixel-height window)) nil window t))
+          (harness-ui--resize-back window height))
         (set-window-parameter window 'window-preserved-size preserved)))))
 
 (defun harness-ui--display-menu (buffer alist)
