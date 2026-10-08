@@ -37,6 +37,33 @@
     (let ((pos (string-match "item one" plain)))
       (should (equal "  " (get-text-property pos 'wrap-prefix s))))))
 
+(ert-deftest harness-md-code-block-fontified-once ()
+  "A code block rendered again, as a message streaming in is, is not fontified again.
+Fontifying runs the language's major mode in a buffer of its own, and a
+long message was rendered whole, each of its blocks fontified, every
+few tenths of a second as it streamed in."
+  (let ((harness-ui-markdown--fontified (make-hash-table :test 'equal))
+        (harness-ui-markdown--fontified-size 0)
+        (calls 0)
+        (fontify-in (symbol-function 'harness-ui-markdown--fontify-in)))
+    (cl-letf (((symbol-function 'harness-ui-markdown--fontify-in)
+               (lambda (&rest args) (cl-incf calls) (apply fontify-in args))))
+      (dotimes (_ 3)
+        (let* ((s (harness-ui-markdown-render "Some code:\n\n```emacs-lisp\n(defun x () 1)\n```\n"))
+               (pos (string-match "(defun" s)))
+          (should (memq 'harness-md-code-block (harness-md-test-face-at s pos)))
+          (should (memq 'font-lock-keyword-face (harness-md-test-face-at s (1+ pos))))))
+      (should (= 1 calls))
+      ;; Other code is fontified anew.
+      (harness-ui-markdown-render "```emacs-lisp\n(defvar y 2)\n```\n")
+      (should (= 2 calls))
+      (should (= 2 (hash-table-count harness-ui-markdown--fontified)))
+      ;; Past its size the cache starts over.
+      (let ((harness-ui-markdown--fontified-max 20))
+        (harness-ui-markdown-render "```emacs-lisp\n(defvar a-longer-name 3)\n```\n"))
+      (should (= 3 calls))
+      (should (= 1 (hash-table-count harness-ui-markdown--fontified))))))
+
 (ert-deftest harness-md-unclosed-fence-and-empty ()
   (should (equal "" (harness-ui-markdown-render "")))
   (should (string-match-p "still code" (substring-no-properties (harness-ui-markdown-render "```\nstill code"))))

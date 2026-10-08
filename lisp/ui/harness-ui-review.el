@@ -332,7 +332,7 @@ clipboard to the box).
 Read from `harness-ui-review-minor-mode-map': the banner shows the key
 that runs it."
   (if-let* ((key (where-is-internal command (list harness-ui-review-minor-mode-map) t)))
-      (concat "  " (propertize (key-description key) 'face 'harness-chat-key-face))
+      (concat "  " (harness-ui-kbd (key-description key)))
     ""))
 
 (defun harness-ui-review--shown (task)
