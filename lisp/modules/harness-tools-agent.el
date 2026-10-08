@@ -73,6 +73,12 @@ The lines in between keep their indentation, which places the drawing."
       (setq lines (funcall trim (butlast (cdr lines)))))
     (mapconcat #'identity lines "\n")))
 
+(defconst harness-tools-agent-image-max-side 8000
+  "Most pixels an ask_user image may have on a side.
+Emacs draws no image larger than `max-image-size' allows, ten times its
+frame by default, however small it would show it; and an image this
+large shows so small beside the options that nothing in it can be read.")
+
 (defun harness-tools-agent--image (file n ctx)
   "Return the diagram of option N showing image FILE, relative to CTX's cwd."
   (let* ((path (harness-tools-resolve-path file ctx))
@@ -83,7 +89,13 @@ The lines in between keep their indentation, which places the drawing."
                                     n file))
      ((not (and (file-regular-p path) (file-readable-p path)))
       (harness-tools-agent--invalid "Option %d: image %s not found (cwd %s)" n file (plist-get ctx :cwd)))
-     (t (list :type "image" :path path :mime mime)))))
+     (t
+      (let ((size (harness-image-pixel-size path)))
+        (when (and size (> (max (car size) (cdr size)) harness-tools-agent-image-max-side))
+          (harness-tools-agent--invalid
+           "Option %d: image %s is %dx%d pixels, too large to show; crop it to the part the user should compare, or scale it down, to at most %d pixels on a side (about 600x400 shows best)"
+           n file (car size) (cdr size) harness-tools-agent-image-max-side)))
+      (list :type "image" :path path :mime mime)))))
 
 (defun harness-tools-agent--option (item n ctx)
   "Return option ITEM, the Nth, of an ask_user call in CTX as (LABEL . DIAGRAM).
@@ -189,9 +201,41 @@ The waiting ask_user call returns \"The user dismissed the question\"."
   (cl-remove-if-not (lambda (it) (eq (plist-get it :kind) 'question))
                     (harness-call 'session/pending session-id)))
 
+(defconst harness-tools-agent-image-max-bytes (* 16 1024 1024)
+  "Largest image file, in bytes, `question/image' sends.")
+
+(harness-defmethod question/image (session-id pid index)
+  "Return the image of option INDEX of pending question PID of SESSION-ID.
+INDEX counts from 0.  The value is (:mime MIME :data BASE64), the bytes
+of the file the option shows, read here, where the harness runs: for a
+client that cannot read them itself, such as a UI on another machine,
+or one whose session works on a remote host.  Only an image of a
+question still waiting is given.  Signal an error when there is none,
+or the file cannot be read or is larger than
+`harness-tools-agent-image-max-bytes'."
+  (let* ((item (harness-tools-agent--pending-item session-id pid))
+         (diagrams (and (eq (plist-get item :kind) 'question)
+                        (append (plist-get (plist-get item :payload) :diagrams) nil)))
+         (diagram (and (natnump index) (nth index diagrams)))
+         (path (plist-get diagram :path)))
+    (cond
+     ((not item) (error "No question %s waits in session %s" pid session-id))
+     ((not (and (equal (format "%s" (plist-get diagram :type)) "image") (stringp path)))
+      (error "Option %s of question %s shows no image" index pid))
+     ((not (and (file-regular-p path) (file-readable-p path)))
+      (error "The image %s cannot be read any more" path))
+     ((> (or (file-attribute-size (file-attributes path)) 0) harness-tools-agent-image-max-bytes)
+      (error "The image %s is larger than %s" path (file-size-human-readable harness-tools-agent-image-max-bytes)))
+     (t (list :mime (plist-get diagram :mime)
+              :data (with-temp-buffer
+                      (set-buffer-multibyte nil)
+                      (insert-file-contents-literally path)
+                      (base64-encode-region (point-min) (point-max) t)
+                      (buffer-string)))))))
+
 (harness-define-tool "ask_user"
   :label "Question"
-  :description "Ask the user a question and wait for the answer. Use it when only the user can decide (ambiguous requirements, destructive choices, credentials). Offer options when there is a small set of sensible answers; the user may also type a free-form answer unless allow_free_text is false. When the options are easier to tell apart seen than described (layouts, architectures, data flows, UI sketches), give each option a diagram: ASCII art in diagram, or an image file in image. If one option has a diagram, every option must have one; the user flips between them in one place before answering."
+  :description "Ask the user a question and wait for the answer. Use it when only the user can decide (ambiguous requirements, destructive choices, credentials). Offer options when there is a small set of sensible answers; the user may also type a free-form answer unless allow_free_text is false. When the options are easier to tell apart seen than described (layouts, architectures, data flows, UI sketches), give each option a diagram: ASCII art in diagram, or an image file in image. If one option has a diagram, every option must have one; the user flips between them in one place before answering. An image shows what ASCII art cannot, such as a mockup of a page or a chart: write an SVG with write_file, or save a screenshot of a mockup cropped to what differs between the options, in your temporary directory rather than the working directory, so it stays out of the work. Each image is shown at most about 400 pixels high, less in a small window, drawn on white as a browser shows it: draw about 600x400 with large text, and give an SVG a viewBox."
   :schema '(:type "object"
             :properties (:question (:type "string" :description "The question to ask.")
                          ;; Plain objects: the schema reaches every provider
@@ -201,7 +245,7 @@ The waiting ask_user call returns \"The user dismissed the question\"."
                                    :items (:type "object"
                                            :properties (:label (:type "string" :description "The answer, as the user reads it and as it is returned when picked.")
                                                         :diagram (:type "string" :description "ASCII diagram of this answer, shown in a fixed-width font.")
-                                                        :image (:type "string" :description "Path of an image file (PNG, JPEG, GIF, SVG or WebP) showing this answer, instead of an ASCII diagram."))
+                                                        :image (:type "string" :description "Path of an image file (PNG, JPEG, GIF, SVG or WebP) showing this answer, instead of an ASCII diagram, such as an SVG you wrote in your temporary directory. A relative path is taken in the working directory."))
                                            :required ("label"))
                                    :description "Optional list of suggested answers, each with a label and, to compare them by sight, a diagram or an image illustrating it; a plain string is an option without one. If one option has a diagram or image, every option must have one.")
                          :allow_free_text (:type "boolean"

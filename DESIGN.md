@@ -64,6 +64,7 @@ At the core of any agentic session is a series of messages, and tool calls (from
 - Sessions can be resumed
 - Sessions can be forked 
 - Sessions are scoped to a specific project (auto-detected) 
+- Sessions can move to another working directory, and with it to that directory's project, when the work turns out to be elsewhere: the user moves one with a command, or confirms an agent's request to (it changes the directories the session may reach). A session in a worktree or working on a task stays put, and one running a turn moves when the turn ends.
 - Sessions can be idle (waiting for user to send next message), running (agent is generating tokens or ingesting tool calls, ect), blocked (waiting for user response to tool call or for permission)
 - Sessions can have a parent child relationship with another session 
 

@@ -316,6 +316,122 @@ A task's project is its `:project', else its `:cwd'."
         (harness-tasks-test-wait-state id 'done)
         (should-error (harness-call 'task/start id))))))
 
+(declare-function harness-tasks--holds-slot-p "harness-tasks")
+(declare-function harness-tasks--put "harness-tasks")
+(declare-function harness-provider-demo--last-user-text "harness-provider-demo")
+
+(defun harness-tasks-test--record (state sid &optional project)
+  "Return a task record in STATE worked on by session SID, in PROJECT."
+  (list :id (concat "t-" (harness-short-id 8)) :project (or project default-directory)
+        :cwd default-directory :prompt "already at it" :state state :session sid
+        :merge-status (and (eq state 'merging) 'conflict) :created (float-time)))
+
+(ert-deftest harness-tasks-slot-held-by-top-level-session-at-work ()
+  "Only a task's own top-level session at work on it takes a slot.
+A task holds one while it starts, and while it is active with that
+session running or blocked mid-turn.  A session another one started --
+a sub-agent, a fork, a merge-conflict resolver -- holds none, even made
+a task, and nor does a task in the merge queue, whatever its session
+does; nor review, done, refining or pending."
+  (harness-tasks-test-with
+    (let* ((top (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted") :id))
+           (sub (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted"
+                                         :kind 'subagent :parent-id top)
+                           :id)))
+      (dolist (status '(running blocked))
+        (dolist (sid (list top sub)) (harness-call 'session/set-status sid status))
+        (should (harness-tasks--holds-slot-p (harness-tasks-test--record 'active top)))
+        (should-not (harness-tasks--holds-slot-p (harness-tasks-test--record 'active sub)))
+        (dolist (state '(merging pending refining review done))
+          (should-not (harness-tasks--holds-slot-p (harness-tasks-test--record state top)))))
+      ;; Idle: it stopped, or waits for a follow-up.
+      (harness-call 'session/set-status top 'idle)
+      (should-not (harness-tasks--holds-slot-p (harness-tasks-test--record 'active top)))
+      ;; Starting holds one before there is a session at all.
+      (let ((starting (harness-tasks-test--record 'active nil)))
+        (should-not (harness-tasks--holds-slot-p starting))
+        (puthash (plist-get starting :id) t harness-tasks--starting)
+        (should (harness-tasks--holds-slot-p starting))))))
+
+(ert-deftest harness-tasks-schedule-counts-top-level-sessions-only ()
+  "The scheduler fills a project's slots counting top-level task sessions only.
+Of two slots, a task whose own session runs takes one.  A task in the
+merge queue, its session at work on the conflicts, and a sub-agent made
+a task, at work too, take none: the oldest waiting task starts in the
+free slot, and the next one waits for it."
+  (harness-tasks-test-with
+    (let (first second)
+      (let ((harness-tasks-max-running 0))
+        (setq first (harness-tasks-test-submit "first waiting")
+              second (harness-tasks-test-submit "second waiting")))
+      (let* ((project (plist-get (harness-tasks-test-task first) :project))
+             (running (lambda (&rest opts)
+                        (let ((sid (plist-get (apply #'harness-call 'session/create
+                                                     :cwd dir :model "demo:scripted" opts)
+                                              :id)))
+                          (harness-call 'session/set-status sid 'running)
+                          sid)))
+             (worker (funcall running))
+             (merger (funcall running))
+             (helper (funcall running :kind 'subagent :parent-id worker))
+             (harness-tasks-max-running 2))
+        (harness-tasks--put (harness-tasks-test--record 'active worker project))
+        (harness-tasks--put (harness-tasks-test--record 'merging merger project))
+        (harness-tasks--put (harness-tasks-test--record 'active helper project))
+        (should (= 1 (harness-tasks--free-slots project)))
+        (harness-tasks--schedule)
+        (should (eq 'active (harness-tasks-test-state first)))
+        (should (eq 'pending (harness-tasks-test-state second)))
+        (should (= 0 (harness-tasks--free-slots project)))
+        ;; Its slot is free again once it is done.
+        (harness-tasks-test-wait-state first 'done)
+        (harness-tasks-test-wait-state second 'done)
+        (should (>= (plist-get (harness-tasks-test-task second) :started)
+                    (plist-get (harness-tasks-test-task first) :finished)))
+        (dolist (sid (list worker merger helper)) (harness-call 'session/set-status sid 'idle))))))
+
+(ert-deftest harness-tasks-sub-agent-takes-no-slot ()
+  "A task's sub-agent at work takes no slot: the task holds one, through
+its own session, which waits on the sub-agent.  With two slots, while a
+task's sub-agent runs, another task starts at once."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-agent)
+    (harness-tasks-test--hang-tool)
+    (let* ((harness-tasks-max-running 2)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (cond ((plist-get (plist-get request :session) :parent-id)
+                     ;; The sub-agent: its first call hangs.
+                     '((:type tool-call :id "h1" :name "hang" :input (:path "x"))
+                       (:type done :stop-reason end-turn)))
+                    ((string-match-p "delegate" (harness-provider-demo--last-user-text request))
+                     '((:type tool-call :id "s1" :name "spawn_agent" :input (:prompt "dig in" :name "helper"))
+                       (:type text :delta "Delegated.")
+                       (:type done :stop-reason end-turn)))
+                    (t harness-tasks-test-script))))
+           (a (harness-tasks-test-submit "delegate the work"))
+           (sid (plist-get (harness-tasks-test-task a) :session))
+           (project (plist-get (harness-tasks-test-task a) :project))
+           (helper (harness-test-wait
+                    (lambda ()
+                      (cl-find-if (lambda (s)
+                                    (harness-tasks-test--node (plist-get s :id)
+                                                              (lambda (n) (equal (plist-get n :tool) "hang"))))
+                                  (harness-call 'session/list (list :parent-id sid))))
+                    10 "the sub-agent at work")))
+      ;; Two sessions at work, and one slot taken: the task's own.
+      (should (eq 'subagent (plist-get helper :kind)))
+      (should (eq 'running (plist-get (harness-call 'session/get (plist-get helper :id)) :status)))
+      (should (eq 'running (plist-get (harness-tasks-test-session a) :status)))
+      (should (eq 'active (harness-tasks-test-state a)))
+      (should (= 1 (harness-tasks--free-slots project)))
+      (let ((b (harness-tasks-test-submit "something else")))
+        (should (eq 'active (harness-tasks-test-state b)))
+        (harness-tasks-test-wait-state b 'done))
+      ;; The sub-agent stops; its task finishes.
+      (harness-call 'agent/cancel (plist-get helper :id))
+      (harness-tasks-test-wait-state a 'done))))
+
 (ert-deftest harness-tasks-edit-and-cancel-pending ()
   (harness-tasks-test-with
     (let ((harness-tasks-max-running 0))
@@ -1843,6 +1959,59 @@ commits from call `harness-tasks-test--commit-on-call' on."
         (should (= 2 harness-tasks-test--calls))
         (should (equal "two\n" (harness-tasks-test--main-text root)))))))
 
+(defvar harness-merge-conflict-resolver)
+
+(ert-deftest harness-tasks-git-merge-work-takes-no-slot ()
+  "A task in the merge queue holds no slot while its conflicts are resolved,
+whoever resolves them: a fresh session, a sub-agent of the task's, or
+the task's own session.  With one slot, the next task starts meanwhile."
+  (dolist (resolver '(fresh child))
+    (harness-tasks-test-with-git
+      (harness-tasks-test--hang-tool)
+      (let ((harness-merge-conflict-resolver resolver)
+            (harness-tasks-require-verification t)
+            (harness-tasks-max-running 1)
+            ;; Resolving the conflicts hangs; any other work changes the file.
+            (harness-provider-demo-script-override
+             (lambda (request)
+               (if (string-match-p "conflict" (harness-provider-demo--last-user-text request))
+                   '((:type tool-call :id "h1" :name "hang" :input (:path "x"))
+                     (:type done :stop-reason end-turn))
+                 '((:type tool-call :id "c1" :name "change_shared" :input (:text "two"))
+                   (:type text :delta "Changed it.")
+                   (:type done :stop-reason end-turn)))))
+            (hanging-p (lambda (sid)
+                         (harness-tasks-test--node sid (lambda (n) (equal (plist-get n :tool) "hang"))))))
+        (let* ((a (harness-tasks-test-submit "Change the shared file"))
+               (project (plist-get (harness-tasks-test-task a) :project))
+               (sid (progn (harness-tasks-test-wait-state a 'review)
+                           (plist-get (harness-tasks-test-task a) :session))))
+          ;; The main checkout moves on: the task's branch conflicts with it now.
+          (with-temp-file (expand-file-name "shared.txt" root) (insert "three\n"))
+          (harness-tasks-test--git root "commit" "-q" "-am" "main moves on")
+          (harness-call 'task/verify a)
+          (let ((resolving
+                 (harness-test-wait
+                  (lambda ()
+                    (cl-find-if hanging-p (cons sid (mapcar (lambda (s) (plist-get s :id))
+                                                            (harness-call 'session/list (list :parent-id sid))))))
+                  30 (format "the conflicts to be resolved (%s)" resolver))))
+            (if (eq resolver 'child)
+                (should (equal sid resolving))
+              (should (equal sid (plist-get (harness-call 'session/get resolving) :parent-id))))
+            (should (eq 'running (plist-get (harness-call 'session/get resolving) :status)))
+            (should (eq 'merging (harness-tasks-test-state a)))
+            (should (eq 'conflict (plist-get (harness-tasks-test-task a) :merge-status)))
+            (should (= 1 (harness-tasks--free-slots project)))
+            (let ((b (harness-tasks-test-submit "Change it in another task")))
+              (should (eq 'active (harness-tasks-test-state b)))
+              (harness-tasks-test-wait-state b 'review))
+            ;; Give up on the merge, which stops the resolution.
+            (harness-call 'merge/cancel sid)
+            (harness-call 'agent/cancel resolving)
+            (harness-test-wait (lambda () (not (harness-call 'agent/running resolving))) 10
+                               "the resolution to stop")))))))
+
 (ert-deftest harness-tasks-git-refined-task-moves-into-its-worktree ()
   "A backlog task is written up at the root; starting moves its session into a worktree."
   (harness-tasks-test-with-git
@@ -2219,6 +2388,7 @@ With nil it starts at the level the project configures instead."
 ;; completes it, `task/reject' sends it back to its session with feedback.
 
 (defvar harness-tasks--reject-message)
+(defvar harness-tasks--aside-message)
 
 (ert-deftest harness-tasks-review-then-verify ()
   "Finished work waits in review, not done, until the user verifies it."
@@ -2307,13 +2477,15 @@ With nil it starts at the level the project configures instead."
         (should (= 2 (length (plist-get (harness-tasks-test-task id) :feedback))))
         (should (= 3 (length (harness-tasks-test-user-texts sid))))))))
 
-(ert-deftest harness-tasks-review-any-message-sends-it-back ()
-  "A message to the session of a task in review sends it back, as `task/reject' does.
-Whoever wrote it -- the user in the session's chat, without [Send back]
-(`agent/prompt'), an agent's task_control message (`task/prompt'),
-another session's agent -- the task is active at once, the round of
+(ert-deftest harness-tasks-review-user-message-sends-it-back ()
+  "A message the user sends the session of a task in review sends it back.
+That is as `task/reject' does, wherever the user wrote it: the
+session's chat, without [Send back] (`agent/prompt'), or the board's
+reply (`task/prompt').  The task is active at once, the round of
 feedback is kept and the agent gets the message opened by the reject
-text.  The harness's own messages do not count."
+text, as the user's.  The harness's own messages do not count, and
+neither do another session's (see
+`harness-tasks-review-session-message-is-no-review')."
   (harness-tasks-test-with
     (let ((harness-tasks-require-verification t))
       (let* ((id (harness-tasks-test-submit "fix the parser"))
@@ -2333,33 +2505,150 @@ text.  The harness's own messages do not count."
         (should (equal (harness-tasks--reject-text "Nested quotes still break.")
                        (plist-get (funcall last-user) :content)))
         (should-not (harness-node-sender (funcall last-user)))
-        ;; A message through `task/prompt', as task_control sends it.
+        ;; A message through `task/prompt' without a sender: the board's reply.
         (harness-call 'task/prompt id "And the docs.")
         (should (eq 'active (harness-tasks-test-state id)))
         (harness-tasks-test-wait-state id 'review)
         (should (equal '("Nested quotes still break." "And the docs.") (funcall rounds)))
         (should (equal (harness-tasks--reject-text "And the docs.") (plist-get (funcall last-user) :content)))
-        ;; Another session's agent, which stays the sender.
-        (let ((from (harness-sender-session (list :id "s-other" :name "orchestrator"))))
-          (harness-call 'agent/prompt sid "Ship it." (list :from from))
-          (should (eq 'active (harness-tasks-test-state id)))
-          (harness-tasks-test-wait-state id 'review)
-          (should (equal "Ship it." (car (last (funcall rounds)))))
-          (should (equal (harness-tasks--reject-text "Ship it.") (plist-get (funcall last-user) :content)))
-          (should (equal from (harness-node-sender (funcall last-user)))))
+        (should-not (harness-node-sender (funcall last-user)))
         ;; The harness's own message is not feedback: no round, as it was sent.
         (harness-call 'agent/prompt sid "Carry on." (harness-tasks--from-harness))
         (harness-tasks-test-wait-state id 'review)
-        (should (= 3 (length (funcall rounds))))
+        (should (= 2 (length (funcall rounds))))
         (should (equal "Carry on." (plist-get (funcall last-user) :content)))
-        ;; Sent back three times, then accepted as any review.
+        ;; Sent back twice, then accepted as any review.
         (harness-call 'task/verify id)
         (should (eq 'done (harness-tasks-test-state id)))
         ;; Done, a message is a follow-up again, not feedback.
         (harness-call 'agent/prompt sid "One more thing.")
         (harness-tasks-test-wait-state id 'review)
-        (should (= 3 (length (funcall rounds))))
+        (should (= 2 (length (funcall rounds))))
         (should (equal "One more thing." (plist-get (funcall last-user) :content)))))))
+
+(defconst harness-tasks-test--other
+  (list :kind 'session :id "s-other" :name "Onboard benito")
+  "The sender of the other session's messages, as `harness-sender-session' makes it.")
+
+(defconst harness-tasks-test--other-header
+  "[Message from session s-other \"Onboard benito\"]\n\n"
+  "The header session_send and task_control open the other session's messages with.")
+
+(ert-deftest harness-tasks-review-session-message-is-no-review ()
+  "Another session's message to a task in review does not send it back.
+Only the user reviews.  Through `agent/prompt' (as session_send sends
+it) or `task/prompt' (as task_control's message does), the agent gets
+it as that session's, opened by the aside text and never the reject
+text, and no round of feedback is kept.  The task is active while its
+session deals with it and waits for review again once the turn ends,
+the report handed in standing: the reply is to the other session.  The
+user's feedback after that still sends it back, reject text and all."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-handin)
+    (let ((harness-tasks-require-verification t)
+          (harness-provider-demo-script-override
+           '((:type tool-call :id "h1" :name "hand_in" :input (:summary "# Done" :evidence ("looks good"))))))
+      (let* ((id (harness-tasks-test-submit "fix the parser"))
+             (sid (plist-get (harness-tasks-test-task id) :session))
+             (from harness-tasks-test--other)
+             (sent (lambda (text) (concat harness-tasks-test--other-header text)))
+             (last-user (lambda () (car (last (harness-tasks-test-user-nodes sid))))))
+        (harness-tasks-test-wait-state id 'review)
+        (should (equal "# Done" (plist-get (harness-tasks-test--report id) :summary)))
+        (setq harness-provider-demo-script-override
+              '((:type text :delta "Noted, thanks.\n") (:type done :stop-reason end-turn)))
+        ;; As session_send delivers it.
+        (harness-call 'agent/prompt sid (funcall sent "Applying now.") (list :from from))
+        ;; Active while its session deals with it, but not sent back.
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'active (plist-get task :state)))
+          (should (eq 'active (plist-get task :column)))
+          (should-not (plist-get task :feedback)))
+        (harness-tasks-test-wait-state id 'review)
+        (let ((node (funcall last-user)))
+          (should (equal (harness-tasks--aside-text (funcall sent "Applying now."))
+                         (plist-get node :content)))
+          (should (string-prefix-p harness-tasks--aside-message (plist-get node :content)))
+          (should-not (string-search harness-tasks--reject-message (plist-get node :content)))
+          (should (equal from (harness-node-sender node))))
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'review (plist-get task :column)))
+          (should-not (plist-get task :feedback))
+          (should-not (plist-get task :reopened)))
+        ;; The report handed in stands: the reply was to the other session.
+        (should (equal "# Done" (plist-get (harness-tasks-test--report id) :summary)))
+        (should-not (harness-tasks-test--missing-p id))
+        ;; The same through `task/prompt', as task_control's message sends it.
+        (harness-call 'task/prompt id (funcall sent "The Helm job finished.") nil (list :from from))
+        (should (eq 'active (harness-tasks-test-state id)))
+        (should-not (plist-get (harness-tasks-test-task id) :feedback))
+        (harness-tasks-test-wait-state id 'review)
+        (let ((node (funcall last-user)))
+          (should (equal (harness-tasks--aside-text (funcall sent "The Helm job finished."))
+                         (plist-get node :content)))
+          (should-not (string-search harness-tasks--reject-message (plist-get node :content)))
+          (should (equal from (harness-node-sender node))))
+        (should-not (plist-get (harness-tasks-test-task id) :feedback))
+        (should (equal "# Done" (plist-get (harness-tasks-test--report id) :summary)))
+        ;; The user's own feedback still sends it back, opened by the reject text.
+        (harness-call 'task/reject id "Nested quotes still break.")
+        (harness-tasks-test-wait-state id 'review)
+        (should (equal (harness-tasks--reject-text "Nested quotes still break.")
+                       (plist-get (funcall last-user) :content)))
+        (should-not (harness-node-sender (funcall last-user)))
+        (should (equal '("Nested quotes still break.")
+                       (mapcar (lambda (round) (plist-get round :text))
+                               (plist-get (harness-tasks-test-task id) :feedback))))
+        ;; That is a round of its own: handing nothing in, its report says so.
+        (should (harness-tasks-test--missing-p id))
+        (should (equal "Noted, thanks." (plist-get (harness-tasks-test--report id) :summary)))))))
+
+(ert-deftest harness-tasks-review-session-message-keeps-a-missing-report ()
+  "A round recorded without a report keeps it through another session's message.
+The report says what the round's work last said, not the reply the
+session gave the other one."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-handin)
+    (let ((harness-tasks-require-verification t)
+          (harness-provider-demo-script-override
+           '((:type text :delta "I fixed the parser; see the diff.\n") (:type done :stop-reason end-turn))))
+      (let* ((id (harness-tasks-test-submit "fix the parser"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (harness-tasks-test-wait-state id 'review)
+        (should (harness-tasks-test--missing-p id))
+        (should (equal "I fixed the parser; see the diff." (plist-get (harness-tasks-test--report id) :summary)))
+        (setq harness-provider-demo-script-override
+              '((:type text :delta "Noted, thanks.\n") (:type done :stop-reason end-turn)))
+        (harness-call 'agent/prompt sid (concat harness-tasks-test--other-header "Applying now.")
+                      (list :from harness-tasks-test--other))
+        (should (eq 'active (harness-tasks-test-state id)))
+        (harness-tasks-test-wait-state id 'review)
+        ;; The session replied, and its reply is not the report's.
+        (should (equal "Noted, thanks." (harness-tasks--last-message sid 0)))
+        (should (harness-tasks-test--missing-p id))
+        (should (equal "I fixed the parser; see the diff." (plist-get (harness-tasks-test--report id) :summary)))
+        (should-not (plist-get (harness-tasks-test-task id) :feedback))))))
+
+(ert-deftest harness-tasks-review-queued-session-message-is-no-review ()
+  "Another session's message queued while the task works is no review when it goes out.
+It goes out once the task waits for review, and the task works on it
+and waits for review again without being sent back."
+  (harness-tasks-test-with
+    (let ((harness-tasks-require-verification t)
+          (harness-provider-demo--delay 0.05)
+          (reviews 0))
+      (harness-on 'task/review (lambda (_) (cl-incf reviews)))
+      (let* ((id (harness-tasks-test-submit "fix the parser"))
+             (sid (plist-get (harness-tasks-test-task id) :session))
+             (text (concat harness-tasks-test--other-header "Rebase when you can.")))
+        (should (harness-call 'agent/running sid))
+        (harness-call 'agent/prompt sid text (list :queue t :from harness-tasks-test--other))
+        (harness-test-wait (lambda () (and (= reviews 2) (eq 'review (harness-tasks-test-state id))))
+                           10 "the task back in review after the queued message")
+        (should-not (plist-get (harness-tasks-test-task id) :feedback))
+        (let ((node (car (last (harness-tasks-test-user-nodes sid)))))
+          (should (equal (harness-tasks--aside-text text) (plist-get node :content)))
+          (should (equal harness-tasks-test--other (harness-node-sender node))))))))
 
 (ert-deftest harness-tasks-review-queued-message-sends-it-back ()
   "A message queued while the task works goes out when it finishes, and sends it back."

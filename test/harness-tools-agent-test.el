@@ -131,7 +131,83 @@ option, is an error saying what to fix, and asks nothing."
                               (funcall try '((:label "A" :image "missing.png") (:label "B" :diagram "[B]")))))
       (should (string-match-p "Option 1: notes.txt is not an image file"
                               (funcall try '((:label "A" :image "notes.txt") (:label "B" :diagram "[B]")))))
+      ;; A full page's screenshot, 1400x12000: too large to show; crop it.
+      (let ((coding-system-for-write 'no-conversion))
+        (write-region (unibyte-string #x89 ?P ?N ?G ?\r ?\n #x1a ?\n 0 0 0 13 ?I ?H ?D ?R
+                                      0 0 5 120 0 0 46 224 8 6 0 0 0)
+                      nil (expand-file-name "page.png" cwd) nil 'silent))
+      (should (string-match-p "Option 2: image page.png is 1400x12000 pixels, too large to show; crop it"
+                              (funcall try '((:label "A" :diagram "[A]") (:label "B" :image "page.png")))))
       (should (eq 'idle (plist-get (harness-call 'session/get sid) :status))))))
+
+(defvar harness-tools-agent-image-max-bytes)
+
+(ert-deftest harness-tools-agent-question-image-gives-the-file ()
+  "`question/image' gives an option's image, read where the harness runs,
+for a client that cannot read the path; it says why when it cannot."
+  (harness-tools-agent-test-with
+    (let* ((sid (harness-tools-agent-test-session))
+           (cwd (plist-get (harness-call 'session/get sid) :cwd))
+           (bytes harness-test-png))
+      (let ((coding-system-for-write 'no-conversion))
+        (write-region bytes nil (expand-file-name "a.png" cwd) nil 'silent)
+        (write-region "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\"/>" nil
+                      (expand-file-name "b.svg" cwd) nil 'silent))
+      (harness-tools-agent-test-asked sid '(:question "Which?" :options ((:label "A" :image "a.png")
+                                                                         (:label "B" :image "b.svg"))))
+      (let ((pid (plist-get (car (harness-call 'question/pending sid)) :id)))
+        (let ((image (harness-call 'question/image sid pid 0)))
+          (should (equal "image/png" (plist-get image :mime)))
+          (should (equal bytes (base64-decode-string (plist-get image :data)))))
+        (should (equal "image/svg+xml" (plist-get (harness-call 'question/image sid pid 1) :mime)))
+        (should (string-match-p "Option 2 of question .* shows no image"
+                                (cadr (should-error (harness-call 'question/image sid pid 2)))))
+        (should (string-match-p "No question nope waits"
+                                (cadr (should-error (harness-call 'question/image sid "nope" 0)))))
+        (let ((harness-tools-agent-image-max-bytes 8))
+          (should (string-match-p "a\\.png is larger than 8"
+                                  (cadr (should-error (harness-call 'question/image sid pid 0))))))
+        (delete-file (expand-file-name "a.png" cwd))
+        (should (string-match-p "a\\.png cannot be read any more"
+                                (cadr (should-error (harness-call 'question/image sid pid 0)))))
+        ;; Over ACP too, by the names a client gives.
+        (harness-test-load-module 'acp)
+        (should (equal "image/svg+xml"
+                       (plist-get (harness-acp--call-extension "question/image"
+                                                               (list :sessionId sid :pid pid :index 1))
+                                  :mime)))
+        ;; Once answered, it is no longer given.
+        (harness-call 'question/answer sid pid "A")
+        (should-error (harness-call 'question/image sid pid 1))))))
+
+(ert-deftest harness-tools-agent-demo-images-script ()
+  "The demo provider's `images' script draws SVG mockups in the session's
+temporary directory and asks with one per option, as a model is told to."
+  (harness-tools-agent-test-with
+    (let* ((sid (harness-tools-agent-test-session))
+           (tmp (harness-call 'session/tmp-dir sid))
+           (p (harness-call 'agent/prompt sid "Show me the layouts as images")))
+      (harness-test-wait (lambda () (harness-call 'question/pending sid)) 5 "the question with images")
+      (let* ((item (car (harness-call 'question/pending sid)))
+             (payload (plist-get item :payload))
+             (diagrams (plist-get payload :diagrams)))
+        (should (equal '("Sidebar on the left" "Sidebar on the right" "Tabs across the top")
+                       (plist-get payload :options)))
+        (should (= 3 (length diagrams)))
+        (dolist (d diagrams)
+          (should (equal "image" (plist-get d :type)))
+          (should (equal "image/svg+xml" (plist-get d :mime)))
+          (should (file-in-directory-p (plist-get d :path) tmp))
+          (with-temp-buffer
+            (insert-file-contents (plist-get d :path))
+            (should (looking-at-p "<svg [^>]*viewBox=\"0 0 600 400\""))))
+        ;; Three drawings, not one thrice.
+        (should (= 3 (length (delete-dups (mapcar (lambda (d) (with-temp-buffer
+                                                                (insert-file-contents (plist-get d :path))
+                                                                (buffer-string)))
+                                                  diagrams)))))
+        (harness-call 'question/answer sid (plist-get item :id) "Tabs across the top"))
+      (should (eq 'end-turn (plist-get (harness-test-await p) :stop-reason))))))
 
 (ert-deftest harness-tools-agent-ask-user-string-answer-and-cancel ()
   (harness-tools-agent-test-with
