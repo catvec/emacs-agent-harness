@@ -17,13 +17,16 @@ OpenAI-compatible APIs and AWS Bedrock.
   or API key), GitHub Copilot through the `copilot` CLI, DeepSeek,
   OpenAI-compatible endpoints, and AWS Bedrock.
 - **Built-in tools.** Tools for files (read, write, edit, search), the
-  shell, the user's Emacs (buffers, windows, showing and editing a
+  shell, commands on other hosts over ssh, the user's Emacs (buffers, windows, showing and editing a
   buffer, saving it, documentation, `*Messages*`, and debugging its
   Lisp: describing symbols, finding definitions, tracing functions
   and variables), Emacs Lisp
   evaluation in a separate background Emacs, web search and fetch,
   sub-agents and skills, plus tools that let an agent inspect and
   drive other sessions and tasks.
+- **Remote hosts.** Agents work on other machines through TRAMP: a
+  session in a remote directory, the `ssh` tool, and TRAMP paths given
+  to any tool.
 - **Permissions and sandboxing.** Four permission modes (Ask, Accept
   edits, Auto, YOLO), per-session directory access, and a kernel
   sandbox for tool processes (bubblewrap or `systemd-run`).
@@ -93,7 +96,8 @@ Optional dependencies:
 | An AWS profile or `AWS_BEARER_TOKEN_BEDROCK` | Models on AWS Bedrock |
 | `BRAVE_API_KEY` | Web search with any model; until it is set, Claude Code and Copilot sessions use the CLI's own web search (`harness-websearch-builtin`) |
 | `ffmpeg`, `mpv` | Audio recording and playback, video posters (playing videos, and the thumbnails and durations shown; `ffprobe` comes with `ffmpeg`) |
-| `notify-send` (libnotify), or Emacs with D-Bus support | Desktop notifications on GNU/Linux; macOS uses `osascript` |
+| `notify-send` (libnotify), or Emacs with D-Bus support | Desktop notifications on GNU/Linux |
+| `terminal-notifier` 3 or later (`brew install terminal-notifier`) | Desktop notifications on macOS that open what they are about when clicked ([Notifications](#notifications)) |
 | A [Gotify](https://gotify.net) server | Notifications on your phone |
 
 ## Installation
@@ -279,6 +283,8 @@ the menu's Version entry says so.
 | `C-c h p` | `harness-set-permission-mode` | Choose the permission mode |
 | `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
 | `C-c h d` | `harness-directories` | Manage the directories a session may access |
+| `C-c h W` | `harness-move-session` | Move a session to another working directory, and with it to that directory's project (see [Moving a session](#moving-a-session-to-another-directory)) |
+| `m` | `harness-ui-sessions-move` | In the session list, move the session at point to another directory |
 | `C-c h u` | `harness-usage` | Show the usage and cost dashboard |
 | `C-c h I` | `harness-insights` | Show the Insights report: how a period of work with the agents went |
 | `C-c h B` | `harness-delete-budget` | Delete a budget, chosen by name |
@@ -333,6 +339,7 @@ number of options, and a permission's `y`, `s`, `a`, `n` and `N`, and
 | `C-c C-s` | Search the transcript |
 | `C-c C-t` | Show or hide the session's todo list |
 | `C-c C-w` | Copy the last reply |
+| `C-c >` | Quote, to reply: the selected text, or the agent's reply or plan at point (elsewhere the one above it, from the box the last), goes in the compose box as a Markdown quote, point under it. A selection keeps its code blocks, inline code and links as Markdown, and leaves out what a fold hides |
 | `C-c C-e` | Jump to the bottom |
 | `C-c C-r` | Redraw the buffer |
 | `C-c C-z` | Bury the session: its window shows the buffer it showed before (a side window closes) |
@@ -373,6 +380,21 @@ that key is the review banner's `[Verify]`, so a screenshot never has
 to fight the banner's key. Set
 `harness-compose-yank-media` to nil to leave `C-y` and `M-y` alone.
 
+Each image you attach, paste or drop also puts a token into the message
+where point is (or at its end): `[image 1]`, `[image 2]`, and so on. It
+shows as a small chip with the image's thumbnail, so you can write
+"in [image 2] the button is cut off" and the model knows which
+screenshot you mean: it gets the same `[image 2]` right before that
+image. Delete a token (`DEL` right after it takes it whole) and its
+image goes with it; undo or yank the token back and the image returns.
+The `×` on an image's line removes its tokens too. Numbers never shift
+under a sentence you already wrote: a new image takes the number after
+the highest one attached, and every message starts again at 1. The
+attachment lines above the box stay, each image's leading with its
+token, since they also hold files that are not images, downloads still
+on their way, and the larger thumbnail, size and `×`. In the transcript
+the tokens keep their look, and each image has its token over it.
+
 Permission requests and questions from the agent appear inline above
 the compose box. An indicator in the mode line, visible from any buffer,
 shows how many sessions need your attention. Clicking it opens the
@@ -383,9 +405,14 @@ to settle it there: `[Allow]` and `[Deny]` for a permission request,
 which `y` and `n` press too, and `[Answer…]` for a question, which pops
 it out.
 `RET` or a click on a session opens it in its project: with Doom
-Emacs's workspaces, the project's workspace becomes current first, as
-switching project does, and a session already showing there gets its
-window selected instead of opening again
+Emacs's workspaces, the project's workspace becomes current first, with
+the windows and buffers you left in it, and a session already showing
+there gets its window selected instead of opening again. The project's
+workspace is the one named after the project, or one that records the
+project's directory (as some forks of Doom do); of two, the one with
+the project's files open. A project without a workspace gets a new one,
+as switching project makes it but without asking for a file, and the
+session takes its window instead of opening beside Doom's dashboard
 (`harness-ui-switch-project-function`, nil to never switch). `b`, or
 the banner's `[Show all]`, shows every session again. With nobody
 waiting, the click opens the session list as usual.
@@ -417,6 +444,13 @@ command. The directory is made with the session, made again if it went
 missing, and deleted with the session. `C-c h d` lists all of these
 directories. Remote sessions have no temporary directory.
 
+In the sandbox a shell command sees the system directories and, of
+yours, only these directories, each at its own path: a directory you
+grant the session reaches its commands at once, as it reaches the other
+tools. `~` is your home directory there as well, emptied, so
+`~/.emacs.d/x` names the same file inside as outside, and only what the
+session may use shows in it.
+
 Every permission request offers the same five answers, under the same
 names and keys wherever it shows (the chat, BTW, the popout, an ACP
 client): `[Allow]` `y`, `[Allow for session]` `s`, `[Always allow]` `a`,
@@ -428,17 +462,28 @@ this once, and for the agent's own request for a directory
 directory until the agent's turn ends, so the agent can do what it
 asked for and has to ask again in a later turn. A button's tooltip, and
 the echo area after it, say what it covers for the request at hand.
+The one exception is an agent's request to move a session (see
+[Moving a session](#moving-a-session-to-another-directory)), which you
+answer with `[Allow]` or `[Deny]` only.
 
 A permission request about a path outside the session's directories
 (a tool call reaching there, or the agent asking for a directory) is
 answered for a glob pattern, not for a single file. By default the
-pattern covers everything in the directory: the directory that holds
-the file, or the directory itself, such as `~/notes/**`. The panel
-shows the pattern on its own line. Press `e` on the panel, `C-c C-p`,
-or click `[Edit]` to change it in the minibuffer, either more specific
+pattern covers everything in a directory. For a tool call that is the
+root of the repository the path lies in (the closest directory above it
+with `.git` or another version control directory), so that one answer
+opens the project or package the agent is finding its way around, such
+as `~/.emacs.d/**`, rather than one directory of it after another. When
+there is no repository, or its root is or holds your home directory or
+the session's own working directory, it is the directory that holds
+the file, or the directory itself, such as `~/notes/**`; for the
+agent's own request, the directory it asked for. The panel shows the
+pattern on its own line. Press `e` on the panel, `C-c C-p`, or click
+`[Edit]` to change it in the minibuffer, either more specific
 (`~/notes/*.org`, a subdirectory, one file) or less (`~/**`). `*`
 matches within a name and `**` across directories, and `M-n` offers
-patterns around the request's own. The answer grants or denies the
+patterns around the request's own, from the file itself up to the
+directory above the pattern's. The answer grants or denies the
 pattern: once (for the one call, or until the turn ends for the agent's
 own request), for the session, or always (as an entry of
 `harness-allowed-directories`, or a rule in `harness-perms-rules` for
@@ -461,6 +506,12 @@ the rule has changed since, edited in Settings say, `[Undo]` leaves it
 as it is, and the note says so under it; it says so too when the rule
 or the directory is gone already. An answer that recorded nothing new,
 the same rule being there already, offers no `[Undo]`.
+
+The tools that inspect your Emacs never ask. When `emacs_find_definition`
+shows a definition, the file it names may then be read without a grant
+for the rest of the session, by the tools that only read, so the agent
+can read the code around it: only that file, not its directory, and not
+for writing.
 
 A shell command is about what its command line names, not only the
 directory it runs in. The prompt for `ls -la ~/.claude/projects/x`,
@@ -500,12 +551,33 @@ and show one at a time. Switch between them with the tabs above the
 area, `n` and `p` on the panel, `C-c C-f` and `C-c C-b` anywhere in the
 buffer, or by moving point onto an option.
 
+An image is a file the agent made, usually an SVG it wrote or a cropped
+screenshot of a mockup, in its session's temporary directory. Images
+are drawn black on white, as a browser shows them, so a drawing made
+for a white page reads under a dark theme too
+(`harness-ui-image-colors`, also for the transcript's images; nil draws
+them in the colours of the text around them). Each is sized to show
+whole: at most `harness-ui-image-max-height` pixels high and half the
+window's height in a chat, so a short window such as a BTW still shows
+it with the options around it. An image larger than Emacs draws at all
+(`max-image-size`, ten times the frame), such as a whole page's
+screenshot, shows as a line saying so that opens it outside Emacs; the
+agent is told to crop one over 8000 pixels on a side. Only you see the
+images; the model gets your answer. Try one with the demo provider's
+`images` prompt. When the UI reaches the harness at a host and port,
+which may run on another machine, or the image is on a remote host, the
+UI asks the harness for the image (`question/image`) instead of reading
+the file itself.
+
 The same request can be read and answered without opening the session:
 `SPC` in the session list, or on the task board, pops out
 what the session at point waits on, in a small window with the same
 panel -- the permission prompt or the question in full, its options,
 diagrams and keys, and a box for a typed answer. It closes itself once
 the request is settled, and the session's own view stays where it was.
+The popout of a question with images grows taller than others, up to
+`harness-ui-pending-popout-max-height` of the frame, and fits the image
+in beside the options and the box.
 Both views also answer in place, with the same buttons from the same
 code: a blocked session's row in the session list and a task's card on
 the board carry `[Allow]` and `[Deny]`, or `[Answer…]`.
@@ -529,6 +601,15 @@ such as CLAUDE.md. It refuses only what risks serious harm that is
 hard to undo, such as wiping data outside the project, force pushes,
 system changes, leaking secrets, or widening its own permissions. It
 never rules on the task or your workflow, and when in doubt it allows.
+It also follows the `autoMode` rules that Claude Code's own auto mode
+follows, taken from the same places: your `~/.claude/settings.json`
+and your organization's managed settings, never a project's. So with
+the same settings it is no stricter than Claude Code. Pushing to the
+repositories, buckets and services your organization lists as trusted
+counts as ordinary work, and the organization's `soft_deny` and
+`hard_deny` rules hold as they do in Claude Code. No entry lifts the
+judge's own rules. Set `harness-perms-claude-auto-mode` to nil to
+leave them out.
 A call it would deny is put to you in an interactive session, with the
 judge's reason, so you can allow it; in a non-interactive session the
 denial stands and the agent is told to find another
@@ -541,6 +622,42 @@ session has its own switch.
 
 Opening an inactive session shows it without resuming it. Its compose
 box stays available, and the first message you send resumes it.
+
+### Moving a session to another directory
+
+A session works in the directory it was started in, and the session
+list files it under that directory's project. When a session started in
+one place turns out to work on another, move it there: `C-c h W`
+(`M-x harness-move-session`, also called `harness-session-move`) asks
+for the new directory, starting next to the session's own, and `m` does
+the same for the session at point in the session list and for the
+session of the directory access list (`C-c h d`). The session then
+works in the new directory and is listed under its project, also after
+a restart. It no longer reaches the old directory, unless you move it
+with a prefix argument (`C-u C-c h W`), which keeps the old directory
+allowed. The directories you granted it stay granted.
+
+The conversation goes on where it was, but the model's provider starts
+a new conversation in the new directory, which gets the transcript:
+the Claude Code CLI keeps its conversations per directory. A session in
+the middle of a turn moves when the turn ends, and moving it back to
+where it works cancels that. Some sessions cannot move:
+
+- a session working in a worktree, whose branch merges back through the
+  merge queue;
+- a task's session, which stays with its task: submit a task in the
+  other directory instead;
+- a session that branches are queued to merge into, until those merges
+  are through;
+- a session on a remote host, to another host.
+
+Agents can move a session too, their own or another one, with the
+`session_move` tool. You confirm every move, whatever the permission
+mode, yolo included: the request offers only `[Allow]` and `[Deny]`,
+and neither is remembered. An agent moving its own session may use the
+new directory for the rest of its turn, and the session moves when the
+turn ends. A non-interactive session cannot ask, so its agent says in
+its answer where it wanted to move.
 
 ### Forks and side conversations
 
@@ -572,6 +689,9 @@ extra controls appear at the front of its header line:
   asked is deleted.
 - `[keep]` (`C-c C-o`) keeps it as a normal session.
 
+The rest of its keys are the chat's: `C-c >`, for one, quotes its
+answer, or the part of it you select, in the box to follow up on it.
+
 So that quick questions get quick answers, a BTW starts at the `low`
 thinking level, whatever the session's level is. Set
 `harness-btw-thinking` to choose another level, or to nil to start
@@ -594,6 +714,16 @@ your checkout itself can be submitted to the **main tree** instead (the
   first: a task it already has is refused rather than written up (drop
   it, or write it up anyway), and the write-up names the tasks working
   on the same code, to coordinate with instead of redoing their work.
+- `harness-tasks-max-running` limits how many of a project's tasks work
+  at once (nil, the default, means no limit; the compose box notes it as
+  `N at a time`). Every project has that many slots of its own; a task
+  submitted while they are all taken waits in *Pending* and starts,
+  oldest first, when one frees up, or at once with `s`. Only top-level
+  sessions are limited: a task takes a slot while its own session works
+  on it, running or waiting for your answer mid-turn. The sessions
+  working for it -- its sub-agents and forks, and the sessions resolving
+  its merge conflicts -- never take one, and neither does a task in
+  *Merging*, so the merge queue never holds up the next task.
 - Each card is one line, with a subtitle that recaps the task: what it is
   doing or has done so far, written by a short model call and refreshed
   at the first of so many turns, seconds or tool calls since the last
@@ -639,9 +769,13 @@ your checkout itself can be submitted to the **main tree** instead (the
   its session with feedback. Any message you send to a task waiting
   for review sends it back the same way, with your message as the
   feedback, wherever you write it: in the task's session (no need to
-  press `[Send back]` first), with `m` on the board, from another
-  device, or from another session. The task goes back to work at once
-  and comes back for review when it is done.
+  press `[Send back]` first), with `m` on the board, or from another
+  device. The task goes back to work at once and comes back for review
+  when it is done. Only you review: a message another session's agent
+  sends the task (`session_send`, or `task_control`'s message) reaches
+  it as that session's, not as your feedback. The task deals with it
+  and waits for review again, its report standing unless it hands in a
+  new one; an agent sends work back only with `task_control` reject.
 - When the project is the harness itself, a card in *Ready for review*
   whose worktree is a checkout of the harness also offers
   `[Open harness]`: it opens an Emacs running that worktree's harness
@@ -673,7 +807,9 @@ your checkout itself can be submitted to the **main tree** instead (the
   in the box, `C-c C-c` sends it) and `[Review]`, which pops it out, so
   you can read the work and accept it without going back to the board.
   The two keys work only while the banner shows; otherwise `C-c C-v`
-  is nothing there, the box pasting with `C-y`.
+  is nothing there, the box pasting with `C-y`. `C-c >` on the summary
+  quotes it in the box, as it does a part of it you select, so the
+  feedback can answer it point by point.
 - `[Review]` on a card that has a report, or on the banner, pops the
   handed-in summary and evidence out beside the board: images large, as
   wide as the popout, videos as thumbnails, files as buttons, and each
@@ -683,11 +819,13 @@ your checkout itself can be submitted to the **main tree** instead (the
   While the task waits for review, the report ends with the same banner
   as its session: `[Verify]` (`C-c C-v`) and `[Send back]` (`C-c C-x`),
   and a box under it for the feedback (`C-c C-c` sends it), so you can
-  read the work and accept it in one place. Once the review is decided
-  -- the task verified, or sent back with feedback -- the report closes,
-  wherever that was done: from the board, from the session's banner or
-  from the report's own banner. The board's item-at-point key (`SPC`)
-  opens the report too, along with whatever else the task has to show.
+  read the work and accept it in one place; `C-c >` quotes the summary
+  in that box, or the part of the report you select. Once the review
+  is decided -- the task verified, or sent back with feedback -- the
+  report closes, wherever that was done: from the board, from the
+  session's banner or from the report's own banner. The board's
+  item-at-point key (`SPC`) opens the report too, along with whatever
+  else the task has to show.
 - `I` adds an ongoing session to the board as a task, and `b` opens a
   BTW conversation about the tasks.
 - `SPC` on a task that needs input pops out what it waits on -- the
@@ -760,6 +898,44 @@ anything else the harness shows while the layout lasts.
 - `fullscreen` is a position too, so `C-u C-c h a` and then `fullscreen`
   opens the board in the layout.
 
+### Remote hosts
+
+Agents work on other machines through TRAMP, as you do in Emacs:
+
+- A session started in a TRAMP directory works on that host: press
+  `C-c h n` and choose a directory such as `/ssh:box:/srv/app/`. Every
+  tool of the session runs there.
+- Any session reaches a host with the `ssh` tool, which runs a shell
+  command there. The host is an alias from `~/.ssh/config`,
+  `user@host:port`, or a TRAMP prefix such as `/ssh:user@host#2222:`
+  (`/ssh:jump|ssh:host:` through a jump host). The other tools take
+  TRAMP paths as well: `read_file`, `write_file`, `edit_file`,
+  `list_dir`, `glob`, `grep` and `file_info` work on
+  `/ssh:box:/etc/hosts` as on a local file, and `bash` runs on the host
+  given a directory there.
+
+The harness connects without a terminal, so nothing can answer a
+password, passphrase or host key prompt: the host must accept a key
+from ssh-agent (or one without a passphrase) and be in
+`~/.ssh/known_hosts`. `ssh -o BatchMode=yes HOST true` in a terminal
+shows whether it is. When a connection fails, the agent is told why,
+in ssh's own words, and how the host is set up.
+
+A host is a directory outside the session's like any other. The first
+call that reaches it asks for access: to `/ssh:box:/srv/app/` when the
+call runs there, to the host's root `/ssh:box:/` when it runs in the
+home directory. Granting the root lets the session work anywhere on the
+host, with every tool. A non-interactive session, such as a task's,
+needs the host in `harness-allowed-directories` beforehand. An `ssh`
+call is a command, so the permission mode decides it as it decides a
+`bash` command. Commands on another host run outside the sandbox, which
+confines this machine.
+
+The harness process reaches hosts through a TRAMP of its own, and the
+TRAMP settings you made, such as `tramp-default-method`,
+`tramp-remote-path` and `tramp-default-proxies-alist`, are copied into
+it.
+
 ### Notifications
 
 The harness tells you when a task's work waits for your review and
@@ -767,8 +943,8 @@ when a task is done, so you can leave it working:
 
 - A desktop notification, shown by your Emacs. Clicking it opens the
   task board on that task. It uses `notify-send` on GNU/Linux (or
-  Emacs's D-Bus support) and `osascript` on macOS; set
-  `harness-notifications-desktop-backend` to choose.
+  Emacs's D-Bus support) and `terminal-notifier` on macOS (see below);
+  set `harness-notifications-desktop-backend` to choose.
 - A push through [Gotify](https://gotify.net), for your phone, once it
   is set up. Create an application in Gotify and give the harness its
   address and token:
@@ -793,6 +969,34 @@ test notification and says what each provider did with it.
 - Agents can notify you with the `notify` tool, for example when long
   work you asked for has finished. Clicking such a notification opens
   the session.
+
+On macOS, a click opens what the notification is about when two things
+are in place:
+
+- [terminal-notifier](https://github.com/julienXX/terminal-notifier):
+  `brew install terminal-notifier`. The first notification asks whether
+  terminal-notifier may show notifications; allow it (System Settings >
+  Notifications > terminal-notifier).
+- The Emacs server, which the click reaches through `emacsclient`:
+  `(server-start)` in your init file, or `M-x server-start`. Doom Emacs
+  starts it already.
+
+A click then brings Emacs to the front and opens the session, or the
+task board on the task. A notification clicked after Emacs restarted,
+from the Notification Center, lists the sessions waiting for you, as
+clicking the mode line's notifier does. Without the server a click only
+brings Emacs to the front; Emacs says so once, in the echo area and in
+the log (`M-x harness-show-log`).
+
+Without terminal-notifier, a graphical Emacs shows the notification as
+its own, through AppleScript: a click brings Emacs to the front, but
+cannot tell which notification it was. Only a terminal Emacs falls back
+to `osascript`, whose notifications macOS gives to Script Editor, so a
+click opens Script Editor. A click brings forward the Emacs
+application, or for Emacs in a terminal, the terminal. Set
+`harness-notifications-desktop-macos-app` to a bundle id
+(`"org.gnu.Emacs"`, `"com.googlecode.iterm2"`) when that finds the
+wrong one.
 
 ### Insights
 
@@ -1211,6 +1415,8 @@ It turns off:
 - Network tools other than web search. Sessions do not get
   `web_fetch`, which reaches any URL. When a model calls it anyway, the
   call is denied and the model is told why.
+- The `ssh` tool, which runs commands on other machines. Sessions do
+  not get it, and a call to it is denied.
 
 It leaves alone:
 
@@ -1223,6 +1429,9 @@ It leaves alone:
   permission rules decide as usual: if your policy rules out web search
   too, add `(:tool "web_search" :behavior deny)` to
   `harness-perms-rules`.
+- Remote hosts through TRAMP. A session started in a TRAMP directory
+  works on its host, and a tool given a TRAMP path reaches another host
+  once you grant access to it (see [Remote hosts](#remote-hosts)).
 - Shell commands. They follow the permission mode and the sandbox, as
   always, so a command can still reach the network. Use a permission
   mode that asks before commands run (Ask or Accept edits), and set
@@ -1339,7 +1548,7 @@ ACP, so it works the same with a local or a remote harness.
 |---|---|
 | Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `handoff` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `acp` `acp-remote` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
-| Tools | `tools` `tools-fs` `tools-shell` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
+| Tools | `tools` `tools-fs` `tools-shell` `tools-ssh` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
 | User interface | `ui` `ui-chat` `ui-compose` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` |
 
 Further documentation:

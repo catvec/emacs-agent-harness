@@ -46,6 +46,13 @@ may reach the user's real `harness-state-directory'.")
 ;; turn it on against a server of their own.
 (setq harness-deepseek-list-models nil)
 
+(defvar harness-perms-claude-auto-mode)
+;; No auto-mode judge reads the user's real Claude Code settings, or
+;; the machine's managed ones, whose autoMode rules would go into its
+;; prompt.  Tests of those rules turn it on with settings files of
+;; their own.
+(setq harness-perms-claude-auto-mode nil)
+
 (defvar harness-tasks-store-in-repository)
 ;; Tasks stay in the throwaway state directory whatever directory a test
 ;; submits them in, so no test writes into a real repository's .git.

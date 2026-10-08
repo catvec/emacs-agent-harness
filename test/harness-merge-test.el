@@ -684,5 +684,28 @@ as it settles the resolver, though the child itself was not running."
       (accept-process-output nil 0.3)
       (should (equal "locked on a usb stick" (harness-merge-test--lock-line root wt))))))
 
+(ert-deftest harness-merge-keeps-its-sessions-from-moving ()
+  "A session that queued branches merge into, or that resolves a merge's
+conflicts, stays where the merge expects it, until the merge is through."
+  (harness-merge-test-with
+    (let ((elsewhere (harness-test-temp-dir))
+          (helper (plist-get (harness-call 'session/create :cwd root :model "demo:scripted" :name "helper") :id)))
+      ;; Hold the parent so the branch stays queued.
+      (puthash parent "someone" harness-merge--locks)
+      (harness-call 'merge/enqueue child parent)
+      (should (equal "Session main cannot move: the merge queue has a branch to merge into it (fixer); move it after that merge"
+                     (cadr (should-error (harness-call 'session/move parent elsewhere) :type 'harness-error))))
+      (harness-merge--set (harness-merge--entry child) :resolver helper)
+      (should (string-match-p "\\`Session helper cannot move: it takes part in a merge"
+                              (cadr (should-error (harness-call 'session/move-check helper elsewhere)
+                                                  :type 'harness-error))))
+      (should (equal root (plist-get (harness-call 'session/get parent) :cwd)))
+      (harness-call 'merge/cancel child)
+      (remhash parent harness-merge--locks)
+      (harness-call 'session/move parent elsewhere)
+      (harness-call 'session/move helper elsewhere)
+      (should (equal elsewhere (plist-get (harness-call 'session/get parent) :cwd)))
+      (should (equal elsewhere (plist-get (harness-call 'session/get helper) :cwd))))))
+
 (provide 'harness-merge-test)
 ;;; harness-merge-test.el ends here

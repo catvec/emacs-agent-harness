@@ -102,7 +102,8 @@ recognition; a larger one is scaled down to fit."
 (defvar-local harness-ui-popout--parent nil "KEY of the popout this one was opened from, or nil.")
 (defvar-local harness-ui-popout--max-height nil
   "Height this popout grows to at most, as a fraction of its frame's.
-Nil for `harness-ui-popout-max-height'.")
+Nil for `harness-ui-popout-max-height'; a function of no arguments
+returns either, asked each time.")
 (defvar-local harness-ui-popout--content-end nil "Marker: the end of the content, the start of the box.")
 (defvar-local harness-ui-popout--discard nil "Non-nil when closing drops what the box holds.")
 
@@ -152,7 +153,8 @@ box, other typing there goes into the box.
        ["Popout"
         (". q" "Close" harness-ui-popout-quit)
         (". g" "Draw again" harness-ui-popout-redraw)
-        ("C-c C-c" "Send the box" harness-ui-popout-submit)]))
+        ("C-c C-c" "Send the box" harness-ui-popout-submit)
+        ("C-c >" "Quote reply: region or message" harness-compose-quote-reply)]))
 
 (defun harness-ui-popout--header ()
   "Return the header line: the title, then a [close] button.
@@ -292,8 +294,11 @@ The box calls this when its attachments change."
 (defun harness-ui-popout--max-lines (frame)
   "Return how many lines this popout's window takes at most in FRAME.
 That is its :max-height of the frame, or `harness-ui-popout-max-height'."
-  (max harness-ui-popout-min-height
-       (floor (* (or harness-ui-popout--max-height harness-ui-popout-max-height) (frame-height frame)))))
+  (let ((fraction (if (functionp harness-ui-popout--max-height)
+                      (funcall harness-ui-popout--max-height)
+                    harness-ui-popout--max-height)))
+    (max harness-ui-popout-min-height
+         (floor (* (or fraction harness-ui-popout-max-height) (frame-height frame))))))
 
 (defun harness-ui-popout--fit (window)
   "Fit WINDOW, showing a popout, to its content within the height limits."
@@ -390,7 +395,10 @@ PROPS:
                     `harness-ui-popout-max-height': an item with large
                     images takes more.  RENDER sizes them with
                     `harness-ui-popout-pixel-width' and
-                    `harness-ui-popout-pixel-height'.
+                    `harness-ui-popout-pixel-height'.  A function of no
+                    arguments returning FRACTION, or nil, is asked on
+                    every draw: for an item that comes to show images
+                    after it opened.
   :parent KEY       the popout this one is opened from, such as the
                     report an image is shown larger from.  It shows in
                     that one's window, its header says [back], and
@@ -561,18 +569,21 @@ A remote file is never read, which would block: it can be opened."
   (let* ((local (not (file-remote-p file)))
          (readable (and local (file-readable-p file)))
          (graphic (display-images-p))
-         (natural (and readable graphic (harness-ui-popout--image-size file)))
+         ;; Measured from its header: loading it to measure it would fail.
+         (too-large (and readable graphic (harness-ui-image-too-large file)))
+         (natural (and readable graphic (not too-large) (harness-ui-popout--image-size file)))
          (image (and natural
                      (ignore-errors
                        ;; Scaled up by the most it may be, then down to
                        ;; the box, the max sizes being hard limits: it
                        ;; fills the box either way.  A column to spare:
                        ;; an image as wide as the window would wrap.
-                       (create-image file nil nil
-                                     :scale (* harness-ui-popout-image-max-scale
-                                               (image-compute-scaling-factor image-scaling-factor))
-                                     :max-width (max 1 (- (harness-ui-popout-pixel-width) (frame-char-width)))
-                                     :max-height (harness-ui-popout-pixel-height 2)))))
+                       (apply #'create-image file nil nil
+                              :scale (* harness-ui-popout-image-max-scale
+                                        (image-compute-scaling-factor image-scaling-factor))
+                              :max-width (max 1 (- (harness-ui-popout-pixel-width) (frame-char-width)))
+                              :max-height (harness-ui-popout-pixel-height 2)
+                              (harness-ui-image-color-props)))))
          (shown (and image (ignore-errors (image-size image t))))
          (bytes (and readable (harness-file-size file))))
     (cond
@@ -588,9 +599,13 @@ A remote file is never read, which would block: it can be opened."
      ((not readable)
       (insert (propertize (format "%s cannot be read.\n" (abbreviate-file-name file))
                           'face 'harness-tool-error-face)))
+     (too-large
+      (insert (propertize "This image is too large for Emacs to draw (`max-image-size'): open it to see it.\n"
+                          'face 'harness-dim-face)))
      (t (insert (propertize (if graphic "This image cannot be shown here: open it to see it.\n"
                               "Images do not show here: open it to see it.\n")
                             'face 'harness-dim-face))))
+    (setq natural (or natural too-large))
     (insert " " (propertize (file-name-nondirectory file) 'face 'bold)
             (propertize (concat (if natural (format "  %d×%d" (car natural) (cdr natural)) "")
                                 (if (and natural shown (/= (car shown) (car natural)))

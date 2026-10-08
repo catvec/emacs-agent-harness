@@ -54,6 +54,12 @@
 ;; prompt names it.  /tmp is shared, so only a directory that is the
 ;; user's own is ever handed out.
 ;;
+;; A session can move to another working directory, and with it to that
+;; directory's project (`session/move'): one started in the wrong place
+;; need not stay listed there.  Its provider conversation stays behind,
+;; and a session in the middle of a turn moves when the turn ends (see
+;; Methods: moving to another directory).
+;;
 ;; A session may instead cap its context window at a number of tokens
 ;; (`:context-window-limit' to `session/create' or `session/update'):
 ;; the window in effect is then the smaller of the model's and the
@@ -88,7 +94,8 @@
   (loaded nil)
   (runtime nil)
   ;; Slots added later go last, see `harness-session--upgrade-records'.
-  provider-node)                        ; the node its provider conversation reached
+  provider-node                         ; the node its provider conversation reached
+  move)                                 ; a move waiting for its turn to end, or nil
 
 (defvar harness-sessions (make-hash-table :test 'equal)
   "Session id -> `harness-session'.")
@@ -114,7 +121,7 @@ defaults."
   '(:id :name :kind :project :cwd :host :worktree :model :permission-mode :thinking
     :non-interactive :allowed-dirs :status :parent-id :fork-node :created :updated :usage
     :context-window :context-window-override :context-window-limit :budget :head :queue :pending
-    :todos :plan :provider-state :provider-node :cache))
+    :todos :plan :provider-state :provider-node :cache :move))
 
 (defconst harness-session--symbol-keys '(:kind :status :permission-mode)
   "Keys whose values are symbols in memory and strings on disk.")
@@ -156,7 +163,8 @@ cache (see `harness-session--cache')."
         :todos (harness-session-todos s) :plan (harness-session-plan s)
         :provider-state (harness-session-provider-state s)
         :provider-node (harness-session-provider-node s)
-        :cache (harness-session--cache s)))
+        :cache (harness-session--cache s)
+        :move (harness-session-move s)))
 
 (defun harness-session--intern-values (plist)
   "Turn string enum values in PLIST back into symbols."
@@ -199,7 +207,8 @@ cache (see `harness-session--cache')."
           (harness-session-todos s) (plist-get pl :todos)
           (harness-session-plan s) (plist-get pl :plan)
           (harness-session-provider-state s) (plist-get pl :provider-state)
-          (harness-session-provider-node s) (plist-get pl :provider-node))
+          (harness-session-provider-node s) (plist-get pl :provider-node)
+          (harness-session-move s) (harness-session--move-value (plist-get pl :move)))
     s))
 
 ;;;; Persistence
@@ -924,6 +933,251 @@ With only ID return the whole runtime plist."
           (t (setf (harness-session-runtime s) (plist-put (harness-session-runtime s) key value))
              value))))
 
+;;;; Methods: moving to another directory
+;;
+;; A session works in the directory it was started in, and belongs to
+;; that directory's project, until it moves: `session/move' gives it
+;; another working directory, and with it the project the session list
+;; files it under.  The provider conversation stays behind.  The Claude
+;; Code CLI keeps its conversations per directory and cannot resume one
+;; elsewhere, so the provider state goes, and the next turn starts a new
+;; conversation that gets the transcript as text
+;; (`harness-provider-history-text').
+;;
+;; A session in the middle of a turn moves when the turn ends: its
+;; provider process and the system prompt the model works from stay in
+;; the old directory until then, and the provider records its state as
+;; the turn goes on.  The move waits in the record (`:move'), so a
+;; harness that stops first makes it as it loads the session again.
+;;
+;; Some moves are refused:
+;;   - a session working in a worktree, whose branch belongs to the
+;;     merge queue;
+;;   - a directory on another host: the session's grants hold on its
+;;     host, and its temporary directory is this machine's;
+;;   - a directory that does not exist;
+;;   - whatever a module vetoes through the sync filter
+;;     `session/before-move'.  Its value is (:proceed t) and its
+;;     arguments the session plist and the new directory; a filter
+;;     that refuses returns (:proceed nil :reason WHY).  The tasks
+;;     module keeps a task's session in its task's directory this way,
+;;     and the merge queue keeps a session that branches are queued to
+;;     merge into.
+
+(defun harness-session--move-value (value)
+  "Return VALUE, a stored move, as `session/move' records one, or nil.
+A move is (:cwd DIR :project ROOT :keep-old-dir BOOL); anything without
+a directory is none."
+  (when (and (consp value) (stringp (plist-get value :cwd)))
+    (list :cwd (plist-get value :cwd)
+          :project (let ((p (plist-get value :project))) (and (stringp p) p))
+          :keep-old-dir (and (harness-json-true-p (plist-get value :keep-old-dir)) t))))
+
+(defun harness-session--label (s)
+  "Return the name of session S, or the start of its id when it has none."
+  (let ((name (harness-session-name s)) (id (format "%s" (harness-session-id s))))
+    (if (and (stringp name) (not (harness-string-blank-p name)))
+        name
+      (substring id 0 (min 8 (length id))))))
+
+(defun harness-session--full-cwd (s)
+  "Return the working directory of session S, a remote name on a remote host."
+  (let ((cwd (harness-session-cwd s))
+        (host (harness-session-host s)))
+    (if (and host (not (file-remote-p cwd))) (concat host cwd) cwd)))
+
+(defun harness-session--move-target (s dir)
+  "Return DIR, where session S is to move, as an absolute directory name.
+A relative DIR is relative to S's working directory, and a local name
+is one on S's host, as for its tools.  A remote session's DIR may not
+start with ~: only the host knows where that is."
+  (let* ((cwd (harness-session--full-cwd s))
+         (host (file-remote-p cwd))
+         (dir (string-trim dir)))
+    (file-name-as-directory
+     (cond ((file-remote-p dir) (expand-file-name dir))
+           ((null host) (expand-file-name dir cwd))
+           ((string-prefix-p "~" dir)
+            (signal 'harness-error (list (format "Give an absolute path on %s rather than %s" host dir))))
+           (t (concat host (expand-file-name dir (file-local-name cwd))))))))
+
+(defun harness-session--project-of (dir)
+  "Return the project root of DIR, as `session/create' finds it."
+  (if (harness-method-exists-p 'project/root) (harness-call 'project/root dir) dir))
+
+(defun harness-session--turn-running-p (id)
+  "Non-nil while session ID runs a turn."
+  (if (harness-method-exists-p 'agent/running)
+      (harness-call 'agent/running id)
+    (eq (harness-session-status (harness-session--get id)) 'running)))
+
+(defun harness-session--move-check (s dir)
+  "Return how session S moves to DIR, or signal why it cannot.
+The value is (:id ID :name NAME :cwd NEW :host HOST :project ROOT
+:old-cwd OLD :old-project OLD-ROOT :defer BOOL :cancel BOOL).  NEW is
+DIR as an absolute directory name on S's host, ROOT its project.
+DEFER says S runs a turn, so the move waits for the turn to end.
+CANCEL says NEW is where S works already: moving there only cancels the
+move S waits to make, and with none waiting it is refused."
+  (unless (and (stringp dir) (not (harness-string-blank-p dir)))
+    (signal 'harness-error (list "Give the directory to move the session to")))
+  (let ((label (harness-session--label s))
+        (old (harness-session--full-cwd s)))
+    (when (harness-session-worktree s)
+      (signal 'harness-error
+              (list (format "Session %s works in the worktree %s, whose branch merges back through the merge queue; it cannot move. Start or fork a session in the other directory instead"
+                            label (abbreviate-file-name (harness-session-worktree s))))))
+    (let* ((new (harness-session--move-target s dir))
+           (host (file-remote-p new)))
+      (unless (equal host (file-remote-p old))
+        (signal 'harness-error
+                (list (format "%s is on %s and session %s on %s: a session cannot move to another host"
+                              new (or host "this machine") label (or (file-remote-p old) "this machine")))))
+      (unless (or host (file-directory-p new))
+        (signal 'harness-error (list (format "%s is not a directory" (abbreviate-file-name new)))))
+      (let ((same (or (equal new (file-name-as-directory old))
+                      (and (not host) (file-equal-p new old)))))
+        (cond
+         ((and same (null (harness-session-move s)))
+          (signal 'harness-error (list (format "Session %s works in %s already" label (abbreviate-file-name old)))))
+         ((not same)
+          (let ((gate (harness-run-filter 'session/before-move (list :proceed t) (harness-session-plist s) new)))
+            (unless (plist-get gate :proceed)
+              (signal 'harness-error
+                      (list (format "Session %s cannot move: %s" label
+                                    (or (plist-get gate :reason) "a module refused it"))))))))
+        (list :id (harness-session-id s) :name (harness-session-name s)
+              :cwd new :host host
+              :project (if same (harness-session-project s) (harness-session--project-of new))
+              :old-cwd old :old-project (harness-session-project s)
+              :defer (and (not same) (harness-session--turn-running-p (harness-session-id s)) t)
+              :cancel (and same t))))))
+
+(defun harness-session--moved-grants (s old move)
+  "Return the grants of session S after MOVE away from OLD, its working directory.
+A grant written relative to the working directory keeps naming what it
+named, and with MOVE's `:keep-old-dir' OLD joins them, unless the new
+directory holds it already."
+  (let* ((local (file-local-name old))
+         (grants (mapcar (lambda (d) (if (and (stringp d) (not (file-name-absolute-p d)) (not (file-remote-p d)))
+                                         (expand-file-name d local)
+                                       d))
+                         (harness-session-allowed-dirs s)))
+         (new (plist-get move :cwd)))
+    (if (and (plist-get move :keep-old-dir)
+             (not (member old grants))
+             (not (string-prefix-p new (file-name-as-directory old))))
+        (append grants (list old))
+      grants)))
+
+(defun harness-session--apply-move (s move)
+  "Move session S as MOVE, a pending move, says, now.
+MOVE is (:cwd NEW :project ROOT :keep-old-dir BOOL): S works in NEW
+from now on, and belongs to the project at ROOT (by default NEW's).
+Its provider state goes, so the next turn starts a new conversation in
+NEW.  Emits `session/updated' and `session/moved'; the record is
+written at once."
+  (let* ((id (harness-session-id s))
+         (old (harness-session--full-cwd s))
+         (new (plist-get move :cwd))
+         (host (file-remote-p new))
+         (project (or (plist-get move :project) (harness-session--project-of new)))
+         (grants (harness-session--moved-grants s old move))
+         (kept (and (member old grants) (not (member old (harness-session-allowed-dirs s)))))
+         (conversation (harness-session-provider-state s)))
+    (setf (harness-session-move s) nil)
+    ;; The provider conversation stays in OLD: the Claude Code CLI can
+    ;; only resume a conversation in the directory it was held in.  A
+    ;; process that held it closes once it is idle; the next turn starts
+    ;; a new one in NEW, which gets the transcript.
+    (harness-call 'session/set-provider-state id nil)
+    (setf (harness-session-cwd s) new
+          (harness-session-host s) host
+          (harness-session-project s) project
+          (harness-session-allowed-dirs s) grants)
+    (harness-call 'session/hint id
+                  (concat (format "Moved to %s (was %s)" (abbreviate-file-name new) (abbreviate-file-name old))
+                          (if kept (format "; %s stays allowed" (abbreviate-file-name old)) "")
+                          (if conversation
+                              "; the next turn starts a new provider conversation there, which gets the transcript"
+                            "")))
+    (harness-emit 'session/updated id (list :cwd new :host host :project project :allowed-dirs grants))
+    (harness-emit 'session/moved id old new)
+    (harness-session--touch s)
+    (harness-session--save id)
+    (harness-session-plist s)))
+
+(defun harness-session--apply-pending-move (id &rest _)
+  "Make the move session ID waits to make, now that its turn ended.
+On `agent/turn-ended'.  A move that cannot be made any more (its
+directory went, a module refuses it now) is dropped, and a hint says
+why."
+  (when-let* ((s (gethash id harness-sessions))
+              (move (harness-session-move s)))
+    (condition-case err
+        (let ((check (harness-session--move-check s (plist-get move :cwd))))
+          (if (plist-get check :cancel)
+              (progn (setf (harness-session-move s) nil)
+                     (harness-session--touch s)
+                     (harness-session--save id))
+            (harness-session--apply-move s (append (list :cwd (plist-get check :cwd)) move))))
+      (error
+       (setf (harness-session-move s) nil)
+       (harness-call 'session/hint id (format "Not moved to %s: %s" (abbreviate-file-name (plist-get move :cwd))
+                                              ;; A refusal reads as its message alone.
+                                              (if (and (eq (car err) 'harness-error) (stringp (cadr err)) (null (cddr err)))
+                                                  (cadr err)
+                                                (harness-error-message err))))
+       (harness-session--touch s)
+       (harness-session--save id)))))
+
+(harness-defmethod session/move-check (id dir)
+  "Return how session ID would move to DIR, or signal why it cannot.
+Nothing changes: this is what a prompt asking the user about the move
+says.  See `harness-session--move-check' for the value."
+  (harness-session--move-check (harness-session--get id) dir))
+
+(harness-defmethod session/move (id dir &rest options)
+  "Move session ID to the working directory DIR, and to DIR's project.
+DIR is absolute, or relative to the session's working directory, and
+on the session's host.  OPTIONS: `:keep-old-dir' non-nil grants the
+old working directory to the session, so it may still reach it;
+`:project' names the root of the project to file the session under,
+by default the one `project/root' finds for DIR (a UI passes its own,
+as for `session/new').
+The session's provider conversation stays behind: its next turn starts
+a new one, which gets the transcript.  A session running a turn moves
+when the turn ends, and the plist returned has the move it waits to
+make in `:move'.  Moving a session to where it works cancels that.
+Signals when the session cannot move (another host, a worktree, a
+directory that is not one, a module's veto through the filter
+`session/before-move').  Returns the session plist."
+  (let* ((s (harness-session--get id))
+         (check (harness-session--move-check s dir))
+         (project (plist-get options :project))
+         (move (list :cwd (plist-get check :cwd)
+                     :project (if (and (stringp project) (not (harness-string-blank-p project)))
+                                  (file-name-as-directory (expand-file-name project))
+                                (plist-get check :project))
+                     :keep-old-dir (and (harness-json-true-p (plist-get options :keep-old-dir)) t))))
+    (cond
+     ((plist-get check :cancel)
+      (let ((pending (harness-session-move s)))
+        (setf (harness-session-move s) nil)
+        (harness-call 'session/hint id (format "Move to %s cancelled; the session stays in %s"
+                                               (abbreviate-file-name (plist-get pending :cwd))
+                                               (abbreviate-file-name (plist-get check :old-cwd))))
+        (harness-session--touch s)
+        (harness-session--save id)))
+     ((plist-get check :defer)
+      (setf (harness-session-move s) move)
+      (harness-call 'session/hint id (format "Moves to %s when this turn ends"
+                                             (abbreviate-file-name (plist-get move :cwd))))
+      (harness-session--touch s)
+      (harness-session--save id))
+     (t (harness-session--apply-move s move)))
+    (harness-session-plist s)))
+
 ;;;; Methods: forks, BTWs and trees
 
 (defconst harness-session-forked-output
@@ -1556,7 +1810,14 @@ Sessions saved mid-turn are settled with `harness-session--settle'."
       (condition-case err
           (harness-session--settle (car entry) (cdr entry))
         (error (harness-log 'warn "session %s: could not settle its interrupted turn: %S"
-                            (harness-session-id (car entry)) err))))))
+                            (harness-session-id (car entry)) err))))
+    ;; A move waiting for a turn that the stop ended.
+    (maphash (lambda (id s)
+               (when (harness-session-move s)
+                 (condition-case err
+                     (harness-session--apply-pending-move id)
+                   (error (harness-log 'warn "session %s: could not make its move: %S" id err)))))
+             harness-sessions)))
 
 (defconst harness-session--budget-copies-marker "session-budget-copies-dropped.json"
   "Store document written once the copies of the Budget setting are dropped.")
@@ -1598,11 +1859,14 @@ After that, a budget a session has was given to it, and stays."
   (harness-session--load-all)
   (harness-session--drop-budget-copies)
   (harness-on 'provider/models-updated #'harness-session--on-models-updated)
+  ;; A session that asked to move during a turn moves when it ends.
+  (harness-on 'agent/turn-ended #'harness-session--apply-pending-move)
   (add-hook 'kill-emacs-hook #'harness-session--on-kill-emacs))
 
 ;; A reload does not run `:init' again for a ready module, so the
-;; subscription is made here too.
+;; subscriptions are made here too.
 (harness-on 'provider/models-updated #'harness-session--on-models-updated)
+(harness-on 'agent/turn-ended #'harness-session--apply-pending-move)
 
 ;; The context-window slot of sessions loaded by an earlier version of
 ;; this file holds a copy of their model's window, or the stand-in for
@@ -1628,6 +1892,7 @@ After that, a budget a session has was given to it, and stays."
               (session/provider-state-changed . "(ID STATE) when the provider state is replaced by another")
               (session/node-added . "(ID NODE)") (session/node-updated . "(ID NODE TRANSIENT)")
               (session/head-moved . "(ID NODE-ID)")
+              (session/moved . "(ID OLD-CWD NEW-CWD) after the session moved to another working directory")
               (session/queue-changed . "(ID ITEMS)") (session/pending-changed . "(ID ITEMS)")
               (session/pending-resolved . "(ID ITEM ANSWER)")
               (session/usage . "(ID TOTALS RECORD)") (session/todos . "(ID TODOS)") (session/plan . "(ID TEXT)")))

@@ -75,6 +75,38 @@
       (harness-ui--notification-clicked '(:title "T"))
       (should (= 2 (length opened))))))
 
+(ert-deftest harness-ui-notifications-forgotten-click-lists-the-waiting ()
+  "A click on a notification this Emacs no longer knows lists the sessions waiting for you.
+macOS keeps notifications past a restart of the Emacs that showed them."
+  (let ((waiting 0) (listed 0)
+        (harness-notifications-desktop--actions nil)
+        (harness-notifications-desktop-unknown-click-function #'harness-ui--unknown-notification-clicked))
+    (cl-letf (((symbol-function 'harness-ui-notify-show-waiting) (lambda () (cl-incf waiting)))
+              ((symbol-function 'harness-sessions) (lambda () (interactive) (cl-incf listed))))
+      (harness-notifications-desktop-clicked "n-from-before-a-restart")
+      (harness-test-wait (lambda () (= waiting 1)) 2 "the waiting sessions")
+      ;; Without the mode line's notifier, the session list.
+      (cl-letf (((symbol-function 'harness-ui-notify-show-waiting) nil))
+        (harness-ui--unknown-notification-clicked))
+      (should (= 1 listed))
+      (should (= 1 waiting)))))
+
+(ert-deftest harness-ui-notifications-click-through-emacsclient ()
+  "A click a terminal-notifier notification hears through emacsclient opens what it is about."
+  (let ((clicked nil)
+        (harness-notifications-desktop--actions nil))
+    (cl-letf (((symbol-function 'harness-notifications-desktop-notify)
+               (lambda (&rest params)
+                 ;; As the terminal-notifier backend keeps it.
+                 (harness-notifications-desktop--remember-action "n1" (plist-get params :on-action))
+                 (harness-resolved '(:backend terminal-notifier))))
+              ((symbol-function 'harness-ui--notification-clicked) (lambda (params) (setq clicked params))))
+      (harness-ui--show-notification '(:title "Needs you: x" :session "s1" :project "/p/"))
+      ;; What emacsclient evaluates when the notification is clicked.
+      (should-not (harness-notifications-desktop-clicked "n1"))
+      (harness-test-wait (lambda () clicked) 2 "the click")
+      (should (equal "s1" (plist-get clicked :session))))))
+
 (ert-deftest harness-ui-notifications-summary ()
   (should (equal "system sent (notify-send, in the UI); gotify skipped (not set up); mail failed (refused)"
                  (harness-ui--notification-summary

@@ -24,12 +24,19 @@
 ;; `tools/authorize' gives without running anything.
 ;;
 ;; Corporate mode (`harness-corporate-mode') turns off the tools of kind
-;; net other than web search (`harness-tools--corporate-net-tools').
-;; No session gets them, and a call to one is refused before the
-;; permission chain, whatever the permission mode and the standing
-;; rules say (`harness-tools--corporate-refusal').  web_search stays,
-;; and so does a provider's own search in its place: that is a call of
-;; web_search too, which the permission chain decides as usual.
+;; net other than web search (`harness-tools--corporate-net-tools'),
+;; and ssh, which runs commands on other machines
+;; (`harness-tools--corporate-remote-tools').  No session gets them,
+;; and a call to one is refused before the permission chain, whatever
+;; the permission mode and the standing rules say
+;; (`harness-tools--corporate-refusal').  web_search stays, and so does
+;; a provider's own search in its place: that is a call of web_search
+;; too, which the permission chain decides as usual.
+;;
+;; Every tool reaches another host through TRAMP, given a path there or
+;; in a session on that host.  A call that fails because TRAMP could not
+;; connect says why and how to set the host up, whichever tool made it
+;; (`harness-tools-remote-failure').
 
 ;;; Code:
 
@@ -39,6 +46,12 @@
 (require 'harness-util)
 
 (defvar harness-state-directory)
+
+(declare-function tramp-dissect-file-name "tramp" (name &optional nodefault))
+(declare-function tramp-get-method-parameter "tramp" (vec param &optional default))
+(declare-function tramp-file-name-user "tramp" (vec))
+(declare-function tramp-file-name-host "tramp" (vec))
+(declare-function tramp-file-name-port "tramp" (vec))
 
 (defcustom harness-tools-max-output-chars 30000
   "Tool outputs longer than this are saved to a file and truncated."
@@ -306,6 +319,153 @@ unresponsive UI."
                 (delq nil (funcall (harness-tool-paths-fn tool) input)))
       (error (harness-log 'warn "tool %s: paths function failed: %S" (harness-tool-name tool) err) nil))))
 
+;;;; Remote hosts
+
+;; When TRAMP cannot connect to a host it says little more than that
+;; ("Tramp failed to connect.  If this happens repeatedly, try `M-x
+;; tramp-cleanup-this-connection'"), nothing a model can act on, and
+;; the harness has no terminal at which ssh could ask for a password.
+;; So a call that failed on a host TRAMP is not connected to is
+;; explained instead: ssh, asked once more in batch mode, says why, and
+;; the error says how to set the host up.
+
+(defconst harness-tools--remote-check-timeout 20
+  "Seconds the batch-mode ssh that explains a failed connection may take.")
+
+(defconst harness-tools-remote-setup-hint
+  "The harness connects without a terminal, so nothing can answer a password, key passphrase or host key prompt: the host must accept a key from ssh-agent (or one without a passphrase) and be in ~/.ssh/known_hosts. `ssh -o BatchMode=yes HOST true' in a terminal shows whether it is set up. That is for the user to set up; do not try to work around it."
+  "What the error about a failed ssh connection says about setting a host up.")
+
+(defun harness-tools--remote-busy-p (err)
+  "Non-nil when ERR is TRAMP refusing a call on a connection in use.
+TRAMP serves one call at a time on a connection, and the harness may
+make another one while it waits on the host for the first."
+  (and (string-search "Forbidden reentrant call of Tramp" (harness-error-message err)) t))
+
+(defun harness-tools--remote-reason (err)
+  "Return what went wrong for ERR, an error TRAMP signalled while connecting.
+Nil when TRAMP says no more than that it could not connect."
+  (let ((message (harness-error-message err)))
+    (cond
+     ;; TRAMP read the answer to a prompt from the harness's closed stdin.
+     ((eq (car-safe err) 'end-of-file)
+      "the login asked for a password, a passphrase or a host key confirmation, which the harness cannot answer")
+     ((string-match-p "Tramp failed to connect" message) nil)
+     ;; TRAMP's buffers are of no use to the model.
+     (t (replace-regexp-in-string ",? see buffer .*\\'" ""
+                                   (string-trim (car (split-string message "\n"))))))))
+
+(defun harness-tools--ssh-jump (vec)
+  "Return VEC, a dissected hop, as ssh's -J option writes a jump host."
+  (let ((host (tramp-file-name-host vec))
+        (user (tramp-file-name-user vec))
+        (port (tramp-file-name-port vec)))
+    (concat (if user (concat user "@") "")
+            (if (string-search ":" host) (concat "[" host "]") host)
+            (if port (concat ":" port) ""))))
+
+(defun harness-tools--ssh-batch-command (prefix)
+  "Return the ssh command that connects to PREFIX's host in batch mode, or nil.
+PREFIX is a TRAMP prefix, such as /ssh:box: or /ssh:jump|ssh:box:.  Nil
+when a hop does not log in with ssh (sudo, docker, TRAMP's mock method)."
+  (require 'tramp)
+  (let ((vecs (mapcar (lambda (hop) (tramp-dissect-file-name (concat "/" hop ":")))
+                      (split-string (substring prefix 1 -1) "|" t))))
+    (when (and vecs (cl-every (lambda (v) (equal (tramp-get-method-parameter v 'tramp-login-program) "ssh"))
+                              vecs))
+      (let* ((target (car (last vecs)))
+             (jumps (butlast vecs))
+             (user (tramp-file-name-user target))
+             (port (tramp-file-name-port target)))
+        (append (list "ssh" "-o" "BatchMode=yes" "-o" "ConnectTimeout=10")
+                (and jumps (list "-J" (mapconcat #'harness-tools--ssh-jump jumps ",")))
+                (and port (list "-p" port))
+                (and user (list "-l" user))
+                (list "--" (tramp-file-name-host target) "true"))))))
+
+(defun harness-tools--remote-diagnose (command)
+  "Return a promise of what COMMAND, ssh in batch mode, says, or nil.
+TRAMP only says that the connection failed; ssh in batch mode, which
+fails where it would ask, says why: no such host, a refused key, an
+unknown host key.  The promise resolves to nil when COMMAND is nil,
+when ssh does not run, or when nothing was learnt."
+  (if (not command)
+      (harness-resolved nil)
+    (harness-then
+     (condition-case err
+         (harness-run-command command :cwd temporary-file-directory
+                              :timeout harness-tools--remote-check-timeout :name "harness-ssh-check")
+       (error (harness-rejected err)))
+     (lambda (r)
+       (let ((exit (plist-get r :exit))
+             (said (string-trim (plist-get r :stderr))))
+         (cond
+          ((eql exit 0)
+           "nothing: it connects, so TRAMP could not set up its shell on the host (a login script that prints or prompts?)")
+          ((eq exit 'timeout) (format "nothing within %ss" harness-tools--remote-check-timeout))
+          ((string-empty-p said) (format "exit %s" exit))
+          (t (harness-truncate-end (string-join (last (split-string said "\n" t) 3) "\n") 600)))))
+     (lambda (_err) nil))))
+
+(defun harness-tools-remote-failure (prefix err)
+  "Return the tool error for a call that could not reach PREFIX's host.
+PREFIX is the host's TRAMP prefix, such as /ssh:box:, and ERR what
+TRAMP signalled.  The error says why, as far as TRAMP and ssh in batch
+mode can tell, and how to set up a host ssh logs in to; it comes as a
+promise, since ssh is asked.  A connection that another call was using
+did not fail: that error, at once, says to make the call again."
+  (if (harness-tools--remote-busy-p err)
+      (harness-tool-error (format "TRAMP was busy with another call on %s; make this call again." prefix)
+                          :meta (list :host prefix :busy t))
+    (harness-log 'info "tools: could not connect to %s: %s" prefix (harness-error-message err))
+    (let ((ssh (condition-case nil (harness-tools--ssh-batch-command prefix) (error nil))))
+      (harness-then
+       (harness-tools--remote-diagnose ssh)
+       (lambda (said)
+         (let ((reason (harness-tools--remote-reason err)))
+           (harness-tool-error
+            (concat (format "Could not connect to %s" prefix)
+                    (if reason (format " (%s)" reason) "")
+                    "."
+                    (if said (format "\nssh -o BatchMode=yes says: %s" said) "")
+                    (if ssh (concat "\n" harness-tools-remote-setup-hint) ""))
+            :meta (list :host prefix :connected nil))))))))
+
+(defun harness-tools--unreached-host (tool input ctx err)
+  "Return the TRAMP prefix of the host TOOL's call could not reach, or nil.
+ERR is what the call with INPUT under CTX signalled.  The host is that
+of the first of the call's paths on another host, else of the
+session's directory.  ERR must be a file error, or the end of input
+TRAMP met reading the answer to a prompt, while TRAMP has no
+connection to the host: on a host it is connected to, a file error is
+about a file there.  A connection that another call was using counts
+either way."
+  (when (and (symbolp (car-safe err))
+             (or (eq (car err) 'end-of-file)
+                 (memq 'file-error (get (car err) 'error-conditions))))
+    (when-let* ((path (cl-find-if (lambda (p) (and (stringp p) (file-remote-p p)))
+                                  (append (harness-tools--paths tool input ctx)
+                                          (list (plist-get ctx :cwd))))))
+      (and (or (harness-tools--remote-busy-p err)
+               (not (file-remote-p path nil t)))
+           (file-remote-p path)))))
+
+(defun harness-tools--failure (tool input ctx err)
+  "Return a promise of the result of TOOL's call with INPUT under CTX.
+The call failed with ERR, and the result says so; or, when TRAMP
+could not reach the host the call is about, why not
+\(`harness-tools-remote-failure')."
+  (let ((plain (harness-tool-error (format "Tool %s failed: %s" (harness-tool-name tool)
+                                           (harness-error-message err))))
+        (prefix (condition-case nil (harness-tools--unreached-host tool input ctx err) (error nil))))
+    (if (not prefix)
+        (harness-resolved plain)
+      (harness-then (condition-case e
+                        (harness-as-promise (harness-tools-remote-failure prefix err))
+                      (error (harness-rejected e)))
+                    nil
+                    (lambda (_) plain)))))
+
 ;;;; Corporate mode
 
 (defconst harness-tools--corporate-net-tools '("web_search")
@@ -315,6 +475,11 @@ runs it in the tool's place (see `tools/builtin'), and either is a call
 of web_search.  Every other tool of kind net, such as web_fetch, which
 reaches any URL, is off with `harness-corporate-mode' on.")
 
+(defconst harness-tools--corporate-remote-tools '("ssh")
+  "Tools of other kinds than net that corporate mode turns off too.
+ssh is of kind exec, since it runs commands, but it runs them on
+another machine, which carries data off this one as web_fetch does.")
+
 (defconst harness-tools-corporate-hint
   "Work with the project and the tools you have; do not try to reach the network another way, such as with curl in the shell. If the task cannot be done without this tool, finish what you can and say so in your answer."
   "What the model is told when corporate mode refuses a network tool.")
@@ -322,10 +487,12 @@ reaches any URL, is off with `harness-corporate-mode' on.")
 (defun harness-tools--corporate-off-p (name kind)
   "Non-nil when corporate mode turns off tool NAME, of KIND.
 With `harness-corporate-mode' on, that is every tool of kind net other
-than those of `harness-tools--corporate-net-tools'."
-  (and (eq kind 'net)
-       (harness-corporate-p)
-       (not (member name harness-tools--corporate-net-tools))))
+than those of `harness-tools--corporate-net-tools', and the tools of
+`harness-tools--corporate-remote-tools'."
+  (and (harness-corporate-p)
+       (or (and (eq kind 'net) (not (member name harness-tools--corporate-net-tools)))
+           (member name harness-tools--corporate-remote-tools))
+       t))
 
 (defun harness-tools--off-p (name)
   "Non-nil when tool NAME is off: corporate mode turns it off."
@@ -335,12 +502,15 @@ than those of `harness-tools--corporate-net-tools'."
 (defun harness-tools--corporate-refusal (name kind)
   "Return the decision refusing a call of tool NAME, of KIND, or nil.
 With `harness-corporate-mode' on, the tools of kind net other than web
-search are off (`harness-tools--corporate-off-p'): a call to one is
-refused without asking the `permission/decide' chain, so no permission
-mode, standing rule or answer lets it run.  A web search is not refused
-here: the chain decides it, as any other call."
+search and ssh are off (`harness-tools--corporate-off-p'): a call to
+one is refused without asking the `permission/decide' chain, so no
+permission mode, standing rule or answer lets it run.  A web search is
+not refused here: the chain decides it, as any other call."
   (when (harness-tools--corporate-off-p name kind)
-    (list :behavior 'deny :reason "corporate mode: network tools other than web search are off"
+    (list :behavior 'deny
+          :reason (if (member name harness-tools--corporate-remote-tools)
+                      "corporate mode: tools that reach other machines are off"
+                    "corporate mode: network tools other than web search are off")
           :hint harness-tools-corporate-hint)))
 
 (defun harness-tools--decide (request)
@@ -358,8 +528,8 @@ never reaches the `permission/decide' chain; any other call does."
 (defun harness-tools--names (session)
   "Return the names of the tools SESSION gets, after `agent/tools'.
 In corporate mode no session gets the tools of kind net other than web
-search (`harness-tools--off-p').  Without SESSION, every registered
-tool: a catalogue, offered to no model."
+search, nor ssh (`harness-tools--off-p').  Without SESSION, every
+registered tool: a catalogue, offered to no model."
   (let ((names (let (n) (maphash (lambda (k _) (push k n)) harness-tools) (sort n #'string<))))
     (if session
         (cl-remove-if #'harness-tools--off-p (harness-run-filter 'agent/tools names session))
@@ -390,8 +560,8 @@ filter `agent/builtin-tools' pick them."
   "Return tool specs available to SESSION-ID (or all), after `agent/tools'.
 The tools SESSION-ID's provider runs itself (see `tools/builtin') are
 left out, and in corporate mode (`harness-corporate-mode') the tools of
-kind net other than web search.  Without SESSION-ID, every registered
-tool is listed."
+kind net other than web search, and ssh.  Without SESSION-ID, every
+registered tool is listed."
   (let* ((session (and session-id (harness-tools--session session-id)))
          (names (harness-tools--names session))
          (builtin (harness-tools--builtin session names))
@@ -428,7 +598,8 @@ call goes through the `permission/decide' chain as `tools/execute'
 sends it, as a call of the harness tool NAME: that tool's kind and paths
 apply when it is registered, else CALL's `:kind', else exec.  In
 corporate mode a call of kind net is denied without asking the chain,
-unless it is a web search (`harness-tools--corporate-refusal').  Emits
+unless it is a web search, and so is one of ssh
+\(`harness-tools--corporate-refusal').  Emits
 `permission/decided'.  Return a promise of the DECISION, whose
 `:behavior' is allow or deny; a denial carries `:message', what the
 model is told."
@@ -462,7 +633,10 @@ model is told."
   (let ((tool (harness-tool-get name))) (and tool (harness-tool-spec tool))))
 
 (defun harness-tools--run-handler (tool input ctx)
-  "Run TOOL's handler; return a promise of a normalised result, with timeout."
+  "Run TOOL's handler with INPUT under CTX; return a promise of its result.
+The result is normalised, and an error once the tool's timeout has
+passed.  A handler that signals, or whose promise rejects, fails the
+call with a result that says why (`harness-tools--failure')."
   (harness-with-promise (resolve reject)
     (let* ((timeout (or (harness-tool-timeout tool) harness-tools--timeout))
            (timer nil)
@@ -471,7 +645,9 @@ model is told."
                      (unless settled
                        (setq settled t)
                        (when timer (cancel-timer timer))
-                       (funcall resolve (harness-tools--normalise-result value))))))
+                       (funcall resolve (harness-tools--normalise-result value)))))
+           (fail (lambda (err)
+                   (harness-then (harness-tools--failure tool input ctx err) finish))))
       (ignore reject)
       (setq timer (run-at-time timeout nil
                                (lambda ()
@@ -480,20 +656,15 @@ model is told."
       (condition-case err
           (let ((value (funcall (harness-tool-handler tool) input ctx)))
             (if (harness-promise-p value)
-                (harness-then value finish
-                              (lambda (e) (funcall finish (harness-tool-error
-                                                           (format "Tool %s failed: %s" (harness-tool-name tool)
-                                                                   (harness-error-message e))))))
+                (harness-then value finish fail)
               (funcall finish value)))
-        (error (funcall finish (harness-tool-error
-                                (format "Tool %s failed: %s" (harness-tool-name tool)
-                                        (harness-error-message err)))))))))
+        (error (funcall fail err))))))
 
 (harness-defmethod tools/execute (session-id call)
   "Execute CALL (:id :name :input) for SESSION-ID; return a promise of a RESULT.
 The `permission/decide' chain decides first; in corporate mode a call of
 a tool of kind net is denied without asking it, unless it is a web
-search (`harness-tools--corporate-refusal')."
+search, and so is a call of ssh (`harness-tools--corporate-refusal')."
   (let* ((name (plist-get call :name))
          (call-id (or (plist-get call :id) (harness-short-id)))
          (input (plist-get call :input))

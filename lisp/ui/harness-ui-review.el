@@ -30,9 +30,10 @@
 ;; Under the banner the compose box writes the feedback that sends the
 ;; task back: C-c C-c takes what the box holds to the task's session,
 ;; which works on it again and comes back for review.  The session's box
-;; needs nothing of its own: the harness takes any message to the
-;; session of a task in review for the feedback that sends it back,
-;; whoever wrote it (`harness-tasks--on-message').  The report's box
+;; needs nothing of its own: the harness takes any message the user
+;; sends the session of a task in review for the feedback that sends it
+;; back, wherever it was written (`harness-tasks--on-message'); another
+;; session's agent's message is no review and does not.  The report's box
 ;; sends it back itself (`harness-ui-review--send' through
 ;; `harness-ui-report-compose-functions').  Its keys,
 ;; C-c C-v to verify and C-c C-x to send back, are those of
@@ -146,7 +147,7 @@ its report popout, while it waits for review."
   "Send the work of the task this buffer shows back: say what should change.
 Point goes to the compose box, whose C-c C-c sends what you write there
 back to the task.  In a task's session or in its report popout, while
-it waits for review.  Any message sent to the session while its task
+it waits for review.  Any message you send the session while its task
 waits for review sends the task back with it as the feedback; this
 takes you to the box."
   (interactive)
@@ -166,8 +167,9 @@ takes you to the box."
   "Send the task this buffer shows back, TEXT and ATTACHMENTS its feedback.
 The report popout's box under the banner sends this way
 \(`harness-ui-report-compose-functions'); a session's box is the
-session's own, the harness taking any message to the task's session for
-the feedback that sends it back (`harness-tasks--on-message')."
+session's own, the harness taking any message the user sends the
+task's session for the feedback that sends it back
+\(`harness-tasks--on-message')."
   (let ((task (harness-ui-review--current-task)))
     (if (and (harness-string-blank-p text) (null attachments))
         (user-error "Sending the work back needs feedback: type what should change")
@@ -332,7 +334,7 @@ clipboard to the box).
 Read from `harness-ui-review-minor-mode-map': the banner shows the key
 that runs it."
   (if-let* ((key (where-is-internal command (list harness-ui-review-minor-mode-map) t)))
-      (concat "  " (propertize (key-description key) 'face 'harness-chat-key-face))
+      (concat "  " (harness-ui-kbd (key-description key)))
     ""))
 
 (defun harness-ui-review--shown (task)
@@ -366,8 +368,8 @@ The board's Ready for review has it: a panel's own background stays out."
 On `harness-chat-panel-functions': nil for a session that is no task's,
 one that is not in review, or before the task is known.  While it
 shows, the banner's keys are on (`harness-ui-review-minor-mode'); the
-box is the session's own, since the harness takes any message to the
-task's session for the feedback that sends it back
+box is the session's own, since the harness takes any message the user
+sends the task's session for the feedback that sends it back
 \(`harness-tasks--on-message')."
   (let* ((sid harness-ui-session-id)
          (task (harness-ui-review--task sid))

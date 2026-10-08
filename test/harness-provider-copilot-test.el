@@ -242,6 +242,12 @@ ON-EVENT, when given, is called with each event as well."
       (should (= 1 (length (car out))))
       (should (equal "" (cdr out))))))
 
+(ert-deftest harness-provider-copilot-image-goes-by-its-label ()
+  "An image with a label, which its token in the text names, is attached under it."
+  (harness-provider-copilot-test--setup)
+  (should (equal '(:type "blob" :data "QUJD" :mimeType "image/png" :displayName "image 2")
+                 (harness-provider-copilot--image-attachment '(:type "image" :data "QUJD" :label "image 2")))))
+
 (ert-deftest harness-provider-copilot-prompt-from-trailing-messages ()
   "Only what follows the last assistant message is sent; images become blobs."
   (harness-provider-copilot-test--setup)
