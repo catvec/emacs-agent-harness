@@ -482,6 +482,77 @@ names are case-sensitive."
         (insert-file-contents path))
       (buffer-string))))
 
+;;;; Image sizes
+
+(defun harness--image-header-size ()
+  "Return (WIDTH . HEIGHT) of the image whose bytes the buffer holds, or nil.
+The buffer is unibyte, the image's header at its start."
+  (cl-labels ((byte (pos) (char-after pos))
+              (u16le (pos) (+ (byte pos) (* 256 (byte (1+ pos)))))
+              (u16be (pos) (+ (* 256 (byte pos)) (byte (1+ pos))))
+              (u24le (pos) (+ (u16le pos) (* 65536 (byte (+ pos 2)))))
+              (u32le (pos) (+ (u16le pos) (* 65536 (u16le (+ pos 2)))))
+              (u32be (pos) (+ (* 65536 (u16be pos)) (u16be (+ pos 2))))
+              (at (pos string) (and (<= (+ pos (length string)) (point-max))
+                                    (string= string (buffer-substring pos (+ pos (length string)))))))
+    (let ((size
+           (cond
+            ((and (at 1 "\211PNG\r\n\032\n") (at 13 "IHDR"))
+             (cons (u32be 17) (u32be 21)))
+            ((or (at 1 "GIF87a") (at 1 "GIF89a"))
+             (cons (u16le 7) (u16le 9)))
+            ((and (at 1 "RIFF") (at 9 "WEBP"))
+             (cond ((and (at 13 "VP8 ") (at 24 "\235\001\052"))
+                    (cons (logand (u16le 27) #x3fff) (logand (u16le 29) #x3fff)))
+                   ((at 13 "VP8L")
+                    (let ((b0 (byte 22)) (b1 (byte 23)) (b2 (byte 24)) (b3 (byte 25)))
+                      (cons (1+ (logior (ash (logand b1 #x3f) 8) b0))
+                            (1+ (logior (ash (logand b3 #x0f) 10) (ash b2 2) (ash (logand b1 #xc0) -6))))))
+                   ((at 13 "VP8X") (cons (1+ (u24le 25)) (1+ (u24le 28))))))
+            ((at 1 "BM")
+             (if (= (u32le 15) 12)
+                 (cons (u16le 19) (u16le 21))
+               (let ((h (u32le 23)))
+                 ;; A height below zero, in two's complement, is a top-down image.
+                 (cons (u32le 19) (if (>= h #x80000000) (- #x100000000 h) h)))))
+            ((at 1 "\377\330")
+             ;; JPEG: the size is in the frame header, after the segments
+             ;; before it (EXIF, colour profiles...), each saying its length.
+             (let ((pos 3) found)
+               (while (and (not found) (< (+ pos 8) (point-max)) (= (byte pos) #xff))
+                 (let ((marker (byte (1+ pos))))
+                   (cond ((= marker #xff) (cl-incf pos))
+                         ((and (<= #xc0 marker #xcf) (not (memq marker '(#xc4 #xc8 #xcc))))
+                          (setq found (cons (u16be (+ pos 7)) (u16be (+ pos 5)))))
+                         ((or (memq marker '(#x01 #xd8)) (<= #xd0 marker #xd7)) (cl-incf pos 2))
+                         (t (cl-incf pos (+ 2 (u16be (+ pos 2))))))))
+               found)))))
+      (and size (> (car size) 0) (> (cdr size) 0) size))))
+
+(defun harness-image-pixel-size (file &optional bytes)
+  "Return (WIDTH . HEIGHT) of the image FILE, in its own pixels, or nil.
+It is read from the file's header, without decoding the image, so it
+costs the same for any size.  BYTES, the image's bytes as a unibyte
+string, are read instead of FILE when given.  PNG, GIF, JPEG, WebP and
+BMP are known; nil for other formats (an SVG has no size of its own),
+and when the file cannot be read."
+  (condition-case nil
+      (with-temp-buffer
+        (set-buffer-multibyte nil)
+        (if bytes
+            (insert bytes)
+          (insert-file-contents-literally file nil 0 65536))
+        (or (harness--image-header-size)
+            ;; Other headers fit in the first few dozen bytes, but the
+            ;; segments before a JPEG's size (EXIF, colour profiles) may
+            ;; be longer.
+            (and (not bytes) (= (buffer-size) 65536)
+                 (equal (buffer-substring 1 3) "\377\330")
+                 (progn (erase-buffer)
+                        (insert-file-contents-literally file nil 0 (* 4 1024 1024))
+                        (harness--image-header-size)))))
+    (error nil)))
+
 ;;;; Strings
 
 (defun harness-fuzzy-score (query candidate)

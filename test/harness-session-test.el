@@ -591,14 +591,17 @@ its transcript; one made at its parent's head goes on."
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :name "old") :id))
            (s (gethash id harness-sessions))
-           (old (apply #'record (cl-loop for i below (1- (length s)) collect (aref s i)))))
+           ;; Made before the last two slots, provider-node and move.
+           (old (apply #'record (cl-loop for i below (- (length s) 2) collect (aref s i)))))
       (puthash id old harness-sessions)
       (should-error (harness-session-provider-node old))
+      (should-error (harness-session-move old))
       (harness-session--upgrade-records)
       (let ((new (gethash id harness-sessions)))
         (should (= (length s) (length new)))
         (should (equal "old" (harness-session-name new)))
         (should-not (harness-session-provider-node new))
+        (should-not (harness-session-move new))
         (should (equal "old" (plist-get (harness-call 'session/get id) :name)))))))
 
 (defun harness-session-test-kinds (id)
@@ -1491,6 +1494,191 @@ level given to it wins, and other kinds of session are left alone."
         (should (equal "high" (level :kind 'fork :model "test-think:thinker")))
         (let ((harness-btw-thinking nil))
           (should (equal "high" (level :kind 'btw :model "test-think:thinker"))))))))
+
+;;;; Moving to another directory
+
+(defun harness-session-test-repo ()
+  "Make a git repository with a directory sub/ in it; return its root."
+  (let ((root (harness-test-temp-dir)))
+    (with-temp-buffer
+      (let ((default-directory root))
+        (unless (zerop (call-process "git" nil t nil "init" "-q"))
+          (error "git init failed: %s" (buffer-string)))))
+    (make-directory (expand-file-name "sub" root))
+    root))
+
+(defun harness-session-test-hints (id)
+  "Return the hint texts of session ID, oldest first."
+  (delq nil (mapcar (lambda (n) (and (eq (plist-get n :kind) 'hint) (plist-get n :content)))
+                    (harness-call 'session/nodes id))))
+
+(ert-deftest harness-session-move-changes-directory-project-and-grants ()
+  "A move gives the session another working directory and the project
+of that directory, keeps what its grants named, drops its provider
+conversation, says so and is written at once."
+  (harness-session-test-with
+    (let* ((old (harness-test-temp-dir))
+           (repo (harness-session-test-repo))
+           (new (file-name-as-directory (expand-file-name "sub" repo)))
+           (extra (harness-test-temp-dir))
+           (id (plist-get (harness-call 'session/create :cwd old :name "wanderer") :id))
+           (moved nil) (states nil))
+      (harness-call 'session/update id :allowed-dirs (list "lib/" extra) :silent t)
+      (harness-call 'session/set-provider-state id '(:cli-session-id "abc"))
+      (harness-on 'session/moved (lambda (&rest args) (push args moved)))
+      (harness-on 'session/provider-state-changed (lambda (_ state) (push state states)))
+      ;; What would happen, without changing anything.
+      (let ((check (harness-call 'session/move-check id new)))
+        (should (equal new (plist-get check :cwd)))
+        (should (equal repo (plist-get check :project)))
+        (should (equal old (plist-get check :old-cwd)))
+        (should-not (plist-get check :defer))
+        (should (equal old (plist-get (harness-call 'session/get id) :cwd))))
+      (let ((s (harness-call 'session/move id new)))
+        (should (equal new (plist-get s :cwd)))
+        (should (equal repo (plist-get s :project)))
+        (should-not (plist-get s :move))
+        ;; A grant relative to the old directory still names what it named;
+        ;; the old directory itself is not kept.
+        (should (equal (list (expand-file-name "lib/" old) extra) (plist-get s :allowed-dirs)))
+        (should-not (plist-get s :provider-state)))
+      (should (equal (list (list id old new)) moved))
+      (should (equal '(nil) states))
+      (should (equal "Moved to %s (was %s); the next turn starts a new provider conversation there, which gets the transcript"
+                     (replace-regexp-in-string
+                      (regexp-quote (abbreviate-file-name old)) "%s"
+                      (replace-regexp-in-string (regexp-quote (abbreviate-file-name new)) "%s"
+                                                (car (last (harness-session-test-hints id)))))))
+      ;; The session list files it under its new project.
+      (should (= 1 (length (harness-call 'session/list (list :project repo)))))
+      ;; Written at once: a restart finds it moved.
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (let ((s (harness-call 'session/get id)))
+        (should (equal new (plist-get s :cwd)))
+        (should (equal repo (plist-get s :project)))
+        (should (equal (list (expand-file-name "lib/" old) extra) (plist-get s :allowed-dirs)))))))
+
+(ert-deftest harness-session-move-relative-keeping-the-old-directory ()
+  "A relative directory is relative to the working directory.  With
+`:keep-old-dir' the old directory stays allowed, unless the new one
+holds it; `:project' files the session under another root."
+  (harness-session-test-with
+    (let* ((base (harness-test-temp-dir))
+           (a (file-name-as-directory (expand-file-name "a" base)))
+           (b (file-name-as-directory (expand-file-name "b" base)))
+           (id (progn (make-directory a) (make-directory b)
+                      (plist-get (harness-call 'session/create :cwd a) :id))))
+      (let ((s (harness-call 'session/move id "../b" :keep-old-dir t :project base)))
+        (should (equal b (plist-get s :cwd)))
+        (should (equal base (plist-get s :project)))
+        (should (equal (list a) (plist-get s :allowed-dirs)))
+        (should (string-match-p "stays allowed" (car (last (harness-session-test-hints id))))))
+      ;; Into the directory that holds it: nothing to keep.
+      (let ((s (harness-call 'session/move id base :keep-old-dir t)))
+        (should (equal base (plist-get s :cwd)))
+        (should (equal (list a) (plist-get s :allowed-dirs))))
+      ;; Without a conversation, the hint says nothing about one.
+      (should-not (string-match-p "conversation" (car (last (harness-session-test-hints id))))))))
+
+(ert-deftest harness-session-move-refusals ()
+  "A move is refused for a session in a worktree, to a directory that is
+not one, on another host or where the session is, and when a module
+vetoes it through `session/before-move'."
+  (harness-session-test-with
+    (cl-letf* ((real-root (symbol-function 'harness-files-project-root))
+               ;; Never open a connection to the made-up host.
+               ((symbol-function 'harness-files-project-root)
+                (lambda (dir) (if (file-remote-p dir) (file-name-as-directory dir) (funcall real-root dir)))))
+      (let* ((cwd (harness-test-temp-dir))
+             (other (harness-test-temp-dir))
+             (id (plist-get (harness-call 'session/create :cwd cwd :name "stay") :id))
+             (wt (plist-get (harness-call 'session/create :cwd other :worktree other :name "wt") :id))
+             (remote "far"))
+        (puthash remote (make-harness-session :id remote :name "far" :kind 'main :cwd "/ssh:box:/srv/app/"
+                                              :host "/ssh:box:" :project "/ssh:box:/srv/app/")
+                 harness-sessions)
+        (cl-flet ((refused (regexp sid dir)
+                    (let ((err (should-error (harness-call 'session/move sid dir) :type 'harness-error)))
+                      (should (string-match-p regexp (harness-error-message err))))))
+          (refused "worktree" wt cwd)
+          (refused "not a directory" id (expand-file-name "missing" cwd))
+          (refused "another host" id "/ssh:box:/srv/")
+          (refused "another host" remote "/ssh:elsewhere:/srv/")
+          (refused "absolute path on /ssh:box:" remote "~/elsewhere")
+          (refused "works in .* already" id cwd)
+          (refused "works in .* already" remote "/srv/app")
+          (refused "Give the directory" id "  ")
+          (harness-add-filter 'session/before-move
+                              (lambda (gate session dir)
+                                (if (equal dir other)
+                                    (list :proceed nil :reason (format "%s is busy" (plist-get session :name)))
+                                  gate)))
+          (refused "Session stay cannot move: stay is busy" id other))
+        ;; Nothing changed.
+        (should (equal cwd (plist-get (harness-call 'session/get id) :cwd)))
+        ;; A remote session moves on its host: a local name is a path there.
+        (let ((s (harness-call 'session/move remote "../other")))
+          (should (equal "/ssh:box:/srv/other/" (plist-get s :cwd)))
+          (should (equal "/ssh:box:" (plist-get s :host)))
+          (should (equal "/ssh:box:/srv/other/" (plist-get s :project))))))))
+
+(ert-deftest harness-session-move-waits-for-the-turn ()
+  "A session running a turn moves when the turn ends.  Until then the
+move waits in its record, and moving it back to where it works cancels
+it.  A move that cannot be made any more when the turn ends is dropped,
+and a hint says why."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (new (harness-test-temp-dir))
+           (id (plist-get (harness-call 'session/create :cwd cwd) :id)))
+      (harness-call 'session/set-status id 'running)
+      (let ((s (harness-call 'session/move id new :keep-old-dir t)))
+        (should (equal cwd (plist-get s :cwd)))
+        (should (equal new (plist-get (plist-get s :move) :cwd)))
+        (should (plist-get (plist-get s :move) :keep-old-dir)))
+      (should (string-match-p "when this turn ends" (car (last (harness-session-test-hints id)))))
+      ;; Back where it works: the move is cancelled.
+      (should-not (plist-get (harness-call 'session/move id cwd) :move))
+      (harness-emit 'agent/turn-ended id 'end-turn)
+      (should (equal cwd (plist-get (harness-call 'session/get id) :cwd)))
+      ;; Again, and this time the turn ends.
+      (harness-call 'session/move id new :keep-old-dir t)
+      (harness-call 'session/set-status id 'idle)
+      (harness-emit 'agent/turn-ended id 'end-turn)
+      (let ((s (harness-call 'session/get id)))
+        (should (equal new (plist-get s :cwd)))
+        (should-not (plist-get s :move))
+        (should (equal (list cwd) (plist-get s :allowed-dirs))))
+      ;; A directory gone by the end of the turn: no move.
+      (let ((gone (harness-test-temp-dir)))
+        (harness-call 'session/set-status id 'running)
+        (harness-call 'session/move id gone)
+        (delete-directory gone)
+        (harness-call 'session/set-status id 'idle)
+        (harness-emit 'agent/turn-ended id 'end-turn)
+        (let ((s (harness-call 'session/get id)))
+          (should (equal new (plist-get s :cwd)))
+          (should-not (plist-get s :move)))
+        ;; Said plainly, not as Emacs prints the error.
+        (should (string-match-p "\\`Not moved to [^:]*: [^\"]* is not a directory\\'"
+                                (car (last (harness-session-test-hints id)))))))))
+
+(ert-deftest harness-session-move-made-after-a-restart ()
+  "A move waiting for a turn that a stop of the harness ended is made
+as the session loads again."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (new (harness-test-temp-dir))
+           (id (plist-get (harness-call 'session/create :cwd cwd) :id)))
+      (harness-call 'session/set-status id 'running)
+      (harness-call 'session/move id new)
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (let ((s (harness-call 'session/get id)))
+        (should (equal new (plist-get s :cwd)))
+        (should-not (plist-get s :move))))))
 
 (ert-deftest harness-session-delete-and-events ()
   (harness-session-test-with

@@ -713,6 +713,42 @@ and \"two\", `one' and `two'."
     (should (eq 'identity (cadr offered)))
     (should (equal "accept-edits" (plist-get sent :modeId)))))
 
+(ert-deftest harness-ui-models-redraw-only-when-new ()
+  "A model catalogue redraws every view only when it is new.
+The harness says the catalogue was updated each time a provider
+settles, mostly with nothing new, and each redraw fetched and rendered
+every chat buffer again.  It is new when it changed, or when it is the
+first over a connection (another harness may know other models)."
+  (let ((harness-ui--models (make-hash-table :test 'equal))
+        (harness-ui--models-seen nil)
+        (harness-ui-connection 'first)
+        (catalogue '((:id "demo:a") (:id "demo:b")))
+        (redrawn 0) (got nil)
+        (harness-ui-redraw-hook nil))
+    (add-hook 'harness-ui-redraw-hook (lambda () (cl-incf redrawn)))
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (method _params callback &rest _)
+                 (should (equal "_harness/provider/models" method))
+                 (funcall callback (copy-tree catalogue)))))
+      (harness-ui-refresh-models)
+      (should (= 1 redrawn))
+      (should (gethash "demo:b" harness-ui--models))
+      ;; The same again: nothing to redraw, the callback still called.
+      (harness-ui-refresh-models (lambda (models) (setq got models)))
+      (should (= 1 redrawn))
+      (should (equal catalogue got))
+      ;; Changed.
+      (setq catalogue '((:id "demo:a")))
+      (harness-ui-refresh-models)
+      (should (= 2 redrawn))
+      (should-not (gethash "demo:b" harness-ui--models))
+      ;; The same models, over another connection.
+      (setq harness-ui-connection 'second)
+      (harness-ui-refresh-models)
+      (should (= 3 redrawn))
+      (harness-ui-refresh-models)
+      (should (= 3 redrawn)))))
+
 (ert-deftest harness-ui-model-window-says-when-it-is-estimated ()
   "The model picker marks a window the catalogue estimated with a tilde."
   (should (equal "1.00M" (harness-ui-format-model-window '(:context-window 1000000))))
@@ -787,6 +823,52 @@ nothing about it and asks for nothing."
         (should (string-match-p " i Non-interactive: on" (harness-ui-test-menu "i")))
         (should (equal '((:non-interactive nil)) set))))
     (should-not sent)))
+
+(ert-deftest harness-ui-move-session-asks-the-harness ()
+  "C-c h W moves a session.  The harness gets the directory, absolute,
+and the project the UI sees there; a prefix argument keeps the old
+directory.  A remote session's directory goes as typed, a path on its
+host, and no TRAMP connection is opened for it."
+  (should (eq 'harness-move-session (lookup-key harness-ui-map (kbd "W"))))
+  (should (eq 'harness-move-session (lookup-key harness-global-mode-map (kbd "C-c h W"))))
+  (should (eq 'harness-move-session (symbol-function 'harness-session-move)))
+  (let* ((harness-ui--sessions (make-hash-table :test 'equal))
+         (harness-ui-sessions-changed-hook nil)
+         (base (file-name-as-directory (file-truename (harness-test-temp-dir))))
+         (repo (file-name-as-directory (expand-file-name "repo" base)))
+         (sub (file-name-as-directory (expand-file-name "sub" repo)))
+         (sent nil) (answer nil) (said nil))
+    (unwind-protect
+        (progn
+          (make-directory sub t)
+          (let ((default-directory repo)) (should (zerop (call-process "git" nil nil nil "init" "-q"))))
+          (harness-ui-cache-session (list :id "s-here" :name "Here" :cwd base :project base))
+          (harness-ui-cache-session (list :id "s-far" :name "Far" :cwd "/srv/app/" :host "/ssh:box:"))
+          (cl-letf (((symbol-function 'harness-ui-call)
+                     (lambda (method params callback &optional _on-error)
+                       (push (cons method params) sent)
+                       (funcall callback answer)))
+                    ((symbol-function 'message)
+                     (lambda (format &rest args) (push (apply #'format-message format args) said))))
+            ;; Moved at once: the cache has the session where it is now.
+            (setq answer (list :id "s-here" :name "Here" :cwd sub :project repo))
+            (harness-move-session (concat repo "sub") "s-here")
+            (should (equal (cons "_harness/session/move" (list :id "s-here" :dir sub :keep-old-dir :false :project repo))
+                           (pop sent)))
+            (should (equal sub (plist-get (harness-ui-session "s-here") :cwd)))
+            (should (string-match-p "\\`Moved .*Here to .*/repo/sub/\\'" (pop said)))
+            ;; Running a turn: it moves when the turn ends.
+            (setq answer (list :id "s-here" :name "Here" :cwd sub :project repo :move (list :cwd base)))
+            (harness-move-session base "s-here" t)
+            (should (eq t (plist-get (cdr (pop sent)) :keep-old-dir)))
+            (should (string-match-p "Here moves to .* when its turn ends\\'" (pop said)))
+            ;; A remote session's directory is for its host to resolve.
+            (setq answer (list :id "s-far" :name "Far" :cwd "/srv/other/" :host "/ssh:box:"))
+            (harness-move-session "../other" "s-far")
+            (should (equal (cons "_harness/session/move" (list :id "s-far" :dir "../other" :keep-old-dir :false))
+                           (pop sent)))
+            (should (string-match-p "Moved .*Far to /srv/other/\\'" (pop said)))))
+      (delete-directory base t))))
 
 (ert-deftest harness-ui-tool-outcome-tells-denied-from-failed ()
   "A refused call is `denied' whatever else its result says; one that
