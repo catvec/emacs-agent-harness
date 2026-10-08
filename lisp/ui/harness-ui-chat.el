@@ -476,9 +476,7 @@ here.  Nil when ATT is not media, or the media module is not loaded."
   "Return a string displaying SOURCE (a path or a (:data BASE64) plist).
 MIME is a hint for the image type.  Without image support, and for a
 path on a remote host, which reading here would block on, a button
-opening the file is returned instead.  A tall image is drawn a line at
-a time, so the transcript scrolls past it like text
-\(`harness-ui-image-lines'); clicking any of it opens it."
+opening the file is returned instead."
   (let* ((path (and (stringp source) source))
          (data (and (consp source) (plist-get source :data)))
          (label (if path (format "[image %s]" (abbreviate-file-name path)) "[image]"))
@@ -495,10 +493,10 @@ a time, so the transcript scrolls past it like text
                                          :max-width width :max-height harness-chat--image-max-height))
                        (error nil))))))
     (cond
-     (img (harness-ui-image-lines img label
-                                  (list 'pointer 'hand
-                                        'help-echo (format "mouse-1 or RET: open %s" (or path mime "the image"))
-                                        'keymap (and open (harness-chat--mouse-map open)))))
+     (img (concat (propertize label 'display img 'pointer 'hand
+                              'help-echo (format "mouse-1 or RET: open %s" (or path mime "the image"))
+                              'keymap (and open (harness-chat--mouse-map open)))
+                  "\n"))
      (open (concat (harness-chat--button label open :help (format "Open %s" path)) "\n"))
      (t (concat (propertize label 'face 'harness-dim-face) "\n")))))
 
@@ -823,25 +821,6 @@ and in the message that attached it."
                   (when-let* ((block (gethash node harness-chat--blocks)))
                     (harness-chat--rerender block)))))))))
     handled))
-
-(defun harness-chat--recut-images ()
-  "Redraw what shows an image cut for another text size.
-A tall image is cut into strips a line high (`harness-ui-image-lines'):
-once the text is scaled, the blocks showing one, and the panels under
-the transcript when they do, are redrawn to cut it for the new size
-\(`harness-ui-image-recut-positions').  On `text-scale-mode-hook'."
-  (when (and harness-chat--blocks harness-chat--transcript-end (not harness-chat--loading))
-    (harness-chat--with-display
-      (let (nodes tail)
-        (dolist (pos (harness-ui-image-recut-positions))
-          (if (>= pos harness-chat--transcript-end)
-              (setq tail t)
-            (when-let* ((node (get-text-property pos 'harness-chat-node)))
-              (cl-pushnew node nodes :test #'equal))))
-        (dolist (node (nreverse nodes))
-          (when-let* ((block (gethash node harness-chat--blocks)))
-            (harness-chat--rerender block)))
-        (when tail (harness-chat--render-tail))))))
 
 (defun harness-chat--render-hint (block)
   "Return the body of hint BLOCK."
@@ -2740,7 +2719,6 @@ on \\[harness-menu] here, or the [menu] button in the header line.
   (add-hook 'post-command-hook #'harness-chat--post-command nil t)
   (add-hook 'window-buffer-change-functions #'harness-chat--on-window-buffer-change nil t)
   (add-hook 'window-scroll-functions #'harness-chat--schedule-history nil t)
-  (add-hook 'text-scale-mode-hook #'harness-chat--recut-images nil t)
   (add-hook 'kill-buffer-hook #'harness-chat--on-kill nil t))
 
 ;; The chat's keys in the harness menu, as the buffer binds them.

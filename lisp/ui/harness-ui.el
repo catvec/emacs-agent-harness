@@ -1403,210 +1403,11 @@ position just after the region moves to the end of TEXT."
       (insert text))
     (harness-ui--fix-positions fix pt windows)))
 
-;;;; Images a line at a time
-;;
-;; An image is one character whose `display' draws it, so however tall
-;; it is it makes one line: scrolling by lines (the wheel, C-v, C-n)
-;; jumps past it whole, or sticks on it when it is taller than the
-;; window.  `harness-ui-image-lines' cuts a tall image into strips a
-;; line high, one per line, which scroll like text.  To know how many
-;; strips, it sizes the image as Emacs will show it from a few bytes of
-;; its file's header (PNG, GIF, JPEG and WebP): decoding every picture of
-;; a transcript as it renders would block on pictures nobody scrolled to.
-
-(defconst harness-ui--image-header-bytes 65536
-  "Bytes of an image file read to find its size.
-A JPEG's size comes after its metadata, which this much holds as a rule.")
-
-(defun harness-ui--uint (bytes pos n &optional little)
-  "Return the N-byte unsigned integer at POS in BYTES, big-endian.
-LITTLE non-nil reads it little-endian."
-  (let ((v 0))
-    (dotimes (i n)
-      (setq v (+ (ash v 8) (aref bytes (+ pos (if little (- n i 1) i))))))
-    v))
-
-(defun harness-ui--jpeg-size (bytes)
-  "Return (WIDTH . HEIGHT) from the frame header of the JPEG BYTES, or nil.
-The segments before it are walked by their lengths; scan data, or a
-header past the end of BYTES, ends the walk empty-handed."
-  (let ((len (length bytes)) (i 2) size)
-    (while (and (< (+ i 8) len) (= (aref bytes i) #xff))
-      (let ((marker (aref bytes (1+ i))))
-        (cond ((= marker #xff) (setq i (1+ i)))      ; a fill byte
-              ((or (memq marker '(#x01 #xd8)) (<= #xd0 marker #xd7)) (setq i (+ i 2)))
-              ((memq marker '(#xd9 #xda)) (setq i len))
-              ;; A start of frame: SOF0 to SOF15, but DHT, JPG and DAC.
-              ((and (<= #xc0 marker #xcf) (not (memq marker '(#xc4 #xc8 #xcc))))
-               (let ((h (harness-ui--uint bytes (+ i 5) 2))
-                     (w (harness-ui--uint bytes (+ i 7) 2)))
-                 (setq size (and (> w 0) (> h 0) (cons w h)) i len)))
-              (t (setq i (+ i 2 (harness-ui--uint bytes (+ i 2) 2)))))))
-    size))
-
-(defun harness-ui--image-header-size (bytes)
-  "Return (WIDTH . HEIGHT), in pixels, read from the header in BYTES.
-BYTES, a unibyte string, starts a PNG, GIF, JPEG or WebP image; nil for
-anything else, or a header cut short."
-  (let ((len (length bytes)))
-    (cl-flet ((at (pos s) (and (>= len (+ pos (length s))) (string= (substring bytes pos (+ pos (length s))) s))))
-      (cond
-       ((multibyte-string-p bytes) nil)
-       ((and (at 0 "\211PNG\r\n\032\n") (at 12 "IHDR") (>= len 24))
-        (cons (harness-ui--uint bytes 16 4) (harness-ui--uint bytes 20 4)))
-       ((and (or (at 0 "GIF87a") (at 0 "GIF89a")) (>= len 10))
-        (cons (harness-ui--uint bytes 6 2 t) (harness-ui--uint bytes 8 2 t)))
-       ((and (>= len 4) (= (aref bytes 0) #xff) (= (aref bytes 1) #xd8))
-        (harness-ui--jpeg-size bytes))
-       ((and (at 0 "RIFF") (at 8 "WEBP") (>= len 30))
-        (cond ((at 12 "VP8 ") (cons (logand (harness-ui--uint bytes 26 2 t) #x3fff)
-                                    (logand (harness-ui--uint bytes 28 2 t) #x3fff)))
-              ((at 12 "VP8L") (let ((bits (harness-ui--uint bytes 21 4 t)))
-                                (cons (1+ (logand bits #x3fff)) (1+ (logand (ash bits -14) #x3fff)))))
-              ((at 12 "VP8X") (cons (1+ (harness-ui--uint bytes 24 3 t)) (1+ (harness-ui--uint bytes 27 3 t))))))))))
-
-(defun harness-ui--image-native-size (image)
-  "Return the (WIDTH . HEIGHT) of the picture of IMAGE from its header, or nil.
-IMAGE is an image descriptor: the start of its `:data', or of its
-`:file' when that is local, is read.  Nil for other types, which only
-decoding them sizes, and for a remote file, which reading would block on."
-  (let ((data (plist-get (cdr image) :data))
-        (file (plist-get (cdr image) :file)))
-    (harness-ui--image-header-size
-     (cond ((stringp data) (substring data 0 (min (length data) harness-ui--image-header-bytes)))
-           ((and (stringp file) (file-name-absolute-p file) (not (file-remote-p file)) (file-readable-p file))
-            (ignore-errors
-              (with-temp-buffer
-                (set-buffer-multibyte nil)
-                (insert-file-contents-literally file nil 0 harness-ui--image-header-bytes)
-                (buffer-string))))))))
-
-(defun harness-ui--image-fit (image size)
-  "Return the (WIDTH . HEIGHT), in pixels, that IMAGE shows a SIZE picture at.
-SIZE is the picture's own (WIDTH . HEIGHT).  IMAGE's `:scale',
-`:max-width' and `:max-height' apply as Emacs applies them (see
-`compute_image_size' in image.c).  Nil when IMAGE sizes it otherwise,
-with `:width' or `:height' or in font units."
-  (let* ((props (cdr image))
-         (scale (plist-get props :scale))
-         (scale (cond ((and (numberp scale) (>= scale 0)) scale)
-                      ((eq scale 'default)
-                       (if (numberp image-scaling-factor) image-scaling-factor
-                         (let ((column (frame-char-width))) (if (> column 10) (/ column 10.0) 1))))
-                      (t 1)))
-         (max-width (plist-get props :max-width))
-         (max-height (plist-get props :max-height))
-         (w0 (float (car size)))
-         (h0 (float (cdr size))))
-    (unless (or (plist-member props :width) (plist-member props :height)
-                (and max-width (not (natnump max-width)))
-                (and max-height (not (natnump max-height)))
-                (<= w0 0) (<= h0 0))
-      (let ((w (ceiling (* w0 scale)))
-            (h (ceiling (* h0 scale))))
-        (when (and max-width (< max-width w))
-          (setq w max-width h (ceiling (/ (* (float max-width) h0) w0))))
-        (when (and max-height (< max-height h))
-          (setq h max-height w (ceiling (/ (* (float max-height) w0) h0))))
-        (cons w h)))))
-
-(defun harness-ui--image-height (image &optional size)
-  "Return the height in pixels at which IMAGE shows its picture, or nil.
-Margins are not counted.  SIZE, the picture's own (WIDTH . HEIGHT) when
-the caller knows it, or else its header, sizes it without decoding it;
-any other picture is decoded to measure it (`image-size'), as showing
-it would."
-  (let ((size (or size (harness-ui--image-native-size image))))
-    (or (cdr (and size (harness-ui--image-fit image size)))
-        (when-let* ((shown (ignore-errors (image-size image t))))
-          (let ((margin (plist-get (cdr image) :margin)))
-            (- (cdr shown) (* 2 (cond ((consp margin) (cdr margin)) ((natnump margin) margin) (t 0)))))))))
-
-(defun harness-ui--image-line-height ()
-  "Return the height in pixels of a line of this buffer's text, or nil.
-Its default font's, scaled text included; nil off a graphic display."
-  (and (display-graphic-p)
-       (let ((line (default-font-height)))
-         (and (> line 1) line))))
-
-(defun harness-ui--image-rows (height line)
-  "Return how many strips a picture HEIGHT pixels high is cut into.
-As many whole lines LINE pixels high as it covers; one, a picture drawn
-whole, under two lines high or when either is nil."
-  (let ((rows (if (and height line) (/ height line) 1)))
-    (if (< rows 2) 1 rows)))
-
-(defun harness-ui-image-lines (image label &optional props size)
-  "Return a string showing IMAGE over LABEL, then a newline.
-An image under two lines high is LABEL with IMAGE as its `display', a
-line of its own.  A taller one is cut into strips a line high, one per
-line, so scrolling by lines (the mouse wheel, `scroll-up-command',
-`next-line') passes it a line at a time instead of jumping past it
-whole, or sticking on it when it is taller than the window.  The first
-strip is drawn over LABEL, the others over a space each: searching and
-copying meet LABEL once.  The strips stack without a gap: the image is
-centred on each line and the newlines take no height of their own
-\(`line-height' t).  Every strip records the cut, (ROWS . HEIGHT), in a
-`harness-ui-image-rows' property, which tells when scaled text needs
-another cut (`harness-ui-image-recut-positions').
-
-PROPS, a plist of text properties such as a `keymap', a `help-echo' and
-a `pointer', go on every strip, so a click anywhere on the picture does
-what it did; the newlines carry none of them.  SIZE is the picture's
-own (WIDTH . HEIGHT) in pixels, when the caller knows it, such as for
-an SVG it drew.  The strips' edges are fractions of the picture's
-height, so a frame that scales the picture otherwise still shows all of it."
-  (let* ((image (if (eq (plist-get (cdr image) :ascent) 'center) image
-                  (cons 'image (plist-put (copy-sequence (cdr image)) :ascent 'center))))
-         (line (harness-ui--image-line-height))
-         (height (and line (harness-ui--image-height image size)))
-         (rows (harness-ui--image-rows height line))
-         (props (if height (append (list 'harness-ui-image-rows (cons rows height)) props) props)))
-    (if (= rows 1)
-        (concat (apply #'propertize label 'display image props) "\n")
-      (let ((newline (propertize "\n" 'line-height t))
-            (strips nil))
-        (dotimes (i rows)
-          ;; Each edge sits half a pixel inside its row: redisplay
-          ;; truncates the fraction it scales by the picture's height.
-          (let ((top (/ (* i height) rows))
-                (bottom (/ (* (1+ i) height) rows)))
-            (push (concat (apply #'propertize (if (zerop i) label " ")
-                                 'display (list (list 'slice 0 (/ (+ top 0.5) height)
-                                                      1.0 (/ (+ (- bottom top) 0.5) height))
-                                                image)
-                                 props)
-                          newline)
-                  strips)))
-        (apply #'concat (nreverse strips))))))
-
-(defun harness-ui-image-recut-positions ()
-  "Return where this buffer shows an image cut for another text size.
-`harness-ui-image-lines' cuts a tall image into strips as high as a
-line of text was when it drew it: text scaled up since stands taller
-than the strips, which gaps then part, and text scaled down makes each
-strip a step of several lines.  The value has the position of the first
-strip of each image a new cut would change, in buffer order; drawing
-those images again fits them to the text."
-  (let ((line (harness-ui--image-line-height))
-        (pos (point-min))
-        last found)
-    (when line
-      (while (setq pos (text-property-not-all pos (point-max) 'harness-ui-image-rows nil))
-        (let ((cut (get-text-property pos 'harness-ui-image-rows)))
-          ;; The strips of one image share their cut.
-          (unless (or (eq cut last) (= (car cut) (harness-ui--image-rows (cdr cut) line)))
-            (push pos found))
-          (setq last cut
-                pos (next-single-property-change pos 'harness-ui-image-rows nil (point-max))))))
-    (nreverse found)))
-
 (defun harness-ui-image-string (source &optional mime)
   "Return a string displaying SOURCE (a path or a (:data BASE64) plist).
 MIME is a hint for the image type.  Without image support, and for a
 path on a remote host, which reading here would block on, a button
-opening the file is returned instead.  A tall image is drawn a line at
-a time (`harness-ui-image-lines')."
+opening the file is returned instead."
   (let* ((path (and (stringp source) source))
          (data (and (consp source) (plist-get source :data)))
          (label (if path (format "[image %s]" (abbreviate-file-name path)) "[image]"))
@@ -1623,10 +1424,10 @@ a time (`harness-ui-image-lines')."
                                          :max-width width :max-height harness-ui-image-max-height))
                        (error nil))))))
     (cond
-     (img (harness-ui-image-lines img label
-                                  (list 'pointer 'hand
-                                        'help-echo (format "mouse-1 or RET: open %s" (or path mime "the image"))
-                                        'keymap (and open (harness-ui-action-map open)))))
+     (img (concat (propertize label 'display img 'pointer 'hand
+                              'help-echo (format "mouse-1 or RET: open %s" (or path mime "the image"))
+                              'keymap (and open (harness-ui-action-map open)))
+                  "\n"))
      (open (concat (harness-ui-action-button label open :help (format "Open %s" path)) "\n"))
      (t (concat (propertize label 'face 'harness-dim-face) "\n")))))
 
