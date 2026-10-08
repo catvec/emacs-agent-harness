@@ -67,10 +67,13 @@
 ;;
 ;; A prompt about a path outside the allowed directories (the jail's,
 ;; or an agent's own request for a directory) is answered for a glob
-;; pattern, not for one file: by default everything in the directory
-;; (`DIR/**'), the one holding the file or the directory itself.  The
-;; user may edit it, more or less specific, before answering, and the
-;; answer grants or denies the pattern.  No other prompt has one: the
+;; pattern, not for one file: by default everything in a directory
+;; (`DIR/**').  For the jail's that is the root of the repository the
+;; path lies in, unless that would open too much (see
+;; `harness-perms--prompt-dir'), else the directory holding the file or
+;; the directory itself; for an agent's request, the directory it asked
+;; for.  The user may edit it, more or less specific, before answering,
+;; and the answer grants or denies the pattern.  No other prompt has one: the
 ;; mode asking, or the judge objecting, is about the call itself, whose
 ;; paths the jail already let through, so its answers for the session
 ;; or for always record a rule for the tool.
@@ -96,7 +99,9 @@
 ;; are left out, since what a tool reads goes to the model's provider.
 ;; The judge's prompt says the same for the calls it sees, such as Emacs
 ;; Lisp that reads the state directory.  Standing rules still come
-;; first, so a user's deny rule holds.
+;; first, so a user's deny rule holds.  The file emacs_find_definition
+;; showed a definition in may be read the same way, and only that file
+;; (see "Files the user's Emacs showed a definition in").
 ;;
 ;; Skills are read the same way (see "Skills, which every session may
 ;; read"): a call that only reads may read every directory skill
@@ -574,11 +579,13 @@ directory (`harness-perms--skills-hint')."
 (defun harness-perms--unreachable (request roots)
   "Return the first path of REQUEST it may not reach, or nil.
 A path is reachable when it lies inside one of ROOTS, or, for a call
-that only reads, inside the harness itself (`harness-perms--inspectable-p')
-or a skills directory (`harness-perms--skill-readable-p')."
+that only reads, inside the harness itself (`harness-perms--inspectable-p'),
+a skills directory (`harness-perms--skill-readable-p') or a file the
+user's Emacs showed a definition in (`harness-perms--revealed-p')."
   (cl-find-if (lambda (p) (and (harness-perms--outside (list p) roots)
                                (not (harness-perms--inspectable-p request p))
-                               (not (harness-perms--skill-readable-p request p))))
+                               (not (harness-perms--skill-readable-p request p))
+                               (not (harness-perms--revealed-p request p))))
               (plist-get request :paths)))
 
 (defun harness-perms--reads-harness-p (request)
@@ -594,6 +601,75 @@ mode."
            (and (not (harness-perms--unreachable request roots))
                 (harness-perms--outside paths roots)
                 t)))))
+
+;;;; Files the user's Emacs showed a definition in
+;;
+;; emacs_find_definition, which inspects the user's Emacs and so never
+;; needs approval, names the file a definition was loaded from and shows
+;; the definition's source.  An agent that wants the code around it then
+;; reads that file, which mostly lies outside the session's roots (the
+;; user's configuration, a package): asking the user about it would ask
+;; again about what the inspection already showed.  So the tool reports
+;; the file (`permission/reveal-file'), and a call that only reads may
+;; read it for the rest of the session, in every mode.  Only that file:
+;; its directory, and writing the file, stay jailed, and the harness's
+;; credentials stay out of reach.  A definition's file is Lisp the
+;; user's Emacs loaded, whose definitions and values the inspection
+;; tools show anyway.
+
+(defvar harness-perms--revealed (make-hash-table :test 'equal)
+  "Session id -> the files the user's Emacs showed a definition in.
+Each is local and has its symbolic links resolved; see
+`permission/reveal-file'.")
+
+(defun harness-perms--revealed-p (request path)
+  "Non-nil when REQUEST may read PATH because the user's Emacs showed it.
+REQUEST must only read, PATH must be on this machine and be, symbolic
+links resolved, one of the files `permission/reveal-file' recorded for
+REQUEST's session, and the call must not reach the harness's
+credentials."
+  (and (eq (harness-perms--sym (plist-get request :kind)) 'read)
+       (stringp path)
+       (not (file-remote-p path))
+       (let ((files (gethash (plist-get (plist-get request :session) :id) harness-perms--revealed)))
+         (and files (member (harness-path-normalize path) files)))
+       (not (harness-perms--private-p (plist-get request :tool) path))
+       t))
+
+(defun harness-perms--reads-revealed-p (request)
+  "Non-nil when REQUEST reads, outside the session's roots, only revealed files.
+Those are the files the user's Emacs showed a definition in (see
+`harness-perms--revealed-p'); the mode stage allows such a call in
+every mode."
+  (let ((paths (plist-get request :paths)))
+    (and (eq (harness-perms--sym (plist-get request :kind)) 'read)
+         paths
+         (let* ((roots (append (harness-perms-roots (plist-get request :session))
+                               (plist-get request :jail-once)))
+                (outside (cl-remove-if-not (lambda (p) (harness-perms--outside (list p) roots)) paths)))
+           (and outside
+                (cl-every (lambda (p) (harness-perms--revealed-p request p)) outside)
+                t)))))
+
+(harness-defmethod permission/reveal-file (session-id file)
+  "Let SESSION-ID's calls that only read read FILE from now on.
+FILE is the source file the user's Emacs showed a definition in, as an
+inspection tool (emacs_find_definition) reports it.  Only FILE itself
+becomes readable, not its directory; see \"Files the user's Emacs
+showed a definition in\".  Return FILE as recorded, its symbolic links
+resolved, or nil when it is no local, existing regular file."
+  (when (and (stringp session-id) (stringp file)
+             (file-name-absolute-p file) (not (file-remote-p file)))
+    (let ((real (harness-path-normalize file)))
+      (when (file-regular-p real)
+        (let ((files (gethash session-id harness-perms--revealed)))
+          (unless (member real files)
+            (puthash session-id (cons real files) harness-perms--revealed)))
+        real))))
+
+(defun harness-perms--forget-revealed (session-id &rest _)
+  "Forget the files revealed to SESSION-ID, which is gone."
+  (remhash session-id harness-perms--revealed))
 
 ;;;; Skills, which every session may read
 ;;
@@ -755,6 +831,44 @@ so the prompt has to name the directory a grant really opens."
       (if (file-directory-p path)
           (file-name-as-directory path)
         (or (file-name-directory path) path)))))
+
+(defconst harness-perms--repository-markers '(".git" ".hg" ".jj" ".svn" ".bzr" "_darcs" ".fslckout")
+  "Names whose presence makes a directory the root of a repository.")
+
+(defun harness-perms--repository-root (dir)
+  "Return the root of the repository DIR lies in, as a directory name, or nil.
+That is the closest directory holding DIR, DIR included, with one of
+`harness-perms--repository-markers': a project, a package's checkout,
+a configuration kept in git.  A remote DIR has none here: looking would
+open a TRAMP connection from inside the permission chain."
+  (unless (file-remote-p dir)
+    (when-let* ((root (locate-dominating-file
+                       dir (lambda (d)
+                             (cl-some (lambda (m) (file-exists-p (expand-file-name m d)))
+                                      harness-perms--repository-markers)))))
+      (file-name-as-directory (expand-file-name root)))))
+
+(defun harness-perms--prompt-dir (session dir)
+  "Return the directory a prompt about DIR, outside SESSION's roots, offers.
+That is the root of the repository DIR lies in (see
+`harness-perms--repository-root'), so one answer opens the project or
+package a file belongs to, not just the directory holding it: an agent
+finding its way around one asked about each directory it reached in
+turn.  It is DIR itself when DIR lies in no repository, and when that
+root would open too much: the root directory, the home directory or a
+directory holding it, or one holding SESSION's working directory or
+worktree, such as the main checkout of a worktree.  The user may still
+edit the prompt's pattern to something narrower."
+  (let ((root (harness-perms--repository-root dir))
+        (home (expand-file-name "~"))
+        (own (delq nil (list (plist-get session :cwd) (plist-get session :worktree)))))
+    (if (and root
+             (not (equal root "/"))
+             (not (harness-path-within-p root home))
+             (not (cl-some (lambda (d) (and (stringp d) (not (file-remote-p d)) (harness-path-within-p root d)))
+                           own)))
+        root
+      dir)))
 
 (defun harness-perms--scratch-hint (session path)
   "Return a sentence sending SESSION's scratch files at PATH to its own dir.
@@ -985,9 +1099,14 @@ rule."
 ;;
 ;; A prompt about a path outside the allowed directories (the jail's,
 ;; an agent's directory request) is answered for a glob pattern rather
-;; than one file: by default everything in the directory (`DIR/**'),
-;; the directory holding a file or the directory itself.  The prompt's
-;; payload carries it as `:pattern' and the user may answer with
+;; than one file: by default everything in a directory (`DIR/**').  The
+;; jail offers the root of the repository the path lies in, so one
+;; answer covers the project or package an agent is finding its way
+;; around, rather than one directory of it at a time; the directory
+;; holding a file, or the directory itself, when there is no such root
+;; or it would open too much (`harness-perms--prompt-dir').  An agent's
+;; request offers the directory it asked for.  The prompt's payload
+;; carries the pattern as `:pattern' and the user may answer with
 ;; another one, more or less specific, in the answer's `:pattern'.
 ;; Only these prompts carry one (see `harness-perms--ask').
 
@@ -1082,8 +1201,11 @@ properties to the entry kept until then."
 
 (defun harness-perms--ask-dir (decision next request bad)
   "Ask the user to grant the directory holding BAD to REQUEST's session.
-DECISION and NEXT continue the chain once `permission/answer' arrives."
-  (harness-perms--pend-dir request next (harness-perms--dir-of bad)
+The prompt offers the root of the repository BAD lies in, when that is
+not too wide (see `harness-perms--prompt-dir').  DECISION and NEXT
+continue the chain once `permission/answer' arrives."
+  (harness-perms--pend-dir request next
+                           (harness-perms--prompt-dir (plist-get request :session) (harness-perms--dir-of bad))
                            (format "%s wants %s, which is outside the allowed directories"
                                    (harness-tools-label (plist-get request :tool)) (abbreviate-file-name bad))
                            harness-perms-dir-options
@@ -1316,7 +1438,9 @@ CTX names the session."
                    ('turn "the rest of this turn (ask again in a later turn if you need it then)")
                    (_ "this session"))
                  (if glob "the paths it matches" "what it holds")
-                 (if glob "" "; to run bash there, set its cwd inside it")))))
+                 (if glob
+                     "; bash may not see them, since its sandbox shows whole directories only"
+                   ", and bash sees it at the same path")))))
      ((null entry)
       (harness-tool-error (format "%s is still outside the allowed directories." shown)))
      (t
@@ -1330,7 +1454,7 @@ CTX names the session."
           (`(,source ,_) (format "%s is already accessible: it lies inside %s (%s)." shown
                                  (abbreviate-file-name (plist-get entry :dir))
                                  (harness-perms--source-label source))))
-        " Tools that take paths can use it; to run bash there, set its cwd inside it."))))))
+        " Tools that take paths can use it, and bash sees it at the same path."))))))
 
 (harness-define-tool harness-perms-dir-tool
   :label "Request access"
@@ -1464,6 +1588,10 @@ DECISION is returned unchanged when the mode leaves the question open."
      ;; through, and this names the reason.
      ((harness-perms--reads-skills-p request)
       (list :behavior 'allow :reason "reading skills never needs approval"))
+     ;; And reading the file the user's Emacs showed a definition in.
+     ((harness-perms--reads-revealed-p request)
+      (list :behavior 'allow
+            :reason "the user's Emacs showed a definition in this file; reading it never needs approval"))
      ((harness-perms--reads-harness-p request)
       (list :behavior 'allow :reason "reading the harness itself never needs approval"))
      ((eq mode 'yolo) (list :behavior 'allow :reason "yolo mode"))
@@ -2164,6 +2292,7 @@ to call again."
   (harness-add-filter 'permission/decide #'harness-perms--ask 90)
   (harness-on 'permission/decided #'harness-perms--on-decided)
   (harness-on 'session/updated #'harness-perms--on-session-updated)
+  (harness-on 'session/deleted #'harness-perms--forget-revealed)
   ;; What was granted until a turn ends goes when it ends.
   (harness-on 'agent/turn-started #'harness-perms--end-turn-grants)
   (harness-on 'agent/turn-ended #'harness-perms--end-turn-grants))
@@ -2175,6 +2304,7 @@ to call again."
     (harness-remove-filter 'permission/decide fn))
   (harness-off (cons 'permission/decided #'harness-perms--on-decided))
   (harness-off (cons 'session/updated #'harness-perms--on-session-updated))
+  (harness-off (cons 'session/deleted #'harness-perms--forget-revealed))
   (harness-off (cons 'agent/turn-started #'harness-perms--end-turn-grants))
   (harness-off (cons 'agent/turn-ended #'harness-perms--end-turn-grants)))
 

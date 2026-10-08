@@ -437,6 +437,13 @@ command. The directory is made with the session, made again if it went
 missing, and deleted with the session. `C-c h d` lists all of these
 directories. Remote sessions have no temporary directory.
 
+In the sandbox a shell command sees the system directories and, of
+yours, only these directories, each at its own path: a directory you
+grant the session reaches its commands at once, as it reaches the other
+tools. `~` is your home directory there as well, emptied, so
+`~/.emacs.d/x` names the same file inside as outside, and only what the
+session may use shows in it.
+
 Every permission request offers the same five answers, under the same
 names and keys wherever it shows (the chat, BTW, the popout, an ACP
 client): `[Allow]` `y`, `[Allow for session]` `s`, `[Always allow]` `a`,
@@ -452,13 +459,21 @@ the echo area after it, say what it covers for the request at hand.
 A permission request about a path outside the session's directories
 (a tool call reaching there, or the agent asking for a directory) is
 answered for a glob pattern, not for a single file. By default the
-pattern covers everything in the directory: the directory that holds
-the file, or the directory itself, such as `~/notes/**`. The panel
-shows the pattern on its own line. Press `e` on the panel, `C-c C-p`,
-or click `[Edit]` to change it in the minibuffer, either more specific
+pattern covers everything in a directory. For a tool call that is the
+root of the repository the path lies in (the closest directory above it
+with `.git` or another version control directory), so that one answer
+opens the project or package the agent is finding its way around, such
+as `~/.emacs.d/**`, rather than one directory of it after another. When
+there is no repository, or its root is or holds your home directory or
+the session's own working directory, it is the directory that holds
+the file, or the directory itself, such as `~/notes/**`; for the
+agent's own request, the directory it asked for. The panel shows the
+pattern on its own line. Press `e` on the panel, `C-c C-p`, or click
+`[Edit]` to change it in the minibuffer, either more specific
 (`~/notes/*.org`, a subdirectory, one file) or less (`~/**`). `*`
 matches within a name and `**` across directories, and `M-n` offers
-patterns around the request's own. The answer grants or denies the
+patterns around the request's own, from the file itself up to the
+directory above the pattern's. The answer grants or denies the
 pattern: once (for the one call, or until the turn ends for the agent's
 own request), for the session, or always (as an entry of
 `harness-allowed-directories`, or a rule in `harness-perms-rules` for
@@ -468,6 +483,12 @@ one, is about the call itself and shows no pattern: *Allow for
 session*, *Always allow* and *Always deny* hold for every call of that
 tool, and a call outside the session's directories still asks for the
 directory first.
+
+The tools that inspect your Emacs never ask. When `emacs_find_definition`
+shows a definition, the file it names may then be read without a grant
+for the rest of the session, by the tools that only read, so the agent
+can read the code around it: only that file, not its directory, and not
+for writing.
 
 A shell command is about what its command line names, not only the
 directory it runs in. The prompt for `ls -la ~/.claude/projects/x`,
