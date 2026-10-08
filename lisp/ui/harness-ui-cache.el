@@ -11,9 +11,19 @@
 ;; provider keeps it: the session's `:cache', (:at TIME :ttl SECONDS
 ;; :expires TIME :model MODEL).  Once that moment is past, a panel above
 ;; the compose box says so, with how much context the next message sends
-;; uncached and what that costs at list prices.  It informs; there is
-;; nothing to do about it but know, as a summary on the same model would
-;; read the history uncached too.
+;; uncached and what that costs at list prices.
+;;
+;; It offers to compact the conversation first, so the next message sends
+;; only what stands in for it (harness-ui-compact.el): a button for each
+;; kind with what it costs (`compaction/estimate', asked once per thing
+;; the panel says and drawn when it comes), the brief summary first.
+;; That one is the cheap way out of a long conversation gone cold: a
+;; cheap model reads only its first and last messages, for cents,
+;; where a summary on the session's model reads all of it uncached, as
+;; carrying on would.  A transcript file asks no model at all.  The
+;; buttons' keys work while point is on their line.  A session blocked
+;; on an answer is in the middle of a turn, which no compaction
+;; interrupts: its panel only informs.
 ;;
 ;; A cache serves one model, so a session switched to another model
 ;; finds nothing cached for it: the panel says so at once, with what the
@@ -44,6 +54,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-ui)
+(require 'harness-ui-compact)
 
 (defvar harness-chat-panel-functions)
 (defvar harness-chat-mode-hook)
@@ -53,6 +64,8 @@
 (defvar harness-ui-switch--prompt)
 (declare-function harness-chat--buffer-for "harness-ui-chat" (sid))
 (declare-function harness-compose-redraw "harness-ui-compose" ())
+(declare-function harness-chat--button "harness-ui-chat" (label action &rest props))
+(declare-function harness-chat--kbd "harness-ui-chat" (key))
 
 (defgroup harness-ui-cache nil
   "Telling when a session's prompt cache has expired." :group 'harness-ui)
@@ -76,6 +89,15 @@ See `harness-ui-cache--state'.")
 
 (defvar-local harness-ui-cache--due nil
   "The moment `harness-ui-cache--timer' is set for, a float time.")
+
+(defvar-local harness-ui-cache--estimate nil
+  "What compacting this buffer's session costs, as its cache panel last asked.
+A cons (STATE . ESTIMATE): STATE what the panel showed when it asked
+\(`harness-ui-cache--state'), ESTIMATE the `compaction/estimate'
+answer, `pending' while it is asked, or `failed'.")
+
+(defvar-local harness-ui-cache--compacting nil
+  "The kind of compaction the cache panel started in this buffer, while it runs.")
 
 ;;;; What the panel shows
 
@@ -140,12 +162,15 @@ The price, in US dollars per million tokens, is the catalogue's."
 (defun harness-ui-cache--cost (state)
   "Return what the context of STATE costs uncached and cached, or nil.
 A cons (UNCACHED . CACHED) at the model's list prices: written to the
-cache again (its cache-write price, else its input price) against read
-back from it.  Nil when the catalogue does not price both."
+cache again against read back from it.  Writing costs the higher of the
+cache-write and the input price: a provider that does not charge for
+writes (DeepSeek, whose catalogue says 0) still charges the input.  Nil
+when the catalogue does not price both."
   (let* ((tokens (plist-get state :context))
          (model (plist-get state :model))
-         (uncached (or (harness-ui-cache--price tokens model :cache-write)
-                       (harness-ui-cache--price tokens model :input)))
+         (written (harness-ui-cache--price tokens model :cache-write))
+         (input (harness-ui-cache--price tokens model :input))
+         (uncached (if (and written input) (max written input) (or written input)))
          (cached (harness-ui-cache--price tokens model :cache-read)))
     (and uncached cached (> uncached cached) (cons uncached cached))))
 
@@ -191,8 +216,10 @@ the cache of the model the session used before."
                  'face 'harness-dim-face)
      "\n")))
 
-(defun harness-ui-cache--banner (state now)
-  "Return the cache panel for STATE, drawn at NOW."
+(defun harness-ui-cache--banner (state now &optional offer)
+  "Return the cache panel for STATE, drawn at NOW.
+OFFER, when given, is the line offering to compact the conversation
+first (`harness-ui-cache--offer'), which goes last."
   (let* ((cost (harness-ui-cache--cost state))
          (tokens (plist-get state :context))
          (string
@@ -208,10 +235,105 @@ the cache of the model the session used before."
                                  "."))
                        'wrap-prefix "   ")
            "\n")))
-    (add-text-properties 0 (length string)
-                         (list 'harness-ui-cache-panel t 'help-echo (harness-ui-cache--help state))
-                         string)
+    (add-text-properties 0 (length string) (list 'help-echo (harness-ui-cache--help state)) string)
+    (when offer (setq string (concat string offer)))
+    (add-text-properties 0 (length string) (list 'harness-ui-cache-panel t) string)
     (harness-ui-add-face string 'harness-chat-cache-face)))
+
+;;;; Compacting first
+
+(defun harness-ui-cache--estimated (buffer state estimate)
+  "Keep ESTIMATE, what compacting costs, for the panel of BUFFER showing STATE.
+The tail is drawn again when the panel still shows STATE."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (equal (car harness-ui-cache--estimate) state)
+        (setq harness-ui-cache--estimate (cons state estimate))
+        (when (equal state harness-ui-cache--shown)
+          (harness-ui-cache--redraw))))))
+
+(defun harness-ui-cache--estimate (state)
+  "Return what compacting costs while the panel shows STATE, or nil.
+The `compaction/estimate' answer, asked once per STATE; nil while it is
+asked, and its answer draws the tail again, or when asking failed."
+  (let ((known (and (equal (car harness-ui-cache--estimate) state)
+                    (cdr harness-ui-cache--estimate))))
+    (cond ((consp known) known)
+          (known nil)
+          (harness-ui-session-id
+           (let ((buffer (current-buffer)))
+             (setq harness-ui-cache--estimate (cons state 'pending))
+             (harness-ui-call "_harness/compaction/estimate" (list :session-id harness-ui-session-id)
+                              (lambda (estimate) (harness-ui-cache--estimated buffer state estimate))
+                              (lambda (_err) (harness-ui-cache--estimated buffer state 'failed) nil))
+             nil)))))
+
+(defun harness-ui-cache--compact (buffer kind)
+  "Compact the session of BUFFER as KIND, from its cache panel.
+The panel says so while it runs, and goes once the conversation is
+compacted, as nothing of it is cached any more."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (unless harness-ui-cache--compacting
+        (setq harness-ui-cache--compacting kind)
+        (harness-ui-cache--redraw)
+        (harness-ui-compact-run harness-ui-session-id kind
+                                (lambda (_node)
+                                  (when (buffer-live-p buffer)
+                                    (with-current-buffer buffer
+                                      (setq harness-ui-cache--compacting nil)
+                                      (harness-ui-cache--redraw)))))))))
+
+(defun harness-ui-cache--command (buffer kind)
+  "Return the command compacting the session of BUFFER as KIND."
+  (lambda () (interactive) (harness-ui-cache--compact buffer kind)))
+
+(defun harness-ui-cache--offer-help (estimate kind)
+  "Return the tooltip of the button compacting as KIND, as ESTIMATE says.
+ESTIMATE is nil while it is asked."
+  (let ((entry (assq kind harness-ui-compact-kinds))
+        (cost (harness-ui-compact-cost-text estimate kind)))
+    (concat (harness-ui-compact-label kind) (if cost (format " (%s)" cost) "") ": "
+            (if estimate
+                (harness-ui-compact-describe estimate kind)
+              (concat (nth 3 entry) "."))
+            (format "\nPress %c on this line, or click, to compact the conversation this way."
+                    (nth 1 entry)))))
+
+(defun harness-ui-cache--offer (state)
+  "Return the line of the cache panel for STATE that offers to compact, or nil.
+A button for each kind of compaction (`harness-ui-compact-kinds') says
+what it costs as the harness estimates it; while it is asked, or
+without a price, the buttons only name the kinds.  While a compaction
+the panel started runs, the line says so instead.  A session blocked on
+an answer is running a turn, which no compaction interrupts: nil."
+  (cond
+   ((plist-get state :blocked) nil)
+   (harness-ui-cache--compacting
+    (propertize (format "   Compacting the conversation into a %s…\n"
+                        (nth 2 (assq harness-ui-cache--compacting harness-ui-compact-kinds)))
+                'face 'harness-dim-face))
+   (t
+    (let* ((buffer (current-buffer))
+           (estimate (harness-ui-cache--estimate state))
+           (map (make-sparse-keymap))
+           (line
+            (concat
+             (propertize "   Compact it first" 'face 'harness-label-face)
+             (mapconcat
+              (lambda (entry)
+                (pcase-let* ((`(,kind ,key . ,_) entry)
+                             (cost (harness-ui-compact-cost-text estimate kind)))
+                  (define-key map (char-to-string key) (harness-ui-cache--command buffer kind))
+                  (concat "  " (harness-chat--kbd (format " %c " key)) " "
+                          (harness-chat--button (harness-ui-compact-label kind)
+                                                (harness-ui-cache--command buffer kind)
+                                                :help (harness-ui-cache--offer-help estimate kind))
+                          (if cost (propertize (format " (%s)" cost) 'face 'harness-dim-face) ""))))
+              harness-ui-compact-kinds "")
+             "\n")))
+      (add-text-properties 0 (length line) (list 'wrap-prefix "   ") line)
+      (harness-ui-with-keymap line map)))))
 
 ;;;; Showing it on time
 
@@ -272,7 +394,7 @@ the cache lapses too, so a buffer that just opened shows it on time."
          (state (harness-ui-cache--current session now)))
     (setq harness-ui-cache--shown state)
     (harness-ui-cache--schedule session)
-    (and state (harness-ui-cache--banner state now))))
+    (and state (harness-ui-cache--banner state now (harness-ui-cache--offer state)))))
 
 (defun harness-ui-cache--on-update (sid update)
   "Follow the record of session SID, which UPDATE may bring.
@@ -301,7 +423,7 @@ On `harness-ui-update-functions', after the chat has taken it in."
   (add-hook 'harness-ui-update-functions #'harness-ui-cache--on-update t))
 
 (harness-define-module 'ui-cache
-  :doc "Warns above a session's compose box once its prompt cache has expired."
+  :doc "Warns above a session's compose box once its prompt cache has expired, offering to compact."
   :requires '(ui ui-chat)
   :init #'harness-ui-cache--init)
 

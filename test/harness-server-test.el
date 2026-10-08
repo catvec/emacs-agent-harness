@@ -261,6 +261,68 @@ forwarded as every `harness-' option the user sets."
       (should (string-search "(customize-set-variable 'harness-corporate-mode 't)"
                              (harness-read-file file))))))
 
+(defvar harness-policy-file)
+
+(ert-deftest harness-server-holds-to-the-policy-it-reads ()
+  "The harness process reads the policy itself and holds to it: the
+settings it describes are locked and a change over ACP is refused.
+The options it sets for itself stay its own whatever the policy says:
+were they the policy's, it would take itself for a UI, load the UI's
+modules and listen beyond this machine."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (let* ((init (expand-file-name "server-init.el" harness-state-directory))
+           (policy (expand-file-name "policy.el" harness-state-directory))
+           (harness-process t)
+           (harness-model "demo:scripted")
+           (harness-server-init-file init))
+      ;; Where the process looks is its own business, as /etc would be:
+      ;; this Emacs has no policy, and forwards none.
+      (harness-test-write-policy policy '((harness-permission-mode . ask)
+                                          (harness-process . t)
+                                          (harness-module-directories . ("lisp/ui"))
+                                          (harness-acp-host . "192.0.2.1")))
+      (with-temp-file init
+        (insert harness-server-test--init (format "(setq harness-policy-file %S)\n" policy)))
+      (unwind-protect
+          (progn
+            (harness-start)
+            (let* ((described (harness-test-await (harness-ui-request "_harness/config/describe"
+                                                                      (list :cwd harness-state-directory))
+                                                  30))
+                   (mode (cl-find "harness-permission-mode" (plist-get described :settings)
+                                  :key (lambda (s) (plist-get s :key)) :test #'equal)))
+              (should (eq t (plist-get mode :locked)))
+              (should (equal "policy" (plist-get mode :source)))
+              (should (equal "ask" (plist-get mode :value)))
+              (should (equal policy (plist-get (plist-get described :policy) :file))))
+            (should-error (harness-test-await (harness-ui-request "_harness/config/set"
+                                                                  (list :key "harness-permission-mode"
+                                                                        :value "yolo" :scope "global"))
+                                              30))
+            ;; Its sessions are the policy's, whatever they ask for.
+            (let ((session (harness-test-await (harness-ui-request "_harness/session/create"
+                                                                   (list :cwd harness-state-directory
+                                                                         :permission-mode "yolo"))
+                                               30)))
+              (should (equal "ask" (format "%s" (plist-get session :permission-mode)))))
+            (harness-server-test--settle))
+        (harness-server-test--stop)))))
+
+(ert-deftest harness-server-keeps-the-policy-file-behind ()
+  "Where this Emacs reads the policy never reaches the harness process,
+which reads the administrator's file itself: not even when it was set
+before harness-policy.el defined it, as an init file may."
+  (harness-test-with-temp-state
+    (let ((harness-policy-file (expand-file-name "my-policy.el" harness-state-directory))
+          (symbol-file (symbol-function 'symbol-file)))
+      (cl-letf (((symbol-function 'symbol-file)
+                 (lambda (symbol &optional type native)
+                   (unless (eq symbol 'harness-policy-file)
+                     (funcall symbol-file symbol type native)))))
+        (should (harness-server--user-set-p 'harness-policy-file))
+        (should-not (assq 'harness-policy-file (harness-server--forwarded)))))))
+
 (ert-deftest harness-server-forwards-tramp-settings ()
   "The TRAMP options the user set reach the harness process, which
 reaches remote hosts through a TRAMP of its own; those left alone stay

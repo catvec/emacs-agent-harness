@@ -73,11 +73,11 @@
   (harness-tools-sessions-test-with
     (let ((names (mapcar (lambda (s) (plist-get s :name)) (harness-call 'tools/list))))
       (dolist (n '("session_list" "session_search" "session_read" "session_send" "session_control"
-                   "session_wait" "task_list" "task_submit" "task_control" "task_wait"))
+                   "session_move" "session_wait" "task_list" "task_submit" "task_control" "task_wait"))
         (should (member n names))))
     (dolist (n '("session_list" "session_search" "session_read" "session_wait" "task_list" "task_wait"))
       (should (eq 'read (plist-get (harness-call 'tools/get n) :kind))))
-    (dolist (n '("session_send" "session_control" "task_submit" "task_control"))
+    (dolist (n '("session_send" "session_control" "session_move" "task_submit" "task_control"))
       (should (eq 'meta (plist-get (harness-call 'tools/get n) :kind))))))
 
 (ert-deftest harness-tools-sessions-list-and-filters ()
@@ -328,6 +328,155 @@ tell it from the user's messages."
       (should (eq 'idle (plist-get (harness-call 'session/get other) :status)))
       (should (plist-get (harness-tools-sessions-test-run me "session_control" (list :session_id me :action "cancel")) :is-error)))))
 
+;;;; session_move
+
+(defun harness-tools-sessions-test-prompt (sid)
+  "Return the permission request SID waits on, once it waits on one."
+  (harness-test-wait (lambda () (car (harness-call 'permission/pending sid))) 5 "a permission request"))
+
+(ert-deftest harness-tools-sessions-move-this-session-when-its-turn-ends ()
+  "An agent moves its own session: the user confirms, the new directory
+is allowed for the rest of the turn, and the session moves as the turn
+ends."
+  (harness-tools-sessions-test-with
+    (harness-test-load-module 'perms)
+    (let* ((new (harness-test-temp-dir))
+           (me (harness-tools-sessions-test-session :name "Wanderer"))
+           (granted nil)
+           (harness-provider-demo-script-override
+            `((:type tool-call :id "mv" :name "session_move" :input (:directory ,new :reason "the work is there"))
+              (:type done :stop-reason end-turn))))
+      (harness-on 'permission/dir-allowed (lambda (_ d) (push d granted)))
+      (let ((turn (harness-call 'agent/prompt me "Go where the work is")))
+        (let* ((request (harness-tools-sessions-test-prompt me))
+               (payload (plist-get request :payload)))
+          ;; Allow or deny, this call only.
+          (should (equal '(allow-once deny-once) (plist-get payload :options)))
+          (should (equal (format "Move session: %s" (abbreviate-file-name new))
+                         (plist-get payload :title)))
+          (should (string-match-p "\\`When this turn ends, this session moves from " (plist-get payload :reason)))
+          (should (string-match-p "access to .* is not kept" (plist-get payload :reason)))
+          (should (string-match-p "The agent says: the work is there\\'" (plist-get payload :reason)))
+          (should (equal (list new) (plist-get payload :paths)))
+          (should (equal default-directory (plist-get (harness-call 'session/get me) :cwd)))
+          (harness-call 'permission/answer me (plist-get request :id) "allow-once"))
+        (harness-test-await turn 10))
+      (harness-test-wait (lambda () (equal new (plist-get (harness-call 'session/get me) :cwd))) 5 "the move")
+      ;; Allowed for the rest of the turn it asked in.
+      (should (member new granted))
+      (let ((result (cl-find 'tool-result (harness-call 'session/nodes me) :key (lambda (n) (plist-get n :kind)))))
+        (should (string-match-p "This session moves to .* when this turn ends" (plist-get result :output)))))))
+
+(ert-deftest harness-tools-sessions-move-another-session ()
+  "Moving another session asks the user; a denial leaves it, an allow
+moves it at once, keeping its old directory when asked to."
+  (harness-tools-sessions-test-with
+    (harness-test-load-module 'perms)
+    (let* ((old (harness-test-temp-dir))
+           (new (harness-test-temp-dir))
+           (me (harness-tools-sessions-test-session :name "Me"))
+           (other (let ((default-directory old)) (harness-tools-sessions-test-session :name "Lost")))
+           (call (lambda (input)
+                   (harness-call 'tools/execute me (list :id (harness-short-id) :name "session_move" :input input)))))
+      (let ((p (funcall call (list :session_id "Lost" :directory new))))
+        (let ((request (harness-tools-sessions-test-prompt me)))
+          (should (equal (format "Move session: Lost → %s" (abbreviate-file-name new))
+                         (plist-get (plist-get request :payload) :title)))
+          (should (string-match-p "\\`Session Lost moves from " (plist-get (plist-get request :payload) :reason)))
+          (harness-call 'permission/answer me (plist-get request :id) "deny-once"))
+        (let ((r (harness-test-await p 5)))
+          (should (plist-get r :is-error))
+          (should (string-match-p "the user said no" (plist-get r :content)))))
+      (should (equal old (plist-get (harness-call 'session/get other) :cwd)))
+      ;; The directory goes while the user is asked: the move fails, and
+      ;; says why plainly.
+      (let* ((gone (harness-test-temp-dir))
+             (p (funcall call (list :session_id "Lost" :directory gone))))
+        (let ((request (harness-tools-sessions-test-prompt me)))
+          (delete-directory gone)
+          (harness-call 'permission/answer me (plist-get request :id) "allow-once"))
+        (let ((r (harness-test-await p 5)))
+          (should (plist-get r :is-error))
+          (should (string-match-p "is not a directory" (plist-get r :content)))
+          (should-not (string-match-p "Harness error" (plist-get r :content)))))
+      (should (equal old (plist-get (harness-call 'session/get other) :cwd)))
+      (let ((p (funcall call (list :session_id other :directory new :keep_old_directory t))))
+        (harness-call 'permission/answer me (plist-get (harness-tools-sessions-test-prompt me) :id) "allow-once")
+        (should (string-match-p "Session Lost moved from .* to .* stays allowed"
+                                (plist-get (harness-test-await p 5) :content))))
+      (let ((s (harness-call 'session/get other)))
+        (should (equal new (plist-get s :cwd)))
+        (should (equal (list old) (plist-get s :allowed-dirs)))))))
+
+(ert-deftest harness-tools-sessions-move-a-running-session-waits ()
+  "A session running a turn moves when it ends; moving it back to where
+it works cancels that, without asking."
+  (harness-tools-sessions-test-with
+    (harness-test-load-module 'perms)
+    (let* ((harness-provider-demo--delay 0.5)
+           (new (harness-test-temp-dir))
+           (me (harness-tools-sessions-test-session :name "Me"))
+           (other (harness-tools-sessions-test-session :name "Busy"))
+           (move (lambda ()
+                   (let ((p (harness-call 'tools/execute me (list :id (harness-short-id) :name "session_move"
+                                                                  :input (list :session_id other :directory new)))))
+                     (let ((request (harness-tools-sessions-test-prompt me)))
+                       (should (string-match-p "when the turn it is running ends"
+                                               (plist-get (plist-get request :payload) :reason)))
+                       (harness-call 'permission/answer me (plist-get request :id) "allow-once"))
+                     (should (string-match-p "Busy is running a turn; it moves to"
+                                             (plist-get (harness-test-await p 5) :content)))))))
+      (harness-tools-sessions-test-ok me "session_send" (list :session_id other :message "long job"))
+      (funcall move)
+      (should (equal default-directory (plist-get (harness-call 'session/get other) :cwd)))
+      (should (equal new (plist-get (plist-get (harness-call 'session/get other) :move) :cwd)))
+      (should (string-match-p "stays in .*cancelled"
+                              (harness-tools-sessions-test-ok me "session_move"
+                                                              (list :session_id other :directory default-directory))))
+      (should-not (plist-get (harness-call 'session/get other) :move))
+      (funcall move)
+      (harness-tools-sessions-test-idle other)
+      (harness-test-wait (lambda () (equal new (plist-get (harness-call 'session/get other) :cwd))) 5 "the move"))))
+
+(ert-deftest harness-tools-sessions-move-refusals-ask-nobody ()
+  "A move that cannot be made fails at once, nobody asked: a session in
+a worktree, a task's session, a directory that is no directory or the
+one the session works in.  A non-interactive session cannot ask, and
+the handler moves nothing the user did not confirm."
+  (harness-tools-sessions-test-with
+    (harness-test-load-module 'perms)
+    (let* ((new (harness-test-temp-dir))
+           (me (harness-tools-sessions-test-session :name "Me"))
+           (wt (harness-tools-sessions-test-session :name "Branch" :worktree (harness-test-temp-dir)))
+           (worker (harness-tools-sessions-test-session :name "Worker"))
+           (requested nil))
+      (harness-on 'permission/requested (lambda (&rest _) (setq requested t)))
+      (puthash "t-move" (list :id "t-move" :session worker :cwd default-directory :state 'active
+                              :created (float-time))
+               harness-tasks--table)
+      (cl-flet ((refused (regexp input)
+                  (let ((r (harness-tools-sessions-test-run me "session_move" input)))
+                    (should (plist-get r :is-error))
+                    (should (string-match-p regexp (plist-get r :content)))
+                    ;; The reason alone, not Emacs's printed form of the error.
+                    (should-not (string-match-p "Harness error" (plist-get r :content))))))
+        (refused "worktree" (list :session_id wt :directory new))
+        (refused "Worker cannot move: it works on task t-move" (list :session_id worker :directory new))
+        (refused "not a directory" (list :directory (expand-file-name "missing" new)))
+        (refused "works in .* already" (list :directory default-directory))
+        (refused "No session matches" (list :session_id "nobody" :directory new)))
+      (should-not requested)
+      (harness-call 'session/update me :non-interactive t :silent t)
+      (let ((r (harness-tools-sessions-test-run me "session_move" (list :directory new))))
+        (should (plist-get r :is-error))
+        (should (string-match-p "needs the user's confirmation, and the session is non-interactive"
+                                (plist-get r :content))))
+      (should-not requested)
+      (should (plist-get (harness-tools-sessions--move (list :session_id me :directory new :confirmed t)
+                                                       (list :session-id me))
+                         :is-error))
+      (should (equal default-directory (plist-get (harness-call 'session/get me) :cwd))))))
+
 (ert-deftest harness-tools-sessions-tasks ()
   (harness-tools-sessions-test-with
     (let* ((harness-provider-demo--delay 0.05)
@@ -490,6 +639,77 @@ tell it from the user's messages."
         (should (string-match-p "state done.*, verified" text)))
       (should (plist-get (harness-tools-sessions-test-run me "task_control" (list :task_id id :action "verify")) :is-error))
       (should (eq 'done (plist-get (harness-call 'task/get id) :state))))))
+
+(defvar harness-tasks--reject-message)
+(defvar harness-tasks--aside-message)
+(declare-function harness-tasks--reject-text "harness-tasks" (feedback))
+(declare-function harness-tasks--aside-text "harness-tasks" (text))
+
+(ert-deftest harness-tools-sessions-message-to-a-task-in-review-is-no-review ()
+  "session_send and task_control's message reach a task in review as this session's.
+Neither is a review, so neither sends the task back: the message says
+who sent it (its header and its node's sender), opens with the aside
+text and never the reject text, keeps no round of feedback, and the
+task waits for review again once its turn ends.  Only task_control's
+reject sends the work back, opened by the reject text."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-require-verification t)
+           (me (harness-tools-sessions-test-session :name "Onboard benito"))
+           (id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Fix the lexer")) :meta)
+                          :task-id))
+           (header (format "[Message from session %s \"Onboard benito\"]\n\n" me))
+           (sender (list :kind 'session :id me :name "Onboard benito")))
+      (harness-tools-sessions-test-ok me "task_wait" (list :task_id id))
+      (should (eq 'review (plist-get (harness-call 'task/get id) :state)))
+      (let* ((sid (plist-get (harness-call 'task/get id) :session))
+             (last-user (lambda () (car (last (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
+                                                                (harness-call 'session/nodes sid)))))))
+        ;; session_send, waiting for the reply.
+        (should (string-match-p "turn ended: end-turn"
+                                (harness-tools-sessions-test-ok me "session_send"
+                                                                (list :session_id sid :message "Applying now." :wait t))))
+        (let ((node (funcall last-user)))
+          (should (equal (harness-tasks--aside-text (concat header "Applying now.")) (plist-get node :content)))
+          (should (string-prefix-p harness-tasks--aside-message (plist-get node :content)))
+          (should-not (string-search harness-tasks--reject-message (plist-get node :content)))
+          (should (equal sender (harness-node-sender node))))
+        (let ((line (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "review"))))
+          (should (string-match-p (concat (regexp-quote id) " +review ") line))
+          (should-not (string-match-p "sent back" line)))
+        (should-not (plist-get (harness-call 'task/get id) :feedback))
+        ;; task_control's message: no review either, and it says who sent it.
+        (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "message" :message "Traefik checks out."))
+        (let ((line (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "review"))))
+          (should-not (string-match-p "sent back" line)))
+        (let ((node (funcall last-user)))
+          (should (equal (harness-tasks--aside-text (concat header "Traefik checks out.")) (plist-get node :content)))
+          (should-not (string-search harness-tasks--reject-message (plist-get node :content)))
+          (should (equal sender (harness-node-sender node))))
+        (should-not (plist-get (harness-call 'task/get id) :feedback))
+        ;; task_control's reject sends it back, as the user's review.
+        (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "reject" :message "Also the parser."))
+        (should (string-match-p "sent back 1 time\\b"
+                                (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "review"))))
+        (should (equal (harness-tasks--reject-text "Also the parser.") (plist-get (funcall last-user) :content)))
+        (should (equal '("Also the parser.")
+                       (mapcar (lambda (round) (plist-get round :text))
+                               (plist-get (harness-call 'task/get id) :feedback))))))))
+
+(ert-deftest harness-tools-sessions-task-message-says-who-sent-it ()
+  "task_control's message to a task's session is the calling session's, as session_send's is.
+A follow-up to a done task too: its header and its node's sender name
+the calling session, not the user."
+  (harness-tools-sessions-test-with
+    (let* ((me (harness-tools-sessions-test-session :name "Boss"))
+           (id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Fix the lexer")) :meta)
+                          :task-id)))
+      (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "done"))
+      (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "message" :message "and the parser"))
+      (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "done"))
+      (let ((node (car (last (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
+                                               (harness-call 'session/nodes (plist-get (harness-call 'task/get id) :session)))))))
+        (should (equal (format "[Message from session %s \"Boss\"]\n\nand the parser" me) (plist-get node :content)))
+        (should (equal (list :kind 'session :id me :name "Boss") (harness-node-sender node)))))))
 
 (ert-deftest harness-tools-sessions-task-list-merging-column ()
   "A task holding a place in the merge queue lists as merging.

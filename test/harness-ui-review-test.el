@@ -178,6 +178,21 @@ gives the task another script."
   "The feedback task ID was sent back with, as texts."
   (mapcar (lambda (round) (plist-get round :text)) (plist-get (harness-call 'task/get id) :feedback)))
 
+(defun harness-ui-review-test--undefined-faces (buffer)
+  "Return the names in the `face' properties of BUFFER's text that name no face."
+  (with-current-buffer buffer
+    (let ((pos (point-min)) (bad nil))
+      (cl-labels ((walk (face)
+                    (cond ((or (null face) (keywordp face)))
+                          ((symbolp face) (unless (facep face) (cl-pushnew face bad)))
+                          ;; An anonymous face: attributes, not names.
+                          ((keywordp (car-safe face)))
+                          ((consp face) (mapc #'walk face)))))
+        (while (< pos (point-max))
+          (walk (get-text-property pos 'face))
+          (setq pos (next-single-property-change pos 'face nil (point-max)))))
+      bad)))
+
 (ert-deftest harness-ui-review-banner-shows-and-verifies ()
   "A task in review says so in its session, and its [Verify] accepts the work."
   (harness-ui-review-test-with
@@ -188,6 +203,16 @@ gives the task another script."
         (should (string-match-p "Fix the flaky test" (buffer-string)))
         (should (string-search "[Verify]  C-c C-v" (buffer-string)))
         (should (string-search "[Send back]  C-c C-x" (buffer-string)))
+        ;; The keys show as keys.  Their face was named after one gone, and
+        ;; each redisplay of the banner logged "Invalid face reference".
+        (let ((key (save-excursion
+                     (goto-char (point-min))
+                     (search-forward "[Verify]  C-c C-v")
+                     (- (point) (length "C-c C-v")))))
+          (should (memq 'harness-ui-key-face (ensure-list (get-text-property key 'face)))))
+        (should-not (harness-ui-review-test--undefined-faces chat))
+        ;; Text from before still shows: the old name is an alias.
+        (should (facep 'harness-chat-key-face))
         ;; The report pops out with [Review]: [Report] read as reporting
         ;; the agent for something bad.
         (should (string-search "[Review]" (buffer-string)))

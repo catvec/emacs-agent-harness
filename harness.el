@@ -102,12 +102,14 @@ Only the ACP client half is used: its TCP server stays off here.")
 They define the macros modules expand, so a change to one recompiles
 every file (see `harness--compiled-fresh-p').")
 
-(defconst harness--library-files '("lisp/harness-files.el" "lisp/harness-emacs-endpoint.el"
+(defconst harness--library-files '("lisp/harness-policy.el" "lisp/harness-files.el"
+                                  "lisp/harness-emacs-endpoint.el"
                                   "lisp/harness-notifications-desktop.el" "lisp/harness-server.el"
                                   "lisp/harness-revision.el")
   "Libraries loaded after the core files and before any module, in order.
 Both sides of the process split use them: the UI requires them all, and
-the harness process's modules require harness-files,
+the harness process's modules require harness-policy (the settings an
+administrator fixes, which each side reads for itself), harness-files,
 harness-notifications-desktop, harness-revision (which notes, on each
 side, the commit the harness was loaded from) and harness-emacs-endpoint
 \(whose `harness-emacs-eval' each side reads for itself).  They are loaded
@@ -159,10 +161,15 @@ recompile the modules.")
 (defvar harness-acp--server-enabled)
 (defvar harness-ui-connection-address)
 (declare-function harness-ui-reload-server "harness-ui")
+(declare-function harness-policy-load "harness-policy")
+(declare-function harness-policy-apply "harness-policy" (&optional final))
 
 ;;;###autoload
 (defun harness-start ()
   "Load the core and every enabled module, then initialise them.
+The policy (see harness-policy.el) is read first and applied before any
+module loads, and again once they all have: a policy that cannot be
+trusted signals an error, and nothing starts.
 Return non-nil when every module loaded and initialised."
   (interactive)
   (harness--setup-load-path)
@@ -171,6 +178,14 @@ Return non-nil when every module loaded and initialised."
         (harness-load-compiled (harness--path f))
       (error (harness-log 'error "compiling %s failed: %S; loading source" f err)
              (load (harness--path f) nil 'nomessage))))
+  ;; Before any module: which ones load is a setting too.  Required
+  ;; too, in case the library files left it out: no policy is no option.
+  (condition-case err
+      (progn (require 'harness-policy)
+             (harness-policy-load)
+             (harness-policy-apply))
+    (error (harness-log 'error "%s" (error-message-string err))
+           (signal (car err) (cdr err))))
   (let (failed)
     (dolist (f (harness--module-files))
       (condition-case err
@@ -183,6 +198,12 @@ Return non-nil when every module loaded and initialised."
       (when (and (boundp 'harness-ui-connection-address)
                  (not (stringp harness-ui-connection-address)))
         (setq harness-ui-connection-address 'process)))
+    ;; The options the modules define.  The UI of a harness process
+    ;; lacks those of lisp/modules, which that process applies itself.
+    (condition-case err
+        (harness-policy-apply (not harness-process))
+      (error (harness-log 'error "%s" (error-message-string err))
+             (signal (car err) (cdr err))))
     (harness-modules-init)
     (setq harness-started t)
     (run-hooks 'harness-start-hook)
@@ -302,6 +323,17 @@ the UI of a harness process, the process is asked to reload too."
                   (harness-load-compiled f)
                 (harness--load-file f))
             (error (let ((problem (format "%s: %s" (file-name-nondirectory f) (error-message-string err))))
+                     (harness-log 'error "reload: %s" problem)
+                     (push problem errors)))))
+        ;; The policy file is read again; one that cannot be trusted
+        ;; leaves the policy in force as it was.  Applying it again
+        ;; also guards anew the options whose definitions were evaluated.
+        (dolist (step (list (lambda () (require 'harness-policy))
+                            #'harness-policy-load
+                            (lambda () (harness-policy-apply (not harness-process)))))
+          (condition-case err
+              (funcall step)
+            (error (let ((problem (error-message-string err)))
                      (harness-log 'error "reload: %s" problem)
                      (push problem errors)))))
         (harness-modules-init)

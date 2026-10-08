@@ -36,6 +36,10 @@ tasks when they are `fail', fails.  Each request is recorded in
          (harness-resolved harness-ui-sessions-test--tasks))
         ((member method '("_harness/permission/answer" "_harness/question/answer"))
          (harness-resolved t))
+        ((equal method "_harness/session/move")
+         (harness-resolved (harness-plist-merge (harness-ui-session (plist-get params :id))
+                                                (list :cwd (plist-get params :dir)
+                                                      :project (plist-get params :project)))))
         (t (harness-rejected (list 'harness-error (format "%s: no such method" method))))))
 
 (defun harness-ui-sessions-test--answers ()
@@ -467,12 +471,38 @@ before the session says it waits no more."
           (should (equal '("child") popped))
           (should (= 2 (length (harness-ui-sessions-test--answers)))))))))
 
+(ert-deftest harness-ui-sessions-move-the-session-at-point ()
+  "m moves the session at point to another directory, read from the
+directory that holds its own, and the list follows it to the project
+there."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--with-init
+      (let ((asked nil))
+        (harness-ui-sessions-test--add "lost" other)
+        (harness-ui-sessions-test--add "home" root)
+        (let ((default-directory other)) (harness-sessions))
+        (with-current-buffer harness-ui-sessions--buffer-name
+          (should (equal '("lost") (harness-ui-sessions-test--shown)))
+          (harness-ui-sessions-test--goto "lost")
+          (should (eq 'harness-ui-sessions-move (key-binding (kbd "m"))))
+          (cl-letf (((symbol-function 'read-directory-name)
+                     (lambda (prompt dir &rest _) (push (list prompt dir) asked) root)))
+            (call-interactively (key-binding (kbd "m"))))
+          (should (= 1 (length asked)))
+          (should (string-match-p "\\`Move .*lost to directory: \\'" (car (car asked))))
+          (should (equal base (cadr (car asked))))
+          (should (equal (list (list "_harness/session/move" (list :id "lost" :dir root :keep-old-dir :false :project root)))
+                         (harness-ui-sessions-test--answers)))
+          (should (equal root (plist-get (harness-ui-session "lost") :project)))
+          (harness-test-wait (lambda () (null (harness-ui-sessions-test--shown))) 5 "the list to follow the move"))))))
+
 (ert-deftest harness-ui-sessions-open-in-its-project ()
   "RET opens the session at point in its project, from either of its lines.
 The project switched to is the main checkout, a task's worktree's too,
-and the session then opens where sessions open; without a switch it
-replaces the list, as ever.  A session shown already gets its window
-selected.  A remote project, or one gone from disk, is not switched to."
+and the session then opens where sessions open -- in the one window of
+a workspace showing nothing yet -- and without a switch it replaces the
+list, as ever.  A session shown already gets its window selected.  A
+remote project, or one gone from disk, is not switched to."
   (harness-ui-sessions-test-with-repo
     (harness-ui-sessions-test--blocked "task" wt "permission")
     (harness-ui-sessions-test--add "remote" "/ssh:nobody@example.invalid:/srv/project/")
@@ -510,6 +540,18 @@ selected.  A remote project, or one gone from disk, is not switched to."
               (should (eq chat (harness-ui-visit-session "task"))))
             (should-not shown)
             (should (eq chat (window-buffer (selected-window))))
+            ;; Switched to a workspace showing nothing yet: the session
+            ;; takes its window, unless a position is asked for.
+            (set-window-buffer (selected-window) window-buffer)
+            (setq switched nil shown nil switch 'blank)
+            (with-current-buffer harness-ui-sessions--buffer-name
+              (setq-local harness-ui-position 'left)
+              (harness-ui-sessions-test--goto "task")
+              (harness-ui-sessions-open)
+              (harness-ui-sessions-open 'bottom))
+            (should (equal (list root root) switched))
+            (should (equal (list (list chat 'bottom) (list chat 'full)) shown))
+            (setq switch t)
             ;; Nowhere to switch to.
             (setq switched nil)
             (cl-letf (((symbol-function 'harness-files-owning-checkout) (lambda (&rest _) (error "Looked at"))))
@@ -527,39 +569,226 @@ selected.  A remote project, or one gone from disk, is not switched to."
 
 (defvar persp-mode)
 (defvar +workspaces-switch-project-function)
+(defvar doom-fallback-buffer-name)
+
+(defun harness-ui-sessions-test--project (base dir &rest files)
+  "Make a project at DIR under BASE, a directory with .git, holding FILES.
+Return its root."
+  (let ((root (file-name-as-directory (expand-file-name dir base))))
+    (make-directory (expand-file-name ".git" root) t)
+    (dolist (file files)
+      (write-region "" nil (expand-file-name file root)))
+    root))
+
+(defmacro harness-ui-sessions-test-with-workspaces (&rest body)
+  "Run BODY with Doom Emacs's workspaces faked, in a frame of one window.
+In BODY, `workspaces' lists the workspaces in order, each as
+\(NAME PROJECT . OPEN): PROJECT is the directory it notes as its
+`+workspace-project', as a fork of Doom keeps it (nil for none), OPEN
+the files (or buffers) it has open.  `current' names the current one.
+`switched' lists the workspaces switched to and `made' Doom's project
+switches, as (DIR FUNCTION), FUNCTION the `+workspaces-switch-project-function'
+it ran with, newest first.  `base' is a directory for projects
+\(`harness-ui-sessions-test--project').  A workspace shows its first
+open file in the window, else Doom's fallback buffer; Doom's project
+switch makes a workspace named after the project, noting it, as the
+fork's does -- \"parent/name\" when the name is taken -- that shows
+the fallback buffer."
+  (declare (indent 0))
+  `(let* ((base (file-name-as-directory (file-truename (harness-test-temp-dir))))
+          (workspaces nil) (current nil) (switched nil) (made nil)
+          (doom-fallback-buffer-name " *harness-ui-sessions-test doom*")
+          (persp-mode t)
+          (buffers (lambda (open)
+                     (mapcar (lambda (f) (if (bufferp f) f (find-file-noselect f))) open)))
+          (show (lambda (name)
+                  (setq current name)
+                  (set-window-buffer
+                   nil (or (car (funcall buffers (cddr (assoc name workspaces))))
+                           (get-buffer-create doom-fallback-buffer-name))))))
+     (save-window-excursion
+       (delete-other-windows)
+       (unwind-protect
+           (cl-letf (((symbol-function '+workspace-list-names) (lambda () (mapcar #'car workspaces)))
+                     ((symbol-function '+workspace-get)
+                      (lambda (name &optional _noerror) (assoc name workspaces)))
+                     ((symbol-function '+workspace-buffer-list)
+                      (lambda (&optional persp) (funcall buffers (cddr persp))))
+                     ((symbol-function 'persp-parameter)
+                      (lambda (param &optional persp)
+                        (and (eq param '+workspace-project) (cadr persp))))
+                     ((symbol-function '+workspace-current-name) (lambda () current))
+                     ((symbol-function '+workspace-switch)
+                      (lambda (name &optional _auto-create)
+                        (push name switched)
+                        (funcall show name)
+                        t))
+                     ((symbol-function '+workspace-message) #'ignore)
+                     ((symbol-function '+workspaces-switch-to-project-h)
+                      (lambda (&optional dir)
+                        (push (list dir (symbol-value '+workspaces-switch-project-function)) made)
+                        (let* ((name (file-name-nondirectory (directory-file-name dir)))
+                               (name (if (assoc name workspaces)
+                                         (concat (file-name-nondirectory
+                                                  (directory-file-name (file-name-directory
+                                                                        (directory-file-name dir))))
+                                                 "/" name)
+                                       name)))
+                          (setq workspaces (append workspaces (list (list name dir))))
+                          (funcall show name))))
+                     ((symbol-function 'doom-project-name)
+                      (lambda (&optional dir) (file-name-nondirectory (directory-file-name dir))))
+                     ((symbol-function 'doom-project-p)
+                      (lambda (&optional dir) (file-directory-p (expand-file-name ".git" dir)))))
+             ,@body)
+         (dolist (buffer (buffer-list))
+           (when (or (equal (buffer-name buffer) doom-fallback-buffer-name)
+                     (string-prefix-p base (or (buffer-file-name buffer) "")))
+             (kill-buffer buffer)))
+         (delete-directory base t)))))
 
 (ert-deftest harness-ui-sessions-switch-doom-workspaces ()
-  "With Doom Emacs's workspaces, a session's project is switched to as
-switching project does, but without asking for a file to open.  A
-project whose workspace is current already is not switched to, nor a
-directory that is no project, and without workspaces nothing is."
-  (let ((switched nil) (current "acme-api"))
-    (cl-letf (((symbol-function '+workspaces-switch-to-project-h)
-               (lambda (&optional dir)
-                 (push (list dir (symbol-value '+workspaces-switch-project-function)) switched)
-                 (setq current (file-name-nondirectory (directory-file-name dir)))))
-              ((symbol-function '+workspace-current-name) (lambda () current))
-              ((symbol-function 'doom-project-name)
-               (lambda (&optional dir) (file-name-nondirectory (directory-file-name dir))))
-              ((symbol-function 'doom-project-p)
-               (lambda (&optional dir) (string-prefix-p "/srv/" dir))))
-      (let ((persp-mode t))
-        (should (harness-ui-switch-project-workspace "/srv/shop/"))
-        (should (equal '(("/srv/shop/" ignore)) switched))
-        (should (equal "shop" current))
-        ;; Its workspace is current already.
-        (should-not (harness-ui-switch-project-workspace "/srv/shop/"))
-        (should (= 1 (length switched)))
-        ;; No project.
-        (should-not (harness-ui-switch-project-workspace "/tmp/scratch/"))
-        (should (= 1 (length switched))))
+  "With Doom Emacs's workspaces, a session's project is switched to.
+Its workspace, when it has one, comes back as it was left; else Doom
+makes one, as switching project does but without asking for a file to
+open, which shows nothing yet.  A project whose workspace is current
+already is not switched to, nor a directory that is no project, and
+without workspaces nothing is."
+  (harness-ui-sessions-test-with-workspaces
+    (let ((shop (harness-ui-sessions-test--project base "srv/shop/" "README.md"))
+          (blog (harness-ui-sessions-test--project base "srv/blog/" "post.md"))
+          (lab (harness-ui-sessions-test--project base "srv/lab/"))
+          (scratch (file-name-as-directory (expand-file-name "scratch" base))))
+      (make-directory scratch)
+      (setq workspaces (list (list "blog" nil (expand-file-name "post.md" blog))
+                             (list "shop" nil (expand-file-name "README.md" shop)))
+            current "blog")
+      (should (eq t (harness-ui-switch-project-workspace shop)))
+      (should (equal '("shop") switched))
+      (should-not made)
+      (should (equal (expand-file-name "README.md" shop) (buffer-file-name (window-buffer))))
+      ;; Its workspace is current already.
+      (should-not (harness-ui-switch-project-workspace shop))
+      (should (equal '("shop") switched))
+      ;; None yet: Doom makes it, with no file to open, and it is blank.
+      (should (eq 'blank (harness-ui-switch-project-workspace lab)))
+      (should (equal (list (list lab 'ignore)) made))
+      (should (equal "lab" current))
+      (should-not (harness-ui-switch-project-workspace lab))
+      ;; No project.
+      (should-not (harness-ui-switch-project-workspace scratch))
       (let ((persp-mode nil))
-        (should-not (harness-ui-switch-project-workspace "/srv/blog/"))
-        (should (= 1 (length switched)))))
-    ;; No Doom at all.
-    (let ((persp-mode t))
-      (should-not (fboundp '+workspaces-switch-to-project-h))
-      (should-not (harness-ui-switch-project-workspace "/srv/blog/")))))
+        (should-not (harness-ui-switch-project-workspace blog)))
+      (should (equal '("shop") switched))
+      (should (= 1 (length made)))))
+  ;; No Doom at all.
+  (let ((persp-mode t))
+    (should-not (fboundp '+workspaces-switch-to-project-h))
+    (should-not (harness-ui-switch-project-workspace "/srv/blog/"))))
+
+(ert-deftest harness-ui-sessions-switch-to-the-workspace-a-fork-notes ()
+  "A fork of Doom notes the project a workspace is for, `+workspace-project'.
+A workspace noting the project is the project's whatever its name, and
+so is the one named after it noting none: the empty workspace the
+project was first opened in, which the fork renames without noting
+anything, and whose project the fork's own switch passes over for a
+new, empty workspace.  One named after the project noting another is
+the other's, unless that is gone, moved say.  A workspace noting a
+directory on another host is not looked at, which would connect to it."
+  (harness-ui-sessions-test-with-workspaces
+    (let ((shop (harness-ui-sessions-test--project base "srv/shop/" "README.md"))
+          (old-shop (harness-ui-sessions-test--project base "old/shop/" "main.c"))
+          (blog (harness-ui-sessions-test--project base "srv/blog/" "post.md"))
+          (lab (harness-ui-sessions-test--project base "srv/lab/"))
+          (other-lab (harness-ui-sessions-test--project base "elsewhere/lab/"))
+          (wiki (harness-ui-sessions-test--project base "srv/wiki/" "index.org"))
+          (looked nil))
+      (setq workspaces (list (list "blog" blog (expand-file-name "post.md" blog))
+                             (list "shop" nil (expand-file-name "README.md" shop))
+                             (list "old/shop" old-shop (expand-file-name "main.c" old-shop))
+                             (list "lab" other-lab)
+                             (list "wiki" (expand-file-name "gone/wiki/" base)
+                                   (expand-file-name "index.org" wiki))
+                             (list "far/shop" "/ssh:nobody@example.invalid:/srv/shop/"))
+            current "blog")
+      (cl-letf* ((directory-p (symbol-function 'file-directory-p))
+                 ((symbol-function 'file-directory-p)
+                  (lambda (file)
+                    (if (file-remote-p file)
+                        (ignore (push file looked))
+                      (funcall directory-p file))))
+                 (equal-p (symbol-function 'file-equal-p))
+                 ((symbol-function 'file-equal-p)
+                  (lambda (file other)
+                    (if (or (file-remote-p file) (file-remote-p other))
+                        (ignore (push file looked))
+                      (funcall equal-p file other)))))
+        ;; Noting the project, from inside: current already.
+        (should-not (harness-ui-switch-project-workspace blog))
+        ;; Named after it, noting none.
+        (should (eq t (harness-ui-switch-project-workspace shop)))
+        (should (equal "shop" current))
+        ;; Noting it under another name, past "shop", which has none of its files.
+        (should (eq t (harness-ui-switch-project-workspace old-shop)))
+        (should (equal "old/shop" current))
+        (should (eq t (harness-ui-switch-project-workspace blog)))
+        (should (equal "blog" current))
+        ;; Named after it, noting a directory gone since.
+        (should (eq t (harness-ui-switch-project-workspace wiki)))
+        (should (equal "wiki" current))
+        (should (equal (expand-file-name "index.org" wiki) (buffer-file-name (window-buffer))))
+        ;; Named after it, noting another project: Doom makes its own.
+        (should (eq 'blank (harness-ui-switch-project-workspace lab)))
+        (should (equal (list (list lab 'ignore)) made))
+        (should (equal "srv/lab" current))
+        (should (equal '("wiki" "blog" "old/shop" "shop") switched))
+        (should-not looked)))))
+
+(ert-deftest harness-ui-sessions-switch-past-an-empty-duplicate ()
+  "Of two workspaces of a project, the one with its files open is taken.
+That is the one named after the project, noting none, rather than the
+empty one a fork of Doom made beside it, noting the project -- from
+another workspace or from that empty one.  The one with the most of
+the project's files open wins; on a tie the one named after the
+project.  Remote files are not looked at."
+  (harness-ui-sessions-test-with-workspaces
+    (let* ((harness (harness-ui-sessions-test--project base "ai/emacs-agent-harness/"
+                                                       "README.md" "harness.el" "DESIGN.md"))
+           (site (harness-ui-sessions-test--project base "web/site/" "index.html"))
+           (file (lambda (name) (expand-file-name name harness)))
+           (remote (generate-new-buffer " *harness-ui-sessions-test remote*")))
+      (with-current-buffer remote
+        (setq buffer-file-name "/ssh:nobody@example.invalid:/srv/x.el"))
+      (unwind-protect
+          (cl-letf* ((in-directory (symbol-function 'file-in-directory-p))
+                     ((symbol-function 'file-in-directory-p)
+                      (lambda (file dir)
+                        (when (file-remote-p file) (error "Looked at %s" file))
+                        (funcall in-directory file dir))))
+            (setq workspaces (list (list "emacs-agent-harness" nil
+                                         (funcall file "README.md") (funcall file "harness.el"))
+                                   (list "site" site (expand-file-name "index.html" site))
+                                   (list "ai/emacs-agent-harness" harness remote))
+                  current "site")
+            (should (eq t (harness-ui-switch-project-workspace harness)))
+            (should (equal "emacs-agent-harness" current))
+            (should (equal (funcall file "README.md") (buffer-file-name (window-buffer))))
+            ;; From the empty one too.
+            (setq current "ai/emacs-agent-harness")
+            (should (eq t (harness-ui-switch-project-workspace harness)))
+            (should (equal "emacs-agent-harness" current))
+            ;; More of its files open wins.
+            (setcdr (cdr (assoc "ai/emacs-agent-harness" workspaces))
+                    (list (funcall file "DESIGN.md") (funcall file "README.md") (funcall file "harness.el")))
+            (should (eq t (harness-ui-switch-project-workspace harness)))
+            (should (equal "ai/emacs-agent-harness" current))
+            ;; A tie: the one named after the project.
+            (setcdr (cdr (assoc "emacs-agent-harness" workspaces)) nil)
+            (setcdr (cdr (assoc "ai/emacs-agent-harness" workspaces)) nil)
+            (should (eq 'blank (harness-ui-switch-project-workspace harness)))
+            (should (equal "emacs-agent-harness" current))
+            (should-not made))
+        (kill-buffer remote)))))
 
 (ert-deftest harness-ui-sessions-notifier-shows-those-waiting ()
   "A click on the mode line's notifier lists the sessions waiting for you.

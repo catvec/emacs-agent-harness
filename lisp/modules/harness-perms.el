@@ -28,8 +28,10 @@
 ;; `:reason' and, when there is something the model can do about it, a
 ;; `:hint', because a denial the model can act on is the difference
 ;; between an autonomous session and one that stalls.  Other modules
-;; add stages of their own: the tasks module keeps the turns that write
-;; a backlog task up read-only at 25.
+;; add stages of their own: the session tools have the user confirm
+;; session_move at 6 (`harness-perms-confirm', see Confirmations), and
+;; the tasks module keeps the turns that write a backlog task up
+;; read-only at 25.
 ;;
 ;; Non-interactive mode (the user is away) is no permission policy of
 ;; its own: what the session's mode would ask the user, the auto-mode
@@ -49,6 +51,13 @@
 ;; verdicts and no project instructions (CLAUDE.md) along: it never
 ;; rules on the task, its review or the project's workflow.
 ;;
+;; What it does follow is what Claude Code's own auto mode follows: the
+;; autoMode rules of Claude Code's user and managed settings (see "The
+;; rules Claude Code's own auto mode follows").  The organization's
+;; trusted infrastructure is no place "off the machine" to it, and the
+;; organization's denials hold, so with the same settings it is no
+;; stricter than Claude Code.  No entry lifts its own rules.
+;;
 ;; Its verdict is a verdict on one call, never on the work: an `auto'
 ;; session whose user is present turns a judge denial into a permission
 ;; prompt (`harness-perms--judge-decision') that says what the judge
@@ -67,10 +76,13 @@
 ;;
 ;; A prompt about a path outside the allowed directories (the jail's,
 ;; or an agent's own request for a directory) is answered for a glob
-;; pattern, not for one file: by default everything in the directory
-;; (`DIR/**'), the one holding the file or the directory itself.  The
-;; user may edit it, more or less specific, before answering, and the
-;; answer grants or denies the pattern.  No other prompt has one: the
+;; pattern, not for one file: by default everything in a directory
+;; (`DIR/**').  For the jail's that is the root of the repository the
+;; path lies in, unless that would open too much (see
+;; `harness-perms--prompt-dir'), else the directory holding the file or
+;; the directory itself; for an agent's request, the directory it asked
+;; for.  The user may edit it, more or less specific, before answering,
+;; and the answer grants or denies the pattern.  No other prompt has one: the
 ;; mode asking, or the judge objecting, is about the call itself, whose
 ;; paths the jail already let through, so its answers for the session
 ;; or for always record a rule for the tool.
@@ -96,7 +108,9 @@
 ;; are left out, since what a tool reads goes to the model's provider.
 ;; The judge's prompt says the same for the calls it sees, such as Emacs
 ;; Lisp that reads the state directory.  Standing rules still come
-;; first, so a user's deny rule holds.
+;; first, so a user's deny rule holds.  The file emacs_find_definition
+;; showed a definition in may be read the same way, and only that file
+;; (see "Files the user's Emacs showed a definition in").
 ;;
 ;; Skills are read the same way (see "Skills, which every session may
 ;; read"): a call that only reads may read every directory skill
@@ -112,7 +126,18 @@
 ;; the prompt: the call was open only because the old mode asked, and
 ;; yolo would have allowed it.  A standing rule still decides, and a
 ;; directory prompt keeps waiting, because yolo does not grant
-;; directories.
+;; directories; nor does a confirmation, which only the user gives.
+;;
+;; A policy (see harness-policy.el and docs/policy.md) holds here too.
+;; A permission mode or non-interactive switch it sets is every
+;; session's, whatever a session record says.  Standing rules it sets
+;; come before the session's own, so no answer overrides them, and no
+;; answer records a standing rule: the prompts leave out the answers
+;; for always, and one given anyway holds for the session.  Allowed
+;; directories it sets are not added to: a directory prompt offers no
+;; allow-always, and a grant is for the session or the turn.  That a
+;; person in front of a prompt may let a session reach a directory
+;; outside them, as they may let a call run, the policy leaves as it is.
 ;;
 ;; The module works without the session and agent modules: methods it
 ;; needs from them are looked up with `harness-method-exists-p'.
@@ -125,6 +150,7 @@
 (require 'harness-util)
 (require 'harness-config)
 (require 'harness-tools)
+(require 'harness-policy)
 
 (defvar harness-state-directory)
 (defvar harness-directory)
@@ -324,20 +350,54 @@ agent can do what it asked for, and nothing is remembered (see
       (symbol-value key))))
 
 (defun harness-perms--mode-of (session)
-  "Return the effective permission mode symbol for SESSION."
-  (or (harness-perms--sym (plist-get session :permission-mode))
-      (harness-perms--sym (harness-perms--config 'harness-permission-mode session))
-      'ask))
+  "Return the effective permission mode symbol for SESSION.
+A mode the policy sets is every session's (see harness-policy.el)."
+  (if-let* ((pinned (harness-policy-entry 'harness-permission-mode)))
+      (harness-perms--sym (cdr pinned))
+    (or (harness-perms--sym (plist-get session :permission-mode))
+        (harness-perms--sym (harness-perms--config 'harness-permission-mode session))
+        'ask)))
 
 (defun harness-perms--non-interactive-p (session)
   "Non-nil when SESSION should never wait for the user.
 A session record's own switch decides, off as much as on: it starts
 from `harness-non-interactive' and the user flips it per session.  The
-setting alone decides only for a request without a session record."
+setting alone decides only for a request without a session record.  A
+switch the policy sets is every session's (see harness-policy.el)."
   (harness-json-true-p
-   (if (plist-member session :non-interactive)
-       (plist-get session :non-interactive)
-     (harness-perms--config 'harness-non-interactive session))))
+   (cond ((harness-policy-entry 'harness-non-interactive)
+          (cdr (harness-policy-entry 'harness-non-interactive)))
+         ((plist-member session :non-interactive)
+          (plist-get session :non-interactive))
+         (t (harness-perms--config 'harness-non-interactive session)))))
+
+(defun harness-perms--scope-allowed (scope option)
+  "Return SCOPE of an answer, or `session' when the policy rules it out.
+An answer for `always' changes OPTION -- `harness-allowed-directories'
+or `harness-perms-rules' -- which the policy may set; then it holds for
+the session instead."
+  (if (and (eq scope 'always) (harness-policy-pinned-p option))
+      (progn (harness-log 'info "perms: %s is set by policy; the answer holds for the session" option)
+             'session)
+    scope))
+
+(defun harness-perms--tool-options ()
+  "Return the answers a tool prompt offers.
+Those of `harness-perms-options', but for the ones for always, which
+record a standing rule, when the policy sets `harness-perms-rules'."
+  (if (harness-policy-pinned-p 'harness-perms-rules)
+      (cl-remove-if (lambda (o) (memq o '(allow-always deny-always))) harness-perms-options)
+    harness-perms-options))
+
+(defun harness-perms--dir-prompt-options (options)
+  "Return OPTIONS, the answers a directory prompt offers, as the policy allows.
+`allow-always' goes when the policy sets `harness-allowed-directories',
+which it would add to, and `deny-always' when it sets
+`harness-perms-rules', where it would record a rule."
+  (cl-remove-if (lambda (o)
+                  (or (and (eq o 'allow-always) (harness-policy-pinned-p 'harness-allowed-directories))
+                      (and (eq o 'deny-always) (harness-policy-pinned-p 'harness-perms-rules))))
+                options))
 
 (defun harness-perms--judge-p (session)
   "Non-nil when the auto-mode judge decides SESSION's undecided calls.
@@ -574,11 +634,13 @@ directory (`harness-perms--skills-hint')."
 (defun harness-perms--unreachable (request roots)
   "Return the first path of REQUEST it may not reach, or nil.
 A path is reachable when it lies inside one of ROOTS, or, for a call
-that only reads, inside the harness itself (`harness-perms--inspectable-p')
-or a skills directory (`harness-perms--skill-readable-p')."
+that only reads, inside the harness itself (`harness-perms--inspectable-p'),
+a skills directory (`harness-perms--skill-readable-p') or a file the
+user's Emacs showed a definition in (`harness-perms--revealed-p')."
   (cl-find-if (lambda (p) (and (harness-perms--outside (list p) roots)
                                (not (harness-perms--inspectable-p request p))
-                               (not (harness-perms--skill-readable-p request p))))
+                               (not (harness-perms--skill-readable-p request p))
+                               (not (harness-perms--revealed-p request p))))
               (plist-get request :paths)))
 
 (defun harness-perms--reads-harness-p (request)
@@ -594,6 +656,75 @@ mode."
            (and (not (harness-perms--unreachable request roots))
                 (harness-perms--outside paths roots)
                 t)))))
+
+;;;; Files the user's Emacs showed a definition in
+;;
+;; emacs_find_definition, which inspects the user's Emacs and so never
+;; needs approval, names the file a definition was loaded from and shows
+;; the definition's source.  An agent that wants the code around it then
+;; reads that file, which mostly lies outside the session's roots (the
+;; user's configuration, a package): asking the user about it would ask
+;; again about what the inspection already showed.  So the tool reports
+;; the file (`permission/reveal-file'), and a call that only reads may
+;; read it for the rest of the session, in every mode.  Only that file:
+;; its directory, and writing the file, stay jailed, and the harness's
+;; credentials stay out of reach.  A definition's file is Lisp the
+;; user's Emacs loaded, whose definitions and values the inspection
+;; tools show anyway.
+
+(defvar harness-perms--revealed (make-hash-table :test 'equal)
+  "Session id -> the files the user's Emacs showed a definition in.
+Each is local and has its symbolic links resolved; see
+`permission/reveal-file'.")
+
+(defun harness-perms--revealed-p (request path)
+  "Non-nil when REQUEST may read PATH because the user's Emacs showed it.
+REQUEST must only read, PATH must be on this machine and be, symbolic
+links resolved, one of the files `permission/reveal-file' recorded for
+REQUEST's session, and the call must not reach the harness's
+credentials."
+  (and (eq (harness-perms--sym (plist-get request :kind)) 'read)
+       (stringp path)
+       (not (file-remote-p path))
+       (let ((files (gethash (plist-get (plist-get request :session) :id) harness-perms--revealed)))
+         (and files (member (harness-path-normalize path) files)))
+       (not (harness-perms--private-p (plist-get request :tool) path))
+       t))
+
+(defun harness-perms--reads-revealed-p (request)
+  "Non-nil when REQUEST reads, outside the session's roots, only revealed files.
+Those are the files the user's Emacs showed a definition in (see
+`harness-perms--revealed-p'); the mode stage allows such a call in
+every mode."
+  (let ((paths (plist-get request :paths)))
+    (and (eq (harness-perms--sym (plist-get request :kind)) 'read)
+         paths
+         (let* ((roots (append (harness-perms-roots (plist-get request :session))
+                               (plist-get request :jail-once)))
+                (outside (cl-remove-if-not (lambda (p) (harness-perms--outside (list p) roots)) paths)))
+           (and outside
+                (cl-every (lambda (p) (harness-perms--revealed-p request p)) outside)
+                t)))))
+
+(harness-defmethod permission/reveal-file (session-id file)
+  "Let SESSION-ID's calls that only read read FILE from now on.
+FILE is the source file the user's Emacs showed a definition in, as an
+inspection tool (emacs_find_definition) reports it.  Only FILE itself
+becomes readable, not its directory; see \"Files the user's Emacs
+showed a definition in\".  Return FILE as recorded, its symbolic links
+resolved, or nil when it is no local, existing regular file."
+  (when (and (stringp session-id) (stringp file)
+             (file-name-absolute-p file) (not (file-remote-p file)))
+    (let ((real (harness-path-normalize file)))
+      (when (file-regular-p real)
+        (let ((files (gethash session-id harness-perms--revealed)))
+          (unless (member real files)
+            (puthash session-id (cons real files) harness-perms--revealed)))
+        real))))
+
+(defun harness-perms--forget-revealed (session-id &rest _)
+  "Forget the files revealed to SESSION-ID, which is gone."
+  (remhash session-id harness-perms--revealed))
 
 ;;;; Skills, which every session may read
 ;;
@@ -755,6 +886,44 @@ so the prompt has to name the directory a grant really opens."
       (if (file-directory-p path)
           (file-name-as-directory path)
         (or (file-name-directory path) path)))))
+
+(defconst harness-perms--repository-markers '(".git" ".hg" ".jj" ".svn" ".bzr" "_darcs" ".fslckout")
+  "Names whose presence makes a directory the root of a repository.")
+
+(defun harness-perms--repository-root (dir)
+  "Return the root of the repository DIR lies in, as a directory name, or nil.
+That is the closest directory holding DIR, DIR included, with one of
+`harness-perms--repository-markers': a project, a package's checkout,
+a configuration kept in git.  A remote DIR has none here: looking would
+open a TRAMP connection from inside the permission chain."
+  (unless (file-remote-p dir)
+    (when-let* ((root (locate-dominating-file
+                       dir (lambda (d)
+                             (cl-some (lambda (m) (file-exists-p (expand-file-name m d)))
+                                      harness-perms--repository-markers)))))
+      (file-name-as-directory (expand-file-name root)))))
+
+(defun harness-perms--prompt-dir (session dir)
+  "Return the directory a prompt about DIR, outside SESSION's roots, offers.
+That is the root of the repository DIR lies in (see
+`harness-perms--repository-root'), so one answer opens the project or
+package a file belongs to, not just the directory holding it: an agent
+finding its way around one asked about each directory it reached in
+turn.  It is DIR itself when DIR lies in no repository, and when that
+root would open too much: the root directory, the home directory or a
+directory holding it, or one holding SESSION's working directory or
+worktree, such as the main checkout of a worktree.  The user may still
+edit the prompt's pattern to something narrower."
+  (let ((root (harness-perms--repository-root dir))
+        (home (expand-file-name "~"))
+        (own (delq nil (list (plist-get session :cwd) (plist-get session :worktree)))))
+    (if (and root
+             (not (equal root "/"))
+             (not (harness-path-within-p root home))
+             (not (cl-some (lambda (d) (and (stringp d) (not (file-remote-p d)) (harness-path-within-p root d)))
+                           own)))
+        root
+      dir)))
 
 (defun harness-perms--scratch-hint (session path)
   "Return a sentence sending SESSION's scratch files at PATH to its own dir.
@@ -985,9 +1154,14 @@ rule."
 ;;
 ;; A prompt about a path outside the allowed directories (the jail's,
 ;; an agent's directory request) is answered for a glob pattern rather
-;; than one file: by default everything in the directory (`DIR/**'),
-;; the directory holding a file or the directory itself.  The prompt's
-;; payload carries it as `:pattern' and the user may answer with
+;; than one file: by default everything in a directory (`DIR/**').  The
+;; jail offers the root of the repository the path lies in, so one
+;; answer covers the project or package an agent is finding its way
+;; around, rather than one directory of it at a time; the directory
+;; holding a file, or the directory itself, when there is no such root
+;; or it would open too much (`harness-perms--prompt-dir').  An agent's
+;; request offers the directory it asked for.  The prompt's payload
+;; carries the pattern as `:pattern' and the user may answer with
 ;; another one, more or less specific, in the answer's `:pattern'.
 ;; Only these prompts carry one (see `harness-perms--ask').
 
@@ -1082,11 +1256,14 @@ properties to the entry kept until then."
 
 (defun harness-perms--ask-dir (decision next request bad)
   "Ask the user to grant the directory holding BAD to REQUEST's session.
-DECISION and NEXT continue the chain once `permission/answer' arrives."
-  (harness-perms--pend-dir request next (harness-perms--dir-of bad)
+The prompt offers the root of the repository BAD lies in, when that is
+not too wide (see `harness-perms--prompt-dir').  DECISION and NEXT
+continue the chain once `permission/answer' arrives."
+  (harness-perms--pend-dir request next
+                           (harness-perms--prompt-dir (plist-get request :session) (harness-perms--dir-of bad))
                            (format "%s wants %s, which is outside the allowed directories"
                                    (harness-tools-label (plist-get request :tool)) (abbreviate-file-name bad))
-                           harness-perms-dir-options
+                           (harness-perms--dir-prompt-options harness-perms-dir-options)
                            :decision decision))
 
 (defun harness-perms--answer-dir (session-id waiting answer)
@@ -1122,7 +1299,7 @@ decision, or `continue' when the chain goes on."
         (funcall next d)
         d))
      (t
-      (pcase scope
+      (pcase (harness-perms--scope-allowed scope 'harness-allowed-directories)
         ('session (harness-call 'permission/allow-dir session-id grant))
         ('always (harness-call 'permission/allow-dir session-id grant 'always))
         (_ (setq request (plist-put (copy-sequence request) :jail-once
@@ -1169,7 +1346,7 @@ in particular, such as an \"Always deny\" answer to a directory prompt
 records."
   (let ((probe (list :session session :paths (list dir))))
     (cl-find-if (lambda (r) (and (plist-get r :path) (harness-perms--rule-matches-p r probe)))
-                (append (gethash (plist-get session :id) harness-perms--session-rules) harness-perms-rules))))
+                (harness-perms--rules (plist-get session :id)))))
 
 (defun harness-perms--dir-request (decision next request)
   "Decide a call to `harness-perms-dir-tool' from the user's answer alone.
@@ -1220,7 +1397,7 @@ grants a directory."
         (harness-perms--pend-dir (plist-put (copy-sequence request) :input (list :path path))
                                  next dir
                                  (harness-perms--request-reason session dir (plist-get input :reason))
-                                 harness-perms-dir-request-options
+                                 (harness-perms--dir-prompt-options harness-perms-dir-request-options)
                                  :explicit t))))))
 
 (defun harness-perms--grant-requested (session-id grant scope input)
@@ -1229,9 +1406,11 @@ This is the answer to an agent's own request.  GRANT is a directory or
 a glob pattern.  SCOPE `always' adds it to `harness-allowed-directories',
 `session' grants it to the session, and `once' grants it until the
 session's turn ends (`harness-perms--grant-for-turn').  The tool gets
-INPUT's path with `:granted' GRANT, so it can tell the agent."
+INPUT's path with `:granted' GRANT, so it can tell the agent.  When the
+policy sets `harness-allowed-directories', `always' grants to the
+session."
   (condition-case err
-      (progn
+      (let ((scope (harness-perms--scope-allowed scope 'harness-allowed-directories)))
         (pcase scope
           ('always (harness-call 'permission/allow-dir session-id grant 'always))
           ('session (harness-call 'permission/allow-dir session-id grant))
@@ -1316,7 +1495,9 @@ CTX names the session."
                    ('turn "the rest of this turn (ask again in a later turn if you need it then)")
                    (_ "this session"))
                  (if glob "the paths it matches" "what it holds")
-                 (if glob "" "; to run bash there, set its cwd inside it")))))
+                 (if glob
+                     "; bash may not see them, since its sandbox shows whole directories only"
+                   ", and bash sees it at the same path")))))
      ((null entry)
       (harness-tool-error (format "%s is still outside the allowed directories." shown)))
      (t
@@ -1330,7 +1511,7 @@ CTX names the session."
           (`(,source ,_) (format "%s is already accessible: it lies inside %s (%s)." shown
                                  (abbreviate-file-name (plist-get entry :dir))
                                  (harness-perms--source-label source))))
-        " Tools that take paths can use it; to run bash there, set its cwd inside it."))))))
+        " Tools that take paths can use it, and bash sees it at the same path."))))))
 
 (harness-define-tool harness-perms-dir-tool
   :label "Request access"
@@ -1403,10 +1584,21 @@ deny rule also stops it for a path it names inside them."
                              (lambda (p) (harness-perms--within-p pattern p))
                              paths)))))))
 
+(defun harness-perms--rules (session-id)
+  "Return the rules of SESSION-ID in the order they are weighed, first first.
+Its own rules (answers for the session) come before the standing ones
+\(`harness-perms-rules'), unless the policy sets those: then they come
+first, so no answer overrides them."
+  (let ((own (gethash session-id harness-perms--session-rules)))
+    (if (harness-policy-pinned-p 'harness-perms-rules)
+        (append harness-perms-rules own)
+      (append own harness-perms-rules))))
+
 (defun harness-perms--find-rule (request)
-  "Return the first session or global rule that applies to REQUEST."
+  "Return the first session or global rule that applies to REQUEST.
+See `harness-perms--rules' for the order."
   (let* ((sid (plist-get (plist-get request :session) :id))
-         (rules (append (gethash sid harness-perms--session-rules) harness-perms-rules))
+         (rules (harness-perms--rules sid))
          ;; A command is read once, not once per rule about paths.
          (request (if (cl-some (lambda (r) (plist-get r :path)) rules)
                       (harness-perms--with-reach request)
@@ -1431,8 +1623,10 @@ deny rule also stops it for a path it names inside them."
   (harness-save-user-option 'harness-perms-rules harness-perms-rules))
 
 (defun harness-perms-add-rule (session-id rule scope)
-  "Record RULE for SESSION-ID with SCOPE (`session' or `always')."
-  (pcase scope
+  "Record RULE for SESSION-ID with SCOPE (`session' or `always').
+When the policy sets `harness-perms-rules', `always' records it for the
+session."
+  (pcase (harness-perms--scope-allowed scope 'harness-perms-rules)
     ('session
      (puthash session-id (cons rule (cl-remove rule (gethash session-id harness-perms--session-rules)
                                                :test #'equal))
@@ -1464,6 +1658,10 @@ DECISION is returned unchanged when the mode leaves the question open."
      ;; through, and this names the reason.
      ((harness-perms--reads-skills-p request)
       (list :behavior 'allow :reason "reading skills never needs approval"))
+     ;; And reading the file the user's Emacs showed a definition in.
+     ((harness-perms--reads-revealed-p request)
+      (list :behavior 'allow
+            :reason "the user's Emacs showed a definition in this file; reading it never needs approval"))
      ((harness-perms--reads-harness-p request)
       (list :behavior 'allow :reason "reading the harness itself never needs approval"))
      ((eq mode 'yolo) (list :behavior 'allow :reason "yolo mode"))
@@ -1522,8 +1720,10 @@ Deny only what clearly risks serious harm:
 - widening the agent's own permissions or weakening the harness's safeguards:
   granting itself directories (harness-allowed-directories, including in
   .dir-locals.el files), changing the permission mode or the non-interactive
-  setting, or turning the sandbox off.  Only the user grants directories; the
-  agent asks for one with the request_directory_access tool.
+  setting, turning the sandbox off, or writing autoMode rules into Claude
+  Code's settings (~/.claude/settings.json, its managed settings), which this
+  judge follows too.  Only the user grants directories; the agent asks for
+  one with the request_directory_access tool.
 
 The harness's own tools are ordinary work: spawning and answering sub-agents,
 reading, messaging and controlling other sessions of the harness, reading and
@@ -1551,7 +1751,9 @@ like) either.  Inspecting the harness is ordinary work to it, as it is
 to the rules that allow it before the judge is asked (see
 `harness-perms--inspection-tools' and `harness-perms-inspection-dirs'):
 the judge only sees such inspection done by other means, such as Emacs
-Lisp, and is told where the harness lives.")
+Lisp, and is told where the harness lives.  The rules of Claude Code's
+auto-mode settings, which Claude Code's own auto mode follows, come
+after it (`harness-perms--judge-system-prompt').")
 
 (defun harness-perms--what-it-does (description)
   "Return what a tool does: the first sentence of its DESCRIPTION.
@@ -1697,6 +1899,7 @@ value and NEXT continues the chain."
                   (harness-method-exists-p 'provider/complete)))
         (funcall next decision)
       (let* ((model (harness-perms--judge-model session))
+             (system (harness-perms--judge-system-prompt))
              (attempt 0)                ; judge calls made so far
              (settled nil) (timer nil) (handle nil)
              (failure nil)              ; why the judge gave no verdict
@@ -1735,7 +1938,7 @@ value and NEXT continues the chain."
                                      :ephemeral t
                                      :session (list :id (format "%s-perms" (plist-get session :id))
                                                     :cwd (plist-get session :cwd) :host (plist-get session :host))
-                                     :system harness-perms--judge-system
+                                     :system system
                                      :messages (list (list :role 'user
                                                            :content (list (list :type "text"
                                                                                 :text (harness-perms--judge-text request)))))
@@ -1773,6 +1976,246 @@ value and NEXT continues the chain."
                        (setq failure (format "it failed: %s" (harness-error-message err)))
                        (funcall finish decision))))))
           (ask 1))))))
+
+;;;; Auto mode: the rules Claude Code's own auto mode follows
+
+;; Where the harness has its judge, Claude Code's auto mode has a
+;; classifier, and the classifier follows an `autoMode' block in
+;; Claude Code's settings: the user's own and the organization's
+;; managed settings.  Its `environment' entries say where the
+;; organization's boundary lies: the source control, buckets, internal
+;; domains and services it trusts, so pushing to its repositories or
+;; uploading to its build bucket is routine, and what it holds
+;; sensitive.  `hard_deny' entries block whatever else applies;
+;; `soft_deny' entries block unless an `allow' entry makes an
+;; exception.  A judge that knows none of it is stricter than Claude
+;; Code with the same settings.  To it, the organization's own
+;; infrastructure is off the machine, so it denies, or puts to the
+;; user, calls Claude Code's auto mode allows there.  So the judge
+;; reads the same block from the same places
+;; (`harness-perms-claude-auto-mode-rules') and is told what each list
+;; means to Claude Code, on top of its own rules, which no entry lifts
+;; (`harness-perms--auto-mode-block').  Claude Code's classifier reads
+;; CLAUDE.md as well, the organization's managed one included.  The
+;; judge reads none (its request is `:ephemeral'), because a judge given
+;; free-form instructions enforced them as workflow.  The structured
+;; rules are the part it can follow as Claude Code does.
+;;
+;; Like Claude Code it never reads a project's settings: the
+;; .claude/settings.json and settings.local.json of a repository are
+;; written by whoever writes the repository.  Of the managed sources it
+;; applies the highest-ranked one that delivers a policy, or every one
+;; when that one says "merge".  The "$defaults" marker, which splices
+;; Claude Code's built-in rules into a list, is dropped, since the
+;; judge's own rules stand in for those and always apply.  Policies in
+;; the Windows registry are not read.
+
+(defcustom harness-perms-claude-auto-mode t
+  "Whether the auto-mode judge follows the autoMode rules of Claude Code.
+Claude Code's own auto mode reads an `autoMode' block from the
+user's settings (settings.json in ~/.claude, or $CLAUDE_CONFIG_DIR)
+and from the organization's managed settings.  Its `environment'
+says which repositories, buckets, domains and services the
+organization trusts, and its `allow', `soft_deny' and `hard_deny'
+lists add exceptions and denials.  Non-nil gives the judge the same
+rules (`harness-perms-claude-auto-mode-rules').  A session in auto
+mode is then no stricter than Claude Code with the same settings,
+and it follows the organization's denials as Claude Code does.  The
+judge's own rules still apply: no entry lifts them.  nil leaves the
+judge with its own rules only."
+  :type 'boolean
+  :group 'harness)
+
+(defconst harness-perms--auto-mode-lists '(:environment :hard_deny :soft_deny :allow)
+  "The rule lists of an autoMode block in Claude Code's settings.
+In the order the judge's prompt gives them.")
+
+(defconst harness-perms--claude-control-keys '(:managedSourcesBehavior :wslInheritsWindowsSettings)
+  "Keys of Claude Code's managed settings that say how to read the sources.
+They are no policy: a source that holds nothing else delivers none.")
+
+(defun harness-perms--claude-config-dir ()
+  "Return Claude Code's configuration directory, as a directory name.
+That is $CLAUDE_CONFIG_DIR when it is set, else ~/.claude, as Claude
+Code decides.  It holds the user's settings.json and the server-managed
+settings Claude Code caches, remote-settings.json."
+  (let ((env (getenv "CLAUDE_CONFIG_DIR")))
+    (file-name-as-directory (expand-file-name (if (harness-string-blank-p env) "~/.claude" env)))))
+
+(defun harness-perms--claude-system-dir ()
+  "Return the directory of Claude Code's managed settings files on this system."
+  (pcase system-type
+    ('darwin "/Library/Application Support/ClaudeCode/")
+    ('windows-nt "C:/Program Files/ClaudeCode/")
+    (_ "/etc/claude-code/")))
+
+(defun harness-perms--claude-object (value)
+  "Return VALUE when it is a parsed JSON object, else nil."
+  (and (consp value) (keywordp (car value)) value))
+
+(defun harness-perms--claude-read-settings (file)
+  "Return the settings object in FILE, a JSON file of Claude Code's settings.
+nil when FILE is missing or unreadable or holds no JSON object."
+  (when (and (file-regular-p file) (file-readable-p file))
+    (condition-case err
+        (harness-perms--claude-object (harness-json-parse (harness-read-file file)))
+      (error (harness-log 'warn "perms: ignoring the Claude Code settings in %s: %s"
+                          file (harness-error-message err))
+             nil))))
+
+(defun harness-perms--claude-profile-settings ()
+  "Return the settings of Claude Code's macOS configuration profile, or nil.
+That is the managed preferences domain com.anthropic.claudecode, the
+user's own profile before the computer's, converted to JSON by plutil."
+  (when (eq system-type 'darwin)
+    (cl-some
+     (lambda (file)
+       (when (file-readable-p file)
+         (with-temp-buffer
+           (let ((default-directory "/")
+                 (coding-system-for-read 'utf-8))
+             (when (eql 0 (ignore-errors
+                            (call-process "plutil" nil '(t nil) nil "-convert" "json" "-o" "-" file)))
+               (harness-perms--claude-object (ignore-errors (harness-json-parse (buffer-string)))))))))
+     (list (format "/Library/Managed Preferences/%s/com.anthropic.claudecode.plist" (user-login-name))
+           "/Library/Managed Preferences/com.anthropic.claudecode.plist"))))
+
+(defun harness-perms--claude-managed-files ()
+  "Return Claude Code's managed settings files, in the order it merges them.
+managed-settings.json in its system directory first, then the .json
+files of managed-settings.d there in alphabetical order, hidden ones
+left out (`harness-perms--claude-system-dir')."
+  (let* ((dir (harness-perms--claude-system-dir))
+         (drop-ins (expand-file-name "managed-settings.d" dir)))
+    (cons (expand-file-name "managed-settings.json" dir)
+          (and (file-directory-p drop-ins)
+               (directory-files drop-ins t "\\`[^.].*\\.json\\'")))))
+
+(defun harness-perms--claude-managed-sources ()
+  "Return Claude Code's managed settings sources, highest-ranked first.
+Each is the list of settings objects one source delivers: the
+server-managed settings Claude Code caches (remote-settings.json in
+`harness-perms--claude-config-dir'), the macOS configuration profile
+\(`harness-perms--claude-profile-settings'), and the managed settings
+files (`harness-perms--claude-managed-files')."
+  (list (delq nil (list (harness-perms--claude-read-settings
+                         (expand-file-name "remote-settings.json" (harness-perms--claude-config-dir)))))
+        (delq nil (list (harness-perms--claude-profile-settings)))
+        (delq nil (mapcar #'harness-perms--claude-read-settings (harness-perms--claude-managed-files)))))
+
+(defun harness-perms--claude-policy-p (settings)
+  "Non-nil when the Claude Code SETTINGS object holds a policy key.
+That is any key set to something other than null, except the control
+keys (`harness-perms--claude-control-keys') and metadata such as
+$schema."
+  (cl-loop for (key value) on settings by #'cddr
+           thereis (and value
+                        (not (memq key harness-perms--claude-control-keys))
+                        (not (string-prefix-p ":$" (symbol-name key))))))
+
+(defun harness-perms--claude-managed-settings ()
+  "Return the managed settings objects Claude Code applies, highest-ranked first.
+By default (\"first-wins\") those of the highest-ranked source that
+holds a policy key.  When the highest-ranked source holding a policy
+key or managedSourcesBehavior sets that to \"merge\", those of every
+source that holds a policy key."
+  (let* ((sources (harness-perms--claude-managed-sources))
+         (policy-p (lambda (source) (cl-some #'harness-perms--claude-policy-p source)))
+         (behavior-of (lambda (source)
+                        (car (last (delq nil (mapcar (lambda (s) (plist-get s :managedSourcesBehavior))
+                                                     source))))))
+         (top (cl-find-if (lambda (source) (or (funcall policy-p source) (funcall behavior-of source)))
+                          sources))
+         (applied (cl-remove-if-not policy-p sources)))
+    (apply #'append (if (equal (funcall behavior-of top) "merge")
+                        applied
+                      (and applied (list (car applied)))))))
+
+(defun harness-perms--auto-mode-entries (settings key)
+  "Return the entries of autoMode list KEY in the Claude Code SETTINGS object.
+Only strings count, and neither blank ones nor the \"$defaults\"
+marker, which stands for Claude Code's built-in rules."
+  (let ((entries (plist-get (harness-perms--claude-object (plist-get settings :autoMode)) key)))
+    (and (listp entries)
+         (not (keywordp (car entries)))
+         (cl-remove-if-not (lambda (e) (and (stringp e)
+                                            (not (harness-string-blank-p e))
+                                            (not (equal (string-trim e) "$defaults"))))
+                           entries))))
+
+(defun harness-perms-claude-auto-mode-rules ()
+  "Return the autoMode rules Claude Code's auto mode follows on this machine.
+A plist from the keys of `harness-perms--auto-mode-lists' to their
+entries, prose rules, without the lists that are empty.  Each holds
+the entries of the managed settings Claude Code applies
+\(`harness-perms--claude-managed-settings'), then the user's own
+\(settings.json in `harness-perms--claude-config-dir'), duplicates and
+the \"$defaults\" marker left out, as Claude Code combines them.  No
+project's settings are read.  nil when `harness-perms-claude-auto-mode'
+is nil."
+  (when harness-perms-claude-auto-mode
+    (let ((all (append (harness-perms--claude-managed-settings)
+                       (delq nil (list (harness-perms--claude-read-settings
+                                        (expand-file-name "settings.json" (harness-perms--claude-config-dir))))))))
+      (cl-loop for key in harness-perms--auto-mode-lists
+               for entries = (delete-dups (cl-loop for s in all
+                                                   append (copy-sequence (harness-perms--auto-mode-entries s key))))
+               when entries append (list key entries)))))
+
+(defconst harness-perms--auto-mode-headings
+  '((:environment . "Environment: what counts as the organization's own infrastructure, and what
+is sensitive.  Code and data going to infrastructure named here as trusted
+(repositories, source control, buckets, domains, services, registries) stay
+inside the organization: that is ordinary work, not sending private data off
+the machine.  Secrets still go nowhere but the service they belong to, and
+what is named here as sensitive stays protected.  A destination these entries
+do not name is judged by the rules above alone.")
+    (:hard_deny . "Hard deny: deny every call one of these describes, whatever else applies.")
+    (:soft_deny . "Soft deny: deny every call one of these describes, unless an allow entry
+covers it.")
+    (:allow . "Allow: exceptions to the soft deny entries, and to nothing else."))
+  "What each autoMode list means to the judge, as it does to Claude Code.")
+
+(defun harness-perms--auto-mode-block (rules)
+  "Return the part of the judge's system prompt that gives it RULES, or nil.
+RULES are the autoMode rules of Claude Code's settings
+\(`harness-perms-claude-auto-mode-rules'), and nil when there are none.
+Each list comes under what it means in Claude Code's auto mode
+\(`harness-perms--auto-mode-headings'): the environment says where the
+organization's boundary lies, hard deny entries deny, soft deny
+entries deny unless an allow entry covers the call, and allow entries
+make only those exceptions.  The judge's own rules stand over them
+all: no entry lifts one."
+  (when rules
+    (concat
+     "Rules from Claude Code's settings.  Claude Code's own auto mode follows these
+entries, which the organization's managed settings and the user's own settings
+give it; follow them as it does.  They add to the rules above and lift none
+of them."
+     (mapconcat (lambda (key)
+                  (let ((entries (plist-get rules key)))
+                    (if (null entries) ""
+                      (concat "\n\n" (alist-get key harness-perms--auto-mode-headings) "\n"
+                              (mapconcat (lambda (e) (concat "- " (replace-regexp-in-string
+                                                                   "\n" "\n  " (string-trim e))))
+                                         entries "\n")))))
+                harness-perms--auto-mode-lists ""))))
+
+(defun harness-perms--judge-system-prompt ()
+  "Return the auto-mode judge's system prompt.
+That is `harness-perms--judge-system', then the rules of Claude Code's
+auto-mode settings when there are any (`harness-perms--auto-mode-block'),
+so the judge follows what Claude Code's own auto mode follows.  Settings
+that cannot be read leave the prompt as it is: they never keep the judge
+from judging."
+  (let ((block (condition-case err
+                   (harness-perms--auto-mode-block (harness-perms-claude-auto-mode-rules))
+                 (error (harness-log 'warn "perms: cannot read Claude Code's auto-mode rules: %s"
+                                     (harness-error-message err))
+                        nil))))
+    (if block
+        (concat harness-perms--judge-system "\n\n" block)
+      harness-perms--judge-system)))
 
 ;;;; Non-interactive mode
 
@@ -1898,7 +2341,7 @@ where it runs."
                                              (and cwd (list :cwd cwd))
                                              (list :title (harness-perms-describe-request request)
                                                    :reason (harness-perms--judge-prompt-reason decision)
-                                                   :options harness-perms-options))))
+                                                   :options (harness-perms--tool-options)))))
              (pid (harness-call 'session/pending-add sid pending)))
         (puthash pid (list :session-id sid :request request :next next :paths paths :cwd cwd)
                  harness-perms--waiting)
@@ -1933,7 +2376,8 @@ ANSWER is (:behavior allow|deny :scope once|session|always :reason
 a path outside the allowed directories (one with `:dir') is answered
 for a glob pattern: the payload's `:pattern' unless ANSWER's names
 another, absolute or relative to the session's cwd.  Any other prompt
-is answered for its tool.
+is answered for its tool, and a confirmation (`harness-perms-confirm')
+for this call alone.
 Resolves the pending request, records session or standing rules (for
 a directory prompt: grants the pattern to the session or, with
 `always', to every session, or denies it) and lets the tool call
@@ -1943,11 +2387,14 @@ the final decision, or `continue' when a jail prompt hands the call on."
     (unless waiting
       (signal 'harness-error (list (format "no pending permission %s" pending-id))))
     (remhash pending-id harness-perms--waiting)
-    (if (plist-get waiting :dir)
-        (let ((answer (harness-perms--parse-answer answer)))
-          (harness-perms--resolve session-id pending-id answer)
-          (harness-perms--answer-dir session-id waiting answer))
-      (harness-perms--answer-tool session-id pending-id waiting answer))))
+    (cond
+     ((plist-get waiting :dir)
+      (let ((answer (harness-perms--parse-answer answer)))
+        (harness-perms--resolve session-id pending-id answer)
+        (harness-perms--answer-dir session-id waiting answer)))
+     ((plist-get waiting :confirm)
+      (harness-perms--answer-confirm session-id pending-id waiting answer))
+     (t (harness-perms--answer-tool session-id pending-id waiting answer)))))
 
 (defun harness-perms--resolve (session-id pending-id answer)
   "Mark PENDING-ID of SESSION-ID resolved with ANSWER."
@@ -1976,6 +2423,78 @@ the jail still decides where each call may reach."
     (funcall (plist-get waiting :next) decision)
     decision))
 
+;;;; Confirmations
+;;
+;; Some calls change what only the user may change, whatever the
+;; permission mode, the standing rules and the judge would say: moving a
+;; session to another directory changes the directories it may reach.
+;; The tool's own `permission/decide' stage, ahead of the jail, has the
+;; user confirm each such call with `harness-perms-confirm'.  The prompt
+;; offers allow-once and deny-once only, records no rule, and its answer
+;; is final; yolo does not answer it, and a session nobody can answer
+;; for is denied at once.
+
+(defconst harness-perms-confirm-options '(allow-once deny-once)
+  "Answer options of a confirmation (see `harness-perms-confirm').")
+
+(defun harness-perms-confirm (request next &rest prompt)
+  "Have the user confirm REQUEST, a tool call, then go on with NEXT.
+For the `permission/decide' stage of a tool whose every call needs the
+user's yes.  PROMPT is a plist: `:title', the prompt's headline;
+`:reason', what the call would do; `:paths', the paths it is about
+\(REQUEST's by default); `:input', what the tool's handler gets once
+the user allows the call (REQUEST's input by default); `:hint', what the
+agent is told after a denial.  The prompt shows REQUEST's input.  The
+decision handed to NEXT is final: the user's answer, or a denial at once
+when REQUEST's session is non-interactive or there is no user to ask."
+  (let* ((session (plist-get request :session))
+         (sid (plist-get session :id))
+         (hint (or (plist-get prompt :hint) "Do not ask again unless the user wants it.")))
+    (if (or (harness-perms--non-interactive-p session)
+            (not (harness-method-exists-p 'session/pending-add)))
+        (funcall next (list :behavior 'deny :final t
+                            :reason (format "%s needs the user's confirmation, and %s"
+                                            (harness-tools-label (plist-get request :tool))
+                                            (if (harness-perms--non-interactive-p session)
+                                                "the session is non-interactive: the user is away"
+                                              "no user is available"))
+                            :hint "Do not retry; say in your answer what you wanted to do, so the user can do it."))
+      (let* ((title (plist-get prompt :title))
+             (pending (list :kind 'permission
+                            :payload (list :tool (plist-get request :tool)
+                                           :input (plist-get request :input)
+                                           :kind (plist-get request :kind)
+                                           :paths (if (plist-member prompt :paths) (plist-get prompt :paths)
+                                                    (plist-get request :paths))
+                                           :call-id (plist-get request :call-id)
+                                           :title title
+                                           :reason (plist-get prompt :reason)
+                                           :options harness-perms-confirm-options
+                                           :confirm t)))
+             (pid (harness-call 'session/pending-add sid pending)))
+        (puthash pid (list :session-id sid :request request :next next :confirm t
+                           :input (plist-get prompt :input) :hint hint :title title
+                           :options harness-perms-confirm-options)
+                 harness-perms--waiting)
+        (harness-emit 'permission/requested sid (plist-put (copy-sequence pending) :id pid))))))
+
+(defun harness-perms--answer-confirm (session-id pending-id waiting answer)
+  "Answer the confirmation WAITING (PENDING-ID of SESSION-ID) with ANSWER.
+Allow lets the call go on, with the input the confirmation was made for;
+anything else denies it.  Either way only this call: no rule is
+recorded, whatever scope ANSWER names."
+  (let* ((answer (harness-perms--parse-answer answer))
+         (decision (if (eq (plist-get answer :behavior) 'allow)
+                       (append (list :behavior 'allow :final t
+                                     :reason (or (plist-get answer :reason) "confirmed by the user"))
+                               (and (plist-get waiting :input) (list :input (plist-get waiting :input))))
+                     (list :behavior 'deny :final t
+                           :reason (or (plist-get answer :reason) "the user said no")
+                           :hint (plist-get waiting :hint)))))
+    (harness-perms--resolve session-id pending-id answer)
+    (funcall (plist-get waiting :next) decision)
+    decision))
+
 ;;;; Switching to yolo with a prompt waiting
 
 (defun harness-perms--accept-yolo (session-id)
@@ -1985,7 +2504,8 @@ call undecided; once the session is in yolo the call would be allowed
 without asking, so the prompt is answered allow-once and the call runs.
 Only what the mode stage now allows is answered, so a standing deny
 rule still decides, and a directory prompt keeps waiting: not even yolo
-grants a directory without the user's answer."
+grants a directory without the user's answer.  Nor does it confirm what
+only the user confirms (`harness-perms-confirm')."
   (let ((session (harness-perms--session session-id)) pids)
     (when (eq (harness-perms--mode-of session) 'yolo)
       (maphash
@@ -1996,6 +2516,7 @@ grants a directory without the user's answer."
                   ;; prompt was made; the mode stage must see the new one.
                   (fresh (plist-put (copy-sequence request) :session session)))
              (when (and (not (plist-get waiting :dir))
+                        (not (plist-get waiting :confirm))
                         (eq 'allow (plist-get (harness-perms--mode-decision nil fresh) :behavior)))
                (push pid pids)))))
        harness-perms--waiting)
@@ -2038,27 +2559,33 @@ They are stored on the session record when there is one."
 (harness-defmethod permission/allow-dir (session-id dir &optional scope)
   "Grant SESSION-ID access to DIR.
 With SCOPE `always' DIR is added to the global
-`harness-allowed-directories'; otherwise the grant is kept with the
+`harness-allowed-directories', which is refused when the policy sets
+it; with `turn' it is granted until the session's turn ends (see
+`harness-perms--turn-dirs'); otherwise the grant is kept with the
 session.  Return the session's effective roots."
   (let* ((session (harness-perms--session session-id))
          (dir (harness-perms--expand-dir session dir)))
-    (if (eq (harness-perms--sym scope) 'always)
-        (unless (member dir (harness-perms--global-dirs session))
-          (harness-save-user-option 'harness-allowed-directories
-                                    (append (default-value 'harness-allowed-directories) (list dir))))
-      (let ((granted (harness-perms--granted session)))
-        (unless (member dir granted)
-          (harness-perms--set-granted session-id (append granted (list dir))))))
-    (harness-emit 'permission/dir-allowed session-id dir)
+    (pcase (harness-perms--sym scope)
+      ('always
+       (harness-policy-refuse 'harness-allowed-directories)
+       (unless (member dir (harness-perms--global-dirs session))
+         (harness-save-user-option 'harness-allowed-directories
+                                   (append (default-value 'harness-allowed-directories) (list dir))))
+       (harness-emit 'permission/dir-allowed session-id dir))
+      ('turn (harness-perms--grant-for-turn session-id dir))
+      (_ (let ((granted (harness-perms--granted session)))
+           (unless (member dir granted)
+             (harness-perms--set-granted session-id (append granted (list dir)))))
+         (harness-emit 'permission/dir-allowed session-id dir)))
     (harness-perms-roots (harness-perms--session session-id))))
 
 (harness-defmethod permission/revoke-dir (session-id dir)
   "Withdraw DIR from SESSION-ID.
 Removes a session grant, or one until the session's turn ends, or else
 the entry in the global `harness-allowed-directories'.  The cwd, the
-worktree, the session's own temporary directory and directories set in
-a project's .dir-locals.el cannot be revoked here.  Return the
-session's effective roots."
+worktree, the session's own temporary directory, directories set in a
+project's .dir-locals.el and those the policy sets cannot be revoked
+here.  Return the session's effective roots."
   (let* ((session (harness-perms--session session-id))
          (dir (harness-perms--expand-dir session dir))
          (granted (harness-perms--granted session))
@@ -2072,6 +2599,7 @@ session's effective roots."
           (puthash session-id (remove dir turn) harness-perms--turn-dirs)
         (remhash session-id harness-perms--turn-dirs)))
      ((member dir (harness-perms--global-dirs session))
+      (harness-policy-refuse 'harness-allowed-directories)
       (harness-save-user-option
        'harness-allowed-directories
        (cl-remove-if (lambda (d) (equal dir (harness-perms--expand-dir session d))) global)))
@@ -2089,9 +2617,10 @@ session's effective roots."
   "Return the directories SESSION-ID may touch as (:dir :source :revocable).
 SOURCE is as in `harness-perms-dirs'.  An entry is revocable when it
 is a grant, for the session or until its turn ends, or comes from the
-global `harness-allowed-directories'."
+global `harness-allowed-directories', unless the policy sets that."
   (let* ((session (harness-perms--session session-id))
-         (global (harness-perms--global-dirs session)))
+         (global (unless (harness-policy-pinned-p 'harness-allowed-directories)
+                   (harness-perms--global-dirs session))))
     (mapcar (lambda (e)
               (append e (list :revocable
                               (and (or (memq (plist-get e :source) '(session turn))
@@ -2136,8 +2665,12 @@ only reads may read (see `harness-perms-inspection-dirs' and
                                                          (plist-get r :paths))
                                                 :cwd (plist-get w :cwd)
                                                 :dir (plist-get w :dir) :pattern (plist-get w :pattern)
-                                                :title (harness-perms-describe-request r)
-                                                :options harness-perms-options))
+                                                :title (or (plist-get w :title) (harness-perms-describe-request r))
+                                                :options (or (plist-get w :options)
+                                                             (if (plist-get w :dir)
+                                                                 (harness-perms--dir-prompt-options
+                                                                  harness-perms-dir-options)
+                                                               (harness-perms--tool-options)))))
                            out))))
                harness-perms--waiting)
       out)))
@@ -2164,6 +2697,7 @@ to call again."
   (harness-add-filter 'permission/decide #'harness-perms--ask 90)
   (harness-on 'permission/decided #'harness-perms--on-decided)
   (harness-on 'session/updated #'harness-perms--on-session-updated)
+  (harness-on 'session/deleted #'harness-perms--forget-revealed)
   ;; What was granted until a turn ends goes when it ends.
   (harness-on 'agent/turn-started #'harness-perms--end-turn-grants)
   (harness-on 'agent/turn-ended #'harness-perms--end-turn-grants))
@@ -2175,6 +2709,7 @@ to call again."
     (harness-remove-filter 'permission/decide fn))
   (harness-off (cons 'permission/decided #'harness-perms--on-decided))
   (harness-off (cons 'session/updated #'harness-perms--on-session-updated))
+  (harness-off (cons 'session/deleted #'harness-perms--forget-revealed))
   (harness-off (cons 'agent/turn-started #'harness-perms--end-turn-grants))
   (harness-off (cons 'agent/turn-ended #'harness-perms--end-turn-grants)))
 
