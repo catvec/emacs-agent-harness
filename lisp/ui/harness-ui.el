@@ -1997,10 +1997,29 @@ window selected now even when another frame is selected by then."
 ;; as switching project would (Doom Emacs's workspaces), and then shows
 ;; the session, unless it shows there already, in which case its window
 ;; is selected.
+;;
+;; The project's workspace is looked for here, not left to Doom's
+;; project switch: a fork of Doom that notes a workspace's project (its
+;; `+workspace-project') takes only a workspace noting it for the
+;; project's, and a workspace that got the project's name otherwise --
+;; the empty one a project was first opened in, which Doom renames
+;; without noting anything -- is passed over for a new, empty one beside
+;; it.  Switching to the workspace that is there brings back the windows
+;; and buffers left in it; of two, the one with the project's files open
+;; wins, not the empty one made beside it.  A project with none gets a
+;; new one from Doom, and the session then takes its window, which has
+;; nothing else to show.
 
 (defvar +workspaces-switch-project-function)
+(defvar doom-fallback-buffer-name)
 (declare-function +workspaces-switch-to-project-h "ext:workspaces")
 (declare-function +workspace-current-name "ext:workspaces")
+(declare-function +workspace-list-names "ext:workspaces")
+(declare-function +workspace-get "ext:workspaces")
+(declare-function +workspace-buffer-list "ext:workspaces")
+(declare-function +workspace-switch "ext:workspaces")
+(declare-function +workspace-message "ext:workspaces")
+(declare-function persp-parameter "ext:persp-mode")
 (declare-function doom-project-name "ext:doom-projects")
 (declare-function doom-project-p "ext:doom-projects")
 
@@ -2009,33 +2028,98 @@ window selected now even when another frame is selected by then."
 It is called with the project's root directory when a session is
 visited (`harness-ui-visit-session'), from the session list say, and
 returns non-nil when it switched; when that project is current already
-it does nothing and returns nil.  The root is the main checkout of the
-session's project: a task's git worktree belongs to its repository's.
-The default switches workspaces where there are any; nil never
-switches."
+it does nothing and returns nil.  It returns `blank' when what it
+switched to shows nothing yet, a workspace just made say: the session
+then takes the selected window instead of opening beside it.  The root
+is the main checkout of the session's project: a task's git worktree
+belongs to its repository's.  The default switches workspaces where
+there are any; nil never switches."
   :type '(choice (const :tag "Never switch" nil)
                  (function-item harness-ui-switch-project-workspace)
                  function)
   :group 'harness-ui)
 
+(defun harness-ui--workspace-of-project-p (name root project)
+  "Non-nil when NAME names a Doom workspace of the project at ROOT.
+PROJECT is the project's name, as Doom names its workspace.  A
+workspace noting the project it is for -- its `+workspace-project', as
+a fork of Doom keeps it -- is ROOT's when that is ROOT, whatever its
+name; one noting none, or a directory gone since, moved say, is ROOT's
+when it is named PROJECT.  A directory on another host than ROOT's is
+not looked at, which would connect to it."
+  (when-let* ((persp (+workspace-get name t)))
+    (let ((dir (persp-parameter '+workspace-project persp)))
+      (cond ((not (stringp dir)) (equal name project))
+            ((not (equal (file-remote-p dir) (file-remote-p root))) nil)
+            ((file-directory-p dir) (ignore-errors (file-equal-p dir root)))
+            (t (equal name project))))))
+
+(defun harness-ui--workspace-files (name root)
+  "Return how many files under ROOT the Doom workspace NAME has open.
+Remote files are not looked at."
+  (cl-count-if (lambda (buffer)
+                 (let ((file (buffer-file-name buffer)))
+                   (and file (not (file-remote-p file)) (file-in-directory-p file root))))
+               (+workspace-buffer-list (+workspace-get name))))
+
+(defun harness-ui--project-workspace (root project)
+  "Return the name of the Doom workspace of the project at ROOT, or nil.
+PROJECT is the project's name.  The workspaces that may be ROOT's (see
+`harness-ui--workspace-of-project-p') are the one named PROJECT and
+those noting ROOT under another name, which a fork of Doom makes beside
+the first; of more than one, the one with the most of the project's
+files open is ROOT's, the one named PROJECT on a tie, else the first."
+  (let ((names (cl-remove-if-not
+                (lambda (name) (harness-ui--workspace-of-project-p name root project))
+                (cons project (remove project (+workspace-list-names))))))
+    (if (cdr names)
+        (let ((files (mapcar (lambda (name) (harness-ui--workspace-files name root)) names)))
+          (nth (cl-position (apply #'max files) files) names))
+      (car names))))
+
+(defun harness-ui--workspace-blank-p ()
+  "Non-nil when the selected frame shows nothing but Doom's fallback buffer.
+That is a workspace just made: one window, on Doom's dashboard or
+scratch buffer."
+  (let ((windows (window-list nil 'never)))
+    (and (null (cdr windows))
+         (boundp 'doom-fallback-buffer-name)
+         (equal (buffer-name (window-buffer (car windows))) doom-fallback-buffer-name))))
+
 (defun harness-ui-switch-project-workspace (root)
   "Switch to the workspace of the project at ROOT, if there are workspaces.
-That is Doom Emacs's workspaces, on with `persp-mode': the project's
-workspace becomes current, made when it has none, as switching project
-makes it, but without asking for a file to open.  Return non-nil when
-the workspace changed.  Without workspaces this does nothing: a buffer
-belongs to no project.  Nor does a ROOT that is no project, a scratch
-directory say, which would only get a workspace of its own."
+That is Doom Emacs's workspaces, on with `persp-mode'.  The project's
+workspace is the one named after the project, or one noting ROOT as
+its project (see `harness-ui--project-workspace'), and switching to it
+brings back the windows and buffers left in it.  A project with none
+gets one, as switching project makes it, but without asking for a file
+to open.  Return nil when the project's workspace is current already,
+`blank' when the workspace switched to shows nothing yet but Doom's
+fallback buffer, as a new one does, and t otherwise.  Without
+workspaces this does nothing: a buffer belongs to no project.  Nor does
+a ROOT that is no project, a scratch directory say, which would only
+get a workspace of its own."
   (when (and (bound-and-true-p persp-mode)
              (fboundp '+workspaces-switch-to-project-h)
              (fboundp '+workspace-current-name)
+             (fboundp '+workspace-list-names)
+             (fboundp '+workspace-get)
+             (fboundp '+workspace-buffer-list)
+             (fboundp '+workspace-switch)
+             (fboundp 'persp-parameter)
              (fboundp 'doom-project-name)
              (fboundp 'doom-project-p)
-             (doom-project-p root)
-             (not (equal (+workspace-current-name) (doom-project-name root))))
-    (let ((+workspaces-switch-project-function #'ignore))
-      (+workspaces-switch-to-project-h root))
-    t))
+             (doom-project-p root))
+    (let ((name (harness-ui--project-workspace root (doom-project-name root))))
+      (unless (and name (equal name (+workspace-current-name)))
+        (if name
+            (progn
+              (+workspace-switch name)
+              (when (fboundp '+workspace-message)
+                (+workspace-message (format "Switched to '%s'" name) 'success)))
+          (let ((+workspaces-switch-project-function #'ignore))
+            (+workspaces-switch-to-project-h root)))
+        (if (harness-ui--workspace-blank-p) 'blank t)))))
 
 (defun harness-ui-session-project (session)
   "Return the main checkout of SESSION's project, or nil.
@@ -2064,14 +2148,19 @@ project's workspace, after a switch -- that shows it already is
 selected, and otherwise it opens in POSITION.  POSITION defaults to the
 current buffer's own, as `harness-ui-session-opener' has it, and after a
 switch, which leaves the current buffer's window behind, to where
-sessions open (`harness-ui-default-position')."
+sessions open (`harness-ui-default-position'), beside the windows of
+the project's workspace; a workspace showing nothing yet, a new one,
+has its window taken instead (`full')."
   (unless harness-ui-open-session-function
     (user-error "No chat module loaded"))
   (let* ((here (or position
                    (and (harness-ui--fullscreen-layout) 'fullscreen)
                    harness-ui-position
                    harness-ui-default-position))
-         (position (if (harness-ui-switch-to-session-project id) position here))
+         (switched (harness-ui-switch-to-session-project id))
+         (position (cond ((null switched) here)
+                         (position)
+                         ((eq switched 'blank) 'full)))
          (buffer (funcall harness-ui-open-session-function id))
          (window (get-buffer-window buffer)))
     (if (window-live-p window)
