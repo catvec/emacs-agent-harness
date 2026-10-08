@@ -818,18 +818,26 @@ yet: it starts after the init file, with the value set there."
             (or (and name (not (string-empty-p name)) name)
                 (format "unnamed (%s)" (substring (or (plist-get session :id) "????") 0 4))))))
 
-(defun harness-ui-task-title (task &optional session)
-  "Return TASK's title, as the task board shows it.
+(defun harness-ui-task-name (task &optional session)
+  "Return TASK's name, or nil while it has none and its title is its prompt.
 That is the name of its SESSION, by default the cached session it works
-in, once it has one, else the first line of its prompt.  A session is
-named after its first turn, and a task works in that turn, so a task at
-work has no name yet."
+in, else the task's own `:name': the title a cheap model gave it as it
+was submitted, which it has while it waits for a slot, before it has a
+session to name."
   (let ((name (plist-get (or session
                              (and (plist-get task :session) (harness-ui-session (plist-get task :session))))
                          :name)))
-    (if (harness-string-blank-p name)
-        (harness-first-line (plist-get task :prompt) 72)
-      name)))
+    (cond ((not (harness-string-blank-p name)) name)
+          ((not (harness-string-blank-p (plist-get task :name))) (plist-get task :name)))))
+
+(defun harness-ui-task-title (task &optional session)
+  "Return TASK's title, as the task board shows it.
+That is its name (`harness-ui-task-name', SESSION's or its own) once it
+has one, else the first line of its prompt: a task is named as soon as
+it is submitted, and its title shows its prompt only until the name
+comes, or when naming it failed."
+  (or (harness-ui-task-name task session)
+      (harness-first-line (plist-get task :prompt) 72)))
 
 ;;;; Model catalogue cache
 

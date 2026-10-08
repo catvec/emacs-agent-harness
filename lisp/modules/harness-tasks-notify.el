@@ -65,8 +65,12 @@ nil sends them where `harness-notifications-providers' says."
          (ignore-errors (harness-call 'session/get sid)))))
 
 (defun harness-tasks-notify--title (task session)
-  "Return TASK's title: its SESSION's name, else its prompt's first line."
-  (let ((name (plist-get session :name)))
+  "Return TASK's title: its SESSION's name, else its own, else its prompt's.
+A task gets its own `:name' as soon as it is submitted; without one the
+title is its prompt's first line."
+  (let ((name (if (harness-string-blank-p (plist-get session :name))
+                  (plist-get task :name)
+                (plist-get session :name))))
     (harness-truncate-end
      (if (harness-string-blank-p name)
          (let ((line (harness-first-line (or (plist-get task :prompt) ""))))

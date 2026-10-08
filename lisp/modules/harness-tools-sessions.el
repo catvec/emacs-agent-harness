@@ -719,12 +719,15 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
 
 (defun harness-tools-sessions--task-line (task &optional self)
   "Return the listing of TASK.
-Its title on the board, the name of its session once it has one, comes
-before its prompt.  When SELF, a session id, is TASK's session, the
-line says \"(this task)\"."
+Its title on the board, once it has one, comes before its prompt: the
+name of its session, else its own, which a task waiting for a slot has
+before it has a session.  When SELF, a session id, is TASK's session,
+the line says \"(this task)\"."
   (let* ((sid (plist-get task :session))
          (session (and sid (harness-call 'session/exists-p sid) (harness-call 'session/get sid)))
-         (title (plist-get session :name))
+         (title (if (harness-string-blank-p (plist-get session :name))
+                    (plist-get task :name)
+                  (plist-get session :name)))
          (pending (and session (harness-tools-sessions--pending-text session))))
     (concat
      (format "%s  %-11s %s%s%s" (plist-get task :id) (plist-get task :column)
@@ -774,7 +777,7 @@ line says \"(this task)\"."
 
 (harness-define-tool "task_list"
   :label "List tasks"
-  :description "List the task board: tasks (one session each, usually in its own worktree, or in the project's main tree when submitted with main_tree, done once the user verified the work and it merged) with their title (their session's name, once it has one), prompt, column (pending, needs-input, active, review, merging, done), state, when they were created and finished, session, branch, merge status and review status. A task in review has finished and waits for the user to verify it or send it back; one in merging holds a place in the merge queue (queued, merging, or its session resolving conflicts). Defaults to this project's unarchived tasks, oldest first; limit keeps the most recent ones. The task this session works on says (this task). Inspect a task's work with session_read on its session."
+  :description "List the task board: tasks (one session each, usually in its own worktree, or in the project's main tree when submitted with main_tree, done once the user verified the work and it merged) with their title (their session's name, else the one a task is given as soon as it is submitted), prompt, column (pending, needs-input, active, review, merging, done), state, when they were created and finished, session, branch, merge status and review status. A task in review has finished and waits for the user to verify it or send it back; one in merging holds a place in the merge queue (queued, merging, or its session resolving conflicts). Defaults to this project's unarchived tasks, oldest first; limit keeps the most recent ones. The task this session works on says (this task). Inspect a task's work with session_read on its session."
   :schema '(:type "object"
             :properties (:column (:type "string" :enum ("pending" "needs-input" "active" "review" "merging" "done"))
                          :include_archived (:type "boolean" :description "Include archived tasks (default false).")

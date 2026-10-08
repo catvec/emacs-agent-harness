@@ -8,9 +8,10 @@
 ;; permission mode so it is seldom held up waiting for the user.  It is
 ;; interactive, asking when it needs a permission, unless the
 ;; configuration makes it non-interactive (`harness-tasks-non-interactive',
-;; or `harness-non-interactive' for its directory).  The session's name is
-;; the task's title, so when the model names it,
-;; `harness-tasks--naming-instructions' asks for a ticket title.
+;; or `harness-non-interactive' for its directory).  A task is named as
+;; soon as it is submitted, while it may wait for a slot, and its session
+;; takes that name: `harness-tasks--naming-instructions' asks the model
+;; for a ticket title (see Titles).
 ;;
 ;; A task's session also runs on a shorter context than an interactive
 ;; one by default: `harness-tasks-context-limit' (256k tokens) caps the
@@ -1011,11 +1012,177 @@ worktree, how it reaches the main branch -- or, in the main tree
 
 
 (defun harness-tasks--naming-prompt (prompt session)
-  "Ask for a ticket title when naming a task's SESSION (PROMPT filter)."
+  "Ask for a ticket title when naming a task or its SESSION (PROMPT filter).
+SESSION is the session named, or the options of a task's own request
+\(`naming/title'), which name the task with `:task'."
   (if (and (not (harness-string-blank-p harness-tasks--naming-instructions))
-           (harness-tasks--by-session (plist-get session :id)))
+           (or (plist-get session :task)
+               (harness-tasks--by-session (plist-get session :id))))
       (concat prompt "\n\n" harness-tasks--naming-instructions)
     prompt))
+
+;;;; Titles
+;;
+;; A task is named as soon as it is submitted, while it may still wait
+;; for a slot: its prompt goes out in the request that names a session
+;; from its first message, to the cheap naming model (`naming/title'),
+;; and the title comes back as the task's `:name'.  The board, task_list
+;; and the session list show it until the task's session has a name of
+;; its own.  The session takes it as the task starts (`session/create'
+;; with `:name'; a written-up task's session as it moves to the work),
+;; so it is not named again.  A session made while the request is out is
+;; named by it when it comes back: `harness-tasks--auto-name-p' keeps the
+;; naming of its first turn off meanwhile.  Nothing ever waits for a
+;; title: a task starts with one or without, and when the request fails
+;; its session is named the usual way, from the same message.  A backlog
+;; task is named the same way, from the words it was written up from,
+;; and so is every task of a board found without a title when the
+;; harness starts or reloads.
+
+(defvar harness-naming-auto)
+
+(defconst harness-tasks--naming-concurrency 2
+  "Naming requests of tasks that may be out at once; the others wait their turn.
+A burst of submissions, or a board of nameless tasks found at start-up,
+would otherwise send them all at once: a process each, with Claude Code.")
+
+(defvar harness-tasks--naming (make-hash-table :test 'equal)
+  "Task id -> the text its naming request asks a title for, while it is out.")
+
+(defvar harness-tasks--naming-queue nil
+  "Ids of the tasks whose naming request waits to go out, oldest first.")
+
+(defun harness-tasks--naming-p ()
+  "Non-nil when tasks are named as they are submitted.
+That is when sessions are named automatically (`harness-naming-auto'),
+and the naming module titles a message on its own (`naming/title')."
+  (and (bound-and-true-p harness-naming-auto)
+       (harness-method-exists-p 'naming/title)))
+
+(defun harness-tasks--naming-text (task)
+  "Return the text TASK is named from: the message its session opens with.
+That is a backlog task's request (`:note'), which its write-up replaces
+as the prompt, else the prompt."
+  (or (plist-get task :note) (plist-get task :prompt)))
+
+(defun harness-tasks--titled-p (task)
+  "Non-nil when TASK has a title: a `:name', or a session with a name."
+  (or (not (harness-string-blank-p (plist-get task :name)))
+      (not (harness-string-blank-p (plist-get (harness-tasks--session task) :name)))))
+
+(defun harness-tasks--wants-name-p (task)
+  "Non-nil when TASK is to be named from its prompt.
+That is a task with no title (`harness-tasks--titled-p'), not archived,
+whose session, when it has one, runs no turn: the start of that turn
+named its session from the same message, or will name it at the next."
+  (and (not (harness-json-true-p (plist-get task :archived)))
+       (not (harness-string-blank-p (harness-tasks--naming-text task)))
+       (not (harness-tasks--titled-p task))
+       (not (harness-tasks--turn-p task))))
+
+(defun harness-tasks--name (id)
+  "Have task ID named from its prompt, unless its title is already on its way.
+The request waits its turn (`harness-tasks--naming-concurrency').  This
+never signals and nothing waits for it: a task does not wait for, nor
+fail with, its title."
+  (condition-case err
+      (when (and (harness-tasks--naming-p)
+                 (not (member id harness-tasks--naming-queue))
+                 (not (gethash id harness-tasks--naming)))
+        (setq harness-tasks--naming-queue (append harness-tasks--naming-queue (list id)))
+        (harness-tasks--naming-next))
+    (error (harness-log 'warn "naming task %s failed: %s" id (harness-error-message err)))))
+
+(defun harness-tasks--naming-next ()
+  "Send the naming requests that wait while fewer than the limit are out.
+A task that no longer wants a title is passed over: one that started
+while it waited has its session named as the turn starts."
+  (while (and harness-tasks--naming-queue
+              (< (hash-table-count harness-tasks--naming) harness-tasks--naming-concurrency))
+    (let ((task (gethash (pop harness-tasks--naming-queue) harness-tasks--table)))
+      (when (and task (harness-tasks--wants-name-p task))
+        (harness-tasks--ask-name task)))))
+
+(defun harness-tasks--naming-model (task)
+  "Return the model whose naming tier titles TASK: its session's, now or to be.
+That is the model of the session it has, else the one it will get: a
+backlog task's refining one, another's working one."
+  (or (plist-get (harness-tasks--session task) :model)
+      (plist-get (if (harness-tasks--backlog-p task)
+                     (harness-tasks--refine-settings task)
+                   (harness-tasks--work-settings task))
+                 :model)
+      (harness-tasks--config 'harness-model (plist-get task :cwd))))
+
+(defun harness-tasks--ask-name (task)
+  "Send the request naming TASK; `harness-tasks--named' takes its answer."
+  (let ((id (plist-get task :id))
+        (text (harness-tasks--naming-text task)))
+    (puthash id text harness-tasks--naming)
+    (harness-then (condition-case err
+                      (harness-call 'naming/title text
+                                    (list :task id :model (harness-tasks--naming-model task)
+                                          :cwd (plist-get task :cwd)))
+                    (error (harness-rejected err)))
+                  (lambda (name) (harness-tasks--named id text name nil) nil)
+                  (lambda (err) (harness-tasks--named id text nil err) nil))))
+
+(defun harness-tasks--name-session (session-id)
+  "Have SESSION-ID named from its first message, as its turn's start does."
+  (when (harness-method-exists-p 'naming/name)
+    (harness-catch (harness-call-async 'naming/name session-id '(:opening t)) #'ignore)))
+
+(defun harness-tasks--named (id text name err)
+  "Take NAME, the title of task ID from TEXT, or ERR, why there is none.
+The task takes NAME as its `:name', and its session too when it has no
+name.  A title of a prompt edited since is dropped, and the task named
+again.  When the request failed, or its title was dropped, a nameless
+session whose turn runs is named from its first message right away, as
+the start of that turn left it to this request."
+  (remhash id harness-tasks--naming)
+  (harness-run-soon #'harness-tasks--naming-next)
+  (condition-case problem
+      (when-let* ((task (gethash id harness-tasks--table)))
+        (let* ((session (harness-tasks--session task))
+               (nameless (and session (harness-string-blank-p (plist-get session :name))))
+               (current (equal text (harness-tasks--naming-text task))))
+          (if (and name current)
+              (progn
+                (harness-tasks--set id :name name)
+                (when nameless (harness-call 'session/update (plist-get session :id) :name name)))
+            (if name
+                (harness-log 'info "task %s: its prompt changed while it was named, so %S is dropped" id name)
+              (harness-log 'warn "naming task %s failed: %s" id (harness-error-message err)))
+            (cond ((and nameless (harness-tasks--turn-p task))
+                   (harness-tasks--name-session (plist-get session :id)))
+                  ((not current) (harness-tasks--name id))))))
+    (error (harness-log 'warn "naming task %s failed: %s" id (harness-error-message problem)))))
+
+(defun harness-tasks--auto-name-p (verdict session)
+  "Keep the naming of SESSION's turn off while its task's title is on its way.
+A `naming/auto-p' filter, VERDICT being the verdict so far: the title
+names the session when it comes (`harness-tasks--named'), which names
+the session the usual way should the request fail."
+  (and verdict
+       (not (when-let* ((task (harness-tasks--by-session (plist-get session :id))))
+              (gethash (plist-get task :id) harness-tasks--naming)))))
+
+(defun harness-tasks--name-untitled ()
+  "Name the tasks found without a title (`harness-tasks--wants-name-p').
+They come from before tasks were named as they were submitted, or
+their naming failed."
+  (when (harness-tasks--naming-p)
+    (dolist (task (harness-tasks--sorted #'harness-tasks--wants-name-p))
+      (harness-tasks--name (plist-get task :id)))))
+
+(defun harness-tasks--name-option (task &optional session)
+  "Return (:name NAME) to give a session of TASK its title, or nil.
+That is when TASK has a `:name' and SESSION, the session as it is now
+when there is one, has none."
+  (let ((name (plist-get task :name)))
+    (and (not (harness-string-blank-p name))
+         (harness-string-blank-p (plist-get session :name))
+         (list :name name))))
 
 ;;;; Side conversations about the board
 
@@ -1193,12 +1360,15 @@ session is what its next turn uses, so both change.  Return TASK's view."
     (harness-call 'task/get id)))
 
 (defun harness-tasks--open-session (id cwd worktree)
-  "Create task ID's session in CWD (in WORKTREE, when non-nil) and prompt it."
+  "Create task ID's session in CWD (in WORKTREE, when non-nil) and prompt it.
+The session is named with the task's title when it has one by now, so
+it is not named again; else the title still on its way names it."
   (condition-case err
       (let* ((task (harness-tasks--get id))
              (session (apply #'harness-call 'session/create
                              :cwd cwd
                              (append (and worktree (list :worktree worktree))
+                                     (harness-tasks--name-option task)
                                      (harness-tasks--work-settings task))))
              (sid (plist-get session :id)))
         (harness-tasks--set id :session sid)
@@ -1317,7 +1487,8 @@ directory changes, the provider's conversation is dropped: the Claude
 CLI keeps conversations per directory.  The start message carries
 everything the work needs, and the new conversation gets the
 transcript, which keeps the refinement, as text
-\(`harness-provider-history-text')."
+\(`harness-provider-history-text').  A session that has no name yet
+takes the task's title."
   (condition-case err
       (let* ((task (harness-tasks--get id))
              (sid (plist-get task :session))
@@ -1333,6 +1504,7 @@ transcript, which keeps the refinement, as text
         (apply #'harness-call 'session/update sid :silent t :cwd cwd
                (append
                 (and worktree (list :worktree worktree))
+                (harness-tasks--name-option task session)
                 (list :permission-mode (or (plist-get settings :permission-mode)
                                            (harness-tasks--config 'harness-permission-mode cwd) 'ask)
                       :thinking (or (plist-get settings :thinking) (harness-tasks--config 'harness-thinking cwd))
@@ -1466,8 +1638,9 @@ this only adds the error a failed turn reports."
 
 (defun harness-tasks--refine (id &optional text)
   "Have an agent write task ID up for the backlog.
-The first time a session is made for it at the task's directory and
-given the task; afterwards TEXT, feedback on the write-up, goes to that
+The first time a session is made for it at the task's directory, named
+with the task's title when it has one, and given the task; afterwards
+TEXT, feedback on the write-up, goes to that
 session (without it, a request to write it up again, or after the agent
 refused it as a duplicate, to write it up all the same).  A session that
 never received the task, cut short by a restart, gets the task itself."
@@ -1491,7 +1664,8 @@ never received the task, cut short by a restart, gets the task itself."
                ;; write-up (again, or all the same after a duplicate).
                (and begun (harness-string-blank-p text) (harness-tasks--from-harness))))
           (let* ((sid (plist-get (apply #'harness-call 'session/create :cwd (plist-get task :cwd)
-                                        (harness-tasks--refine-settings task))
+                                        (append (harness-tasks--name-option task)
+                                                (harness-tasks--refine-settings task)))
                                  :id)))
             (harness-tasks--set id :session sid)
             (harness-tasks--refine-turn id sid (harness-tasks--refine-blocks task text)))))
@@ -1808,11 +1982,13 @@ restart."
 (defun harness-tasks--pick-up ()
   "Soon pick up the work a stopped harness left, then start waiting tasks.
 Runs once the modules are up, and again when a store read later adds
-records.  Each step leaves alone the tasks something already works on."
+records.  Each step leaves alone the tasks something already works on.
+Last, the tasks without a title are named."
   (harness-run-soon #'harness-tasks--recover)
   (harness-run-soon #'harness-tasks--resume-merges)
   (harness-run-soon #'harness-tasks--recover-refinements)
-  (harness-run-soon #'harness-tasks--schedule))
+  (harness-run-soon #'harness-tasks--schedule)
+  (harness-run-soon #'harness-tasks--name-untitled))
 
 ;;;; Methods
 
@@ -1831,7 +2007,10 @@ or the directory's `harness-non-interactive' is on.  With `:refine'
 the task goes to the backlog instead: an agent writes it up (state
 refining), then it waits in pending until `task/start' -- unless the
 agent finds the board has it already, and refuses it as a duplicate.
-A refined task keeps `:main-tree' for when it finally starts."
+A refined task keeps `:main-tree' for when it finally starts.
+Either way the task is named from PROMPT at once, beside everything
+else (see Titles above): its `:name' comes while it waits, and its
+session takes it."
   (when (harness-string-blank-p prompt) (error "A task needs a prompt"))
   (harness-tasks--load)
   (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
@@ -1854,6 +2033,9 @@ A refined task keeps `:main-tree' for when it finally starts."
     (when refine
       (setq task (append task (list :backlog t :note (string-trim prompt)))))
     (harness-tasks--put task)
+    ;; Out before the task gets a session, so that session leaves its
+    ;; naming to this request (`harness-tasks--auto-name-p').
+    (harness-tasks--name (plist-get task :id))
     (if refine
         (harness-tasks--refine (plist-get task :id))
       (harness-tasks--schedule))
@@ -2023,15 +2205,22 @@ the prompt it has), but not one an agent is writing up right now."
 (harness-defmethod task/update (id prompt &optional attachments)
   "Replace the prompt of pending task ID with PROMPT and its ATTACHMENTS.
 A task whose write-up stopped can be written by hand this way; it then
-waits in the backlog like a refined one."
+waits in the backlog like a refined one.  A task named from its prompt
+\(not a backlog task, named from the words it was written up from) is
+named again from the new one."
   (let ((task (harness-tasks--get id)))
     (unless (memq (plist-get task :state) '(pending refining))
       (error "Only tasks that have not started can be edited"))
     (when (harness-tasks--turn-p task)
       (error "Task %s is being written up; wait for it or stop it" id))
     (when (harness-string-blank-p prompt) (error "A task needs a prompt"))
-    (harness-tasks--set id :prompt (string-trim prompt) :attachments attachments
-                        :state 'pending :outcome nil :error nil :duplicate-of nil)))
+    (let* ((before (harness-tasks--naming-text task))
+           (view (harness-tasks--set id :prompt (string-trim prompt) :attachments attachments
+                                     :state 'pending :outcome nil :error nil :duplicate-of nil)))
+      (if (equal before (harness-tasks--naming-text view))
+          view
+        (prog1 (harness-tasks--set id :name nil)
+          (harness-tasks--name id))))))
 
 (harness-defmethod task/prompt (id text &optional attachments)
   "Send TEXT and ATTACHMENTS to the session of task ID: a follow-up, or steering.
@@ -2287,6 +2476,7 @@ up again, merges in flight are queued again and waiting tasks start."
   (harness-add-filter 'agent/system-prompt #'harness-tasks--system-prompt 60)
   (harness-add-filter 'agent/system-prompt #'harness-tasks--btw-system-prompt 60)
   (harness-add-filter 'naming/system-prompt #'harness-tasks--naming-prompt 60)
+  (harness-add-filter 'naming/auto-p #'harness-tasks--auto-name-p)
   (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25)
   (harness-add-filter 'agent/message #'harness-tasks--on-message)
   (harness-tasks--pick-up))
@@ -2309,10 +2499,13 @@ up again, merges in flight are queued again and waiting tasks start."
 ;; A reload does not initialise a running module again, and a write-up
 ;; must not go without the stage that keeps it read-only, nor a message
 ;; to a task in review without the filter that sends it back: install
-;; them now.
+;; them now.  The session of a task whose title is on its way waits for
+;; it, and the tasks of the boards without a title get one.
 (when (harness-module-ready-p 'tasks)
   (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25)
-  (harness-add-filter 'agent/message #'harness-tasks--on-message))
+  (harness-add-filter 'agent/message #'harness-tasks--on-message)
+  (harness-add-filter 'naming/auto-p #'harness-tasks--auto-name-p)
+  (harness-run-soon #'harness-tasks--name-untitled))
 
 (provide 'harness-tasks)
 ;;; harness-tasks.el ends here

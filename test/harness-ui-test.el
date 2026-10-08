@@ -810,6 +810,22 @@ after its first turn, so a task at work has none yet."
     ;; A long first line is shortened.
     (should (= 72 (length (harness-ui-task-title (list :prompt (make-string 100 ?x))))))))
 
+(ert-deftest harness-ui-task-title-is-the-task-name-before-the-session-has-one ()
+  "A task is named as soon as it is submitted: one waiting for a slot, or
+whose session has no name yet, is called by its own name.  Its
+session's name, once it has one, comes first."
+  (let ((task '(:id "t-1" :name "Export orders as CSV" :prompt "Add CSV export to reports\n\nFinance wants it.")))
+    (should (equal "Export orders as CSV" (harness-ui-task-title task)))
+    (should (equal "Export orders as CSV" (harness-ui-task-name task)))
+    (should (equal "Export orders as CSV" (harness-ui-task-title task '(:id "s-1" :name nil))))
+    (should (equal "CSV export for finance"
+                   (harness-ui-task-title task '(:id "s-1" :name "CSV export for finance"))))
+    ;; Without a name the title is the prompt, and the task has no name.
+    (let ((nameless (plist-put (copy-sequence task) :name "  ")))
+      (should (equal "Add CSV export to reports" (harness-ui-task-title nameless)))
+      (should-not (harness-ui-task-name nameless))
+      (should-not (harness-ui-task-name nameless '(:id "s-1" :name ""))))))
+
 ;;;; The prefix key
 
 (ert-deftest harness-ui-prefix-key-moves-the-keys ()
