@@ -1672,6 +1672,148 @@ supervisor."
         (should-not (harness-supervisor-plan-test-plans sid))
         (should-not harness-supervisor-plan-test--calls)))))
 
+;; The user approves a plan in ask mode alone.  In every other mode, and
+;; whenever the user is away, the plan is allowed at once and the judge of
+;; auto mode never rules on it.  The probe below is a judge that would
+;; deny every call: a plan that gets through was not put to it.
+
+(defvar harness-perms-auto-model)
+(defvar harness-perms-rules)
+
+(defun harness-supervisor-plan-test-judge-provider ()
+  "Register the provider `judge', a model that denies every call it is asked about.
+Return a function that gives the requests the judge got, newest first."
+  (let ((requests nil))
+    (harness-define-provider 'judge
+      :label "Judge"
+      :complete (lambda (req)
+                  (push req requests)
+                  (let ((cb (plist-get req :on-event)))
+                    (dolist (ev '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"a detail in the plan looks insecure\"}")
+                                  (:type done :stop-reason end-turn)))
+                      (let ((ev ev)) (run-at-time 0.01 nil (lambda () (funcall cb ev))))))
+                  (list :cancel #'ignore)))
+    (lambda () requests)))
+
+(defun harness-supervisor-plan-test-judged-p (probe)
+  "Return non-nil when the judge PROBE does answer the call of a session.
+The session does not supervise, is non-interactive and in auto mode, so
+the judge decides its call to submit_plan, and denies it.  A probe that
+did not answer would make \"the judge was never asked\" mean nothing."
+  (let* ((hands-on (harness-supervisor-plan-test-session
+                    :permission-mode 'auto :non-interactive t :ext '(:supervisor :false)))
+         (decision (harness-test-await
+                    (harness-run-filter-async
+                     'permission/decide (list :behavior 'ask)
+                     (list :session (harness-call 'session/get hands-on) :tool "submit_plan"
+                           :input nil :kind 'meta :call-id "call-hands-on"))
+                    10)))
+    (and (eq 'deny (plist-get decision :behavior))
+         (= 1 (length (funcall probe))))))
+
+(ert-deftest harness-supervisor-plan-in-auto-mode-the-plan-starts-with-no-prompt-and-no-judge ()
+  "The judge is not asked about a plan, so a detail in it cannot make the judge refuse."
+  (harness-supervisor-plan-test-with-modules (perms)
+    (harness-remove-filter 'permission/decide #'harness-supervisor-plan-test--allow)
+    (harness-supervisor-plan-test-stub-starts
+      (let* ((probe (harness-supervisor-plan-test-judge-provider))
+             (harness-perms-auto-model "judge:x")
+             (sid (harness-supervisor-plan-test-session :permission-mode 'auto))
+             (input (harness-supervisor-plan-test-plan-input (harness-supervisor-plan-test-step-input "s1")))
+             (result (harness-supervisor-plan-test-run sid "submit_plan" input "call-1")))
+        (should-not (plist-get result :is-error))
+        (should (plist-get result :end-turn))
+        ;; Nobody was asked: nothing is pending, and the step runs.
+        (should-not (harness-call 'permission/pending sid))
+        (should (harness-supervisor-plan-test-plans sid))
+        (should (= 1 (length harness-supervisor-plan-test--calls)))
+        (should-not (funcall probe))
+        ;; The probe does hear of calls that are not plans of a supervisor.
+        (should (harness-supervisor-plan-test-judged-p probe))))))
+
+(ert-deftest harness-supervisor-plan-in-every-mode-but-ask-and-when-the-user-is-away-the-plan-starts-at-once ()
+  "Yolo, accept-edits, and ask mode with the user away, like auto mode: no prompt, no judge."
+  (dolist (settings '((:permission-mode yolo)
+                      (:permission-mode accept-edits)
+                      (:permission-mode ask :non-interactive t)
+                      (:permission-mode auto :non-interactive t)))
+    (ert-info ((format "%S" settings))
+      (harness-supervisor-plan-test-with-modules (perms)
+        (harness-remove-filter 'permission/decide #'harness-supervisor-plan-test--allow)
+        (harness-supervisor-plan-test-stub-starts
+          (let* ((probe (harness-supervisor-plan-test-judge-provider))
+                 (harness-perms-auto-model "judge:x")
+                 (sid (apply #'harness-supervisor-plan-test-session settings))
+                 (input (harness-supervisor-plan-test-plan-input (harness-supervisor-plan-test-step-input "s1")))
+                 (result (harness-supervisor-plan-test-run sid "submit_plan" input "call-1")))
+            (should-not (plist-get result :is-error))
+            (should-not (harness-call 'permission/pending sid))
+            (should (harness-supervisor-plan-test-plans sid))
+            (should (= 1 (length harness-supervisor-plan-test--calls)))
+            (should-not (funcall probe))
+            (should (harness-supervisor-plan-test-judged-p probe))))))))
+
+(ert-deftest harness-supervisor-plan-in-auto-mode-a-retry-needs-no-approval-and-no-judge ()
+  "retry_step is allowed like submit_plan, and the step runs again on a new worker."
+  (harness-supervisor-plan-test-with-modules (perms)
+    (harness-remove-filter 'permission/decide #'harness-supervisor-plan-test--allow)
+    (harness-supervisor-plan-test-stub-starts
+      (let* ((probe (harness-supervisor-plan-test-judge-provider))
+             (harness-perms-auto-model "judge:x")
+             (sid (harness-supervisor-plan-test-session :permission-mode 'auto)))
+        (should-not (plist-get (harness-supervisor-plan-test-run
+                                sid "submit_plan"
+                                (harness-supervisor-plan-test-plan-input
+                                 (harness-supervisor-plan-test-step-input "s1")))
+                               :is-error))
+        ;; The worker of the step failed.
+        (harness-supervisor--update-step sid (plist-get (harness-supervisor-plan-test-plan sid) :id) "s1"
+                                         :state "failed" :error "boom")
+        (let ((result (harness-supervisor-plan-test-run sid "retry_step" '(:step "s1" :reason "once more"))))
+          (should-not (plist-get result :is-error))
+          (should (string-match-p "runs again" (plist-get result :content))))
+        (should-not (harness-call 'permission/pending sid))
+        (should (= 2 (plist-get (harness-supervisor-plan-test-step sid "s1") :attempts)))
+        (should (= 2 (length harness-supervisor-plan-test--calls)))
+        (should-not (funcall probe))
+        (should (harness-supervisor-plan-test-judged-p probe))))))
+
+(ert-deftest harness-supervisor-plan-a-plan-that-waits-for-approval-starts-when-the-user-goes-away ()
+  "Switching the session to non-interactive decides the waiting plan as a new one is: allowed, not judged."
+  (harness-supervisor-plan-test-with-modules (perms)
+    (harness-remove-filter 'permission/decide #'harness-supervisor-plan-test--allow)
+    (harness-supervisor-plan-test-stub-starts
+      (let* ((probe (harness-supervisor-plan-test-judge-provider))
+             (harness-perms-auto-model "judge:x")
+             (sid (harness-supervisor-plan-test-session :permission-mode 'ask))
+             (input (harness-supervisor-plan-test-plan-input (harness-supervisor-plan-test-step-input "s1")))
+             (done (harness-call 'tools/execute sid (list :id "call-1" :name "submit_plan" :input input))))
+        (harness-test-wait (lambda () (car (harness-call 'permission/pending sid))) 10 "the approval prompt")
+        (should-not (harness-supervisor-plan-test-plans sid))
+        (harness-call 'session/update sid :non-interactive t)
+        (should-not (plist-get (harness-test-await done) :is-error))
+        (should (harness-supervisor-plan-test-plans sid))
+        (should-not (harness-call 'permission/pending sid))
+        (should-not (funcall probe))))))
+
+(ert-deftest harness-supervisor-plan-a-standing-deny-rule-still-refuses-a-plan-in-auto-mode ()
+  "Only a call that would ask is allowed: what a rule denied stays denied, and nothing starts."
+  (harness-supervisor-plan-test-with-modules (perms)
+    (harness-remove-filter 'permission/decide #'harness-supervisor-plan-test--allow)
+    (harness-supervisor-plan-test-stub-starts
+      (let* ((probe (harness-supervisor-plan-test-judge-provider))
+             (harness-perms-auto-model "judge:x")
+             (harness-perms-rules '((:tool "submit_plan" :behavior deny)))
+             (sid (harness-supervisor-plan-test-session :permission-mode 'auto))
+             (input (harness-supervisor-plan-test-plan-input (harness-supervisor-plan-test-step-input "s1")))
+             (result (harness-supervisor-plan-test-run sid "submit_plan" input "call-1")))
+        (should (plist-get result :is-error))
+        (should (string-match-p "standing rule" (plist-get result :content)))
+        (should-not (harness-supervisor-plan-test-plans sid))
+        (should-not harness-supervisor-plan-test--calls)
+        (should-not (harness-call 'permission/pending sid))
+        (should-not (funcall probe))))))
+
 ;;;; A task's supervisor
 
 (defmacro harness-supervisor-plan-test-with-tasks (&rest body)

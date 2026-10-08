@@ -19,6 +19,19 @@
 ;;   sends a model that stopped without one back, twice at most, with a
 ;;   reminder; after that it lets the turn end and leaves a hint.
 ;;
+;; A plan is approved by the user alone, and only in ask mode.  It
+;; changes nothing by itself: every call of its workers goes through the
+;; whole permission chain in the worker's own session, and that
+;; session's mode and judge decide it as usual.  So `submit_plan' and
+;; `retry_step' ask the user only in ask mode, with the user present
+;; (the session not non-interactive).  In accept-edits, auto and yolo
+;; mode, and in any non-interactive session whatever its mode, the
+;; `permission/decide' stage at 28 allows them, after the mode and the
+;; rules (20) and before the judge (30), so that the auto-mode judge never
+;; rules on a plan.  What an earlier stage denied stays denied: the
+;; refusals of the stage at 8, a standing deny rule.  `no_plan_needed'
+;; only records a decision, and is allowed in every mode.
+;;
 ;; Whether a session supervises is its `:ext' `:supervisor': t, `:false'
 ;; for hands-on, or nothing for a session this module does not govern
 ;; (a sub-agent, a side conversation, a session older than the module).
@@ -108,6 +121,12 @@
 (defvar harness-tools-agent-planning-section)
 (defvar harness-perms-dir-tool)
 (defvar harness-supervisor--ending)
+
+;; The permission module is optional here, as this module is a plugin to
+;; it: the approval stage asks for the mode and the user's presence only
+;; when it is loaded (`harness-supervisor--approval').
+(declare-function harness-perms--mode-of "harness-perms" (session))
+(declare-function harness-perms--non-interactive-p "harness-perms" (session))
 
 ;;;; Settings
 
@@ -279,21 +298,83 @@ is final, so no permission mode, rule or answer lets the call run.
 Calls of a session that does not supervise go on as they were.  A call
 this stage cannot check is denied too: it fails closed, since a handler
 that signals would be skipped, and the call would then be decided as if
-the mode were off.  The supervisor's own `no_plan_needed' only records
-a decision, so what would ask the user is allowed."
+the mode were off.  The stage only refuses: it allows nothing, so what
+a supervising session may do is decided by the stages after it, and by
+`harness-supervisor--approval' for the tools of its own."
   (funcall next
            (condition-case err
-               (cond
-                ((harness-supervisor--refusal request))
-                ((and (equal (plist-get request :tool) "no_plan_needed")
-                      (eq (plist-get decision :behavior) 'ask)
-                      (harness-supervisor--session-p (plist-get request :session)))
-                 (list :behavior 'allow :reason "no_plan_needed only records a decision"))
-                (t decision))
+               (or (harness-supervisor--refusal request) decision)
              (error
               (harness-log 'error "supervisor: checking a call of %s failed, so it is denied: %S"
                            (plist-get request :tool) err)
               (harness-supervisor--denial "this call could not be checked, so it is not made")))))
+
+(defconst harness-supervisor--approval-tools '("no_plan_needed" "submit_plan" "retry_step")
+  "The supervisor's own tools, which `harness-supervisor--approval' decides.
+A tool an extension adds to `harness-supervisor-tools' is decided as
+any other is.")
+
+(defconst harness-supervisor--approval-reason
+  "a plan is approved by the user in ask mode only, and no judge rules on plans: every call of its workers is decided in the worker's own session"
+  "Why `harness-supervisor--approval' allows a plan without asking.")
+
+(defun harness-supervisor--approval-decision (decision request)
+  "Return what the approval of REQUEST comes to, given DECISION.
+That is DECISION itself, unless it still asks, REQUEST is a call of one
+of `harness-supervisor--approval-tools' by a supervising session, and
+no user is there to approve it: then it is an allow.  See
+`harness-supervisor--approval' for when that is."
+  (let ((session (plist-get request :session))
+        (tool (plist-get request :tool)))
+    (cond
+     ((not (and (eq (plist-get decision :behavior) 'ask)
+                (member tool harness-supervisor--approval-tools)
+                (harness-supervisor--session-p session)))
+      decision)
+     ;; It records a decision and nothing more, so asking about it is no use.
+     ((equal tool "no_plan_needed")
+      (list :behavior 'allow :reason "no_plan_needed only records a decision"))
+     ;; The mode and whether the user is there are the permission
+     ;; module's to say: without it the plan is left as it is.
+     ((not (and (fboundp 'harness-perms--mode-of) (fboundp 'harness-perms--non-interactive-p)))
+      decision)
+     ;; Ask mode, the user there: they approve the plan, at 90.
+     ((and (eq (harness-perms--mode-of session) 'ask)
+           (not (harness-perms--non-interactive-p session)))
+      decision)
+     (t (list :behavior 'allow :reason harness-supervisor--approval-reason)))))
+
+(defun harness-supervisor--approval (decision next request)
+  "Have only the user approve a plan, and only in ask mode, then go on with NEXT.
+A `permission/decide' stage at 28, after the mode and the standing rules
+\(20) and the write-up gate of the tasks module (25), before the
+auto-mode judge (30): DECISION is the current value and REQUEST the call.
+It decides the calls of a supervising session to `submit_plan',
+`retry_step' and `no_plan_needed' that are still undecided.
+
+A plan changes nothing by itself: each call of its workers goes through
+the whole permission chain in the worker's own session, by that
+session's mode, rules and judge.  So the user alone approves a plan,
+and only in ask mode while they are there: the stage leaves the decision
+as it is, and the prompt at 90 asks.  In every other mode (accept-edits,
+auto, yolo), and in a non-interactive session whatever its mode, the plan
+is allowed, and no judge ever rules on it.  `no_plan_needed' only
+records a decision, and is allowed in every mode.  What an earlier stage
+decided stays decided, since only a call that still asks is touched: the
+refusals of `harness-supervisor--gate', a standing rule, the write-up
+gate.  Without the permission module the mode is not known, so a plan is
+left as it is.
+
+A handler that signals is skipped, so when anything goes wrong here the
+error is logged and DECISION goes on unchanged: refusing is the work of
+the gate."
+  (funcall next
+           (condition-case err
+               (harness-supervisor--approval-decision decision request)
+             (error
+              (harness-log 'error "supervisor: deciding whether a call of %s needs approval failed, so the other stages decide: %S"
+                           (plist-get request :tool) err)
+              decision))))
 
 ;;;; Bash
 
@@ -1662,6 +1743,9 @@ appended.  Other sessions keep PROMPT."
   "Hook the module into the bus (idempotent)."
   (harness-add-filter 'agent/tools #'harness-supervisor--tools 90)
   (harness-add-filter 'permission/decide #'harness-supervisor--gate 8)
+  ;; After the mode and the rules (20) and the tasks' write-up gate (25),
+  ;; before the judge (30): it keeps the judge off the plans.
+  (harness-add-filter 'permission/decide #'harness-supervisor--approval 28)
   ;; Late, so the options of the handlers before it cannot undo its own.
   (harness-add-filter 'tools/sandbox-options #'harness-supervisor--sandbox-options 90)
   (harness-add-filter 'agent/stop #'harness-supervisor--stop)
@@ -1690,6 +1774,7 @@ left once they are (`harness-tasks--pick-up').  A reload hooks in again
   "Take the module off the bus.  Sessions keep their setting."
   (harness-remove-filter 'agent/tools #'harness-supervisor--tools)
   (harness-remove-filter 'permission/decide #'harness-supervisor--gate)
+  (harness-remove-filter 'permission/decide #'harness-supervisor--approval)
   (harness-remove-filter 'tools/sandbox-options #'harness-supervisor--sandbox-options)
   (harness-remove-filter 'agent/stop #'harness-supervisor--stop)
   (harness-remove-filter 'agent/system-prompt #'harness-supervisor--system-prompt)
