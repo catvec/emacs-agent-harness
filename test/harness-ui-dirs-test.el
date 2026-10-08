@@ -77,5 +77,24 @@
       (harness-call 'permission/allow-dir sid extra)
       (harness-test-wait (lambda () (member "session" (harness-ui-dirs-test--sources))) 5 "granted row"))))
 
+(ert-deftest harness-ui-dirs-shows-a-grant-until-the-turn-ends ()
+  "A directory an agent was allowed until its turn ends is listed as such.
+It can be revoked, and its row goes when the turn ends."
+  (harness-ui-dirs-test-with
+    (let ((extra (harness-test-temp-dir)))
+      (clrhash harness-perms--turn-dirs)
+      (harness-directories sid)
+      (harness-test-wait (lambda () harness-ui-dirs--entries) 5 "directory rows")
+      (harness-perms--grant-for-turn sid extra)
+      (harness-test-wait (lambda () (member "turn" (harness-ui-dirs-test--sources))) 5 "the turn's row")
+      (goto-char (point-min))
+      (while (and (not (eobp)) (not (equal (tabulated-list-get-id) extra))) (forward-line 1))
+      (should (equal extra (tabulated-list-get-id)))
+      (should (string-match-p "granted for this turn +k to revoke"
+                              (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
+      (harness-emit 'agent/turn-ended sid 'end-turn)
+      (harness-test-wait (lambda () (not (member "turn" (harness-ui-dirs-test--sources)))) 5 "the row gone")
+      (should-not (member extra (harness-call 'permission/allowed-dirs sid))))))
+
 (provide 'harness-ui-dirs-test)
 ;;; harness-ui-dirs-test.el ends here

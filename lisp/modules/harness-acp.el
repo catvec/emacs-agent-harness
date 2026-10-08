@@ -105,23 +105,29 @@ is never used for any other failure.")
     (yolo "YOLO" "Everything inside the project is allowed; outside still asks."))
   "Permission modes as ACP session modes: (ID NAME DESCRIPTION).")
 
-(defconst harness-acp--permission-options
-  '((:optionId "allow-once" :name "Allow" :kind "allow_once")
-    (:optionId "allow-session" :name "Allow for this session" :kind "allow_always")
-    (:optionId "allow-always" :name "Always allow" :kind "allow_always")
-    (:optionId "deny-once" :name "Deny" :kind "reject_once")
-    (:optionId "deny-always" :name "Always deny" :kind "reject_always"))
-  "Options offered with a `session/request_permission' for a tool call.")
+(defconst harness-acp-permission-answers
+  '(("allow-once" "Allow" "allow_once")
+    ("allow-session" "Allow for session" "allow_always")
+    ("allow-always" "Always allow" "allow_always")
+    ("deny-once" "Deny" "reject_once")
+    ("deny-always" "Always deny" "reject_always"))
+  "The answers to a permission request: (OPTION-ID LABEL ACP-KIND).
+They are the same for every kind of request -- a tool call, a call
+reaching outside the allowed directories, an agent asking for a
+directory -- and so is LABEL, wherever an answer is offered: the
+buttons of the chat and the popout, those of the session list and the
+task board, and the option names ACP clients get.  What an answer
+covers depends on the request, and the prompt says so (its pattern,
+its tooltips); allow-once never records anything.  The UI binds each to
+one key (`harness-ui-pending-permission-keys').")
 
-(defconst harness-acp--dir-permission-options
-  '((:optionId "allow-once" :name "Allow once" :kind "allow_once")
-    (:optionId "allow-session" :name "Allow directory for this session" :kind "allow_always")
-    (:optionId "allow-always" :name "Always allow directory" :kind "allow_always")
-    (:optionId "deny-once" :name "Deny" :kind "reject_once")
-    (:optionId "deny-always" :name "Always deny directory" :kind "reject_always"))
-  "Options offered when a tool call reaches outside the allowed directories.
-A client that shows the request's `_harness.pattern' can answer for
-another pattern; the names speak of the directory, the default.")
+(defconst harness-acp--permission-options
+  (mapcar (lambda (a) (list :optionId (nth 0 a) :name (nth 1 a) :kind (nth 2 a)))
+          harness-acp-permission-answers)
+  "Options offered with a `session/request_permission', for any request.
+A request about a path outside the allowed directories carries the
+pattern it is answered for in `_harness.pattern'; a client that shows
+it can answer for another one.")
 
 (defconst harness-acp--forwarded-events
   '(session/created session/deleted session/queue-changed session/pending-changed
@@ -953,14 +959,13 @@ edited the request's."
 
 (defun harness-acp--offered-options (payload)
   "Return the ACP options for a permission request with PAYLOAD.
-A directory prompt is worded for directories; when PAYLOAD lists its
-`:options' (ids such as `allow-session'), only those are offered, so
-an agent's own directory request has no \"Allow once\"."
-  (let* ((all (if (plist-get payload :dir) harness-acp--dir-permission-options
-                harness-acp--permission-options))
-         (ids (mapcar (lambda (o) (format "%s" o)) (append (plist-get payload :options) nil))))
-    (or (and ids (cl-remove-if-not (lambda (o) (member (plist-get o :optionId) ids)) all))
-        all)))
+Every kind of request is offered the same options, with the same
+names (`harness-acp-permission-answers'); when PAYLOAD lists its
+`:options' (ids such as `allow-session'), only those are offered."
+  (let ((ids (mapcar (lambda (o) (format "%s" o)) (append (plist-get payload :options) nil))))
+    (or (and ids (cl-remove-if-not (lambda (o) (member (plist-get o :optionId) ids))
+                                   harness-acp--permission-options))
+        harness-acp--permission-options)))
 
 (defun harness-acp--on-permission-requested (sid pending)
   "Ask the connected clients to decide PENDING permission request of SID.

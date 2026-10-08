@@ -2110,8 +2110,8 @@ task's key typed off a card.
         (". m" "Message session" harness-ui-tasks-reply)
         (". SPC" "View what point needs" harness-ui-tasks-requests)
         (". r" "Refine" harness-ui-tasks-refine)
-        (". y" "Allow tool call" harness-ui-tasks-allow)
-        (". n" "Deny tool call" harness-ui-tasks-deny)]
+        (". y" "Allow request" harness-ui-tasks-allow)
+        (". n" "Deny request" harness-ui-tasks-deny)]
        ["Finish"
         (". k" "Stop or drop" harness-ui-tasks-cancel)
         (". v" "Verify (accept)" harness-ui-tasks-verify)
@@ -2539,12 +2539,16 @@ but a failure shows on the board."
                                                 (harness-ui-tasks--on-error "Answering the permission request"))))
 
 (defun harness-ui-tasks-allow ()
-  "Allow the tool call the task at point is waiting on."
+  "Answer the permission request the task at point waits on with Allow.
+That is the [Allow] of the request's panel and of the session list, and
+their y; its tooltip says what it covers (`harness-ui-pending-answer-help')."
   (interactive)
   (harness-ui-tasks--permission "allow-once"))
 
 (defun harness-ui-tasks-deny ()
-  "Deny the tool call the task at point is waiting on."
+  "Answer the permission request the task at point waits on with Deny.
+That is the [Deny] of the request's panel and of the session list, and
+their n."
   (interactive)
   (harness-ui-tasks--permission "deny-once"))
 

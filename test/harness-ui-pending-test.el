@@ -475,6 +475,136 @@ answers the tool call, [Answer…] pops the question out."
       (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the permission answered from the board")
       (should (equal (list 'permission sid "p1" "allow-once") (car harness-ui-pending-test-answers))))))
 
+;;;; The same answers on every request
+
+(defun harness-ui-pending-test-item (kind)
+  "Return a pending permission item of KIND, offering every answer.
+KIND is `tool' (a call the mode asks about), `jail' (a call reaching
+outside the allowed directories) or `dir' (the agent's own request for
+a directory); the item's id is KIND's name."
+  (let ((options '("allow-once" "allow-session" "allow-always" "deny-once" "deny-always")))
+    (list :id (symbol-name kind) :kind "permission"
+          :payload (pcase kind
+                     ('tool (list :title "Bash: ls -la" :tool "bash" :kind "exec"
+                                  :input '(:command "ls -la") :options options))
+                     ('jail (list :title "Read /srv/notes/todo.org" :tool "read_file" :kind "read"
+                                  :input '(:path "/srv/notes/todo.org") :paths '("/srv/notes/todo.org")
+                                  :dir "/srv/notes/" :pattern "/srv/notes/**" :options options))
+                     ('dir (list :title "Access /srv/api/" :tool "request_directory_access" :kind "meta"
+                                 :input '(:path "/srv/api") :dir "/srv/api/" :pattern "/srv/api/**"
+                                 :reason "The agent asks for access: read the API types"
+                                 :options options))))))
+
+(ert-deftest harness-ui-pending-every-request-has-the-same-buttons ()
+  "A tool call, a call reaching outside, an agent's own request: the same buttons.
+Under the same labels, which ACP clients get as the options' names, and
+with the same keys, which answer the same on every panel; the echo area
+says what the answer covered."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session))
+           (row "[Allow] y  [Allow for session] s  [Always allow] a  [Deny] n  [Always deny] N")
+           (press (lambda (pid key)
+                    (with-current-buffer (harness-ui-popout-buffer (list 'pending sid))
+                      ;; Onto the request's panel (its id is a string: no `eq').
+                      (goto-char (point-min))
+                      (while (not (equal pid (get-text-property (point) 'harness-ui-pending)))
+                        (goto-char (or (next-single-property-change (point) 'harness-ui-pending)
+                                       (error "No panel for %s" pid))))
+                      (let ((shown nil))
+                        (cl-letf (((symbol-function 'message)
+                                   (lambda (fmt &rest args) (setq shown (apply #'format fmt args)))))
+                          (call-interactively (key-binding (kbd key))))
+                        shown)))))
+      (harness-ui-pending-test-record-answers)
+      (harness-ui-pending-sync sid (mapcar #'harness-ui-pending-test-item '(tool jail dir)))
+      (dolist (pid '("tool" "jail" "dir"))
+        (should (equal '(("Allow" "y" "allow-once") ("Allow for session" "s" "allow-session")
+                         ("Always allow" "a" "allow-always") ("Deny" "n" "deny-once")
+                         ("Always deny" "N" "deny-always"))
+                       (harness-ui-pending-permission-buttons (harness-ui-pending-record sid pid)))))
+      (should (equal (mapcar (lambda (o) (plist-get o :name)) harness-acp--permission-options)
+                     (mapcar #'car (harness-ui-pending-permission-buttons (harness-ui-pending-record sid "dir")))))
+      (harness-ui-pending-popout sid)
+      (with-current-buffer (harness-ui-popout-buffer (list 'pending sid))
+        (should (= 3 (how-many (regexp-quote row) (point-min) (point-max)))))
+      (should (equal "Always allowed" (funcall press "tool" "a")))
+      (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "the tool call answered")
+      (should (equal (list 'permission sid "tool" "allow-always") (car harness-ui-pending-test-answers)))
+      (should (equal "Allowed this call to reach /srv/notes/**" (funcall press "jail" "y")))
+      (harness-test-wait (lambda () (= 2 (length harness-ui-pending-test-answers))) 5 "the jail's prompt answered")
+      (should (equal (list 'permission sid "jail" "allow-once") (car harness-ui-pending-test-answers)))
+      ;; The agent's own request has an Allow too: until the turn ends.
+      (should (equal "Allowed /srv/api/** until this turn ends" (funcall press "dir" "y")))
+      (harness-test-wait (lambda () (= 3 (length harness-ui-pending-test-answers))) 5 "the request answered")
+      (should (equal (list 'permission sid "dir" "allow-once") (car harness-ui-pending-test-answers))))))
+
+(ert-deftest harness-ui-pending-answer-help-says-what-it-covers ()
+  "The same answer covers what the request is about, and its tooltip says so."
+  (harness-ui-pending-test-with
+    (let* ((sid (harness-ui-pending-test-session))
+           (help (lambda (pid option)
+                   (harness-ui-pending-answer-help (harness-ui-pending-record sid pid) option))))
+      (harness-ui-pending-sync sid (mapcar #'harness-ui-pending-test-item '(tool jail dir)))
+      (should (equal "Allow this call, this time" (funcall help "tool" "allow-once")))
+      (should (equal "Allow every bash call for this session" (funcall help "tool" "allow-session")))
+      (should (equal "Always allow every bash call, in every session" (funcall help "tool" "allow-always")))
+      (should (equal "Deny this call" (funcall help "tool" "deny-once")))
+      (should (equal "Always deny every bash call" (funcall help "tool" "deny-always")))
+      (should (equal "Let this call reach /srv/notes/**, this time" (funcall help "jail" "allow-once")))
+      (should (equal "Allow /srv/notes/** for this session" (funcall help "jail" "allow-session")))
+      (should (equal "Always allow /srv/notes/**, in every session" (funcall help "jail" "allow-always")))
+      (should (equal "Deny this call" (funcall help "jail" "deny-once")))
+      (should (equal "Always deny /srv/notes/**, to every tool" (funcall help "jail" "deny-always")))
+      (should (equal "Allow /srv/api/** until this turn ends" (funcall help "dir" "allow-once")))
+      (should (equal "Allow /srv/api/** for this session" (funcall help "dir" "allow-session")))
+      (should (equal "Always allow /srv/api/**, in every session" (funcall help "dir" "allow-always")))
+      (should (equal "Deny the request" (funcall help "dir" "deny-once")))
+      (should (equal "Always deny /srv/api/**, to every tool" (funcall help "dir" "deny-always")))
+      ;; A pattern the user edited is what the answers hold for.
+      (harness-ui-pending-set-pattern sid "dir" "/srv/api/types/**")
+      (should (equal "Allow /srv/api/types/** until this turn ends" (funcall help "dir" "allow-once")))
+      ;; The panel's buttons carry it, with their keys.
+      (with-temp-buffer
+        (let ((harness-ui-session-id sid))
+          (harness-ui-pending--insert-permission (harness-ui-pending-record sid "dir")))
+        (goto-char (point-min))
+        (search-forward "[Allow]")
+        (should (equal "Allow /srv/api/types/** until this turn ends (y)"
+                       (get-text-property (1- (point)) 'help-echo)))))))
+
+(ert-deftest harness-ui-pending-views-offer-the-panels-allow-and-deny ()
+  "The session list and the task board offer the panel's own [Allow] and [Deny].
+With the panel's keys and tooltips, whatever the request: the views'
+Allow answers an agent's own request for a directory as its y does."
+  (harness-ui-pending-test-with
+    (let ((tool (harness-ui-pending-test-session "Tool"))
+          (dir (harness-ui-pending-test-session "Dir"))
+          (shown (lambda (sid) (mapcar (lambda (a) (list (nth 0 a) (nth 2 a)))
+                                       (harness-ui-pending-view-actions sid)))))
+      (harness-ui-pending-test-record-answers)
+      (harness-ui-pending-sync tool (list (harness-ui-pending-test-item 'tool)))
+      (harness-ui-pending-sync dir (list (harness-ui-pending-test-item 'dir)))
+      (should (equal '(("[Allow]" "Allow this call, this time (y)") ("[Deny]" "Deny this call (n)"))
+                     (funcall shown tool)))
+      (should (equal '(("[Allow]" "Allow /srv/api/** until this turn ends (y)") ("[Deny]" "Deny the request (n)"))
+                     (funcall shown dir)))
+      (funcall (nth 1 (car (harness-ui-pending-view-actions dir))))
+      (harness-test-wait (lambda () harness-ui-pending-test-answers) 5 "answered from the view")
+      (should (equal (list 'permission dir "dir" "allow-once") (car harness-ui-pending-test-answers))))))
+
+(ert-deftest harness-ui-pending-refuses-an-answer-not-offered ()
+  "A request offering only some answers shows those, and refuses the others."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-test-record-answers)
+      (harness-ui-pending-test-permission sid "p1")
+      (should (equal '(("Allow" "y" "allow-once") ("Allow for session" "s" "allow-session") ("Deny" "n" "deny-once"))
+                     (harness-ui-pending-permission-buttons (harness-ui-pending-record sid "p1"))))
+      (should-error (harness-ui-pending-answer-permission sid "p1" "deny-always") :type 'user-error)
+      (should (harness-ui-pending-record sid "p1"))
+      (accept-process-output nil 0.05)
+      (should-not harness-ui-pending-test-answers))))
+
 (ert-deftest harness-ui-pending-sessions-list-leaves-spc-alone ()
   "A session that waits on nothing pops nothing out: SPC still scrolls."
   (harness-ui-pending-test-with
