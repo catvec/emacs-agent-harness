@@ -328,6 +328,18 @@ opens the file.  An assistant or thinking node's `:meta` `:model` is
 the model of the step that wrote it, which a switch during that step
 does not change.
 
+A hint the perms module writes after a lasting answer to a permission
+request (allow or deny for the session, or always) says what the answer
+recorded in its `:meta` `:permission`: `(:scope session|always :rule
+RULE :undo offered)` for a rule, `(:scope session|always :dir DIR :undo
+offered)` for a directory granted.  After an undo, `:undo` is `undone`,
+`changed` or `gone`, and `:result` is the message it gave.  No `:undo`
+means the answer recorded nothing new.  Read it with
+`harness-node-permission` and `harness-permission-undo-state`
+(harness-util), which tolerate the symbols that travelled as strings.
+The chat shows the note's text with an [Undo] that calls
+`permission/undo` (see perms) while `:undo` is `offered`.
+
 A session's transcript is the path root → `:head`.  A fork copies the
 ancestor chain (same node ids) into the new session and records
 `:parent-id` / `:fork-node`, so the tree view can merge families by id.
@@ -1779,6 +1791,42 @@ session it stays a denial.
   call reaching the pattern, for the jail's prompt; the pattern until
   the turn ends, for `request_directory_access`.  A confirmation is the
   exception: it offers allow-once and deny-once only, for the call.
+- An answer that lasts is noted in the session's transcript, whoever
+  gave it (the chat, a popout, a view, an ACP client): a rule recorded
+  (an allow or a deny for the session or always on a tool prompt, a
+  deny for the session or always on a directory prompt) or a directory
+  granted (allow-session or allow-always on the jail's prompt or
+  `request_directory_access`) appends a hint
+  (`harness-perms--note-recorded`, through `session/append` before the
+  call goes on, so it sits under the call) saying what, such as
+  "Always allowing every bash call, in every session", with the record
+  in its `:meta` `:permission` (see Node).  A rule or a grant that was
+  there already gives a note with nothing to undo (no `:undo`, and the
+  text says "already so").  allow-once records nothing and gives no
+  note, the turn grant of the agent's own request included.
+- `permission/undo SESSION-ID NODE-ID` → `(:outcome undone|changed|gone|none
+  :message "…")` takes back what note NODE-ID recorded and nothing
+  else: the decision on the call it answered stands.  It marks the
+  note (`session/update-node`, `:undo` OUTCOME and `:result` the
+  message), and a note tried already returns what it got and changes
+  nothing (`none` for one with nothing to undo).  A rule is looked up
+  by value, the rule as recorded first, then one equal in substance
+  (`harness-perms--rule-key`: tool, kind, path and behavior, compared
+  trimmed and with symbols as strings, so a rule Settings saved back
+  still counts); `undone` removes it from the session's rules or from
+  `harness-perms-rules`, saved.  A rule for the same tool and path that
+  says something else since (edited in Settings, say) is `changed` and
+  stays, and with none left the outcome is `gone`; session rules live
+  in memory and a fork starts without them, so that is what a session
+  note gets after a restart, or in a fork, which copies the note.  A
+  directory: the entry recorded, or one that expands to it, is removed
+  (`permission/dir-revoked`); an entry that still covers it, a parent
+  put in its place say, is `changed` and stays; else `gone`.  The
+  message says what happened and why.
+- Saving `harness-perms-rules` or `harness-allowed-directories` (an
+  answer, `permission/allow-dir` with `always`, a revoke, an undo)
+  emits `config/changed KEY VALUE global nil`, as the config module
+  does, so an open settings page shows the change.
 - Modes: `ask` (reads inside the jail allowed; everything else asks),
   `accept-edits` (reads/writes inside the jail allowed; exec/net ask),
   `auto` (reads inside the jail allowed; a cheap model,

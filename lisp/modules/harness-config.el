@@ -782,7 +782,9 @@ Return (SCOPE . FILE-OR-NIL); FILE is nil when the file had no KEY."
 (harness-declare-event 'config/changed
                        "(KEY VALUE SCOPE CWD) after `config/set' or `config/unset'.
 VALUE is the value set, or after an unset the value now in effect at
-CWD; it is nil for a secret.")
+CWD; it is nil for a secret.  The perms module announces the options
+a permission answer or its undo saves the same way (SCOPE `global',
+CWD nil).")
 
 (harness-define-module 'config
   :doc "Layered settings through customize and dir-locals."

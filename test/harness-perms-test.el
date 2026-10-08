@@ -3490,6 +3490,290 @@ A deny rule stops it for any path it runs in or names."
         (should (eq 'deny (plist-get d :behavior)))
         (should (equal "no user available" (plist-get d :reason)))))))
 
+;;;; Notes of lasting answers, and their undo
+
+(defvar harness-perms-rules)
+(defvar harness-allowed-directories)
+(declare-function harness-session-flush "harness-session")
+(declare-function harness-session--load-all "harness-session")
+
+(defvar harness-perms-test--saved nil
+  "(OPTION . VALUE) of every option saved, newest first.")
+
+(defvar harness-perms-test--announced nil
+  "The options `config/changed' announced, newest first.")
+
+(defmacro harness-perms-test--with-notes (&rest body)
+  "Run BODY with real sessions; `sid' is a fresh session in ask mode.
+The saved rules and the allowed directories start empty, and saving
+an option only records it in `harness-perms-test--saved'."
+  (declare (indent 0))
+  `(let ((harness-perms-rules nil)
+         (harness-allowed-directories nil)
+         (harness-perms-test--saved nil)
+         (harness-perms-test--announced nil))
+     (harness-test-with-temp-state
+       (cl-letf (((symbol-function 'harness-save-user-option)
+                  (lambda (sym value) (set sym value) (push (cons sym value) harness-perms-test--saved))))
+         (unwind-protect
+             (let ((sid (harness-perms-test--real-session 'ask)))
+               (clrhash harness-perms--session-rules)
+               (clrhash harness-perms--turn-dirs)
+               (harness-on 'config/changed (lambda (key &rest _) (push key harness-perms-test--announced)))
+               (harness-define-tool "t_exec" :label "Run" :kind 'exec :handler (lambda (_in _ctx) "ran"))
+               (harness-define-tool "t_read" :label "Read" :kind 'read
+                                    :paths (lambda (in) (list (plist-get in :path)))
+                                    :handler (lambda (_in _ctx) "read"))
+               ,@body)
+           (clrhash harness-sessions))))))
+
+(defun harness-perms-test--answered (sid tool input answer)
+  "Run TOOL with INPUT in SID, answer its prompt with ANSWER; return the result.
+The call goes into the transcript first, as the agent puts it there."
+  (let* ((call-id (harness-short-id))
+         (p (progn (harness-call 'session/append sid (list :kind 'tool-call :tool tool :call-id call-id :input input))
+                   (harness-call 'tools/execute sid (list :id call-id :name tool :input input)))))
+    (harness-test-wait (lambda () (harness-call 'session/pending sid)) 2 "the prompt")
+    (harness-call 'permission/answer sid (plist-get (car (harness-call 'session/pending sid)) :id) answer)
+    (harness-test-await p)))
+
+(defun harness-perms-test--notes (sid)
+  "Return the notes of lasting answers in SID's transcript, oldest first."
+  (cl-remove-if-not #'harness-node-permission (harness-call 'session/nodes sid)))
+
+(defun harness-perms-test--undo (sid note)
+  "Undo the answer NOTE of SID tells of; return (OUTCOME . MESSAGE)."
+  (let ((r (harness-call 'permission/undo sid (plist-get note :id))))
+    (cons (plist-get r :outcome) (plist-get r :message))))
+
+(defun harness-perms-test--record (sid note)
+  "Return the record NOTE of SID holds now."
+  (harness-node-permission (harness-call 'session/node sid (plist-get note :id))))
+
+(ert-deftest harness-perms-lasting-answer-is-noted-and-undone ()
+  "Always allow notes its rule under the call; undo takes back that rule only.
+The call stays allowed, the note says it was undone, and undoing again
+changes nothing."
+  (harness-perms-test--with-notes
+    (setq harness-perms-rules (list '(:tool "web_fetch" :behavior deny)))
+    (let ((r (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-always")))
+      (should (equal "ran" (plist-get r :content))))
+    (should (equal '((:tool "t_exec" :behavior allow) (:tool "web_fetch" :behavior deny)) harness-perms-rules))
+    (let* ((nodes (harness-call 'session/nodes sid))
+           (note (car (last nodes))))
+      ;; Right under the call it answers, a hint the model never gets.
+      (should (equal '(tool-call hint) (mapcar (lambda (n) (plist-get n :kind)) nodes)))
+      (should (equal "Always allowing every t_exec call, in every session" (plist-get note :content)))
+      (should (equal '(:scope always :rule (:tool "t_exec" :behavior allow) :undo offered)
+                     (harness-node-permission note)))
+      (should-not (string-match-p "Always allowing" (format "%S" (harness-call 'session/messages sid))))
+      (setq harness-perms-test--saved nil harness-perms-test--announced nil)
+      (should (equal '(undone . "Undone: no longer always allowing every t_exec call, in every session")
+                     (harness-perms-test--undo sid note)))
+      ;; Only that rule went, saved again, and an open settings page hears so.
+      (should (equal '((:tool "web_fetch" :behavior deny)) harness-perms-rules))
+      (should (equal (list (cons 'harness-perms-rules '((:tool "web_fetch" :behavior deny)))) harness-perms-test--saved))
+      (should (memq 'harness-perms-rules harness-perms-test--announced))
+      (let ((record (harness-perms-test--record sid note)))
+        (should (eq 'undone (plist-get record :undo)))
+        (should (equal "Undone: no longer always allowing every t_exec call, in every session"
+                       (plist-get record :result))))
+      ;; Undone once: the same rule recorded again since stays.
+      (harness-perms-add-rule sid '(:tool "t_exec" :behavior allow) 'always)
+      (should (eq 'undone (car (harness-perms-test--undo sid note))))
+      (should (member '(:tool "t_exec" :behavior allow) harness-perms-rules)))
+    ;; A once answer records nothing, and notes nothing.
+    (harness-perms-test--answered sid "t_read" (list :path (expand-file-name "x" (harness-test-temp-dir))) "allow-once")
+    (should (= 1 (length (harness-perms-test--notes sid))))
+    ;; Nor is there a note to undo anywhere else.
+    (should-error (harness-call 'permission/undo sid (plist-get (car (harness-call 'session/nodes sid)) :id)))))
+
+(ert-deftest harness-perms-every-lasting-answer-is-noted ()
+  "Each answer for the session or always notes what it recorded, and undo
+takes that back from where it was recorded; the call keeps its answer."
+  (harness-perms-test--with-notes
+    (pcase-dolist (`(,answer ,text ,record ,denied)
+                   '(("allow-session" "Allowing every t_exec call for this session"
+                      (:scope session :rule (:tool "t_exec" :behavior allow)) nil)
+                     ("deny-session" "Denying every t_exec call for this session"
+                      (:scope session :rule (:tool "t_exec" :behavior deny)) t)
+                     ("deny-always" "Always denying every t_exec call, in every session"
+                      (:scope always :rule (:tool "t_exec" :behavior deny)) t)))
+      (let ((r (harness-perms-test--answered sid "t_exec" '(:command "make") answer))
+            (note (car (last (harness-perms-test--notes sid)))))
+        (should (eq denied (and (plist-get r :denied) t)))
+        (should (equal text (plist-get note :content)))
+        (should (equal (append record '(:undo offered)) (harness-node-permission note)))
+        (should (equal (list (plist-get record :rule))
+                       (if (eq 'always (plist-get record :scope))
+                           harness-perms-rules
+                         (gethash sid harness-perms--session-rules))))
+        (should (eq 'undone (car (harness-perms-test--undo sid note))))
+        (should-not (gethash sid harness-perms--session-rules))
+        (should-not harness-perms-rules)))
+    (should (= 3 (length (harness-perms-test--notes sid))))))
+
+(ert-deftest harness-perms-undo-leaves-a-rule-changed-since-alone ()
+  "A rule changed in Settings after the answer stays as it is, and undo says so.
+One saved again in another form, but saying the same, is still undone."
+  (harness-perms-test--with-notes
+    (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-always")
+    (let ((note (car (last (harness-perms-test--notes sid)))))
+      ;; Edited on the settings page: the rule now denies exec calls.
+      (harness-call 'config/set 'harness-perms-rules '((:tool "t_exec" :kind exec :behavior deny)) :scope 'global)
+      (setq harness-perms-test--saved nil)
+      (should (equal '(changed . "Not undone: the saved rule for t_exec has changed since (in Settings, say), so it stays as it is")
+                     (harness-perms-test--undo sid note)))
+      (should (equal '((:tool "t_exec" :kind exec :behavior deny)) harness-perms-rules))
+      (should-not harness-perms-test--saved)
+      (let ((record (harness-perms-test--record sid note)))
+        (should (eq 'changed (plist-get record :undo)))
+        (should (string-prefix-p "Not undone" (plist-get record :result)))))
+    ;; Saved again with its keys in another order and a string: the same rule.
+    (setq harness-perms-rules nil)
+    (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-always")
+    (setq harness-perms-rules (list '(:behavior "allow" :tool "t_exec") '(:tool "web_fetch" :behavior deny)))
+    (should (eq 'undone (car (harness-perms-test--undo sid (car (last (harness-perms-test--notes sid)))))))
+    (should (equal '((:tool "web_fetch" :behavior deny)) harness-perms-rules))))
+
+(ert-deftest harness-perms-undo-when-the-rule-is-gone ()
+  "Nothing to undo once the rule went: removed in Settings, or a session
+rule lost when the harness restarted.  Nothing else is touched."
+  (harness-perms-test--with-notes
+    (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-session")
+    (clrhash harness-perms--session-rules)
+    (should (equal '(gone . "Nothing to undo: this session has no such rule now (session rules end when the harness restarts, and a fork starts without them)")
+                   (harness-perms-test--undo sid (car (last (harness-perms-test--notes sid))))))
+    (harness-perms-test--answered sid "t_exec" '(:command "make") "allow-always")
+    (setq harness-perms-rules (list '(:tool "web_fetch" :behavior deny)))
+    (setq harness-perms-test--saved nil)
+    (should (equal '(gone . "Nothing to undo: the saved rules no longer have one for t_exec")
+                   (harness-perms-test--undo sid (car (last (harness-perms-test--notes sid))))))
+    (should (equal '((:tool "web_fetch" :behavior deny)) harness-perms-rules))
+    (should-not harness-perms-test--saved)))
+
+(ert-deftest harness-perms-note-offers-no-undo-for-nothing-new ()
+  "A second prompt answered the same way adds nothing, so its note offers no undo."
+  (harness-perms-test--with-notes
+    (let* ((calls (mapcar (lambda (id)
+                            (harness-call 'session/append sid (list :kind 'tool-call :tool "t_exec" :call-id id))
+                            (harness-call 'tools/execute sid (list :id id :name "t_exec" :input nil)))
+                          '("c1" "c2"))))
+      (harness-test-wait (lambda () (= 2 (length (harness-call 'session/pending sid)))) 2 "two prompts")
+      (dolist (pending (harness-call 'session/pending sid))
+        (harness-call 'permission/answer sid (plist-get pending :id) "allow-session"))
+      (dolist (p calls) (should (equal "ran" (plist-get (harness-test-await p) :content)))))
+    (pcase-let ((`(,first ,second) (harness-perms-test--notes sid)))
+      (should (eq 'offered (plist-get (harness-node-permission first) :undo)))
+      (should (equal "Allowing every t_exec call for this session (already so: nothing new to undo)"
+                     (plist-get second :content)))
+      (should-not (plist-member (harness-node-permission second) :undo))
+      (should (eq 'none (car (harness-perms-test--undo sid second))))
+      (should (equal '((:tool "t_exec" :behavior allow)) (gethash sid harness-perms--session-rules))))))
+
+(ert-deftest harness-perms-undo-reads-its-note-back-from-the-log ()
+  "A note read back from the node log, its symbols strings, is undone the same."
+  (harness-perms-test--with-notes
+    (harness-perms-test--answered sid "t_exec" '(:command "make") "deny-always")
+    ;; A restart: every node is read back from the session's log.
+    (harness-session-flush)
+    (clrhash harness-sessions)
+    (harness-session--load-all)
+    (let ((record (harness-node-permission (car (last (harness-perms-test--notes sid))))))
+      (should (equal "always" (plist-get record :scope)))
+      (should (equal "deny" (plist-get (plist-get record :rule) :behavior))))
+    (should (eq 'undone (car (harness-perms-test--undo sid (car (last (harness-perms-test--notes sid)))))))
+    (should-not harness-perms-rules)))
+
+(ert-deftest harness-perms-directory-grants-are-noted-and-undone ()
+  "A directory granted for the session or always is noted, and undo withdraws
+that grant only; one changed since in Settings stays, and undo says so."
+  (harness-perms-test--with-notes
+    (let* ((cwd (plist-get (harness-call 'session/get sid) :cwd))
+           (other (harness-test-temp-dir))
+           (a (harness-test-temp-dir))
+           (b (harness-test-temp-dir))
+           (c (harness-test-temp-dir))
+           (revoked nil)
+           (read (lambda (dir answer)
+                   (harness-perms-test--answered sid "t_read" (list :path (expand-file-name "f.txt" dir)) answer)
+                   (car (last (harness-perms-test--notes sid))))))
+      (ignore cwd)
+      (harness-on 'permission/dir-revoked (lambda (_sid dir) (push dir revoked)))
+      ;; For the session.
+      (let ((note (funcall read a "allow-session")))
+        (should (equal (format "Allowing %s for this session" (abbreviate-file-name a)) (plist-get note :content)))
+        (should (equal (list :scope 'session :dir a :undo 'offered) (harness-node-permission note)))
+        (should (equal (list a) (plist-get (harness-call 'session/get sid) :allowed-dirs)))
+        (should (eq 'undone (car (harness-perms-test--undo sid note))))
+        (should-not (plist-get (harness-call 'session/get sid) :allowed-dirs))
+        (should (equal (list a) revoked))
+        (should-not harness-allowed-directories))
+      ;; Always, beside an entry of the user's.
+      (setq harness-allowed-directories (list other))
+      (let ((note (funcall read b "allow-always")))
+        (should (equal (format "Always allowing %s, in every session" (abbreviate-file-name b))
+                       (plist-get note :content)))
+        (should (equal (list other b) harness-allowed-directories))
+        (setq harness-perms-test--announced nil)
+        (should (equal (cons 'undone (format "Undone: no longer always allowing %s, in every session"
+                                             (abbreviate-file-name b)))
+                       (harness-perms-test--undo sid note)))
+        (should (equal (list other) harness-allowed-directories))
+        (should (equal (cons 'harness-allowed-directories (list other)) (car harness-perms-test--saved)))
+        (should (memq 'harness-allowed-directories harness-perms-test--announced)))
+      ;; Written another way in Settings, the same directory: undone.
+      (let ((note (funcall read c "allow-always")))
+        (setq harness-allowed-directories (list other (directory-file-name c)))
+        (should (eq 'undone (car (harness-perms-test--undo sid note))))
+        (should (equal (list other) harness-allowed-directories)))
+      ;; Changed in Settings to its parent, which still covers it: it stays.
+      (let* ((d (file-name-as-directory (expand-file-name "sub" (harness-test-temp-dir))))
+             (_ (make-directory d))
+             (note (funcall read d "allow-always"))
+             (parent (file-name-directory (directory-file-name d))))
+        (setq harness-allowed-directories (list other parent))
+        (should (equal (cons 'changed (format "Not undone: the allowed directories changed since (in Settings, say), and %s still covers %s, so they stay as they are"
+                                              (abbreviate-file-name parent) (abbreviate-file-name d)))
+                       (harness-perms-test--undo sid note)))
+        (should (equal (list other parent) harness-allowed-directories))
+        ;; Removed: nothing to undo.
+        (setq harness-allowed-directories (list other))
+        (let ((note (funcall read d "allow-always")))
+          (setq harness-allowed-directories (list other))
+          (should (equal (cons 'gone (format "Nothing to undo: %s is no longer among the allowed directories"
+                                             (abbreviate-file-name d)))
+                         (harness-perms-test--undo sid note))))))))
+
+(ert-deftest harness-perms-directory-denials-and-requests-are-noted ()
+  "Always deny for a path outside notes its rule; an agent's own request granted
+for the session is noted too, but one granted until the turn ends is not."
+  (harness-perms-test--with-notes
+    (let* ((outside (harness-test-temp-dir))
+           (pattern (concat outside "**")))
+      (let ((r (harness-perms-test--answered sid "t_read" (list :path (expand-file-name "f" outside)) "deny-always"))
+            (note (car (last (harness-perms-test--notes sid)))))
+        (should (plist-get r :denied))
+        (should (equal (list (list :path pattern :behavior 'deny)) harness-perms-rules))
+        (should (equal (format "Always denying %s to every tool, in every session" (abbreviate-file-name pattern))
+                       (plist-get note :content)))
+        (should (equal (list :scope 'always :rule (list :path pattern :behavior 'deny) :undo 'offered)
+                       (harness-node-permission note)))
+        (should (eq 'undone (car (harness-perms-test--undo sid note))))
+        (should-not harness-perms-rules))
+      ;; The agent asks for a directory itself.
+      (let ((request (harness-test-temp-dir)))
+        (harness-perms-test--answered sid "request_directory_access" (list :path request :reason "Read it") "allow-once")
+        (should (= 1 (length (harness-perms-test--notes sid))))
+        ;; That grant ends with the turn; the next request asks again.
+        (harness-emit 'agent/turn-ended sid)
+        (harness-perms-test--answered sid "request_directory_access" (list :path request :reason "Read it") "allow-session")
+        (let ((note (car (last (harness-perms-test--notes sid)))))
+          (should (equal (list :scope 'session :dir (harness-perms-test--real request) :undo 'offered)
+                         (harness-node-permission note)))
+          (should (eq 'undone (car (harness-perms-test--undo sid note))))
+          (should-not (plist-get (harness-call 'session/get sid) :allowed-dirs)))))))
+
 ;;;; A policy
 
 (ert-deftest harness-perms-policy-mode-and-non-interactive-are-every-sessions ()

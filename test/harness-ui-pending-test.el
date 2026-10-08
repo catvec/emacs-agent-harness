@@ -36,6 +36,9 @@
 (defvar harness-chat--buffers)
 (defvar harness-ui-tasks--tasks)
 (defvar harness-ui-tasks--loading)
+(defvar harness-perms-rules)
+(defvar harness-perms--session-rules)
+(defvar harness-chat--loading)
 
 (declare-function harness-sessions "harness-ui-sessions")
 (declare-function harness-sessions-waiting "harness-ui-sessions")
@@ -53,6 +56,7 @@
 (declare-function harness-ui-popout-submit "harness-ui-popout")
 (declare-function harness-compose-live-p "harness-ui-compose")
 (declare-function harness-chat-push "harness-ui-chat")
+(declare-function harness-chat-buffer "harness-ui-chat")
 (defvar harness-compose-end)
 
 (defvar harness-ui-pending-test-answers nil
@@ -1027,6 +1031,89 @@ once the UI connects again."
             (should (equal '(:data "bmV3" :mime "image/png") (harness-ui-pending--fetched-image sid "q1" 0)))
             (should (= 3 (length asked))))
         (remove-hook 'harness-ui-pending-changed-hook note)))))
+
+;;;; The note of a lasting answer
+
+(ert-deftest harness-ui-pending-lasting-answer-is-noted-in-the-chat ()
+  "A lasting answer given in a popout is noted in the session's chat, with [Undo].
+Answered from the popout a view opens -- the session list's, the task
+board's SPC -- with no chat open: the perms module records the rule and
+notes it in the session's transcript all the same, so the chat shows
+the notes when it opens, and its [Undo] takes the rule back."
+  (harness-ui-pending-test-with
+    (harness-test-load-module 'perms)
+    (let ((harness-perms-rules nil))
+      (cl-letf (((symbol-function 'harness-save-user-option) (lambda (sym value) (set sym value))))
+        (let* ((sid (harness-ui-pending-test-session "Asker"))
+               (popout (list 'pending sid))
+               (board nil)
+               (ask (lambda (tool command)
+                      ;; The agent puts the call in the transcript, then runs it.
+                      (let ((call-id (harness-short-id)))
+                        (harness-call 'session/append sid (list :kind 'tool-call :tool tool :call-id call-id
+                                                                :input (list :command command)))
+                        (prog1 (harness-call 'tools/execute sid (list :id call-id :name tool
+                                                                      :input (list :command command)))
+                          (harness-test-wait (lambda () (harness-call 'session/pending sid)) 5 "the prompt")
+                          ;; As `_harness/session' brings it: what it waits on, over the wire.
+                          (harness-ui-pending-test-cache
+                           sid (harness-json-parse (harness-json-encode (harness-call 'session/get sid))))))))
+               (press (lambda (key)
+                        (with-current-buffer (harness-ui-popout-buffer popout)
+                          (goto-char (point-min))
+                          (while (not (get-text-property (point) 'harness-ui-pending))
+                            (goto-char (or (next-single-property-change (point) 'harness-ui-pending)
+                                           (error "No panel in %S" (buffer-string)))))
+                          (call-interactively (key-binding (kbd key)))))))
+          (harness-call 'session/update sid :permission-mode 'ask)
+          (dolist (tool '("t_make" "t_deploy"))
+            (harness-define-tool tool :label tool :kind 'exec :handler (lambda (_in _ctx) "ran")))
+          ;; Always allow, from the popout the session list opens.
+          (let ((call (funcall ask "t_make" "make")))
+            (harness-ui-pending-popout sid)
+            (funcall press "a")
+            (should (equal "ran" (plist-get (harness-test-await call) :content))))
+          (should (equal '((:tool "t_make" :behavior allow)) harness-perms-rules))
+          ;; Allow for session, from the popout the task board's SPC opens.
+          (let ((call (funcall ask "t_deploy" "deploy")))
+            (cl-letf (((symbol-function 'harness-ui-tasks--fetch) (lambda (&rest _) nil)))
+              (setq board (harness-tasks dir)))
+            (with-current-buffer board
+              (setq harness-ui-tasks--tasks
+                    (list (list :id "t-1" :session sid :state "active" :column "needs-input"
+                                :project dir :cwd dir :prompt "Ship the release"))
+                    harness-ui-tasks--loading nil)
+              (harness-ui-tasks--render)
+              (goto-char (point-min))
+              (search-forward "Asker")
+              (call-interactively (key-binding (kbd "SPC"))))
+            (funcall press "s")
+            (should (equal "ran" (plist-get (harness-test-await call) :content))))
+          (should (equal '((:tool "t_deploy" :behavior allow)) (gethash sid harness-perms--session-rules)))
+          ;; The chat, opened afterwards, has both notes under their calls.
+          (let ((buf (harness-chat-buffer sid))
+                (find (lambda (buf text)
+                        (with-current-buffer buf
+                          (save-excursion (goto-char (point-min)) (search-forward text nil t))))))
+            (harness-test-wait (lambda () (with-current-buffer buf (and (not harness-chat--loading) harness-compose-end)))
+                               5 "the chat loaded")
+            (harness-test-wait (lambda () (funcall find buf "Allowing every t_deploy call for this session  [Undo]"))
+                               5 "the notes in the chat")
+            (should (funcall find buf "Always allowing every t_make call, in every session  [Undo]"))
+            (let ((shown nil))
+              (cl-letf (((symbol-function 'message)
+                         (lambda (fmt &rest args) (when fmt (push (apply #'format fmt args) shown)))))
+                (with-current-buffer buf
+                  (goto-char (- (funcall find buf "in every session  [Undo]") 2))
+                  (harness-chat-push))
+                (harness-test-wait (lambda () shown) 5 "the echo area"))
+              (should (equal '("Undone: no longer always allowing every t_make call, in every session") shown)))
+            (should-not harness-perms-rules)
+            (harness-test-wait (lambda () (funcall find buf "Always allowing every t_make call, in every session  undone"))
+                               5 "the note redrawn")
+            ;; The other answer's rule stays, and so does its [Undo].
+            (should (equal '((:tool "t_deploy" :behavior allow)) (gethash sid harness-perms--session-rules)))
+            (should (funcall find buf "for this session  [Undo]"))))))))
 
 (provide 'harness-ui-pending-test)
 ;;; harness-ui-pending-test.el ends here

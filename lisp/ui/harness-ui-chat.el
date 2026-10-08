@@ -138,6 +138,11 @@ under it." :group 'harness-ui-chat)
     (((background dark)) :background "#262a3a" :extend t))
   "Background of plan blocks." :group 'harness-ui-chat)
 
+(defface harness-chat-undone-face '((t :inherit harness-hint-face :strike-through t))
+  "Face of the note of a lasting permission answer that was undone.
+The rule or directory grant it tells of is gone, so it is struck
+through." :group 'harness-ui-chat)
+
 (harness-ui-define-icon harness-chat-icon-plan "plan" "≡" "plan" "A plan.")
 (harness-ui-define-icon harness-chat-icon-compaction "compaction" "⟲" "compact" "A compaction.")
 (harness-ui-define-icon harness-chat-icon-question "question" "?" "?" "A question.")
@@ -1206,10 +1211,43 @@ and in the message that attached it."
     handled))
 
 (defun harness-chat--render-hint (block)
-  "Return the body of hint BLOCK."
-  (let ((text (string-trim (or (plist-get (harness-chat-block-node block) :content) ""))))
+  "Return the body of hint BLOCK.
+The note the harness writes after a lasting permission answer (see
+`harness-node-permission') ends in an [Undo] button while the answer
+can be undone.  Once that was tried it says how it went: struck
+through when undone, else with the reason under it."
+  (let* ((node (harness-chat-block-node block))
+         (text (string-trim (or (plist-get node :content) "")))
+         (record (harness-node-permission node))
+         (state (harness-permission-undo-state record)))
     (harness-chat--margin
-     (propertize (concat "    " text "\n") 'face 'harness-hint-face 'wrap-prefix "    "))))
+     (propertize
+      (concat (propertize "    " 'face 'harness-hint-face)
+              (propertize text 'face (if (eq state 'undone) 'harness-chat-undone-face 'harness-hint-face))
+              (pcase state
+                ('nil "")
+                ('offered (concat "  " (harness-chat--undo-button (plist-get node :id) record)))
+                ('undone (propertize "  undone" 'face 'harness-hint-face 'help-echo (plist-get record :result)))
+                (_ (propertize (format "\n    %s" (or (plist-get record :result) state)) 'face 'harness-hint-face)))
+              (propertize "\n" 'face 'harness-hint-face))
+      'wrap-prefix "    "))))
+
+(defun harness-chat--undo-button (node-id record)
+  "Return the [Undo] button of note NODE-ID, which tells of lasting answer RECORD."
+  (let ((sid harness-ui-session-id)
+        (denied (and (not (stringp (plist-get record :dir)))
+                     (equal "deny" (format "%s" (plist-get (plist-get record :rule) :behavior))))))
+    (harness-chat--button "[Undo]" (lambda () (harness-chat--undo-permission sid node-id))
+                          :help (format "Take back what this answer recorded; the call it answered stays %s"
+                                        (if denied "denied" "allowed")))))
+
+(defun harness-chat--undo-permission (session-id node-id)
+  "Undo the lasting permission answer that note NODE-ID of SESSION-ID tells of.
+The harness removes what the answer recorded while it is still as the
+answer left it (`permission/undo'); the echo area says how that went,
+and the note changes when the harness updates it."
+  (harness-ui-call "_harness/permission/undo" (list :session-id session-id :node-id node-id)
+                   (lambda (result) (message "%s" (or (plist-get result :message) "Undone")))))
 
 (defun harness-chat--render-compaction (block)
   "Return the body of compaction BLOCK.
