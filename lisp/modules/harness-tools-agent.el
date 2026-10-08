@@ -17,7 +17,10 @@
 ;; - `todo_write' replaces the session's todo list.
 ;; - `spawn_agent' creates a child session (fresh or forked, optionally
 ;;   in its own git worktree), runs one prompt in it and returns the
-;;   child's final answer.
+;;   child's final answer.  A sub-agent works on a deliberately shorter
+;;   context window (`harness-subagent-context-limit'); the limit a
+;;   child gets is `harness-tools-agent-context-limit', which other
+;;   modules that start sub-agents use too.
 ;; - `session_info' describes the current session to the model.
 ;;
 ;; Nothing here waits: every long operation returns a promise, and the
@@ -427,29 +430,80 @@ Replace the todos of the session in CTX with those in INPUT."
             (or (plist-get last-assistant :content) "(the sub-agent produced no answer)")
             child-id calls (harness-format-spend (plist-get child :usage)))))
 
+(defcustom harness-subagent-context-limit 128000
+  "Most tokens of context a sub-agent adds of its own, or nil for no cap.
+A sub-agent does one job, so it works on a deliberately shorter
+context window than the session that started it: it compacts once its
+own work has filled this many tokens, which keeps its calls cheap and
+its reports short.  A fresh sub-agent starts empty, so its window is
+this limit.  A fork starts with the context it inherits from the
+session it was forked from and gets this many tokens on top of that,
+so it does not compact at once (see
+`harness-tools-agent-context-limit').  Neither window goes above the
+limit of the session that started it, and neither is above its model's
+own window.  With nil sub-agents use the whole window like any other
+session."
+  :type '(choice (const :tag "No cap" nil)
+                 (integer :tag "Tokens of context"))
+  :safe (lambda (v) (or (null v) (and (integerp v) (> v 0))))
+  :group 'harness)
+
+(defun harness-tools-agent-context-limit (parent-id fork)
+  "Return the `:context-window-limit' for a sub-agent of session PARENT-ID.
+It is nil when `harness-subagent-context-limit' is nil: no cap.
+Otherwise a fresh sub-agent (FORK nil or `:false') gets the cap itself,
+and a fork the context it inherits plus the cap, so that it does not
+compact at once.  The inherited context is the parent's `:usage'
+`:context' plus its `:last-output' (what the conversation holds about),
+0 when the parent has not run yet.  Either way the limit is never above
+the parent's own `:context-window-limit', when it has one, so
+sub-agents of sub-agents do not grow.  `spawn_agent' and the
+supervisor's workers pass the result to `session/create' or
+`session/fork'."
+  (let ((cap harness-subagent-context-limit))
+    (when (and (integerp cap) (> cap 0))
+      (let* ((parent (and parent-id (harness-call 'session/exists-p parent-id)
+                          (harness-call 'session/get parent-id)))
+             (usage (plist-get parent :usage))
+             (inherited (if (harness-json-true-p fork)
+                            (+ (let ((n (plist-get usage :context))) (if (numberp n) n 0))
+                               (let ((n (plist-get usage :last-output))) (if (numberp n) n 0)))
+                          0))
+             (limit (round (+ cap inherited)))
+             (own (plist-get parent :context-window-limit)))
+        (if (and (numberp own) (> own 0))
+            (min limit (round own))
+          limit)))))
+
 (defun harness-tools-agent--create-child (parent input child-id cwd worktree call-id)
   "Return a promise of the child session plist for PARENT from INPUT.
 CHILD-ID is the id to use, CWD its working directory and WORKTREE
 its worktree path (or nil).  CALL-ID is the spawn_agent call's: a fork
 copies it among the parent's calls still running, and answers it with
-a result saying the fork is the sub-agent it started."
-  (let ((fork (harness-json-true-p (plist-get input :fork)))
-        (name (plist-get input :name))
-        (model (or (plist-get input :model) (plist-get parent :model))))
+a result saying the fork is the sub-agent it started.  The child's
+context is capped as `harness-tools-agent-context-limit' says."
+  (let* ((fork (harness-json-true-p (plist-get input :fork)))
+         (name (plist-get input :name))
+         (model (or (plist-get input :model) (plist-get parent :model)))
+         (limit (harness-tools-agent-context-limit (plist-get parent :id) fork))
+         ;; Without a cap a fork keeps its parent's limit, as it always did.
+         (limit-option (and limit (list :context-window-limit limit))))
     (if fork
         (harness-as-promise
-         (harness-call 'session/fork (plist-get parent :id)
-                       :id child-id :kind 'subagent :name name :model model
-                       :cwd cwd :worktree worktree :call-id call-id))
+         (apply #'harness-call 'session/fork (plist-get parent :id)
+                :id child-id :kind 'subagent :name name :model model
+                :cwd cwd :worktree worktree :call-id call-id
+                limit-option))
       (harness-as-promise
-       (harness-call 'session/create
-                     :id child-id :cwd cwd :worktree worktree :kind 'subagent
-                     :parent-id (plist-get parent :id) :name name :model model
-                     :host (plist-get parent :host)
-                     :permission-mode (plist-get parent :permission-mode)
-                     :thinking (plist-get parent :thinking)
-                     ;; Off too, not left to the setting.
-                     :non-interactive (if (harness-json-true-p (plist-get parent :non-interactive)) t :false))))))
+       (apply #'harness-call 'session/create
+              :id child-id :cwd cwd :worktree worktree :kind 'subagent
+              :parent-id (plist-get parent :id) :name name :model model
+              :host (plist-get parent :host)
+              :permission-mode (plist-get parent :permission-mode)
+              :thinking (plist-get parent :thinking)
+              ;; Off too, not left to the setting.
+              :non-interactive (if (harness-json-true-p (plist-get parent :non-interactive)) t :false)
+              limit-option)))))
 
 (defun harness-tools-agent--spawn (input ctx)
   "Handler of the spawn_agent tool.
