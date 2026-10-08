@@ -82,9 +82,10 @@
 ;;
 ;; States:
 ;;
-;;   pending   submitted, waiting for a free slot (only when
-;;             `harness-tasks-max-running' limits how many run at once),
-;;             or a backlog task waiting for someone to start it
+;;   pending   submitted, waiting for a free slot of its project (only
+;;             when `harness-tasks-max-running' limits how many of a
+;;             project's tasks run at once: each project has slots of
+;;             its own), or a backlog task waiting for someone to start it
 ;;   refining  an agent is writing a backlog task up, or stopped part
 ;;             way (`:outcome' says why: error, cancelled, duplicate…)
 ;;   active    its session is working on it, or stopped part way
@@ -152,8 +153,13 @@
 (require 'harness-files)
 
 (defcustom harness-tasks-max-running nil
-  "Tasks that may work at the same time; the rest wait as pending.
-nil (the default) means no limit."
+  "Tasks of each project that may work at once; the rest wait as pending.
+The limit is per project: every project has this many slots of its
+own, and its pending tasks wait only for its own working ones, never
+for another project's.  With 2, two projects may run four tasks
+between them.  A task's project is the main checkout it was submitted
+for, also when it works in a worktree.  nil (the default) means no
+limit."
   :type '(choice (const :tag "No limit" nil) integer) :group 'harness)
 
 (defcustom harness-tasks-require-verification t
@@ -1027,6 +1033,10 @@ listed under it (`session/btw'), so only the board's have no parent."
     prompt))
 
 ;;;; Scheduling
+;;
+;; `harness-tasks-max-running' limits each project on its own: every
+;; project has that many slots, and its queued tasks wait only for its
+;; own working tasks, so a busy board never holds up another project's.
 
 (defun harness-tasks--working-p (task)
   "Non-nil when TASK holds a slot: starting, running or blocked mid-turn."
@@ -1034,12 +1044,23 @@ listed under it (`session/btw'), so only the board's have no parent."
       (and (memq (plist-get task :state) '(active merging))
            (memq (plist-get (harness-tasks--session task) :status) '(running blocked)))))
 
-(defun harness-tasks--free-slots ()
-  "Return how many more tasks may start now (most-positive-fixnum without a limit)."
+(defun harness-tasks--slot-project (task)
+  "Return the project whose slots TASK takes: its `:project', else its `:cwd'.
+`:project' is the main checkout `harness-tasks--project' found for it,
+the key boards, `task/list' and the stores group tasks by, so a task in
+a worktree takes a slot of the project it merges into."
+  (or (plist-get task :project) (plist-get task :cwd)))
+
+(defun harness-tasks--free-slots (project)
+  "Return how many more tasks of PROJECT may start now.
+Each project has `harness-tasks-max-running' slots of its own, so only
+PROJECT's working tasks count; `most-positive-fixnum' without a limit."
   (if (null harness-tasks-max-running)
       most-positive-fixnum
     (- harness-tasks-max-running
-       (cl-count-if #'harness-tasks--working-p (harness-tasks--sorted)))))
+       (cl-loop for task being the hash-values of harness-tasks--table
+                count (and (equal (harness-tasks--slot-project task) project)
+                           (harness-tasks--working-p task))))))
 
 (defun harness-tasks--queued-p (task)
   "Non-nil when TASK waits for a slot: pending, not in the backlog, not archived."
@@ -1047,13 +1068,18 @@ listed under it (`session/btw'), so only the board's have no parent."
        (not (plist-get task :archived))))
 
 (defun harness-tasks--schedule ()
-  "Start the oldest queued tasks while slots are free.
-Backlog tasks wait for `task/start' instead."
-  (let ((free (harness-tasks--free-slots)))
+  "Start the oldest queued tasks of every project while it has slots free.
+Projects have slots of their own (`harness-tasks--free-slots'): the walk
+keeps what is left of each one's, so a project at its limit holds up
+only its own tasks.  Backlog tasks wait for `task/start' instead."
+  (let ((free (make-hash-table :test 'equal)))
     (dolist (task (harness-tasks--sorted #'harness-tasks--queued-p))
-      (when (> free 0)
-        (cl-decf free)
-        (harness-tasks--start task)))))
+      (let* ((project (harness-tasks--slot-project task))
+             (left (or (gethash project free) (harness-tasks--free-slots project))))
+        (when (> left 0)
+          (cl-decf left)
+          (harness-tasks--start task))
+        (puthash project left free)))))
 
 (defun harness-tasks--blocks (task)
   "Return the content blocks that open TASK's session."
@@ -1792,7 +1818,8 @@ records.  Each step leaves alone the tasks something already works on."
 
 (harness-defmethod task/submit (cwd prompt &optional opts)
   "Submit PROMPT as a new task in directory CWD; return the task.
-It starts at once when a slot is free, otherwise it waits as pending.
+It starts at once when its project has a slot free, otherwise it waits
+as pending: `harness-tasks-max-running' limits each project on its own.
 OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode',
 `:thinking', `:non-interactive' (an explicit false turns it off) and
 `:main-tree' (work in the project's main checkout, with no worktree,
@@ -1983,7 +2010,7 @@ first."
     (nreverse changed)))
 
 (harness-defmethod task/start (id)
-  "Start pending task ID now, even when every slot is taken.
+  "Start pending task ID now, even when every slot of its project is taken.
 A backlog task starts too, and so does one whose write-up stopped (with
 the prompt it has), but not one an agent is writing up right now."
   (let ((task (harness-tasks--get id)))
@@ -2274,7 +2301,7 @@ up again, merges in flight are queued again and waiting tasks start."
 (harness-declare-event 'task/done "(TASK HOW) when a task becomes done; HOW is merged, finished, verified or completed.")
 
 (harness-define-module 'tasks
-  :doc "Task mode: one session per task on a shorter context, from backlog write-up or worktree through your review to merged, with a concurrency limit."
+  :doc "Task mode: one session per task on a shorter context, from backlog write-up or worktree through your review to merged, with a concurrency limit per project."
   :requires '(store project session agent)
   :init #'harness-tasks--init
   :shutdown #'harness-tasks--shutdown)
