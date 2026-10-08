@@ -1302,6 +1302,9 @@ the same would carry the bar on."
   (harness-ui-tasks-test-with
     (let ((harness-tasks-require-verification t)
           (notices nil))
+      ;; The board learns review is on as from a change of the option.
+      (with-current-buffer board (harness-ui-tasks-refresh))
+      (harness-ui-tasks-test--settings-say board t)
       (cl-letf* ((orig (symbol-function 'message))
                  ((symbol-function 'message)
                   (lambda (format-string &rest args)

@@ -861,13 +861,24 @@ comes, or when naming it failed."
 (defvar harness-ui--models (make-hash-table :test 'equal)
   "Model id -> model plist from the harness catalogue.")
 
+(defvar harness-ui--models-seen nil
+  "(CONNECTION . MODELS): the catalogue last fetched, and over which connection.")
+
 (defun harness-ui-refresh-models (&optional callback)
-  "Reload the model catalogue cache, redraw, then call CALLBACK with the models."
+  "Reload the model catalogue cache, then call CALLBACK with the models.
+Every view redraws (`harness-ui-redraw-hook') when the catalogue is new:
+it changed, or it is the first over this connection.  The harness says
+the catalogue was updated (`provider/models-updated') whenever a
+provider settles, mostly with nothing new, and a redraw fetches and
+renders every chat buffer again."
   (harness-ui-call "_harness/provider/models" nil
                    (lambda (models)
-                     (clrhash harness-ui--models)
-                     (dolist (m models) (puthash (plist-get m :id) m harness-ui--models))
-                     (run-hooks 'harness-ui-redraw-hook)
+                     (let ((new (not (and (eq harness-ui-connection (car harness-ui--models-seen))
+                                          (equal models (cdr harness-ui--models-seen))))))
+                       (setq harness-ui--models-seen (cons harness-ui-connection models))
+                       (clrhash harness-ui--models)
+                       (dolist (m models) (puthash (plist-get m :id) m harness-ui--models))
+                       (when new (run-hooks 'harness-ui-redraw-hook)))
                      (when callback (funcall callback models)))
                    (unless callback #'ignore)))
 
@@ -1580,6 +1591,10 @@ warning colour." :group 'harness-ui)
 
 (defface harness-ui-key-face '((t :inherit help-key-binding))
   "Keyboard shortcut hints in panels." :group 'harness-ui)
+
+;; Its name while the chat drew the panels.  Text still carrying the old
+;; name, undefined, made each redisplay log "Invalid face reference".
+(define-obsolete-face-alias 'harness-chat-key-face 'harness-ui-key-face "3.1")
 
 (defface harness-ui-output-face '((t :inherit (fixed-pitch harness-md-code-block)))
   "Fixed-width output, such as the diagram of a question's option." :group 'harness-ui)
