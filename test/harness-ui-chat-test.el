@@ -14,6 +14,8 @@
 (require 'harness-acp)
 
 (defvar harness-provider-claude-program)
+(defvar mwheel-scroll-up-function)
+(defvar mwheel-scroll-down-function)
 (declare-function harness-provider-claude-close-all "harness-provider-claude")
 
 (defvar harness-ui-chat-test-events nil "Recorded (EVENT . ARGS), newest first.")
@@ -724,6 +726,175 @@ The call and its result appear as any tool call's would."
         (set-window-point w (point-min))
         (harness-chat--append-local-block "hint" "again")
         (should harness-chat--unseen)))))
+
+(ert-deftest harness-ui-chat-scrolls-by-pixels-wiring ()
+  "The wheel, C-v and M-v scroll the chat by pixels, C-M-v too.
+An image is one line however tall, so scrolling by lines jumped past
+it or stuck on it.  The wheel goes through `mwheel-scroll's scroll
+functions, the keys through the remapped scroll commands; point's line
+is left partly shown while the window is scrolled partway into a line."
+  (harness-ui-chat-test-with
+    (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session)))
+           (window (selected-window)))
+      (set-window-buffer window buf)
+      (with-current-buffer buf
+        (should (local-variable-p 'mwheel-scroll-up-function))
+        (should (eq mwheel-scroll-up-function #'harness-chat-scroll-forward))
+        (should (eq mwheel-scroll-down-function #'harness-chat-scroll-back))
+        (should (eq (key-binding (kbd "C-v")) #'harness-chat-scroll-up))
+        (should (eq (key-binding [next]) #'harness-chat-scroll-up))
+        (should (eq (key-binding (kbd "M-v")) #'harness-chat-scroll-down))
+        (should (eq make-cursor-line-fully-visible #'harness-chat--cursor-line-fully-visible))
+        (cl-letf (((symbol-function 'window-vscroll) (lambda (&rest _) 0)))
+          (should (harness-chat--cursor-line-fully-visible window)))
+        (cl-letf (((symbol-function 'window-vscroll) (lambda (&rest _) 40)))
+          (should-not (harness-chat--cursor-line-fully-visible window))))
+      ;; Other buffers keep their own.
+      (with-temp-buffer
+        (should-not (eq mwheel-scroll-up-function #'harness-chat-scroll-forward))
+        (should-not (eq make-cursor-line-fully-visible #'harness-chat--cursor-line-fully-visible)))
+      ;; C-M-v from another window runs the chat's own C-v there.
+      (let ((other (split-window window nil 'below))
+            (called nil))
+        (unwind-protect
+            (progn
+              (set-window-buffer other buf)
+              (with-temp-buffer
+                (set-window-buffer window (current-buffer))
+                (select-window window)
+                (cl-letf (((symbol-function 'harness-chat-scroll-up)
+                           (lambda (&rest args) (setq called (cons (window-buffer) args)))))
+                  (scroll-other-window 3)))
+              (should (equal called (list buf 3))))
+          (delete-window other))))))
+
+(ert-deftest harness-ui-chat-scrolls-by-pixels ()
+  "The chat scrolls a line's height in pixels for each line asked for.
+Less than a window at a time, as the precision scroll functions need;
+at either end, once nothing moves, it signals as `scroll-up' does,
+which `mwheel-scroll' needs to stop, and C-v moves point there when
+`scroll-error-top-bottom' says so.  A terminal scrolls by lines."
+  (harness-ui-chat-test-with
+    (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session)))
+           (window (selected-window))
+           (vscroll 0) (steps nil))
+      (set-window-buffer window buf)
+      (with-current-buffer buf
+        ;; A window 100 pixels high, lines of 18, and 1000 pixels to scroll.
+        (cl-letf (((symbol-function 'display-graphic-p) #'always)
+                  ((symbol-function 'default-line-height) (lambda () 18))
+                  ((symbol-function 'window-text-height) (lambda (&rest _) 100))
+                  ((symbol-function 'window-vscroll) (lambda (&rest _) vscroll))
+                  ((symbol-function 'harness-chat--snap-start) #'ignore)
+                  ((symbol-function 'pixel-scroll-precision-scroll-down-page)
+                   (lambda (delta)
+                     (push delta steps)
+                     (setq vscroll (min 1000 (+ vscroll delta)))
+                     (when (= vscroll 1000) (signal 'end-of-buffer nil))))
+                  ((symbol-function 'pixel-scroll-precision-scroll-up-page)
+                   (lambda (delta)
+                     (push (- delta) steps)
+                     (setq vscroll (max 0 (- vscroll delta)))
+                     (when (zerop vscroll) (signal 'beginning-of-buffer nil)))))
+          ;; A wheel notch of three lines goes three lines' height.
+          (harness-chat-scroll-forward 3)
+          (should (equal steps '(54)))
+          ;; More than the window goes in steps short of it.
+          (setq steps nil)
+          (harness-chat-scroll-forward 10)
+          (should (equal (reverse steps) '(99 81)))
+          ;; Back; a negative count goes the other way; zero stays.
+          (setq steps nil)
+          (harness-chat-scroll-back 2)
+          (harness-chat-scroll-forward -1)
+          (harness-chat-scroll-forward 0)
+          (should (equal (reverse steps) '(-36 -18)))
+          ;; No count: the window less `next-screen-context-lines' lines.
+          ;; C-v and M-v read their argument as `scroll-up-command' does.
+          (setq steps nil)
+          (let ((next-screen-context-lines 2))
+            (harness-chat-scroll-forward)
+            (harness-chat-scroll-up 2)
+            (harness-chat-scroll-down '-)
+            (harness-chat-scroll-up '(4))
+            (harness-chat-scroll-down 1))
+          (should (equal (reverse steps) '(64 36 64 72 -18)))
+          ;; The end: what is left, then nothing moves and it says so.
+          (setq vscroll 990)
+          (harness-chat-scroll-forward 1)
+          (should (= vscroll 1000))
+          (should-error (harness-chat-scroll-forward 1) :type 'end-of-buffer)
+          (let ((scroll-error-top-bottom nil))
+            (goto-char (point-min))
+            (should-error (harness-chat-scroll-up) :type 'end-of-buffer)
+            (should (= (point) (point-min))))
+          ;; C-v there moves point instead: ARG lines, or to the end.
+          (let ((scroll-error-top-bottom t)
+                (second (save-excursion (goto-char (point-min)) (forward-line 1) (point))))
+            (should (< second (point-max)))
+            (harness-chat-scroll-up 1)
+            (should (= (point) second))
+            (harness-chat-scroll-up)
+            (should (= (point) (point-max)))
+            (should-error (harness-chat-scroll-up) :type 'end-of-buffer))
+          ;; The start likewise.
+          (setq vscroll 0)
+          (should-error (harness-chat-scroll-back 1) :type 'beginning-of-buffer)
+          (let ((scroll-error-top-bottom t))
+            (harness-chat-scroll-down)
+            (should (= (point) (point-min)))))
+        ;; A terminal draws no images: by lines, as ever.
+        (let ((calls nil))
+          (cl-letf (((symbol-function 'display-graphic-p) #'ignore)
+                    ((symbol-function 'scroll-up) (lambda (&optional n) (push (list 'up n) calls)))
+                    ((symbol-function 'scroll-down) (lambda (&optional n) (push (list 'down n) calls))))
+            (harness-chat-scroll-forward 3)
+            (harness-chat-scroll-back nil)
+            (harness-chat-scroll-up 2))
+          (should (equal (reverse calls) '((up 3) (down nil) (up 2)))))))))
+
+(ert-deftest harness-ui-chat-scroll-snaps-to-whole-lines-of-text ()
+  "Scrolling by pixels leaves text whole at the top, an image partway.
+A line of text scrolled partway goes back to its top, or on to the next
+line when more than half of it went; an image, two lines high or more,
+stays where the scroll left it."
+  (harness-ui-chat-test-with
+    (with-temp-buffer
+      (insert "line one\nline two\n")
+      (let* ((next (save-excursion (goto-char (point-min)) (forward-line 1) (point)))
+             (after next) (start 1) (vscroll 0) (height 18))
+        (cl-letf (((symbol-function 'default-line-height) (lambda () 18))
+                  ((symbol-function 'window-vscroll) (lambda (&rest _) vscroll))
+                  ((symbol-function 'set-window-vscroll) (lambda (_w v &rest _) (setq vscroll v)))
+                  ((symbol-function 'window-start) (lambda (&rest _) start))
+                  ((symbol-function 'set-window-start) (lambda (_w pos &rest _) (setq start pos)))
+                  ((symbol-function 'harness-chat--line-after) (lambda (_pos) after))
+                  ((symbol-function 'line-pixel-height) (lambda () height)))
+          ;; A third into a line of text: back to its top, either way.
+          (goto-char (point-min))
+          (dolist (forward '(t nil))
+            (setq start 1 vscroll 6)
+            (harness-chat--snap-start forward)
+            (should (equal (list start vscroll) '(1 0))))
+          ;; Two thirds, going forward: on to the next line, point with it.
+          (setq vscroll 12)
+          (harness-chat--snap-start t)
+          (should (equal (list start vscroll) (list next 0)))
+          (should (= (point) next))
+          ;; Going back, the line shows whole instead.
+          (setq start 1 vscroll 12)
+          (harness-chat--snap-start nil)
+          (should (equal (list start vscroll) '(1 0)))
+          ;; An image stays partway, either way.
+          (setq height 400)
+          (dolist (forward '(t nil))
+            (setq vscroll 120)
+            (harness-chat--snap-start forward)
+            (should (equal (list start vscroll) '(1 120))))
+          ;; The last line has none after it: back to its top.
+          (setq height 18 after nil vscroll 12)
+          (harness-chat--snap-start t)
+          (should (equal (list start vscroll) '(1 0))))))))
 
 ;;;; Queue
 

@@ -341,6 +341,147 @@ Knows the chat's own `harness-chat-action' buttons and the shared
       (insert text))
     (harness-chat--fix-positions fix pt windows)))
 
+;;;; Scrolling by pixels
+;;
+;; An image is one character whose `display' draws it, so however tall
+;; it is it makes one line, and Emacs scrolls by lines: the mouse wheel
+;; and C-v jumped past a tall image whole, or stuck on one taller than
+;; the window.  The chat scrolls by pixels instead, through the window's
+;; vscroll as `pixel-scroll-precision-mode' does, a line's height for
+;; every line asked for: the wheel (`mwheel-scroll' calls
+;; `mwheel-scroll-up-function' and `mwheel-scroll-down-function' with a
+;; number of lines) and C-v and M-v, which the mode remaps.  An image
+;; goes by a line's height at a time like the text around it, and stays
+;; whole: nothing about it is measured or changed when it is drawn.  The
+;; window still starts at a whole line of text; only an image is left
+;; partly scrolled at the top.
+
+(defvar mwheel-scroll-up-function)
+(defvar mwheel-scroll-down-function)
+
+(defun harness-chat--line-after (pos)
+  "Return where the screen line after the one at POS starts, or nil at the end.
+In the selected window."
+  (save-excursion
+    (goto-char pos)
+    (and (= (vertical-motion 1) 1) (> (point) pos) (point))))
+
+(defun harness-chat--snap-start (forward)
+  "Start the selected window at a whole screen line unless its first is tall.
+Scrolling by pixels can stop partway into a line of text, which would
+then show cut through at the top.  A line at least two lines of text
+high, an image, keeps the part scrolled; any other goes back to its top,
+or FORWARD on to the next line when more than half of it was scrolled."
+  (let ((vscroll (window-vscroll nil t)))
+    (when (> vscroll 0)
+      (let* ((start (window-start))
+             ;; The whole line: `window-text-pixel-size' from the window's
+             ;; start counts only what the vscroll leaves of it, which near
+             ;; an image's bottom is as little as a line of text.
+             (height (save-excursion (goto-char start) (line-pixel-height))))
+        (when (< height (* 2 (default-line-height)))
+          (set-window-vscroll nil 0 t t)
+          (let ((next (and forward (> (* 2 vscroll) height)
+                           (harness-chat--line-after start))))
+            (when next
+              (set-window-start nil next t)
+              (when (< (point) next) (goto-char next)))))))))
+
+(defun harness-chat--scroll-pixels (pixels forward)
+  "Scroll the selected window PIXELS pixels, FORWARD toward the end or back.
+`pixel-scroll-precision-scroll-down-page' and its `-up-page' go less
+than a window's height at a time, so a longer scroll takes steps."
+  (let ((most (max 1 (1- (window-text-height nil t)))))
+    (while (> pixels 0)
+      (let ((step (min pixels most)))
+        (if forward
+            (pixel-scroll-precision-scroll-down-page step)
+          (pixel-scroll-precision-scroll-up-page step))
+        (setq pixels (- pixels step))))))
+
+(defun harness-chat--scroll (lines forward)
+  "Scroll the selected window LINES lines' height, FORWARD toward the end or back.
+LINES nil is the window's height less `next-screen-context-lines'
+lines, as `scroll-up' takes it, negative LINES go the other way, and
+zero stays.  Signals `end-of-buffer' or `beginning-of-buffer' when
+nothing moves, as `scroll-up' and `scroll-down' do: `mwheel-scroll'
+scrolls on until one does.  A terminal, which draws no images, scrolls
+by lines."
+  (cond
+   ((eql lines 0))
+   ((not (display-graphic-p))
+    (if forward (scroll-up lines) (scroll-down lines)))
+   (t
+    (let* ((line (default-line-height))
+           (forward (if (and lines (< lines 0)) (not forward) forward))
+           (pixels (if lines (* (abs lines) line)
+                     (max line (- (window-text-height nil t) (* next-screen-context-lines line)))))
+           (before (cons (window-start) (window-vscroll nil t))))
+      (condition-case nil
+          (harness-chat--scroll-pixels pixels forward)
+        ((beginning-of-buffer end-of-buffer) nil))
+      (harness-chat--snap-start forward)
+      (when (equal before (cons (window-start) (window-vscroll nil t)))
+        (signal (if forward 'end-of-buffer 'beginning-of-buffer) nil))))))
+
+(defun harness-chat-scroll-forward (&optional lines)
+  "Scroll the chat LINES lines' height toward its end, by pixels.
+The wheel's `mwheel-scroll-up-function' in the chat; LINES nil is
+nearly a window.  See `harness-chat--scroll'."
+  (harness-chat--scroll lines t))
+
+(defun harness-chat-scroll-back (&optional lines)
+  "Scroll the chat LINES lines' height toward its start, by pixels.
+The wheel's `mwheel-scroll-down-function' in the chat; LINES nil is
+nearly a window.  See `harness-chat--scroll'."
+  (harness-chat--scroll lines nil))
+
+(defun harness-chat--scroll-command (arg forward)
+  "Scroll nearly a window, or ARG lines' height, FORWARD or back.
+As `scroll-up-command' takes ARG: `-' goes a window the other way.
+Where nothing is left to scroll, point moves that way instead when
+`scroll-error-top-bottom' says so, as that command moves it: ARG lines,
+or to the end of the buffer; else the error is signaled."
+  (let ((forward (if (eq arg '-) (not forward) forward))
+        (lines (and arg (not (eq arg '-)) (prefix-numeric-value arg))))
+    (condition-case err
+        (harness-chat--scroll lines forward)
+      ((beginning-of-buffer end-of-buffer)
+       (let* ((ahead (eq (car err) 'end-of-buffer))
+              (edge (if ahead (point-max) (point-min))))
+         (cond
+          ((or (not scroll-error-top-bottom) (= (point) edge))
+           (signal (car err) (cdr err)))
+          (lines (forward-line (if ahead (abs lines) (- (abs lines)))))
+          (t (goto-char edge))))))))
+
+(defun harness-chat-scroll-up (&optional arg)
+  "Scroll the chat nearly a window toward its end, by pixels.
+`scroll-up-command' in the chat: an image goes by a line's height at a
+time instead of all at once.  With ARG, scroll ARG lines' height; `-'
+scrolls back."
+  (interactive "^P")
+  (harness-chat--scroll-command arg t))
+
+(defun harness-chat-scroll-down (&optional arg)
+  "Scroll the chat nearly a window toward its start, by pixels.
+`scroll-down-command' in the chat; with ARG, ARG lines' height; `-'
+scrolls forward."
+  (interactive "^P")
+  (harness-chat--scroll-command arg nil))
+
+(dolist (command '(harness-chat-scroll-up harness-chat-scroll-down))
+  (put command 'scroll-command t)
+  (put command 'isearch-scroll t))
+
+(defun harness-chat--cursor-line-fully-visible (window)
+  "The chat's `make-cursor-line-fully-visible', for WINDOW.
+Point's line is brought into full view, as by default, unless WINDOW
+is scrolled partway into a tall line: that would undo the scroll.
+`pixel-scroll-precision-mode' turns the option off everywhere for this
+\(bug#65214)."
+  (zerop (window-vscroll window t)))
+
 ;;;; Auto-scroll
 
 (defun harness-chat--at-bottom-p (&optional window)
@@ -2683,6 +2824,9 @@ message sent from it resumes it."
   ;; The compose box's keys; not `special-mode-map', whose letters would
   ;; eat typing in the box.
   (set-keymap-parent map harness-compose-map)
+  ;; By pixels, so a tall image goes by a bit at a time.
+  (define-key map [remap scroll-up-command] #'harness-chat-scroll-up)
+  (define-key map [remap scroll-down-command] #'harness-chat-scroll-down)
   (define-key map (kbd "TAB") #'harness-chat-tab)
   (define-key map (kbd "C-c C-q") #'harness-chat-queue)
   (define-key map (kbd "C-c C-c") #'harness-chat-send)
@@ -2719,6 +2863,10 @@ on \\[harness-menu] here, or the [menu] button in the header line.
   (add-hook 'post-command-hook #'harness-chat--post-command nil t)
   (add-hook 'window-buffer-change-functions #'harness-chat--on-window-buffer-change nil t)
   (add-hook 'window-scroll-functions #'harness-chat--schedule-history nil t)
+  ;; The wheel scrolls by pixels too (see "Scrolling by pixels").
+  (setq-local mwheel-scroll-up-function #'harness-chat-scroll-forward
+              mwheel-scroll-down-function #'harness-chat-scroll-back
+              make-cursor-line-fully-visible #'harness-chat--cursor-line-fully-visible)
   (add-hook 'kill-buffer-hook #'harness-chat--on-kill nil t))
 
 ;; The chat's keys in the harness menu, as the buffer binds them.
