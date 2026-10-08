@@ -640,6 +640,77 @@ the handler moves nothing the user did not confirm."
       (should (plist-get (harness-tools-sessions-test-run me "task_control" (list :task_id id :action "verify")) :is-error))
       (should (eq 'done (plist-get (harness-call 'task/get id) :state))))))
 
+(defvar harness-tasks--reject-message)
+(defvar harness-tasks--aside-message)
+(declare-function harness-tasks--reject-text "harness-tasks" (feedback))
+(declare-function harness-tasks--aside-text "harness-tasks" (text))
+
+(ert-deftest harness-tools-sessions-message-to-a-task-in-review-is-no-review ()
+  "session_send and task_control's message reach a task in review as this session's.
+Neither is a review, so neither sends the task back: the message says
+who sent it (its header and its node's sender), opens with the aside
+text and never the reject text, keeps no round of feedback, and the
+task waits for review again once its turn ends.  Only task_control's
+reject sends the work back, opened by the reject text."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-require-verification t)
+           (me (harness-tools-sessions-test-session :name "Onboard benito"))
+           (id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Fix the lexer")) :meta)
+                          :task-id))
+           (header (format "[Message from session %s \"Onboard benito\"]\n\n" me))
+           (sender (list :kind 'session :id me :name "Onboard benito")))
+      (harness-tools-sessions-test-ok me "task_wait" (list :task_id id))
+      (should (eq 'review (plist-get (harness-call 'task/get id) :state)))
+      (let* ((sid (plist-get (harness-call 'task/get id) :session))
+             (last-user (lambda () (car (last (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
+                                                                (harness-call 'session/nodes sid)))))))
+        ;; session_send, waiting for the reply.
+        (should (string-match-p "turn ended: end-turn"
+                                (harness-tools-sessions-test-ok me "session_send"
+                                                                (list :session_id sid :message "Applying now." :wait t))))
+        (let ((node (funcall last-user)))
+          (should (equal (harness-tasks--aside-text (concat header "Applying now.")) (plist-get node :content)))
+          (should (string-prefix-p harness-tasks--aside-message (plist-get node :content)))
+          (should-not (string-search harness-tasks--reject-message (plist-get node :content)))
+          (should (equal sender (harness-node-sender node))))
+        (let ((line (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "review"))))
+          (should (string-match-p (concat (regexp-quote id) " +review ") line))
+          (should-not (string-match-p "sent back" line)))
+        (should-not (plist-get (harness-call 'task/get id) :feedback))
+        ;; task_control's message: no review either, and it says who sent it.
+        (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "message" :message "Traefik checks out."))
+        (let ((line (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "review"))))
+          (should-not (string-match-p "sent back" line)))
+        (let ((node (funcall last-user)))
+          (should (equal (harness-tasks--aside-text (concat header "Traefik checks out.")) (plist-get node :content)))
+          (should-not (string-search harness-tasks--reject-message (plist-get node :content)))
+          (should (equal sender (harness-node-sender node))))
+        (should-not (plist-get (harness-call 'task/get id) :feedback))
+        ;; task_control's reject sends it back, as the user's review.
+        (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "reject" :message "Also the parser."))
+        (should (string-match-p "sent back 1 time\\b"
+                                (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "review"))))
+        (should (equal (harness-tasks--reject-text "Also the parser.") (plist-get (funcall last-user) :content)))
+        (should (equal '("Also the parser.")
+                       (mapcar (lambda (round) (plist-get round :text))
+                               (plist-get (harness-call 'task/get id) :feedback))))))))
+
+(ert-deftest harness-tools-sessions-task-message-says-who-sent-it ()
+  "task_control's message to a task's session is the calling session's, as session_send's is.
+A follow-up to a done task too: its header and its node's sender name
+the calling session, not the user."
+  (harness-tools-sessions-test-with
+    (let* ((me (harness-tools-sessions-test-session :name "Boss"))
+           (id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Fix the lexer")) :meta)
+                          :task-id)))
+      (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "done"))
+      (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "message" :message "and the parser"))
+      (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "done"))
+      (let ((node (car (last (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
+                                               (harness-call 'session/nodes (plist-get (harness-call 'task/get id) :session)))))))
+        (should (equal (format "[Message from session %s \"Boss\"]\n\nand the parser" me) (plist-get node :content)))
+        (should (equal (list :kind 'session :id me :name "Boss") (harness-node-sender node)))))))
+
 (ert-deftest harness-tools-sessions-task-list-merging-column ()
   "A task holding a place in the merge queue lists as merging.
 task_list filters on it and task_wait can wait for it."

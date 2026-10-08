@@ -749,5 +749,31 @@ other view, shows the command as it was left."
       (should (equal (list 'permission sid pid "allow-once") (car harness-ui-pending-test-answers)))
       (harness-test-wait (lambda () (null (harness-ui-popout-buffer key))) 5 "the popout to close"))))
 
+(declare-function harness-ui-pending--pattern-suggestions "harness-ui-pending")
+
+(ert-deftest harness-ui-pending-pattern-suggestions-go-from-the-file-to-the-root ()
+  "Editing a pattern offers, narrowest first, the call's path, the files
+like it beside it, its directory and each one above it up to the
+prompt's own, which may be the root of a repository far above the
+file, then that pattern and the directory above it."
+  (require 'harness-ui-pending)
+  (should (equal '("/srv/emacs.d/modules/doom/compat/compat.el"
+                   "/srv/emacs.d/modules/doom/compat/*.el"
+                   "/srv/emacs.d/modules/doom/compat/**"
+                   "/srv/emacs.d/modules/doom/**"
+                   "/srv/emacs.d/modules/**"
+                   "/srv/emacs.d/**"
+                   "/srv/**")
+                 (harness-ui-pending--pattern-suggestions
+                  (list :pattern "/srv/emacs.d/**" :paths ["/srv/emacs.d/modules/doom/compat/compat.el"]))))
+  ;; A pattern for the file's own directory, and one for a directory itself.
+  (should (equal '("/srv/x/a.txt" "/srv/x/*.txt" "/srv/x/**" "/srv/**")
+                 (harness-ui-pending--pattern-suggestions (list :pattern "/srv/x/**" :paths '("/srv/x/a.txt")))))
+  (should (equal '("/srv/x/sub" "/srv/x/sub/**" "/srv/x/**")
+                 (harness-ui-pending--pattern-suggestions (list :pattern "/srv/x/sub/**" :paths '("/srv/x/sub")))))
+  ;; A path named through a link elsewhere: nothing between.
+  (should (equal '("/link/x/a.el" "/real/x/**" "/real/**")
+                 (harness-ui-pending--pattern-suggestions (list :pattern "/real/x/**" :paths '("/link/x/a.el"))))))
+
 (provide 'harness-ui-pending-test)
 ;;; harness-ui-pending-test.el ends here

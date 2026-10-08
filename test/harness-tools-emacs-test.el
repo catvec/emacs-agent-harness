@@ -426,6 +426,11 @@ from the source without visiting it, or from the buffer visiting it."
               (should (string-search "No file defines harness-test-defs-evaluated" c))
               (should (string-search "(defun harness-test-defs-evaluated (x)" c))
               (should (string-search "\"Double X.\"" c)))
+            ;; One with no docstring holds fewer slots, and prints too.
+            (eval '(defun harness-test-defs-bare (x) (* 3 x)) t)
+            (let ((r (harness-tools-emacs-test--call "emacs_find_definition" :symbol "harness-test-defs-bare")))
+              (should-not (plist-get r :is-error))
+              (should (string-search "(defun harness-test-defs-bare (x)" (plist-get r :content))))
             ;; Built in, with no C source on this machine.
             (let ((find-function-C-source-directory nil))
               (let ((c (plist-get (harness-tools-emacs-test--call "emacs_find_definition" :symbol "car") :content)))
@@ -443,6 +448,42 @@ from the source without visiting it, or from the buffer visiting it."
             (should (equal "Find definition: variable x"
                            (harness-tool-title "emacs_find_definition" '(:symbol "x" :type "variable")))))
         (let ((buf (find-buffer-visiting file))) (when buf (kill-buffer buf)))
+        (delete-directory root t)))))
+
+(ert-deftest harness-tools-emacs-find-definition-reveals-its-file ()
+  "emacs_find_definition tells the permission layer which source file it
+showed a definition from, for the session that asked, so that reading
+the rest of that file asks nobody.  Not for a definition printed from
+memory, for one it did not find, or without a session."
+  (harness-tools-emacs-test--setup)
+  (harness-test-with-temp-state
+    (let* ((root (harness-test-temp-dir))
+           (file (expand-file-name "harness-test-reveal.el" root))
+           (revealed nil)
+           (saved (gethash 'permission/reveal-file harness--methods))
+           (find (lambda (symbol)
+                   (harness-await (harness-call 'tools/execute "s1"
+                                                (list :id (harness-short-id) :name "emacs_find_definition"
+                                                      :input (list :symbol symbol)))))))
+      (harness-register-method 'permission/reveal-file (lambda (sid f) (push (list sid f) revealed) f))
+      (unwind-protect
+          (progn
+            (write-region (concat ";;; harness-test-reveal.el --- Reveal me  -*- lexical-binding: t; -*-\n\n"
+                                  "(defun harness-test-reveal-fn ()\n  \"Return nil.\"\n  nil)\n")
+                          nil file)
+            (load file nil t)
+            (should-not (plist-get (funcall find "harness-test-reveal-fn") :is-error))
+            (should (equal '("s1") (mapcar #'car revealed)))
+            (should (equal (file-truename file) (file-truename (cadr (car revealed)))))
+            (eval '(defun harness-test-reveal-evaluated () nil) t)
+            (should-not (plist-get (funcall find "harness-test-reveal-evaluated") :is-error))
+            (should (plist-get (funcall find "harness-no-such-symbol-qqq") :is-error))
+            (should-not (plist-get (harness-tools-emacs-test--call "emacs_find_definition" :symbol "harness-test-reveal-fn")
+                                   :is-error))
+            (should (= 1 (length revealed))))
+        (if saved
+            (puthash 'permission/reveal-file saved harness--methods)
+          (remhash 'permission/reveal-file harness--methods))
         (delete-directory root t)))))
 
 (defun harness-tools-emacs-test--trace-output ()
