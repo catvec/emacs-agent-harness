@@ -2634,7 +2634,14 @@ rest of the harness.  Sessions are named by id, a unique id prefix or a
 unique name; a session cannot message, control or wait on itself.
 Listing and search default to the current project (worktrees included).
 `session_search` greps the `sessions/*.nodes.jsonl` logs in a subprocess,
-so transcripts are not loaded into memory to be searched.  `session_send`
+so transcripts are not loaded into memory to be searched.  A node is one
+line of its log and can be megabytes long, so a hit is split from its
+file name by a plain search (`harness-grep-hit`, which the task board's
+search uses too), never a backtracking regexp that would overflow the
+matcher.  Its snippet, a few hundred characters at most, is cut from a
+window around the match.  In regexp mode grep decides the hits; a
+pattern that overflows the matcher over a whole node is run over pieces
+of it just to place the snippet.  `session_send`
 prefixes the message with `[Message from session ID "NAME"]` and goes
 through `agent/prompt` (a turn, steering, or the queue) with
 `:from` naming the calling session, so that session's chat shows the

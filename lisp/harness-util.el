@@ -78,7 +78,9 @@ raw-byte characters there (\"\\342\\234\\227\" for U+2717), which
 
 (defun harness-json-parse (string)
   "Parse JSON STRING into the plist convention.  Return nil on empty input."
-  (unless (or (null string) (string-empty-p (string-trim string)))
+  ;; Not `string-trim': its search for trailing whitespace takes time
+  ;; quadratic in a long run of spaces inside STRING.
+  (unless (or (null string) (string-blank-p string))
     (json-parse-string string :object-type 'plist :array-type 'list
                        :null-object nil :false-object :false)))
 
@@ -609,6 +611,19 @@ on a local CWD, so children cannot outlive it -- and :exit is
                                                       (harness-kill-process-tree tree 'kill)))))))
       (when stdin (process-send-string proc stdin))
       (when (process-live-p proc) (process-send-eof proc)))))
+
+(defun harness-grep-hit (line suffix)
+  "Split LINE of `grep -H' output into (NAME . TEXT), or return nil.
+LINE is FILE:TEXT where FILE's name ends in SUFFIX (such as
+\".nodes.jsonl\"); NAME is that name without its directory and SUFFIX.
+LINE is cut where SUFFIX and a colon first appear together, by a plain
+search, not a regexp: TEXT can be megabytes long (a node log holds a
+whole node on each line), and a regexp that backtracks over it
+overflows the matcher."
+  (let ((cut (string-search (concat suffix ":") line)))
+    (and cut
+         (cons (file-name-nondirectory (substring line 0 cut))
+               (substring line (+ cut (length suffix) 1))))))
 
 ;;;; User options
 
