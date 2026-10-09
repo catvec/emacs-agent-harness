@@ -206,7 +206,8 @@ An option two sections name, such as `harness-supervisor', is listed
 once, in the first.")
 
 (defconst harness-config-hidden-options
-  '(harness-process harness-module-directories harness-enabled-modules harness-disabled-modules
+  '(harness-process harness-module-directories harness-extra-module-directories
+    harness-enabled-modules harness-disabled-modules
     harness-state-directory harness-server-emacs harness-server-forward-variables
     harness-server-init-file harness-corporate-mode)
   "Harness options `config/describe' leaves out, besides the `harness-acp-' ones.

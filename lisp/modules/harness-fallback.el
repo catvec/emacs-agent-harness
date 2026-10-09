@@ -298,7 +298,11 @@ scoped to MODEL and no plan-wide one; otherwise the whole provider."
 
 (cl-defun harness-fallback--put (key &key kind reason until guess source model)
   "Mark KEY out of KIND until UNTIL; return the mark.
-A mark that is live already keeps its `:since' and is only extended."
+A mark that is live already keeps its `:since' and is only extended.
+REASON is the text saying why, and GUESS non-nil says UNTIL is a retry
+time rather than a reset the provider gave.  SOURCE is what made the
+mark, error or quota, and MODEL, when KEY is a provider, the model
+whose failure put it out."
   (let* ((now (float-time))
          (old (gethash key harness-fallback--marks))
          (old (and old (harness-fallback--live-p old now) old))
@@ -317,8 +321,8 @@ A mark that is live already keeps its `:since' and is only extended."
 (defun harness-fallback--record-failure (model kind failure)
   "Mark what MODEL's failure of KIND puts out; return the mark.
 Money spent puts the whole provider out; a quota the provider's report
-scopes to MODEL puts MODEL out.  The mark lasts until the reset the
-failure or the report gives, else `harness-fallback--retry-after'."
+scopes to MODEL puts MODEL out.  The mark lasts until the reset
+FAILURE or the report gives, else `harness-fallback--retry-after'."
   (let* ((now (float-time))
          (resets (let ((r (plist-get failure :resets))) (and (numberp r) (> r now) (float r))))
          (key (if (eq kind 'quota) (harness-fallback--quota-scope model) (harness-fallback--provider-of model)))
@@ -522,7 +526,8 @@ session's own model is remembered while it runs on another."
                      (lambda (e) (harness-log 'warn "fallback: notifying failed: %s" (harness-error-message e)))))))
 
 (defun harness-fallback--notify-switch (session mark target)
-  "Tell the user once that MARK put a provider out and sessions go to TARGET."
+  "Tell the user once that MARK put a provider out and sessions go to TARGET.
+The notification is about SESSION, the first of them to move."
   (harness-fallback--notify (format "%s/%s" (plist-get mark :key) (plist-get mark :since))
                             (harness-fallback--out-text mark)
                             (format "Sessions carry on with %s." (harness-fallback--model-label target))

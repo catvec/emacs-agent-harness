@@ -134,7 +134,7 @@ reaching a custom file."
       (should (member "core" (mapcar (lambda (m) (plist-get m :name)) (plist-get d :modules))))
       ;; What decides how the harness starts or talks to the UI is left out.
       (dolist (hidden '("harness-process" "harness-state-directory" "harness-module-directories"
-                        "harness-auto-reload-mode"))
+                        "harness-extra-module-directories" "harness-auto-reload-mode"))
         (should-not (member hidden keys)))
       (should-not (cl-some (lambda (k) (string-prefix-p "harness-acp-" k)) keys))
       ;; A secret says whether it is set, never what it is.

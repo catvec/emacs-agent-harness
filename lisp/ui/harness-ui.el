@@ -319,7 +319,8 @@ triangle).  Words that go with the icon take `harness-ui-level-face'."
 
 (defvar harness-ui-connection nil "The ACP connection the UI talks through.")
 (defvar harness-ui-connection-address nil
-  "Where the harness is: nil in this Emacs, `process' for the harness
+  "Address of the harness the UI talks to.
+It is nil for the harness in this Emacs, `process' for the harness
 process `harness-start' manages (see `harness-process'), or \"host:port\".")
 
 (defvar harness-ui-update-functions nil
@@ -372,10 +373,11 @@ Each is (METHOD PARAMS PROMISE); PROMISE is nil for notifications.")
   (and harness-ui-connection (harness-acp-connected-p harness-ui-connection)))
 
 (defun harness-ui-connect (&optional address)
-  "Connect the UI to ADDRESS: nil for the in-process harness, `process'
-for the managed harness process, or \"host:port\".  Return the
-connection, or nil while the harness process is still starting; requests
-made meanwhile are queued and sent once it listens.
+  "Connect the UI to ADDRESS.
+ADDRESS is nil for the in-process harness, `process' for the managed
+harness process, or \"host:port\".  Return the connection, or nil while
+the harness process is still starting; requests made meanwhile are
+queued and sent once it listens.
 In corporate mode (`harness-corporate-mode') a \"host:port\" ADDRESS
 gives way to this Emacs's own harness: the UI connects to no other."
   (when (and (stringp address) (harness-corporate-p))
@@ -441,15 +443,19 @@ initialize: one it let go of for another closes on purpose."
     conn))
 
 (defun harness-ui-connection ()
-  "Return the live connection, connecting if needed; nil while the harness
-process is starting.  A TCP connection still connecting is live: what is
-sent meanwhile goes out once it connects, whereas connecting again would
-drop it along with every request it carries."
+  "Return the live connection, connecting if needed.
+Return nil while the harness process is starting.  A TCP connection
+still connecting is live: what is sent meanwhile goes out once it
+connects, whereas connecting again would drop it along with every
+request it carries."
   (if (harness-acp-open-p harness-ui-connection)
       harness-ui-connection
     (harness-ui-connect harness-ui-connection-address)))
 
 (defun harness-ui--on-close ()
+  "Say in the echo area that the UI's connection closed.
+A connection to the managed harness process is left to its supervisor
+to report."
   (unless (eq harness-ui-connection-address 'process) ; the supervisor reports that
     (message "Harness: connection closed%s"
              (if harness-ui-connection-address (format " (%s)" harness-ui-connection-address) ""))))
@@ -579,6 +585,18 @@ tasks among them carry on once the process is back (see
                      (lambda (_) (message "Harness process reloaded"))
                      (lambda (e) (message "Harness process: %s" (harness-error-message e))))))
 
+(defun harness-ui--harness-modules ()
+  "Return (TITLE . PROMISE) of the modules of the harness the UI talks to.
+For `harness-describe-modules-functions'.  Nil when that harness runs
+in this Emacs, whose modules `harness-describe-modules' lists anyway."
+  (when harness-ui-connection-address
+    (cons (if (eq harness-ui-connection-address 'process)
+              "Modules of the harness process"
+            (format "Modules of the harness at %s" harness-ui-connection-address))
+          (harness-ui-request "_harness/harness/modules"))))
+
+(add-hook 'harness-describe-modules-functions #'harness-ui--harness-modules)
+
 (defun harness-ui--advertise ()
   "Tell the harness again what this Emacs lends it, as `initialize' did.
 After a reload, so that a connection opened by older code, which lent
@@ -653,11 +671,15 @@ as needing input and its chat panel or task card answers it later."
   t)
 
 (defun harness-ui--default-permission (params respond)
-  "Fallback when no UI module claimed permission request PARAMS: leave it pending."
+  "Leave permission request PARAMS pending, as no UI module claimed it.
+Declining it through RESPOND keeps it pending on its session (see
+`harness-ui--leave-pending')."
   (harness-ui--leave-pending params respond "permission request"))
 
 (defun harness-ui--default-question (params respond)
-  "Fallback when no UI module claimed question PARAMS: leave it pending."
+  "Leave question PARAMS pending, as no UI module claimed it.
+Declining it through RESPOND keeps it pending on its session (see
+`harness-ui--leave-pending')."
   (harness-ui--leave-pending params respond "question"))
 
 ;;;; Desktop notifications
@@ -811,6 +833,8 @@ yet: it starts after the init file, with the value set there."
 (defalias 'harness-ui--cache-session #'harness-ui-cache-session)
 
 (defun harness-ui--forget-session (id)
+  "Remove session ID from the cache and notify listeners.
+Its output rate and live token figures go with it."
   (remhash id harness-ui--sessions)
   (harness-ui--store-rate id nil)
   (harness-ui--store-live id nil)
@@ -1241,8 +1265,9 @@ NOW defaults to the current time."
               (if (numberp limit) (format " of %s" (harness-format-cost limit)) "")))))
 
 (defun harness-ui-quota-headline-windows (quota)
-  "Return the windows of QUOTA worth a glance: the 5-hour and weekly ones,
-and any other that is at least 70% used."
+  "Return the windows of QUOTA worth a glance.
+They are the 5-hour and weekly ones, and any other that is at least
+70% used."
   (cl-remove-if-not (lambda (w) (or (member (plist-get w :name) '("5h" "7d"))
                                     (>= (or (plist-get w :used) 0) 0.7)))
                     (plist-get quota :windows)))
@@ -1656,7 +1681,7 @@ PROPS are extra text properties; `:help' sets the tooltip."
                         'mouse-face 'highlight)))
 
 (defun harness-ui-mouse-keymap (command)
-  "Return a keymap running COMMAND on mouse-1, mouse-2 and RET.
+  "Return a keymap running COMMAND on a left or middle click and on RET.
 The bindings also work from header-line and mode-line segments."
   (let ((map (make-sparse-keymap))
         ;; Not (interactive "e"), which signals for RET, an event without
@@ -1820,7 +1845,7 @@ it: the switch banner's, the cache panel's."
   (propertize key 'face 'harness-ui-key-face))
 
 (defun harness-ui-action-map (command)
-  "Return a keymap running COMMAND on mouse-1, mouse-2 and RET."
+  "Return a keymap running COMMAND on a left or middle click and on RET."
   (let ((map (make-sparse-keymap)))
     (define-key map [mouse-1] command)
     (define-key map [mouse-2] command)
@@ -2688,6 +2713,9 @@ fullscreen layout this ends the layout, as `harness-ui-quit-view' does."
 ;;;; Commands
 
 (defun harness-ui--default-directory ()
+  "Return the directory that prompts for a directory offer by default.
+That is the root of the project `default-directory' is in, else
+`default-directory' itself."
   (harness-files-project-root default-directory))
 
 ;;;###autoload
@@ -2717,7 +2745,7 @@ fullscreen layout this ends the layout, as `harness-ui-quit-view' does."
   "Function telling the session setting commands what to change in this buffer.
 It returns a session id, or (SETTINGS . SET) for settings that are not a
 session's yet: SETTINGS is a plist with a session's setting keys
-(`:model' `:thinking' `:permission-mode' `:non-interactive') and SET a
+\(`:model' `:thinking' `:permission-mode' `:non-interactive') and SET a
 function of KEY and VALUE storing one.  The task board uses it so the
 same commands set up the next task.  When it is nil or returns nil, the
 commands use `harness-ui-current-session-id'.")
@@ -3006,7 +3034,8 @@ their number).  The risks show before the question.  Return a mode of
 
 (defun harness-ui--ask-handoff (checks label total _session _host callback)
   "Ask how to hand over a lossy switch in the minibuffer.
-See `harness-ui-switch-function'; CALLBACK gets the mode chosen."
+See `harness-ui-switch-function' for CHECKS, LABEL and TOTAL; CALLBACK
+gets the mode chosen."
   (funcall callback (harness-ui--read-handoff checks label total)))
 
 (defvar harness-ui-switch-function #'harness-ui--ask-handoff
@@ -3619,6 +3648,8 @@ the harness UI loads, that is before `harness-start'."
   :global t :group 'harness-ui :keymap harness-global-mode-map)
 
 (defun harness-ui--command-available-p (symbol)
+  "Non-nil when the command SYMBOL is defined, so the menu may offer it.
+Some commands belong to modules that may be off."
   (fboundp symbol))
 
 (defun harness-ui--free-side-slot (side)
@@ -3634,15 +3665,24 @@ the harness UI loads, that is before `harness-start'."
   (cl-remove-if-not (lambda (window) (eq (window-parameter window 'window-side) 'bottom))
                     (window-list nil 'nomini)))
 
-(defun harness-ui--menu-lines (buffer)
-  "Return about how many lines the menu BUFFER needs, its mode line included.
-Transient fills the buffer before it shows it and fits the window to
-it once shown, so this need only be close."
-  (with-current-buffer buffer
-    (max window-min-height
-         (+ (count-lines (point-min) (point-max))
-            (if mode-line-format 1 0)
-            (if header-line-format 1 0)))))
+(defun harness-ui--menu-height (buffer window)
+  "Return how many pixels the menu BUFFER needs in a window below WINDOW.
+That is its text, as it shows in a window as wide as WINDOW, and a
+line for each of its mode and header lines.  On a text terminal a
+pixel is a line, and so is each line of the text.  On a graphic frame
+the text is measured: transient draws the line under a menu a pixel
+high there, and counted as a whole line it would make the window too
+tall.  Transient fills the buffer before it shows it and fits the
+window to it once shown, shrinking it to its text; the pixels it gives
+up would go to WINDOW, which is to keep its height."
+  (let* ((frame (window-frame window))
+         (line (frame-char-height frame)))
+    (with-current-buffer buffer
+      (max (* window-min-height line)
+           (+ (if (display-graphic-p frame)
+                  (cdr (buffer-text-pixel-size buffer window))
+                (count-lines (point-min) (point-max)))
+              (* line (+ (if mode-line-format 1 0) (if header-line-format 1 0))))))))
 
 (defun harness-ui--display-menu-below (buffer window alist)
   "Display the menu BUFFER in a new window below WINDOW and return it.
@@ -3653,21 +3693,25 @@ come from the windows above, so WINDOW keeps its height while the menu
 shows, and `harness-ui--delete-menu-below' gives them back once the
 menu closes.  Return nil, the windows as they were, when the windows
 above cannot spare the lines.  ALIST is the action alist."
-  (let ((height (window-pixel-height window))
-        (preserved (window-parameter window 'window-preserved-size))
-        (lines (min (harness-ui--menu-lines buffer)
-                    (window-max-delta window nil window)))
-        menu)
-    (when (>= lines window-min-height)
+  (let* ((height (window-pixel-height window))
+         (preserved (window-parameter window 'window-preserved-size))
+         ;; Pixels, so that WINDOW gives the menu exactly what it took.
+         (pixels (min (harness-ui--menu-height buffer window)
+                      (window-max-delta window nil window nil nil nil t)))
+         menu)
+    (when (>= pixels (* window-min-height (frame-char-height (window-frame window))))
       (condition-case err
           (progn
-            (window-resize window lines nil window)
-            (setq menu (let ((window-combination-resize 'side)
-                             (window-combination-limit t)
-                             ;; WINDOW itself, even a Doom popup, whose
-                             ;; `split-window' splits another window.
-                             (ignore-window-parameters t))
-                         (split-window window (- lines) 'below)))
+            ;; To the pixel: rounded to whole lines, the menu would come
+            ;; out a line short of its text on a graphic frame.
+            (let ((window-resize-pixelwise t))
+              (window-resize window pixels nil window t)
+              (setq menu (let ((window-combination-resize 'side)
+                               (window-combination-limit t)
+                               ;; WINDOW itself, even a Doom popup, whose
+                               ;; `split-window' splits another window.
+                               (ignore-window-parameters t))
+                           (split-window window (- pixels) 'below t))))
             (set-window-parameter menu 'harness-ui--menu-below (list window height preserved))
             (set-window-parameter menu 'delete-window #'harness-ui--delete-menu-below)
             ;; Fixed at its height while the menu shows, so that transient
@@ -3678,8 +3722,15 @@ above cannot spare the lines.  ALIST is the action alist."
          (harness-log 'error "harness-menu: no window below %s: %s" window (error-message-string err))
          (if (window-live-p menu)
              (delete-window menu)
-           (window-resize-no-error window (- height (window-pixel-height window)) nil window t))
+           (harness-ui--resize-back window height))
          nil)))))
+
+(defun harness-ui--resize-back (window height)
+  "Make WINDOW HEIGHT pixels high again, with the lines of the windows above.
+To the pixel, as `harness-ui--display-menu-below' resized it: rounded
+to whole lines, WINDOW would come out a pixel or more off."
+  (let ((window-resize-pixelwise t))
+    (window-resize-no-error window (- height (window-pixel-height window)) nil window t)))
 
 (defun harness-ui--delete-menu-below (menu)
   "Delete MENU, a window of `harness-ui--display-menu-below', putting sizes back.
@@ -3695,7 +3746,7 @@ and the windows above get back the lines the menu took."
         (delete-window menu)
       (when (window-live-p window)
         (unless (window-live-p menu)
-          (window-resize-no-error window (- height (window-pixel-height window)) nil window t))
+          (harness-ui--resize-back window height))
         (set-window-parameter window 'window-preserved-size preserved)))))
 
 (defun harness-ui--display-menu (buffer alist)
@@ -3900,9 +3951,15 @@ leaves the buffer's commands out, never the whole menu."
 ;;;; Module
 
 (defun harness-ui--on-reloaded ()
+  "Have every UI buffer redraw, as after a reload."
   (run-hooks 'harness-ui-redraw-hook))
 
 (defun harness-ui--init ()
+  "Start the UI: connect it to the harness and turn on `harness-global-mode'.
+Also stop the harness process when Emacs exits, and make changes of
+`harness-corporate-mode' reach the harness.  A click on a notification
+this Emacs no longer knows lists the sessions waiting for you, unless
+another function already handles such clicks."
   (add-hook 'kill-emacs-hook #'harness-ui--stop-server)
   (add-hook 'harness-corporate-mode-change-hook #'harness-ui--corporate-mode-changed)
   ;; A click on a macOS notification this Emacs no longer knows (one it

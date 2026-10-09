@@ -91,6 +91,8 @@
           (harness-http--body handle buf))))))
 
 (defun harness-http--body (handle data)
+  "Hand body DATA of HANDLE to its chunk function, or add it to its body.
+An error in the chunk function is logged, not signalled."
   (if (harness-http-handle-on-chunk handle)
       (condition-case err
           (funcall (harness-http-handle-on-chunk handle) data)
@@ -118,6 +120,10 @@
           (error (harness-log 'error "http callback failed: %S" cerr)))))))
 
 (defun harness-http--sentinel (handle process event)
+  "Finish HANDLE once PROCESS, its curl, has exited; EVENT says how.
+The request fails when it was cancelled, when curl exited 0 before any
+response headers came, and when curl failed: its error then gives the
+exit status, EVENT and what curl printed on stderr."
   (unless (process-live-p process)
     (let* ((code (process-exit-status process))
            (stderr-buf (process-get process 'harness-stderr))
@@ -153,6 +159,7 @@ link off a selection) would be printed as #(\"https://...\" 0 84
 
 (defun harness-http--write-body (body binary)
   "Write BODY to a mode 600 temp file; return its path.
+BODY is written as raw bytes when BINARY is non-nil, else as UTF-8.
 A request body never goes through `process-send-string': a body big
 enough to fill the pipe can be left half-written in Emacs's process
 write queue, which only another send would drain, and curl then waits
@@ -188,7 +195,7 @@ BODY is sent encoded as UTF-8, and the response body reaches ON-CHUNK
 and CALLBACK as unibyte strings, undecoded.  Return a handle usable
 with `harness-http-cancel'."
   (unless harness-http--curl-program
-    (error "harness-http: curl is not available"))
+    (error "The curl program harness-http needs is not available"))
   (when json
     (setq body (harness-json-encode json))
     (unless (assoc "Content-Type" headers)
@@ -241,7 +248,7 @@ with `harness-http-cancel'."
 
 (defun harness-http-request-json (url &rest args)
   "Like `harness-http-request' but resolve a promise with the parsed JSON body.
-ARGS are passed through; a callback must not be supplied.  Rejects
+URL and ARGS are passed through; a callback must not be supplied.  Rejects
 with (STATUS BODY-OR-ERROR) on HTTP or transport errors."
   (harness-with-promise (resolve reject)
     (apply #'harness-http-request url
@@ -290,7 +297,7 @@ event.  Multi-line data fields are joined with newlines per the spec."
 (defun harness-http-clean-url (url)
   "Return URL without the junk a drop or a clipboard can carry.
 Control characters, NULs, byte order marks and the invisible spaces
-(no-break space, soft hyphen, zero width and bidi marks, ideographic
+\(no-break space, soft hyphen, zero width and bidi marks, ideographic
 space) make curl read an address differently from how it prints -- a
 link that looks whole can come back as \"URL rejected: No host
 present\" -- and browsers strip tabs and newlines from URLs
@@ -495,10 +502,10 @@ caps the body in bytes, TIMEOUT the whole transfer in seconds (default
 one hour; a transfer stalled for a minute fails anyway).  HEADERS is an
 alist of extra request headers."
   (unless harness-http--curl-program
-    (error "harness-http: curl is not available"))
+    (error "The curl program harness-http needs is not available"))
   (setq url (harness-http-clean-url url))
   (unless (harness-http-link-p url)
-    (error "harness-http: not a link with a host to fetch: %S" url))
+    (error "Not a link with a host for harness-http to fetch: %S" url))
   (harness-ensure-directory (file-name-directory (expand-file-name file)))
   (let* ((config (make-temp-file "harness-download-" nil ".curlrc"))
          (dl (harness-http--make-download :url url :file (expand-file-name file) :config-file config

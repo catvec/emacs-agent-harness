@@ -245,8 +245,9 @@ Return the promise of a recap request just started, or nil."
 
 (defun harness-recap--on-turn-ended (session-id reason)
   "Recap SESSION-ID's task when its turn ended.
-A turn that stopped for the user, or on an error, is recapped at once:
-its card needs the recap then, whatever the thresholds say."
+A turn that stopped for the user, or on an error (REASON `blocked',
+`cancelled' or `error'), is recapped at once: its card needs the recap
+then, whatever the thresholds say."
   (harness-recap--maybe session-id (memq reason '(blocked error cancelled))))
 
 (defun harness-recap--on-tool-result (session-id &rest _)

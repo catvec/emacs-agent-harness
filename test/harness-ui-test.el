@@ -6,11 +6,15 @@
 
 (defmacro harness-ui-test-with-layout (&rest body)
   "Run BODY with \"other\" in the main window and a session in a right side window.
-The side window is selected and not dedicated, as Doom leaves it."
+The side window is selected and not dedicated, as Doom leaves it.  The
+echo area keeps its height while BODY runs: on a graphic frame, a long
+message from an earlier test can leave it two lines high, and emptied
+in BODY, it would give the windows above its second line."
   (declare (indent 0))
   `(let ((other (get-buffer-create "other"))
          (chat (get-buffer-create "*harness: test*"))
          (menu (get-buffer-create " *harness-test-menu*"))
+         (resize-mini-windows nil)
          (split-width-threshold 160)
          (split-height-threshold nil)
          (transient-display-buffer-action
@@ -71,7 +75,7 @@ menu closes; beside it, it would get its height only."
                    (window (harness-ui--display-menu menu '((inhibit-same-window . t)))))
               (should (eq 'bottom (window-parameter window 'window-side)))
               (should (eq window (window-in-direction 'below btw-window t)))
-              (should (= (frame-width) (window-total-width window)))
+              (should (= (window-total-width (frame-root-window)) (window-total-width window)))
               (should (= (nth 3 (window-pixel-edges (frame-root-window)))
                          (nth 3 (window-pixel-edges window))))
               (should (eq menu (window-buffer window)))
@@ -104,12 +108,21 @@ commands, it does too: `harness-ui-btw-has-the-full-chat-header'."
               (unwind-protect
                   (let ((window (get-buffer-window transient--buffer-name)))
                     (should (eq window (window-in-direction 'below btw-window t)))
-                    (should (= (frame-width) (window-total-width window)))
+                    (should (= (window-total-width (frame-root-window)) (window-total-width window)))
                     (should (= height (window-pixel-height btw-window)))
-                    ;; Tall enough for every line of the menu.
-                    (should (<= (with-current-buffer transient--buffer-name
-                                  (length (split-string (string-trim-right (buffer-string)) "\n")))
-                                (window-body-height window))))
+                    ;; Tall enough for all of the menu.  In pixels: on a
+                    ;; graphic frame transient draws the line under the
+                    ;; menu a pixel high, so the last line of the window
+                    ;; is a pixel high too.  On a text terminal a pixel is
+                    ;; a line, and the lines are the menu's own, as
+                    ;; `harness-ui--menu-height' counts them there: a batch
+                    ;; frame is 80 columns wide, and the menu's longest
+                    ;; lines wrap in it.
+                    (should (<= (if (display-graphic-p)
+                                    (cdr (window-text-pixel-size window))
+                                  (with-current-buffer transient--buffer-name
+                                    (count-lines (point-min) (point-max))))
+                                (window-body-height window t))))
                 (execute-kbd-macro (kbd "C-g")))
               (should-not (get-buffer-window transient--buffer-name))
               (should (equal before (harness-ui-test--layout)))
@@ -132,7 +145,7 @@ same, and leaves every window as it was."
                  (window (harness-ui--display-menu menu '((inhibit-same-window . t)))))
             (should (eq window (window-in-direction 'below popup t)))
             (should (eq 'bottom (window-parameter window 'window-side)))
-            (should (= (frame-width) (window-total-width window)))
+            (should (= (window-total-width (frame-root-window)) (window-total-width window)))
             (delete-window window)
             (should (equal before (harness-ui-test--layout))))
         (kill-buffer help)))))
@@ -150,7 +163,7 @@ top, whole, and leaves them as they were."
       (unwind-protect
           (let ((window (harness-ui--display-menu menu '((inhibit-same-window . t)))))
             (should (eq 'top (window-parameter window 'window-side)))
-            (should (= (frame-width) (window-total-width window)))
+            (should (= (window-total-width (frame-root-window)) (window-total-width window)))
             (should (eq menu (window-buffer window)))
             (should (equal (list bottom btw) (mapcar #'window-buffer windows)))
             (should (equal edges (mapcar #'window-edges windows)))
@@ -1844,29 +1857,31 @@ without a position, as it does on a click."
 Segments are given in display order; the lowest priority goes first,
 the rightmost among equals, and a segment with a shortened form shrinks
 to it once nothing is left to drop.  A segment whose priority is t
-always stays."
-  (let ((segments '(" One" (" Two" 5) (" Three" 5 " 3") (" Four" 100))))
-    (should (equal " One Two Three Four" (harness-ui-fit-header segments 200)))
-    ;; Room for the rightmost of two equal priorities only after it
-    ;; shortens: a shortened segment is worth keeping over dropping it.
-    (should (equal " One Two 3 Four" (harness-ui-fit-header segments 16)))
-    ;; Not even its shortened form fits: then it goes.
-    (should (equal " One Four" (harness-ui-fit-header segments 10)))
-    (should (equal " One" (harness-ui-fit-header segments 4)))
-    ;; What cannot be dropped stays, however little room there is.
-    (should (equal " One" (harness-ui-fit-header segments 0)))
-    ;; A flexible segment shrinks only when dropping cannot help: the
-    ;; name has priority t here, so it is never dropped, only shortened.
-    (should (equal " One Four Wide Name" (harness-ui-fit-header
-                                          '(" One" (" Four" 100) (" Wide Name" t " W…")) 40)))
-    ;; Room for the name whole once the droppable segment is gone.
-    (should (equal " One Wide Name" (harness-ui-fit-header
-                                     '(" One" (" Four" 100) (" Wide Name" t " W…")) 16)))
-    ;; Too narrow even then: the name shortens, which is all that is left.
-    (should (equal " One W…" (harness-ui-fit-header
-                              '(" One" (" Four" 100) (" Wide Name" t " W…")) 10)))
-    ;; nil segments are left out, not turned into "nil".
-    (should (equal " One" (harness-ui-fit-header (list " One" nil "" nil) 80)))))
+always stays.  The widths are columns, as on a text terminal, even
+in a graphic Emacs: measuring in pixels has a test of its own."
+  (cl-letf (((symbol-function 'display-graphic-p) #'ignore))
+    (let ((segments '(" One" (" Two" 5) (" Three" 5 " 3") (" Four" 100))))
+      (should (equal " One Two Three Four" (harness-ui-fit-header segments 200)))
+      ;; Room for the rightmost of two equal priorities only after it
+      ;; shortens: a shortened segment is worth keeping over dropping it.
+      (should (equal " One Two 3 Four" (harness-ui-fit-header segments 16)))
+      ;; Not even its shortened form fits: then it goes.
+      (should (equal " One Four" (harness-ui-fit-header segments 10)))
+      (should (equal " One" (harness-ui-fit-header segments 4)))
+      ;; What cannot be dropped stays, however little room there is.
+      (should (equal " One" (harness-ui-fit-header segments 0)))
+      ;; A flexible segment shrinks only when dropping cannot help: the
+      ;; name has priority t here, so it is never dropped, only shortened.
+      (should (equal " One Four Wide Name" (harness-ui-fit-header
+                                            '(" One" (" Four" 100) (" Wide Name" t " W…")) 40)))
+      ;; Room for the name whole once the droppable segment is gone.
+      (should (equal " One Wide Name" (harness-ui-fit-header
+                                       '(" One" (" Four" 100) (" Wide Name" t " W…")) 16)))
+      ;; Too narrow even then: the name shortens, which is all that is left.
+      (should (equal " One W…" (harness-ui-fit-header
+                                '(" One" (" Four" 100) (" Wide Name" t " W…")) 10)))
+      ;; nil segments are left out, not turned into "nil".
+      (should (equal " One" (harness-ui-fit-header (list " One" nil "" nil) 80))))))
 
 (ert-deftest harness-ui-fit-header-measures-in-the-header-face ()
   "On a graphic frame a header is measured in pixels, icons included."

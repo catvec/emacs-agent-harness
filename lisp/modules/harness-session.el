@@ -362,8 +362,13 @@ The policy file is read again on reload, and may fix what it did not."
 
 ;;;; Persistence
 
-(defun harness-session--meta-name (id) (format "sessions/%s.json" id))
-(defun harness-session--nodes-name (id) (format "sessions/%s.nodes.jsonl" id))
+(defun harness-session--meta-name (id)
+  "Return the store name of the record of session ID."
+  (format "sessions/%s.json" id))
+
+(defun harness-session--nodes-name (id)
+  "Return the store name of the node log of session ID."
+  (format "sessions/%s.nodes.jsonl" id))
 
 (defun harness-session--save (id)
   "Write the record of session ID now."
@@ -393,6 +398,8 @@ The policy file is read again on reload, and may fix what it did not."
   (maphash (lambda (id _) (ignore-errors (harness-session--save id))) harness-sessions))
 
 (defun harness-session--intern-node (node)
+  "Return a copy of NODE, as its node log gave it, in the form used in memory.
+A string `:kind' becomes a symbol, and `:is-error' becomes t or nil."
   (let ((n (copy-sequence node)))
     (when (stringp (plist-get n :kind)) (setq n (plist-put n :kind (intern (plist-get n :kind)))))
     (when (plist-member n :is-error) (setq n (plist-put n :is-error (harness-json-true-p (plist-get n :is-error)))))
@@ -414,6 +421,9 @@ The policy file is read again on reload, and may fix what it did not."
     (setf (harness-session-loaded s) t)))
 
 (defun harness-session--persist-node (s node &optional update)
+  "Append NODE to the node log of S.
+With UPDATE non-nil, the line is marked as an update of the node with
+that id, which `harness-session--load-nodes' merges into it."
   (harness-call 'store/append (harness-session--nodes-name (harness-session-id s))
                 (if update (plist-put (copy-sequence node) :_op "update") node)))
 
@@ -540,6 +550,9 @@ taken anywhere but at the head of its parent starts off it."
           (list :mode 'fresh))))))
 
 (defun harness-session--config (key cwd)
+  "Return the value of setting KEY in effect at CWD, or nil.
+That is what `config/get' says, nil when it fails; without the config
+module, the global value of KEY, nil when it has none."
   (if (harness-method-exists-p 'config/get)
       (ignore-errors (harness-call 'config/get key cwd))
     (and (boundp key) (symbol-value key))))
@@ -703,9 +716,10 @@ BTW the level it would have otherwise."
 
 (defvar harness-session--tmp-root nil
   "Directory holding every session's temporary directory, or nil for the default.
-The default is harness-UID in `temporary-file-directory', UID being the
-user's, so that the users of a machine never share it.  Internal, not
-an option (see docs/configuration-audit.md): TMPDIR, through
+The default is harness-UID in the directory the variable
+`temporary-file-directory' names, UID being the user's, so that the
+users of a machine never share it.  Internal, not an option (see
+docs/configuration-audit.md): TMPDIR, through the variable
 `temporary-file-directory', already says where temporary files go.
 The tests point it into their throwaway state directory.")
 
@@ -800,7 +814,7 @@ configured at `:cwd'.  A setting the policy fixes (see
 PLIST asks for.  `:ext' gives it settings of the modules that keep
 some for a session (see `session/set-ext'), a plist."
   (let* ((plist (harness-session--without-pinned plist (or (plist-get plist :kind) 'main)))
-         (cwd (or (plist-get plist :cwd) (error "session/create needs :cwd")))
+         (cwd (or (plist-get plist :cwd) (error "The session/create method needs :cwd")))
          (host (or (plist-get plist :host) (file-remote-p cwd)))
          (cwd (file-name-as-directory (expand-file-name cwd)))
          (kind (or (plist-get plist :kind) 'main))
@@ -939,6 +953,8 @@ next start settles its turn."
     status))
 
 (defun harness-session--describe-change (key value)
+  "Return the hint text that says setting KEY changed to VALUE, or nil.
+Nil for a setting that changes without a hint, such as `:allowed-dirs'."
   (pcase key
     (:name (format "renamed to %s" value))
     (:model (format "model → %s" value))
@@ -1704,7 +1720,7 @@ FROM, when non-nil, is who sent it, when that was not the user (see
     items))
 
 (defun harness-session--reconcile-status (s)
-  "Enter or leave `blocked' as pending requests come and go."
+  "Make S enter or leave `blocked' as its pending requests come and go."
   (let ((id (harness-session-id s)))
     (cond ((and (harness-session-pending s) (not (eq (harness-session-status s) 'blocked)))
            (setf (harness-session-runtime s)
@@ -1833,6 +1849,9 @@ subscription paid.  Return the totals."
 ;;;; Methods: derived views
 
 (defun harness-session--text-blocks (node)
+  "Return the content blocks of NODE for a provider message.
+They are its `:blocks' when it has them, else one text block of its
+`:content'."
   (or (plist-get node :blocks)
       (list (list :type "text" :text (or (plist-get node :content) "")))))
 
@@ -2162,7 +2181,9 @@ After that, a budget a session has was given to it, and stays."
         (harness-log 'info "session: dropped the copy of the Budget setting from %d session%s"
                      n (if (= n 1) "" "s"))))))
 
-(defun harness-session--on-kill-emacs () (harness-session-flush))
+(defun harness-session--on-kill-emacs ()
+  "Write every session record, as Emacs exits."
+  (harness-session-flush))
 
 (defun harness-session--on-models-updated (&rest _)
   "Announce the sessions whose context window changed with the model catalogue."
@@ -2174,6 +2195,11 @@ After that, a budget a session has was given to it, and stays."
     (mapc #'harness-session--announce moved)))
 
 (defun harness-session--init ()
+  "Start the session module.
+Load the saved sessions, drop the copies of the Budget setting they
+hold, follow the updates of the model catalogue, hold every session to
+the policy after a reload, make the move a session waits to make once
+its turn ends, and write every record when Emacs exits."
   (harness-session--load-all)
   (harness-session--drop-budget-copies)
   (harness-on 'provider/models-updated #'harness-session--on-models-updated)

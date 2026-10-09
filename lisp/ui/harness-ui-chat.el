@@ -1025,7 +1025,7 @@ transcript it points the new model at."
   "Block kinds the agent produces; a run of them is one agent turn.")
 
 (defun harness-chat--head-p (kind previous)
-  "Non-nil when a KIND block after a PREVIOUS-kind block starts an agent turn.
+  "Non-nil when a KIND block after one of kind PREVIOUS starts an agent turn.
 Pass the kinds `harness-chat--turn-kind' gives."
   (and (member kind harness-chat--agent-kinds)
        (not (member previous harness-chat--agent-kinds))))
@@ -2047,17 +2047,19 @@ edits the same request the same way."
   (harness-ui-pending-edit-pattern pid))
 
 (defun harness-chat-next-diagram (&optional n)
-  "Show the diagram of the next option of the question waiting with diagrams."
+  "Show the diagram of the next option of the question waiting with diagrams.
+With prefix argument N, move N options on; a negative N moves back."
   (interactive "p")
   (harness-ui-pending-next-diagram n))
 
 (defun harness-chat-previous-diagram (&optional n)
-  "Show the diagram of the previous option of the question waiting with diagrams."
+  "Show the diagram of the previous option of the question waiting with diagrams.
+With prefix argument N, move N options back."
   (interactive "p")
   (harness-ui-pending-previous-diagram n))
 
 (defun harness-chat--on-pending-changed (sid)
-  "Mirror SESSION-ID's requests and redraw the tail showing them.
+  "Mirror the requests of session SID and redraw the tail showing them.
 On `harness-ui-pending-changed-hook'."
   (when-let* ((buf (harness-chat--buffer-for sid)))
     (with-current-buffer buf
@@ -2288,10 +2290,12 @@ redefines it.  The task module shows its review banner this way.")
 (defun harness-chat--insert-panels ()
   "Insert what `harness-chat-panel-functions' return, in order.
 Each string gets the panel background, which its own properties may
-override, as the pending panel's do."
+override, as the pending panel's do.  A function cannot move point,
+where its panel goes: it may measure text in a window, which takes the
+window's point."
   (run-hook-wrapped 'harness-chat-panel-functions
                     (lambda (fn)
-                      (when-let* ((text (funcall fn)))
+                      (when-let* ((text (save-excursion (funcall fn))))
                         (unless (string-empty-p text)
                           (insert (harness-chat--face text 'harness-chat-panel-face))))
                       nil)))
@@ -2710,10 +2714,11 @@ A function of TEXT and ATTACHMENTS, called in the chat buffer with what
 the box held, after it is emptied.  It sends them wherever they belong
 instead of prompting the session, for a module showing something of its
 own in the buffer (see `harness-chat-panel-functions').  An answer to a
-waiting question still goes to the question, and C-c C-q queues and
-C-c C-k cancels as usual.  A task in review is no such thing: the
-harness takes any message the user sends its session for the feedback
-that sends it back (`harness-tasks--on-message').")
+waiting question still goes to the question, and\\<harness-chat-mode-map>
+\\[harness-chat-queue] queues and \\[harness-chat-cancel] cancels as usual.
+A task in review is no such thing: the harness takes any message the
+user sends its session for the feedback that sends it back
+\(`harness-tasks--on-message').")
 
 (defvar harness-chat-send-functions nil
   "Functions run with the TEXT and ATTACHMENTS of each message sent.
@@ -3107,14 +3112,37 @@ conversation and gives it its [close] and [keep] buttons this way.")
                         nil))
     (apply #'concat (nreverse segments))))
 
+(defvar harness-chat-header-end-functions nil
+  "Functions adding segments of their own to the chat header line.
+Each is called without arguments in the chat buffer whenever the header
+line is drawn, and returns a segment as `harness-ui-fit-header' takes
+it -- a string, or (TEXT PRIORITY MIN) -- or nil for nothing.  TEXT
+carries its separator in front.  The segments show after the session's
+own, before [menu], in order; one with a low PRIORITY makes room before
+the session's own do in a narrow window.  Add to it buffer-locally or
+globally, with a symbol, so a reload redefines it.  The companion pet
+shows its face this way.")
+
+(defun harness-chat--header-end ()
+  "Return the segments `harness-chat-header-end-functions' add, in order."
+  (let ((segments nil))
+    (run-hook-wrapped 'harness-chat-header-end-functions
+                      (lambda (fn)
+                        (when-let* ((segment (ignore-errors (funcall fn))))
+                          (push segment segments))
+                        nil))
+    (nreverse segments)))
+
 (defun harness-chat--header (&optional width)
   "Return the header line, fitted to WIDTH, its window's by default.
 In a window too narrow for all of it, the output rate goes first, then
 the output tokens, the spend, the thinking level, the context, the
 non-interactive mode, the model and the todos; the name shortens after
 those.  What `harness-chat-header-functions' put in front, the status,
-the permission mode, [menu] and the notice of new messages stay.  WIDTH
-is as `harness-ui-fit-header' takes it."
+the permission mode, [menu] and the notice of new messages stay.  What
+`harness-chat-header-end-functions' add shows before [menu], making
+room as its priorities say.  WIDTH is as `harness-ui-fit-header' takes
+it."
   (let* ((s (harness-chat--session))
          (status (or (plist-get s :status) "idle"))
          (running (equal status "running"))
@@ -3123,44 +3151,48 @@ is as `harness-ui-fit-header' takes it."
          (output (harness-ui-format-output s))
          (name (or (plist-get s :name) "unnamed")))
     (harness-ui-fit-header
-     (list
-      (harness-chat--header-prefix)
-      (concat " "
-              (if running
-                  (propertize (harness-chat--spinner-frame)
-                              'face 'harness-status-running-face
-                              'help-echo (harness-chat--activity-text harness-chat--activity))
-                (propertize (harness-ui-status-icon status) 'help-echo status)))
-      (list (concat " " (harness-chat--segment name #'harness-rename-session
-                                               "Session name (mouse-1: rename)" 'bold))
-            70 (concat " " (harness-chat--segment (harness-truncate-end name 8) #'harness-rename-session
-                                                 "Session name (mouse-1: rename)" 'bold)))
-      ;; The segment ends in two spaces of its own; the list takes them
-      ;; as the separator, as the plain header line did.
-      (and todos (list (concat "  " (string-trim-right todos " +")) 55))
-      (list (concat "  " (harness-chat--segment (harness-ui-model-label (plist-get s :model)) #'harness-set-model
-                                                "Model (mouse-1: change)" 'harness-dim-face))
-            50)
-      (list (concat "  " (harness-chat--segment (harness-ui-permission-mode-label (plist-get s :permission-mode))
-                                                #'harness-set-permission-mode
-                                                "Permission mode (mouse-1: change)"))
-            90)
-      (list (concat "  " (harness-chat--non-interactive-segment s)) 40)
-      (list (concat "  " (harness-chat--segment (harness-ui-thinking-label (plist-get s :thinking))
-                                                #'harness-set-thinking "Thinking level (mouse-1: change)"
-                                                'harness-dim-face))
-            20)
-      (list (concat "  " (harness-ui-format-context s)) 30)
-      (and output (list (concat "  " output) 7))
-      (and rate (list (concat "  " rate) 5))
-      (list (concat "  " (harness-chat--spend-segment s)) 10)
-      (list (concat "  " (harness-chat--segment "[menu]" #'harness-menu #'harness-chat--menu-help 'harness-dim-face))
-            95)
-      (and harness-chat--unseen
-           (list (concat "  " (harness-chat--segment "↓ new messages" #'harness-chat-scroll-to-bottom
-                                                     "New content below (mouse-1: jump to it)"
-                                                     'harness-status-blocked-face))
-                 88)))
+     (append
+      (list
+       (harness-chat--header-prefix)
+       (concat " "
+               (if running
+                   (propertize (harness-chat--spinner-frame)
+                               'face 'harness-status-running-face
+                               'help-echo (harness-chat--activity-text harness-chat--activity))
+                 (propertize (harness-ui-status-icon status) 'help-echo status)))
+       (list (concat " " (harness-chat--segment name #'harness-rename-session
+                                                "Session name (mouse-1: rename)" 'bold))
+             70 (concat " " (harness-chat--segment (harness-truncate-end name 8) #'harness-rename-session
+                                                  "Session name (mouse-1: rename)" 'bold)))
+       ;; The segment ends in two spaces of its own; the list takes them
+       ;; as the separator, as the plain header line did.
+       (and todos (list (concat "  " (string-trim-right todos " +")) 55))
+       (list (concat "  " (harness-chat--segment (harness-ui-model-label (plist-get s :model)) #'harness-set-model
+                                                 "Model (mouse-1: change)" 'harness-dim-face))
+             50)
+       (list (concat "  " (harness-chat--segment (harness-ui-permission-mode-label (plist-get s :permission-mode))
+                                                 #'harness-set-permission-mode
+                                                 "Permission mode (mouse-1: change)"))
+             90)
+       (list (concat "  " (harness-chat--non-interactive-segment s)) 40)
+       (list (concat "  " (harness-chat--segment (harness-ui-thinking-label (plist-get s :thinking))
+                                                 #'harness-set-thinking "Thinking level (mouse-1: change)"
+                                                 'harness-dim-face))
+             20)
+       (list (concat "  " (harness-ui-format-context s)) 30)
+       (and output (list (concat "  " output) 7))
+       (and rate (list (concat "  " rate) 5))
+       (list (concat "  " (harness-chat--spend-segment s)) 10))
+      ;; Other modules' segments, the companion pet's face say.
+      (harness-chat--header-end)
+      (list
+       (list (concat "  " (harness-chat--segment "[menu]" #'harness-menu #'harness-chat--menu-help 'harness-dim-face))
+             95)
+       (and harness-chat--unseen
+            (list (concat "  " (harness-chat--segment "↓ new messages" #'harness-chat-scroll-to-bottom
+                                                      "New content below (mouse-1: jump to it)"
+                                                      'harness-status-blocked-face))
+                  88))))
      width)))
 
 (defun harness-chat--mode-line ()

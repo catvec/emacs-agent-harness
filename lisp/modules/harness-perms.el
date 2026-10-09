@@ -1540,7 +1540,7 @@ CTX names the session."
          (entry (and dir (cl-find-if (lambda (e) (harness-perms--within-p (plist-get e :dir) dir)) entries)))
          (shown (and dir (abbreviate-file-name dir))))
     (cond
-     ((null dir) (harness-tool-error "Give path, the directory you need."))
+     ((null dir) (harness-tool-error "Give path, the directory you need"))
      ;; The user edited the prompt's pattern: say what they granted.
      ((and grant (not (equal (plist-get grant :dir) dir)))
       (let ((glob (harness-perms--glob-p (plist-get grant :dir))))

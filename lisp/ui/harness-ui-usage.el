@@ -1548,7 +1548,9 @@ Defaults come from the budget on the current line when there is one."
                       (lambda () (when (buffer-live-p buf) (harness-ui-usage--load buf))))))
 
 (defun harness-ui-usage--on-event (event args)
-  "Refresh after EVENT changed spending, budgets or the fallback list."
+  "Refresh after EVENT changed spending, budgets or the fallback list.
+ARGS are the event's arguments: for `config/changed', the first names
+the option that changed."
   (cond
    ((member event '("usage/budget-warning" "agent/turn-ended" "usage/budgets-changed" "usage/recorded"
                     "usage/reported-changed" "fallback/changed" "fallback/switched"))
