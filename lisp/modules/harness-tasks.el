@@ -535,8 +535,15 @@ that session brings the task back to work, so the session stays."
     view))
 
 (defun harness-tasks--set (id &rest plist)
-  "Merge PLIST into task ID and store it.  Return its view."
-  (harness-tasks--put (apply #'harness-plist-merge (harness-tasks--get id) (list plist))))
+  "Merge PLIST into task ID and store it.  Return its view.
+A change that names `:state' ends what the task waits for (`:waiting',
+see `harness-tasks--on-turn-ended'), unless it sets a wait itself."
+  (let ((task (apply #'harness-plist-merge (harness-tasks--get id) (list plist))))
+    (harness-tasks--put (if (and (plist-member plist :state)
+                                 (not (plist-member plist :waiting))
+                                 (plist-member task :waiting))
+                            (harness-plist-remove task :waiting)
+                          task))))
 
 (defun harness-tasks--intern (task)
   "Turn the string enum values of a stored TASK back into symbols.
@@ -1321,7 +1328,9 @@ and the session list shows them under it."
   "Non-nil when TASK takes one of its project's slots.
 It does while it starts, and while it is active with its own session
 running or blocked mid-turn: one waiting on the user keeps its slot, as
-its turn goes on once answered.  Only that session counts, and only
+its turn goes on once answered.  So does one that waits on work its
+session left running (`:waiting', see `agent/outstanding'), such as the
+workers of a supervisor's plan.  Only that session counts, and only
 when it is top-level (`harness-tasks--top-level-p'): the sub-agents,
 forks and conflict resolvers working for a task take no slot of their
 own, and neither does a sub-agent made a task (`task/adopt'), which
@@ -1332,7 +1341,8 @@ the conflicts, and nor does writing a backlog task up (refining)."
       (and (eq (plist-get task :state) 'active)
            (let ((session (harness-tasks--session task)))
              (and (harness-tasks--top-level-p session)
-                  (memq (plist-get session :status) '(running blocked)))))))
+                  (or (plist-get task :waiting)
+                      (memq (plist-get session :status) '(running blocked))))))))
 
 (defun harness-tasks--slot-project (task)
   "Return the project whose slots TASK takes: its `:project', else its `:cwd'.
@@ -2058,6 +2068,19 @@ task's worktree is locked again for the new work."
                 (unless (eq (plist-get task :state) 'merging) (list :verified nil :verified-at nil))
                 (when (memq (plist-get task :state) '(review done)) (list :reopened (float-time)))))))))
 
+(defun harness-tasks--outstanding (task)
+  "Return what runs for TASK's session outside its own turn, or nil.
+That is the text of `agent/outstanding': work a module started for the
+session that goes on without its turn, a supervisor plan's workers say.
+Nil when no module reports any, and without the agent module."
+  (let ((sid (plist-get task :session)))
+    (when (and sid (harness-method-exists-p 'agent/outstanding))
+      (condition-case err
+          (harness-call 'agent/outstanding sid)
+        (error (harness-log 'warn "task %s: asking what its session has outstanding failed: %s"
+                            (plist-get task :id) (harness-error-message err))
+               nil)))))
+
 (defun harness-tasks--on-turn-ended (session-id reason)
   "Advance SESSION-ID's task when its turn ended with REASON.
 `end-turn' puts the work in review (`harness-tasks-require-verification')
@@ -2065,10 +2088,17 @@ until the user verified it; after that, or without review, it completes
 the task outside git -- in the main tree too, which has nothing to
 merge -- and queues its merge inside.  A round that ends without a
 report handed in gets one saying so (`harness-tasks--missing-report').
-A refinement turn puts its write-up in the backlog."
+A refinement turn puts its write-up in the backlog.  A clean end of a
+turn is not the end of the work while something the session started
+still runs outside it (`harness-tasks--outstanding'): the task then
+neither goes to review nor merges, but stays active, with the text of
+what runs as its `:waiting' until its state next changes.  The turn the
+session takes when that work is done, or once nothing runs any more,
+ends the task as usual."
   (remhash session-id harness-tasks--refine-calls)
   (when-let* ((task (harness-tasks--by-session session-id)))
-    (let ((id (plist-get task :id)))
+    (let ((id (plist-get task :id))
+          (waiting nil))
       (remhash id harness-tasks--starting)
       (cond
        ((harness-tasks--refinement-p task) (harness-tasks--finish-refinement id reason))
@@ -2078,6 +2108,8 @@ A refinement turn puts its write-up in the backlog."
        ((plist-get task :merge-status) nil) ; a conflict turn; merge/finished decides
        ;; Merged mid-turn: done, or in review when that merge needs one.
        ((and (memq (plist-get task :state) '(done review)) (harness-tasks--merged-p task)) nil)
+       ((setq waiting (harness-tasks--outstanding task))
+        (harness-tasks--set id :state 'active :waiting waiting))
        ((harness-tasks--needs-review-p task)
         (apply #'harness-tasks--to-review id :outcome reason :error nil :finished (float-time)
                (harness-tasks--missing-report task)))

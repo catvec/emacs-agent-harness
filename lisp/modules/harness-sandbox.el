@@ -45,6 +45,15 @@
 ;; the harness has no way to verify them there.  `sandbox/wrap'
 ;; returns such commands unchanged and logs at debug level.
 ;;
+;; A caller that needs a command to change nothing -- a supervisor's
+;; shell, which only looks -- passes `:read-only': the working
+;; directory, the git directories and every `:writable' entry are then
+;; mounted read-only, and the command writes nothing but the sandbox's
+;; private /tmp.  It fails closed: where the command would run
+;; unconfined, with the `off' policy, in a remote directory or with no
+;; backend (whatever the policy), `sandbox/wrap' signals
+;; `harness-sandbox-unavailable' instead of returning it.
+;;
 ;; Seeing only its own directory makes some git commands destructive
 ;; inside the sandbox: `git worktree prune' takes every other worktree
 ;; of the repository for deleted and drops its registration.
@@ -321,29 +330,40 @@ Return (:common DIR :protected (PATH…)) or nil."
     (append (and (car id) (list (cons "GIT_AUTHOR_NAME" (car id)) (cons "GIT_COMMITTER_NAME" (car id))))
             (and (cdr id) (list (cons "GIT_AUTHOR_EMAIL" (cdr id)) (cons "GIT_COMMITTER_EMAIL" (cdr id)))))))
 
-(defun harness-sandbox--bwrap-git-args (cwd)
-  "Return the bwrap arguments that let git work in a worktree at CWD."
+(defun harness-sandbox--bwrap-git-args (cwd &optional read-only)
+  "Return the bwrap arguments that let git work in a worktree at CWD.
+With READ-ONLY the git directory is shown read-only whole, hooks,
+config, index and HEAD no more or less than the rest: git then reads
+the repository and changes none of it."
   (when-let* ((git (harness-sandbox--worktree-git cwd)))
     (let ((common (directory-file-name (plist-get git :common))))
-      (append (list "--bind" common common)
-              (cl-loop for p in (plist-get git :protected) append (list "--ro-bind" p p))
+      (append (list (if read-only "--ro-bind" "--bind") common common)
+              (unless read-only
+                (cl-loop for p in (plist-get git :protected) append (list "--ro-bind" p p)))
               (cl-loop for (var . value) in (harness-sandbox--git-env (plist-get git :common))
                        append (list "--setenv" var value))))))
 
-(defun harness-sandbox--systemd-git-args (cwd)
-  "Return the systemd-run arguments that let git work in a worktree at CWD."
+(defun harness-sandbox--systemd-git-args (cwd &optional read-only)
+  "Return the systemd-run arguments that let git work in a worktree at CWD.
+With READ-ONLY the git directory is bound read-only whole and not made
+writable, as for `harness-sandbox--bwrap-git-args'."
   (when-let* ((git (harness-sandbox--worktree-git cwd)))
     (let ((common (directory-file-name (plist-get git :common))))
-      (append (list "-p" (concat "BindPaths=" common) "-p" (concat "ReadWritePaths=" common))
-              (cl-loop for p in (plist-get git :protected) append (list "-p" (concat "BindReadOnlyPaths=" p)))
+      (append (if read-only
+                  (list "-p" (concat "BindReadOnlyPaths=" common))
+                (append (list "-p" (concat "BindPaths=" common) "-p" (concat "ReadWritePaths=" common))
+                        (cl-loop for p in (plist-get git :protected)
+                                 append (list "-p" (concat "BindReadOnlyPaths=" p)))))
               (cl-loop for (var . value) in (harness-sandbox--git-env (plist-get git :common))
                        collect (format "--setenv=%s=%s" var value))))))
 
-(cl-defun harness-sandbox--bwrap-command (program cwd command &key (network t) writable readable)
+(cl-defun harness-sandbox--bwrap-command (program cwd command &key (network t) writable readable read-only)
   "Build the bwrap command line running COMMAND in CWD.
 PROGRAM is the bwrap executable.  NETWORK nil unshares the network
 namespace; WRITABLE and READABLE list extra directories to expose (see
-`harness-sandbox--mounts' for how they are shown).
+`harness-sandbox--mounts' for how they are shown).  READ-ONLY binds
+CWD, the git directories and every WRITABLE entry with `--ro-bind', so
+that the command writes nothing but the sandbox's private /tmp.
 
 $HOME keeps its path: an empty tmpfs covers the home directory, so
 ~/x names the same path inside as outside and shows only what is
@@ -373,9 +393,9 @@ under it too."
      ;; last: a later mount covers what an earlier one shows below it, so
      ;; the working directory stays writable inside a read-only directory.
      (cl-loop for (mode source dest) in (harness-sandbox--mounts readable writable cwd private)
-              append (list (if (eq mode 'rw) "--bind" "--ro-bind") source dest))
-     (list "--bind" cwd cwd)
-     (harness-sandbox--bwrap-git-args cwd)
+              append (list (if (and (eq mode 'rw) (not read-only)) "--bind" "--ro-bind") source dest))
+     (list (if read-only "--ro-bind" "--bind") cwd cwd)
+     (harness-sandbox--bwrap-git-args cwd read-only)
      (list "--unshare-pid" "--unshare-ipc" "--unshare-uts"
            "--die-with-parent" "--new-session"
            "--chdir" cwd)
@@ -384,10 +404,16 @@ under it too."
      (list "--")
      command)))
 
-(cl-defun harness-sandbox--systemd-command (program cwd command &key (network t) writable readable)
+(cl-defun harness-sandbox--systemd-command (program cwd command &key (network t) writable readable read-only)
   "Build the systemd-run command line running COMMAND in CWD.
-PROGRAM is the systemd-run executable; NETWORK, WRITABLE and READABLE
-are as for `harness-sandbox--bwrap-command'.
+PROGRAM is the systemd-run executable; NETWORK, WRITABLE, READABLE and
+READ-ONLY are as for `harness-sandbox--bwrap-command'.  READ-ONLY binds
+CWD, the git directories and every WRITABLE entry with
+`BindReadOnlyPaths=', sets no `ReadWritePaths=', and makes the rest of
+the file system read-only with `ProtectSystem=strict': unlike bwrap's,
+this sandbox shows the whole file system, and only the user's own files
+are hidden (`ProtectHome=tmpfs'), so what it does not show it must
+still refuse to write.
 
 Home directories are hidden with `ProtectHome=tmpfs' rather than
 `ProtectHome=yes': with the latter systemd cannot mount anything
@@ -401,18 +427,21 @@ too, so ~/x reaches them."
      (list program "--user" "--quiet" "--pipe" "--wait" "--collect"
            (concat "--working-directory=" cwd)
            "-p" "PrivateTmp=yes"
-           "-p" "ProtectHome=tmpfs"
-           "-p" (concat "BindPaths=" cwd)
-           "-p" (concat "ReadWritePaths=" cwd))
+           "-p" "ProtectHome=tmpfs")
+     (if read-only
+         (list "-p" "ProtectSystem=strict"
+               "-p" (concat "BindReadOnlyPaths=" cwd))
+       (list "-p" (concat "BindPaths=" cwd)
+             "-p" (concat "ReadWritePaths=" cwd)))
      ;; systemd orders the mounts itself, a directory before what lies
      ;; in it.  A path its setting cannot hold as written is not shown.
      (cl-loop for (mode source dest) in (harness-sandbox--mounts
                                          readable writable cwd (unless (harness-sandbox--home-inside-p cwd) "/tmp"))
               if (and (harness-sandbox--systemd-path-p source) (harness-sandbox--systemd-path-p dest))
-              append (list "-p" (concat (if (eq mode 'rw) "BindPaths=" "BindReadOnlyPaths=")
+              append (list "-p" (concat (if (and (eq mode 'rw) (not read-only)) "BindPaths=" "BindReadOnlyPaths=")
                                         source (if (equal source dest) "" (concat ":" dest))))
               else do (harness-log 'debug "sandbox: systemd cannot show %s at %s" source dest))
-     (harness-sandbox--systemd-git-args cwd)
+     (harness-sandbox--systemd-git-args cwd read-only)
      (unless network (list "-p" "PrivateNetwork=yes"))
      (unless (harness-sandbox--home-inside-p cwd)
        (list "--setenv=HOME=/tmp"))
@@ -420,6 +449,15 @@ too, so ~/x reaches them."
      command)))
 
 ;;;; Methods
+
+(defun harness-sandbox--refuse-read-only (command why)
+  "Signal `harness-sandbox-unavailable': a read-only COMMAND cannot be confined.
+WHY says what stands in the way.  A command that is to write nothing
+must not run unconfined, whatever the policy says."
+  (harness-log 'error "sandbox: a read-only command needs the sandbox, but %s; refusing to run %S"
+               why (car command))
+  (signal 'harness-sandbox-unavailable
+          (list (format "a read-only command cannot run unconfined, but %s" why))))
 
 (harness-defmethod sandbox/wrap (cwd command &rest opts)
   "Return COMMAND (a list of strings) wrapped to run confined in CWD.
@@ -429,24 +467,40 @@ directories granted to a session) and `:readable' (extra read-only
 directories).  Both are shown where they are named, where their
 symbolic links lead and, under a sandbox $HOME that is not the real
 one's path, where they are under the real one; see
-`harness-sandbox--mounts'.  A remote CWD or the `off' policy return
-COMMAND unchanged.  Signals `harness-sandbox-unavailable' when the
-policy is `required' and no backend exists."
+`harness-sandbox--mounts'.  `:read-only' non-nil mounts read-only the
+working directory, the git directories and every `:writable' entry as
+well, so that the command can write nothing but the sandbox's private
+/tmp.  A remote CWD or the `off' policy return COMMAND unchanged.
+Signals `harness-sandbox-unavailable' when the policy is `required' and
+no backend exists.  A `:read-only' command fails closed instead of
+running unconfined: it signals `harness-sandbox-unavailable' too for
+the `off' policy, for a remote CWD and for no backend, whatever the
+policy."
   (let ((policy (harness-sandbox--policy cwd))
         (network (if (plist-member opts :network) (plist-get opts :network) t))
         (writable (plist-get opts :writable))
-        (readable (plist-get opts :readable)))
+        (readable (plist-get opts :readable))
+        (read-only (harness-json-true-p (plist-get opts :read-only))))
     (cond
+     ((and read-only (eq policy 'off))
+      (harness-sandbox--refuse-read-only command "the sandbox policy is `off'"))
      ((eq policy 'off) command)
      ((file-remote-p cwd)
+      (when read-only
+        (harness-sandbox--refuse-read-only
+         command (format "%s is on another host, where the sandbox does not reach" cwd)))
       (harness-log 'debug "sandbox: remote cwd %s runs unconfined" cwd)
       command)
      ((eq harness-sandbox--backend 'bwrap)
       (harness-sandbox--bwrap-command (alist-get 'bwrap harness-sandbox--programs) cwd command
-                                      :network network :writable writable :readable readable))
+                                      :network network :writable writable :readable readable
+                                      :read-only read-only))
      ((eq harness-sandbox--backend 'systemd)
       (harness-sandbox--systemd-command (alist-get 'systemd harness-sandbox--programs) cwd command
-                                        :network network :writable writable :readable readable))
+                                        :network network :writable writable :readable readable
+                                        :read-only read-only))
+     (read-only
+      (harness-sandbox--refuse-read-only command "neither bwrap nor systemd-run is available"))
      ((eq policy 'required)
       (harness-log 'error "sandbox: policy is `required' but no backend (bwrap, systemd-run) is available; refusing to run %S"
                    (car command))

@@ -390,6 +390,257 @@ rest of the home directory stays hidden."
             (sleep-for 0.1)))
         (should-not (eql 0 (signal-process child 0)))))))
 
+;;;; bash: sandbox options from a module
+
+(defmacro harness-tools-shell-test-with-options (handlers &rest body)
+  "Run BODY with HANDLERS, functions, on the `tools/sandbox-options' filter.
+HANDLERS is a list of (PRIORITY . FUNCTION).  They are taken off again."
+  (declare (indent 1))
+  `(let ((installed ,handlers))
+     (dolist (h installed) (harness-add-filter 'tools/sandbox-options (cdr h) (car h)))
+     (unwind-protect (progn ,@body)
+       (dolist (h installed) (harness-remove-filter 'tools/sandbox-options (cdr h))))))
+
+(defmacro harness-tools-shell-test-without-methods (names &rest body)
+  "Run BODY with the bus methods NAMES, symbols, removed; put them back afterwards."
+  (declare (indent 1))
+  `(let ((saved (mapcar (lambda (name) (cons name (gethash name harness--methods))) ,names)))
+     (dolist (m saved) (remhash (car m) harness--methods))
+     (unwind-protect (progn ,@body)
+       (dolist (m saved)
+         (when (cdr m) (puthash (car m) (cdr m) harness--methods))))))
+
+(defun harness-tools-shell-test--as (session-id name &rest input)
+  "Execute tool NAME with INPUT for SESSION-ID through tools/execute and wait."
+  (harness-await (harness-call 'tools/execute session-id (list :id "c1" :name name :input input)) 20))
+
+(ert-deftest harness-tools-shell-bash-asks-for-sandbox-options ()
+  "bash runs the `tools/sandbox-options' filter, from nil and with the
+session id, and gives what it returns to the sandbox; with no handler it
+asks for nothing more than the directories."
+  (harness-tools-shell-test--setup)
+  (let ((seen nil) (asked nil))
+    (harness-tools-shell-test-with-methods
+        (list (cons 'sandbox/wrap (lambda (cwd command &rest opts) (push (cons cwd opts) seen) command)))
+      (harness-tools-shell-test-in-dir
+        ;; No handler: as it was.
+        (should (equal "exit 0" (plist-get (harness-tools-shell-test--as "s1" "bash" :command "true") :content)))
+        (should (equal '(:writable nil :readable nil) (cdar seen)))
+        (harness-tools-shell-test-with-options
+            (list (cons 10 (lambda (options session-id)
+                             (push (list options session-id) asked)
+                             (plist-put (copy-sequence options) :network nil))))
+          (should (equal "exit 0" (plist-get (harness-tools-shell-test--as "s1" "bash" :command "true") :content)))
+          (should (equal '((nil "s1")) asked))
+          (should-not (plist-member (cdar seen) :read-only))
+          (should (plist-member (cdar seen) :network))
+          (should (null (plist-get (cdar seen) :network)))
+          (should (equal "exit 0" (plist-get (harness-tools-shell-test--call "bash" :command "true") :content)))
+          (should (equal '((nil nil) (nil "s1")) asked)))
+        ;; A handler that has gone: as it was.
+        (harness-tools-shell-test--as "s1" "bash" :command "true")
+        (should (equal '(:writable nil :readable nil) (cdar seen)))))))
+
+(ert-deftest harness-tools-shell-bash-merges-the-sandbox-options-of-the-handlers ()
+  "Each handler gets the options earlier ones gave, and sets its own over
+them, so a later one wins."
+  (harness-tools-shell-test--setup)
+  (let ((seen nil) (given nil))
+    (harness-tools-shell-test-with-methods
+        (list (cons 'sandbox/wrap (lambda (cwd command &rest opts) (push (cons cwd opts) seen) command)))
+      (harness-tools-shell-test-in-dir
+        (harness-tools-shell-test-with-options
+            (list (cons 20 (lambda (options _sid)
+                             (push options given)
+                             (plist-put (plist-put (copy-sequence options) :read-only t) :network :later)))
+                  (cons 10 (lambda (options _sid)
+                             (push options given)
+                             (plist-put (plist-put (copy-sequence options) :network nil) :read-only :false))))
+          (should (equal "exit 0" (plist-get (harness-tools-shell-test--as "s1" "bash" :command "true") :content)))
+          ;; The one with the lower priority first, from nothing.
+          (should (equal (list '(:network nil :read-only :false) nil) given))
+          (should (eq t (plist-get (cdar seen) :read-only)))
+          (should (eq :later (plist-get (cdar seen) :network))))))))
+
+(ert-deftest harness-tools-shell-bash-read-only-shows-every-directory-to-read ()
+  "With :read-only no directory is writable: those that would be, and a
+handler's own, are readable, once each."
+  (harness-tools-shell-test--setup)
+  (let ((seen nil))
+    (harness-tools-shell-test-with-methods
+        (list (cons 'sandbox/wrap (lambda (cwd command &rest opts) (push (cons cwd opts) seen) command))
+              (cons 'session/tmp-dir (lambda (sid) (and (equal sid "s1") "/tmp/harness-0/s1/")))
+              (cons 'skills/directories
+                    (lambda (_cwd) (list (list :dir "/skills/mine/" :source 'global :contained t))))
+              (cons 'permission/dirs
+                    (lambda (_sid)
+                      (list (list :dir "/work/proj/" :source 'cwd)
+                            (list :dir "/tmp/harness-0/s1/" :source 'tmp)
+                            (list :dir "/home/u/shared/" :source 'config)
+                            (list :dir "/state/outputs/" :source 'outputs)))))
+      (harness-tools-shell-test-in-dir
+        (let ((read-only :unset) (extra nil))
+          (harness-tools-shell-test-with-options
+              (list (cons 10 (lambda (options _sid)
+                               (append (and (not (eq read-only :unset)) (list :read-only read-only))
+                                       extra options))))
+            ;; Not read-only: the directories as they were.
+            (harness-tools-shell-test--as "s1" "bash" :command "true")
+            (should (equal '(:writable ("/tmp/harness-0/s1/" "/work/proj/" "/home/u/shared/")
+                             :readable ("/skills/mine/" "/state/outputs/"))
+                           (cdar seen)))
+            ;; An explicit off is not read-only either; the handler's
+            ;; directories join the others.
+            (setq read-only :false
+                  extra (list :writable '("/handler/rw/") :readable '("/handler/ro/" "/work/proj/")))
+            (harness-tools-shell-test--as "s1" "bash" :command "true")
+            (should (equal '(:writable ("/tmp/harness-0/s1/" "/work/proj/" "/home/u/shared/" "/handler/rw/")
+                             :readable ("/skills/mine/" "/state/outputs/" "/handler/ro/" "/work/proj/")
+                             :read-only :false)
+                           (cdar seen)))
+            ;; Read-only: all of them readable, once each, none writable.
+            (setq read-only t)
+            (harness-tools-shell-test--as "s1" "bash" :command "true")
+            (should (equal '(:writable nil
+                             :readable ("/tmp/harness-0/s1/" "/work/proj/" "/home/u/shared/" "/handler/rw/"
+                                        "/skills/mine/" "/state/outputs/" "/handler/ro/")
+                             :read-only t)
+                           (cdar seen)))
+            ;; Without a session there is no more to show than the skills.
+            (setq extra nil)
+            (harness-tools-shell-test--call "bash" :command "true")
+            (should-not (plist-get (cdar seen) :writable))
+            (should (equal '("/skills/mine/") (plist-get (cdar seen) :readable)))))))))
+
+(ert-deftest harness-tools-shell-bash-sandbox-options-fail-closed-without-the-sandbox ()
+  "A command that asks for sandbox options does not run unconfined: not
+without the sandbox method, whatever the policy says, not in a remote
+directory, and not when a handler's answer is no plist of options."
+  (harness-tools-shell-test--setup)
+  (harness-tools-shell-test-in-dir
+    (let ((marker (expand-file-name "ran" root))
+          (answer '(:read-only t)))
+      (cl-flet ((run ()
+                  (harness-tools-shell-test--as "s1" "bash" :command (format "touch %s; echo leaked" (shell-quote-argument marker)))))
+        (harness-tools-shell-test-without-methods '(sandbox/wrap)
+          (should-not (harness-method-exists-p 'sandbox/wrap))
+          ;; As it is without a handler: no sandbox, no required policy, it runs.
+          (let ((r (let ((harness-sandbox-policy 'preferred)) (run))))
+            (should-not (plist-get r :is-error))
+            (should (string-search "leaked" (plist-get r :content)))
+            (should (file-exists-p marker))
+            (delete-file marker))
+          (dolist (policy '(preferred required off))
+            (let ((harness-sandbox-policy policy))
+              (dolist (options '((:read-only t) (:network nil) (:read-only :false)))
+                (setq answer options)
+                (harness-tools-shell-test-with-options (list (cons 10 (lambda (_options _sid) answer)))
+                  (let ((r (run)))
+                    (should (plist-get r :is-error))
+                    (should (string-search "Cannot run command" (plist-get r :content)))
+                    (should (string-search "the sandbox module is not loaded" (plist-get r :content)))
+                    (should (string-search (format "%S" options) (plist-get r :content)))
+                    (should-not (string-search "leaked" (plist-get r :content)))
+                    (should-not (file-exists-p marker)))))))
+          ;; The sandbox there: it runs again.
+          (harness-tools-shell-test-with-methods
+              (list (cons 'sandbox/wrap (lambda (_cwd command &rest _opts) command)))
+            (harness-tools-shell-test-with-options (list (cons 10 (lambda (_options _sid) '(:read-only t))))
+              (should-not (plist-get (run) :is-error))
+              (should (file-exists-p marker))
+              (delete-file marker))))
+        ;; A handler that answers something that is no plist of options.
+        (harness-tools-shell-test-with-methods
+            (list (cons 'sandbox/wrap (lambda (_cwd command &rest _opts) command)))
+          (dolist (bad (list 42 "read-only" '(:read-only) '(read-only t) '(:read-only t . :network)))
+            (setq answer bad)
+            (harness-tools-shell-test-with-options (list (cons 10 (lambda (_options _sid) answer)))
+              (let ((r (run)))
+                (should (plist-get r :is-error))
+                (should (string-search "Cannot run command" (plist-get r :content)))
+                (should (string-search "not a plist of sandbox options" (plist-get r :content)))
+                (should-not (file-exists-p marker))))))))))
+
+(defun harness-tools-shell-test--enable-mock-tramp ()
+  "Define the local TRAMP method \"mock\", as Emacs's own tests do."
+  (require 'tramp)
+  (defvar tramp-methods)
+  (defvar tramp-default-remote-shell)
+  (defvar tramp-verbose)
+  (unless (assoc "mock" tramp-methods)
+    (add-to-list 'tramp-methods
+                 `("mock"
+                   (tramp-login-program        ,tramp-default-remote-shell)
+                   (tramp-login-args           (("-i")))
+                   (tramp-direct-async         ("-c"))
+                   (tramp-remote-shell         ,tramp-default-remote-shell)
+                   (tramp-remote-shell-args    ("-c"))
+                   (tramp-connection-timeout   10))))
+  (setq tramp-verbose 1))
+
+(ert-deftest harness-tools-shell-bash-sandbox-options-refuse-a-remote-directory ()
+  "The sandbox does not reach another host, so a command there that asks
+for sandbox options does not run; without them it runs on the host."
+  (harness-tools-shell-test--setup)
+  (harness-tools-shell-test--enable-mock-tramp)
+  (harness-tools-shell-test-in-dir
+    (let* ((remote (concat "/mock::" (directory-file-name root) "/"))
+           (marker (expand-file-name "ran" root))
+           (wrapped nil)
+           (command (format "touch %s; echo leaked" (shell-quote-argument marker))))
+      (should (file-remote-p remote))
+      (harness-tools-shell-test-with-methods
+          (list (cons 'sandbox/wrap (lambda (_cwd command &rest _opts) (setq wrapped t) command)))
+        (let ((r (harness-tools-shell-test--as "s1" "bash" :command command :cwd remote)))
+          (should-not (plist-get r :is-error))
+          (should (file-exists-p marker))
+          (delete-file marker))
+        (harness-tools-shell-test-with-options (list (cons 10 (lambda (options _sid) (plist-put (copy-sequence options) :read-only t))))
+          (let ((r (harness-tools-shell-test--as "s1" "bash" :command command :cwd remote)))
+            (should (plist-get r :is-error))
+            (should (string-search "Cannot run command" (plist-get r :content)))
+            (should (string-search "another host" (plist-get r :content)))
+            (should (string-search "(:read-only t)" (plist-get r :content)))
+            (should-not (string-search "leaked" (plist-get r :content)))
+            (should-not (file-exists-p marker))
+            (should-not wrapped)))))))
+
+(ert-deftest harness-tools-shell-bwrap-read-only-session ()
+  "Under the real bwrap a command of a session whose handler asks for
+:read-only reads the working directory and the session's temporary
+directory and writes neither, where another session's command writes both."
+  (harness-tools-shell-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (dolist (m '(store project config provider session sandbox)) (harness-test-load-module m))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (harness-tools-shell-test-in-dir
+    (let* ((harness-sandbox-policy 'required)
+           (sid (plist-get (harness-call 'session/create :cwd root) :id))
+           (other (plist-get (harness-call 'session/create :cwd root) :id))
+           (tmp (harness-call 'session/tmp-dir sid))
+           (script (format "cat seen.txt; { echo x > new.txt; } 2>/dev/null && echo cwd-written || echo cwd-refused; { echo x > %s; } 2>/dev/null && echo tmp-written || echo tmp-refused; echo x > /tmp/scratch && echo scratch-written"
+                           (shell-quote-argument (concat tmp "note.txt")))))
+      (with-temp-file (expand-file-name "seen.txt" root) (insert "seen\n"))
+      (unwind-protect
+          (harness-tools-shell-test-with-options
+              (list (cons 10 (lambda (options session-id)
+                               (if (equal session-id sid) (plist-put (copy-sequence options) :read-only t) options))))
+            (let ((r (harness-tools-shell-test--as sid "bash" :command script)))
+              (when (and (plist-get r :is-error) (string-search "bwrap:" (plist-get r :content)))
+                (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get r :content))))
+              (should-not (plist-get r :is-error))
+              (should (plist-get (plist-get r :meta) :sandboxed))
+              (should (equal "seen\ncwd-refused\ntmp-refused\nscratch-written\nexit 0" (plist-get r :content)))
+              (should-not (file-exists-p (expand-file-name "new.txt" root)))
+              (should-not (file-exists-p (concat tmp "note.txt"))))
+            ;; The other session is untouched by it.
+            (let ((r (harness-tools-shell-test--as other "bash" :command "echo x > new.txt && echo written")))
+              (should (equal "written\nexit 0" (plist-get r :content)))
+              (should (file-exists-p (expand-file-name "new.txt" root)))))
+        (harness-call 'session/delete sid)
+        (harness-call 'session/delete other)))))
+
 ;;;; elisp
 
 (ert-deftest harness-tools-shell-elisp-values-output-and-messages ()

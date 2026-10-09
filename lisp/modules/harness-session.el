@@ -67,6 +67,12 @@
 ;; sessions use this to compact earlier than interactive ones (see
 ;; `harness-tasks-context-limit').  A `:context-window' set outright
 ;; for the session wins over the limit, being the more explicit choice.
+;;
+;; A session also carries `ext', a plist of the settings that other
+;; modules keep for it, whether it is a supervisor's, say
+;; (`session/set-ext').  It is stored with the record, announced as
+;; `session/ext-changed' and never copied to a fork: each module sets
+;; up its own forks.
 
 ;;; Code:
 
@@ -98,7 +104,8 @@
   (runtime nil)
   ;; Slots added later go last, see `harness-session--upgrade-records'.
   provider-node                         ; the node its provider conversation reached
-  move)                                 ; a move waiting for its turn to end, or nil
+  move                                  ; a move waiting for its turn to end, or nil
+  ext)                                  ; settings modules keep here, a plist, or nil
 
 (defvar harness-sessions (make-hash-table :test 'equal)
   "Session id -> `harness-session'.")
@@ -124,7 +131,7 @@ defaults."
   '(:id :name :kind :project :cwd :host :worktree :model :permission-mode :thinking
     :non-interactive :allowed-dirs :status :parent-id :fork-node :created :updated :usage
     :context-window :context-window-override :context-window-limit :budget :head :queue :pending
-    :todos :plan :provider-state :provider-node :cache :move))
+    :todos :plan :provider-state :provider-node :cache :move :ext))
 
 (defconst harness-session--symbol-keys '(:kind :status :permission-mode)
   "Keys whose values are symbols in memory and strings on disk.")
@@ -167,7 +174,47 @@ cache (see `harness-session--cache')."
         :provider-state (harness-session-provider-state s)
         :provider-node (harness-session-provider-node s)
         :cache (harness-session--cache s)
-        :move (harness-session-move s)))
+        :move (harness-session-move s)
+        :ext (harness-session-ext s)))
+
+;; The `ext' slot holds what the modules that are not the session's own
+;; keep about it, a plist of keyword to value (`session/set-ext').  It
+;; is stored with the record as a JSON object, so a value has to be
+;; something JSON keeps as it is: t, `:false' (an explicit off, which
+;; nil is not: nil removes the key), a string, a number, or a list or
+;; plist of those.  A symbol would come back from a restart as a string.
+
+(defun harness-session--ext-value (value)
+  "Return VALUE, a stored or given `ext' plist, as a session holds it.
+That is a plist of keyword keys without the keys set to nil, which is
+how `session/set-ext' removes one; nil for anything else, a value that
+is no plist included."
+  (when (and (consp value) (keywordp (car value)) (proper-list-p value) (cl-evenp (length value)))
+    (cl-loop for (k v) on value by #'cddr
+             when (and (keywordp k) v) append (list k v))))
+
+(defun harness-session--ext-key (key)
+  "Return KEY, the name of a setting in `ext', as the keyword it is stored under.
+KEY may be that keyword, a symbol or a string -- a client on the wire can
+send no more than a string, with or without the colon.  Signal for
+anything else."
+  (cond ((keywordp key) key)
+        ((and key (symbolp key) (not (eq key t))) (intern (concat ":" (symbol-name key))))
+        ((and (stringp key) (not (string-empty-p key)))
+         (intern (if (string-prefix-p ":" key) key (concat ":" key))))
+        (t (signal 'harness-error (list (format "Not the name of a setting: %S" key))))))
+
+(defun harness-session--ext-json-p (value)
+  "Non-nil when VALUE comes back from the JSON store of a record as it is.
+That is t, `:false', a string, a number, nil inside a list, and a list
+or a plist (keyword keys) of those."
+  (cond ((or (null value) (eq value t) (eq value :false) (stringp value) (numberp value)) t)
+        ((and (consp value) (proper-list-p value))
+         (if (keywordp (car value))
+             (and (cl-evenp (length value))
+                  (cl-loop for (k v) on value by #'cddr
+                           always (and (keywordp k) (harness-session--ext-json-p v))))
+           (cl-every #'harness-session--ext-json-p value)))))
 
 (defun harness-session--intern-values (plist)
   "Turn string enum values in PLIST back into symbols."
@@ -211,7 +258,8 @@ cache (see `harness-session--cache')."
           (harness-session-plan s) (plist-get pl :plan)
           (harness-session-provider-state s) (plist-get pl :provider-state)
           (harness-session-provider-node s) (plist-get pl :provider-node)
-          (harness-session-move s) (harness-session--move-value (plist-get pl :move)))
+          (harness-session-move s) (harness-session--move-value (plist-get pl :move))
+          (harness-session-ext s) (harness-session--ext-value (plist-get pl :ext)))
     ;; A session saved before the policy came keeps no setting it fixes.
     (harness-session--apply-policy s)
     s))
@@ -763,7 +811,8 @@ A `btw' session without `:thinking' thinks at `harness-btw-thinking'
 when its model offers that level, else at `harness-thinking', as
 configured at `:cwd'.  A setting the policy fixes (see
 `harness-session--policy-options') has the policy's value, whatever
-PLIST asks for."
+PLIST asks for.  `:ext' gives it settings of the modules that keep
+some for a session (see `session/set-ext'), a plist."
   (let* ((plist (harness-session--without-pinned plist (or (plist-get plist :kind) 'main)))
          (cwd (or (plist-get plist :cwd) (error "The session/create method needs :cwd")))
          (host (or (plist-get plist :host) (file-remote-p cwd)))
@@ -804,6 +853,9 @@ PLIST asks for."
           ;; (`harness-budget') is one budget for all sessions together.
           (harness-session-budget s) (plist-get plist :budget)
           (harness-session-provider-state s) (plist-get plist :provider-state)
+          ;; Nothing is copied from a parent: a fork is made with the
+          ;; `:ext' its maker gives it.
+          (harness-session-ext s) (harness-session--ext-value (plist-get plist :ext))
           (harness-session-loaded s) t)
     ;; Without a config module the defaults are the options' values,
     ;; which hold the policy's already; this makes sure either way.
@@ -811,9 +863,10 @@ PLIST asks for."
     (puthash (harness-session-id s) s harness-sessions)
     (harness-session--save (harness-session-id s))
     (harness-session--tmp-dir s)
-    (let ((pl (harness-session-plist s)))
-      (harness-emit 'session/created (harness-session-id s) pl)
-      (harness-session--announce s pl))))
+    (harness-emit 'session/created (harness-session-id s) (harness-session-plist s))
+    ;; Announced and returned as it is now: a subscriber of
+    ;; `session/created' may have set something on it (its `:ext', say).
+    (harness-session--announce s)))
 
 (harness-defmethod session/get (id)
   "Return the public plist of session ID."
@@ -1012,6 +1065,40 @@ lists the ids that changed, newest first."
           (apply #'harness-call 'session/update id settings)
           (push id changed))))
     (nreverse changed)))
+
+(harness-defmethod session/set-ext (id key value &optional hint)
+  "Set the setting KEY of session ID's `:ext' to VALUE; return the session plist.
+The `ext' plist is where modules keep what they remember about a
+session, such as whether it is a supervisor's (see
+`harness-session--ext-value').  KEY is a keyword, or a symbol or a
+string naming one (what a client over the wire can send).  VALUE nil
+removes KEY; `:false' is stored as it is and means an explicit off.  A
+value must come back from the JSON store of the record as it is: t,
+`:false', a string, a number, or a list or plist of those; another is
+kept in memory but logged, as it would not survive a restart.  A fork
+does not get its parent's settings: each module decides what its own
+forks take.
+
+The change is saved and announced like any other, and `session/ext-changed'
+\(ID KEY VALUE) says which setting changed, KEY being the keyword and
+VALUE nil once it was removed.  A HINT that is a string is added to the
+transcript as a hint (`session/hint')."
+  (let* ((s (harness-session--get id))
+         (key (harness-session--ext-key key))
+         (ext (harness-session-ext s)))
+    (unless (harness-session--ext-json-p value)
+      (harness-log 'warn "session %s: the value %S of ext %s would not survive the JSON store"
+                   id value key))
+    ;; A new plist each time: whoever holds the earlier one keeps what it saw.
+    (setf (harness-session-ext s)
+          (if (null value)
+              (harness-plist-remove ext key)
+            (plist-put (copy-sequence ext) key value)))
+    (when (and (stringp hint) (not (harness-string-blank-p hint)))
+      (harness-call 'session/hint id hint))
+    (harness-emit 'session/ext-changed id key value)
+    (harness-session--touch s)
+    (harness-session-plist s)))
 
 (harness-defmethod session/set-provider-state (id state)
   "Replace the opaque provider state of session ID with STATE.
@@ -2148,6 +2235,7 @@ its turn ends, and write every record when Emacs exits."
               (session/status . "(ID STATUS)")
               (session/deleted . "(ID SESSION)") (session/resumed . "(ID)") (session/deactivated . "(ID)")
               (session/forked . "(PARENT-ID CHILD-ID)")
+              (session/ext-changed . "(ID KEY VALUE) when a module's setting of the session changed (`session/set-ext'); VALUE nil once removed")
               (session/provider-state-changed . "(ID STATE) when the provider state is replaced by another")
               (session/node-added . "(ID NODE)") (session/node-updated . "(ID NODE TRANSIENT)")
               (session/head-moved . "(ID NODE-ID)")

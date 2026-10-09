@@ -102,7 +102,7 @@ is never used for any other failure.")
     "config/" "skills/" "permission/" "compaction/" "handoff/" "naming/" "sandbox/status"
     "harness/api" "harness/modules" "harness/version" "harness/reload" "harness-dev/" "question/"
     "project/" "task/"
-    "notification/" "acp/remote-" "pet/" "version/" "insights/")
+    "notification/" "acp/remote-" "pet/" "version/" "insights/" "supervisor/" "seed/")
   "Bus method name prefixes callable as `_harness/NAME'.
 Modules of the user's own add theirs to
 `harness-acp-extra-method-prefixes'.")
@@ -167,7 +167,7 @@ it can answer for another one.")
     fallback/changed fallback/switched
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed worktree/locked worktree/unlocked session/forked session/head-moved
-    session/moved
+    session/moved session/ext-changed supervisor/changed
     question/answered task/changed task/deleted task/review task/done permission/dir-allowed permission/dir-revoked
     config/changed harness/reloaded tools/file-written acp/remote-changed pet/changed pet/said version/checked)
   "Bus events forwarded verbatim as `_harness/event' notifications.")

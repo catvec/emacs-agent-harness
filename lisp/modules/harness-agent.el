@@ -15,6 +15,9 @@
 ;; starts a turn or steers one, a queued one when its queue goes out;
 ;; then, and only then, the `agent/message' filters see it and may
 ;; change it (task mode sends a task waiting for review back this way).
+;; A model that stops on its own, with nothing steering, is not let go
+;; at once: the `agent/stop' filters may answer it with a message of the
+;; harness's and a step more, a few times at most (`harness-agent--stopped').
 ;;
 ;; A provider may run a tool of its own in place of a harness tool (see
 ;; `tools/builtin'): Claude Code's web search for web_search, say.  It
@@ -54,6 +57,12 @@ Each retry follows a handler's verdict that another try can work (the
 fallback module moves the session to another provider first), so a
 handful covers every provider of a fallback list; the cap only keeps a
 handler that is wrong from looping.")
+
+(defconst harness-agent--max-stop-continues 3
+  "Most times one turn is sent on after its model stopped, for `agent/stop'.
+Each time a handler had the stop answered with a message of the
+harness's and one more step; the cap only keeps a handler that is
+wrong, or a model that stops again whatever it is told, from looping.")
 
 (defconst harness-agent--handoff-max-chars 120000
   "Most characters of transcript a handoff to a hosted loop carries.
@@ -114,6 +123,11 @@ Kept beside the turn records, so a reload keeps the turns working.")
 
 (defvar harness-agent--retries (make-hash-table :test 'equal)
   "Session id -> how many failed steps its running turn ran again.")
+
+(defvar harness-agent--stop-continues (make-hash-table :test 'equal)
+  "Session id -> how many times its running turn was sent on past a stop.
+Counted against `harness-agent--max-stop-continues'.  Kept beside the
+turn records, as the retries are, so a reload keeps the turns working.")
 
 (defvar harness-agent--open-nodes (make-hash-table :test 'equal)
   "Session id -> the text or thinking node its turn wrote last, until a tool call.
@@ -602,6 +616,22 @@ none leaves the message as it was, so a message is never emptied."
   (or (harness-run-filter 'agent/message blocks session-id (list :from from :steering steering))
       blocks))
 
+(defun harness-agent--record-steering (turn blocks from)
+  "Record BLOCKS, a message from FROM, as steering of the running TURN.
+The message is a user node marked `:steering' (and `:from', when FROM is
+who sent it: see `agent/prompt') and waits for the next step boundary,
+which delivers it once (`harness-agent--take-steering').  Return the
+node."
+  (let* ((text (harness-agent--blocks-text blocks))
+         (node (harness-call 'session/append (harness-agent-turn-session-id turn)
+                             (list :kind 'user :content text
+                                   :blocks (unless (harness-agent--only-text-p blocks) blocks)
+                                   :meta (append (list :steering t) (and from (list :from from)))))))
+    (setf (harness-agent-turn-steering turn)
+          (append (harness-agent-turn-steering turn)
+                  (list (list :node (plist-get node :id) :text text))))
+    node))
+
 (harness-defmethod agent/prompt (session-id blocks &optional opts)
   "Send BLOCKS (content blocks, or a string) to SESSION-ID.
 Idle session: start a turn and return a promise of (:stop-reason …).
@@ -636,13 +666,7 @@ one does when its queue is sent."
       (harness-call 'session/queue session-id (harness-agent--blocks-text blocks) attachments from)
       (harness-resolved (list :queued t)))
      (turn
-      (let ((node (harness-call 'session/append session-id
-                                (list :kind 'user :content (harness-agent--blocks-text blocks)
-                                      :blocks (unless (harness-agent--only-text-p blocks) blocks)
-                                      :meta (append (list :steering t) (and from (list :from from)))))))
-        (setf (harness-agent-turn-steering turn)
-              (append (harness-agent-turn-steering turn)
-                      (list (list :node (plist-get node :id) :text (harness-agent--blocks-text blocks))))))
+      (harness-agent--record-steering turn blocks from)
       (harness-emit 'agent/steered session-id)
       (harness-agent-turn-promise turn))
      (t (harness-agent--start session-id blocks from)))))
@@ -697,6 +721,7 @@ FROM, when non-nil, is who sent the message (see `agent/prompt')."
     (puthash session-id turn harness-agent--turns)
     (remhash session-id harness-agent--failures)
     (remhash session-id harness-agent--retries)
+    (remhash session-id harness-agent--stop-continues)
     ;; The provider conversation follows the head first, then the gate
     ;; runs, so that an automatic compaction lands before the user's new
     ;; message, never after it.  The gate's value carries the message
@@ -1174,6 +1199,19 @@ everything recorded so far."
     (ignore-errors (funcall (plist-get handle :cancel))))
   (harness-agent--end turn 'end-turn))
 
+(defun harness-agent--next-step (turn)
+  "Run one more step of TURN, once the `agent/step' filters let it.
+They are asked at every step boundary: a filter that refuses (a merge
+hold, say) ends the turn `blocked', with its reason as a hint."
+  (let ((sid (harness-agent-turn-session-id turn)))
+    (harness-then
+     (harness-run-filter-async 'agent/step (list :proceed t) (harness-call 'session/get sid))
+     (lambda (gate)
+       (if (plist-get gate :proceed)
+           (harness-agent--step turn)
+         (when (plist-get gate :reason) (harness-call 'session/hint sid (plist-get gate :reason)))
+         (harness-agent--end turn 'blocked (plist-get gate :reason)))))))
+
 (defun harness-agent--maybe-continue (turn)
   "Decide what happens to TURN once its provider is done and no tool runs."
   (when (and (harness-agent-turn-waiting-done turn)
@@ -1188,19 +1226,93 @@ everything recorded so far."
         ((or 'tool-use (and 'end-turn (guard (harness-agent-turn-steering turn))))
          (if (harness-agent-turn-cancelled turn)
              (harness-agent--end turn 'cancelled)
-           (harness-then
-            (harness-run-filter-async 'agent/step (list :proceed t) (harness-call 'session/get sid))
-            (lambda (gate)
-              (if (plist-get gate :proceed)
-                  (harness-agent--step turn)
-                (when (plist-get gate :reason) (harness-call 'session/hint sid (plist-get gate :reason)))
-                (harness-agent--end turn 'blocked (plist-get gate :reason)))))))
-        ('end-turn (harness-agent--end turn 'end-turn))
+           (harness-agent--next-step turn)))
+        ;; A model that stopped on its own is asked of the `agent/stop' filters.
+        ('end-turn (harness-agent--stopped turn))
         ('max-tokens (harness-call 'session/hint sid "The model hit its output limit.")
                      (harness-agent--end turn 'max-tokens))
         ('cancelled (harness-agent--end turn 'cancelled))
         ('error (harness-agent--step-failed turn))
         (_ (harness-agent--end turn (or reason 'end-turn)))))))
+
+(defun harness-agent--stop-message (decision)
+  "Return (TEXT . FROM) when DECISION, an `agent/stop' answer, sends the model on.
+That is an answer that does not stop, (:stop nil :message TEXT), with a
+TEXT that says something.  FROM is the answer's `:from' when that names
+a sender (see `harness-node-sender'), else the harness itself.  Nil for
+any other answer."
+  (when (and (consp decision) (not (harness-json-true-p (plist-get decision :stop))))
+    (let ((text (plist-get decision :message))
+          (from (plist-get decision :from)))
+      (when (and (stringp text) (not (harness-string-blank-p text)))
+        (cons text (if (harness-sender-kind from) from (harness-sender-system "harness")))))))
+
+(defun harness-agent--stopped (turn)
+  "Decide what follows the model of TURN stopping on its own.
+It is the turn's end, or a step more.  Called when the model ended its
+turn (`end-turn') with no steering waiting and the turn is not cancelled.
+
+The async filter `agent/stop' gets the value (:stop t) and the session
+plist.  A handler that answers (:stop nil :message TEXT) sends the
+model on: TEXT is recorded as a message of the harness's -- from
+`(harness-sender-system \"harness\")', or from the answer's own `:from',
+a sender -- marked as steering like a message sent mid-turn, and the
+turn takes one more step (asked of `agent/step', as any step is), which
+delivers it, exactly as when the model stopped with steering waiting.
+This happens at most `harness-agent--max-stop-continues' times a turn,
+and the filters are not asked after that.  Any other answer ends the
+turn `end-turn', and with no handler on the filter it ends at once,
+without asking, as it did before the filter existed.
+
+A handler that fails is logged and leaves the answer as it was.  A turn
+cancelled while the filters run ends `cancelled', one that is no longer
+its session's current turn is left alone, and a message sent to the
+turn meanwhile gets its step even when the answer is to stop."
+  (let* ((sid (harness-agent-turn-session-id turn))
+         (count (gethash sid harness-agent--stop-continues 0)))
+    (if (or (harness-agent-turn-cancelled turn)
+            (>= count harness-agent--max-stop-continues)
+            (not (memq 'agent/stop (harness-filters)))
+            (not (harness-call 'session/exists-p sid)))
+        (harness-agent--end turn 'end-turn)
+      (harness-then
+       (harness-run-filter-async 'agent/stop (list :stop t) (harness-call 'session/get sid))
+       (lambda (decision) (harness-agent--stop-decided turn decision))
+       (lambda (err)
+         (harness-log 'error "agent: agent/stop for %s failed: %S" sid err)
+         (when (harness-agent--current-p turn)
+           (harness-agent--end turn 'end-turn)))))))
+
+(defun harness-agent--stop-continue (turn decision)
+  "Send TURN on past its model's stop as DECISION says; non-nil when it goes on.
+DECISION is what the `agent/stop' filters answered (see
+`harness-agent--stopped').  A message in it is recorded and counted; a
+message sent to the turn meanwhile is steering that waits for its step
+all the same.  Either one is delivered by the step that follows."
+  (let* ((sid (harness-agent-turn-session-id turn))
+         (sent (and (harness-call 'session/exists-p sid) (harness-agent--stop-message decision))))
+    (cond
+     (sent
+      (puthash sid (1+ (gethash sid harness-agent--stop-continues 0)) harness-agent--stop-continues)
+      (harness-agent--record-steering turn (list (list :type "text" :text (car sent))) (cdr sent))
+      (harness-agent--next-step turn)
+      t)
+     ((harness-agent-turn-steering turn)
+      (harness-agent--next-step turn)
+      t))))
+
+(defun harness-agent--stop-decided (turn decision)
+  "Carry out DECISION, what the `agent/stop' filters answered, for TURN.
+See `harness-agent--stopped'.  A failure to go on ends the turn, logged."
+  (cond
+   ((not (harness-agent--current-p turn)) nil)
+   ((harness-agent-turn-cancelled turn) (harness-agent--end turn 'cancelled))
+   ((condition-case err
+        (harness-agent--stop-continue turn decision)
+      (error (harness-log 'error "agent: carrying on %s after agent/stop failed: %S"
+                          (harness-agent-turn-session-id turn) err)
+             nil)))
+   (t (harness-agent--end turn 'end-turn))))
 
 (defun harness-agent--step-failed (turn)
   "Decide what follows TURN's failed step: another try, or the turn's end.
@@ -1251,6 +1363,7 @@ messages next."
       (remhash sid harness-agent--step-models)
       (remhash sid harness-agent--failures)
       (remhash sid harness-agent--retries)
+      (remhash sid harness-agent--stop-continues)
       (harness-agent--clear-activity sid)
       (when (harness-call 'session/exists-p sid)
         (harness-call 'session/usage-add sid (list :turns 1))
@@ -1328,6 +1441,20 @@ item is, else from the first item's sender."
   (if session-id
       (harness-agent-running-p session-id)
     (let (out) (maphash (lambda (k _) (push k out)) harness-agent--turns) out)))
+
+(harness-defmethod agent/outstanding (session-id)
+  "Return what runs for SESSION-ID outside its own turn, as a short text, or nil.
+A module that started work for the session which goes on without its
+turn -- a supervisor plan's workers, say -- reports it to the sync
+filter `agent/outstanding', whose value starts at nil and whose
+argument is SESSION-ID.  A handler with nothing to report returns the
+value unchanged; one that reports returns its own text, or appends it to
+the text the handlers before it returned, separated by \"; \".  Task
+mode keeps the task of a session whose turn ended working while this
+says something (`harness-tasks--on-turn-ended').  A value that is not a
+text with words in it counts as nothing outstanding."
+  (let ((text (harness-run-filter 'agent/outstanding nil session-id)))
+    (and (stringp text) (not (harness-string-blank-p text)) text)))
 
 (dolist (ev '((agent/turn-started . "(SESSION-ID)") (agent/turn-ended . "(SESSION-ID REASON)")
               (agent/cancelling
