@@ -30,12 +30,16 @@
 (defvar harness-pet-model)
 (defvar harness-pet-chance)
 (defvar harness-pet-cooldown)
+(defvar harness-pet-overrides)
+(defvar harness-pet-hats)
 (defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
 (declare-function harness-pet--hash "harness-pet")
 (declare-function harness-pet--rng "harness-pet")
 (declare-function harness-pet-roll "harness-pet")
+(declare-function harness-pet-bones "harness-pet")
+(declare-function harness-pet-overrides "harness-pet")
 (declare-function harness-pet--inspiration "harness-pet")
 (declare-function harness-pet-level "harness-pet")
 (declare-function harness-pet-level-xp "harness-pet")
@@ -77,6 +81,7 @@ cooldown), and no UI shows it until BODY says one does."
            (harness-pet-reactions t)
            (harness-pet-chance 1)
            (harness-pet-cooldown 0)
+           (harness-pet-overrides nil)
            (default-directory dir))
        (unwind-protect (progn ,@body)
          (harness-pet-test-reset)))))
@@ -681,6 +686,167 @@ refuses all but `pet/get'; turned on again, it is as it was."
         (harness-test-wait (lambda () (eq :false (plist-get (harness-call 'pet/get) :thinking))) 10 "the answer"))
       (should (null (funcall said)))
       (should (null (plist-get harness-pet--pet :said))))))
+
+;;;; Overrides
+
+(ert-deftest harness-pet-overrides-shape-the-bones ()
+  "What `harness-pet-overrides' sets replaces what is rolled; a rarity reshapes the roll."
+  (require 'harness-pet)
+  ;; Seed "a" is an uncommon axolotl: snark peaks, wisdom sags.  Legendary,
+  ;; its stats keep their shape from the legendary floor (50), and the
+  ;; rest of its bones are as rolled, but for what is set.
+  (let ((harness-pet-overrides '(:species "dragon" :rarity legendary :eye "^^" :hat crown :shiny t
+                                 :debugging 100 :snark 7)))
+    (should (equal '(:species dragon :rarity legendary :eye "^" :hat crown :shiny t :debugging 100 :snark 7)
+                   (harness-pet-overrides)))
+    (should (equal '(:rarity legendary :species dragon :eye "^" :hat crown :shiny t
+                     :stats (:debugging 100 :patience 72 :chaos 63 :wisdom 49 :snark 7)
+                     :inspiration 868700438)
+                   (harness-pet-bones "a"))))
+  ;; Only the rarity: "seed-1" is an epic duck with a crown.  Common, it
+  ;; loses the hat, and its stats start from the common floor (5).
+  (let ((harness-pet-overrides '(:rarity common)))
+    (let* ((bones (harness-pet-bones "seed-1"))
+           (stats (plist-get bones :stats)))
+      (should (eq 'common (plist-get bones :rarity)))
+      (should (eq 'duck (plist-get bones :species)))
+      (should (eq 'none (plist-get bones :hat)))
+      (should (equal "·" (plist-get bones :eye)))
+      (should (= 271547805 (plist-get bones :inspiration)))
+      (should (<= 70 (plist-get stats :debugging) 84))
+      (should (equal '(:patience 1 :chaos 33 :wisdom 24 :snark 38)
+                     (list :patience (plist-get stats :patience) :chaos (plist-get stats :chaos)
+                           :wisdom (plist-get stats :wisdom) :snark (plist-get stats :snark))))))
+  ;; A common pet made legendary gets a hat, drawn so that nothing else moves.
+  (let* ((seed (cl-loop for i from 0 for s = (format "seed-%d" i)
+                        when (eq 'common (plist-get (harness-pet-roll s) :rarity)) return s))
+         (plain (harness-pet-roll seed))
+         (harness-pet-overrides '(:rarity legendary))
+         (bones (harness-pet-bones seed)))
+    (should (eq 'none (plist-get plain :hat)))
+    (should (eq 'legendary (plist-get bones :rarity)))
+    (should (memq (plist-get bones :hat) harness-pet-hats))
+    (dolist (key '(:species :eye :shiny :inspiration))
+      (should (equal (plist-get plain key) (plist-get bones key))))
+    (cl-loop for (_k v) on (plist-get bones :stats) by #'cddr do (should (<= 40 v 100))))
+  ;; What fits nothing is ignored, and nothing changes.
+  (let ((harness-pet-overrides '(:species unicorn :rarity "mythic" :hat 42 :eye "" :debugging "lots"
+                                 :name "  " :personality nil :level 9)))
+    (should (null (harness-pet-overrides)))
+    (should (equal (harness-pet-roll "a") (harness-pet-bones "a"))))
+  (dolist (nonsense '("nonsense" (1 2) (:species) nil))
+    (let ((harness-pet-overrides nonsense))
+      (should (null (harness-pet-overrides)))))
+  ;; Stats are whole numbers from 1 to 100; names fit; symbols may be strings.
+  (let ((harness-pet-overrides '(:patience 500 :chaos -3 :wisdom 60.4 :species "Dragon" :hat "TOPHAT"
+                                 :eye ?* :name "  two\nlines  " :personality " Hums.\n\nLoudly. ")))
+    (should (equal '(:name "two lines" :personality "Hums. Loudly." :species dragon :eye "*" :hat tophat
+                     :patience 100 :chaos 1 :wisdom 60)
+                   (harness-pet-overrides))))
+  (let ((harness-pet-overrides (list :name (make-string 30 ?a))))
+    (should (= 20 (length (plist-get (harness-pet-overrides) :name)))))
+  ;; Shiny off is an override too, not an absence.
+  (let* ((seed (cl-loop for i from 0 for s = (format "seed-%d" i)
+                        when (plist-get (harness-pet-roll s) :shiny) return s))
+         (harness-pet-overrides '(:shiny nil)))
+    (should (equal '(:shiny nil) (harness-pet-overrides)))
+    (should (null (plist-get (harness-pet-bones seed) :shiny)))
+    (should (plist-get (harness-pet-roll seed) :shiny))))
+
+(ert-deftest harness-pet-overrides-show-in-the-view-and-the-voice ()
+  "Overrides show in the view and give the pet its voice and the name it answers to;
+the record keeps what it hatched with, which comes back when they go."
+  (harness-pet-test-with
+    (harness-pet-test-hatch)
+    (harness-pet-test-watch)
+    (let ((hatched (plist-get harness-pet--pet :name))
+          (said (harness-pet-test-said)))
+      (should (null (plist-get (harness-call 'pet/get) :overrides)))
+      (let ((harness-pet-overrides '(:name "Pickles" :personality "Judges indentation." :species octopus))
+            (harness-pet-chance 0))
+        (let ((view (harness-call 'pet/get)))
+          (should (equal "Pickles" (plist-get view :name)))
+          (should (equal "Judges indentation." (plist-get view :personality)))
+          (should (equal "octopus" (plist-get view :species)))
+          (should (equal '("name" "personality" "species") (plist-get view :overrides))))
+        (should (equal hatched (plist-get harness-pet--pet :name)))
+        ;; A name set by hand is not renamed away.
+        (should-error (harness-call 'pet/rename "Other") :type 'harness-error)
+        (should (equal hatched (plist-get harness-pet--pet :name)))
+        (harness-pet-test-counting-requests requests
+          (setq harness-pet--last-unasked 0 harness-pet--last-spoke 0)
+          (harness-call 'pet/pet)
+          (harness-test-wait (lambda () (funcall said)) 5 "a purr")
+          (let ((system (plist-get (car requests) :system)))
+            (should (string-match-p "Pickles" system))
+            (should (string-match-p "octopus" system))
+            (should (string-match-p "Judges indentation\\." system))
+            (should-not (string-match-p (regexp-quote hatched) system)))
+          (harness-test-wait (lambda () (eq :false (plist-get (harness-call 'pet/get) :thinking))) 5 "quiet")
+          ;; It answers to the name it goes by now, not the one it hatched with.
+          (setq harness-pet--last-unasked 0 harness-pet--last-spoke 0)
+          (let ((sid (harness-pet-test-session)))
+            (harness-call 'session/append sid (list :kind 'user :content (format "hey %s, look" hatched)))
+            (sleep-for 0.1)
+            (should (= 1 (length requests)))
+            (harness-call 'session/append sid (list :kind 'user :content "what do you think, pickles?"))
+            (harness-test-wait (lambda () (= 2 (length (funcall said)))) 5 "the answer")
+            (should (equal "addressed" (plist-get (cadr (funcall said)) :reason))))))
+      ;; Gone, they leave the pet as it hatched.
+      (let ((view (harness-call 'pet/get)))
+        (should (equal hatched (plist-get view :name)))
+        (should (null (plist-get view :overrides)))))))
+
+(ert-deftest harness-pet-overrides-shape-the-hatching ()
+  "Set before the egg hatches, the overrides shape the pet the model names."
+  (harness-pet-test-with
+    (let ((harness-pet-overrides '(:species dragon :rarity epic :shiny t)))
+      (should (equal '("species" "rarity" "shiny") (plist-get (harness-call 'pet/get) :overrides)))
+      (harness-pet-test-counting-requests requests
+        (let* ((view (harness-pet-test-hatch))
+               (text (harness-pet-test-request-text (car requests))))
+          (should (string-match-p "^Species: dragon$" text))
+          (should (string-match-p "^Rarity: EPIC$" text))
+          (should (string-match-p "This one is SHINY" text))
+          (should (equal "dragon" (plist-get view :species)))
+          (should (equal "epic" (plist-get view :rarity)))
+          (should (= 4 (plist-get view :stars)))
+          (should (eq t (plist-get view :shiny)))
+          ;; The demo model names it for the species it was told of.
+          (should (string-match-p "\\`A dragon that rates" (plist-get view :personality))))))))
+
+(ert-deftest harness-pet-overrides-change-announces-the-pet ()
+  "A change of `harness-pet-overrides' announces the pet as it is now; other options do not."
+  (harness-pet-test-with
+    (harness-pet-test-hatch)
+    (let ((changes nil))
+      (harness-on 'pet/changed (lambda (view) (push view changes)))
+      (let ((harness-pet-overrides '(:species cat :eye "◉")))
+        (harness-emit 'config/changed 'harness-pet-overrides harness-pet-overrides 'global nil)
+        (should (equal "cat" (plist-get (car changes) :species)))
+        (should (equal "◉" (plist-get (car changes) :eye)))
+        (should (equal '("species" "eye") (plist-get (car changes) :overrides))))
+      (let ((n (length changes)))
+        (harness-emit 'config/changed 'harness-model "demo:other" 'global nil)
+        (should (= n (length changes)))))))
+
+(ert-deftest harness-pet-overrides-set-through-config ()
+  "The settings page sets the option through `config/set', printed, and the pet follows."
+  (harness-pet-test-with
+    (harness-pet-test-hatch)
+    (let ((setting (cl-find "harness-pet-overrides" (plist-get (harness-call 'config/describe dir) :settings)
+                            :key (lambda (s) (plist-get s :key)) :test #'equal)))
+      (should setting)
+      (should (string-match-p "dragon" (plist-get setting :type)))
+      (should (string-match-p "legendary" (plist-get setting :type))))
+    (cl-letf (((symbol-function 'harness-save-user-option) (lambda (symbol value) (set symbol value))))
+      (harness-call 'config/set "harness-pet-overrides" "(:species \"cat\" :snark 100)" :printed t :scope 'global)
+      (let ((view (harness-call 'pet/get)))
+        (should (equal "cat" (plist-get view :species)))
+        (should (= 100 (plist-get (plist-get view :stats) :snark)))
+        (should (equal '("species" "snark") (plist-get view :overrides))))
+      (harness-call 'config/unset "harness-pet-overrides" :scope 'global)
+      (should (null (plist-get (harness-call 'pet/get) :overrides))))))
 
 ;;;; Over ACP
 

@@ -3580,14 +3580,34 @@ again brings it back as it was.
   floor+4, at least 1), the rest floor to floor+39.  A last draw seeds
   the inspiration words the model names it after.  `harness-pet-roll
   SEED` → `(:rarity :species :eye :hat :shiny :stats :inspiration)`.
+- `harness-pet-overrides`, a plist, forces attributes over the roll and
+  the record: `:name :personality :species :rarity :eye :hat :shiny` and
+  the stats `:debugging :patience :chaos :wisdom :snark`.
+  `harness-pet-overrides` (the function) reads it as a clean plist,
+  dropping what fits nothing (a species, rarity or hat not in the
+  tables, a stat that is not a number; a symbol may be a string, stats
+  clamp to 1..100, the eye is one character, the name one line of at
+  most `harness-pet--max-name` characters).  `harness-pet-roll SEED
+  RARITY` draws the hat and the stats as for RARITY, the rarity draw
+  still made and a hat for a pet drawn common taken from a generator of
+  its own, so nothing else shifts; `harness-pet-bones SEED` is that roll
+  with the rest laid over.  The view, the voice
+  (`harness-pet--say-system`), the name it answers to, the sanitiser
+  and the hatch prompt use the effective bones, name and personality
+  (`harness-pet--name`, `harness-pet--personality`); the record keeps
+  what the model gave, so dropping an override brings it back.  The VIEW
+  carries `:overrides`, the keys in effect as strings.  `pet/rename`
+  refuses while `:name` is overridden.  `config/changed` of the option
+  emits `pet/changed`.
 - The record, `pet.json` under the state directory: `(:seed :name
   :personality :hatched :xp :pets :muted :said)`, SAID its last
   `harness-pet--memory` sayings.  A change it makes while growing is
   saved `harness-pet--save-delay` seconds later (`harness-pet-flush` at
   shutdown and on `kill-emacs-hook`); other changes at once.
 - `pet/get` → the VIEW: `(:hatched :enabled :hatching :reactions
-  :watching :model)`, `:enabled` false while it is turned off, and once
-  hatched also `:seed :name :personality :hatched-at
+  :watching :model :overrides)`, `:enabled` false while it is turned
+  off, `:overrides` the attributes `harness-pet-overrides` sets as names
+  without the colon, and once hatched also `:seed :name :personality :hatched-at
   :rarity :stars :species :eye :hat :shiny :stats :level :xp :level-xp
   :next-xp :pets :muted :thinking :said`.  Booleans are t or `:false`;
   `:thinking` is t while it waits for a line; LEVEL is
@@ -5617,7 +5637,8 @@ when shiny) and personality, its level with an experience meter, and
 what it said last on a band of its own (`harness-pet-speech-face`,
 the action between asterisks in `harness-pet-action-face`), then the
 two before it and a footer saying whether and through which model it
-speaks.  Prose is filled to the window and drawn again when its width
+speaks and, when `harness-pet-overrides` sets any, which attributes are
+set by hand.  Prose is filled to the window and drawn again when its width
 changes.  The header line has [Pet] (`p`, `SPC`), [Rename] (`r`),
 [Mute]/[Unmute] (`m`), [Release] (`R`, asks first) and [Turn off]
 (`O`), or [Hatch] and [Turn off], and `g`, `q`.  Turned off (the VIEW's
