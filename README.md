@@ -1479,6 +1479,26 @@ beyond the last few messages. Nothing runs while nothing happens: the
 creature by a compose box is drawn again only when it changes, says
 something else, or has more or less room.
 
+Want a particular pet? `harness-pet-overrides` sets any of its
+attributes by hand, over what it hatched with: its name and
+personality, species, rarity, eyes, hat, whether it is shiny, and each
+of its five stats. For instance
+
+```elisp
+(setq harness-pet-overrides
+      '(:name "Pickles" :species dragon :rarity legendary :shiny t :snark 100))
+```
+
+What you leave out stays as it hatched. A rarity set here reshapes the
+rest: a legendary pet gets a hat and stats from the legendary floor, a
+common one loses its hat. The pet changes everywhere as soon as the
+option does, and its voice follows: the model is told what it is now.
+Set before the egg hatches, it shapes the name and personality the
+model gives it. The settings page offers it as a form with one line per
+attribute, and the pet's buffer says which are set by hand. While the
+name is set here, `r` cannot rename the pet. Its level and experience
+are what it grew, not attributes: nothing here changes them.
+
 To keep it quiet, set `harness-pet-reactions` to nil. To turn it off
 altogether, press `O` in its buffer, click [Turn off] there, or set
 `harness-pet-enabled` to nil (also on the settings page). It then shows

@@ -31,6 +31,7 @@
 (defvar harness-pet-model)
 (defvar harness-pet-chance)
 (defvar harness-pet-cooldown)
+(defvar harness-pet-overrides)
 (defvar harness-pet-species)
 (defvar harness-pet-eyes)
 (defvar harness-pet-hats)
@@ -166,6 +167,7 @@ the whole frame."
            (harness-pet-reactions t)
            (harness-pet-chance 1)
            (harness-pet-cooldown 0)
+           (harness-pet-overrides nil)
            (harness-ui-pet-animations nil)
            (harness-ui-default-position 'full)
            (default-directory dir))
@@ -348,6 +350,34 @@ once in the fifteen half seconds of its idle loop."
       (with-current-buffer buf (harness-ui-pet-release t))
       (harness-ui-pet-test--wait-text "An egg")
       (should-not harness-pet--pet))))
+
+(ert-deftest harness-ui-pet-footer-names-what-is-set-by-hand ()
+  "The footer says which attributes `harness-pet-overrides' sets, as soon as it changes,
+and the card shows the pet they make."
+  (harness-ui-pet-test-with
+    (harness-ui-pet-test--open)
+    (harness-ui-pet-test--hatch)
+    (let ((hatched (plist-get harness-pet--pet :name)))
+      (should-not (string-match-p "Set by hand" (harness-ui-pet-test--text)))
+      ;; Set as the settings page sets it; the harness, in this process, sees it.
+      (setq harness-pet-overrides '(:name "Pickles" :species octopus))
+      (harness-emit 'config/changed 'harness-pet-overrides harness-pet-overrides 'global nil)
+      (harness-ui-pet-test--wait-text "Set by hand in harness-pet-overrides: name and species\\.")
+      (let ((text (harness-ui-pet-test--flat-text)))
+        (should (string-match-p "Pickles" text))
+        (should (string-match-p "OCTOPUS" text))
+        (should-not (string-match-p (regexp-quote hatched) text)))
+      (should (string-match-p "Set by hand in harness-pet-overrides: snark\\."
+                              (harness-ui-pet--by-hand (list :overrides (vector "snark")))))
+      (should (string-match-p ": name, species and snark\\."
+                              (harness-ui-pet--by-hand (list :overrides '("name" "species" "snark")))))
+      (should-not (harness-ui-pet--by-hand (list :overrides nil)))
+      ;; Gone, the footer forgets them and the pet is as it hatched.
+      (setq harness-pet-overrides nil)
+      (harness-emit 'config/changed 'harness-pet-overrides nil 'global nil)
+      (harness-test-wait (lambda () (not (string-match-p "Set by hand" (harness-ui-pet-test--text))))
+                         5 "the footer to forget the overrides")
+      (should (string-match-p (regexp-quote hatched) (harness-ui-pet-test--text))))))
 
 (ert-deftest harness-ui-pet-fits-a-narrow-window ()
   "Beside the creature in a wide window, the stats go below it in a narrow one,
