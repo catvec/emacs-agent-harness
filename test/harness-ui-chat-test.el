@@ -3798,5 +3798,50 @@ layout, and C-c C-z there buries it, back to the user's buffer."
         (kill-buffer file)
         (kill-buffer view)))))
 
+(ert-deftest harness-ui-chat-redisplay-does-not-measure-a-huge-line ()
+  "The redisplay helper answers without looking at a huge line whole.
+A chat line can be megabytes long (a model wrote a whole file, or an
+error carried a request body), and measuring it on every redisplay is
+what made redisplay expensive; the helper looks a bounded distance
+either way along the line instead."
+  (with-temp-buffer
+    (insert "short line\n")
+    (should (harness-chat--line-at-most-p (point-min) 10000))
+    (erase-buffer)
+    (insert (make-string 5000 ?x) "\n" "tail\n")
+    (should (harness-chat--line-at-most-p 1 10000))
+    (erase-buffer)
+    (insert (make-string 40000 ?x) "\n" "tail\n")
+    ;; Anywhere on the huge line, from either end.
+    (should-not (harness-chat--line-at-most-p 1 10000))
+    (should-not (harness-chat--line-at-most-p 20000 10000))
+    (should-not (harness-chat--line-at-most-p 40000 10000))
+    ;; The line after it is ordinary again.
+    (should (harness-chat--line-at-most-p 40002 10000))))
+
+(ert-deftest harness-ui-chat-redisplay-leaves-a-huge-line-alone ()
+  "A line too long to show whole is left where it is.
+Asking redisplay to bring such a line fully into view would rescan it on
+every redisplay; the window, not scrolled, is told yes only for a line
+it can show."
+  (harness-ui-chat-test-with
+    (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session)))
+           (window (selected-window))
+           (huge (get-buffer-create " *harness-chat-huge-line*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer huge
+              (insert (make-string 40000 ?x) "\n" "tail\n")
+              (goto-char (point-min)))
+            (set-window-buffer window huge)
+            (set-window-point window (point-min))
+            (should-not (harness-chat--cursor-line-fully-visible window))
+            (with-current-buffer buf (goto-char (point-min)))
+            (set-window-buffer window buf)
+            (set-window-point window (point-min))
+            (should (harness-chat--cursor-line-fully-visible window)))
+        (set-window-buffer window buf)
+        (kill-buffer huge)))))
+
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here

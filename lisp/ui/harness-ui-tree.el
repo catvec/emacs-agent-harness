@@ -57,6 +57,14 @@
 (defconst harness-ui-tree--expand-limit 6000
   "Characters of node content shown when a row is expanded.")
 
+(defconst harness-ui-tree--node-text-limit 20000
+  "Characters of one string a tree node keeps.
+A row carries its node as a text property, and a node's content, tool
+input or output can be a whole file, a dumped error or a request body;
+keeping all of it would make the buffer -- and the undo list, where a
+text property's value is recorded -- hold megabytes.  What the expanded
+row shows is cut again to `harness-ui-tree--expand-limit'.")
+
 (defface harness-tree-id-face '((t :inherit shadow :family "Monospace"))
   "Short node ids." :group 'harness-ui-tree)
 (defface harness-tree-fork-face '((t :inherit bold))
@@ -70,6 +78,29 @@
 
 (harness-ui-define-icon harness-icon-hint "hint" "ⓘ" "hint" "A harness hint.")
 (harness-ui-define-icon harness-icon-fork "fork" "↱" "fork" "A fork begins.")
+
+(defun harness-ui-tree--clip-value (value)
+  "Return VALUE with strings longer than `harness-ui-tree--node-text-limit' cut.
+Lists and vectors are walked, so a node's content, the input of its tool
+call and a tool result are all bounded."
+  (cond ((stringp value)
+         (if (> (length value) harness-ui-tree--node-text-limit)
+             (concat (substring value 0 harness-ui-tree--node-text-limit) "…")
+           value))
+        ((consp value) (mapcar #'harness-ui-tree--clip-value value))
+        ((vectorp value) (apply #'vector
+                                (mapcar #'harness-ui-tree--clip-value (append value nil))))
+        (t value)))
+
+(defun harness-ui-tree--bounded-data (data)
+  "Return DATA with the text of every node bounded.
+The buffer keeps its nodes in its data and in text properties, so a
+node holding megabytes (`harness-ui-tree--node-text-limit') would be
+copied into both, and into the undo list on every redraw, all the same."
+  (let ((nodes (plist-get data :nodes)))
+    (if nodes
+        (plist-put (copy-sequence data) :nodes (mapcar #'harness-ui-tree--clip-value nodes))
+      data)))
 
 ;;;; Buffer state
 
@@ -527,7 +558,7 @@ making each buffer current in turn."
        (lambda (results)
          (when (buffer-live-p buffer)
            (with-current-buffer buffer
-             (setq harness-ui-tree--data (car results)
+             (setq harness-ui-tree--data (harness-ui-tree--bounded-data (car results))
                    harness-ui-tree--family (mapcar (lambda (s) (plist-get s :id))
                                                    (plist-get harness-ui-tree--data :sessions))
                    harness-ui-tree--loading nil)
@@ -537,7 +568,7 @@ making each buffer current in turn."
        (lambda (e)
          (when (buffer-live-p buffer)
            (with-current-buffer buffer
-             (setq harness-ui-tree--loading nil harness-ui-tree--error (harness-error-message e))
+             (setq harness-ui-tree--loading nil harness-ui-tree--error (harness-error-short-message e))
              (harness-ui-tree--render))))))))
 
 (defun harness-ui-tree--refresh-buffer (buffer)
@@ -586,6 +617,11 @@ making each buffer current in turn."
   (setq truncate-lines t
         buffer-read-only t
         cursor-type 'bar)
+  ;; The buffer is generated afresh on every update, and its rows carry
+  ;; whole nodes as text properties: recording that for undo grows by
+  ;; megabytes within a few redraws (and warns when it passes
+  ;; `undo-outer-limit'), and a redraw cannot be undone in any case.
+  (buffer-disable-undo)
   (setq-local harness-ui-session-id nil)
   (add-hook 'window-configuration-change-hook #'harness-ui-tree--on-resize nil t))
 
@@ -705,7 +741,7 @@ the node's session is left as it is, its head included."
                           (message "Forked %s" (substring (plist-get child :id) 0 8))
                           (when harness-ui-open-session-function
                             (funcall open (plist-get child :id))))))
-                     (lambda (e) (message "Fork failed: %s" (harness-error-message e))))))
+                     (lambda (e) (message "Fork failed: %s" (harness-error-short-message e))))))
 
 (defun harness-ui-tree-btw ()
   "Start a BTW side conversation over the session of the node at point.
