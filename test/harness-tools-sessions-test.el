@@ -911,6 +911,197 @@ confirmation can be tried live without a model."
             (dolist (key (harness-plist-keys input))
               (should (plist-member (plist-get schema :properties) key)))))))))
 
+;;;; session_settings
+
+(defun harness-tools-sessions-test-hints (sid)
+  "Return the texts of the hint nodes of session SID, oldest first."
+  (delq nil (mapcar (lambda (n) (and (eq (plist-get n :kind) 'hint) (plist-get n :content)))
+                    (harness-call 'session/nodes sid))))
+
+(ert-deftest harness-tools-sessions-settings-read ()
+  "session_settings reads this session's settings or another's: model,
+thinking, the context window with what caps it, the budget, and the
+permission mode and non-interactive state it cannot change."
+  (harness-tools-sessions-test-with
+    (let* ((me (harness-tools-sessions-test-session :name "Planner" :thinking "high"))
+           (other (harness-tools-sessions-test-session
+                   :name "Worker" :kind 'subagent :context-window-limit 4000
+                   :non-interactive t :budget (list :amount 5.0 :hard t))))
+      (let ((text (harness-tools-sessions-test-ok me "session_settings" '(:action "read"))))
+        (should (string-match-p "«Planner» (this session)" text))
+        (should (string-match-p "model: demo:scripted" text))
+        (should (string-match-p "thinking: high" text))
+        (should (string-match-p "context window: 8k tokens (the model's own; no limit is set)" text))
+        (should (string-match-p "budget: none" text))
+        (should (string-match-p "permission mode: ask; non-interactive: off" text))
+        ;; The settings it cannot change say which tool changes them.
+        (should (string-match-p "set_non_interactive" text))
+        (should (string-match-p "session_move" text)))
+      (let ((text (harness-tools-sessions-test-ok
+                   me "session_settings" (list :action "read" :session_id other))))
+        (should (string-match-p "«Worker»" text))
+        (should (string-match-p "kind subagent" text))
+        (should (string-match-p
+                 (regexp-quote "capped at 4k by a sub-agent cap (harness-subagent-context-limit)")
+                 text))
+        (should (string-match-p "budget: \\$5.00 (hard" text))
+        (should (string-match-p "non-interactive: on" text))))))
+
+(ert-deftest harness-tools-sessions-settings-set-on-this-session ()
+  "A set changes the calling session's own model, thinking, context
+limit and budget through session/update, and every change says who made
+it, the old value and the new one."
+  (harness-tools-sessions-test-with
+    (let* ((me (harness-tools-sessions-test-session :name "Planner" :thinking "high"))
+           (events nil))
+      (harness-on 'session/updated (lambda (id changes) (push (cons id changes) events)))
+      (let ((text (harness-tools-sessions-test-ok
+                   me "session_settings"
+                   (list :action "set" :thinking "low" :context_window_limit "4k"
+                         :budget "5" :budget_hard t))))
+        (should (string-match-p "This session:" text))
+        (should (string-match-p "Thinking high → low" text))
+        (should (string-match-p
+                 "Context window limit none (the model's own window) → 4k" text))
+        (should (string-match-p "Budget none → \\$5.00 (hard)" text)))
+      ;; It went through session/update, so views and clients refresh.
+      (should (equal (list (cons me (list :thinking "low" :context-window-limit 4000
+                                          :budget (list :amount 5.0 :hard t))))
+                     events))
+      (let ((s (harness-call 'session/get me)))
+        (should (equal "low" (plist-get s :thinking)))
+        (should (equal 4000 (plist-get s :context-window-limit)))
+        (should (equal (list :amount 5.0 :hard t) (plist-get s :budget))))
+      (should (equal '("Thinking high → low, set by the session itself"
+                       "Context window limit none (the model's own window) → 4k, set by the session itself"
+                       "Budget none → $5.00 (hard), set by the session itself")
+                     (harness-tools-sessions-test-hints me))))))
+
+(ert-deftest harness-tools-sessions-settings-set-on-another-session ()
+  "A set on another session names the caller in the hint and shows the
+changes in the caller's result; the other session is told, this one not."
+  (harness-tools-sessions-test-with
+    (let* ((me (harness-tools-sessions-test-session :name "Planner"))
+           (other (harness-tools-sessions-test-session :name "Worker" :kind 'subagent)))
+      (let ((text (harness-tools-sessions-test-ok
+                   me "session_settings"
+                   (list :action "set" :session_id "Worker" :model "demo:scripted-2"
+                         :context_window_limit "model"))))
+        (should (string-match-p "«Worker»:" text))
+        (should (string-match-p "Model demo:scripted → demo:scripted-2" text)))
+      (should (equal "demo:scripted-2" (plist-get (harness-call 'session/get other) :model)))
+      (should (equal '("Model demo:scripted → demo:scripted-2, set by session «Planner»")
+                     (harness-tools-sessions-test-hints other)))
+      (should-not (harness-tools-sessions-test-hints me)))))
+
+(ert-deftest harness-tools-sessions-settings-a-running-session-hears-next-request ()
+  "A change to a running session leaves a hint saying it takes effect
+from its next request."
+  (harness-tools-sessions-test-with
+    (let* ((harness-provider-demo--delay 0.5)
+           (me (harness-tools-sessions-test-session :name "Me"))
+           (other (harness-tools-sessions-test-session :name "Busy")))
+      (harness-tools-sessions-test-ok me "session_send" (list :session_id other :message "long job"))
+      (should (eq 'running (plist-get (harness-call 'session/get other) :status)))
+      (let ((text (harness-tools-sessions-test-ok
+                   me "session_settings" (list :action "set" :session_id other :thinking "low"))))
+        (should (string-match-p "is running; the changes take effect from its next request:" text)))
+      (let ((hint (cl-find-if (lambda (h) (string-match-p "\\`Thinking" h))
+                              (harness-tools-sessions-test-hints other))))
+        (should (string-match-p "Thinking the model's default → low, set by session «Me»" hint))
+        (should (string-match-p "takes effect from its next request" hint)))
+      (harness-tools-sessions-test-idle other))))
+
+(ert-deftest harness-tools-sessions-settings-refuses-what-is-not-its ()
+  "Permission mode, non-interactive, directories, the working directory
+and the host are refused, naming the tool that changes them; an unknown
+key names what this tool does change; nothing changes."
+  (harness-tools-sessions-test-with
+    (let* ((me (harness-tools-sessions-test-session :name "Me"))
+           (refuse (lambda (input)
+                     (let ((r (harness-tools-sessions-test-run me "session_settings" input)))
+                       (should (plist-get r :is-error))
+                       (plist-get r :content)))))
+      (dolist (case '(("permission_mode" "yolo" "the permission mode is the user's")
+                      ("non_interactive" t "set_non_interactive")
+                      ("allowed_dirs" ("/tmp") "request_directory_access")
+                      ("allowed_directories" ("/tmp") "request_directory_access")
+                      ("directory" "/tmp" "session_move")
+                      ("cwd" "/tmp" "session_move")
+                      ("working_directory" "/tmp" "session_move")
+                      ("host" "box" "session_move")))
+        (should (string-match-p (nth 2 case)
+                                (funcall refuse (list :action "set"
+                                                      (intern (concat ":" (car case))) (nth 1 case))))))
+      ;; A refusal is a refusal on a read too: a read changes nothing.
+      (should (string-match-p "set_non_interactive"
+                              (funcall refuse '(:action "read" :non_interactive t))))
+      (should (string-match-p "does not know temperature"
+                              (funcall refuse '(:action "set" :temperature 0.5))))
+      (should (string-match-p "needs action" (funcall refuse '(:session_id "Me"))))
+      (should (string-match-p "Unknown session_settings action" (funcall refuse '(:action "frob"))))
+      (let ((s (harness-call 'session/get me)))
+        (should (eq 'ask (plist-get s :permission-mode)))
+        (should-not (plist-get s :non-interactive))
+        (should-not (plist-get s :allowed-dirs))))))
+
+(ert-deftest harness-tools-sessions-settings-refuses-a-value-that-is-not ()
+  "A model offering no such thinking level, a limit that is no token
+count and a budget that is no dollar amount are refused with the reason."
+  (harness-tools-sessions-test-with
+    (let* ((me (harness-tools-sessions-test-session :name "Me"))
+           (refuse (lambda (input)
+                     (let ((r (harness-tools-sessions-test-run me "session_settings" input)))
+                       (should (plist-get r :is-error))
+                       (plist-get r :content)))))
+      (should (string-match-p "does not offer the thinking level medium; it offers low, high"
+                              (funcall refuse '(:action "set" :thinking "medium"))))
+      (should (string-match-p "is not a positive number of tokens"
+                              (funcall refuse '(:action "set" :context_window_limit 0))))
+      (should (string-match-p "is not a positive number of tokens"
+                              (funcall refuse '(:action "set" :context_window_limit "soon"))))
+      (should (string-match-p "is not a dollar amount"
+                              (funcall refuse '(:action "set" :budget "cheap"))))
+      (should (string-match-p "is negative"
+                              (funcall refuse '(:action "set" :budget -1))))
+      (should (string-match-p "no budget to make hard or soft"
+                              (funcall refuse '(:action "set" :budget_hard t)))))))
+
+(ert-deftest harness-tools-sessions-settings-policy-pins ()
+  "A setting the policy fixes cannot be set through the tool, the read
+says it is pinned, and the policy's own value is no change."
+  (harness-tools-sessions-test-with
+    (let ((me (harness-tools-sessions-test-session :name "Me")))
+      (harness-test-with-policy '((harness-model . "demo:scripted"))
+        (let ((r (harness-tools-sessions-test-run
+                  me "session_settings" '(:action "set" :model "demo:scripted-2"))))
+          (should (plist-get r :is-error))
+          (should (string-match-p "harness-model is set by policy" (plist-get r :content))))
+        (should (equal "demo:scripted" (plist-get (harness-call 'session/get me) :model)))
+        (should (string-match-p
+                 "Nothing to change"
+                 (harness-tools-sessions-test-ok
+                  me "session_settings" '(:action "set" :model "demo:scripted"))))
+        (should (string-match-p
+                 "model: demo:scripted (set by policy, and cannot be changed)"
+                 (harness-tools-sessions-test-ok me "session_settings" '(:action "read"))))))))
+
+(ert-deftest harness-tools-sessions-settings-nothing-to-change ()
+  "A set that asks for what the session already has changes nothing and
+says so: no hint and no session/updated."
+  (harness-tools-sessions-test-with
+    (let* ((me (harness-tools-sessions-test-session
+                :name "Me" :thinking "high" :context-window-limit 4000))
+           (events nil))
+      (harness-on 'session/updated (lambda (_id _changes) (push t events)))
+      (should (string-match-p
+               "Nothing to change"
+               (harness-tools-sessions-test-ok
+                me "session_settings" '(:action "set" :thinking "high"
+                                        :context_window_limit "4k"))))
+      (should-not events)
+      (should-not (harness-tools-sessions-test-hints me)))))
+
 ;;;; session_move
 
 (defun harness-tools-sessions-test-prompt (sid)

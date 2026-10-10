@@ -270,13 +270,35 @@ names the harness tools whose stand-ins to turn on.")
 `:builtin-tools' names the harness tools of
 `harness-provider-claude-builtin-tools'.")
 
-(defconst harness-provider-claude-tiers
-  '(:cheap "haiku" :balanced "sonnet" :frontier "opus")
-  "Claude models named for the common tiers, by family.
-Each names the CLI's alias of that name when the CLI lists it, which is
-the newest model of the family, else the first model of the catalogue
-whose name holds it (see `harness-provider-tier-model').  The
-auto-mode judge, for one, runs on the `cheap' one.")
+(defun harness-provider-claude--set-tiers (symbol value)
+  "Set SYMBOL to VALUE, and the tiers of the Claude provider with it.
+SYMBOL is `harness-provider-claude-tiers'.  The change takes effect at
+once: the next model the harness picks by tier is picked from VALUE."
+  (set-default symbol value)
+  (when-let* ((provider (and (fboundp 'harness-provider-get) (harness-provider-get 'claude))))
+    (setf (harness-provider-tiers provider) value)))
+
+(defcustom harness-provider-claude-tiers
+  '(:simple "haiku" :medium "sonnet" :hard "opus" :frontier "fable")
+  "Claude models named for the tiers, by family.
+Haiku is simple, Sonnet medium, Opus hard -- the strongest model the
+harness picks on its own, what a supervisor plans on -- and Fable
+frontier, which the harness never picks on its own: only you do (see
+`harness-model-tiers').  Each names the CLI's alias of that name when
+the CLI lists it, which is the newest model of the family, else the
+first model of the catalogue whose name holds it (see
+`harness-provider-tier-model').  A tier may also name a thinking level,
+as (:model \"sonnet\" :thinking \"high\"): what runs on the tier for the
+harness, a supervisor's worker say, thinks at that level.  Without one
+it thinks at the level it would have.  The auto-mode judge, for one,
+runs on the `simple' one."
+  :type harness-provider-tiers-type
+  :set #'harness-provider-claude--set-tiers
+  :group 'harness)
+
+;; It was a constant of three tiers once, which a reload would keep.
+(harness-renew-default 'harness-provider-claude-tiers
+                       '(:cheap "haiku" :balanced "sonnet" :frontier "opus"))
 
 (defconst harness-provider-claude--api-token-sources '("ANTHROPIC_AUTH_TOKEN" "apiKeyHelper")
   "Token sources the CLI reports for credentials billed per token.")
@@ -1467,20 +1489,62 @@ at API prices, once a window is used up."
                         out)))
     (nreverse out)))
 
+(defconst harness-provider-claude--window-reset-tolerance 2
+  "Seconds within which two reset times of a quota window count as one.
+The CLI's usage report and its rate-limit events both name a window's
+reset time, and the two can differ by a second of rounding: the report's
+ISO time loses its fraction.  A difference of no more than this is the
+same window; a larger one is the window after a reset.")
+
+(defun harness-provider-claude--same-window-p (old new)
+  "Non-nil when quota windows OLD and NEW are the same window.
+A quota window's usage only accrues until it resets, so a reset time
+that is not later by more than `harness-provider-claude--window-reset-tolerance'
+is still the same window, and a stale snapshot of it must not lower
+what it shows.  A window without a reset time keeps the one it has."
+  (let ((a (plist-get old :resets))
+        (b (plist-get new :resets)))
+    (or (null a) (null b)
+        (<= (- b a) harness-provider-claude--window-reset-tolerance))))
+
+(defun harness-provider-claude--merge-window (old new)
+  "Return quota window OLD updated with NEW, never lowering its usage.
+Within one window (`harness-provider-claude--same-window-p') usage only
+grows, so a newer snapshot whose `:used' is lower is stale and the
+higher figure stands; the window's other fields still take NEW's.  Once
+the window reset, NEW is a new window and stands whole."
+  (let ((merged (harness-plist-merge old new)))
+    (if (harness-provider-claude--same-window-p old new)
+        (plist-put merged :used (max (or (plist-get old :used) 0)
+                                     (or (plist-get new :used) 0)))
+      merged)))
+
 (defun harness-provider-claude--merge-windows (old new)
-  "Return quota windows OLD updated with NEW ones, matched by name."
+  "Return quota windows OLD updated with NEW ones, matched by name.
+Each matched window merges without lowering its usage
+\(`harness-provider-claude--merge-window'); windows only in NEW follow."
   (let ((name (lambda (w) (plist-get w :name))))
     (append (mapcar (lambda (w)
                       (let ((n (cl-find (plist-get w :name) new :key name :test #'equal)))
-                        (if n (harness-plist-merge w n) w)))
+                        (if n (harness-provider-claude--merge-window w n) w)))
                     old)
             (cl-remove-if (lambda (n) (cl-find (plist-get n :name) old :key name :test #'equal))
                           new))))
 
 (defun harness-provider-claude--publish (changes)
-  "Merge CHANGES into the account status, announce it, and return it."
+  "Merge CHANGES into the account status, announce it, and return it.
+Quota windows merge without lowering their usage: a snapshot of the same
+window that reports less than one before it is stale, so the higher
+figure stands until the window resets (see
+`harness-provider-claude--merge-windows')."
   (let* ((old harness-provider-claude--status)
          (new (harness-plist-merge old changes)))
+    (when (and (plist-member changes :windows)
+               (plist-get old :windows)
+               (plist-get changes :windows))
+      (setq new (plist-put new :windows
+                           (harness-provider-claude--merge-windows
+                            (plist-get old :windows) (plist-get changes :windows)))))
     (setq harness-provider-claude--status new)
     (unless (equal old new)
       (harness-emit 'provider/quota-updated 'claude new))

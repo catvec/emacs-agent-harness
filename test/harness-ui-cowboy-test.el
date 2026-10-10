@@ -60,7 +60,7 @@ for lists."
                        :preview "now add tests for the parser" :default "brief" :history t
                        :choices
                        (vector
-                        '(:choice "brief" :label "Brief summary" :what "a cheap model summarises the first and last messages"
+                        '(:choice "brief" :label "Brief summary" :what "a cheap model summarises the narrative, tool calls in brief"
                                   :cost 0.004 :cost-text "~$0.0040" :by "Demo cheap" :after 900)
                         '(:choice "summary" :label "Summary" :what "the session's model summarises it all, reading it uncached"
                                   :cost 0.33 :cost-text "~$0.330" :by "Demo scripted" :after 1500)
@@ -93,7 +93,7 @@ its key, its button, its cost and what it does, the default marked."
                            " the $0.025 it would cost cached.  What goes first?")
                    (nth 2 lines)))
     (should (equal "" (nth 3 lines)))
-    (should (equal '("    b  Brief summary    ~$0.0040          a cheap model summarises the first and last messages · the default"
+    (should (equal '("    b  Brief summary    ~$0.0040          a cheap model summarises the narrative, tool calls in brief · the default"
                      "    s  Summary          ~$0.330           the session's model summarises it all, reading it uncached"
                      "    t  Transcript file  free              the conversation goes to a file the model reads as it needs"
                      "    f  Start afresh     free              nothing is carried over; the model looks back when it needs to"
@@ -117,7 +117,7 @@ its key, its button, its cost and what it does, the default marked."
     ;; A choice's button says more when hovered.
     (let* ((at (string-search "Brief summary" string))
            (help (get-text-property at 'help-echo string)))
-      (should (string-match-p "\\`Brief summary (~\\$0\\.0040): a cheap model summarises the first and last messages\\." help))
+      (should (string-match-p "\\`Brief summary (~\\$0\\.0040): a cheap model summarises the narrative, tool calls in brief\\." help))
       (should (string-match-p "Written by Demo cheap\\." help))
       (should (string-match-p "The conversation then holds ~900 tokens\\." help))
       (should (string-match-p "Press b on this panel, or click; B makes it the default\\." help))

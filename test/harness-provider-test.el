@@ -10,6 +10,7 @@
 (declare-function harness-provider--forget "harness-provider")
 (declare-function harness-provider-relist "harness-provider")
 (declare-function harness-provider-model-key "harness-provider")
+(declare-function harness-provider-normalize-tiers "harness-provider" (tiers))
 
 (defmacro harness-provider-test-with (providers &rest body)
   "Load the provider module into a fresh bus, run BODY, then drop PROVIDERS.
@@ -326,17 +327,81 @@ A models function that takes an argument is told when a refresh asks."
                                 (list :name "small" :pricing '(:input 1.0 :output 5.0))
                                 (list :name "mid" :pricing '(:input 3.0 :output 15.0)))))
       ;; Deliberately not the price order, so the declaration is what decides.
-      :tiers '(:cheap "mid" :balanced "big" :frontier "small"))
-    (should (equal "test-tiered:mid" (harness-call 'provider/tier-model "test-tiered:big" :cheap)))
-    (should (equal "test-tiered:big" (harness-call 'provider/tier-model "test-tiered:big" :balanced)))
-    (should (equal "test-tiered:small" (harness-call 'provider/tier-model "test-tiered:big" :frontier)))
-    ;; The tier defaults to cheap, and an unknown provider has none.
+      :tiers '(:simple "mid" :medium "big" :hard "small" :frontier "mid"))
+    (should (equal "test-tiered:mid" (harness-call 'provider/tier-model "test-tiered:big" :simple)))
+    (should (equal "test-tiered:big" (harness-call 'provider/tier-model "test-tiered:big" :medium)))
+    (should (equal "test-tiered:small" (harness-call 'provider/tier-model "test-tiered:big" :hard)))
+    (should (equal "test-tiered:mid" (harness-call 'provider/tier-model "test-tiered:big" :frontier)))
+    ;; A tier is named by a symbol or a string just as well.
+    (should (equal "test-tiered:small" (harness-call 'provider/tier-model "test-tiered:big" 'hard)))
+    (should (equal "test-tiered:small" (harness-call 'provider/tier-model "test-tiered:big" "hard")))
+    ;; The tier defaults to simple, and an unknown provider has none.
     (should (equal "test-tiered:mid" (harness-call 'provider/tier-model "test-tiered:big")))
-    (should-not (harness-call 'provider/tier-model "nobody:m" :cheap))))
+    (should-not (harness-call 'provider/tier-model "nobody:m" :simple))))
+
+(ert-deftest harness-provider-tier-model-reads-the-tiers-of-old ()
+  "A `:tiers' plist in the three tiers of old reads as it was meant.
+Cheap is simple and balanced medium, and its frontier, the strongest
+model the harness picked then, is hard: the frontier of now is left to
+the prices, the dearest model.  The names of old still ask for theirs."
+  (harness-provider-test-with (test-old)
+    (harness-define-provider 'test-old
+      :complete #'ignore
+      :models (lambda () (harness-resolved
+                          (list (list :name "haiku" :pricing '(:input 1.0 :output 5.0))
+                                (list :name "sonnet" :pricing '(:input 2.0 :output 10.0))
+                                (list :name "opus" :pricing '(:input 4.0 :output 20.0))
+                                (list :name "fable" :pricing '(:input 10.0 :output 50.0)))))
+      :tiers '(:cheap "haiku" :balanced "sonnet" :frontier "opus"))
+    (should (equal "test-old:haiku" (harness-call 'provider/tier-model "test-old:x" :simple)))
+    (should (equal "test-old:sonnet" (harness-call 'provider/tier-model "test-old:x" :medium)))
+    (should (equal "test-old:opus" (harness-call 'provider/tier-model "test-old:x" :hard)))
+    (should (equal "test-old:fable" (harness-call 'provider/tier-model "test-old:x" :frontier)))
+    (should (equal "test-old:haiku" (harness-call 'provider/tier-model "test-old:x" 'cheap)))
+    (should (equal "test-old:sonnet" (harness-call 'provider/tier-model "test-old:x" :balanced)))
+    (should (eq 'hard (harness-call 'provider/model-tier "test-old:opus")))
+    (should (eq 'frontier (harness-call 'provider/model-tier "test-old:fable")))))
+
+(ert-deftest harness-provider-normalize-tiers-renames-the-tiers-of-old ()
+  "A plist of old is renamed key by key; a plist of now stays as it is.
+Its `:frontier' is hard only in a plist of old, a key of now wins over
+the old one for the same tier, and anything else is kept."
+  (should (equal '(:simple "h" :medium "s" :hard "o")
+                 (harness-provider-normalize-tiers '(:cheap "h" :balanced "s" :frontier "o"))))
+  (should (equal '(:simple "h" :medium "s" :hard "o" :frontier "f")
+                 (harness-provider-normalize-tiers '(:simple "h" :medium "s" :hard "o" :frontier "f"))))
+  ;; Mixed: the new key wins, and frontier keeps its meaning of now.
+  (should (equal '(:simple "new" :frontier "f" :medium "s")
+                 (harness-provider-normalize-tiers '(:simple "new" :cheap "old" :balanced "s" :frontier "f"))))
+  (should (equal '(:simple (:model "m" :thinking "low") :frontier nil)
+                 (harness-provider-normalize-tiers '(:simple (:model "m" :thinking "low") :frontier nil))))
+  (should-not (harness-provider-normalize-tiers nil)))
+
+(ert-deftest harness-provider-tier-named-nil-has-no-model ()
+  "A tier the provider names as nil has no model: no price picks one.
+Its model-tier is then the nearest tier the provider has a model for,
+and a tier it does not name at all still goes by price."
+  (harness-provider-test-with (test-nofrontier)
+    (harness-define-provider 'test-nofrontier
+      :complete #'ignore
+      :models (lambda () (harness-resolved
+                          (list (list :name "flash" :pricing '(:input 0.1 :output 0.4))
+                                (list :name "pro" :pricing '(:input 1.0 :output 4.0)))))
+      :tiers '(:simple "flash" :medium "flash" :frontier nil))
+    (should (equal (cons nil 'none)
+                   (harness-call 'provider/tier-model-info "test-nofrontier:flash" :frontier)))
+    (should-not (harness-call 'provider/tier-model "test-nofrontier:flash" 'frontier))
+    ;; Hard is not named: the prices place the dearer model there.
+    (should (equal "test-nofrontier:pro" (harness-call 'provider/tier-model "test-nofrontier:flash" 'hard)))
+    ;; Flash is named medium (and simple): medium comes first.
+    (should (eq 'medium (harness-call 'provider/model-tier "test-nofrontier:flash")))
+    ;; Pro's price makes it frontier, which the provider has no model for.
+    (should (eq 'hard (harness-call 'provider/model-tier "test-nofrontier:pro")))))
 
 (ert-deftest harness-provider-tier-model-falls-back-to-price ()
   "Without `:tiers', a tier is the provider's models sorted by price.
-A model whose cost is unknown is never chosen over one that is priced."
+The four tiers spread over them, cheapest first; a model whose cost is
+unknown is never chosen over one that is priced."
   (harness-provider-test-with (test-sorted)
     (harness-define-provider 'test-sorted
       :complete #'ignore
@@ -344,11 +409,18 @@ A model whose cost is unknown is never chosen over one that is priced."
                           (list (list :name "free" :pricing nil)
                                 (list :name "big" :pricing '(:input 10.0 :output 50.0))
                                 (list :name "small" :pricing '(:input 1.0 :output 5.0))
+                                (list :name "large" :pricing '(:input 5.0 :output 25.0))
                                 (list :name "mid" :pricing '(:input 3.0 :output 15.0))))))
-    (should (equal "test-sorted:small" (harness-call 'provider/tier-model "test-sorted:x" :cheap)))
-    (should (equal "test-sorted:mid" (harness-call 'provider/tier-model "test-sorted:x" :balanced)))
+    (should (equal "test-sorted:small" (harness-call 'provider/tier-model "test-sorted:x" :simple)))
+    (should (equal "test-sorted:mid" (harness-call 'provider/tier-model "test-sorted:x" :medium)))
+    (should (equal "test-sorted:large" (harness-call 'provider/tier-model "test-sorted:x" :hard)))
     (should (equal "test-sorted:big" (harness-call 'provider/tier-model "test-sorted:x" :frontier)))
-    (should-not (equal "test-sorted:free" (harness-call 'provider/tier-model "test-sorted:x" :cheap)))))
+    (should-not (equal "test-sorted:free" (harness-call 'provider/tier-model "test-sorted:x" :simple)))
+    ;; And back: a model's price places it in its tier.
+    (should (eq 'simple (harness-call 'provider/model-tier "test-sorted:small")))
+    (should (eq 'medium (harness-call 'provider/model-tier "test-sorted:mid")))
+    (should (eq 'hard (harness-call 'provider/model-tier "test-sorted:large")))
+    (should (eq 'frontier (harness-call 'provider/model-tier "test-sorted:big")))))
 
 (ert-deftest harness-provider-tier-model-matches-a-regexp ()
   "A tier names its model by a name a catalogue id matches as a regexp.
@@ -362,11 +434,11 @@ family names rather than whole ids."
                                 (list :name "us.anthropic.claude-sonnet-5" :pricing '(:input 3.0 :output 15.0))
                                 (list :name "us.anthropic.claude-opus-5" :pricing '(:input 5.0 :output 25.0)))))
       ;; The regexp wins over the price: sonnet, not the cheaper haiku.
-      :tiers '(:cheap "sonnet" :frontier "opus"))
+      :tiers '(:simple "sonnet" :hard "opus"))
     (should (equal "test-regexp:us.anthropic.claude-sonnet-5"
-                   (harness-call 'provider/tier-model "test-regexp:x" :cheap)))
+                   (harness-call 'provider/tier-model "test-regexp:x" :simple)))
     (should (equal "test-regexp:us.anthropic.claude-opus-5"
-                   (harness-call 'provider/tier-model "test-regexp:x" :frontier)))))
+                   (harness-call 'provider/tier-model "test-regexp:x" :hard)))))
 
 (ert-deftest harness-provider-tier-model-info-says-which-model-or-why-not ()
   "The info answers with the model of a tier, else why there is none.
@@ -380,7 +452,7 @@ with nothing for the tier."
                           (list (list :name "small" :pricing '(:input 1.0 :output 5.0))
                                 (list :name "big" :pricing '(:input 10.0 :output 50.0))))))
     (should (equal (cons "test-priced:small" nil)
-                   (harness-call 'provider/tier-model-info "test-priced:big" :cheap)))
+                   (harness-call 'provider/tier-model-info "test-priced:big" :simple)))
     (should (equal (cons "test-priced:big" nil)
                    (harness-call 'provider/tier-model-info "test-priced" :frontier)))
     ;; A provider that has not listed its models yet says so rather than
@@ -388,18 +460,18 @@ with nothing for the tier."
     (harness-define-provider 'test-late :complete #'ignore
                              :models (lambda () (harness-make-promise)))
     (should (equal (cons nil 'unlisted)
-                   (harness-call 'provider/tier-model-info "test-late:m" :cheap)))
+                   (harness-call 'provider/tier-model-info "test-late:m" :simple)))
     ;; A catalogue with no price to rank and no `:tiers' names no model.
     (harness-define-provider 'test-unpriced :complete #'ignore
                              :models (lambda () (harness-resolved '((:name "m")))))
     (should (equal (cons nil 'none)
-                   (harness-call 'provider/tier-model-info "test-unpriced:m" :cheap)))
+                   (harness-call 'provider/tier-model-info "test-unpriced:m" :simple)))
     ;; The id alone is enough to name the provider, and an unknown one
     ;; cannot even be asked.
     (should (equal (cons nil 'unknown)
-                   (harness-call 'provider/tier-model-info "nobody:m" :cheap)))
+                   (harness-call 'provider/tier-model-info "nobody:m" :simple)))
     (should (equal (cons nil 'unknown)
-                   (harness-call 'provider/tier-model-info nil :cheap)))))
+                   (harness-call 'provider/tier-model-info nil :simple)))))
 
 (ert-deftest harness-provider-tier-model-async-waits-for-a-late-catalogue ()
   "A provider that answers late gives the tier its model to a caller that can wait.
@@ -418,29 +490,95 @@ there; a listing that fails settles as `unlisted', never rejected."
                   answer))
       ;; Before it answers, a lookup that cannot wait is told so.
       (should (equal (cons nil 'unlisted)
-                     (harness-call 'provider/tier-model-info "test-slow:big" :cheap)))
+                     (harness-call 'provider/tier-model-info "test-slow:big" :simple)))
       (should (equal (cons "test-slow:small" nil)
-                     (harness-test-await (harness-call 'provider/tier-model-async "test-slow:big" :cheap))))
+                     (harness-test-await (harness-call 'provider/tier-model-async "test-slow:big" :simple))))
       (should (equal (cons "test-slow:big" nil)
                      (harness-test-await (harness-call 'provider/tier-model-async "test-slow:big" :frontier))))
       ;; Answered once: the next lookup needs no wait.
       (should (equal (cons "test-slow:small" nil)
-                     (harness-call 'provider/tier-model-info "test-slow:big" :cheap))))
+                     (harness-call 'provider/tier-model-info "test-slow:big" :simple))))
     (harness-define-provider 'test-broken :complete #'ignore
                              :models (lambda () (harness-rejected '(error "offline"))))
     (should (equal (cons nil 'unlisted)
-                   (harness-test-await (harness-call 'provider/tier-model-async "test-broken:m" :cheap))))
+                   (harness-test-await (harness-call 'provider/tier-model-async "test-broken:m" :simple))))
     (should (equal (cons nil 'unknown)
-                   (harness-test-await (harness-call 'provider/tier-model-async "nobody:m" :cheap))))))
+                   (harness-test-await (harness-call 'provider/tier-model-async "nobody:m" :simple))))))
+
+(ert-deftest harness-provider-tier-thinking-is-the-level-a-tier-names ()
+  "A tier given as (:model :thinking) runs its model at that level.
+The model is found as for a name alone; a tier with no level, an unknown
+provider and one that names nothing give no level.  It needs no catalogue."
+  (harness-provider-test-with (test-levels)
+    (harness-define-provider 'test-levels
+      :complete #'ignore
+      :models (lambda () (harness-make-promise))
+      :tiers '(:simple (:model "flash" :thinking "low")
+               :medium (:model "flash" :thinking high)
+               :hard "flash"
+               :frontier nil))
+    ;; Never listed, and still the levels are known.
+    (should (equal "low" (harness-call 'provider/tier-thinking "test-levels:flash" 'simple)))
+    (should (equal "high" (harness-call 'provider/tier-thinking "test-levels:flash" :medium)))
+    (should (equal "low" (harness-call 'provider/tier-thinking "test-levels")))
+    (should-not (harness-call 'provider/tier-thinking "test-levels:flash" 'hard))
+    (should-not (harness-call 'provider/tier-thinking "test-levels:flash" 'frontier))
+    (should-not (harness-call 'provider/tier-thinking "nobody:m" 'simple)))
+  (harness-provider-test-with (test-plist)
+    (harness-define-provider 'test-plist
+      :complete #'ignore
+      :models (lambda () (harness-resolved
+                          (list (list :name "flash" :pricing '(:input 0.1 :output 0.4))
+                                (list :name "pro" :pricing '(:input 1.0 :output 4.0)))))
+      :tiers '(:simple (:model "flash" :thinking "low") :hard (:model "pro" :thinking "max")))
+    (should (equal "test-plist:flash" (harness-call 'provider/tier-model "test-plist:pro" 'simple)))
+    (should (equal "test-plist:pro" (harness-call 'provider/tier-model "test-plist:flash" 'hard)))
+    (should (eq 'simple (harness-call 'provider/model-tier "test-plist:flash")))
+    (should (eq 'hard (harness-call 'provider/model-tier "test-plist:pro")))))
+
+(ert-deftest harness-provider-fit-thinking-keeps-a-level-within-the-model ()
+  "A level above or below what a model offers is brought within it.
+A level the model offers, one between two it offers, an unknown level
+and a model with no levels keep the level as it is."
+  (harness-provider-test-with (test-fit)
+    (harness-define-provider 'test-fit
+      :complete #'ignore
+      :models (lambda () (harness-resolved
+                          (list (list :name "small" :thinking-levels '("low" "medium" "high"))
+                                (list :name "sparse" :thinking-levels '("low" "high" "max"))
+                                (list :name "plain")))))
+    (should (equal "high" (harness-call 'provider/fit-thinking "test-fit:small" "max")))
+    (should (equal "high" (harness-call 'provider/fit-thinking "test-fit:small" "xhigh")))
+    (should (equal "low" (harness-call 'provider/fit-thinking "test-fit:small" "minimal")))
+    (should (equal "medium" (harness-call 'provider/fit-thinking "test-fit:small" "medium")))
+    ;; Between two levels: the provider maps it as it does.
+    (should (equal "medium" (harness-call 'provider/fit-thinking "test-fit:sparse" "medium")))
+    (should (equal "max" (harness-call 'provider/fit-thinking "test-fit:plain" "max")))
+    (should (equal "none" (harness-call 'provider/fit-thinking "test-fit:small" "none")))
+    (should (equal "max" (harness-call 'provider/fit-thinking "nobody:m" "max")))
+    (should-not (harness-call 'provider/fit-thinking "test-fit:small" nil))))
 
 (ert-deftest harness-provider-tiers-type-names-the-tiers ()
-  "The settings page offers each tier of a provider by name."
+  "The settings page offers each tier of a provider by name.
+A tier is a model, a model at a thinking level, or none."
   (let ((type harness-provider-tiers-type))
-    (should (equal '(:cheap :balanced :frontier) (harness-test-option-keys type)))
+    (should (equal '(:simple :medium :hard :frontier) (harness-test-option-keys type)))
     (harness-test-check-record-type type)
     (should (harness-test-fits-p type (plist-get (cdr type) :value)))
+    (should (harness-test-fits-p type '(:simple (:model "flash" :thinking "low")
+                                        :medium (:model "flash" :thinking "high")
+                                        :hard (:model "flash" :thinking "max")
+                                        :frontier nil)))
     ;; A tier with no name of its own still fits, as a key it does not name.
-    (should (harness-test-fits-p type '(:cheap "haiku" :my-tier "other")))))
+    (should (harness-test-fits-p type '(:simple "haiku" :my-tier "other")))
+    ;; A tier named as nil reads as none on the settings page, whose menu
+    ;; shows the first of the tier's types that fits: an empty plist fits
+    ;; nil too, so none comes before it.
+    (dolist (key '(:simple :medium :hard :frontier))
+      (let* ((tier (cadr (assq key (plist-get (cdr type) :options))))
+             (fits (cl-find-if (lambda (w) (widget-apply w :match nil))
+                               (widget-get (widget-convert tier) :args))))
+        (should (equal "None: no model of the provider is for it" (widget-get fits :tag)))))))
 
 (ert-deftest harness-provider-warm-and-close-reach-the-provider ()
   "`provider/warm' and `provider/close' call the hooks of the request's
@@ -657,11 +795,11 @@ one of them."
         (should (equal '("test-allowed:big")
                        (mapcar (lambda (m) (plist-get m :id))
                                (harness-test-await (harness-call 'provider/models)))))
-        ;; The cheap model is the cheapest allowed.
-        (should (equal "test-allowed:big" (harness-call 'provider/tier-model "test-allowed" :cheap)))
-        (should-not (harness-call 'provider/tier-model "test-other" :cheap)))
+        ;; The simple model is the cheapest allowed.
+        (should (equal "test-allowed:big" (harness-call 'provider/tier-model "test-allowed" :simple)))
+        (should-not (harness-call 'provider/tier-model "test-other" :simple)))
       (should (= 3 (length (harness-test-await (harness-call 'provider/models)))))
-      (should (equal "test-allowed:small" (harness-call 'provider/tier-model "test-allowed" :cheap))))))
+      (should (equal "test-allowed:small" (harness-call 'provider/tier-model "test-allowed" :simple))))))
 
 (provide 'harness-provider-test)
 ;;; harness-provider-test.el ends here

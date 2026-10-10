@@ -249,9 +249,9 @@
           (should (equal "go on" (car (last texts)))))))))
 
 (ert-deftest harness-handoff-compact-new-summarises-on-the-new-model ()
-  "The new model writes the summary when the old one cannot, from a bounded context.
-Only the first and last messages of the session go to it, and the
-summary it writes opens the new conversation with a lossy-handoff note."
+  "The new model writes the summary when the old one cannot, from the narrative.
+Every message goes to it, tools named in brief, and the summary it
+writes opens the new conversation with a lossy-handoff note."
   (harness-handoff-test-with
     (let ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
                                         :model "demo:scripted")
@@ -264,8 +264,8 @@ summary it writes opens the new conversation with a lossy-handoff note."
         (should (equal "hosted:m" (plist-get result :summarizer)))
         (should (eq 'sample (plist-get result :context)))
         (should (equal "hosted:m" (plist-get (harness-call 'session/get sid) :model)))
-        ;; The new model got one message of text: the start and end of the
-        ;; conversation, with what was left out said so.
+        ;; The new model got one message of text: the conversation's
+        ;; narrative, tools named in brief.
         (should (= 1 (length harness-handoff-test--requests)))
         (let* ((request (car harness-handoff-test--requests))
                (texts (harness-handoff-test--last-user-texts request)))
@@ -273,9 +273,8 @@ summary it writes opens the new conversation with a lossy-handoff note."
           (should-not (plist-get request :provider-state))
           (should (= 2 (length texts)))
           (let ((text (car texts)))
-            (dolist (i '(0 3 8 19)) (should (string-match-p (format "message %d" i) text)))
-            (dolist (i '(4 5 6 7)) (should-not (string-match-p (format "message %d" i) text)))
-            (should (string-match-p "left out the 4 messages" text)))
+            (dolist (i (number-sequence 0 19)) (should (string-match-p (format "message %d" i) text)))
+            (should-not (string-match-p "left out" text)))
           (should (string-match-p "Summarize the conversation above" (cadr texts))))
         ;; Its summary opens the session, marked as a lossy handoff.
         (let ((compaction (cl-find 'compaction (harness-call 'session/nodes sid)

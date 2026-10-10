@@ -534,8 +534,20 @@ the development checkout, which no session works in, is configured."
     (setq harness-version-origins
           (list (list :name "local" :location (abbreviate-file-name (plist-get paths :dev)) :branch "main")))))
 
+(defconst harness-media--harness-bodies
+  '(("Show the fallback entries' tiers in the usage dashboard"
+     . "Name each fallback entry's tier beside its model, so the cheapest
+fit for what a session needs is visible before it is chosen.")
+    ("Ask how to hand over in a chat banner, not a wall of text"
+     . "The handoff question is a banner of the choices now: what each
+option keeps, and the box to change it."))
+  "Bodies of the commits in the version picture that have one, by subject.
+A commit's message body shows on the version page as its changelog entry.")
+
 (defun harness-media--harness-commit (subject days-ago)
-  "Commit SUBJECT in the development checkout, dated DAYS-AGO days back."
+  "Commit SUBJECT in the development checkout, dated DAYS-AGO days back.
+A subject in `harness-media--harness-bodies' is committed with that
+body, so the version picture shows a commit as its changelog entry."
   (let* ((dev (plist-get (harness-media--harness-paths) :dev))
          (date (format-time-string "%Y-%m-%dT%H:%M:%S" (- (float-time) (* days-ago 86400))))
          (process-environment (append (list (concat "GIT_AUTHOR_DATE=" date)
@@ -545,7 +557,10 @@ the development checkout, which no session works in, is configured."
       (insert "- " subject "\n")
       (write-region nil nil (expand-file-name "NEWS.md" dev) t 'silent))
     (harness-media--git-in dev "add" "-A")
-    (harness-media--git-in dev "-c" "commit.gpgsign=false" "commit" "-q" "--no-gpg-sign" "-m" subject)))
+    (apply #'harness-media--git-in dev "-c" "commit.gpgsign=false" "commit" "-q" "--no-gpg-sign"
+           "-m" subject
+           (when-let* ((body (cdr (assoc subject harness-media--harness-bodies))))
+             (list "-m" body)))))
 
 (defun harness-media--make-harness-repos ()
   "Make the development checkout, GitHub and straight's clone of the harness.

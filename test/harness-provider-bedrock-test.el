@@ -497,6 +497,28 @@ Folded header lines continue the header above them."
                                                      (harness-bedrock--model-info '(:id x) "acme.mystery-v1")
                                                      '(:system "s" :messages ((:role user :content "q"))))))))))
 
+(ert-deftest harness-provider-bedrock-clamps-an-effort-to-what-a-model-offers ()
+  "An adaptive model is asked for an effort it offers, by the shared rule.
+That is the level itself, else the strongest it offers below it, else its
+weakest (`harness-thinking-level-fit'); a model that lists none is asked
+for the level as it is."
+  (let ((levels '("low" "medium" "high")))
+    ;; Offered: asked for as it is.
+    (dolist (level levels)
+      (should (equal level (harness-bedrock--clamp-level level levels))))
+    ;; Not offered: the strongest it has below.
+    (should (equal "high" (harness-bedrock--clamp-level "xhigh" levels)))
+    (should (equal "high" (harness-bedrock--clamp-level "max" levels)))
+    (should (equal "high" (harness-bedrock--clamp-level "xhigh" '("low" "medium" "high" "max"))))
+    ;; None below: its weakest.
+    (should (equal "low" (harness-bedrock--clamp-level "minimal" levels)))
+    (should (equal "high" (harness-bedrock--clamp-level "low" '("max" "high"))))
+    ;; The order of the model's list is no matter.
+    (should (equal "high" (harness-bedrock--clamp-level "max" (reverse levels))))
+    ;; No levels to go by: the level as it is.
+    (should (equal "max" (harness-bedrock--clamp-level "max" nil)))
+    (should (equal "max" (harness-bedrock--clamp-level "max" '(nil))))))
+
 ;;;; Streams to events
 
 (defun harness-bedrock-test--reasoning-tool-stream ()
@@ -688,6 +710,22 @@ at most every `harness-bedrock--progress-interval' seconds."
                                                              (harness-bedrock-test--request "go")))))
             (should (equal '(start hint done) (harness-bedrock-test--types events)))
             (should (equal "HTTP 503: still busy" (plist-get (car (last events)) :error)))))))))
+
+(ert-deftest harness-provider-bedrock-asks-the-http-layer-to-retry ()
+  "A completion asks the HTTP layer to repeat it when the connection is lost.
+Its POST is worth repeating, a turn's and the harness's own calls alike
+\(a title, a judge): before any of the answer reached the provider the
+layer below tries again.  A response the provider throttled or failed is
+its own retry's (above), so only the lost connection is asked for here."
+  (harness-bedrock-test-with-keys
+    (harness-bedrock-test-with-fake
+        `(("converse-stream" . (:chunks (,(harness-bedrock-mock-text-stream "ok")))))
+      (let ((events (car (harness-bedrock-test--complete harness-bedrock-test-endpoint
+                                                         (harness-bedrock-test--request "go")))))
+        (should (equal "ok" (harness-bedrock-test--text events)))
+        (should (= 1 (length harness-bedrock-test--requests)))
+        (should (equal "POST" (plist-get (car harness-bedrock-test--requests) :method)))
+        (should (eq t (plist-get (plist-get (car harness-bedrock-test--requests) :args) :retry)))))))
 
 (ert-deftest harness-provider-bedrock-adjusts-to-what-a-model-rejects ()
   (harness-bedrock-test-with-keys
@@ -1179,6 +1217,35 @@ lists for the same model."
         (should (equal "You said: héllo ✓" (harness-bedrock-test--text events)))
         (should (equal '(:type done :stop-reason end-turn) (car (last events))))
         (should (null (plist-get (car (harness-bedrock-mock-requests mock)) :auth-problem)))))))
+
+(ert-deftest harness-provider-bedrock-end-to-end-retries-a-lost-connection ()
+  "A connection lost before the answer began is tried again below the provider.
+The mock resets the first connection of the ConverseStream request and
+answers the second.  The retry sends the request as it was signed, which
+the mock checks both times, and the provider saw one request answered:
+no hint, no second stream."
+  (skip-unless harness-http--curl-program)
+  (harness-bedrock-test-with-keys
+    (let ((attempts 0)
+          (harness-http-retry-delay 0.01)
+          (harness-http-retry-jitter 0))
+      (harness-bedrock-test-with-mock
+          (lambda (request)
+            (if (and (string-suffix-p "/converse-stream" (plist-get request :path))
+                     (= 1 (cl-incf attempts)))
+                '(:reset t)
+              (harness-bedrock-mock-agent-handler request)))
+        (let ((events (car (harness-bedrock-test--complete
+                            (harness-bedrock-mock-endpoint mock :id 'mockrock)
+                            '(:model "mockrock:amazon.nova-pro-v1:0"
+                              :messages ((:role user :content "hello")))
+                            10))))
+          (should (equal "You said: hello" (harness-bedrock-test--text events)))
+          (should (equal '(:type done :stop-reason end-turn) (car (last events))))
+          (should-not (cl-find 'hint events :key (lambda (e) (plist-get e :type))))
+          (should (= 2 attempts))
+          (should (equal '(nil nil) (mapcar (lambda (r) (plist-get r :auth-problem))
+                                            (harness-bedrock-mock-requests mock)))))))))
 
 ;;;; Gateways
 ;;

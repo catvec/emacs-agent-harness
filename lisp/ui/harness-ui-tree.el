@@ -417,9 +417,15 @@ triangle when it failed.  That icon has a face of its own."
     (insert (propertize " " 'display `(space :align-to (- right ,(1+ (length time)))))
             (propertize time 'face 'harness-dim-face)
             "\n")
-    (add-text-properties start (point)
+    ;; The row's properties stop before its newline: Emacs highlights
+    ;; every contiguous character that shares a `mouse-face' value, so a
+    ;; row whose newline carried the same value as the next row would
+    ;; join it, and hovering anywhere would light up every node at once.
+    ;; Each row also gets a value of its own, so no two can merge even
+    ;; if the newline ever did carry one.
+    (add-text-properties start (1- (point))
                          (list 'harness-ui-tree-node node 'harness-ui-tree-row row
-                               'mouse-face 'highlight
+                               'mouse-face (list 'highlight)
                                'help-echo "mouse-1: open the session here; c: check out; f: fork; TAB: expand"))
     (when (equal sid harness-ui-tree--session-id)
       (add-face-text-property start (point) 'harness-tree-current-line-face t))
@@ -750,10 +756,13 @@ the node's session is left as it is, its head included."
 Like every BTW it is a new session, listed under that session but
 sharing nothing with it, so the node only says which session: its head
 stays where it is.  It opens blank, over the tree, for a question
-written in its compose box."
+written in its compose box.  Like any BTW it runs on a cheap model
+\(`harness-btw-model'); with a prefix argument it asks which model to
+run this one on."
   (interactive)
   (unless (fboundp 'harness-btw) (user-error "The BTW module is not loaded"))
-  (harness-btw (plist-get (harness-ui-tree-node-at-point) :session)))
+  (harness-btw (plist-get (harness-ui-tree-node-at-point) :session) nil
+               (and current-prefix-arg 'choose)))
 
 (defun harness-ui-tree-toggle ()
   "Expand or collapse the node at point."

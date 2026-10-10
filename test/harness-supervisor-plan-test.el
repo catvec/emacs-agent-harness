@@ -21,8 +21,6 @@
 (defvar harness-supervisor)
 (defvar harness-supervisor-tasks)
 (defvar harness-supervisor-tiers)
-(defvar harness-supervisor-thinking)
-(defvar harness-supervisor-worker-thinking)
 (defvar harness-supervisor-step-budget)
 (defvar harness-subagent-context-limit)
 (defvar harness-cowboy-default)
@@ -46,7 +44,7 @@
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
 (defvar harness-tasks--naming)
-(defvar harness-tasks--naming-queue)
+(defvar harness-tasks--naming-pool)
 (defvar harness-tasks--loaded)
 (defvar harness-tasks--dirty)
 (defvar harness-tasks-max-running)
@@ -63,6 +61,7 @@
 (declare-function harness-define-provider "harness-provider")
 (declare-function harness-provider-unregister "harness-provider")
 (declare-function harness-supervisor--update-step "harness-supervisor")
+(declare-function harness-supervisor--tier-model "harness-supervisor")
 (declare-function harness-supervisor--on-turn-ended "harness-supervisor")
 (declare-function harness-session--ext-json-p "harness-session")
 (declare-function harness-tool-title "harness-tools")
@@ -76,6 +75,7 @@
 (declare-function harness-supervisor--send "harness-supervisor")
 (declare-function harness-tools-agent-context-limit "harness-tools-agent")
 (declare-function harness-tasks--forget-stores "harness-tasks")
+(declare-function harness-tasks--naming-pool-new "harness-tasks")
 (declare-function harness-acp--drop-client "harness-acp")
 (declare-function harness-session--load-all "harness-session")
 (declare-function harness-session-flush "harness-session")
@@ -191,7 +191,7 @@ message that follows a result: providers join the two."
 (defun harness-supervisor-plan-test--tier-model (_model &optional tier)
   "Stand in for `provider/tier-model': a model of the demo provider for TIER."
   (pcase tier
-    ('cheap "demo:cheap") ('balanced "demo:balanced") ('frontier "demo:frontier")))
+    ('simple "demo:simple") ('medium "demo:medium") ('hard "demo:hard")))
 
 (defun harness-supervisor-plan-test-stub-tier-model (fn)
   "Make FN the tier mapping of the provider layer, whatever method it asks through.
@@ -228,7 +228,7 @@ A test of what the real catalogue gives a tier calls this inside
   "Load the state layer, the plan engine and the modules EXTRA names, run BODY.
 The demo provider plays the model through the script of the test, the
 permission chain allows everything the supervisor's own stage lets by,
-and the tiers map to the demo models cheap, balanced and frontier."
+and the tiers map to the demo models simple, medium and hard."
   (declare (indent 1))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
@@ -276,7 +276,7 @@ and the tiers map to the demo models cheap, balanced and frontier."
 (defun harness-supervisor-plan-test-step-input (id &rest props)
   "Return the input of step ID of a plan, PROPS overriding its defaults."
   (append props (list :id id :title (format "Title of %s" id) :prompt (format "Do %s." id)
-                      :tier "mundane" :reason "simple")))
+                      :tier "simple" :reason "simple")))
 
 (defun harness-supervisor-plan-test-plan-input (&rest steps)
   "Return the input of a submit_plan call for STEPS, the inputs of its steps."
@@ -473,7 +473,7 @@ promise that never settles, so the steps stay running."
       (let ((text (plist-get (harness-supervisor-plan-test-run
                               sid "submit_plan"
                               (list :summary "x" :steps (list "just a string"
-                                                              (list :prompt "p" :tier "hard"))))
+                                                              (list :prompt "p" :tier "medium"))))
                              :content)))
         (should (string-match-p "step 1 is not an object" text))
         (should (string-match-p "step 2 has no id" text)))
@@ -499,63 +499,106 @@ promise that never settles, so the steps stay running."
 ;;;; Models
 
 (ert-deftest harness-supervisor-plan-each-tier-runs-on-the-model-of-its-provider ()
-  "Mundane is the provider's cheap model, standard its balanced one, hard its frontier one."
+  "Simple runs on the provider's simple model, medium on its medium one.
+A tier is read whatever its case, and the names of old, mundane and
+standard, stand for simple and medium."
   (harness-supervisor-plan-test-with
     (harness-supervisor-plan-test-stub-starts
       (let* ((sid (harness-supervisor-plan-test-session))
              (result (harness-supervisor-plan-test-run
                       sid "submit_plan"
                       (harness-supervisor-plan-test-plan-input
-                       (harness-supervisor-plan-test-step-input "m" :tier "mundane")
-                       (harness-supervisor-plan-test-step-input "s" :tier "standard")
-                       (harness-supervisor-plan-test-step-input "h" :tier "HARD" :context "fresh")))))
+                       (harness-supervisor-plan-test-step-input "m" :tier "simple")
+                       (harness-supervisor-plan-test-step-input "s" :tier "MEDIUM" :context "fresh")
+                       (harness-supervisor-plan-test-step-input "o" :tier "mundane")
+                       (harness-supervisor-plan-test-step-input "p" :tier "standard")))))
         (should-not (plist-get result :is-error))
-        (should (equal "demo:cheap" (plist-get (harness-supervisor-plan-test-step sid "m") :model)))
-        (should (equal "demo:balanced" (plist-get (harness-supervisor-plan-test-step sid "s") :model)))
-        (should (equal "demo:frontier" (plist-get (harness-supervisor-plan-test-step sid "h") :model)))
-        (should (equal "hard" (plist-get (harness-supervisor-plan-test-step sid "h") :tier)))
+        (should (equal "demo:simple" (plist-get (harness-supervisor-plan-test-step sid "m") :model)))
+        (should (equal "demo:medium" (plist-get (harness-supervisor-plan-test-step sid "s") :model)))
+        (should (equal "medium" (plist-get (harness-supervisor-plan-test-step sid "s") :tier)))
+        (should (equal "demo:simple" (plist-get (harness-supervisor-plan-test-step sid "o") :model)))
+        (should (equal "simple" (plist-get (harness-supervisor-plan-test-step sid "o") :tier)))
+        (should (equal "demo:medium" (plist-get (harness-supervisor-plan-test-step sid "p") :model)))
+        (should (equal "medium" (plist-get (harness-supervisor-plan-test-step sid "p") :tier)))
         ;; The answer says where each step runs.
         (let ((text (plist-get result :content)))
-          (should (string-match-p "^- m → demo:cheap" text))
-          (should (string-match-p "^- s → demo:balanced" text))
-          (should (string-match-p "^- h → demo:frontier" text)))
+          (should (string-match-p "^- m → demo:simple (simple)" text))
+          (should (string-match-p "^- s → demo:medium (medium, fresh)" text)))
         (should-not (cl-some (lambda (h) (string-match-p "own model" h))
                              (harness-supervisor-plan-test-hints sid)))))))
 
-(ert-deftest harness-supervisor-plan-the-setting-overrides-the-model-of-a-tier ()
-  "A model in `harness-supervisor-tiers' wins for its tier; the others keep the provider's."
+(ert-deftest harness-supervisor-plan-a-hard-step-is-refused ()
+  "The steps of a plan are simple or medium: hard is for retry_step alone.
+The supervisor runs on the hard model, so the refusal tells it to break
+the step down, and nothing starts."
   (harness-supervisor-plan-test-with
     (harness-supervisor-plan-test-stub-starts
-      (let ((harness-supervisor-tiers '((hard . "demo:opus") (mundane . "demo:haiku")))
+      (let* ((sid (harness-supervisor-plan-test-session))
+             (result (harness-supervisor-plan-test-run
+                      sid "submit_plan"
+                      (harness-supervisor-plan-test-plan-input
+                       (harness-supervisor-plan-test-step-input "a")
+                       (harness-supervisor-plan-test-step-input "b" :tier "HARD")
+                       (harness-supervisor-plan-test-step-input "c" :tier "frontier")))))
+        (should (plist-get result :is-error))
+        (let ((text (plist-get result :content)))
+          (should (string-match-p (concat "step b has \"hard\" as its tier: the steps of a plan are"
+                                          " simple or medium")
+                                  text))
+          (should (string-match-p "Break it down until each step is medium at most" text))
+          (should (string-match-p "retry_step runs it again on hard" text))
+          (should (string-match-p "step c has \"frontier\" as its tier: it must be simple or medium" text))
+          (should-not (string-match-p "step a" text)))
+        (should-not (harness-supervisor-plan-test-plans sid))
+        (should-not harness-supervisor-plan-test--calls)))))
+
+(ert-deftest harness-supervisor-plan-the-setting-overrides-the-model-of-a-tier ()
+  "A model in `harness-supervisor-tiers' wins for its tier; the others keep the provider's.
+An entry may name a thinking level too, or that alone, and an entry
+under a name of old counts for its tier."
+  (harness-supervisor-plan-test-with
+    (harness-supervisor-plan-test-stub-starts
+      (let ((harness-supervisor-tiers '((hard . "demo:opus") (mundane . "demo:haiku")
+                                        (medium :model "demo:sonnet" :thinking "low")))
             (sid (harness-supervisor-plan-test-session)))
         (harness-supervisor-plan-test-run
          sid "submit_plan"
          (harness-supervisor-plan-test-plan-input
-          (harness-supervisor-plan-test-step-input "m" :tier "mundane")
-          (harness-supervisor-plan-test-step-input "s" :tier "standard")
-          (harness-supervisor-plan-test-step-input "h" :tier "hard")))
+          (harness-supervisor-plan-test-step-input "m" :tier "simple")
+          (harness-supervisor-plan-test-step-input "s" :tier "medium")))
         (should (equal "demo:haiku" (plist-get (harness-supervisor-plan-test-step sid "m") :model)))
-        (should (equal "demo:balanced" (plist-get (harness-supervisor-plan-test-step sid "s") :model)))
-        (should (equal "demo:opus" (plist-get (harness-supervisor-plan-test-step sid "h") :model)))))))
+        (should-not (plist-get (harness-supervisor-plan-test-step sid "m") :thinking))
+        (should (equal "demo:sonnet" (plist-get (harness-supervisor-plan-test-step sid "s") :model)))
+        (should (equal "low" (plist-get (harness-supervisor-plan-test-step sid "s") :thinking)))
+        ;; Hard, which only a retry reaches, takes its entry too.
+        (should (equal '("demo:opus" nil nil)
+                       (harness-test-await (harness-supervisor--tier-model
+                                            (harness-call 'session/get sid) "hard"))))))
+    ;; A level alone keeps the provider's model.
+    (let ((harness-supervisor-tiers '((simple :thinking "high")))
+          (sid (harness-supervisor-plan-test-session)))
+      (should (equal '("demo:simple" nil "high")
+                     (harness-test-await (harness-supervisor--tier-model
+                                          (harness-call 'session/get sid) "simple")))))))
 
 (ert-deftest harness-supervisor-plan-a-tier-without-a-model-runs-on-the-supervisors-own ()
   "With no model for a tier the step runs on the supervisor's, and a hint says so."
   (harness-supervisor-plan-test-with
     (harness-supervisor-plan-test-stub-starts
       (harness-supervisor-plan-test-stub-tier-model
-       (lambda (_model &optional tier) (and (eq tier 'cheap) "demo:cheap")))
+       (lambda (_model &optional tier) (and (eq tier 'simple) "demo:simple")))
       (let ((sid (harness-supervisor-plan-test-session)))
         (harness-supervisor-plan-test-run
          sid "submit_plan"
          (harness-supervisor-plan-test-plan-input
-          (harness-supervisor-plan-test-step-input "m" :tier "mundane")
-          (harness-supervisor-plan-test-step-input "h" :tier "hard")))
-        (should (equal "demo:cheap" (plist-get (harness-supervisor-plan-test-step sid "m") :model)))
+          (harness-supervisor-plan-test-step-input "m" :tier "simple")
+          (harness-supervisor-plan-test-step-input "h" :tier "medium")))
+        (should (equal "demo:simple" (plist-get (harness-supervisor-plan-test-step sid "m") :model)))
         (should (equal "demo:scripted" (plist-get (harness-supervisor-plan-test-step sid "h") :model)))
         (let ((hint (cl-find-if (lambda (h) (string-match-p "own model" h))
                                 (harness-supervisor-plan-test-hints sid))))
           (should hint)
-          (should (string-match-p "step h (hard)" hint))
+          (should (string-match-p "step h (medium)" hint))
           (should-not (string-match-p "step m" hint))
           (should (string-match-p "demo:scripted" hint))))))
   ;; A provider that fails to answer counts as having no model.
@@ -600,9 +643,9 @@ scripted while the models are the provider's own."
 
 (ert-deftest harness-supervisor-plan-the-real-catalogue-decides-what-a-worker-runs-on ()
   "The provider's own catalogue gives each tier its model, and the workers start on it.
-Two mundane steps share a seed -- one seeded fork between them -- and a
-hard step forks the supervisor directly; every worker's model is the one
-its tier ranks with, not the supervisor's."
+Two simple steps share a seed -- one seeded fork between them -- and a
+medium step forks the supervisor directly; every worker's model is the
+one its tier ranks with, not the supervisor's."
   (harness-supervisor-plan-test-with
     (harness-supervisor-plan-test-stub-starts
       (harness-supervisor-plan-test-real-tiers)
@@ -612,17 +655,17 @@ its tier ranks with, not the supervisor's."
             (harness-call 'session/usage-add sid '(:input 10 :output 5 :context 7000))
             (harness-supervisor-plan-test-submit
              sid
-             (harness-supervisor-plan-test-step-input "m1" :tier "mundane")
-             (harness-supervisor-plan-test-step-input "m2" :tier "mundane")
-             (harness-supervisor-plan-test-step-input "h" :tier "hard"))
+             (harness-supervisor-plan-test-step-input "m1" :tier "simple")
+             (harness-supervisor-plan-test-step-input "m2" :tier "simple")
+             (harness-supervisor-plan-test-step-input "h" :tier "medium"))
             (should (equal "tiered:small" (plist-get (harness-supervisor-plan-test-step sid "m1") :model)))
             (should (equal "tiered:small" (plist-get (harness-supervisor-plan-test-step sid "m2") :model)))
-            (should (equal "tiered:big" (plist-get (harness-supervisor-plan-test-step sid "h") :model)))
+            (should (equal "tiered:mid" (plist-get (harness-supervisor-plan-test-step sid "h") :model)))
             (should (equal '("tiered:small" "tiered:small")
                            (mapcar (lambda (args) (nth 1 args))
                                    (harness-supervisor-plan-test-calls 'seed/fork))))
             ;; `session/fork' takes the session id first, then its plist.
-            (should (equal '("tiered:big")
+            (should (equal '("tiered:mid")
                            (mapcar (lambda (args) (plist-get (cdr args) :model))
                                    (harness-supervisor-plan-test-calls 'session/fork))))
             (should-not (cl-some (lambda (h) (string-match-p "own model" h))
@@ -660,8 +703,8 @@ tier, and ran the step on the supervisor's own, expensive model."
             (let ((hint (cl-find-if (lambda (h) (string-match-p "own model" h))
                                     (harness-supervisor-plan-test-hints sid))))
               (should hint)
-              (should (string-match-p "step m (mundane)" hint))
-              (should (string-match-p "unpriced names no cheap model" hint))
+              (should (string-match-p "step m (simple)" hint))
+              (should (string-match-p "unpriced names no simple model" hint))
               (should (string-match-p "unpriced:only" hint))))
         (harness-provider-unregister 'unpriced)))))
 
@@ -689,7 +732,7 @@ Return how the turn ended.  A turn the session still runs ends first."
         (should (eq 'end-turn
                     (harness-supervisor-plan-test-submit
                      sid
-                     (harness-supervisor-plan-test-step-input "s1" :tier "hard" :reason "subtle")
+                     (harness-supervisor-plan-test-step-input "s1" :tier "medium" :reason "subtle")
                      (harness-supervisor-plan-test-step-input "s2" :after '("s1") :context "fresh"))))
         ;; The turn ended on the tool: the model said nothing after the call.
         (should (= 1 (length harness-supervisor-plan-test--requests)))
@@ -707,10 +750,10 @@ Return how the turn ended.  A turn the session still runs ends first."
                 (s2 (harness-supervisor-plan-test-step sid "s2")))
             (should (equal "Title of s1" (plist-get s1 :title)))
             (should (equal "Do s1." (plist-get s1 :prompt)))
-            (should (equal "hard" (plist-get s1 :tier)))
+            (should (equal "medium" (plist-get s1 :tier)))
             (should (equal "subtle" (plist-get s1 :reason)))
             (should (equal "fork" (plist-get s1 :context)))
-            (should (equal "demo:frontier" (plist-get s1 :model)))
+            (should (equal "demo:medium" (plist-get s1 :model)))
             (should (equal "running" (plist-get s1 :state)))
             (should (= 1 (plist-get s1 :attempts)))
             (should-not (plist-get s1 :after))
@@ -729,8 +772,8 @@ Return how the turn ended.  A turn the session still runs ends first."
         ;; The tool answered with one line per step.
         (let ((answer (plist-get (car (harness-supervisor-plan-test-nodes sid 'tool-result)) :output)))
           (should (string-match-p "Plan p-[a-z0-9]+ submitted: 2 steps" answer))
-          (should (string-match-p "^- s1 → demo:frontier" answer))
-          (should (string-match-p "^- s2 → demo:cheap" answer))
+          (should (string-match-p "^- s1 → demo:medium" answer))
+          (should (string-match-p "^- s2 → demo:simple" answer))
           (should (string-match-p "after s1" answer)))))))
 
 (ert-deftest harness-supervisor-plan-one-step-is-a-hint-of-one-step ()
@@ -754,7 +797,7 @@ Return how the turn ended.  A turn the session still runs ends first."
          ;; Not ready yet, but a fork step on the model all the same.
          (harness-supervisor-plan-test-step-input "e" :after '("a"))
          ;; Alone on its model: a plain fork.
-         (harness-supervisor-plan-test-step-input "c" :tier "hard")
+         (harness-supervisor-plan-test-step-input "c" :tier "medium")
          ;; Fresh steps fork nothing.
          (harness-supervisor-plan-test-step-input "d" :context "fresh"))
         (let* ((node (harness-supervisor-plan-test-call-node sid "call-plan"))
@@ -764,15 +807,15 @@ Return how the turn ended.  A turn the session still runs ends first."
           (should node)
           (should (> limit harness-subagent-context-limit))
           (should (= 2 (length seeds)))
-          (should (equal (list sid "demo:cheap" :node node :call-id "call-plan"
+          (should (equal (list sid "demo:simple" :node node :call-id "call-plan"
                                :name "Step a: Title of a" :context-window-limit limit)
                          (nth 0 seeds)))
-          (should (equal (list sid "demo:cheap" :node node :call-id "call-plan"
+          (should (equal (list sid "demo:simple" :node node :call-id "call-plan"
                                :name "Step b: Title of b" :context-window-limit limit)
                          (nth 1 seeds)))
           (should (= 1 (length forks)))
           (should (equal (list sid :node node :call-id "call-plan" :kind 'subagent
-                               :model "demo:frontier" :name "Step c: Title of c"
+                               :model "demo:medium" :name "Step c: Title of c"
                                :context-window-limit limit)
                          (car forks)))
           (should (= 1 (length (harness-supervisor-plan-test-calls 'session/create))))
@@ -786,7 +829,7 @@ Return how the turn ended.  A turn the session still runs ends first."
     (harness-supervisor-plan-test-stub-starts
       (let ((sid (harness-supervisor-plan-test-session)))
         (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "a")
-                                             (harness-supervisor-plan-test-step-input "b" :tier "hard"))
+                                             (harness-supervisor-plan-test-step-input "b" :tier "medium"))
         (should-not (harness-supervisor-plan-test-calls 'seed/fork))
         (should (= 2 (length (harness-supervisor-plan-test-calls 'session/fork)))))))
   (harness-supervisor-plan-test-with
@@ -809,14 +852,14 @@ Return how the turn ended.  A turn the session still runs ends first."
                              :id)))
         (harness-call 'session/usage-add sid '(:input 10 :output 5 :context 7000))
         (harness-supervisor-plan-test-submit
-         sid (harness-supervisor-plan-test-step-input "f" :tier "standard" :context "fresh"))
+         sid (harness-supervisor-plan-test-step-input "f" :tier "medium" :context "fresh"))
         (let ((args (car (harness-supervisor-plan-test-calls 'session/create)))
               (session (harness-call 'session/get sid)))
           (should (equal (plist-get session :cwd) (plist-get args :cwd)))
           (should (equal dir (plist-get args :worktree)))
           (should (eq 'subagent (plist-get args :kind)))
           (should (equal sid (plist-get args :parent-id)))
-          (should (equal "demo:balanced" (plist-get args :model)))
+          (should (equal "demo:medium" (plist-get args :model)))
           (should (equal "Step f: Title of f" (plist-get args :name)))
           (should (eq 'auto (plist-get args :permission-mode)))
           (should (equal "high" (plist-get args :thinking)))
@@ -827,63 +870,91 @@ Return how the turn ended.  A turn the session still runs ends first."
           (should (eql harness-subagent-context-limit (plist-get args :context-window-limit)))
           (should (< (plist-get args :context-window-limit) (harness-tools-agent-context-limit sid t))))))))
 
-(ert-deftest harness-supervisor-plan-a-worker-thinks-at-the-level-of-its-own-provider ()
-  "`harness-supervisor-worker-thinking' sets the level every kind of worker starts at."
+(defun harness-supervisor-plan-test-tier-thinking (levels)
+  "Make every provider's tiers name LEVELS, an alist from a tier to its level.
+It stands in for `provider/tier-thinking', as DeepSeek's tiers name
+low, high and max; a tier LEVELS leaves out names none."
+  (harness-register-method 'provider/tier-thinking
+                           (lambda (_model &optional tier) (cdr (assq tier levels)))))
+
+(ert-deftest harness-supervisor-plan-a-worker-thinks-at-the-level-of-its-tier ()
+  "The level the provider's tier names is the one every kind of worker starts at.
+The step keeps it, and the answer to the plan says it."
   (harness-supervisor-plan-test-with
     (harness-supervisor-plan-test-stub-starts
-      (let ((harness-supervisor-worker-thinking '((demo . "low"))))
-        (let ((sid (harness-supervisor-plan-test-session)))
-          (harness-supervisor-plan-test-submit
-           sid (harness-supervisor-plan-test-step-input "a")
-           ;; Same model, and forked too: both share a seed.
-           (harness-supervisor-plan-test-step-input "b")
-           ;; Alone on its model: forked directly.
-           (harness-supervisor-plan-test-step-input "c" :tier "hard")
-           (harness-supervisor-plan-test-step-input "f" :context "fresh"))
-          (should (= 2 (length (harness-supervisor-plan-test-calls 'seed/fork))))
-          ;; The calls carry positional arguments first (the session forked
-          ;; and, for a seed, its model), so the plist follows them.
-          (dolist (call (harness-supervisor-plan-test-calls 'seed/fork))
-            (should (equal "low" (plist-get (cddr call) :thinking))))
-          (dolist (call (harness-supervisor-plan-test-calls 'session/fork))
-            (should (equal "low" (plist-get (cdr call) :thinking))))
-          (should (equal "low" (plist-get (car (harness-supervisor-plan-test-calls 'session/create))
-                                          :thinking))))))))
+      (harness-supervisor-plan-test-tier-thinking '((simple . "low") (medium . "high")))
+      (let ((sid (harness-supervisor-plan-test-session)))
+        (harness-supervisor-plan-test-submit
+         sid (harness-supervisor-plan-test-step-input "a")
+         ;; Same model, and forked too: both share a seed.
+         (harness-supervisor-plan-test-step-input "b")
+         ;; Alone on its model: forked directly.
+         (harness-supervisor-plan-test-step-input "c" :tier "medium")
+         (harness-supervisor-plan-test-step-input "f" :context "fresh"))
+        (should (= 2 (length (harness-supervisor-plan-test-calls 'seed/fork))))
+        ;; The calls carry positional arguments first (the session forked
+        ;; and, for a seed, its model), so the plist follows them.
+        (dolist (call (harness-supervisor-plan-test-calls 'seed/fork))
+          (should (equal "low" (plist-get (cddr call) :thinking))))
+        (dolist (call (harness-supervisor-plan-test-calls 'session/fork))
+          (should (equal "high" (plist-get (cdr call) :thinking))))
+        (should (equal "low" (plist-get (car (harness-supervisor-plan-test-calls 'session/create))
+                                        :thinking)))
+        (should (equal "low" (plist-get (harness-supervisor-plan-test-step sid "a") :thinking)))
+        (should (equal "high" (plist-get (harness-supervisor-plan-test-step sid "c") :thinking)))
+        (let ((answer (plist-get (car (harness-supervisor-plan-test-nodes sid 'tool-result)) :output)))
+          (should (string-match-p "^- c → demo:medium (medium, high thinking)" answer))
+          (should (string-match-p "^- f → demo:simple (simple, low thinking, fresh)" answer)))))))
 
 (ert-deftest harness-supervisor-plan-the-worker-level-is-the-worker-models-providers ()
-  "A worker takes the level of the provider of its own model, not of its supervisor's."
+  "A worker takes the level its own model's provider names, not its supervisor's provider."
   (harness-supervisor-plan-test-with
     (harness-supervisor-plan-test-stub-starts
-      (let ((harness-supervisor-tiers '((mundane . "deepseek:deepseek-flash")))
-            ;; The supervisor is a demo session, which the alist does not name.
-            (harness-supervisor-worker-thinking '((deepseek . "medium"))))
+      ;; DeepSeek names a level for its simple tier; the demo provider none.
+      (harness-register-method 'provider/tier-thinking
+                               (lambda (model &optional tier)
+                                 (and (string-prefix-p "deepseek:" model) (eq tier 'simple) "low")))
+      (let ((harness-supervisor-tiers '((simple . "deepseek:deepseek-flash"))))
         (let ((sid (harness-supervisor-plan-test-session)))
           (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "a"))
           ;; A session/fork call leads with the session forked and its plist follows.
           (let ((args (cdr (car (harness-supervisor-plan-test-calls 'session/fork)))))
             (should (equal "deepseek:deepseek-flash" (plist-get args :model)))
-            (should (equal "medium" (plist-get args :thinking)))))))))
+            (should (equal "low" (plist-get args :thinking)))))))))
 
 (ert-deftest harness-supervisor-plan-no-worker-level-leaves-the-supervisors-own ()
-  "A provider the setting does not name leaves its workers at the supervisor's level."
+  "A tier that names no level leaves its workers at the supervisor's level.
+Fitted to what the worker's model offers: the demo model thinks at low
+or high, so the worker of a supervisor at max thinks at high."
   (harness-supervisor-plan-test-with
     (harness-supervisor-plan-test-stub-starts
-      (let ((harness-supervisor-worker-thinking nil))
-        (let ((sid (harness-supervisor-plan-test-session :thinking "high")))
-          (harness-supervisor-plan-test-submit
-           sid (harness-supervisor-plan-test-step-input "c" :tier "hard")
-           (harness-supervisor-plan-test-step-input "f" :context "fresh"))
-          ;; A fork inherits it (no `:thinking' passed), a fresh worker is told it.
-          (should-not (plist-member (cdr (car (harness-supervisor-plan-test-calls 'session/fork)))
-                                    :thinking))
-          (should (equal "high" (plist-get (car (harness-supervisor-plan-test-calls 'session/create))
-                                           :thinking))))))))
+      (let ((sid (harness-supervisor-plan-test-session :thinking "high")))
+        (harness-supervisor-plan-test-submit
+         sid (harness-supervisor-plan-test-step-input "c" :tier "medium")
+         (harness-supervisor-plan-test-step-input "f" :context "fresh"))
+        ;; A fork inherits it (no `:thinking' passed), a fresh worker is told it.
+        (should-not (plist-member (cdr (car (harness-supervisor-plan-test-calls 'session/fork)))
+                                  :thinking))
+        (should (equal "high" (plist-get (car (harness-supervisor-plan-test-calls 'session/create))
+                                         :thinking)))
+        (should-not (plist-get (harness-supervisor-plan-test-step sid "c") :thinking)))))
+  (harness-supervisor-plan-test-with
+    (harness-supervisor-plan-test-stub-starts
+      (let ((harness-supervisor-tiers '((medium . "demo:scripted")))
+            (sid (harness-supervisor-plan-test-session :thinking "max")))
+        (harness-supervisor-plan-test-submit
+         sid (harness-supervisor-plan-test-step-input "c" :tier "medium")
+         (harness-supervisor-plan-test-step-input "f" :tier "medium" :context "fresh"))
+        (should (equal "high" (plist-get (cdr (car (harness-supervisor-plan-test-calls 'session/fork)))
+                                         :thinking)))
+        (should (equal "high" (plist-get (car (harness-supervisor-plan-test-calls 'session/create))
+                                         :thinking)))))))
 
 (ert-deftest harness-supervisor-plan-a-seeded-worker-gets-the-level-itself ()
   "A worker forked through a seed thinks at the worker level, not the seed's or the supervisor's."
   (harness-supervisor-plan-test-with
-    (let ((harness-supervisor-worker-thinking '((demo . "low")))
-          (sid (harness-supervisor-plan-test-session :thinking "high")))
+    (harness-supervisor-plan-test-tier-thinking '((simple . "low")))
+    (let ((sid (harness-supervisor-plan-test-session :thinking "high")))
       (harness-supervisor-plan-test-submit
        sid (harness-supervisor-plan-test-step-input "a")
        (harness-supervisor-plan-test-step-input "b"))
@@ -915,7 +986,7 @@ Return how the turn ended.  A turn the session still runs ends first."
         (harness-supervisor-plan-test-submit
          sid (harness-supervisor-plan-test-step-input "a")
          (harness-supervisor-plan-test-step-input "b")
-         (harness-supervisor-plan-test-step-input "c" :tier "hard")
+         (harness-supervisor-plan-test-step-input "c" :tier "medium")
          (harness-supervisor-plan-test-step-input "d" :context "fresh"))
         (dolist (call (append (harness-supervisor-plan-test-calls 'seed/fork)
                               (harness-supervisor-plan-test-calls 'session/fork)
@@ -987,7 +1058,7 @@ worker's the cap alone."
         (should (= 1 (plist-get step :attempts)))
         (should (eq 'subagent (plist-get worker :kind)))
         (should (equal sid (plist-get worker :parent-id)))
-        (should (equal "demo:cheap" (plist-get worker :model)))
+        (should (equal "demo:simple" (plist-get worker :model)))
         (should (equal "Step s1: Title of s1" (plist-get worker :name)))
         (should (equal (plist-get (harness-supervisor-plan-test-plan sid) :node) (plist-get worker :fork-node)))
         ;; A worker works; it does not plan: nothing governs it, and it has no tool of the supervisor's.
@@ -1012,7 +1083,7 @@ worker's the cap alone."
           (should (string-match-p "Do the step, then verify it\\. End with a short report of what you changed and how you checked it\\. Do not commit unless the step says so\\.\\'" text))
           (should-not (string-match-p "What the steps before this one reported" text))))
       ;; The supervisor got a hint, then the report that the plan finished, in a turn of its own.
-      (should (member "Step s1 done on demo:cheap" (harness-supervisor-plan-test-hints sid)))
+      (should (member "Step s1 done on demo:simple" (harness-supervisor-plan-test-hints sid)))
       (let ((reports (harness-supervisor-plan-test-wait-reports sid 1)))
         (should (= 1 (length reports)))
         (should (string-match-p "plan p-[a-z0-9]+ (The plan) finished\\. Its one step is done" (car reports))))
@@ -1025,14 +1096,14 @@ worker's the cap alone."
   (harness-supervisor-plan-test-with
     (let ((sid (harness-supervisor-plan-test-session)))
       (harness-supervisor-plan-test-submit
-       sid (harness-supervisor-plan-test-step-input "f" :context "fresh" :tier "standard"))
+       sid (harness-supervisor-plan-test-step-input "f" :context "fresh" :tier "medium"))
       (harness-supervisor-plan-test-wait-state sid "f" "done")
       (let* ((wid (plist-get (harness-supervisor-plan-test-step sid "f") :session))
              (worker (harness-call 'session/get wid))
              (texts (harness-supervisor-plan-test-user-texts wid)))
         (should (eq 'subagent (plist-get worker :kind)))
         (should (equal sid (plist-get worker :parent-id)))
-        (should (equal "demo:balanced" (plist-get worker :model)))
+        (should (equal "demo:medium" (plist-get worker :model)))
         (should-not (plist-get worker :fork-node))
         (should (= 1 (length texts)))
         (should (string-match-p "\\`You are a worker for one step of a plan that a supervisor made" (car texts)))
@@ -1105,13 +1176,13 @@ worker's the cap alone."
              (b (harness-call 'session/get (plist-get (harness-supervisor-plan-test-step sid "b") :session))))
         (should (= 1 (length seeds)))
         (should (equal (plist-get plan :node) (plist-get (car seeds) :node)))
-        (should (equal "demo:cheap" (plist-get (car seeds) :model)))
+        (should (equal "demo:simple" (plist-get (car seeds) :model)))
         (should (equal (plist-get (car seeds) :id) (plist-get a :parent-id)))
         (should (equal (plist-get (car seeds) :id) (plist-get b :parent-id)))
         (should (equal "Step a: Title of a" (plist-get a :name)))
         (should (equal "Step b: Title of b" (plist-get b :name)))
         (should (eq 'subagent (plist-get a :kind)))
-        (should (equal "demo:cheap" (plist-get a :model)))))))
+        (should (equal "demo:simple" (plist-get a :model)))))))
 
 (ert-deftest harness-supervisor-plan-the-seed-preamble-opens-a-workers-first-message ()
   "What `seed/fork' asks a fork's first message to say goes before the opening."
@@ -1197,7 +1268,7 @@ Step s4 waits for s2 and s3."
    sid
    (harness-supervisor-plan-test-step-input "s1" :prompt "Make the parser strict.")
    (harness-supervisor-plan-test-step-input "s2" :after '("s1"))
-   (harness-supervisor-plan-test-step-input "s3" :tier "standard")
+   (harness-supervisor-plan-test-step-input "s3" :tier "medium")
    (harness-supervisor-plan-test-step-input "s4" :after '("s2" "s3"))))
 
 (ert-deftest harness-supervisor-plan-a-failed-step-holds-its-dependants-and-tells-the-supervisor ()
@@ -1213,7 +1284,7 @@ Step s4 waits for s2 and s3."
               (step (harness-supervisor-plan-test-step sid "s1")))
           (should (equal "the worker's turn ended with error: boom" (plist-get step :error)))
           (should (string-prefix-p "Supervisor report: step s1 (Title of s1) failed.\n" text))
-          (should (string-match-p "tier mundane, model demo:cheap (attempt 1)" text))
+          (should (string-match-p "tier simple, model demo:simple (attempt 1)" text))
           (should (string-match-p "Why: the worker's turn ended with error: boom" text))
           (should (string-match-p (format "session %s" (plist-get step :session)) text))
           (should (string-match-p "Held on it, pending until it is done: s2 (Title of s2), s4 (Title of s4)\\." text))
@@ -1273,7 +1344,7 @@ Step s4 waits for s2 and s3."
         (should (equal "done" (plist-get s1 :state)))
         (should (= 2 (plist-get s1 :attempts)))
         (should (equal "hard" (plist-get s1 :tier)))
-        (should (equal "demo:frontier" (plist-get s1 :model)))
+        (should (equal "demo:hard" (plist-get s1 :model)))
         (should (equal "mundane was not enough" (plist-get s1 :reason)))
         (should (equal "Fixed s1." (plist-get s1 :result)))
         (should-not (plist-get s1 :error))
@@ -1282,14 +1353,14 @@ Step s4 waits for s2 and s3."
         (should (string-prefix-p "Do s1." (plist-get s1 :prompt)))
         ;; The second attempt ran on the higher tier's model, with the notes.
         (let ((again (harness-supervisor-plan-test-step-request "s1" 1)))
-          (should (equal "demo:frontier" (plist-get again :model)))
+          (should (equal "demo:hard" (plist-get again :model)))
           (should (string-match-p "Notes for attempt 2: The first attempt failed with boom\\." (plist-get again :text))))
-        (should (equal "demo:cheap" (plist-get (harness-supervisor-plan-test-step-request "s1" 0) :model)))
+        (should (equal "demo:simple" (plist-get (harness-supervisor-plan-test-step-request "s1" 0) :model)))
         ;; The step that waited got the result of the attempt that worked.
         (should (string-match-p "### s1 (Title of s1)\nFixed s1\\."
                                 (plist-get (harness-supervisor-plan-test-step-request "s2") :text)))
-        (should (equal "demo:cheap" (plist-get s2 :model))))
-      (should (member "Retrying step s1 on demo:frontier (attempt 2): mundane was not enough"
+        (should (equal "demo:simple" (plist-get s2 :model))))
+      (should (member "Retrying step s1 on demo:hard (attempt 2): mundane was not enough"
                       (harness-supervisor-plan-test-hints sid)))
       ;; The retry did not end the turn: the model went on and said its piece.
       (let ((reports (harness-supervisor-plan-test-wait-reports sid 2)))
@@ -1301,6 +1372,41 @@ Step s4 waits for s2 and s3."
                                                                       (plist-get r :text))))
                                     harness-supervisor-plan-test--requests)))
         (should (= 2 (length turn)))))))
+
+(ert-deftest harness-supervisor-plan-a-retry-on-hard-thinks-at-the-hard-tiers-level ()
+  "A step escalated to hard takes the hard tier's model and thinking level.
+retry_step reads the names of old too, and a step moved to a tier that
+names no level loses the level of the tier it left."
+  (harness-supervisor-plan-test-with
+    (harness-supervisor-plan-test-stub-starts
+      (harness-supervisor-plan-test-tier-thinking '((simple . "low") (hard . "high")))
+      (let ((sid (harness-supervisor-plan-test-session)))
+        (harness-supervisor-plan-test-submit
+         sid (harness-supervisor-plan-test-step-input "s1" :tier "medium" :context "fresh")
+         (harness-supervisor-plan-test-step-input "s2" :context "fresh"))
+        (let ((plan-id (plist-get (harness-supervisor-plan-test-plan sid) :id)))
+          (should-not (plist-get (harness-supervisor-plan-test-step sid "s1") :thinking))
+          (should (equal "low" (plist-get (harness-supervisor-plan-test-step sid "s2") :thinking)))
+          (dolist (id '("s1" "s2"))
+            (harness-supervisor--update-step sid plan-id id :state "failed" :error "boom"))
+          (let ((result (harness-supervisor-plan-test-retry-step sid "s1" :tier "hard")))
+            (should-not (plist-get result :is-error))
+            (should (string-match-p "runs again on demo:hard (tier hard, high thinking, attempt 2)"
+                                    (plist-get result :content))))
+          (let ((s1 (harness-supervisor-plan-test-step sid "s1")))
+            (should (equal "hard" (plist-get s1 :tier)))
+            (should (equal "demo:hard" (plist-get s1 :model)))
+            (should (equal "high" (plist-get s1 :thinking))))
+          ;; Its new worker thinks at that level.
+          (let ((create (car (last (harness-supervisor-plan-test-calls 'session/create)))))
+            (should (equal "demo:hard" (plist-get create :model)))
+            (should (equal "high" (plist-get create :thinking))))
+          ;; A name of old is read as its tier of now; medium names no level here.
+          (should-not (plist-get (harness-supervisor-plan-test-retry-step sid "s2" :tier "standard") :is-error))
+          (let ((s2 (harness-supervisor-plan-test-step sid "s2")))
+            (should (equal "medium" (plist-get s2 :tier)))
+            (should (equal "demo:medium" (plist-get s2 :model)))
+            (should-not (plist-get s2 :thinking))))))))
 
 ;; A step that starts again decides what its worker reads by the cache: a
 ;; warm seed, else a compacted fork (harness-supervisor.el).
@@ -1314,7 +1420,7 @@ model's."
   `(harness-supervisor-plan-test-with-modules ,extra
      (let ((harness-cowboy-default 'brief)
            (harness-cowboy-min-context 0)
-           (harness-compaction-brief-model "demo:cheap"))
+           (harness-compaction-brief-model "demo:simple"))
        ,@body)))
 
 (defun harness-supervisor-plan-test-own-compactions (sid)
@@ -1371,23 +1477,25 @@ compacted as the cowboy would, the supervisor is told, and so is the worker."
                (nodes (harness-supervisor-plan-test-own-compactions wid))
                (hints (harness-supervisor-plan-test-hints sid))
                (text (plist-get (harness-supervisor-plan-test-step-request "s1" 1) :text)))
-          (should (equal "demo:frontier" (plist-get s1 :model)))
+          (should (equal "demo:hard" (plist-get s1 :model)))
           (should (= 2 (plist-get s1 :attempts)))
           ;; The fork was compacted, by the cowboy's default, before its turn.
           (should (= 1 (length nodes)))
           (should (equal "brief" (harness-node-compaction-kind (car nodes))))
           (should (equal '(:choice "brief" :by "cold-start") (plist-get (plist-get (car nodes) :meta) :cowboy)))
-          (should (member (concat "No prompt cache on demo:frontier holds the supervisor's conversation: compacting"
+          (should (member (concat "No prompt cache on demo:hard holds the supervisor's conversation: compacting"
                                   " into a brief summary first, the default for a session no warm cache holds"
                                   " (harness-cowboy-default)")
                           (harness-supervisor-plan-test-hints wid)))
-          ;; The worker reads the summary, not the supervisor's conversation.
+          ;; The worker reads the summary, with the conversation's first and
+          ;; last messages kept verbatim: the task it was given is there,
+          ;; while the middle is the summary.
           (let ((sent (harness-supervisor-plan-test-messages-text wid)))
             (should (string-match-p "Do s1\\." sent))
-            (should-not (string-match-p "Do the thing" sent)))
+            (should (string-match-p "Do the thing" sent)))
           ;; The supervisor is told, after the retry it made.
-          (let ((retry (cl-position "Retrying step s1 on demo:frontier (attempt 2): once more" hints :test #'equal))
-                (told (cl-position (concat "Step s1 (attempt 2) on demo:frontier: no warm prompt cache holds the"
+          (let ((retry (cl-position "Retrying step s1 on demo:hard (attempt 2): once more" hints :test #'equal))
+                (told (cl-position (concat "Step s1 (attempt 2) on demo:hard: no warm prompt cache holds the"
                                            " plan's conversation, so its worker starts from a brief summary of it"
                                            " rather than reading it all uncached")
                                    hints :test #'equal)))
@@ -1419,7 +1527,7 @@ the supervisor holds, and its transcript says so after the compaction."
         (let* ((wid (plist-get (harness-supervisor-plan-test-step sid "s1") :session))
                (limit (plist-get (harness-call 'session/get wid) :context-window-limit))
                (hints (harness-supervisor-plan-test-hints wid))
-               (cowboy (cl-position-if (lambda (h) (string-prefix-p "No prompt cache on demo:frontier" h)) hints))
+               (cowboy (cl-position-if (lambda (h) (string-prefix-p "No prompt cache on demo:hard" h)) hints))
                (cap (cl-position-if (lambda (h) (string-prefix-p "Context window capped at" h)) hints)))
           (should (= 1 (length (harness-supervisor-plan-test-own-compactions wid))))
           ;; The cap and the summary's few tokens, far below the 90k and the cap.
@@ -1442,29 +1550,29 @@ the supervisor holds, and its transcript says so after the compaction."
       ;; Two fork steps on a model: their first attempts fork through one seed, as always.
       (harness-supervisor-plan-test-fail-first
        sid
-       (harness-supervisor-plan-test-step-input "s1" :tier "hard")
-       (harness-supervisor-plan-test-step-input "s2" :tier "hard"))
+       (harness-supervisor-plan-test-step-input "s1" :tier "medium")
+       (harness-supervisor-plan-test-step-input "s2" :tier "medium"))
       (let* ((node (plist-get (harness-supervisor-plan-test-plan sid) :node))
              (seed (plist-get (car (harness-call 'seed/list sid)) :id)))
         (should seed)
         (should (equal seed (harness-supervisor-plan-test-forked-from
                              (plist-get (harness-supervisor-plan-test-step sid "s1") :session))))
-        (should-not (harness-call 'seed/warm-p sid "demo:frontier" node))
+        (should-not (harness-call 'seed/warm-p sid "demo:medium" node))
         ;; Warm: s1 forks through the seed and is not compacted.
         (harness-supervisor-plan-test-stamp-seed seed t)
-        (should (equal seed (harness-call 'seed/warm-p sid "demo:frontier" node)))
+        (should (equal seed (harness-call 'seed/warm-p sid "demo:medium" node)))
         (should-not (plist-get (harness-supervisor-plan-test-retry-step sid "s1") :is-error))
         (harness-supervisor-plan-test-wait-state sid "s1" "done")
         (let ((wid (plist-get (harness-supervisor-plan-test-step sid "s1") :session)))
           (should (equal seed (harness-supervisor-plan-test-forked-from wid)))
           (should-not (harness-supervisor-plan-test-own-compactions wid))
-          (should (member "Step s1 (attempt 2) on demo:frontier: forked from the warm shared context"
+          (should (member "Step s1 (attempt 2) on demo:medium: forked from the warm shared context"
                           (harness-supervisor-plan-test-hints sid)))
           (should-not (string-match-p "was compacted"
                                       (plist-get (harness-supervisor-plan-test-step-request "s1" 1) :text))))
         ;; Lapsed: s2 forks the supervisor and is compacted instead of waking the seed.
         (harness-supervisor-plan-test-stamp-seed seed nil)
-        (should-not (harness-call 'seed/warm-p sid "demo:frontier" node))
+        (should-not (harness-call 'seed/warm-p sid "demo:medium" node))
         (let ((messages (length (harness-supervisor-plan-test-nodes seed 'user))))
           (should-not (plist-get (harness-supervisor-plan-test-retry-step sid "s2") :is-error))
           (harness-supervisor-plan-test-wait-state sid "s2" "done")
@@ -1472,7 +1580,7 @@ the supervisor holds, and its transcript says so after the compaction."
         (let ((wid (plist-get (harness-supervisor-plan-test-step sid "s2") :session)))
           (should (equal sid (harness-supervisor-plan-test-forked-from wid)))
           (should (= 1 (length (harness-supervisor-plan-test-own-compactions wid))))
-          (should (member (concat "Step s2 (attempt 2) on demo:frontier: no warm prompt cache holds the plan's"
+          (should (member (concat "Step s2 (attempt 2) on demo:medium: no warm prompt cache holds the plan's"
                                   " conversation, so its worker starts from a brief summary of it rather than"
                                   " reading it all uncached")
                           (harness-supervisor-plan-test-hints sid)))))
@@ -1490,8 +1598,8 @@ the supervisor holds, and its transcript says so after the compaction."
                 (funcall script request))))
       (harness-supervisor-plan-test-fail-first
        sid
-       (harness-supervisor-plan-test-step-input "s1" :tier "hard")
-       (harness-supervisor-plan-test-step-input "s2" :tier "hard"))
+       (harness-supervisor-plan-test-step-input "s1" :tier "medium")
+       (harness-supervisor-plan-test-step-input "s2" :tier "medium"))
       (let ((seed (plist-get (car (harness-call 'seed/list sid)) :id)))
         (harness-supervisor-plan-test-stamp-seed seed nil)
         ;; The module's own kind of message: the cold cache is not asked about.
@@ -1512,9 +1620,9 @@ the supervisor holds, and its transcript says so after the compaction."
   (harness-supervisor-plan-test-with-cache (compaction cowboy)
     (let ((sid (harness-supervisor-plan-test-session)))
       (harness-supervisor-plan-test-submit sid
-                                           (harness-supervisor-plan-test-step-input "a" :tier "hard")
-                                           (harness-supervisor-plan-test-step-input "b" :tier "standard")
-                                           (harness-supervisor-plan-test-step-input "c" :tier "standard"))
+                                           (harness-supervisor-plan-test-step-input "a" :tier "simple")
+                                           (harness-supervisor-plan-test-step-input "b" :tier "medium")
+                                           (harness-supervisor-plan-test-step-input "c" :tier "medium"))
       (dolist (id '("a" "b" "c"))
         (harness-supervisor-plan-test-wait-state sid id "done"))
       (let ((seed (plist-get (car (harness-call 'seed/list sid)) :id)))
@@ -1553,8 +1661,8 @@ there is nothing to compact, and nothing is said of a cache."
           (should-not (plist-get (harness-supervisor-plan-test-retry-step sid "f" :tier "hard") :is-error))
           (let ((creates (harness-supervisor-plan-test-calls 'session/create)))
             (should (= 2 (length creates)))
-            (should (equal "demo:cheap" (plist-get (nth 0 creates) :model)))
-            (should (equal "demo:frontier" (plist-get (nth 1 creates) :model))))
+            (should (equal "demo:simple" (plist-get (nth 0 creates) :model)))
+            (should (equal "demo:hard" (plist-get (nth 1 creates) :model))))
           (should-not (harness-supervisor-plan-test-calls 'session/fork))
           (should-not (harness-supervisor-plan-test-calls 'seed/fork))
           (should-not compacted)
@@ -1574,17 +1682,17 @@ there is nothing to compact, and nothing is said of a cache."
         (should-not (string-match-p "previous attempt"
                                     (plist-get (harness-supervisor-plan-test-step-request "s1") :text)))
         (harness-supervisor-plan-test-retry-step sid "s1" :tier "hard")
-        (harness-supervisor-plan-test-retry-step sid "f" :tier "standard")
+        (harness-supervisor-plan-test-retry-step sid "f" :tier "medium")
         (harness-supervisor-plan-test-wait-state sid "s1" "done")
         (harness-supervisor-plan-test-wait-state sid "f" "done")
         ;; The tier moved the step's model; the previous attempt keeps the one it ran on.
         (let ((s1 (harness-supervisor-plan-test-step sid "s1"))
               (f (harness-supervisor-plan-test-step sid "f")))
-          (should (equal "demo:frontier" (plist-get s1 :model)))
-          (should (equal (list :attempt 1 :session first :model "demo:cheap"
+          (should (equal "demo:hard" (plist-get s1 :model)))
+          (should (equal (list :attempt 1 :session first :model "demo:simple"
                                :error "the worker's turn ended with error: boom")
                          (plist-get s1 :previous)))
-          (should (equal (list :attempt 1 :session first-fresh :model "demo:cheap"
+          (should (equal (list :attempt 1 :session first-fresh :model "demo:simple"
                                :error "the worker's turn ended with error: boom")
                          (plist-get f :previous))))
         ;; It is in the worker's message, after the step and before the closing.
@@ -1592,7 +1700,7 @@ there is nothing to compact, and nothing is said of a cache."
           (let ((text (plist-get (harness-supervisor-plan-test-step-request (car cell) 1) :text)))
             (should (string-match-p
                      (concat "\n\n## Step " (car cell) ": Title of " (car cell) "\n\nDo " (car cell) "\\.\n"
-                             "\n## The previous attempt\n\nAttempt 1 ran on demo:cheap in session "
+                             "\n## The previous attempt\n\nAttempt 1 ran on demo:simple in session "
                              (regexp-quote (cdr cell))
                              " and ended: the worker's turn ended with error: boom\\. You can read what it tried"
                              " with the session_read tool on that session, and should not repeat what failed\\.\n"
@@ -1611,7 +1719,7 @@ With no cowboy and no compaction the retried fork goes on with the whole convers
       (harness-supervisor-plan-test-behave "s1" 'hold)
       (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "s1"))
       (let ((first (harness-supervisor-plan-test-worker sid "s1")))
-        (should (equal "demo:cheap" (plist-get (harness-supervisor-plan-test-step sid "s1") :worker-model)))
+        (should (equal "demo:simple" (plist-get (harness-supervisor-plan-test-step sid "s1") :worker-model)))
         (harness-call 'session/delete first)
         (should (equal "cancelled" (harness-supervisor-plan-test-state sid "s1")))
         (harness-supervisor-plan-test-wait-reports sid 1)
@@ -1619,20 +1727,20 @@ With no cowboy and no compaction the retried fork goes on with the whole convers
         (harness-supervisor-plan-test-retry-step sid "s1" :tier "hard")
         (harness-supervisor-plan-test-wait-state sid "s1" "done")
         (let ((s1 (harness-supervisor-plan-test-step sid "s1")))
-          (should (equal (list :attempt 1 :session first :model "demo:cheap"
+          (should (equal (list :attempt 1 :session first :model "demo:simple"
                                :error "the worker's session was deleted")
                          (plist-get s1 :previous)))
-          (should (equal "demo:frontier" (plist-get s1 :worker-model)))
-          (should (string-match-p (concat "Attempt 1 ran on demo:cheap in session " (regexp-quote first)
+          (should (equal "demo:hard" (plist-get s1 :worker-model)))
+          (should (string-match-p (concat "Attempt 1 ran on demo:simple in session " (regexp-quote first)
                                           " and ended: the worker's session was deleted\\. That session was deleted,"
                                           " so what it tried cannot be read; do not repeat what failed\\.")
                                   (plist-get (harness-supervisor-plan-test-step-request "s1" 1) :text)))
           ;; Neither module: nothing could compact the fork, and it says so.
           (should-not (harness-supervisor-plan-test-own-compactions (plist-get s1 :session)))
-          (should (member (concat "No prompt cache on demo:frontier holds the supervisor's conversation: nothing can"
+          (should (member (concat "No prompt cache on demo:hard holds the supervisor's conversation: nothing can"
                                   " compact it here, so carrying on with the whole conversation, uncached")
                           (harness-supervisor-plan-test-hints (plist-get s1 :session))))
-          (should (member (concat "Step s1 (attempt 2) on demo:frontier: no warm prompt cache holds the plan's"
+          (should (member (concat "Step s1 (attempt 2) on demo:hard: no warm prompt cache holds the plan's"
                                   " conversation and it was not compacted, so its worker reads it all uncached")
                           (harness-supervisor-plan-test-hints sid)))
           (should-not (string-match-p "was compacted"
@@ -1652,10 +1760,10 @@ With no cowboy and no compaction the retried fork goes on with the whole convers
         (should (= 1 (length nodes)))
         (should (equal "brief" (harness-node-compaction-kind (car nodes))))
         (should-not (plist-get (plist-get (car nodes) :meta) :cowboy))
-        (should (member (concat "No prompt cache on demo:frontier holds the supervisor's conversation:"
+        (should (member (concat "No prompt cache on demo:hard holds the supervisor's conversation:"
                                 " compacting into a brief summary first")
                         (harness-supervisor-plan-test-hints wid)))
-        (should (member (concat "Step s1 (attempt 2) on demo:frontier: no warm prompt cache holds the plan's"
+        (should (member (concat "Step s1 (attempt 2) on demo:hard: no warm prompt cache holds the plan's"
                                 " conversation, so its worker starts from a brief summary of it rather than"
                                 " reading it all uncached")
                         (harness-supervisor-plan-test-hints sid)))
@@ -1677,7 +1785,7 @@ With no cowboy and no compaction the retried fork goes on with the whole convers
       (should-not (harness-supervisor-plan-test-own-compactions wid))
       (should (cl-some (lambda (h) (string-match-p "the summariser is down" h))
                        (harness-supervisor-plan-test-hints wid)))
-      (should (member (concat "Step s1 (attempt 2) on demo:frontier: no warm prompt cache holds the plan's"
+      (should (member (concat "Step s1 (attempt 2) on demo:hard: no warm prompt cache holds the plan's"
                               " conversation and it was not compacted, so its worker reads it all uncached")
                       (harness-supervisor-plan-test-hints sid)))
       (should-not (string-match-p "was compacted"
@@ -1704,7 +1812,7 @@ With no cowboy and no compaction the retried fork goes on with the whole convers
       (harness-supervisor-plan-test-wait-state sid "s1" "done")
       (let ((wid (plist-get (harness-supervisor-plan-test-step sid "s1") :session)))
         (should-not (harness-supervisor-plan-test-own-compactions wid))
-        (should (member (concat "Step s1 (attempt 2) on demo:frontier: no warm prompt cache holds the plan's"
+        (should (member (concat "Step s1 (attempt 2) on demo:hard: no warm prompt cache holds the plan's"
                                 " conversation and it was not compacted, so its worker reads it all uncached")
                         (harness-supervisor-plan-test-hints sid)))
         (should (string-match-p "Do the thing" (harness-supervisor-plan-test-messages-text wid))))
@@ -1777,8 +1885,8 @@ With no cowboy and no compaction the retried fork goes on with the whole convers
       (harness-supervisor-plan-test-submit
        sid
        (harness-supervisor-plan-test-step-input "s1")
-       (harness-supervisor-plan-test-step-input "s2" :after '("s1") :tier "standard")
-       (harness-supervisor-plan-test-step-input "s3" :after '("s1" "s2") :tier "hard"))
+       (harness-supervisor-plan-test-step-input "s2" :after '("s1") :tier "medium")
+       (harness-supervisor-plan-test-step-input "s3" :after '("s1" "s2") :tier "medium"))
       (let ((reports (harness-supervisor-plan-test-wait-reports sid 1)))
         (harness-supervisor-plan-test-wait-idle sid)
         ;; One message, however many steps: the steps that got done said it in hints.
@@ -1786,17 +1894,17 @@ With no cowboy and no compaction the retried fork goes on with the whole convers
         (let ((text (car reports)))
           (should (string-prefix-p "Supervisor report: plan " text))
           (should (string-match-p "(The plan) finished\\. All 3 steps are done\\.\n" text))
-          (should (string-match-p "^- s1 (Title of s1) on demo:cheap, session [^ ]+: Added the flag\\.$" text))
-          (should (string-match-p "^- s2 (Title of s2) on demo:balanced, session [^ ]+: Wrote the docs\\.$" text))
-          (should (string-match-p "^- s3 (Title of s3) on demo:frontier, session [^ ]+: Ran the tests: 12 passed\\.$" text))
+          (should (string-match-p "^- s1 (Title of s1) on demo:simple, session [^ ]+: Added the flag\\.$" text))
+          (should (string-match-p "^- s2 (Title of s2) on demo:medium, session [^ ]+: Wrote the docs\\.$" text))
+          (should (string-match-p "^- s3 (Title of s3) on demo:medium, session [^ ]+: Ran the tests: 12 passed\\.$" text))
           (should (string-match-p "Check the work now, with the read-only tools" text))
           (should (string-match-p "session_read on a worker" text))
           (should (string-match-p "a follow-up plan with submit_plan" text))
           (should (string-match-p "no_plan_needed with your reply to the user" text))
           ;; Not a task's session: there is nothing to hand in.
           (should-not (string-match-p "hand_in" text))))
-      (should (equal '("Plan submitted: 3 steps" "Step s1 done on demo:cheap" "Step s2 done on demo:balanced"
-                       "Step s3 done on demo:frontier" "No plan needed: nothing to decide")
+      (should (equal '("Plan submitted: 3 steps" "Step s1 done on demo:simple" "Step s2 done on demo:medium"
+                       "Step s3 done on demo:medium" "No plan needed: nothing to decide")
                      (harness-supervisor-plan-test-hints sid)))
       ;; The supervisor had a turn for the plan (a request) and one for the report (two).
       (should (= 3 (cl-count 'main harness-supervisor-plan-test--requests
@@ -1833,7 +1941,7 @@ With no cowboy and no compaction the retried fork goes on with the whole convers
        (harness-supervisor-plan-test-step-input "a3" :after '("a2")))
       (should (equal '("running" "pending" "pending")
                      (mapcar (lambda (id) (harness-supervisor-plan-test-state sid id 0)) '("a1" "a2" "a3"))))
-      (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "b1" :tier "hard"))
+      (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "b1" :tier "medium"))
       (should (= 2 (length (harness-supervisor-plan-test-plans sid))))
       ;; The steps that waited are superseded; the one that runs is still running.
       (should (equal '("running" "superseded" "superseded")
@@ -1848,7 +1956,7 @@ With no cowboy and no compaction the retried fork goes on with the whole convers
       (should-not (harness-call 'agent/outstanding sid))
       (should-not (harness-supervisor-plan-test-step-request "a2"))
       (should (equal "superseded" (harness-supervisor-plan-test-state sid "a2" 0)))
-      (should (member "Step a1 done on demo:cheap" (harness-supervisor-plan-test-hints sid)))
+      (should (member "Step a1 done on demo:simple" (harness-supervisor-plan-test-hints sid)))
       ;; Each plan reports when nothing is left to do in it: the new one first, the old one
       ;; when its running step ended, saying what a later plan kept from running.
       (let ((reports (harness-supervisor-plan-test-wait-reports sid 2)))
@@ -1858,24 +1966,25 @@ With no cowboy and no compaction the retried fork goes on with the whole convers
         (should (string-match-p "^- b1 " (nth 0 reports)))
         (should (string-match-p "finished\\. 1 of its 3 steps are done; a later plan superseded a2, a3, which never ran\\."
                                 (nth 1 reports)))
-        (should (string-match-p "^- a1 (Title of a1) on demo:cheap, session [^ ]+: Done a1\\.$" (nth 1 reports)))
+        (should (string-match-p "^- a1 (Title of a1) on demo:simple, session [^ ]+: Done a1\\.$" (nth 1 reports)))
         (should (string-match-p "^- a2 (Title of a2): superseded by a later plan, it never ran$" (nth 1 reports)))))))
 
 ;;;; The workers' spawn_agent calls
 
 (ert-deftest harness-supervisor-plan-every-worker-shows-as-a-spawn-agent-call ()
   "Every worker shows in the supervisor's transcript as the spawn_agent
-call that would have started it: the step, its tier and model in the
-input, the worker as a clickable `:child-id', and the call is outside
-the conversation, so the supervisor's model never gets it."
+call that would have started it: the step, its tier, model and thinking
+in the input, the worker as a clickable `:child-id', and the call is
+outside the conversation, so the supervisor's model never gets it."
   (harness-supervisor-plan-test-with
+    (harness-supervisor-plan-test-tier-thinking '((medium . "high")))
     (let ((sid (harness-supervisor-plan-test-session)))
       (harness-supervisor-plan-test-behave "a" '(reply "Done a." 2.0))
       (harness-supervisor-plan-test-behave "b" '(reply "Done b." 2.0))
       (harness-supervisor-plan-test-submit
        sid
-       (harness-supervisor-plan-test-step-input "a" :tier "standard" :reason "ordinary")
-       (harness-supervisor-plan-test-step-input "b" :context "fresh" :tier "hard" :reason "subtle"))
+       (harness-supervisor-plan-test-step-input "a" :tier "medium" :reason "ordinary")
+       (harness-supervisor-plan-test-step-input "b" :context "fresh" :tier "simple" :reason "small"))
       (let* ((a (harness-supervisor-plan-test-worker sid "a"))
              (b (harness-supervisor-plan-test-worker sid "b"))
              (calls (harness-supervisor-plan-test-spawn-calls sid))
@@ -1896,13 +2005,16 @@ the conversation, so the supervisor's model never gets it."
         (should (equal "Sub-agent: Step a: Title of a (fork)" (plist-get call-a :title)))
         (should (equal "Step a: Title of a" (plist-get (plist-get call-a :input) :name)))
         (should (equal "Do a." (plist-get (plist-get call-a :input) :prompt)))
-        (should (equal "demo:balanced" (plist-get (plist-get call-a :input) :model)))
-        (should (equal "standard" (plist-get (plist-get call-a :input) :tier)))
+        (should (equal "demo:medium" (plist-get (plist-get call-a :input) :model)))
+        (should (equal "medium" (plist-get (plist-get call-a :input) :tier)))
+        (should (equal "high" (plist-get (plist-get call-a :input) :thinking)))
         (should (= 1 (plist-get (plist-get call-a :input) :attempt)))
         (should (harness-json-true-p (plist-get (plist-get call-a :input) :fork)))
         ;; A fresh step's call forks nothing and names its own model.
         (should (equal "Sub-agent: Step b: Title of b" (plist-get call-b :title)))
-        (should (equal "demo:frontier" (plist-get (plist-get call-b :input) :model)))
+        (should (equal "demo:simple" (plist-get (plist-get call-b :input) :model)))
+        ;; Its tier names no level, and its supervisor has none: nothing said.
+        (should-not (plist-member (plist-get call-b :input) :thinking))
         (should-not (plist-get (plist-get call-b :input) :fork))
         ;; The plan block is still shown once, before the first call.
         (let ((plan (harness-supervisor-plan-test-nodes sid 'plan)))
@@ -1945,7 +2057,7 @@ the hint that says the step is done."
         (should (numberp (plist-get (plist-get result :meta) :duration)))
         (should (string-prefix-p "Checked it: all good." (plist-get result :output)))
         (should (string-match-p
-                 (format "\\[step a (Title of a) done on demo:cheap, session %s, [0-9]+ tool calls, cost "
+                 (format "\\[step a (Title of a) done on demo:simple, session %s, [0-9]+ tool calls, cost "
                          (regexp-quote worker))
                  (plist-get result :output)))
         ;; Before the hint that says the step is done.
@@ -1953,7 +2065,7 @@ the hint that says the step is done."
                     sid (lambda (n) (equal (plist-get n :id) (plist-get result :id))))
                    (harness-supervisor-plan-test-node-position
                     sid (lambda (n) (and (eq (plist-get n :kind) 'hint)
-                                         (equal "Step a done on demo:cheap" (plist-get n :content))))))))
+                                         (equal "Step a done on demo:simple" (plist-get n :content))))))))
       (harness-supervisor-plan-test-wait-reports sid 1)
       (harness-supervisor-plan-test-wait-idle sid))))
 
@@ -1974,7 +2086,7 @@ with the footer saying the step failed."
         (should (equal worker (plist-get (plist-get result :meta) :child-id)))
         (should (string-match-p "the worker's turn ended with error: boom" (plist-get result :output)))
         (should (string-match-p
-                 (format "\\[step a (Title of a) failed on demo:cheap, session %s]" (regexp-quote worker))
+                 (format "\\[step a (Title of a) failed on demo:simple, session %s]" (regexp-quote worker))
                  (plist-get result :output))))
       (harness-supervisor-plan-test-wait-reports sid 1)
       (harness-supervisor-plan-test-wait-idle sid))))
@@ -2049,7 +2161,7 @@ call and still gets its result."
        (harness-supervisor-plan-test-step-input "a1")
        (harness-supervisor-plan-test-step-input "a2" :after '("a1")))
       (let ((old (harness-supervisor-plan-test-worker sid "a1")))
-        (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "b1" :tier "hard"))
+        (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "b1" :tier "medium"))
         (harness-supervisor-plan-test-wait-state sid "b1" "done" 1)
         (let* ((plan (harness-supervisor-plan-test-plan sid 1))
                (b1 (plist-get (harness-supervisor-plan-test-step sid "b1" 1) :session))
@@ -2090,7 +2202,7 @@ with the cancellation."
           (should (equal worker (plist-get (plist-get result :meta) :child-id)))
           (should (string-match-p "the worker's session was deleted" (plist-get result :output)))
           (should (string-match-p
-                   (format "\\[step s1 (Title of s1) cancelled on demo:cheap, session %s]"
+                   (format "\\[step s1 (Title of s1) cancelled on demo:simple, session %s]"
                            (regexp-quote worker))
                    (plist-get result :output))))
         (harness-supervisor-plan-test-wait-reports sid 1)))))
@@ -2119,7 +2231,7 @@ with the cancellation."
              (harness-supervisor-plan-test-step-input "a" :context (if (eq method 'session/create) "fresh" "fork"))
              ;; On another model, so that a does not fork through a seed unless the test says.
              (harness-supervisor-plan-test-step-input "b" :context (if (eq method 'session/create) "fresh" "fork")
-                                                      :tier (if (eq method 'seed/fork) "mundane" "hard")
+                                                      :tier (if (eq method 'seed/fork) "simple" "medium")
                                                       :after '("a")))
             (harness-supervisor-plan-test-wait-state sid "a" "failed")
             (should (string-match-p "the worker could not be made: no room for a session"
@@ -2253,7 +2365,7 @@ with the cancellation."
       (harness-supervisor-plan-test-submit
        sid
        (harness-supervisor-plan-test-step-input "s1" :prompt "Do s1 \"carefully\"\nwith newlines and ünïcode …")
-       (harness-supervisor-plan-test-step-input "s2" :after '("s1") :context "fresh" :tier "hard")
+       (harness-supervisor-plan-test-step-input "s2" :after '("s1") :context "fresh" :tier "medium")
        (harness-supervisor-plan-test-step-input "s3"))
       (harness-supervisor-plan-test-wait-state sid "s3" "done")
       (harness-supervisor-plan-test-wait-state sid "s1" "failed")
@@ -2325,7 +2437,7 @@ Its workers die, memory is forgotten and the sessions come back from the disk."
 Step s2 follows it, and s3 follows s2.  Return the worker of s1."
   (harness-supervisor-plan-test-behave "s1" 'hold)
   (harness-supervisor-plan-test-submit sid
-                                       (harness-supervisor-plan-test-step-input "s1" :tier "hard")
+                                       (harness-supervisor-plan-test-step-input "s1" :tier "medium")
                                        (harness-supervisor-plan-test-step-input "s2" :after '("s1"))
                                        (harness-supervisor-plan-test-step-input "s3" :after '("s2")))
   (harness-supervisor-plan-test-worker sid "s1"))
@@ -2350,7 +2462,7 @@ Step s2 follows it, and s3 follows s2.  Return the worker of s1."
         (should (equal (harness-sender-system "supervisor") (plist-get (car queue) :from)))
         (let ((text (plist-get (car queue) :text)))
           (should (string-prefix-p "Supervisor report: step s1 (Title of s1) was interrupted." text))
-          (should (string-match-p "tier hard, model demo:frontier (attempt 1)" text))
+          (should (string-match-p "tier medium, model demo:medium (attempt 1)" text))
           (should (string-match-p "the harness stopped while the worker was running" text))
           (should (string-match-p "Held on it, pending until it is done: s2 (Title of s2), s3 (Title of s3)\\." text))
           (should (string-match-p "retry_step s1" text))))
@@ -2414,7 +2526,7 @@ supervisor."
       (harness-supervisor-plan-test-behave "b" 'hold)
       (harness-supervisor-plan-test-submit sid
                                            (harness-supervisor-plan-test-step-input "a")
-                                           (harness-supervisor-plan-test-step-input "b" :tier "hard"))
+                                           (harness-supervisor-plan-test-step-input "b" :tier "medium"))
       (harness-supervisor-plan-test-worker sid "a")
       (harness-supervisor-plan-test-worker sid "b")
       (harness-supervisor-plan-test-restart sid)
@@ -2436,7 +2548,7 @@ supervisor."
       (let ((result (harness-supervisor-plan-test-run
                      sid "retry_step" '(:step "s1" :reason "the harness restarted" :prompt "Check what is done."))))
         (should-not (plist-get result :is-error))
-        (should (string-match-p "Step s1 of plan p-[a-z0-9]+ runs again on demo:frontier" (plist-get result :content))))
+        (should (string-match-p "Step s1 of plan p-[a-z0-9]+ runs again on demo:medium" (plist-get result :content))))
       (harness-supervisor-plan-test-wait-state sid "s3" "done")
       (should (equal "done" (harness-supervisor-plan-test-state sid "s1")))
       (should (= 2 (plist-get (harness-supervisor-plan-test-step sid "s1") :attempts))))))
@@ -2456,16 +2568,16 @@ and the worker is told what the interrupted one ran on and how it ended."
              (wid (plist-get s1 :session))
              (text (plist-get (harness-supervisor-plan-test-step-request "s1" 1) :text)))
         (should (= 2 (plist-get s1 :attempts)))
-        (should (equal (list :attempt 1 :session first :model "demo:frontier"
+        (should (equal (list :attempt 1 :session first :model "demo:medium"
                              :error "the harness stopped while the worker was running")
                        (plist-get s1 :previous)))
         (should (= 1 (length (harness-supervisor-plan-test-own-compactions wid))))
-        (should (member (concat "Step s1 (attempt 2) on demo:frontier: no warm prompt cache holds the plan's"
+        (should (member (concat "Step s1 (attempt 2) on demo:medium: no warm prompt cache holds the plan's"
                                 " conversation, so its worker starts from a brief summary of it rather than"
                                 " reading it all uncached")
                         (harness-supervisor-plan-test-hints sid)))
         (should (string-match-p "was compacted into a summary" text))
-        (should (string-match-p (concat "Attempt 1 ran on demo:frontier in session " (regexp-quote first)
+        (should (string-match-p (concat "Attempt 1 ran on demo:medium in session " (regexp-quote first)
                                         " and ended: the harness stopped while the worker was running\\. You can read")
                                 text))
         ;; The notes the supervisor gave come first, then what happened before.
@@ -2529,7 +2641,7 @@ and the worker is told what the interrupted one ran on and how it ended."
         (harness-supervisor-plan-test-submit
          sid
          (harness-supervisor-plan-test-step-input "a")
-         (harness-supervisor-plan-test-step-input "b" :tier "hard")
+         (harness-supervisor-plan-test-step-input "b" :tier "medium")
          (harness-supervisor-plan-test-step-input "c" :after '("a" "b"))
          (harness-supervisor-plan-test-step-input "d" :after '("c")))
         (should (equal "Supervisor plan: 2 steps running, 2 waiting" (harness-call 'agent/outstanding sid)))
@@ -2780,7 +2892,7 @@ A task's session supervises, and a finished task waits for review."
        (harness-tasks--forget-stores)
        (setq harness-tasks--loaded t
              harness-tasks--dirty nil
-             harness-tasks--naming-queue nil
+             harness-tasks--naming-pool (harness-tasks--naming-pool-new)
              harness-acp--clients nil)
        (let ((harness-naming-auto nil)
              (harness-tasks-max-running 3)
@@ -2805,7 +2917,7 @@ A task's session supervises, and a finished task waits for review."
       (harness-supervisor-plan-test-behave "s2" '(reply "Committed it." 0.2))
       (setq harness-supervisor-plan-test--plan
             (harness-supervisor-plan-test-plan-input
-             (harness-supervisor-plan-test-step-input "s1" :tier "standard")
+             (harness-supervisor-plan-test-step-input "s1" :tier "medium")
              (harness-supervisor-plan-test-step-input "s2" :after '("s1") :prompt "Commit the change.")))
       (setq harness-supervisor-plan-test--on-report
             (lambda (_text)

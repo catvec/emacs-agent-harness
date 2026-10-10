@@ -21,7 +21,7 @@
 ;;    within a fraction of a second, waiting on no input, network or
 ;;    subprocess, with no unbounded loop and no huge buffer?  It is asked
 ;;    as the auto-mode permission judge is (lisp/modules/harness-perms.el):
-;;    one `:ephemeral' request on the session's provider, its cheap tier,
+;;    one `:ephemeral' request on the session's provider, its simple tier,
 ;;    without thinking.  Only the verdict "fast" lets the code run; any
 ;;    other -- slow, blocking, unsure, no verdict at all, a judge that
 ;;    fails or takes too long -- refuses the call with the judge's reason
@@ -212,14 +212,14 @@ first brace to its last."
         (and (boundp key) (symbol-value key)))))
 
 (defun harness-tools-emacs-eval--judge-model (session)
-  "Return the model that judges code for SESSION: its provider's cheap tier.
-That is the cheap tier of the session's model, or of `harness-model'
+  "Return the model that judges code for SESSION: its provider's simple tier.
+That is the simple tier of the session's model, or of `harness-model'
 for a request without one, falling back to that model itself."
   (let ((model (or (plist-get session :model)
                    (harness-tools-emacs-eval--config 'harness-model session))))
     (and (stringp model)
          (or (and (harness-method-exists-p 'provider/tier-model)
-                  (ignore-errors (harness-call 'provider/tier-model model 'cheap)))
+                  (ignore-errors (harness-call 'provider/tier-model model 'simple)))
              model))))
 
 (defun harness-tools-emacs-eval--judge (code session)

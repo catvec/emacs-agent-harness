@@ -80,11 +80,11 @@
 (defcustom harness-tasks-search-model 'auto
   "Model that answers the task board's search, as PROVIDER:NAME, or `auto'.
 `auto' (the default) asks the provider of the model new tasks start
-with for its `cheap' tier (see `harness-provider-tier-model'): a search
+with for its `simple' tier (see `harness-provider-tier-model'): a search
 reads a list and answers in a line, which the fastest, cheapest model
 does best.  A PROVIDER:NAME forces that model, and nil uses the task
 model itself."
-  :type '(choice (const :tag "The task provider's cheap model" auto)
+  :type '(choice (const :tag "The task provider's simple model" auto)
                  (const :tag "The task model" nil)
                  (string :tag "Model" :names model))
   :group 'harness)
@@ -1178,7 +1178,7 @@ See `harness-tasks-search-model'."
         (choice harness-tasks-search-model))
     (cond ((or (eq choice 'auto) (equal choice "auto"))
            (or (and base (harness-method-exists-p 'provider/tier-model)
-                    (ignore-errors (harness-call 'provider/tier-model base 'cheap)))
+                    (ignore-errors (harness-call 'provider/tier-model base 'simple)))
                base))
           ((and (stringp choice) (not (string-empty-p choice))) choice)
           (t base))))

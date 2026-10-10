@@ -3249,7 +3249,7 @@ not called."
   '((?c "current model summarises" compact
         "warm cache; summary from the whole conversation")
     (?n "new model summarises" compact-new
-        "only the first and last messages; small, but lossy")
+        "the conversation's narrative, tool calls in brief; small, but lossy")
     (?t "full transcript" transcript
         "whole conversation as a file the new model reads")
     (?s "no handoff" none
@@ -3458,7 +3458,7 @@ their number).  The risks show before the question.  Return a mode of
       (format "Model → %s from the running turn's next step, which takes the handoff" label))
      ((equal mode "compact") (format "Model → %s, starting from a summary of the conversation" label))
      ((equal mode "compact-new")
-      (format "Model → %s, starting from a summary that model wrote from the first and last messages" label))
+      (format "Model → %s, starting from a summary that model wrote from the conversation's narrative" label))
      ((and (equal mode "transcript") (stringp file))
       (format "Model → %s, which reads the transcript in %s first%s" label (abbreviate-file-name file)
               (if (plist-get result :fallback) " (no summary could be made)" "")))
@@ -3730,24 +3730,18 @@ changes neither."
         ;; A harness that cannot check switches them as it always did.
         (lambda (_err) (harness-ui--switch-all id label 'none no-default) nil))))))
 
-(defconst harness-ui--thinking-level-order
-  '("none" "minimal" "low" "medium" "high" "xhigh" "max")
-  "Thinking levels from weakest to strongest, for ordering the menu.")
-
 (defconst harness-ui--thinking-levels '("low" "medium" "high" "xhigh" "max")
   "The common thinking levels, weakest first.
 The menu offers them to a model that names no levels of its own.")
 
 (defun harness-ui--thinking-levels-for (levels)
   "Return the levels the thinking menu offers for a model's LEVELS.
-A model that names its own levels offers exactly those, weakest first,
-so it is never offered a level it cannot act on; one that names none
-offers the common levels."
-  (let ((rank (lambda (l) (or (cl-position l harness-ui--thinking-level-order
-                                               :test #'equal)
-                              most-positive-fixnum))))
-    (sort (delete-dups (copy-sequence (or levels harness-ui--thinking-levels)))
-          (lambda (a b) (< (funcall rank a) (funcall rank b))))))
+A model that names its own levels offers exactly those, weakest first
+\(`harness-thinking-level-order'), so it is never offered a level it
+cannot act on; one that names none offers the common levels."
+  (sort (delete-dups (copy-sequence (or levels harness-ui--thinking-levels)))
+        (lambda (a b) (< (harness-thinking-level-rank a)
+                         (harness-thinking-level-rank b)))))
 
 (defun harness-ui-choose-thinking (callback &optional model)
   "Prompt for a thinking level and call CALLBACK with (VALUE LABEL).
