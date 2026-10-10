@@ -952,13 +952,8 @@ an ask_user option, goes under its key, indented."
   "Return a sender line naming TEXT in FACE."
   (concat (propertize text 'face face) "\n"))
 
-(defun harness-chat--session-name (id &optional name)
-  "Return the name of session ID to show: its name now, else NAME, else a short id."
-  (let ((name (or (plist-get (and id (harness-ui-session id)) :name) name))
-        (id (or id "?")))
-    (if (and (stringp name) (not (string-blank-p name)))
-        name
-      (substring id 0 (min 8 (length id))))))
+(defalias 'harness-chat--session-name #'harness-ui-session-name
+  "Alias of `harness-ui-session-name'.")
 
 (defun harness-chat--from-line (from)
   "Return the sender line of a message FROM sent, rather than the user.
@@ -1109,20 +1104,37 @@ the session does, until the harness records its result."
           ((memq outcome '(failed denied)) (harness-chat--outcome-status outcome))
           (t (harness-chat--status 'success nil "The tool ran and reported no error")))))
 
+(defun harness-chat--child-id (call result)
+  "Return the id of the session a tool call started, or nil.
+That is the sub-agent of a spawn_agent call: the `:child-id' in the
+`:meta' of CALL, the call's node, or of RESULT, its result.  A call the
+harness recorded (`harness-outside-node-p') names its child from the
+start, and a model's spawn_agent call does from the moment the child
+exists (`harness-tools-agent--name-child'); its result names it too."
+  (let ((id (or (plist-get (plist-get call :meta) :child-id)
+                (plist-get (plist-get result :meta) :child-id))))
+    (and (stringp id) (not (string-empty-p id)) id)))
+
+(defun harness-chat--block-child (block)
+  "Return the id of the session BLOCK's tool call started, or nil.
+Only a tool call's block names one (`harness-chat--child-id')."
+  (and (member (harness-chat-block-kind block) '("tool-call" "tool-result"))
+       (harness-chat--child-id (harness-chat-block-node block)
+                               (harness-chat-block-result block))))
+
 (defun harness-chat--child-line (call result)
   "Return the line linking the session a tool call started, or \"\".
 That is the sub-agent of a spawn_agent call, the `:child-id' in the
-`:meta' of CALL or of RESULT: the merge queue's call names its conflict
-resolver from the start, a model's spawn_agent call once it returns."
-  (let ((id (or (plist-get (plist-get call :meta) :child-id)
-                (plist-get (plist-get result :meta) :child-id))))
-    (if (and (stringp id) (not (string-empty-p id)))
-        (let ((name (harness-chat--session-name id (plist-get (plist-get call :input) :name))))
-          (concat (propertize "  session: " 'face 'harness-dim-face)
-                  (harness-chat--button name (lambda () (harness-open-session id))
-                                        :help (format "Open the session %s" name))
-                  "\n"))
-      "")))
+`:meta' of CALL or of RESULT: the merge queue's and the supervisor's
+calls name their child from the start, and so does a model's
+spawn_agent call from the moment its child exists."
+  (if-let* ((id (harness-chat--child-id call result)))
+      (let ((name (harness-chat--session-name id (plist-get (plist-get call :input) :name))))
+        (concat (propertize "  session: " 'face 'harness-dim-face)
+                (harness-chat--button name (lambda () (harness-open-session id))
+                                      :help (format "Open the session %s" name))
+                "\n"))
+    ""))
 
 (defun harness-chat--render-tool (block)
   "Return the body of tool-call BLOCK (its result rendered with it)."
@@ -1402,6 +1414,14 @@ It counts the calls by label, then the thinking folded between them."
     (add-text-properties 0 (length text)
                          (list 'harness-chat-node (harness-chat-block-id block) 'read-only t 'rear-nonsticky t)
                          text)
+    ;; A call that started a sub-agent opens its session from anywhere on
+    ;; the block, not only from its session line: mouse-1 or RET on the
+    ;; title, the input, the output.  Buttons keep their own keys.
+    (when-let* ((child (harness-chat--block-child block)))
+      (harness-ui-add-session-keys
+       text child
+       (harness-chat--session-name
+        child (plist-get (plist-get (harness-chat-block-node block) :input) :name))))
     text))
 
 ;;;; Folding

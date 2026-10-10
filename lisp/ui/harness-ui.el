@@ -869,6 +869,14 @@ Its output rate and live token figures go with it."
             (or (and name (not (string-empty-p name)) name)
                 (format "unnamed (%s)" (substring (or (plist-get session :id) "????") 0 4))))))
 
+(defun harness-ui-session-name (id &optional name)
+  "Return the name of session ID to show: its name now, else NAME, else a short id."
+  (let ((name (or (plist-get (and id (harness-ui-session id)) :name) name))
+        (id (or id "?")))
+    (if (and (stringp name) (not (string-blank-p name)))
+        name
+      (substring id 0 (min 8 (length id))))))
+
 (defun harness-ui-task-name (task &optional session)
   "Return TASK's name, or nil while it has none and its title is its prompt.
 That is the name of its SESSION, by default the cached session it works
@@ -1875,6 +1883,34 @@ anywhere runs the action (`harness-ui-action-push')."
                     (and (> (point) (point-min)) (get-text-property (1- (point)) 'harness-ui-action)))))
     (if action (funcall action) (if (get-text-property (point) 'button) (push-button (point))
                                   (user-error "No button here")))))
+
+(defun harness-ui-add-session-keys (object id &optional name start end)
+  "Make OBJECT's text from START to END open session ID on a click or RET.
+OBJECT is a string or a buffer.  START and END default to the whole
+object.  Where the text already carries a keymap -- a button's -- the
+new keys are composed under it, so the button keeps its own keys and
+tooltip; where none does, the text gets a hover face and says what a
+click does.  NAME is the session's, for the tooltip; nil uses
+`harness-ui-session-name'.  Return OBJECT."
+  (let* ((string (stringp object))
+         (start (or start (if string 0 (point-min))))
+         (end (or end (if string (length object) (point-max))))
+         (map (harness-ui-action-map (lambda () (interactive) (harness-ui-display-session id))))
+         (help (format "mouse-1, RET: open the session %s"
+                       (or name (harness-ui-session-name id))))
+         (pos start))
+    (while (< pos end)
+      (let ((next (or (next-single-property-change pos 'keymap object end) end))
+            (existing (get-text-property pos 'keymap object)))
+        (put-text-property pos next 'keymap
+                           (if existing (make-composed-keymap (list existing map)) map)
+                           object)
+        (unless existing
+          (put-text-property pos next 'mouse-face 'highlight object)
+          (put-text-property pos next 'help-echo help object)
+          (put-text-property pos next 'pointer 'hand object))
+        (setq pos next)))
+    object))
 
 (defun harness-ui-add-keymap (start end map)
   "Give START..END the keymap MAP, composed under any button keymaps."

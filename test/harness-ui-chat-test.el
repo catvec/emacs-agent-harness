@@ -309,9 +309,19 @@ a turn of its own, and a redraw renders the same."
                         (should-not (invisible-p (1- link)))
                         (should (invisible-p (1- (harness-ui-chat-test-find buf "Resolve the conflicts in README." link))))
                         (setq opened nil)
-                        (cl-letf (((symbol-function 'harness-open-session) (lambda (id &rest _) (setq opened id))))
-                          (funcall (get-text-property (1- link) 'harness-chat-action)))
-                        (should (equal rid opened))
+                        (cl-letf (((symbol-function 'harness-open-session) (lambda (id &rest _) (setq opened id)))
+                                  ((symbol-function 'harness-ui-display-session) (lambda (id &rest _) (setq opened id))))
+                          (funcall (get-text-property (1- link) 'harness-chat-action))
+                          (should (equal rid opened))
+                          ;; The call's own block opens it too, not only the
+                          ;; session line: mouse-1 and RET on the title.
+                          (let ((keys (get-text-property (1- title) 'keymap)))
+                            (setq opened nil)
+                            (call-interactively (lookup-key keys (kbd "RET")))
+                            (should (equal rid opened))
+                            (setq opened nil)
+                            (call-interactively (lookup-key keys [mouse-1]))
+                            (should (equal rid opened))))
                         ;; Running while the session idles, until its result comes.
                         (let ((status (save-excursion (goto-char title)
                                                       (buffer-substring (line-beginning-position) (line-end-position)))))
@@ -333,6 +343,97 @@ a turn of its own, and a redraw renders the same."
             (harness-chat-redraw)
             (harness-test-wait (lambda () (not harness-chat--loading)) 5 "redrawn"))
           (check t))))))
+
+(ert-deftest harness-ui-chat-call-block-opens-the-session-it-started ()
+  "A tool call that names a session -- the spawn_agent call the harness
+named its child on, while the call still runs -- opens that session
+from anywhere on its block, on mouse-1 or RET, as well as from its
+session line.  A button in the block keeps its own key; a call that
+names no session is no link."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Parent"))
+           (kid (harness-ui-chat-test-session "Kid"))
+           (buf (harness-ui-chat-test-open sid))
+           (opened nil))
+      (harness-call 'session/append sid '(:kind user :content "delegate the tour"))
+      (harness-call 'session/append sid
+                    (list :kind 'tool-call :tool "spawn_agent" :call-id "s1"
+                          :title "Sub-agent: Kid" :input (list :prompt "do the tour" :name "Kid")
+                          :meta (list :model "demo:scripted" :child-id kid)))
+      (harness-call 'session/append sid
+                    (list :kind 'tool-call :tool "bash" :call-id "s2"
+                          :title "Bash: true" :input '(:command "true")))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf "Bash")) 5 "the calls rendered")
+      (with-current-buffer buf
+        (let* ((child-title (harness-ui-chat-test-find buf "Sub-agent"))
+               (block (cl-find "s1" (harness-ui-chat-test-blocks buf "tool-call")
+                               :key (lambda (b) (plist-get (harness-chat-block-node b) :call-id))
+                               :test #'equal)))
+          (should block)
+          ;; The session line is there, and opens the child.
+          (let ((line (harness-ui-chat-test-find buf "session: Kid" child-title)))
+            (should line)
+            (cl-letf (((symbol-function 'harness-open-session) (lambda (id &rest _) (setq opened id)))
+                      ((symbol-function 'harness-ui-display-session) (lambda (id &rest _) (setq opened id))))
+              (funcall (get-text-property (1- line) 'harness-chat-action))
+              (should (equal kid opened))
+              ;; The block's own text opens it too, on RET and on a click.
+              (let ((keys (get-text-property (1- child-title) 'keymap)))
+                (should (keymapp keys))
+                (setq opened nil)
+                (call-interactively (lookup-key keys (kbd "RET")))
+                (should (equal kid opened))
+                (setq opened nil)
+                (call-interactively (lookup-key keys [mouse-1]))
+                (should (equal kid opened)))
+              ;; The fold icon keeps its own key: RET on it folds.
+              (let ((fold (harness-ui-chat-test-find
+                           buf (harness-ui-icon 'harness-icon-collapsed)
+                           (harness-chat-block-start block))))
+                (should fold)
+                (should (harness-chat-block-collapsed block))
+                (call-interactively
+                 (lookup-key (get-text-property (1- fold) 'keymap) (kbd "RET")))
+                (should-not (harness-chat-block-collapsed block)))))
+          ;; A call that names no session is no link.
+          (let ((plain (harness-ui-chat-test-find buf "Bash")))
+            (should plain)
+            (should-not (get-text-property (1- plain) 'keymap))
+            (should-not (harness-ui-chat-test-find buf "session:" (1- plain)))))))))
+
+(ert-deftest harness-ui-chat-call-block-links-outside-and-failed-calls ()
+  "A call the harness recorded -- the supervisor's worker -- and a call
+whose result came back an error that names no session both open their
+sub-agent from the block: the call node names it from the start."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Boss"))
+           (worker (harness-ui-chat-test-session "Worker"))
+           (from (harness-sender-system "supervisor"))
+           (buf (harness-ui-chat-test-open sid))
+           (opened nil))
+      (harness-call 'session/append sid
+                    (list :kind 'tool-call :tool "spawn_agent" :call-id "w1"
+                          :title "Sub-agent: Worker" :input (list :prompt "do the job" :name "Worker")
+                          :meta (list :from from :child-id worker)))
+      ;; The result speaks for the step; it does not name the worker again.
+      (harness-call 'session/append sid
+                    (list :kind 'tool-result :call-id "w1" :output "Step failed: boom" :is-error t
+                          :meta (list :from from)))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf "Step failed")) 5 "the result rendered")
+      (with-current-buffer buf
+        (let* ((title (harness-ui-chat-test-find buf "Sub-agent"))
+               (keys (get-text-property (1- title) 'keymap)))
+          (should (harness-ui-chat-test-find buf "session: Worker" title))
+          (should (keymapp keys))
+          (cl-letf (((symbol-function 'harness-ui-display-session) (lambda (id &rest _) (setq opened id))))
+            (setq opened nil)
+            (call-interactively (lookup-key keys (kbd "RET")))
+            (should (equal worker opened))
+            (setq opened nil)
+            (call-interactively (lookup-key keys [mouse-1]))
+            (should (equal worker opened)))
+          ;; The failed call still says so.
+          (should (harness-ui-chat-test-find buf "failed")))))))
 
 (ert-deftest harness-ui-chat-messages-the-user-did-not-write ()
   "A message the harness or another session sent names its sender, not \"You\",
