@@ -101,6 +101,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 |---|---|
 | ![A chat waiting for permission to run pip install, with the allow and deny buttons](docs/media/chat-permission.png) | ![A chat waiting for the answer to a question, with three options](docs/media/chat-question.png) |
 | A permission request, answered in the chat | A question from the agent, answered with a digit |
+| ![A call the harness denied, with an [Approve] button under it and the handle the denial named](docs/media/chat-denied.png) | ![That call after the user approved it: marked user-approved, the agent's rerun under it with what the command printed](docs/media/chat-denied-approved.png) |
+| A denied call: the harness blocked it, [Approve] lets it run anyway | Approved: the agent reruns the call exactly as it was denied |
 | ![The task board with tasks needing input, in review, merging, in progress, pending and completed](docs/media/tasks.png) | ![The conversation tree of a session, its fork and a BTW](docs/media/tree.png) |
 | The task board: each task has a session and a worktree | The conversation tree of a session, a fork and a BTW |
 | ![A task's report popped out of the board: its chart large, the test run it quotes, and the banner and box to verify it or send it back](docs/media/report.png) | ![The chart of that report shown larger, in a popout of its own](docs/media/report-image.png) |
@@ -624,6 +626,20 @@ shows a definition, the file it names may then be read without a grant
 for the rest of the session, by the tools that only read, so the agent
 can read the code around it: only that file, not its directory, and not
 for writing.
+
+The harness decides a call as it happens, so a session never waits on a
+prompt nobody can answer, but it is never the last word: every call it
+refuses is kept under a handle, and the refusal the agent reads names
+it. A refused call in the transcript offers `[Approve]` (or
+`M-x harness-chat-approve-denied-call` on the call at point). Clicking
+it says yes on your behalf, in the transcript and once only: the agent
+is told, and runs the call exactly as it was refused, with its own tool
+and arguments, through the `rerun_approved` tool. The call shows as
+user-approved, and the rerun links to the call it was refused as. A
+handle you have not approved, one another session was refused, and one
+already rerun are refused, so nothing but the very call you approved
+ever runs. What the harness recorded stays in the session, so an
+approval outlives a reload.
 
 A shell command is about what its command line names, not only the
 directory it runs in. The prompt for `ls -la ~/.claude/projects/x`,
