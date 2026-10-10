@@ -27,8 +27,10 @@
 ;; - `session_move' moves a session, this one by default, to another
 ;;   working directory and that directory's project.  The user confirms
 ;;   every move, in every permission mode (see session_move below).
-;; - `session_wait' waits until sessions stop running (or become idle,
-;;   blocked, start running, or change at all).
+;; - `session_wait' does not wait: it registers a wake-up and returns at
+;;   once, and the session is sent a message of its own when the other
+;;   sessions stop running (or become idle, blocked, start running, or
+;;   change at all).
 ;; - `set_non_interactive' turns non-interactive mode on or off for
 ;;   this session, another one, or every current session and task of
 ;;   every project, with `session/set-all' and `task/set-all' as the
@@ -52,9 +54,24 @@
 ;; to ask, so its request is denied.  Turning it off needs no one's
 ;; leave.
 ;;
-;; Waits never block: each is an entry in `harness-tools-sessions--waiters'
-;; re-checked by one subscriber whenever a session or task changes, and
-;; settled by its condition, its timeout, or the end of the waiting turn.
+;; Waits run without blocking the harness: each is an entry in
+;; `harness-tools-sessions--waiters' re-checked by one subscriber
+;; whenever a session or task changes, and settled by its condition, its
+;; timeout, or the end of the waiting turn.  A wait made by a call
+;; (`task_wait') settles with a result for its promise; a registered one
+;; (`session_wait') outlives the turn that made it and sends the session
+;; a message of its own when an event settles it.
+;;
+;; The subscriber is not the only way a wait is looked at: a slow safety
+;; re-check (`harness-tools-sessions-wait-recheck') runs while any wait
+;; does, so a change that no subscribed event announced -- a subscriber
+;; lost to a reload, a session settled by a module of its own, a finish
+;; that happened before the wait was made -- cannot leave a wait or a
+;; registration while its condition already holds.  This matters most
+;; for a sub-agent: `spawn_agent' returns as soon as its child starts,
+;; but a wait made once that child has finished has nothing left to
+;; announce, and `--reached-p' settles a changed wait on an idle or
+;; closed session: nothing new of its own is coming from it.
 
 ;;; Code:
 
@@ -68,10 +85,25 @@
 (defvar harness-state-directory)
 
 (defconst harness-tools-sessions--wait-default 600
-  "Seconds `session_wait' and `task_wait' wait when the call gives no timeout.")
+  "Seconds `task_wait' waits when the call gives no timeout.")
 
 (defconst harness-tools-sessions--wait-max 3600
   "Longest wait, in seconds, a `session_wait' or `task_wait' call may ask for.")
+
+(defcustom harness-tools-sessions-wait-recheck 2
+  "Seconds between the safety re-checks of running waits, or nil for none.
+A wait is settled the moment its condition first holds, as the events
+that announce a session's or task's changes tell the module to look
+again; this is a floor under those events, so a change none of them
+announced -- a subscriber lost to a reload, a status a module set on its
+own, a finish that happened before the wait was made -- cannot leave a
+wait or a registration while its condition already holds.  The
+re-check is a walk over the running waits; with none running, nothing
+runs."
+  :type '(choice (const :tag "No safety re-check" nil)
+                 (number :tag "Seconds"))
+  :safe (lambda (v) (or (null v) (and (numberp v) (> v 0))))
+  :group 'harness)
 
 (defconst harness-tools-sessions--grep-program "grep"
   "Program `session_search' runs over the transcript logs.")
@@ -1035,7 +1067,11 @@ CTX is the tool context, which names the calling session."
 (defvar harness-tools-sessions--waiters (make-hash-table :test 'equal)
   "Wait id -> (:check FN :finish FN :session-id ID) for running waits.
 CHECK returns non-nil once the wait's condition holds; FINISH settles
-the wait with a reason symbol (met, timeout or cancelled).")
+the wait, taking `met', `timeout' or `cancelled'.  A wait made by a
+call (`task_wait') settles with a result for its promise.  One
+registered by `session_wait' carries `:wake' t (and the `:label' its
+outstanding line shows): it outlives the turn that made it and wakes
+its session with a message when an event settles it.")
 
 (defun harness-tools-sessions--wait-title (sid)
   "Return how a wait's note names session SID."
@@ -1073,13 +1109,65 @@ a no-op, when the call can show no note."
                (funcall (plist-get w :finish) 'met)))
            (copy-hash-table harness-tools-sessions--waiters)))
 
-(defun harness-tools-sessions--on-turn-ended (session-id &rest _)
-  "Settle the waits made by SESSION-ID's turn, which has ended, then re-check."
+(defvar harness-tools-sessions--recheck-timer nil
+  "Timer of the safety re-check of the running waits, or nil for none.")
+
+(defun harness-tools-sessions--arm-recheck ()
+  "Keep the waits' safety re-check armed while any wait runs.
+See `harness-tools-sessions-wait-recheck': this is the floor under the
+events that settle waits, so none can be left by a change nothing
+announced."
+  (when (and harness-tools-sessions-wait-recheck
+             (not harness-tools-sessions--recheck-timer)
+             (> (hash-table-count harness-tools-sessions--waiters) 0))
+    (setq harness-tools-sessions--recheck-timer
+          (run-at-time harness-tools-sessions-wait-recheck nil
+                       #'harness-tools-sessions--recheck))))
+
+(defun harness-tools-sessions--recheck ()
+  "Look at every running wait once, and keep the next re-check armed."
+  (setq harness-tools-sessions--recheck-timer nil)
+  (harness-tools-sessions--poke)
+  (harness-tools-sessions--arm-recheck))
+
+(defun harness-tools-sessions--disarm-recheck ()
+  "Stop the safety re-check of the waits when none of them waits any more."
+  (when (and harness-tools-sessions--recheck-timer
+             (zerop (hash-table-count harness-tools-sessions--waiters)))
+    (cancel-timer harness-tools-sessions--recheck-timer)
+    (setq harness-tools-sessions--recheck-timer nil)))
+
+(defun harness-tools-sessions--on-turn-ended (session-id reason &rest _)
+  "Settle the waits of SESSION-ID, whose turn ended with REASON, then re-check.
+A wait made by a call of the turn settles as cancelled: its call went
+with the turn.  A registered wait (`harness-tools-sessions--watch')
+outlives it -- the message it sends is what settles it -- except after a
+turn the user cancelled, when it goes too: a turn the user stopped is
+not one to start another on (as `harness-supervisor--flush' has it)."
   (maphash (lambda (_ w)
-             (when (equal (plist-get w :session-id) session-id)
+             (when (and (equal (plist-get w :session-id) session-id)
+                        (or (not (plist-get w :wake))
+                            (eq reason 'cancelled)))
                (funcall (plist-get w :finish) 'cancelled)))
            (copy-hash-table harness-tools-sessions--waiters))
   (harness-tools-sessions--poke))
+
+(defun harness-tools-sessions--outstanding (value session-id)
+  "Add what SESSION-ID waits for to VALUE (see `agent/outstanding').
+A registered wait (`session_wait') outlives the turn that made it, so a
+task whose session's turn ended stays active, waiting, while this says
+something."
+  (let (labels)
+    (maphash (lambda (_ w)
+               (when (and (plist-get w :wake) (equal (plist-get w :session-id) session-id))
+                 (push (plist-get w :label) labels)))
+             harness-tools-sessions--waiters)
+    (if (null labels)
+        value
+      (let ((text (format "Waiting on %s" (string-join (nreverse labels) ", "))))
+        (if (and (stringp value) (not (harness-string-blank-p value)))
+            (concat value "; " text)
+          text)))))
 
 (defun harness-tools-sessions--wait (ctx timeout check report)
   "Return a promise of REPORT's result once CHECK holds or TIMEOUT seconds pass.
@@ -1092,12 +1180,14 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
                      (when (gethash id harness-tools-sessions--waiters)
                        (remhash id harness-tools-sessions--waiters)
                        (when timer (cancel-timer timer))
+                       (harness-tools-sessions--disarm-recheck)
                        (funcall resolve (condition-case err (funcall report why)
                                           (error (harness-tool-error (harness-error-message err)))))))))
       (if (funcall check)
           (funcall resolve (funcall report 'met))
         (puthash id (list :check check :finish finish :session-id (plist-get ctx :session-id))
                  harness-tools-sessions--waiters)
+        (harness-tools-sessions--arm-recheck)
         (setq timer (run-at-time timeout nil finish 'timeout))))))
 
 (defun harness-tools-sessions--timeout (input)
@@ -1106,8 +1196,110 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
     (max 1 (min harness-tools-sessions--wait-max
                 (if (numberp v) v harness-tools-sessions--wait-default)))))
 
+(defun harness-tools-sessions--wake-timeout (input)
+  "Return the seconds INPUT asks to be woken after without its condition, or nil.
+A registered wait has no timeout of its own: it is woken by its
+condition, however long that takes, unless the call gives one."
+  (let ((v (plist-get input :timeout_seconds)))
+    (and (numberp v) (> v 0) (min harness-tools-sessions--wait-max v))))
+
+(defun harness-tools-sessions--until-phrase (until)
+  "Return UNTIL, a wait's condition, as a few words."
+  (pcase until
+    ("stopped" "stop running")
+    ("idle" "become idle")
+    ("blocked" "wait on the user")
+    ("running" "start running")
+    ("changed" "change in any way")
+    (_ (format "reach %s" until))))
+
+(defun harness-tools-sessions--wait-condition (ids until any)
+  "Return how a wait on IDS until UNTIL reads, as a clause.
+ANY says only one of them has to reach it."
+  (format "%s %s %s"
+          (if any "any of" "all of")
+          (string-join (mapcar #'harness-tools-sessions--short ids) ", ")
+          (harness-tools-sessions--until-phrase until)))
+
+(defun harness-tools-sessions--wait-report (ids until why started &optional timeout)
+  "Return the report of a wait on IDS that settled WHY, started at STARTED.
+TIMEOUT is the seconds it was given, for the text of a timeout.  The
+text is the same whether the call returns it (the condition already
+held) or a later message brings it (the wait was registered), so the
+model reads it the same either way."
+  (concat (pcase why
+            ('met (format "Done waiting after %s (until %s)."
+                          (harness-format-duration (- (float-time) started)) until))
+            ('timeout (format "Still waiting after %ss; the condition (until %s) did not hold. Register session_wait again to keep waiting."
+                              timeout until))
+            (_ "The wait was dropped."))
+          "\n\n"
+          (mapconcat (lambda (sid) (harness-tools-sessions--describe sid)) ids "\n\n")))
+
+(defun harness-tools-sessions--wake (session-id text)
+  "Wake SESSION-ID with TEXT, a message of the harness's own, sent soon.
+An idle session starts a turn on it and a running one is steered, as a
+supervisor's report arrives; a session that is gone is left alone.  The
+message is from the harness (\"session wait\"), so transcripts do not
+show it as the user's."
+  (when (harness-call 'session/exists-p session-id)
+    (harness-run-soon
+     (lambda ()
+       (when (harness-call 'session/exists-p session-id)
+         (harness-catch
+          (harness-call-async 'agent/prompt session-id text (list :from (harness-sender-system "session wait")))
+          (lambda (err)
+            (harness-log 'warn "tools-sessions: waking %s failed: %s"
+                         session-id (harness-error-message err)))))))))
+
+(defun harness-tools-sessions--watch (ctx input ids until any check report)
+  "Register a wake-up for the session in CTX and return its tool result.
+CHECK returns non-nil once the wait's condition holds (IDS until UNTIL,
+ANY of them enough); the session is then woken with (REPORT `met') as a
+message of its own, and reported to `agent/outstanding' as \"Waiting on
+IDS\" until then.  The registration outlives the turn that made it: only
+the event that settles it, its timeout (INPUT's `timeout_seconds'), or a
+turn the user cancelled ends it (see
+`harness-tools-sessions--on-turn-ended').  The call itself returns at
+once and blocks nothing."
+  (let* ((caller (plist-get ctx :session-id))
+         (id (harness-short-id 12))
+         (timeout (harness-tools-sessions--wake-timeout input))
+         (timer nil)
+         (finish (lambda (why)
+                   (when (gethash id harness-tools-sessions--waiters)
+                     (remhash id harness-tools-sessions--waiters)
+                     (when timer (cancel-timer timer))
+                     (harness-tools-sessions--disarm-recheck)
+                     (when (memq why '(met timeout))
+                       (harness-tools-sessions--wake caller (funcall report why)))))))
+    (if (funcall check)
+        (harness-tool-ok (funcall report 'met))
+      (puthash id (list :check check :finish finish :session-id caller :wake t
+                        :label (string-join (mapcar #'harness-tools-sessions--short ids) ", "))
+               harness-tools-sessions--waiters)
+      (harness-tools-sessions--arm-recheck)
+      (when timeout (setq timer (run-at-time timeout nil finish 'timeout)))
+      (harness-tool-ok
+       (format (concat "Waiting in the background: you will be woken with a message when %s. "
+                       "Carry on with other work, and do not poll.%s")
+               (harness-tools-sessions--wait-condition ids until any)
+               (if timeout
+                   (format " If that has not happened in %ss, you are woken then instead." timeout)
+                 ""))))))
+
 (defun harness-tools-sessions--reached-p (sid until baseline)
-  "Non-nil when session SID satisfies UNTIL; BASELINE is its state at the start."
+  "Non-nil when session SID satisfies UNTIL; BASELINE is its state at the start.
+A `changed' wait is met by any new state of the session and also by an
+idle or closed one: a session that is not running and not waiting on
+the user has nothing new of its own coming, so asking for a change that
+can never come would only leave the wait or its registration unsettled
+(a registered wait may have no timeout at all).  It is what a wait made
+on a sub-agent meets: `spawn_agent' returns as soon as its child
+starts, but a wait can still be made once that child has finished -- by
+a session that only looks later, or a third one -- and then nothing is
+left to announce.  A blocked session is left to the wait: its turn is
+not over, and it changes when its question is answered."
   (if (not (harness-call 'session/exists-p sid))
       t
     (let ((status (harness-tools-sessions--status sid)))
@@ -1115,7 +1307,8 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
         ("idle" (eq status 'idle))
         ("blocked" (eq status 'blocked))
         ("running" (eq status 'running))
-        ("changed" (not (equal baseline (harness-tools-sessions--state sid))))
+        ("changed" (or (memq status '(idle inactive))
+                       (not (equal baseline (harness-tools-sessions--state sid)))))
         (_ (not (eq status 'running)))))))
 
 (defun harness-tools-sessions--state (sid)
@@ -1126,44 +1319,37 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
                (mapcar (lambda (p) (plist-get p :id)) (plist-get s :pending))))))
 
 (defun harness-tools-sessions--session-wait (input ctx)
-  "Handler of session_wait.
-INPUT is the tool call's input plist and CTX its context."
+  "Handler of session_wait: register a wake-up for the sessions INPUT names.
+The call returns at once, with the report itself when the condition
+already holds and a registration otherwise; when an event makes the
+condition hold, the session in CTX is woken with the same report as a
+message of the harness's own."
   (let* ((ids (mapcar (lambda (r) (harness-tools-sessions--other r ctx "wait on"))
                       (harness-tools-sessions--refs input :session_id :session_ids)))
          (until (or (plist-get input :until) "stopped"))
          (any (equal (plist-get input :mode) "any"))
          (baselines (mapcar #'harness-tools-sessions--state ids))
-         (timeout (harness-tools-sessions--timeout input))
+         (timeout (harness-tools-sessions--wake-timeout input))
          (started (float-time)))
     (unless ids (signal 'harness-error (list "session_wait needs session_id or session_ids")))
-    (let ((unwatch (harness-tools-sessions--note-watch ctx ids)))
-      (harness-tools-sessions--wait
-       ctx timeout
-       (lambda ()
-         (funcall (if any #'cl-some #'cl-every)
-                  (lambda (pair) (harness-tools-sessions--reached-p (car pair) until (cdr pair)))
-                  (cl-mapcar #'cons ids baselines)))
-       (lambda (why)
-         (funcall unwatch)
-         (harness-tool-ok
-          (concat (pcase why
-                    ('met (format "Done waiting after %s (until %s)." (harness-format-duration (- (float-time) started)) until))
-                    ('timeout (format "Still waiting after %ss; the condition (until %s) did not hold. Call session_wait again to keep waiting." timeout until))
-                    (_ "The wait was interrupted."))
-                  "\n\n"
-                  (mapconcat (lambda (sid) (harness-tools-sessions--describe sid)) ids "\n\n"))))))))
+    (harness-tools-sessions--watch
+     ctx input ids until any
+     (lambda ()
+       (funcall (if any #'cl-some #'cl-every)
+                (lambda (pair) (harness-tools-sessions--reached-p (car pair) until (cdr pair)))
+                (cl-mapcar #'cons ids baselines)))
+     (lambda (why) (harness-tools-sessions--wait-report ids until why started timeout)))))
 
 (harness-define-tool "session_wait"
   :label "Wait for sessions"
-  :description "Wait for other sessions without polling. until=stopped (default) returns when each session is no longer running (its turn ended, it is blocked on the user, or it closed); idle, blocked and running wait for that status; changed waits for any new status, message or pending request. mode=all (default) waits for every session, any for the first. Returns each session's status, what it waits on and its last reply; on timeout it returns the same report, not an error."
+  :description "Wait for other sessions without blocking: the call registers a wake-up and returns at once, and when the condition holds the session is sent a message of the harness's own reporting the sessions. until=stopped (default) waits for a session to stop running (its turn ended: it is idle, blocked on the user, or closed); idle, blocked and running wait for that status; changed waits for any new status, message or pending request, and is met at once by an idle or closed session, whose own work is over and from which nothing new of its own is coming -- so a wait on a sub-agent that has already finished settles rather than ask for a change that can never come. mode=all (default) waits for every session, any for the first. The registration outlives the turn that made it, so nothing is left hanging; with timeout_seconds you are woken with the report anyway if the condition still does not hold by then, and the registration ends. If the condition already holds the report is the call's result. Never poll or wait in a loop: register, and carry on."
   :schema '(:type "object"
             :properties (:session_id (:type "string" :description "A session id, unique id prefix or unique name.")
                          :session_ids (:type "array" :items (:type "string") :description "Several sessions.")
                          :until (:type "string" :enum ("stopped" "idle" "blocked" "running" "changed"))
                          :mode (:type "string" :enum ("all" "any"))
-                         :timeout_seconds (:type "number" :description "Give up after this long (default 600, at most 3600).")))
+                         :timeout_seconds (:type "number" :description "Wake me anyway after this long, without blocking (default: wait for the condition, however long it takes).")))
   :kind 'read
-  :timeout 3700
   :subject (lambda (input) (mapconcat #'harness-tools-sessions--short
                                       (harness-tools-sessions--refs input :session_id :session_ids) " "))
   :handler #'harness-tools-sessions--session-wait)
@@ -1449,9 +1635,11 @@ INPUT is the tool call's input plist and CTX its context."
 Install the stage that has the user confirm session_move, too: the tool
 is registered at load time, and must never be offered without it."
   (dolist (ev '(session/status session/changed session/deleted session/pending-changed
+                session/node-added session/head-moved
                 agent/turn-started task/changed task/deleted))
     (harness-on ev #'harness-tools-sessions--poke 90))
   (harness-on 'agent/turn-ended #'harness-tools-sessions--on-turn-ended 90)
+  (harness-add-filter 'agent/outstanding #'harness-tools-sessions--outstanding)
   (harness-add-filter 'permission/decide #'harness-tools-sessions--move-gate 6))
 
 (harness-tools-sessions--init)

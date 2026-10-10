@@ -363,5 +363,8 @@ and the tasks module would prompt the session while a test runs."
                                                        :input '(:prompt "child work" :name "helper")))
                 10)))
         (should-not (plist-get r :is-error)))
-      ;; The child's recap reached the note of the call that shows it.
-      (should (cl-some (lambda (n) (string-match-p "recap: Implemented the widget, tests pass" n)) notes)))))
+      ;; The child's recap reached the note of the call that shows it,
+      ;; while the child ran and the call watched it.
+      (harness-test-wait
+       (lambda () (cl-some (lambda (n) (string-match-p "recap: Implemented the widget, tests pass" n)) notes))
+       10 "the child's recap in the note"))))
