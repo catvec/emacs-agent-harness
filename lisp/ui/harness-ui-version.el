@@ -709,7 +709,7 @@ works its text out again."
 
 (defvar harness-ui-version-mode-map
   (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
+    (set-keymap-parent map harness-ui-view-map)
     (define-key map (kbd "TAB") #'forward-button)
     (define-key map (kbd "<backtab>") #'backward-button)
     (define-key map (kbd "g") #'harness-ui-version-refresh)

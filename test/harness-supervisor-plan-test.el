@@ -2922,7 +2922,7 @@ A task's session supervises, and a finished task waits for review."
       (setq harness-supervisor-plan-test--on-report
             (lambda (_text)
               (harness-supervisor-plan-test-call
-               "hand_in" '(:summary "The parser is fixed and committed." :evidence ("Read the diff: it does what the plan said.")))))
+               "hand_in" '(:problem "The parser breaks on nested quotes." :summary "The parser is fixed and committed." :evidence ("Read the diff: it does what the plan said.")))))
       (let* ((id (plist-get (harness-call 'task/submit default-directory "Fix the parser") :id))
              (sid (plist-get (harness-supervisor-plan-test-task id) :session)))
         (should (harness-call 'supervisor/active-p sid))
@@ -2966,7 +2966,7 @@ A task's session supervises, and a finished task waits for review."
     (setq harness-supervisor-plan-test--on-report
           (lambda (_text)
             (harness-supervisor-plan-test-call
-             "hand_in" '(:summary "The step failed; handing in what there is." :evidence ("Step s1 failed twice.")))))
+             "hand_in" '(:problem "The parser breaks on nested quotes." :summary "The step failed; handing in what there is." :evidence ("Step s1 failed twice.")))))
     (let* ((id (plist-get (harness-call 'task/submit default-directory "Fix the parser") :id))
            (sid (plist-get (harness-supervisor-plan-test-task id) :session)))
       ;; The failure reaches the supervisor as a turn, even though the first one ended.

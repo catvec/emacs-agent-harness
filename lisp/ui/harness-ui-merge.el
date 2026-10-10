@@ -124,20 +124,42 @@ either that or the symbol."
      (when-let* ((reason (plist-get item :reason)))
        (format ": %s" (harness-first-line reason 60))))))
 
+(defun harness-ui-merge--name (item)
+  "Return the name ITEM, a merge view item, shows in the panel.
+That is the child session's name, or the first characters of its id
+when it has none, marked bold while the merge is live and dim once it
+is through.  A merge naming its child session (`:child') shows the name
+as a clickable link to it (`harness-ui-session-link'), truncated as the
+panel truncates names, so it wears `harness-ui-session-link-face' like
+every session link; the bold or dim mark is added under that face.  One
+naming no child shows plain text, bold or dim."
+  (let* ((child (plist-get item :child))
+         (plain (or (plist-get item :name)
+                    (and (stringp child) (not (string-empty-p child))
+                         (substring child 0 (min 8 (length child))))
+                    "unnamed"))
+         (shown (harness-truncate-end plain 24))
+         (text (if (and (stringp child) (not (string-empty-p child)))
+                   (harness-ui-session-link child shown
+                                            (format "mouse-1, RET: open the session %s" plain))
+                 (copy-sequence shown))))
+    (add-face-text-property 0 (length text)
+                            (if (harness-ui-merge--live-p item) 'bold 'harness-dim-face)
+                            t text)
+    (put-text-property 0 (length text) 'wrap-prefix "   " text)
+    text))
+
 (defun harness-ui-merge--lines (items)
-  "Return one line per ITEM of a merge view, as the panel shows them."
+  "Return one line per ITEM of a merge view, as the panel shows them.
+The name of a merge that names its child session opens it
+\(`harness-ui-merge--name')."
   (string-join
    (mapcar (lambda (item)
-             (let* ((mark (harness-ui-merge--mark item))
-                    (name (or (plist-get item :name)
-                              (substring (plist-get item :child) 0 8)))
-                    (live (harness-ui-merge--live-p item)))
+             (let ((mark (harness-ui-merge--mark item)))
                (concat "   "
                        (propertize (harness-ui-icon (car mark)) 'face (cdr mark))
                        " "
-                       (propertize (harness-truncate-end name 24)
-                                   'face (if live 'bold 'harness-dim-face)
-                                   'wrap-prefix "   ")
+                       (harness-ui-merge--name item)
                        "  "
                        (propertize (harness-ui-merge--state item)
                                    'face 'harness-dim-face))))

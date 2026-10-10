@@ -8,13 +8,14 @@
 ;; in a popout (`harness-ui-popout'), so it can be read without opening
 ;; the session, from
 ;;
-;;   the board  [Review] on a card that has one; the board's item at
+;;   the board  [Review Changes] on a card that has one; the board's item at
 ;;              point (`SPC', through the shared
 ;;              `harness-ui-popout-at-point-functions') too;
-;;   the chat   the review banner's [Review] button.
+;;   the chat   the review banner's [Review Changes] button.
 ;;
-;; The button reads [Review], to look the work over, not [Report],
-;; which reads as reporting the agent for something bad.
+;; The button reads [Review Changes], to look the changes and the work
+;; over, not [Report], which reads as reporting the agent for something
+;; bad.
 ;;
 ;; Inside the task's session the report is not behind a button: while
 ;; the task waits for review, the review banner shows it in full,
@@ -143,6 +144,11 @@ that shows it among its own text, draws them straight away instead: a
 string has nowhere to draw an image later.")
 
 (defvar harness-chat--transcript-end)
+(defvar harness-chat--calls)
+(defvar harness-ui-session-id)
+(declare-function harness-chat-block-node "harness-ui-chat" (block))
+(declare-function harness-chat--str "harness-ui-chat" (kind))
+(declare-function harness-ui-review--task "harness-ui-review" (sid))
 
 (defun harness-ui-report--report (task)
   "Return TASK's report plist, or nil."
@@ -170,6 +176,10 @@ feedback to `:feedback'."
   (if (fboundp 'harness-ui-tasks--title)
       (harness-ui-tasks--title task)
     (harness-first-line (or (plist-get task :prompt) "task") 60)))
+
+(defun harness-ui-report--text (value)
+  "Return VALUE as a non-blank trimmed string, or nil."
+  (and (stringp value) (not (harness-string-blank-p value)) (string-trim value)))
 
 ;;;; Drawing the evidence
 
@@ -312,57 +322,72 @@ The call's title, status, input and output are shown as the chat shows
 them; [Open in the session] goes to the call.  A call that started a
 sub-agent (`:child-id') names it in a session line, and the text of the
 call opens that session, as the chat's call block does; the buttons
-keep their own keys.  The output is capped, with a button for the rest,
-unless the report is drawn in full."
+keep their own keys.  A session id in the input or the output is a
+session link too (`harness-ui-link-session-ids'), as it is in the
+chat, and it keeps its own keys under the call's.  The output is capped,
+with a button for the rest, unless the report is drawn in full.  A call
+reference without the snapshot the harness copies -- a report rebuilt
+from a hand_in call's input -- names the call and links to it, nothing
+else."
   (let* ((call-id (plist-get item :call-id))
          (child (let ((c (plist-get item :child-id)))
                   (and (stringp c) (not (string-empty-p c)) c)))
          (failed (plist-get item :is-error))
          (output (or (plist-get item :output) ""))
+         (unresolved (and (not (plist-get item :tool))
+                          (not (plist-get item :input))
+                          (string-empty-p output)))
          (limit harness-ui-report-output-limit)
          (expanded (or harness-ui-report--full (gethash call-id harness-ui-report--expanded)))
-         (long (and (not expanded) (> (length output) limit)))
+         (long (and (not unresolved) (not expanded) (> (length output) limit)))
          (shown (if long (substring output 0 limit) output))
          (indent (propertize "    " 'face 'harness-md-code-block))
          (start (point)))
     ;; The link line: what it is, then the call as the chat names it.
     (insert "  " (propertize "[tool call]" 'face 'harness-dim-face
                             'help-echo "A link to this call in the session's transcript")
-            " " (propertize (or (plist-get item :title) (plist-get item :tool) "tool call")
+            " " (propertize (or (plist-get item :title) (plist-get item :tool)
+                                (and call-id (format "call %s" call-id)) "tool call")
                             'face 'harness-tool-title-face)
-            (if failed (propertize "  ✗ failed" 'face 'error) (propertize "  ✓" 'face 'success))
+            (cond (unresolved "")
+                  (failed (propertize "  ✗ failed" 'face 'error))
+                  (t (propertize "  ✓" 'face 'success)))
             "\n")
-    (when-let* ((input (plist-get item :input)))
-      (insert (propertize "  input: " 'face 'harness-label-face)
-              (propertize (harness-truncate-end (string-replace "\n" " " input) 400) 'face 'harness-dim-face)
-              "\n"))
-    ;; The sub-agent the call started, as the chat's session line links it.
-    (when child
-      (insert "  " (propertize "session: " 'face 'harness-dim-face))
-      (harness-ui-button (harness-ui-session-name child)
-                         (lambda () (harness-ui-display-session child))
-                         :help (format "Open the session %s" (harness-ui-session-name child)))
-      (insert "\n"))
-    (insert (propertize (if failed "  error\n" "  output\n") 'face 'harness-label-face))
-    (cond
-     ((string-empty-p output) (insert (propertize "  (no output)\n" 'face 'harness-dim-face)))
-     (t
-      (insert (propertize (if (string-suffix-p "\n" shown) shown (concat shown "\n"))
-                          'face 'harness-md-code-block 'line-prefix indent 'wrap-prefix indent))))
-    ;; The call's text opens the session it started; the buttons under it
-    ;; are inserted after, so each keeps its own action and keys.
-    (when child
-      (harness-ui-add-session-keys (current-buffer) child (harness-ui-session-name child)
-                                   start (point)))
-    (when long
-      ;; `harness-ui-button' inserts the button itself, at point.
-      (insert "  ")
-      (harness-ui-button (format "[show all (%d more chars)]" (- (length output) limit))
-                         (lambda ()
-                           (puthash call-id t harness-ui-report--expanded)
-                           (harness-ui-popout-refresh (list 'report (plist-get task :id))))
-                         :help "Show the whole output")
-      (insert "\n"))
+    (if unresolved
+        (insert (propertize "  (the call itself is in the session)\n" 'face 'harness-dim-face))
+      (when-let* ((input (plist-get item :input)))
+        (insert (propertize "  input: " 'face 'harness-label-face)
+                (harness-ui-link-session-ids
+                 (propertize (harness-truncate-end (string-replace "\n" " " input) 400)
+                             'face 'harness-dim-face))
+                "\n"))
+      ;; The sub-agent the call started, as the chat's session line links it.
+      (when child
+        (insert "  " (propertize "session: " 'face 'harness-dim-face))
+        (insert (harness-ui-session-link child))
+        (insert "\n"))
+      (insert (propertize (if failed "  error\n" "  output\n") 'face 'harness-label-face))
+      (cond
+       ((string-empty-p output) (insert (propertize "  (no output)\n" 'face 'harness-dim-face)))
+       (t
+        (insert (harness-ui-link-session-ids
+                 (propertize (if (string-suffix-p "\n" shown) shown (concat shown "\n"))
+                             'face 'harness-md-code-block 'line-prefix indent 'wrap-prefix indent)))))
+      ;; The call's text opens the session it started, as the chat's call
+      ;; block does, with the session link's action; the buttons under it
+      ;; are inserted after, so each keeps its own action and keys.
+      (when child
+        (harness-ui-add-session-keys (current-buffer) child (harness-ui-session-name child)
+                                     start (point) (harness-ui-session-action child)))
+      (when long
+        ;; `harness-ui-button' inserts the button itself, at point.
+        (insert "  ")
+        (harness-ui-button (format "[show all (%d more chars)]" (- (length output) limit))
+                           (lambda ()
+                             (puthash call-id t harness-ui-report--expanded)
+                             (harness-ui-popout-refresh (list 'report (plist-get task :id))))
+                           :help "Show the whole output")
+        (insert "\n")))
     (insert "  ")
     (harness-ui-button "[Open in the session]"
                        (lambda () (harness-ui-report--open-call item task))
@@ -377,7 +402,10 @@ banner shows under the transcript."
   (let ((end (if (and (boundp 'harness-chat--transcript-end) (markerp harness-chat--transcript-end))
                  (marker-position harness-chat--transcript-end)
                (point-max)))
-        (node (plist-get item :id))
+        (node (or (plist-get item :id)
+                  (and (plist-get item :call-id)
+                       (boundp 'harness-chat--calls)
+                       (gethash (plist-get item :call-id) harness-chat--calls))))
         (title (or (plist-get item :title) (plist-get item :tool))))
     (save-excursion
       (or (and (stringp node)
@@ -440,6 +468,52 @@ quotes it from the box too."
       (insert (propertize (concat "  " caption "\n") 'face 'harness-dim-face
                           'wrap-prefix "  ")))))
 
+(defun harness-ui-report--input-item (item)
+  "Return the report evidence item for ITEM, a hand_in call's evidence item.
+ITEM is a string (a note) or an object, as the model wrote it.  A
+`:tool_call' comes back without the snapshot the harness copies at
+hand-in time; the transcript has the call itself."
+  (let ((caption (harness-ui-report--text (plist-get item :caption))))
+    (cond
+     ((stringp item) (if (harness-string-blank-p item)
+                         nil
+                       (list :kind "note" :text (string-trim item))))
+     ((not (listp item)) nil)
+     (t
+      (let* ((image (harness-ui-report--text (plist-get item :image)))
+             (video (harness-ui-report--text (plist-get item :video)))
+             (file (harness-ui-report--text (plist-get item :file)))
+             (code (harness-ui-report--text (plist-get item :code)))
+             (note (harness-ui-report--text (plist-get item :note)))
+             (call (harness-ui-report--text (plist-get item :tool_call)))
+             (put-caption (lambda (plist)
+                            (if caption (plist-put plist :caption caption) plist))))
+        (cond
+         (image (funcall put-caption (list :kind "image" :path image)))
+         (video (funcall put-caption (list :kind "video" :path video)))
+         (file (funcall put-caption (list :kind "file" :path file)))
+         (code (funcall put-caption (list :kind "code"
+                                          :language (or (harness-ui-report--text (plist-get item :language)) "text")
+                                          :code code)))
+         (note (funcall put-caption (list :kind "note" :text note)))
+         (call (funcall put-caption (list :kind "tool-call" :call-id call)))
+         (t nil)))))))
+
+(defun harness-ui-report--from-input (input)
+  "Return the report a hand_in call with INPUT handed in, rebuilt.
+For a call recorded before the report rode its result, or one whose
+result is not loaded: the summary, the problem and the evidence the
+model wrote, tool references without the snapshot the harness copies."
+  (when (and (listp input) (harness-ui-report--text (plist-get input :summary)))
+    (append
+     (list :summary (plist-get input :summary))
+     (when-let* ((problem (harness-ui-report--text (plist-get input :problem))))
+       (list :problem problem))
+     (when-let* ((reproduction (harness-ui-report--text (plist-get input :reproduction))))
+       (list :reproduction reproduction))
+     (list :evidence (delq nil (mapcar #'harness-ui-report--input-item
+                                       (append (plist-get input :evidence) nil)))))))
+
 (defun harness-ui-report-missing-p (report)
   "Non-nil when REPORT says its round of work handed no report in.
 The harness records one such when a task's turn ends without `hand_in'
@@ -484,14 +558,30 @@ is to read, and a button to the session, where the work is."
 A report recorded for a round that handed none in says so instead
 \(`harness-ui-report--insert-missing')."
   (setq harness-ui-report--task task)
-  (let* ((report (harness-ui-report--report task))
-         (evidence (append (and report (plist-get report :evidence)) nil)))
+  (harness-ui-report--insert-report (harness-ui-report--report task) task))
+
+(defun harness-ui-report--insert-report (report task)
+  "Insert REPORT, TASK's report, as `harness-ui-report--insert' does.
+REPORT is what the task handed in (`:summary', `:problem', `:evidence'),
+or one recorded for a round that handed none in (`:missing')."
+  (let ((evidence (append (and report (plist-get report :evidence)) nil)))
     (cond
      ((not report)
       (insert (propertize "This task has not handed a report in.\n" 'face 'harness-dim-face)))
      ((harness-ui-report-missing-p report)
       (harness-ui-report--insert-missing report task))
      (t
+      ;; What must be fixed, first: with many tasks the title alone does
+      ;; not say.  A report from before this field has none and starts
+      ;; with the summary as it always did.
+      (when-let* ((problem (harness-ui-report--text (plist-get report :problem))))
+        (insert (propertize "Problem" 'face 'harness-label-face) "\n\n")
+        (harness-ui-report--insert-markdown problem)
+        (insert "\n"))
+      (when-let* ((reproduction (harness-ui-report--text (plist-get report :reproduction))))
+        (insert (propertize "Reproduction" 'face 'harness-label-face) "\n\n")
+        (harness-ui-report--insert-markdown reproduction)
+        (insert "\n"))
       (insert (propertize "Handed in" 'face 'harness-label-face)
               (if-let* ((at (plist-get report :at)))
                   (propertize (format "  %s" (format-time-string "%Y-%m-%d %H:%M" at)) 'face 'harness-dim-face)
@@ -554,14 +644,21 @@ every referenced call shows its whole output, with no [show all].  It
 is for a view that shows the report among its own text, as the review
 banner of a task's session does.  Images fit WINDOW, by default the
 selected one.  The buttons work wherever the string is inserted."
-  (when (harness-ui-report--report task)
+  (harness-ui-report--string-for (harness-ui-report--report task) task window))
+
+(defun harness-ui-report--string-for (report task &optional window)
+  "Return REPORT, TASK's report, drawn in full, as a string; nil without one.
+Like `harness-ui-report-string', but for a report plist given directly,
+as the transcript's hand_in tool call carries."
+  (when report
     (let ((harness-ui-report--full t)
           ;; A string has nowhere to draw an image later: they are drawn
           ;; into it straight away.
           (harness-ui-report--defer-images nil)
-          (harness-ui-report--window (or window (selected-window))))
+          (harness-ui-report--window (or window (selected-window)))
+          (harness-ui-report--task task))
       (with-temp-buffer
-        (harness-ui-report--insert task)
+        (harness-ui-report--insert-report report task)
         (buffer-string)))))
 
 ;;;; The popout
@@ -632,12 +729,32 @@ it opened, a done one say, stays open through later changes."
           (puthash key task harness-ui-report--reports)
           (harness-ui-popout-refresh key))))))
 
+(defun harness-ui-report--chat-hand-in (block result)
+  "Return the report BLOCK's hand_in call handed in, drawn in full, or nil.
+On `harness-chat-tool-body-functions', so an expanded hand_in call in the
+transcript shows the report the review shows, after it left review too.
+Nil for any other call, for a call still running, and for a hand_in
+whose report is not known: the chat then shows the call's input and
+output as usual."
+  (when result
+    (let ((node (harness-chat-block-node block)))
+      (when (and (equal (harness-chat--str (plist-get node :kind)) "tool-call")
+                 (equal (harness-chat--str (plist-get node :tool)) "hand_in"))
+        (when-let* ((report (or (plist-get (plist-get result :meta) :report)
+                                (harness-ui-report--from-input (plist-get node :input)))))
+          (let ((task (or (and (fboundp 'harness-ui-review--task)
+                               (harness-ui-review--task harness-ui-session-id))
+                          (list :id (plist-get (plist-get result :meta) :task-id)
+                                :session harness-ui-session-id))))
+            (harness-ui-report--string-for report task)))))))
+
 ;;;; Module
 
 (defun harness-ui-report--init ()
   "Offer the task at point to the shared popout command, and follow tasks."
   (add-hook 'harness-ui-popout-at-point-functions #'harness-ui-report-at-point)
-  (add-hook 'harness-ui-event-functions #'harness-ui-report--on-task-changed))
+  (add-hook 'harness-ui-event-functions #'harness-ui-report--on-task-changed)
+  (add-hook 'harness-chat-tool-body-functions #'harness-ui-report--chat-hand-in))
 
 (harness-define-module 'ui-report
   :doc "A task's report: its final message and evidence, in a popout and in its session."

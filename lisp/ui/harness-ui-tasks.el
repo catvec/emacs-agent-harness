@@ -980,11 +980,12 @@ offers for it, the session list too (`harness-ui-pending-view-actions'):
 
 (defun harness-ui-tasks--card-buttons (task)
   "Buttons for TASK's two most useful actions besides opening it.
-A task that handed a report in (`hand_in') gets a [Review] button too:
-its final message and evidence, in a popout.  One whose turn ended
-without it gets [No report] there instead, which pops out what the
-harness recorded for it: that nothing was handed in, and the session's
-last message (`harness-tasks--missing-report').
+A task that handed a report in (`hand_in') gets a [Review Changes]
+button too: the changes, the final message and the evidence, in a
+popout.  One whose turn ended without it gets [No report] there
+instead, which pops out what the harness recorded for it: that nothing
+was handed in, and the session's last message
+\(`harness-tasks--missing-report').
 
 A card has no button for opening its session: a click on its title
 does that.  Nor for Open harness, which stays in the card's menu
@@ -994,15 +995,15 @@ harness (`harness-ui-tasks--open-harness-p')."
     (concat
      (harness-ui-tasks--action-buttons task)
      (when (and (plist-get task :report) (fboundp 'harness-ui-report-popout))
-       ;; [Review] rather than [Report], which reads as reporting the
-       ;; agent for something bad: the button opens the work it handed
-       ;; in, to look it over.
+       ;; [Review Changes] rather than [Report], which reads as
+       ;; reporting the agent for something bad: the button opens the
+       ;; changes and the work it handed in, to look them over.
        (concat " " (harness-ui-tasks--button
-                     (if missing "[No report]" "[Review]")
+                     (if missing "[No report]" "[Review Changes]")
                      (lambda () (harness-ui-report-popout task))
                      (if missing
                          "It handed no report in: no summary, no evidence; see what its session said last"
-                       "Review what it handed in: the final message and the evidence")
+                       "Review the changes and what it handed in: the final message and the evidence")
                      "report"))))))
 
 (defun harness-ui-tasks--subtitle-button (task shown)
@@ -1790,12 +1791,35 @@ the request lapses after `harness-ui-tasks--focus-timeout' seconds.")
         (dolist (w (get-buffer-window-list (current-buffer) nil t))
           (set-window-point w (point)))))))
 
+(defun harness-ui-tasks--notification-root (notification)
+  "Return the main checkout of the project NOTIFICATION is about, or nil.
+The session a notification names, when the harness still has it, says
+the project for sure (`harness-ui-session-project'); otherwise its
+`:project' does, and that may be a task's worktree, which belongs to the
+main checkout around it (`harness-files-owning-checkout')."
+  (or (when-let* ((session-id (plist-get notification :session))
+                  ((stringp session-id))
+                  (session (harness-ui-session session-id)))
+        (harness-ui-session-project session))
+      (when-let* ((project (plist-get notification :project))
+                  ((stringp project))
+                  ((not (string-empty-p project))))
+        (harness-files-owning-checkout project))))
+
 (defun harness-ui-tasks--on-notification (notification)
   "Open the board on the task NOTIFICATION, a clicked notification, is about.
-On `harness-ui-notification-functions': non-nil when it was a task's."
+The click switches to the task's project first, as visiting a session
+does (`harness-ui-switch-to-project'), so the board opens in the project
+the task belongs to rather than the one that happened to be current.  On
+`harness-ui-notification-functions': non-nil when it was a task's."
   (let ((id (plist-get notification :task))
         (project (plist-get notification :project)))
     (when (and (stringp id) (stringp project) (not (string-empty-p project)))
+      ;; Switching is a courtesy to the click: whatever it does, the
+      ;; board still opens below.
+      (when harness-ui-switch-project-function
+        (harness-ignore-errors-logged "switching to the project of a notification's task"
+          (harness-ui-switch-to-project (harness-ui-tasks--notification-root notification))))
       (let ((board (harness-tasks project)))
         (when (buffer-live-p board)
           (with-current-buffer board

@@ -164,6 +164,9 @@
   (harness-ui-remote-test-with
     (should (eq 'harness-remote-control (lookup-key harness-ui-map (kbd "P"))))
     (should (get 'harness-ui-remote-mode 'harness-menu-group))
+    ;; q buries the page rather than quitting its window.
+    (harness-ui-remote-test-open)
+    (should (eq #'harness-ui-quit-view (key-binding (kbd "q"))))
     (should (equal "Android · Chrome"
                    (harness-ui-remote--device-label
                     "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/129.0 Mobile Safari/537.36")))

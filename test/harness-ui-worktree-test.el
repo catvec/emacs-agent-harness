@@ -94,6 +94,8 @@
   (harness-ui-worktree-test-with
     (harness-ui-worktree-test-open root 2)
     (should (derived-mode-p 'harness-ui-worktree-mode))
+    ;; q buries the list rather than quitting its window.
+    (should (eq #'harness-ui-quit-view (key-binding (kbd "q"))))
     (should (harness-ui-worktree-test-same-p root harness-ui-worktree--root))
     (harness-ui-worktree-test-goto root)
     (should (equal "main" (harness-ui-worktree-test-column "Branch")))

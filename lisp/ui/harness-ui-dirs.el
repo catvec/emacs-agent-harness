@@ -93,6 +93,7 @@ BUFFER defaults to the current buffer."
     (define-key map (kbd "d") #'harness-ui-dirs-revoke)
     (define-key map (kbd "g") #'harness-ui-dirs-reload)
     (define-key map (kbd "RET") #'harness-ui-dirs-visit)
+    (define-key map (kbd "q") #'harness-ui-quit-view)
     map)
   "Keymap of `harness-ui-dirs-mode'.")
 
