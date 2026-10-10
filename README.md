@@ -602,8 +602,9 @@ it has one, model, permission mode, whether it is `non-interactive` or
 `interactive`, thinking level, context and cost. Click the model, the
 permission mode, the non-interactive switch or the thinking level to
 change it. A session that [supervises](#supervisor-mode) starts the
-line with `supervisor`, or with `hands-on` once you switched that off;
-a click there toggles it. Switching a session that waits on a
+line with a `supervisor` badge, or a `hands-on` one once you switched
+that off; a click there toggles it, and a window too narrow for the
+whole line drops the badge before the session's model or counts. Switching a session that waits on a
 permission prompt to YOLO answers the prompt, since yolo would have
 allowed the call anyway; a directory prompt still waits for your
 answer. A non-interactive session never waits for you, which suits a session you
@@ -883,7 +884,9 @@ call to one anyway, in every permission mode.
   leaves the sessions that exist as they are. Sub-agents and BTW side
   conversations never supervise, and a fork starts as its parent is.
 - **The header button and `C-c h V`.** The header line of a session
-  starts with `supervisor`, or with `hands-on` once the mode is off. A
+  starts with a `supervisor` badge, or a `hands-on` one once the mode is
+  off; a window too narrow for the whole line drops it before the
+  session's model or counts. A
   click on it, or `C-c h V` (`harness-toggle-supervisor`), flips it, and
   the transcript says so. A hands-on session works as sessions always
   did: it may write. Switch the mode back on and writes are denied

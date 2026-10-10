@@ -49,7 +49,13 @@ The ACP module loads first, with its server off, as the UI requires it."
 
 (defun harness-ui-supervisor-test-session (id ext)
   "Cache session ID, whose :ext plist is EXT, as the UI keeps sessions."
-  (puthash id (list :id id :name "Work" :status "idle" :ext ext) harness-ui--sessions))
+  (puthash id (list :id id :name "Work" :status "idle" :model "demo:scripted"
+                    :permission-mode 'ask :ext ext)
+           harness-ui--sessions))
+
+(defun harness-ui-supervisor-test-priority (segment)
+  "Return the fit priority of the header SEGMENT, or nil."
+  (and (consp segment) (nth 1 segment)))
 
 (defmacro harness-ui-supervisor-test-chat (id &rest body)
   "Run BODY in a chat buffer of session ID, shown in the selected window."
@@ -71,21 +77,26 @@ The ACP module loads first, with its server off, as the UI requires it."
 
 (ert-deftest harness-ui-supervisor-segment-on-off-and-absent ()
   "The segment says supervisor or hands-on for a governed session, else nothing.
-Each state carries its face and its help, and a session never governed has none."
+Each state carries its face, its help and its fit priority, and a
+session never governed has none."
   (harness-ui-supervisor-test-with
     (harness-ui-supervisor-test-chat "s1"
       (harness-ui-supervisor-test-session "s1" '(:supervisor t))
-      (let ((seg (harness-ui-supervisor--header)))
-        (should (equal "supervisor " (substring-no-properties seg)))
-        (should (eq 'harness-supervisor-face (get-text-property 0 'face seg)))
+      (let* ((seg (harness-ui-supervisor--header))
+             (text (car seg)))
+        (should (equal " supervisor " (substring-no-properties text)))
+        (should (eq 'harness-supervisor-face (get-text-property 1 'face text)))
         (should (equal "Supervisor mode: this session plans and delegates to workers on cheaper models; it cannot change files itself (mouse-1: let it work hands-on)"
-                       (get-text-property 0 'help-echo seg))))
+                       (get-text-property 1 'help-echo text)))
+        (should (harness-ui-supervisor-test-priority seg)))
       (harness-ui-supervisor-test-session "s1" '(:supervisor :false))
-      (let ((seg (harness-ui-supervisor--header)))
-        (should (equal "hands-on " (substring-no-properties seg)))
-        (should (eq 'harness-dim-face (get-text-property 0 'face seg)))
+      (let* ((seg (harness-ui-supervisor--header))
+             (text (car seg)))
+        (should (equal " hands-on " (substring-no-properties text)))
+        (should (eq 'harness-dim-face (get-text-property 1 'face text)))
         (should (equal "Hands-on: this session may change files itself (mouse-1: back to supervisor mode)"
-                       (get-text-property 0 'help-echo seg))))
+                       (get-text-property 1 'help-echo text)))
+        (should (harness-ui-supervisor-test-priority seg)))
       ;; Sub-agents and side conversations carry no :supervisor at all.
       (harness-ui-supervisor-test-session "s1" nil)
       (should-not (harness-ui-supervisor--header))
@@ -96,15 +107,40 @@ Each state carries its face and its help, and a session never governed has none.
       (should-not (harness-ui-supervisor--header)))))
 
 (ert-deftest harness-ui-supervisor-segment-leads-the-header ()
-  "The segment comes first in the header line, through the header hook."
+  "The segment comes first in the header line, through the header hook.
+It is padded from the window's edge like the status icon, and separated
+from it as the header separates its other segments."
   (harness-ui-supervisor-test-with
     (harness-ui-supervisor-test-session "s1" '(:supervisor t))
     (harness-ui-supervisor-test-chat "s1"
-      (should (equal "supervisor " (substring-no-properties (harness-chat--header-prefix))))
-      (should (string-prefix-p "supervisor" (substring-no-properties (harness-chat--header most-positive-fixnum)))))
+      (should (equal " supervisor " (harness-chat--header-prefix)))
+      (should (string-prefix-p " supervisor  " (substring-no-properties (harness-chat--header most-positive-fixnum)))))
     (harness-ui-supervisor-test-session "s2" nil)
     (harness-ui-supervisor-test-chat "s2"
       (should (equal "" (harness-chat--header-prefix))))))
+
+(ert-deftest harness-ui-supervisor-segment-yields-before-the-session ()
+  "A narrow header drops the badge before any segment of the session's own.
+At a width too small for the badge and the session's own state together,
+the header reads as it would without the mode, so the model, the mode and
+the counts keep the room the badge would have taken."
+  (harness-ui-supervisor-test-with
+    (harness-ui-supervisor-test-session "s1" '(:supervisor t))
+    (harness-ui-supervisor-test-chat "s1"
+      (let* ((own (let ((harness-chat-header-functions nil))
+                    (harness-chat--header most-positive-fixnum)))
+             (full (harness-chat--header most-positive-fixnum))
+             (narrow (- (string-width full) 1)))
+        (should (< (string-width own) (string-width full)))
+        (should (string-match-p " supervisor " full))
+        ;; One column short of the whole line: the badge goes, the
+        ;; session's own stay.
+        (should-not (string-match-p "supervisor\\|hands-on" (harness-chat--header narrow)))
+        (should (equal (harness-chat--header narrow)
+                       (let ((harness-chat-header-functions nil))
+                         (harness-chat--header narrow))))
+        (should (string-match-p "Scripted (Demo)" (harness-chat--header narrow)))
+        (should (string-match-p "Ask" (harness-chat--header narrow)))))))
 
 (ert-deftest harness-ui-supervisor-toggle-sends-the-flip ()
   "Toggling a supervising session turns it hands-on, and back again.
@@ -136,8 +172,9 @@ Each toggle sends `_harness/supervisor/set' and says what it changed."
         (harness-ui-supervisor-test-session "s1" '(:supervisor :false))
         (harness-ui-supervisor-test-chat "s1"
           (let* ((seg (harness-ui-supervisor--header))
-                 (click (lookup-key (get-text-property 0 'local-map seg) [mouse-1])))
-            (should (equal "hands-on " (substring-no-properties seg)))
+                 (text (car seg))
+                 (click (lookup-key (get-text-property 1 'local-map text) [mouse-1])))
+            (should (equal " hands-on " (substring-no-properties text)))
             (should (equal '("Supervisor mode on")
                            (harness-ui-supervisor-test-messages
                             (lambda ()

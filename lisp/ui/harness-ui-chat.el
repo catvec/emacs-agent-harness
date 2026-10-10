@@ -3095,22 +3095,37 @@ nil, after every session's figures were fetched again, redraws them all."
 (defvar harness-chat-header-functions nil
   "Functions putting segments in front of the chat header line.
 Each is called without arguments in the chat buffer whenever the header
-line is drawn, and returns a string, or nil for nothing.  The header
-shows their strings first, in order, then the session's own segments:
-status, name, model, permission mode, non-interactive and the rest.  Add to it
-buffer-locally, so only that buffer's header changes, and with a
-symbol, so a reload redefines it.  The BTW module marks a side
-conversation and gives it its [close] and [keep] buttons this way.")
+line is drawn, and returns a string, or (TEXT PRIORITY MIN) as
+`harness-ui-fit-header' takes it, or nil for nothing.  The header shows
+their segments first, in order, then the session's own segments:
+status, name, model, permission mode, non-interactive and the rest.  A
+segment with a low PRIORITY makes room before any of the session's own
+do in a narrow window.  Add to it buffer-locally, so only that buffer's
+header changes, and with a symbol, so a reload redefines it.  The BTW
+module marks a side conversation and gives it its [close] and [keep]
+buttons this way.")
 
-(defun harness-chat--header-prefix ()
-  "Return what `harness-chat-header-functions' put in front of the header."
+(defun harness-chat--header-prefix-segments ()
+  "Return what `harness-chat-header-functions' put in front of the header.
+Each is a string, or (TEXT PRIORITY MIN) as `harness-ui-fit-header' takes
+it, in the order the functions add them."
   (let ((segments nil))
     (run-hook-wrapped 'harness-chat-header-functions
                       (lambda (fn)
                         (when-let* ((segment (funcall fn)))
                           (push segment segments))
                         nil))
-    (apply #'concat (nreverse segments))))
+    (nreverse segments)))
+
+(defun harness-chat--header-prefix ()
+  "Return what `harness-chat-header-functions' put in front, as one string.
+That is the text of `harness-chat--header-prefix-segments', for a caller
+that wants the whole prefix as text: the header line itself fits the
+segments one by one, each with the priority its function gave it."
+  (mapconcat (lambda (segment)
+               (if (consp segment) (car segment) segment))
+             (harness-chat--header-prefix-segments)
+             ""))
 
 (defvar harness-chat-header-end-functions nil
   "Functions adding segments of their own to the chat header line.
@@ -3138,11 +3153,12 @@ shows its face this way.")
 In a window too narrow for all of it, the output rate goes first, then
 the output tokens, the spend, the thinking level, the context, the
 non-interactive mode, the model and the todos; the name shortens after
-those.  What `harness-chat-header-functions' put in front, the status,
-the permission mode, [menu] and the notice of new messages stay.  What
-`harness-chat-header-end-functions' add shows before [menu], making
-room as its priorities say.  WIDTH is as `harness-ui-fit-header' takes
-it."
+those.  What `harness-chat-header-functions' put in front leads the
+line and makes room as its own priorities say, before any of the
+session's do; the status, the permission mode, [menu] and the notice of
+new messages stay.  What `harness-chat-header-end-functions' add shows
+before [menu], making room as its priorities say.  WIDTH is as
+`harness-ui-fit-header' takes it."
   (let* ((s (harness-chat--session))
          (status (or (plist-get s :status) "idle"))
          (running (equal status "running"))
@@ -3152,8 +3168,11 @@ it."
          (name (or (plist-get s :name) "unnamed")))
     (harness-ui-fit-header
      (append
+      ;; Other modules' leading segments, each as the fit takes it: a
+      ;; string for a BTW's buttons, (TEXT PRIORITY MIN) for a badge
+      ;; that gives way before the session's own do.
+      (harness-chat--header-prefix-segments)
       (list
-       (harness-chat--header-prefix)
        (concat " "
                (if running
                    (propertize (harness-chat--spinner-frame)
