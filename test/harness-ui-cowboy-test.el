@@ -123,6 +123,18 @@ its key, its button, its cost and what it does, the default marked."
       (should (string-match-p "Press b on this panel, or click; B makes it the default\\." help))
       (should (string-match-p "The default, taken when nobody is asked\\." help)))))
 
+(ert-deftest harness-ui-cowboy-panel-heads-a-cache-held-for-another-model ()
+  "A cache held for a model the session no longer uses is headed so, in
+place of the clock time it lapsed at, which is not why it is asked about."
+  (harness-test-reset-bus)
+  (harness-test-load-module 'ui)
+  (let* ((cowboy (plist-put (copy-sequence (plist-get (harness-ui-cowboy-test--record) :cowboy))
+                            :cache-model-label "Claude Opus 5.5"))
+         (lines (harness-ui-cowboy-test--lines
+                 (harness-ui-cowboy-panel-string "s1" (harness-ui-cowboy-test--record :cowboy cowboy) 1400.0))))
+    (should (string-match-p "\\` .*Prompt cache cold  held for Claude Opus 5\\.5, not Demo scripted · ~84\\.0k tokens\\'"
+                            (nth 0 lines)))))
+
 (ert-deftest harness-ui-cowboy-panel-for-another-sender-and-sparse-info ()
   "A message another session sent says so; a question that brings less
 falls back to the choices' own words, with no costs."

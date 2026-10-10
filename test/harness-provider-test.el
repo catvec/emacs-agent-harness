@@ -367,6 +367,71 @@ family names rather than whole ids."
     (should (equal "test-regexp:us.anthropic.claude-opus-5"
                    (harness-call 'provider/tier-model "test-regexp:x" :frontier)))))
 
+(ert-deftest harness-provider-tier-model-info-says-which-model-or-why-not ()
+  "The info answers with the model of a tier, else why there is none.
+`unknown' is a provider nobody registered, `unlisted' a catalogue not
+there (yet, or a listing that answered nothing), `none' a catalogue
+with nothing for the tier."
+  (harness-provider-test-with (test-priced test-late test-unpriced)
+    (harness-define-provider 'test-priced
+      :complete #'ignore
+      :models (lambda () (harness-resolved
+                          (list (list :name "small" :pricing '(:input 1.0 :output 5.0))
+                                (list :name "big" :pricing '(:input 10.0 :output 50.0))))))
+    (should (equal (cons "test-priced:small" nil)
+                   (harness-call 'provider/tier-model-info "test-priced:big" :cheap)))
+    (should (equal (cons "test-priced:big" nil)
+                   (harness-call 'provider/tier-model-info "test-priced" :frontier)))
+    ;; A provider that has not listed its models yet says so rather than
+    ;; answer that it has none.
+    (harness-define-provider 'test-late :complete #'ignore
+                             :models (lambda () (harness-make-promise)))
+    (should (equal (cons nil 'unlisted)
+                   (harness-call 'provider/tier-model-info "test-late:m" :cheap)))
+    ;; A catalogue with no price to rank and no `:tiers' names no model.
+    (harness-define-provider 'test-unpriced :complete #'ignore
+                             :models (lambda () (harness-resolved '((:name "m")))))
+    (should (equal (cons nil 'none)
+                   (harness-call 'provider/tier-model-info "test-unpriced:m" :cheap)))
+    ;; The id alone is enough to name the provider, and an unknown one
+    ;; cannot even be asked.
+    (should (equal (cons nil 'unknown)
+                   (harness-call 'provider/tier-model-info "nobody:m" :cheap)))
+    (should (equal (cons nil 'unknown)
+                   (harness-call 'provider/tier-model-info nil :cheap)))))
+
+(ert-deftest harness-provider-tier-model-async-waits-for-a-late-catalogue ()
+  "A provider that answers late gives the tier its model to a caller that can wait.
+`provider/tier-model-info' reading meanwhile says the catalogue is not
+there; a listing that fails settles as `unlisted', never rejected."
+  (harness-provider-test-with (test-slow test-broken)
+    (let ((answer (harness-make-promise)))
+      (harness-define-provider 'test-slow
+        :complete #'ignore
+        :models (lambda ()
+                  (run-at-time 0.05 nil
+                               (lambda ()
+                                 (harness-resolve
+                                  answer '((:name "small" :pricing (:input 1.0 :output 5.0))
+                                           (:name "big" :pricing (:input 10.0 :output 50.0))))))
+                  answer))
+      ;; Before it answers, a lookup that cannot wait is told so.
+      (should (equal (cons nil 'unlisted)
+                     (harness-call 'provider/tier-model-info "test-slow:big" :cheap)))
+      (should (equal (cons "test-slow:small" nil)
+                     (harness-test-await (harness-call 'provider/tier-model-async "test-slow:big" :cheap))))
+      (should (equal (cons "test-slow:big" nil)
+                     (harness-test-await (harness-call 'provider/tier-model-async "test-slow:big" :frontier))))
+      ;; Answered once: the next lookup needs no wait.
+      (should (equal (cons "test-slow:small" nil)
+                     (harness-call 'provider/tier-model-info "test-slow:big" :cheap))))
+    (harness-define-provider 'test-broken :complete #'ignore
+                             :models (lambda () (harness-rejected '(error "offline"))))
+    (should (equal (cons nil 'unlisted)
+                   (harness-test-await (harness-call 'provider/tier-model-async "test-broken:m" :cheap))))
+    (should (equal (cons nil 'unknown)
+                   (harness-test-await (harness-call 'provider/tier-model-async "nobody:m" :cheap))))))
+
 (ert-deftest harness-provider-tiers-type-names-the-tiers ()
   "The settings page offers each tier of a provider by name."
   (let ((type harness-provider-tiers-type))

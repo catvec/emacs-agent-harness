@@ -38,6 +38,7 @@
 (require 'harness-util)
 
 (declare-function harness-tool-title "harness-tools")
+(declare-function harness-tools-tail-line "harness-tools" (text))
 
 (defconst harness-agent--base-system-prompt
   "You are an expert software engineering agent working inside the user's GNU Emacs through the Emacs agent harness.
@@ -104,7 +105,9 @@ one worked, without filling its context; the oldest go first.")
 (defvar harness-agent--calls (make-hash-table :test 'equal)
   "Session id -> the tool calls its turn runs, oldest first.
 Each is (CALL-ID :tool NAME :title TITLE :since FLOAT :checking BOOL
-:detail TEXT).")
+:detail TEXT :note TEXT).  `:detail' is the latest progress line the
+tool reported (`tools/progress'), `:note' the note it shows under its
+call (`tools/note').")
 
 (defvar harness-agent--progress-timers (make-hash-table :test 'equal)
   "Session id -> the timer that announces held-back tool progress.")
@@ -158,8 +161,25 @@ tool) unless it brings its own `:since'."
         (remhash sid harness-agent--activities))
       (harness-emit 'agent/activity-changed sid new))))
 
+(defun harness-agent--call-activity (call)
+  "Return what the running tool CALL, of `harness-agent--calls', shows the UI.
+The plist carries the call's id, so a chat can put its note under the
+call's own block, and its latest progress line and note."
+  (let ((props (cdr call)))
+    (harness-agent--compact
+     (list :call-id (car call)
+           :tool (plist-get props :tool)
+           :title (plist-get props :title)
+           :checking (plist-get props :checking)
+           :detail (plist-get props :detail)
+           :note (plist-get props :note)
+           :since (plist-get props :since)))))
+
 (defun harness-agent--calls-activity (sid)
-  "Return the activity of the tool calls SID's turn runs, or nil if none."
+  "Return the activity of the tool calls SID's turn runs, or nil if none.
+The oldest call is the activity itself, as before; `:calls' carries
+every one of them, each as `harness-agent--call-activity' returns it,
+so a UI can attach a note to the block of the call it belongs to."
   (when-let* ((calls (gethash sid harness-agent--calls)))
     (let ((oldest (cdar calls)))
       (harness-agent--compact
@@ -169,6 +189,7 @@ tool) unless it brings its own `:since'."
              :checking (plist-get oldest :checking)
              :detail (plist-get oldest :detail)
              :count (and (cdr calls) (length calls))
+             :calls (mapcar #'harness-agent--call-activity calls)
              :since (apply #'min (mapcar (lambda (c) (plist-get (cdr c) :since)) calls)))))))
 
 (defun harness-agent--update-activity (sid &optional activity)
@@ -224,26 +245,41 @@ It counts as having its permission checked until that is decided."
   "Return the last visible line of tool progress TEXT, or nil.
 Terminal colour codes and other control characters go; a progress bar
 redrawn with carriage returns gives its latest state."
-  (let* ((text (replace-regexp-in-string "\e\\[[0-9;?]*[A-Za-z]" "" (or text "")))
-         (lines (split-string text "[\n\r]+" t "[ \t]+"))
-         (line (and lines (string-trim (replace-regexp-in-string "[[:cntrl:]]+" " " (car (last lines)))))))
-    (unless (or (null line) (string-empty-p line))
-      (harness-truncate-end line 80))))
+  (harness-tools-tail-line text))
+
+(defun harness-agent--announce-progress (sid)
+  "Announce SID's activity now, and once more when the interval is up.
+Further changes within `harness-agent--progress-interval' go out once it
+is up, so a chatty tool does not redraw the line for every chunk."
+  (unless (gethash sid harness-agent--progress-timers)
+    (harness-agent--update-activity sid)
+    ;; Further progress within the interval goes out once it is up.
+    (puthash sid (run-at-time harness-agent--progress-interval nil
+                              (lambda ()
+                                (remhash sid harness-agent--progress-timers)
+                                (when (gethash sid harness-agent--turns)
+                                  (harness-agent--update-activity sid))))
+             harness-agent--progress-timers)))
 
 (defun harness-agent--on-tool-progress (sid call-id text)
   "Note progress TEXT from SID's tool call CALL-ID; announce it now and then."
   (when-let* ((call (assoc call-id (gethash sid harness-agent--calls)))
               (line (harness-agent--progress-line text)))
     (setcdr call (plist-put (cdr call) :detail line))
-    (unless (gethash sid harness-agent--progress-timers)
-      (harness-agent--update-activity sid)
-      ;; Further progress within the interval goes out once it is up.
-      (puthash sid (run-at-time harness-agent--progress-interval nil
-                                (lambda ()
-                                  (remhash sid harness-agent--progress-timers)
-                                  (when (gethash sid harness-agent--turns)
-                                    (harness-agent--update-activity sid))))
-               harness-agent--progress-timers))))
+    (harness-agent--announce-progress sid)))
+
+(defun harness-agent--on-tool-note (sid call-id text)
+  "Note TEXT, the note under SID's tool call CALL-ID.
+The note is kept on the call, which the activity carries with the
+running call (`agent/activity' `:calls'), so the chat draws it under
+the call's block; it goes when the call ends.  Announcements are held
+back as progress is, so a tool that writes often does not redraw it for
+every line, and a multiline note travels whole."
+  (when-let* ((call (assoc call-id (gethash sid harness-agent--calls)))
+              (text (and (stringp text) (not (harness-string-blank-p text))
+                         (string-trim text))))
+    (setcdr call (plist-put (cdr call) :note text))
+    (harness-agent--announce-progress sid)))
 
 (harness-defmethod agent/activity (session-id)
   "Return what SESSION-ID's running turn is doing now, or nil.
@@ -252,9 +288,11 @@ when PHASE began.  PHASE is `waiting' (for the model), `thinking',
 `writing', `tool-input' (the model writes the input of a call to
 `:tool', `:chars' characters so far), `compacting', or `tool': calls
 run, the oldest of them `:tool' with `:title', `:checking' while its
-permission is decided and `:detail', its latest progress, and
-`:count' when several run.  Every change is announced as
-`agent/activity-changed'."
+permission is decided and `:detail', its latest progress, and `:count'
+when several run.  A `tool' phase also carries `:calls', one plist per
+running call (:call-id, :tool, :title, :detail, :note and :since), the
+`:note' being what the call shows under its own block in a chat.
+Every change is announced as `agent/activity-changed'."
   (gethash session-id harness-agent--activities))
 
 (harness-defmethod agent/note-activity (session-id activity)
@@ -1486,7 +1524,8 @@ was receiving."
   "Save streamed text when Emacs exits; follow tool calls (idempotent)."
   (add-hook 'kill-emacs-hook #'harness-agent--save-live)
   (harness-on 'permission/decided #'harness-agent--on-permission-decided)
-  (harness-on 'tools/progress #'harness-agent--on-tool-progress))
+  (harness-on 'tools/progress #'harness-agent--on-tool-progress)
+  (harness-on 'tools/note #'harness-agent--on-tool-note))
 
 (harness-define-module 'agent
   :doc "The turn loop: prompt, stream, run tools, steer, queue."

@@ -477,9 +477,9 @@ before the harness locked them, or registered again after a prune."
                                  (message "Forked into %s" (abbreviate-file-name path))))))))))))
 
 (defun harness-ui-worktree--show-queue (parent-id)
-  "Fetch the merge queue of PARENT-ID and show it in the mode line."
+  "Fetch the merge queue of PARENT-ID, a session, and show it in the mode line."
   (let ((buf (current-buffer)))
-    (harness-ui-call "_harness/merge/queue" (list :parent-id parent-id)
+    (harness-ui-call "_harness/merge/queue" (list :target parent-id)
                      (lambda (items)
                        (when (buffer-live-p buf)
                          (with-current-buffer buf
@@ -499,7 +499,7 @@ before the harness locked them, or registered again after a prune."
                                                 (lambda (s) (memq s sessions))))))
          (child (plist-get session :id))
          (parent (plist-get session :parent-id)))
-    (harness-ui-call "_harness/merge/enqueue" (list :child-id child :parent-id parent)
+    (harness-ui-call "_harness/merge/enqueue" (list :child-id child :target parent)
                      (lambda (position)
                        (message "Queued %s for merging into %s (position %s)"
                                 (or (plist-get session :name) (substring child 0 8))

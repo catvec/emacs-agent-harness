@@ -93,8 +93,10 @@ when it is none of that."
   "Return the evidence plist of tool call REF of session SID, the NUMBERth item.
 REF is the call id as the transcript shows it.  The newest call whose
 call id or node id is REF is copied: what the task view shows is a
-snapshot of the same call the session shows.  Return an error string
-when there is no such call, naming the recent ones."
+snapshot of the same call the session shows, its `:child-id' -- the
+sub-agent a spawn_agent call started -- included, so the report links
+the same session the chat does.  Return an error string when there is
+no such call, naming the recent ones."
   (let ((nodes (if (harness-method-exists-p 'session/nodes) (harness-call 'session/nodes sid) nil)))
     (if-let* ((node (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'tool-call)
                                                  (or (equal (plist-get n :call-id) ref)
@@ -102,19 +104,23 @@ when there is no such call, naming the recent ones."
                                 (reverse nodes))))
         (let* ((result (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'tool-result)
                                                     (equal (plist-get n :call-id) (plist-get node :call-id))))
-                                   (reverse nodes))))
-          (list :kind "tool-call"
-                :id (plist-get node :id)
-                :call-id (plist-get node :call-id)
-                :tool (format "%s" (or (plist-get node :tool) "tool"))
-                :title (or (plist-get node :title) (plist-get node :tool))
-                :input (harness-truncate-end
-                        (harness-json-encode-text (or (plist-get node :input) :empty))
-                        harness-tools-handin--max-input)
-                :output (and result (harness-truncate-end (or (plist-get result :output) "")
-                                                          harness-tools-handin--max-output))
-                :is-error (and result (harness-json-true-p (plist-get result :is-error)))
-                :at (plist-get node :ts)))
+                                   (reverse nodes)))
+               (child (or (plist-get (plist-get node :meta) :child-id)
+                          (and result (plist-get (plist-get result :meta) :child-id)))))
+          (append
+           (list :kind "tool-call"
+                 :id (plist-get node :id)
+                 :call-id (plist-get node :call-id)
+                 :tool (format "%s" (or (plist-get node :tool) "tool"))
+                 :title (or (plist-get node :title) (plist-get node :tool))
+                 :input (harness-truncate-end
+                         (harness-json-encode-text (or (plist-get node :input) :empty))
+                         harness-tools-handin--max-input)
+                 :output (and result (harness-truncate-end (or (plist-get result :output) "")
+                                                           harness-tools-handin--max-output))
+                 :is-error (and result (harness-json-true-p (plist-get result :is-error)))
+                 :at (plist-get node :ts))
+           (and (stringp child) (not (string-empty-p child)) (list :child-id child))))
       (let ((recent (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'tool-call)) nodes)))
         (format "Evidence %d: no tool call %s in this session. The recent calls are: %s"
                 number ref
@@ -178,15 +184,46 @@ ITEM is a string (a note), or an object with exactly one of `:image',
   "Return VALUE as a non-blank trimmed string, or nil."
   (and (stringp value) (not (harness-string-blank-p value)) (string-trim value)))
 
+(defun harness-tools-handin--merges-pending (sid)
+  "Return the merges SID waits for, or nil.
+Those are the branches its own sub-agents have merging into its working
+directory that are not through yet -- queued, merging or in conflict.
+Nothing of the session's own can be handed in while any of them is: the
+work it builds on has to be in the branch first.  A merge that failed
+does not wait here; the queue told the session, and the child's work is
+the child's to fix."
+  (and (harness-method-exists-p 'merge/pending)
+       (ignore-errors (harness-call 'merge/pending sid))))
+
+(defun harness-tools-handin--merges-text (pending)
+  "Return the refusal for PENDING, the merges the session waits for."
+  (format "hand_in: %s into this session's worktree %s not through yet: %s"
+          (if (cdr pending) (format "%d merges" (length pending)) "a merge")
+          (if (cdr pending) "are" "is")
+          (string-join
+           (mapcar (lambda (item)
+                     (format "%s (%s)" (or (plist-get item :name)
+                                           (substring (plist-get item :child) 0 8))
+                             (plist-get item :status)))
+                   pending)
+           ", ")))
+
 (defun harness-tools-handin--hand-in (input ctx)
   "Handler of the hand_in tool: record the report of INPUT and end the turn.
 The report goes on the task of the session in CTX.  A malformed call
-returns an error saying what to fix, and ends nothing."
+returns an error saying what to fix, and ends nothing.  A session whose
+sub-agents' merges are not through yet cannot hand in either: the work
+the session's branch is built on has to be in it first."
   (let* ((sid (plist-get ctx :session-id))
          (summary (let ((s (plist-get input :summary)))
                     (and (stringp s) (not (harness-string-blank-p s)) (string-trim s))))
-         (raw (append (plist-get input :evidence) nil)))
+         (raw (append (plist-get input :evidence) nil))
+         (pending (harness-tools-handin--merges-pending sid)))
     (cond
+     (pending
+      (harness-tools-handin--invalid
+       "%s. Let them merge (the queue takes them in turn), or have the conflicts of the one in conflict resolved in the child's worktree, then hand in."
+       (harness-tools-handin--merges-text pending)))
      ((null summary)
       (harness-tools-handin--invalid "hand_in needs summary: your final message to the user, in markdown"))
      ((null raw)
