@@ -129,6 +129,12 @@ default, so the text keeps the face of what it is drawn on."
 (defface harness-label-face '((t :inherit bold :height 0.9))
   "Small labels such as the sender name." :group 'harness-ui)
 
+(defface harness-ui-session-link-face '((t :inherit link))
+  "A link to a session, wherever the harness shows one.
+Every clickable session name in the UI is drawn by
+`harness-ui-session-link' and wears this face, unless the caller gave
+the text a face of its own." :group 'harness-ui)
+
 (defface harness-status-idle-face '((t :inherit success))
   "Idle sessions." :group 'harness-ui)
 (defface harness-status-running-face '((t :inherit warning))
@@ -715,12 +721,14 @@ The user just asked to see what the notification is about."
 (defun harness-ui--notification-clicked (params)
   "Show what the clicked notification PARAMS is about.
 `harness-ui-notification-functions' come first (the task board opens
-on a task); otherwise the notification's session opens.  The frame it
-opens in comes to the front, as the user just asked for it."
+on a task, in the task's project); otherwise the notification's session
+opens in its project, switching to the project first as a row of the
+session list does (`harness-ui-visit-session').  The frame it opens in
+comes to the front, as the user just asked for it."
   (harness-ui--raise-for-notification)
   (unless (run-hook-with-args-until-success 'harness-ui-notification-functions params)
     (when-let* ((sid (plist-get params :session)))
-      (harness-ui-display-session sid))))
+      (harness-ui-visit-session sid))))
 
 (defun harness-ui--unknown-notification-clicked ()
   "Show the sessions waiting for you, for a click on a forgotten notification.
@@ -878,6 +886,30 @@ Its output rate and live token figures go with it."
     (if (and (stringp name) (not (string-blank-p name)))
         name
       (substring id 0 (min 8 (length id))))))
+
+(defun harness-ui-seed-session-p (session)
+  "Non-nil when SESSION is a seed conversation, not one to navigate to.
+SESSION is a session plist as `harness-ui-session' gives it, or a
+session id, which is looked up in the cache.  A seed is the shared
+prompt cache a session's forks read, an ordinary sub-agent the harness
+marks as one (`:seed' in its `:ext', see harness-seed.el); it is not a
+conversation to open, so what navigates to a session -- the header
+line's `harness-up-to-parent', `harness-open-latest-session', the
+session chosen to switch to -- leaves it out.  A seed deleted and made
+again is marked again; a session that is not a seed, or that the cache
+does not know, is nil.
+
+Nothing guesses a seed from its name: the marker travels with the
+session, so this works for a remote harness's seeds as well as this
+Emacs's own."
+  (let ((s (if (stringp session) (harness-ui-session session) session)))
+    (and (consp s) (harness-json-true-p (plist-get (plist-get s :ext) :seed)))))
+
+(defun harness-ui-navigable-session-p (session)
+  "Non-nil when SESSION is one to open or switch to.
+That is every session but a seed, which is not a conversation (see
+`harness-ui-seed-session-p'); use it to filter what navigation offers."
+  (not (harness-ui-seed-session-p session)))
 
 (defun harness-ui-task-name (task &optional session)
   "Return TASK's name, or nil while it has none and its title is its prompt.
@@ -2175,18 +2207,22 @@ anywhere runs the action (`harness-ui-action-push')."
     (if action (funcall action) (if (get-text-property (point) 'button) (push-button (point))
                                   (user-error "No button here")))))
 
-(defun harness-ui-add-session-keys (object id &optional name start end)
+(defun harness-ui-add-session-keys (object id &optional name start end action)
   "Make OBJECT's text from START to END open session ID on a click or RET.
 OBJECT is a string or a buffer.  START and END default to the whole
 object.  Where the text already carries a keymap -- a button's -- the
 new keys are composed under it, so the button keeps its own keys and
 tooltip; where none does, the text gets a hover face and says what a
 click does.  NAME is the session's, for the tooltip; nil uses
-`harness-ui-session-name'.  Return OBJECT."
+`harness-ui-session-name'.  ACTION, a function of no arguments, runs
+instead of showing the session where it is
+\(`harness-ui-display-session'); a session link passes one that visits
+it in its project (`harness-ui-session-link').  Return OBJECT."
   (let* ((string (stringp object))
          (start (or start (if string 0 (point-min))))
          (end (or end (if string (length object) (point-max))))
-         (map (harness-ui-action-map (lambda () (interactive) (harness-ui-display-session id))))
+         (map (harness-ui-action-map
+               (or action (lambda () (interactive) (harness-ui-display-session id)))))
          (help (format "mouse-1, RET: open the session %s"
                        (or name (harness-ui-session-name id))))
          (pos start))
@@ -2202,6 +2238,33 @@ click does.  NAME is the session's, for the tooltip; nil uses
           (put-text-property pos next 'pointer 'hand object))
         (setq pos next)))
     object))
+
+(defun harness-ui-session-action (id)
+  "Return the action opening session ID in its project, for a session link.
+It is what `harness-ui-session-link' gives `harness-ui-add-session-keys',
+so text wider than the name -- a tool call's whole block, say -- opens
+the session the same way the link does (`harness-ui-visit-session')."
+  (lambda () (interactive) (harness-ui-visit-session id)))
+
+(defun harness-ui-session-link (id &optional label help)
+  "Return a clickable link to session ID, as a string.
+LABEL is the text to show, by default the session's name; a label the
+caller propertized keeps its own face, any other wears
+`harness-ui-session-link-face'.  HELP is the tooltip, by default what a
+click does.  A click or RET opens the session in its project
+\(`harness-ui-visit-session'), exactly as a row of the session list
+does.  This is the one way the UI draws a session link; everything that
+names a session builds on it (`harness-ui-add-session-keys'), and
+`harness-ui-session-action' is the same action for text wider than the
+name."
+  (let* ((shown (or label (harness-ui-session-name id)))
+         (text (copy-sequence (or (and (stringp shown) shown) (format "%s" shown)))))
+    (unless (get-text-property 0 'face text)
+      (put-text-property 0 (length text) 'face 'harness-ui-session-link-face text))
+    (harness-ui-add-session-keys text id shown nil nil (harness-ui-session-action id))
+    (when help
+      (put-text-property 0 (length text) 'help-echo help text))
+    text))
 
 (defun harness-ui-add-keymap (start end map)
   "Give START..END the keymap MAP, composed under any button keymaps."
@@ -2810,14 +2873,30 @@ does one missing from this machine, as a remote harness's may be."
       (let ((main (harness-files-owning-checkout root)))
         (and main (file-directory-p main) main)))))
 
-(defun harness-ui-switch-to-session-project (id)
-  "Switch to the project of session ID; return non-nil when it switched.
-See `harness-ui-switch-project-function'.  A switch that fails is
-logged, and leaves things as they are."
+(defun harness-ui-switch-to-project (root)
+  "Switch to the project at ROOT, and return what the switch reports.
+ROOT is a project's main checkout.  `harness-ui-switch-project-function'
+does the switching, as when a session is visited; it is not called when
+there is none, or when ROOT is empty, remote or missing from this
+machine.  Return nil then, and when the function says nothing switched;
+a switch that fails is logged (`harness-ignore-errors-logged') and
+leaves things as they are."
   (when-let* ((fn harness-ui-switch-project-function)
-              (root (harness-ui-session-project (harness-ui-session id))))
+              (root (and (stringp root)
+                         (not (string-empty-p root))
+                         (not (file-remote-p root))
+                         (file-directory-p root)
+                         root)))
     (harness-ignore-errors-logged (format "switching to the project %s" root)
       (funcall fn root))))
+
+(defun harness-ui-switch-to-session-project (id)
+  "Switch to the project of session ID; return non-nil when it switched.
+A session's project is the main checkout of the one it works in
+\(`harness-ui-session-project'); `harness-ui-switch-to-project' does the
+switch.  A switch that fails is logged, and leaves things as they are."
+  (when-let* ((root (harness-ui-session-project (harness-ui-session id))))
+    (harness-ui-switch-to-project root)))
 
 (defun harness-ui-visit-session (id &optional position)
   "Show session ID in its project, and return its buffer.
@@ -3164,11 +3243,13 @@ That is the root of the project `default-directory' is in, else
 
 ;;;###autoload
 (defun harness-switch-session (&optional position)
-  "Switch to another session, replacing the one in POSITION."
+  "Switch to another session, replacing the one in POSITION.
+A seed conversation is not offered: it is a shared prompt cache, not a
+conversation to open (`harness-ui-navigable-session-p')."
   (interactive (list (and current-prefix-arg (harness-ui-read-position))))
   (harness-ui-refresh-sessions
    (lambda (_)
-     (let ((s (harness-ui-read-session "Switch to session: ")))
+     (let ((s (harness-ui-read-session "Switch to session: " #'harness-ui-navigable-session-p)))
        (harness-ui-display-session (plist-get s :id) position)))))
 
 ;;;; Session settings

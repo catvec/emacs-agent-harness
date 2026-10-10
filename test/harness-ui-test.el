@@ -2137,5 +2137,163 @@ reads its file and asks the fonts."
           (should (equal "idle" (substring-no-properties (harness-ui-icon 'harness-icon-idle))))
           (should (= made 3)))))))
 
+;;;; Session links and project switching
+
+(ert-deftest harness-ui-session-link-opens-the-session-in-its-project ()
+  "A session link is propertized text; a click or RET opens it in its project.
+The link wears `harness-ui-session-link-face' and carries the mouse
+face, the hand pointer, the tooltip and the keys every session link in
+the UI shares, and its keys go through `harness-ui-visit-session',
+which switches to the session's project first, as a row of the session
+list does.  A label and tooltip the caller gives win over the defaults."
+  (let* ((root (harness-test-temp-dir))
+         (chat (get-buffer-create " *harness-ui-test link*"))
+         (switched nil)
+         (opened nil)
+         (shown nil)
+         (harness-ui--sessions (make-hash-table :test 'equal))
+         (harness-ui-switch-project-function (lambda (dir) (push dir switched) t))
+         (harness-ui-open-session-function (lambda (id) (push id opened) chat)))
+    (unwind-protect
+        (progn
+          (harness-ui-cache-session (list :id "child" :name "worker" :project root :cwd root
+                                          :status "running"))
+          (cl-letf (((symbol-function 'harness-files-owning-checkout) (lambda (&rest _) root))
+                    ((symbol-function 'harness-ui-display-buffer)
+                     (lambda (buffer &optional position) (push (list buffer position) shown) buffer)))
+            (let ((link (harness-ui-session-link "child")))
+              (should (equal "worker" link))
+              (should (eq 'harness-ui-session-link-face (get-text-property 0 'face link)))
+              (should (eq 'highlight (get-text-property 0 'mouse-face link)))
+              (should (eq 'hand (get-text-property 0 'pointer link)))
+              (should (equal "mouse-1, RET: open the session worker"
+                             (get-text-property 0 'help-echo link)))
+              ;; The keys on the text open the session, from a buffer point.
+              (with-temp-buffer
+                (insert link)
+                (goto-char (point-min))
+                (let ((command (key-binding (kbd "RET"))))
+                  (should (commandp command))
+                  (call-interactively command)))
+              ;; A label and tooltip the caller gives win over the defaults.
+              (let ((mine (harness-ui-session-link "child" (propertize "w" 'face 'bold) "there")))
+                (should (equal "w" mine))
+                (should (eq 'bold (get-text-property 0 'face mine)))
+                (should (equal "there" (get-text-property 0 'help-echo mine)))))
+            (should (equal (list root) switched))
+            (should (equal '("child") opened))
+            ;; It shows the session: a switch leaves the position to the
+            ;; caller's default (`harness-ui-visit-session').
+            (should (equal (list chat) (mapcar #'car shown)))))
+      (kill-buffer chat)
+      (delete-directory root t))))
+
+(ert-deftest harness-ui-switch-to-project-only-switches-to-a-local-directory ()
+  "`harness-ui-switch-to-project' switches only to a local, existing root.
+A remote root, a missing one or none at all switches nothing, and nor
+does it without `harness-ui-switch-project-function'; the function's
+own answer (nil when nothing switched) comes back, and one that fails
+is logged, not signalled."
+  (let* ((root (harness-test-temp-dir))
+         (asked nil)
+         (harness-ui-switch-project-function (lambda (dir) (push dir asked) t)))
+    (unwind-protect
+        (progn
+          (should (eq t (harness-ui-switch-to-project root)))
+          (should (equal (list root) asked))
+          (setq asked nil)
+          (should-not (harness-ui-switch-to-project "/ssh:nobody@example.invalid:/srv/project/"))
+          (should-not (harness-ui-switch-to-project (expand-file-name "gone/" root)))
+          (should-not (harness-ui-switch-to-project nil))
+          (should-not (harness-ui-switch-to-project ""))
+          (should-not asked)
+          (let ((harness-ui-switch-project-function nil))
+            (should-not (harness-ui-switch-to-project root))
+            (should-not asked))
+          (let ((harness-ui-switch-project-function (lambda (_dir) (error "no workspace for it"))))
+            (should-not (harness-ui-switch-to-project root))))
+      (delete-directory root t))))
+
+(ert-deftest harness-ui-switch-to-session-project-uses-the-session-checkout ()
+  "Switching to a session's project goes through `harness-ui-switch-to-project'.
+The root switched to is the session's main checkout, a task worktree's
+repository root; a remote project is not switched to."
+  (let* ((root (harness-test-temp-dir))
+         (worktree (file-name-as-directory (expand-file-name "wt/" root)))
+         (asked nil)
+         (harness-ui--sessions (make-hash-table :test 'equal))
+         (harness-ui-switch-project-function (lambda (dir) (push dir asked) t)))
+    (unwind-protect
+        (progn
+          (make-directory worktree t)
+          (harness-ui-cache-session (list :id "task" :name "a task" :project worktree :cwd worktree))
+          (harness-ui-cache-session (list :id "remote" :name "far" :project "/ssh:nobody@example.invalid:/srv/project/"))
+          (cl-letf (((symbol-function 'harness-files-owning-checkout) (lambda (&rest _) root)))
+            (should (eq t (harness-ui-switch-to-session-project "task"))))
+          (should (equal (list root) asked))
+          (setq asked nil)
+          (should-not (harness-ui-switch-to-session-project "remote"))
+          (should-not (harness-ui-switch-to-session-project "no-such-session"))
+          (should-not asked))
+      (delete-directory root t))))
+
+;;;; Seeds in what the UI navigates to
+
+(ert-deftest harness-ui-seed-session-p-reads-the-mark-in-the-record ()
+  "A seed is the session whose `:ext' says so, given as a plist or an id.
+A session that is not marked, one marked an explicit `:false', one the
+cache does not know, and nil are not seeds; no name is consulted, so a
+session that merely looks like a seed is navigable."
+  (let ((harness-ui--sessions (make-hash-table :test 'equal)))
+    (harness-ui-cache-session (list :id "seed" :name "Shared context for main" :ext (list :seed t)))
+    (harness-ui-cache-session (list :id "off" :name "Shared context for main" :ext (list :seed :false)))
+    (harness-ui-cache-session (list :id "worker" :name "Shared context for main"))
+    (harness-ui-cache-session (list :id "fork" :name "fork of main" :kind "fork"))
+    (harness-ui-cache-session (list :id "btw" :name "aside" :kind "btw"))
+    (should (harness-ui-seed-session-p (harness-ui-session "seed")))
+    (should (harness-ui-seed-session-p "seed"))
+    (should-not (harness-ui-seed-session-p (harness-ui-session "off")))
+    (should-not (harness-ui-seed-session-p (harness-ui-session "worker")))
+    (should-not (harness-ui-seed-session-p "unknown"))
+    (should-not (harness-ui-seed-session-p nil))
+    (should-not (harness-ui-navigable-session-p (harness-ui-session "seed")))
+    ;; Forks, BTWs and ordinary sub-agents stay navigable.
+    (should (harness-ui-navigable-session-p (harness-ui-session "worker")))
+    (should (harness-ui-navigable-session-p (harness-ui-session "fork")))
+    (should (harness-ui-navigable-session-p (harness-ui-session "btw")))))
+
+(ert-deftest harness-ui-read-session-can-leave-seeds-out ()
+  "A caller's predicate keeps seeds out of the completion it builds.
+`harness-ui-navigable-session-p' is what the commands that open a
+session pass; without it every session, seeds included, is offered."
+  (let ((harness-ui--sessions (make-hash-table :test 'equal))
+        (seen nil))
+    (harness-ui-cache-session (list :id "seed" :name "Shared context for main" :ext (list :seed t)))
+    (harness-ui-cache-session (list :id "worker" :name "worker one"))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt collection &rest _) (setq seen collection) (caar collection))))
+      (harness-ui-read-session "Session: " #'harness-ui-navigable-session-p)
+      (should (= 1 (length seen)))
+      (should (equal "worker" (plist-get (cdr (car seen)) :id)))
+      (harness-ui-read-session "Session: ")
+      (should (= 2 (length seen))))))
+
+(ert-deftest harness-ui-switch-session-leaves-seeds-out ()
+  "Switching to another session never offers a seed conversation."
+  (let ((harness-ui--sessions (make-hash-table :test 'equal))
+        (seen nil)
+        (displayed nil))
+    (harness-ui-cache-session (list :id "seed" :name "Shared context for main" :ext (list :seed t)))
+    (harness-ui-cache-session (list :id "worker" :name "worker one"))
+    (cl-letf (((symbol-function 'harness-ui-refresh-sessions)
+               (lambda (&optional callback) (when callback (funcall callback (harness-ui-sessions)))))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt collection &rest _) (setq seen collection) (caar collection)))
+              ((symbol-function 'harness-ui-display-session)
+               (lambda (id &optional _position) (setq displayed id))))
+      (harness-switch-session)
+      (should (equal "worker" displayed))
+      (should (= 1 (length seen))))))
+
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here

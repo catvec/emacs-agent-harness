@@ -389,7 +389,7 @@ number of options, and a permission's `y`, `s`, `a`, `n` and `N`, and
 | `C-c C-p` | Edit the pattern the newest request about a path outside the session's directories is answered for |
 | `C-c C-f` / `C-c C-b` | Show the next or previous diagram of a question's options |
 | `C-c C-k` | Cancel the running turn |
-| `C-c C-u` | Go to the parent session: the session this one was forked from or started by (also on the `↑` in the header line, when there is one) |
+| `C-c C-u` | Go to the parent session: the session this one was forked from or started by (also on the `↑` in the header line, when there is one; a seed conversation in between is skipped, being a shared prompt cache rather than a conversation) |
 | `TAB` | Complete in the compose box; on a permission request cut short, show its whole input; elsewhere, fold or unfold the block at point |
 | `M-n` / `M-p` | Jump to the next or previous message: what you or the agent wrote, the agent's plan included. Thinking and tool calls are passed over, so a long run of them takes one key to get past |
 | `M-N` / `M-P` | Jump to the next or previous message you wrote — the prompt the session started with included, however far down it is |
@@ -501,6 +501,15 @@ queued, merging, in conflict, merged or failed, with the reason the
 queue gave, the live merges first and the last few finished under them.
 It follows the merges as they happen, and disappears when the queue is
 empty and nothing was merged recently.
+
+A session that started sub-agents lists the ones still running there
+too, in a panel of their own above the compose box: one line per child
+with its name, which opens the child when clicked, how long its turn has
+gone on and what it is doing now -- the text the activity line gives, or
+its current todo item until its first activity arrives. It follows the
+children as they work, draws at most once a second, and disappears when
+none is running. A seed conversation (see **Cache seeds**) is left out,
+being no worker.
 
 A tool call that runs for a while says what it is doing under its own
 header, in dim lines that go when the call ends. `spawn_agent`, which
@@ -1133,8 +1142,10 @@ call to one anyway, in every permission mode.
   is then a fork of the seed, sends the seed's system prompt word for
   word, and reads the context from the cache. The seed is a sub-agent
   session like any other, named "Shared context for ..." in the session
-  list, and stays there until you delete it. One fork step on a model
-  has nothing to share and is forked directly.
+  list, and stays there until you delete it. The harness marks it as a
+  seed, so the header's `↑` (`C-c C-u`), `C-c h o` and the session
+  pickers pass over it. One fork step on a model has nothing to share
+  and is forked directly.
 - **Short context for workers.** A worker is a sub-agent, and
   sub-agents work on a deliberately short context window,
   `harness-subagent-context-limit` (256000 tokens by default, nil for
@@ -2318,7 +2329,7 @@ ACP, so it works the same with a local or a remote harness.
 | Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `cowboy` `handoff` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `supervisor` `seed` `acp` `acp-remote` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-ssh` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-merge` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` `ui-supervisor` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-merge` `ui-children` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` `ui-supervisor` |
 
 ### Modules of your own
 

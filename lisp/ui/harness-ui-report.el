@@ -339,9 +339,7 @@ unless the report is drawn in full."
     ;; The sub-agent the call started, as the chat's session line links it.
     (when child
       (insert "  " (propertize "session: " 'face 'harness-dim-face))
-      (harness-ui-button (harness-ui-session-name child)
-                         (lambda () (harness-ui-display-session child))
-                         :help (format "Open the session %s" (harness-ui-session-name child)))
+      (insert (harness-ui-session-link child))
       (insert "\n"))
     (insert (propertize (if failed "  error\n" "  output\n") 'face 'harness-label-face))
     (cond
@@ -349,11 +347,12 @@ unless the report is drawn in full."
      (t
       (insert (propertize (if (string-suffix-p "\n" shown) shown (concat shown "\n"))
                           'face 'harness-md-code-block 'line-prefix indent 'wrap-prefix indent))))
-    ;; The call's text opens the session it started; the buttons under it
+    ;; The call's text opens the session it started, as the chat's call
+    ;; block does, with the session link's action; the buttons under it
     ;; are inserted after, so each keeps its own action and keys.
     (when child
       (harness-ui-add-session-keys (current-buffer) child (harness-ui-session-name child)
-                                   start (point)))
+                                   start (point) (harness-ui-session-action child)))
     (when long
       ;; `harness-ui-button' inserts the button itself, at point.
       (insert "  ")

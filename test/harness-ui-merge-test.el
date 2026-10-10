@@ -183,7 +183,37 @@ session at ROOT) and `worker' (a session in WT, of PARENT)."
         (should-not (string-match-p "older-worker" panel))
         (should (string-match-p "1 more" panel))
         ;; The panel's own face names are all real.
-        (should-not (harness-ui-merge-test--undefined-faces panel)))
+        (should-not (harness-ui-merge-test--undefined-faces panel))
+        ;; A queued or merging child's name is a link to that session: a
+        ;; hover face, a hand, a tooltip and RET or a click opening it.
+        (dolist (case '(("queued-worker" . "c1") ("merging-worker" . "c3")))
+          (let* ((pos (string-match (car case) panel))
+                 (map (get-text-property pos 'keymap panel)))
+            (should map)
+            (should (eq 'highlight (get-text-property pos 'mouse-face panel)))
+            (should (eq 'hand (get-text-property pos 'pointer panel)))
+            (should (stringp (get-text-property pos 'help-echo panel)))
+            (when map
+              (let ((command (lookup-key map (kbd "RET")))
+                    (visited nil))
+                (should (commandp command))
+                (cl-letf (((symbol-function 'harness-ui-visit-session)
+                           (lambda (id &optional _position) (push id visited) nil)))
+                  (call-interactively command))
+                (should (equal (list (cdr case)) visited))))))
+        ;; A merge view item naming no child session shows plain text,
+        ;; with no keys of its own.
+        (let ((plain (harness-ui-merge--name (list :name "orphan" :status "queued" :position 9))))
+          (should (equal "orphan" plain))
+          (should-not (get-text-property 0 'keymap plain))
+          (should-not (get-text-property 0 'mouse-face plain)))
+        ;; A merge with a child but no name shows the start of the child's
+        ;; id: eight characters of a long one, all of a short one.
+        (dolist (case '(("abcdefghijkl" . "abcdefgh") ("c9" . "c9") ("abcdefgh" . "abcdefgh")))
+          (should (equal (cdr case)
+                         (substring-no-properties
+                          (harness-ui-merge--name
+                           (list :child (car case) :status "queued" :position 9)))))))
       ;; Nothing merging and nothing finished: no panel at all.
       (remhash parent harness-ui-merge--views)
       (puthash parent t harness-ui-merge--asked)
