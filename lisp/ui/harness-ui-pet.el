@@ -1740,13 +1740,13 @@ Then which of its attributes are set by hand, when any are."
         (list (list (harness-ui-pet--segment "Hatch" #'harness-ui-pet-hatch "Hatch the egg (h)") 90)
               turn-off)))
       (list (list (concat "  " (harness-ui-pet--segment "g" #'harness-ui-pet-refresh "Refresh")) 50)
-            (list (harness-ui-pet--segment "q" #'quit-window "Quit") 55))))))
+            (list (harness-ui-pet--segment "q" #'harness-ui-quit-view "Quit") 55))))))
 
 ;;;; Mode and commands
 
 (defvar harness-ui-pet-mode-map
   (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
+    (set-keymap-parent map harness-ui-view-map)
     (define-key map (kbd "p") #'harness-ui-pet-pet)
     (define-key map (kbd "SPC") #'harness-ui-pet-pet)
     (define-key map (kbd "h") #'harness-ui-pet-hatch)

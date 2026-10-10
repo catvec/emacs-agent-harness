@@ -251,6 +251,7 @@
     (define-key map (kbd "f") #'harness-ui-worktree-fork-session)
     (define-key map (kbd "m") #'harness-ui-worktree-merge)
     (define-key map (kbd "g") #'harness-ui-worktree-refresh)
+    (define-key map (kbd "q") #'harness-ui-quit-view)
     (define-key map (kbd "?") #'harness-menu)
     map)
   "Keymap of `harness-ui-worktree-mode'.")

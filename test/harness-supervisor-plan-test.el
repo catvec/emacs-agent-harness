@@ -1487,10 +1487,12 @@ compacted as the cowboy would, the supervisor is told, and so is the worker."
                                   " into a brief summary first, the default for a session no warm cache holds"
                                   " (harness-cowboy-default)")
                           (harness-supervisor-plan-test-hints wid)))
-          ;; The worker reads the summary, not the supervisor's conversation.
+          ;; The worker reads the summary, with the conversation's first and
+          ;; last messages kept verbatim: the task it was given is there,
+          ;; while the middle is the summary.
           (let ((sent (harness-supervisor-plan-test-messages-text wid)))
             (should (string-match-p "Do s1\\." sent))
-            (should-not (string-match-p "Do the thing" sent)))
+            (should (string-match-p "Do the thing" sent)))
           ;; The supervisor is told, after the retry it made.
           (let ((retry (cl-position "Retrying step s1 on demo:hard (attempt 2): once more" hints :test #'equal))
                 (told (cl-position (concat "Step s1 (attempt 2) on demo:hard: no warm prompt cache holds the"
@@ -2920,7 +2922,7 @@ A task's session supervises, and a finished task waits for review."
       (setq harness-supervisor-plan-test--on-report
             (lambda (_text)
               (harness-supervisor-plan-test-call
-               "hand_in" '(:summary "The parser is fixed and committed." :evidence ("Read the diff: it does what the plan said.")))))
+               "hand_in" '(:problem "The parser breaks on nested quotes." :summary "The parser is fixed and committed." :evidence ("Read the diff: it does what the plan said.")))))
       (let* ((id (plist-get (harness-call 'task/submit default-directory "Fix the parser") :id))
              (sid (plist-get (harness-supervisor-plan-test-task id) :session)))
         (should (harness-call 'supervisor/active-p sid))
@@ -2964,7 +2966,7 @@ A task's session supervises, and a finished task waits for review."
     (setq harness-supervisor-plan-test--on-report
           (lambda (_text)
             (harness-supervisor-plan-test-call
-             "hand_in" '(:summary "The step failed; handing in what there is." :evidence ("Step s1 failed twice.")))))
+             "hand_in" '(:problem "The parser breaks on nested quotes." :summary "The step failed; handing in what there is." :evidence ("Step s1 failed twice.")))))
     (let* ((id (plist-get (harness-call 'task/submit default-directory "Fix the parser") :id))
            (sid (plist-get (harness-supervisor-plan-test-task id) :session)))
       ;; The failure reaches the supervisor as a turn, even though the first one ended.

@@ -206,6 +206,22 @@ both are children of the seed and run on the model."
       (should (= 1 (hash-table-count harness-seed--seeds)))
       (should (= 0 (hash-table-count harness-seed--pending))))))
 
+(ert-deftest harness-seed-says-in-its-record-that-it-is-a-seed ()
+  "A seed marks itself in its `:ext', and a fork of it is not a seed.
+Clients read that marker (`harness-ui-seed-session-p') to leave a seed
+out of what they navigate to, rather than guessing from its name; a
+working fork of the seed is an ordinary sub-agent."
+  (harness-seed-test-with
+    (let* ((source (harness-seed-test-source))
+           (fork (harness-seed-test-fork source))
+           (seed (plist-get fork :seed)))
+      (should (harness-json-true-p (plist-get (plist-get (harness-call 'session/get seed) :ext) :seed)))
+      (should-not (harness-json-true-p
+                   (plist-get (plist-get (harness-call 'session/get (plist-get fork :id)) :ext) :seed)))
+      ;; The source a seed was forked from is not one either.
+      (should-not (harness-json-true-p
+                   (plist-get (plist-get (harness-call 'session/get source) :ext) :seed))))))
+
 (ert-deftest harness-seed-a-warm-seed-is-forked-without-another-turn ()
   "The priming turn left the cache warm, so later forks wait for nothing."
   (harness-seed-test-with

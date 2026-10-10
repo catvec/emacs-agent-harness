@@ -316,8 +316,12 @@ I is non-interactive mode for every session, beside i for one."
                   (plist-get (if (keywordp (cadr suffix)) (cdr suffix) (car (last suffix))) :command))))
     (dolist (binding '(("g" . harness-ui-insights-refresh) ("t" . harness-ui-insights-cycle-period)
                        ("p" . harness-ui-insights-set-project) ("n" . harness-ui-insights-write)
-                       ("RET" . harness-ui-insights-open) ("q" . quit-window)))
-      (should (eq (cdr binding) (lookup-key harness-ui-insights-mode-map (kbd (car binding))))))))
+                       ("RET" . harness-ui-insights-open)))
+      (should (eq (cdr binding) (lookup-key harness-ui-insights-mode-map (kbd (car binding))))))
+    ;; q comes from the shared view map, which buries the report.
+    (should (eq harness-ui-view-map (keymap-parent harness-ui-insights-mode-map)))
+    (harness-ui-insights-test-open)
+    (should (eq #'harness-ui-quit-view (key-binding (kbd "q"))))))
 
 (provide 'harness-ui-insights-test)
 ;;; harness-ui-insights-test.el ends here

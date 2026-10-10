@@ -1150,7 +1150,7 @@ Nil while the whole message shows."
 (defun harness-chat--from-line (from)
   "Return the sender line of a message FROM sent, rather than the user.
 The harness reads \"System · SOURCE\", another session's agent
-\"Session · NAME\", NAME a button that opens that session."
+\"Session · NAME\", NAME a session link that opens that session."
   (pcase-let ((`(,label . ,which)
                (pcase (harness-sender-kind from)
                  ('session
@@ -1158,9 +1158,7 @@ The harness reads \"System · SOURCE\", another session's agent
                          (name (harness-chat--session-name id (plist-get from :name))))
                     (cons harness-chat-session-label
                           (if id
-                              (harness-chat--button name (lambda () (harness-open-session id))
-                                                    :face 'harness-dim-face
-                                                    :help (format "Open the session %s" name))
+                              (harness-ui-session-link id name (format "Open the session %s" name))
                             (propertize name 'face 'harness-dim-face)))))
                  (_ (let ((source (plist-get from :source)))
                       (cons harness-chat-system-label
@@ -1323,17 +1321,47 @@ Only a tool call's block names one (`harness-chat--child-id')."
        (harness-chat--child-id (harness-chat-block-node block)
                                (harness-chat-block-result block))))
 
+(defun harness-chat--call-sessions (call result)
+  "Return the ids of the sessions a tool call names, in order, each once.
+First the session CALL started (`harness-chat--child-id', which looks
+in CALL and in RESULT), then the sessions its input refers to: its
+`session_id', a reference as the session tools take one, and its
+`session_ids', a list of them.  Any tool that is given sessions this way
+-- session_read, session_send, session_wait, set_priority... -- names
+them here.  Each reference is resolved against the session cache
+\(`harness-ui-resolve-session'), so one that names no session, or
+several, is left out, and so is the session this chat shows, which a
+link would only lead back to."
+  (let* ((input (plist-get call :input))
+         (many (plist-get input :session_ids))
+         (child (harness-chat--child-id call result))
+         (ids (and child (list child))))
+    (dolist (ref (cons (plist-get input :session_id)
+                       (and (or (listp many) (vectorp many)) (append many nil))))
+      (when-let* ((id (harness-ui-resolve-session ref)))
+        (unless (equal id harness-ui-session-id)
+          (cl-pushnew id ids :test #'equal))))
+    (nreverse ids)))
+
 (defun harness-chat--child-line (call result)
-  "Return the line linking the session a tool call started, or \"\".
+  "Return the line linking the sessions a tool call names, or \"\".
 That is the sub-agent of a spawn_agent call, the `:child-id' in the
 `:meta' of CALL or of RESULT: the merge queue's and the supervisor's
 calls name their child from the start, and so does a model's
-spawn_agent call from the moment its child exists."
-  (if-let* ((id (harness-chat--child-id call result)))
-      (let ((name (harness-chat--session-name id (plist-get (plist-get call :input) :name))))
-        (concat (propertize "  session: " 'face 'harness-dim-face)
-                (harness-chat--button name (lambda () (harness-open-session id))
-                                      :help (format "Open the session %s" name))
+spawn_agent call from the moment its child exists.  It is also each
+session the call's input refers to, such as the one session_read reads
+or the ones session_wait waits for (`harness-chat--call-sessions').  One
+session reads \"  session: NAME\", several \"  sessions: A, B\", each
+name a session link (`harness-ui-session-link')."
+  (if-let* ((ids (harness-chat--call-sessions call result)))
+      (let ((child (harness-chat--child-id call result)))
+        (concat (propertize (if (cdr ids) "  sessions: " "  session: ") 'face 'harness-dim-face)
+                (mapconcat (lambda (id)
+                             (let ((name (harness-chat--session-name
+                                          id (and (equal id child)
+                                                  (plist-get (plist-get call :input) :name)))))
+                               (harness-ui-session-link id name (format "Open the session %s" name))))
+                           ids (propertize ", " 'face 'harness-dim-face))
                 "\n"))
     ""))
 
@@ -1531,9 +1559,14 @@ denied call's block where the buffer still has it."
          (reply (cond (answer)
                       (dismissed (propertize "  dismissed\n" 'face 'harness-dim-face))
                       (t "")))
+         ;; A session id in the call's input or output is a session link.
          (summary (concat (if ask
                               question
-                            (if line (concat (propertize (concat "  " line) 'face 'harness-dim-face) "\n") ""))
+                            (if line
+                                (concat (harness-ui-link-session-ids
+                                         (propertize (concat "  " line) 'face 'harness-dim-face))
+                                        "\n")
+                              ""))
                           (harness-chat--child-line node result)
                           (harness-chat--rerun-line node result)
                           (harness-chat--approval-line (plist-get result :call-id) result)
@@ -1544,31 +1577,34 @@ denied call's block where the buffer still has it."
          (media (and result (mapconcat #'harness-chat--attachment-string
                                        (plist-get result :attachments) "")))
          (details
-          (concat
-           (if input (concat (propertize "  input\n" 'face 'harness-label-face)
-                             (propertize (harness-chat--input-listing input) 'line-prefix indent 'wrap-prefix indent))
-             "")
-           (cond
-            ;; A question's answer, or its dismissal, is the block's
-            ;; reply, after the fold and outside it; the error of one that
-            ;; failed and the reason of one refused fold as any call's do.
-            ((and ask (not (memq outcome '(failed denied)))) "")
-            ((null result) "")
-            ((string-empty-p output) (propertize "  (no output)\n" 'face 'harness-dim-face))
-            ;; A refused call never ran: its text is the permission
-            ;; system's reason, not output.
-            (t (concat (propertize (if (eq outcome 'denied)
-                                       "  reason\n"
-                                     (format "  output (%s chars)\n" (harness-format-tokens (length output))))
-                                   'face 'harness-label-face)
-                       (propertize (harness-chat--ensure-newline shown) 'face 'harness-ui-output-face
-                                   'line-prefix indent 'wrap-prefix indent)
-                       (if long
-                           (concat "  " (harness-chat--button
-                                         (format "show all (%d more chars)" (- (length output) limit))
-                                         (lambda () (harness-chat--show-all id)))
-                                   "\n")
-                         "")))))))
+          (or (run-hook-with-args-until-success 'harness-chat-tool-body-functions block result)
+              (concat
+               (if input (concat (propertize "  input\n" 'face 'harness-label-face)
+                                 (propertize (harness-ui-link-session-ids (harness-chat--input-listing input))
+                                             'line-prefix indent 'wrap-prefix indent))
+                 "")
+               (cond
+                ;; A question's answer, or its dismissal, is the block's
+                ;; reply, after the fold and outside it; the error of one that
+                ;; failed and the reason of one refused fold as any call's do.
+                ((and ask (not (memq outcome '(failed denied)))) "")
+                ((null result) "")
+                ((string-empty-p output) (propertize "  (no output)\n" 'face 'harness-dim-face))
+                ;; A refused call never ran: its text is the permission
+                ;; system's reason, not output.
+                (t (concat (propertize (if (eq outcome 'denied)
+                                           "  reason\n"
+                                         (format "  output (%s chars)\n" (harness-format-tokens (length output))))
+                                       'face 'harness-label-face)
+                           (harness-ui-link-session-ids
+                            (propertize (harness-chat--ensure-newline shown) 'face 'harness-ui-output-face
+                                        'line-prefix indent 'wrap-prefix indent))
+                           (if long
+                               (concat "  " (harness-chat--button
+                                             (format "show all (%d more chars)" (- (length output) limit))
+                                             (lambda () (harness-chat--show-all id)))
+                                       "\n")
+                             ""))))))))
     (harness-chat--margin
      (harness-chat--face (concat header summary media (harness-chat--foldable details) reply) bg)
      bg)))
@@ -1850,12 +1886,15 @@ A run of one call names it as its header does, label and subject:
                          text)
     ;; A call that started a sub-agent opens its session from anywhere on
     ;; the block, not only from its session line: mouse-1 or RET on the
-    ;; title, the input, the output.  Buttons keep their own keys.
+    ;; title, the input, the output.  Buttons keep their own keys.  The
+    ;; action is the session link's, so the block opens the sub-agent in
+    ;; its project as the session line does.
     (when-let* ((child (harness-chat--block-child block)))
       (harness-ui-add-session-keys
        text child
        (harness-chat--session-name
-        child (plist-get (plist-get (harness-chat-block-node block) :input) :name))))
+        child (plist-get (plist-get (harness-chat-block-node block) :input) :name))
+       nil nil (harness-ui-session-action child)))
     text))
 
 ;;;; Folding
@@ -2743,6 +2782,14 @@ between the queue and the attachments, in order, read-only and above
 the compose box.  Add to it buffer-locally, with a symbol, so a reload
 redefines it.  The task module shows its review banner this way.")
 
+(defvar harness-chat-tool-body-functions nil
+  "Functions giving a tool call block a body of their own.
+Each is called with the BLOCK and its result node in the chat buffer and
+returns a string to show in place of the call's input and output, or nil
+to let the generic rendering show them.  The header, the one-line
+summary, the status and the fold stay the chat's either way.  The report
+module shows the report a hand_in call handed in this way.")
+
 (defun harness-chat--insert-panels ()
   "Insert what `harness-chat-panel-functions' return, in order.
 Each string gets the panel background, which its own properties may
@@ -3549,7 +3596,10 @@ nil, after every session's figures were fetched again, redraws them all."
 ;; `harness-session-parent-id').  The header line says which session that
 ;; is and what the relation is, and clicking it goes up to it: a child
 ;; session tells you where it came from and leads back there
-;; (`harness-up-to-parent').
+;; (`harness-up-to-parent').  A seed conversation in between is stepped
+;; over rather than named: a fork made through a seed is the seed's
+;; child, and a seed is a prompt cache, not a conversation to open
+;; (`harness-ui-seed-session-p').
 
 (defconst harness-chat--parent-labels
   '((fork . "fork of")
@@ -3568,9 +3618,31 @@ over ACP, a string."
 
 (defun harness-chat--parent-id ()
   "Return the id of the session this buffer's session was started from, or nil.
-See `harness-chat--parent-label'."
-  (let ((id (plist-get (harness-chat--session) :parent-id)))
+See `harness-chat--parent-label'.  A seed conversation in between is
+stepped over: a fork made through a seed is the seed's child, and the
+seed is the shared prompt cache, not a conversation to open (see
+harness-seed.el).  The id is then the nearest ancestor that is not a
+seed -- the session the whole family was started from -- so the header
+segment and `harness-up-to-parent' lead there rather than into a seed.
+A session whose parent is a seed with no parent of its own has none to
+lead to, and gets nil."
+  (let ((id (plist-get (harness-chat--session) :parent-id))
+        (steps 0))
+    ;; A cycle, which nothing should make, must not hang a redisplay.
+    (while (and (stringp id) (not (string-empty-p id))
+                (< steps 100)
+                (harness-ui-seed-session-p (harness-ui-session id)))
+      (setq id (plist-get (harness-ui-session id) :parent-id))
+      (setq steps (1+ steps)))
     (and (stringp id) (not (string-empty-p id)) id)))
+
+(defun harness-chat--parent-is-seed-p ()
+  "Non-nil when the session this one was started from is a seed conversation.
+The seed is then not opened (`harness-chat--parent-id' steps over it);
+this says why `harness-up-to-parent' has nowhere to go when it has no
+ancestor of its own."
+  (harness-ui-seed-session-p
+   (plist-get (harness-chat--session) :parent-id)))
 
 (defun harness-chat--parent-help (window _object _pos)
   "Return the tooltip of the parent segment in WINDOW's header line.
@@ -3583,17 +3655,29 @@ redisplay of the header line."
 (defun harness-chat--parent-segment ()
   "Return the header segment leading to this session's parent, or nil.
 A fork, a sub-agent and a BTW name the session they were started from,
-and the name opens it (`harness-up-to-parent').  A session with no
-parent, or whose parent the harness no longer has, has no segment."
+and the whole segment -- the arrow, the relation and the name -- opens
+it (`harness-up-to-parent').  A seed conversation in between is not
+named or opened: the segment leads to the nearest ancestor that is not
+a seed (`harness-chat--parent-id').  A session with no such parent, or
+whose parent the harness no longer has, has no segment."
   (when-let* ((id (harness-chat--parent-id))
               (parent (harness-ui-session id)))
     (let* ((label (harness-chat--parent-label (plist-get (harness-chat--session) :kind)))
            (name (harness-chat--session-name id))
            (segment (lambda (name)
-                      (concat "  " (harness-ui-icon 'harness-icon-up) " "
-                              (propertize (concat label " ") 'face 'harness-dim-face)
-                              (harness-chat--segment name #'harness-up-to-parent
-                                                     #'harness-chat--parent-help)))))
+                      ;; The name is drawn by the shared session link, so it
+                      ;; wears `harness-ui-session-link-face' as a session
+                      ;; name does everywhere; the segment's own keymap takes
+                      ;; the click, though, running `harness-up-to-parent':
+                      ;; the arrow and the relation are part of the same
+                      ;; target, and a click on a header line is a
+                      ;; `[header-line mouse-1]' the link's own map does not
+                      ;; bind (see `harness-chat--segment').
+                      (harness-chat--segment
+                       (concat "  " (harness-ui-icon 'harness-icon-up) " "
+                               (propertize (concat label " ") 'face 'harness-dim-face)
+                               (harness-ui-session-link id name))
+                       #'harness-up-to-parent #'harness-chat--parent-help))))
       ;; Shown after the session's own name, which matters more: a narrow
       ;; window drops this before the name, and shortens it before that.
       (list (funcall segment name) 65 (funcall segment (harness-truncate-end name 12))))))
@@ -3943,15 +4027,19 @@ nearest above point, so the agent's last one from the box.  The chat's
   "Show the session this one was started from, and return its buffer.
 A fork, a sub-agent and a BTW record the session they were started from
 as their parent (`:parent-id'); the header line names it, and this
-command, like a click on that name, goes up to it.  The window that
-shows the parent already is selected when there is one; a parent in no
-window opens where this session is shown.  A session that was not
-started from another, or whose parent the harness no longer has, says
-so instead."
+command, like a click on that name, goes up to it.  A seed
+conversation in between is stepped over: a fork made through a seed is
+the seed's child, and this leads to the nearest ancestor that is not a
+seed (`harness-chat--parent-id').  The window that shows the parent
+already is selected when there is one; a parent in no window opens
+where this session is shown.  A session that was not started from
+another, or whose parent the harness no longer has, says so instead."
   (interactive)
   (let ((id (harness-chat--parent-id)))
     (unless id
-      (user-error "This session was not started from another"))
+      (if (harness-chat--parent-is-seed-p)
+          (user-error "This session was started from a seed conversation, which is not opened")
+        (user-error "This session was not started from another")))
     (unless (harness-ui-session id)
       (user-error "The session this one was started from is gone (%s)"
                   (harness-chat--session-name id)))
@@ -3966,17 +4054,27 @@ so instead."
 (defun harness-open-session (id &optional position)
   "Open session ID in POSITION.
 An inactive session opens as it is, compose box included; the first
-message sent from it resumes it."
-  (interactive (list (plist-get (harness-ui-read-session "Open session: ") :id)
+message sent from it resumes it.  The session chosen to open is never
+a seed conversation (`harness-ui-navigable-session-p')."
+  (interactive (list (plist-get (harness-ui-read-session "Open session: "
+                                                         #'harness-ui-navigable-session-p)
+                                :id)
                      (and current-prefix-arg (harness-ui-read-position))))
   (harness-ui-display-session id position))
 
 ;;;###autoload
 (defun harness-open-latest-session (&optional position)
-  "Open the newest session of the current project in POSITION."
+  "Open the newest session of the current project in POSITION.
+A seed conversation is none of the project's sessions to open, however
+newly it was touched: it is a shared prompt cache, not a conversation
+\(`harness-ui-navigable-session-p').  A project whose only sessions are
+seeds has none to open, so a new one starts as it would with no
+session at all."
   (interactive (list (and current-prefix-arg (harness-ui-read-position))))
   (let* ((root (harness-chat--project-root default-directory))
-         (mine (harness-ui-sessions (lambda (s) (equal (plist-get s :project) root)))))
+         (mine (harness-ui-sessions (lambda (s)
+                                      (and (equal (plist-get s :project) root)
+                                           (harness-ui-navigable-session-p s))))))
     (if mine
         (harness-open-session (plist-get (car mine) :id) position)
       (harness-new-session root position))))

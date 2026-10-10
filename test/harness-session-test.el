@@ -1134,6 +1134,56 @@ one; one that holds it carries it on, uncached for its model."
       (harness-call 'session/update id :model "test-loop:l" :silent t)
       (should (equal '(:at 2000.0 :ttl 300 :expires 2300.0 :model "test-api:a") (funcall cache))))))
 
+(ert-deftest harness-session-cache-restamps-on-the-first-request-after-a-reset ()
+  "A compaction of a conversation that had a cache remembers it.
+The first request that follows stamps the new cache even when the
+provider reports no cache tokens for it, as an OpenAI-compatible
+provider's first request after the conversation starts over does; the
+pending marker survives a restart.  A conversation that never had a
+cache is not made to look warm."
+  (harness-session-test-with
+    (let* ((harness-cache-ttl 300)
+           (harness-cache-ttl-overrides nil)
+           (id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (model (plist-get (harness-call 'session/get id) :model))
+           (cache (lambda () (plist-get (harness-call 'session/get id) :cache))))
+      (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 900 :context 920
+                                             :cache-at 1000.0))
+      (should (funcall cache))
+      ;; The compaction clears the stamp and remembers that one existed.
+      (harness-call 'session/usage-add id '(:input 900 :output 200 :cache-read 900 :context 200
+                                             :cache-reset t))
+      (should-not (funcall cache))
+      (should (plist-get (plist-get (harness-call 'session/get id) :usage) :cache-pending))
+      ;; The first request after it is a miss, with no cache tokens: it
+      ;; stamps the new cache with the model's default lifetime.
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 5000.0)))
+        (harness-call 'session/usage-add id '(:input 200 :output 10 :context 210)))
+      (let ((c (funcall cache)))
+        (should (= 5000.0 (plist-get c :at)))
+        (should (= 300 (plist-get c :ttl)))
+        (should (= 5300.0 (plist-get c :expires)))
+        (should (equal model (plist-get c :model))))
+      (should-not (plist-get (plist-get (harness-call 'session/get id) :usage) :cache-pending))
+      ;; The marker survives a restart, and the next request after it stamps.
+      (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 900 :context 920
+                                             :cache-at 6000.0))
+      (harness-call 'session/usage-add id '(:input 100 :output 10 :context 110 :cache-reset t))
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (plist-get (plist-get (harness-call 'session/get id) :usage) :cache-pending))
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 7000.0)))
+        (harness-call 'session/usage-add id '(:input 200 :output 10 :context 210)))
+      (should (= 7000.0 (plist-get (funcall cache) :at)))
+      (should-not (plist-get (plist-get (harness-call 'session/get id) :usage) :cache-pending))
+      ;; A conversation that never had a cache is not made to look warm.
+      (let ((fresh (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+        (harness-call 'session/usage-add fresh '(:input 10 :output 10 :context 20 :cache-reset t))
+        (should-not (plist-get (plist-get (harness-call 'session/get fresh) :usage) :cache-pending))
+        (harness-call 'session/usage-add fresh '(:input 100 :output 10 :context 110))
+        (should-not (plist-get (harness-call 'session/get fresh) :cache))))))
+
 (ert-deftest harness-session-messages-merge-rules ()
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
