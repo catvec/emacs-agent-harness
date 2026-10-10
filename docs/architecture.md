@@ -5224,7 +5224,8 @@ modules hook into a chat buffer without owning it:
 `harness-chat-send-functions` sees each message sent
 or queued from its box (the text as typed, and the attachments),
 `harness-chat-header-functions` (buffer-local) puts segments in front of
-its header line, leaving the session's own segments as they are,
+its header line, leaving the session's own segments as they are, each a
+string or `(TEXT PRIORITY MIN)` as `harness-ui-fit-header` takes it,
 `harness-chat-header-end-functions` adds segments after the session's
 own, before [menu], each a string or `(TEXT PRIORITY MIN)` as
 `harness-ui-fit-header` takes it (the companion pet's face, priority 2,
@@ -5237,8 +5238,13 @@ requires `ui` and `ui-chat`): a session the supervisor module governs
 says so in its `:ext` `:supervisor`, `t` while it supervises and
 `:false` once the user turned that off, and the chat's header line then
 starts with the state, before the status icon, through
-`harness-chat-header-functions`: "supervisor" in `harness-supervisor-face`,
-or "hands-on" in `harness-dim-face`.  A session with no `:supervisor`
+`harness-chat-header-functions`: " supervisor " in
+`harness-supervisor-face`, or " hands-on " in `harness-dim-face`, padded
+from the window's edge and separated from the status icon as the
+header's other segments are.  The segment is fitted at priority 3, below
+every segment of the session's own, so a window too narrow for the whole
+line drops the badge before it loses the model, the permission mode or
+the counts.  A session with no `:supervisor`
 (a sub-agent, a side conversation) shows nothing.  A click on the
 segment, and `V` in the harness keys (`C-c h V`,
 `harness-toggle-supervisor`), toggle the mode: they ask for the opposite
