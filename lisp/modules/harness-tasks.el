@@ -174,9 +174,17 @@
 ;;             queued, merging or conflict; `:merge-queued' says when
 ;;             the branch joined the queue)
 ;;   review    the agent finished; the work waits for the user to
-;;             verify it or send it back with feedback
+;;             verify it or send it back with feedback.  A round that
+;;             handed in work needing no merge (`:no-merge') also waits
+;;             here, and verifying it completes the task without the
+;;             merge queue.
 ;;   done      merged (or finished, outside git), and verified with
 ;;             review; a follow-up message moves the task back to active
+;;
+;; A round can also hand in that it cannot continue (`hand_in' with
+;; `:cannot-continue'): the task then waits for the user with the
+;; outcome `cannot-continue' and nothing merges, its report saying what
+;; blocks it.
 ;;
 ;; Every task a method returns or an event carries also has a derived
 ;; `:column', the kanban column it belongs in:
@@ -609,6 +617,14 @@ A save skips the stores whose text would not change.")
   "Task ids that are starting: worktree or session made, first turn not begun.
 They hold a slot so a burst of submissions never overshoots the limit.")
 
+(defvar harness-tasks--waking (make-hash-table :test 'equal)
+  "Task ids a user's message is on its way to, before a turn starts.
+A message that restarts a stopped task may be held up first -- a
+compaction, say -- and starts no turn yet, so the board shows the task
+at work meanwhile (`harness-tasks--column').  Cleared when its turn
+starts or ends, when the message fails, and when the task goes back to
+pending.")
+
 (defvar harness-tasks--queues (make-hash-table :test 'equal)
   "Project root -> t while that project's pending queue is suspended.
 A suspended queue starts nothing on its own: `task/suspend-queue' stops
@@ -824,6 +840,23 @@ verified the work."
 (defun harness-tasks--merged-p (task)
   "Non-nil when TASK's branch is merged."
   (harness-json-true-p (plist-get task :merged)))
+
+(defun harness-tasks--cannot-continue-p (task)
+  "Non-nil when TASK's round said it cannot continue (hand_in).
+Its session recorded the report with `:cannot-continue', and the task
+waits for the user rather than for review."
+  (and (or (harness-json-true-p (plist-get task :cannot-continue))
+           (harness-json-true-p (plist-get (plist-get task :report) :cannot-continue)))
+       t))
+
+(defun harness-tasks--no-merge-p (task)
+  "Non-nil when TASK's round handed in work that needs no merge.
+Its session recorded the report with `:no-merge': informational work,
+or work that changed nothing, so nothing joins the merge queue when its
+turn ends and verifying it completes the task without merging."
+  (and (or (harness-json-true-p (plist-get task :no-merge))
+           (harness-json-true-p (plist-get (plist-get task :report) :no-merge)))
+       t))
 
 (defun harness-tasks--to-review (id &rest plist)
   "Put task ID in review with PLIST merged in; emit `task/review'.
@@ -1100,10 +1133,12 @@ does for it, show in the backlog: only the user starts one, so it is no
 queued pending task (`harness-tasks--queued-p').  A task whose branch
 holds a place in the merge queue shows in merging however it holds it:
 queued, merging, or its session resolving the conflicts; unless that
-session waits on the user, whose answer the queue then waits for too."
+session waits on the user, whose answer the queue then waits for too.
+A task a user's message is on its way to (`harness-tasks--waking') shows
+active before the turn it starts actually begins."
   (pcase (plist-get task :state)
     ('pending (if (harness-tasks--backlog-p task) 'backlog 'pending))
-    ('done 'done)
+    ('done (if (harness-tasks--waking-p task) 'active 'done))
     ('review 'review)
     ('refining (let ((session (harness-tasks--session task)))
                  (cond ((plist-get session :pending) 'needs-input)
@@ -1114,9 +1149,33 @@ session waits on the user, whose answer the queue then waits for too."
          (cond ((gethash (plist-get task :id) harness-tasks--starting) 'active)
                ((plist-get session :pending) 'needs-input)
                ((plist-get task :merge-status) 'merging)
+               ((harness-tasks--waking-p task) 'active)
                ((eq (plist-get session :status) 'running) 'active)
                ((plist-get task :outcome) 'needs-input)
                (t 'active))))))
+
+(defun harness-tasks--waking-p (task)
+  "Non-nil when a message of the user's is on its way to TASK."
+  (and (gethash (plist-get task :id) harness-tasks--waking) t))
+
+(defun harness-tasks--wake-worthy-p (task)
+  "Non-nil when a user's message to TASK should show it at work at once.
+That is a task stopped part way (active with an outcome) or one
+completed and reopened by the message: never one in review (the message
+sends it back, `harness-tasks--send-back'), nor a pending, refining or
+merging one, whose column the message does not move."
+  (and (memq (plist-get task :state) '(active done))
+       (not (plist-get task :archived))
+       (not (plist-get task :merge-status))
+       (not (eq (harness-tasks--column task) 'active))))
+
+(defun harness-tasks--wake (id)
+  "Show task ID at work while the user's message to it is on its way.
+Called before the message starts a turn: the turn may be held up first
+-- the cold-cache compaction, say -- and until it starts the task would
+still show as it stopped.  Return the task's view."
+  (puthash id t harness-tasks--waking)
+  (harness-tasks--set id))
 
 (defun harness-tasks--view (task)
   "Return TASK as methods and events show it: with its `:column'.
@@ -1264,7 +1323,7 @@ is not merged yet.  Return a promise, or nil when there is nothing to do."
 ;;;; The task prompts
 
 (defconst harness-tasks-hand-in-prompt
-  "Finish with the hand_in tool rather than a plain reply: it hands your summary and your evidence to the user and ends the turn, so the task waits for their review.  The problem statement is required: a short summary of what must be fixed and how to see it, which the review shows at the top, so the user remembers what the task was about from its name.  The reproduction note is optional: how to see the problem, or the steps to check the fix.  The evidence is required, and shows the work rather than describing it -- an image or a video of what you built whenever there is anything to see (take the screenshot first), and the tool call that proves a claim about a command (the tests pass, the command's output) quoted by its call id, by the tool's name (its newest call) or by the `#N` a previous hand_in error listed, so a run whose log you kept can be quoted without running it again.  A file, a code block or a note is evidence for what cannot be shown.  Then stop; do not start more work."
+  "Finish with the hand_in tool rather than a plain reply: it hands your summary and your evidence to the user and ends the turn, so the task waits for their review.  The problem statement is required: a short summary of what must be fixed and how to see it, which the review shows at the top, so the user remembers what the task was about from its name.  The reproduction note is optional: how to see the problem, or the steps to check the fix.  The evidence is required, and shows the work rather than describing it -- an image or a video of what you built whenever there is anything to see (take the screenshot first), and the tool call that proves a claim about a command (the tests pass, the command's output) quoted by its call id, by the tool's name (its newest call) or by the `#N` a previous hand_in error listed, so a run whose log you kept can be quoted without running it again.  A file, a code block or a note is evidence for what cannot be shown.  If you cannot finish the task, hand it in with cannot_continue true and say in the summary what blocks it: the task goes to the user's input instead of review, and nothing merges.  If the work needs no merge -- an informational task, or one that changed nothing -- pass no_merge true: the user's verification then completes it without merging.  Then stop; do not start more work."
   "What a task's session is told about handing its finished work in.")
 
 (defun harness-tasks--system-prompt (prompt session)
@@ -2000,6 +2059,7 @@ harness.  The task's prompt and the user's feedback are the user's."
 (defun harness-tasks--fail (id err)
   "Record ERR as the outcome of task ID."
   (remhash id harness-tasks--starting)
+  (remhash id harness-tasks--waking)
   (harness-log 'warn "task %s failed: %s" id (harness-error-message err))
   (when (gethash id harness-tasks--table)
     (harness-tasks--set id :state 'active :outcome 'error :error (harness-error-message err)))
@@ -2448,6 +2508,12 @@ harness's own messages (FROM a system sender) are left alone, and so
 is a task whose worktree was removed: a turn they start makes the task
 active all the same (`harness-tasks--on-turn-started').  Return the
 blocks to deliver."
+  ;; A message of the user's that restarts a stopped task shows it at
+  ;; work at once, before the turn it starts actually begins.
+  (let ((waking (and (null (harness-sender-kind (plist-get info :from)))
+                     (harness-tasks--by-session session-id))))
+    (when (and waking (harness-tasks--wake-worthy-p waking))
+      (harness-tasks--wake (plist-get waking :id))))
   (let* ((task (harness-tasks--by-session session-id))
          (id (plist-get task :id))
          (from (plist-get info :from))
@@ -2622,6 +2688,7 @@ before is forgotten: no outcome, no round of feedback pending, no
 verification.  `:return-reason' is `returned', the return by hand,
 unless PLIST says why (`harness-tasks--return-reason').  Return the
 task's view."
+  (remhash id harness-tasks--waking)
   (apply #'harness-tasks--set id
          :state 'pending :returned (float-time) :backlog nil
          :return-reason 'returned :preempted-by nil
@@ -2997,6 +3064,7 @@ forgotten."
   (remhash session-id harness-tasks--refine-calls)
   (when-let* ((task (harness-tasks--by-session session-id)))
     (remhash (plist-get task :id) harness-tasks--starting)
+    (remhash (plist-get task :id) harness-tasks--waking)
     (cond
      ((harness-tasks--refinement-p task)
       (harness-tasks--set (plist-get task :id) :state 'refining :outcome nil :error nil :duplicate-of nil
@@ -3027,8 +3095,13 @@ Nil when no module reports any, and without the agent module."
 `end-turn' puts the work in review (`harness-tasks-require-verification')
 until the user verified it; after that, or without review, it completes
 the task outside git -- in the main tree too, which has nothing to
-merge -- and queues its merge inside.  A round that ends without a
-report handed in gets one saying so (`harness-tasks--missing-report').
+merge -- and queues its merge inside.  A round that ended saying it
+cannot continue (`hand_in' with `:cannot-continue') instead puts the
+task before the user, active with the outcome `cannot-continue' and
+nothing merged; a round that handed in work needing no merge (`hand_in'
+with `:no-merge') completes without joining the merge queue.  A round
+that ends without a report handed in gets one saying so
+(`harness-tasks--missing-report').
 A refinement turn puts its write-up in the backlog.  A clean end of a
 turn is not the end of the work while something the session started
 still runs outside it (`harness-tasks--outstanding'): the task then
@@ -3060,6 +3133,7 @@ while it waits, do not start it again: the return starts nothing."
           (waiting nil)
           (skip nil))
       (remhash id harness-tasks--starting)
+      (remhash id harness-tasks--waking)
       (cond
        ((gethash id harness-tasks--returning)
         (remhash id harness-tasks--returning)
@@ -3083,8 +3157,18 @@ while it waits, do not start it again: the return starts nothing."
        ((and (memq (plist-get task :state) '(done review)) (harness-tasks--merged-p task)) nil)
        ((setq waiting (harness-tasks--outstanding task))
         (harness-tasks--set id :state 'active :waiting waiting))
+       ((harness-tasks--cannot-continue-p task)
+        ;; The session said it cannot finish: the task waits for the user
+        ;; instead of review, and nothing joins the merge queue.
+        (harness-tasks--set id :state 'active :outcome 'cannot-continue
+                            :error (harness-first-line (plist-get (plist-get task :report) :summary) 300)
+                            :finished nil :merge-status nil))
        ((harness-tasks--needs-review-p task)
         (apply #'harness-tasks--to-review id :outcome reason :error nil :finished (float-time)
+               (harness-tasks--missing-report task)))
+       ((harness-tasks--no-merge-p task)
+        ;; Informational work: nothing to merge, so nothing joins the queue.
+        (apply #'harness-tasks--to-done id 'finished :outcome reason :finished (float-time)
                (harness-tasks--missing-report task)))
        ((and (plist-get task :worktree) (not (plist-get task :worktree-removed)))
         (when-let* ((missing (harness-tasks--missing-report task)))
@@ -3110,6 +3194,7 @@ while it waits, do not start it again: the return starts nothing."
   "Drop task ID, write the stores and emit `task/deleted'."
   (remhash id harness-tasks--table)
   (remhash id harness-tasks--starting)
+  (remhash id harness-tasks--waking)
   (harness-tasks--save-soon)
   (harness-emit 'task/deleted id)
   (harness-run-soon #'harness-tasks--schedule))
@@ -3684,6 +3769,8 @@ carry-on."
   "Queue task ID's branch for the merge queue again (after a failed merge).
 A task in review merges when the user verifies it (`task/verify')."
   (let ((task (harness-tasks--get id)))
+    (when (harness-tasks--no-merge-p task)
+      (error "Task %s handed in with nothing to merge" id))
     (unless (plist-get task :worktree) (error "Task %s has no worktree to merge" id))
     (when (eq (plist-get task :state) 'done) (error "Task %s is already merged" id))
     (when (eq (plist-get task :state) 'review)
@@ -3781,6 +3868,7 @@ already, it is done now."
       (error "Task %s is not waiting for review" id))
     (harness-tasks--set id :verified t :verified-at (float-time))
     (if (and (plist-get task :worktree) (not (plist-get task :worktree-removed))
+             (not (harness-tasks--no-merge-p task))
              (not (harness-tasks--merged-p task)) (harness-method-exists-p 'merge/enqueue))
         (progn (harness-tasks--set id :merge-attempts 0)
                (harness-tasks--enqueue-merge id))
@@ -3856,12 +3944,16 @@ shown, `:recap-at' when it was made, and `:recap-turns' plus
 (harness-defmethod task/hand-in (id report)
   "Record REPORT as the work ID hands in, waiting for the user's review.
 REPORT is what the hand_in tool validated: a plist of `:summary' and
-`:evidence'.  The record is written and `task/changed' says so; the
-turn that handed it in then ends cleanly, which the review step picks
-up as usual (`harness-tasks--on-turn-ended')."
+`:evidence', and, when the session said it cannot finish or the work
+needs no merge, `:cannot-continue' or `:no-merge'.  The record is
+written and `task/changed' says so; the turn that handed it in then
+ends cleanly, which the review step picks up as usual
+(`harness-tasks--on-turn-ended')."
   (harness-tasks--get id)               ; signals for an unknown task
   ;; `harness-tasks--set' writes it soon and says `task/changed'.
-  (harness-tasks--set id :report report :report-at (float-time) :archived nil))
+  (harness-tasks--set id :report report :report-at (float-time) :archived nil
+                      :cannot-continue (if (harness-json-true-p (plist-get report :cannot-continue)) t :false)
+                      :no-merge (if (harness-json-true-p (plist-get report :no-merge)) t :false)))
 
 (harness-defmethod task/archive (id &optional restore)
   "Archive done task ID, hiding it and deactivating its session; RESTORE undoes it.

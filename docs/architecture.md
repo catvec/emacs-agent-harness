@@ -5106,7 +5106,7 @@ TRAMP prefixes come from the session host):
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: given to the session the task is submitted with, and the order waiting tasks start in) | meta |
 | `task_control` | Control task | task_id, action (start/queue/message/cancel/merge/verify/reject/complete/archive/restore/delete/priority), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
-| `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
+| `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption), cannot_continue (cannot finish: to user input, nothing merges), no_merge (informational: verify completes without the merge queue) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `compact` | Compact the conversation | kind (summary/brief/transcript/fresh/truncate, default summary), mode (queue/interrupt, default queue), reason | meta (tools-compact; offered to every session, so an agent compacts its own conversation) |
 | `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus (for the user: stays until the task is done) | exec (tools-dev; offered in a checkout of the harness only; the instance stops by itself once nothing needs it; needs no approval: `harness-perms--auto-allow-tools`) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
@@ -5143,7 +5143,13 @@ model never sees its own call ids, so the name and the handle make
 quoting a call a one-shot rather than a round of probing.  `hand_in'
 calls are not counted and are not named by the tool-name or handle
 forms (an exact call id or node id still names one), so the handles a
-miss lists stay put between the miss and the retry.
+miss lists stay put between the miss and the retry.  Two optional flags
+change where the hand-in goes.  `cannot_continue' is for a task that
+cannot be finished: it goes to the user's input instead of review,
+nothing merges, and evidence may be empty -- the summary says what
+blocks it.  `no_merge' is for work that changes nothing: it still waits
+for review, and verifying it completes the task without the merge
+queue.
 
 `compact` (`tools-compact`) lets an agent compact its own conversation
 when it sees the context filling up mid-task, and lets the harness ask

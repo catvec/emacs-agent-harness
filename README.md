@@ -1643,6 +1643,17 @@ your checkout itself can be submitted to the **main tree** instead (the
   `priority` action or `set_priority` on the task's session, and the
   board's search understands "do the docs
   task first".
+- The `own worktree` / `main tree` switch and the priority button above
+  the compose box apply to the next task only; the main-tree switch
+  keeps it on when clicked again, and the priority notice's `[keep on]`
+  keeps the priority for every task. A coloured line above the box says
+  which mode is armed.
+  A task that stopped -- its session errored, was cancelled or was
+  interrupted -- has [Retry] on its card, and one at work or stopped
+  part way has [Pause], which puts it back in *Pending* to carry on
+  where it stopped. *Requires your input* sorts by priority, and a
+  message that restarts a stopped task shows it in progress at once,
+  even while the cold-cache compaction holds its turn up.
 - Task sessions run on at most 384k tokens of context
   (`harness-tasks-context-limit`): they compact sooner than interactive
   sessions, so a long task works from a smaller transcript between
@@ -1752,7 +1763,12 @@ your checkout itself can be submitted to the **main tree** instead (the
   The two keys work only while the banner shows; otherwise `C-c C-v`
   is nothing there, the box pasting with `C-y`. `C-c >` on the summary
   quotes it in the box, as it does a part of it you select, so the
-  feedback can answer it point by point.
+  feedback can answer it point by point. Two flags change where the
+  hand-in goes. `cannot_continue` is for a task that cannot be
+  finished: say what blocks it in the summary; it goes to *Requires
+  your input* instead, and nothing merges. `no_merge` is for
+  informational work that changes nothing: it still waits for your
+  review, and verifying it completes the task without the merge queue.
 - `[Review]` on a card that has a report, or on the banner, pops the
   handed-in summary and evidence out beside the board: images large, as
   wide as the popout, videos as thumbnails, files as buttons, and each

@@ -42,6 +42,8 @@
 (defvar harness-ui-tasks--error)
 (defvar harness-ui-tasks--collapse-min-width)
 (defvar harness-ui-tasks--fitting)
+(defvar harness-ui-tasks--main-tree-mode)
+(defvar harness-ui-tasks--priority-mode)
 (declare-function harness-ui-tasks--held "harness-ui-tasks")
 (declare-function harness-ui-tasks--caps-that-fit "harness-ui-tasks")
 (declare-function harness-ui-cache-session "harness-ui")
@@ -1180,7 +1182,9 @@ box alone again."
 (declare-function harness-ui-tasks--render-tail "harness-ui-tasks")
 
 (ert-deftest harness-ui-tasks-main-tree-switch ()
-  "The worktree switch makes the next task work in the main tree, on the card too."
+  "The worktree switch makes the next task work in the main tree, once.
+A second click keeps it on until clicked off; a submission spends the
+one-shot choice, so the next task is a worktree task again."
   (harness-ui-tasks-test-with
     (with-current-buffer board
       ;; A git project, where the switch applies; this test's dir is not one.
@@ -1192,14 +1196,23 @@ box alone again."
         (should (= 1 (1- (length (split-string tail "own worktree"))))))
       (harness-ui-tasks-toggle-main-tree)
       (should (harness-json-true-p (plist-get harness-ui-tasks--new :main-tree)))
+      (should (eq harness-ui-tasks--main-tree-mode 'once))
       (let ((tail (harness-ui-tasks-test--tail-text board)))
         (should (string-match-p "main tree" tail))
-        (should (= 1 (1- (length (split-string tail "main tree")))))
+        (should (string-match-p "Main tree for the next task only" tail))
         (should-not (string-match-p "no worktree" tail))))
     (harness-ui-tasks-test--type-and-submit board "Clean the checkout")
     (harness-ui-tasks-test--wait-text board "main tree")
     (let ((task (car (harness-call 'task/list default-directory))))
-      (should (harness-json-true-p (plist-get task :main-tree))))))
+      (should (harness-json-true-p (plist-get task :main-tree))))
+    ;; The one-shot choice is spent: the next task is a worktree task.
+    (with-current-buffer board
+      (should-not harness-ui-tasks--main-tree-mode)
+      (should-not (harness-json-true-p (plist-get harness-ui-tasks--new :main-tree))))
+    (harness-ui-tasks-test--type-and-submit board "Plain worktree task")
+    (harness-ui-tasks-test--wait-text board "Plain worktree task")
+    (let ((tasks (harness-call 'task/list default-directory)))
+      (should-not (harness-json-true-p (plist-get (cadr tasks) :main-tree))))))
 
 (declare-function harness-ui-tasks-raise-priority "harness-ui-tasks")
 (declare-function harness-ui-tasks-lower-priority "harness-ui-tasks")
@@ -1389,7 +1402,9 @@ task on the board, and the list of every session's change, do not."
           (should (equal (list (buffer-name board)) refreshed)))))))
 
 (ert-deftest harness-ui-tasks-new-task-priority ()
-  "The button beside Submit sets the next task's priority; each click moves it on."
+  "The button beside Submit sets the next task's priority for one task.
+Clicking again cycles the level, and the notice above the box keeps the
+choice on with [keep on]; a submission spends a one-shot choice."
   (harness-ui-tasks-test-with
     (let ((harness-tasks-max-running 0))
       (with-current-buffer board
@@ -1398,19 +1413,36 @@ task on the board, and the list of every session's change, do not."
         (push-button (save-excursion (goto-char harness-ui-tasks--list-end)
                                      (search-forward "medium priority")
                                      (match-beginning 0)))
-        (should (string-match-p "Submit +high priority\n" (harness-ui-tasks-test--tail-text board))))
+        (should (string-match-p "Submit +high priority\n" (harness-ui-tasks-test--tail-text board)))
+        (should (eq harness-ui-tasks--priority-mode 'once))
+        (should (string-match-p "High priority for the next task only" (harness-ui-tasks-test--tail-text board))))
       (harness-ui-tasks-test--type-and-submit board "Urgent fix")
       (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*↑ Urgent fix")
       (should (eq 'high (plist-get (car (harness-call 'task/list default-directory)) :priority)))
-      ;; It stays for the tasks after, like the other settings, until changed.
+      ;; The one-shot choice is spent: the next task is medium again.
       (with-current-buffer board
+        (should-not harness-ui-tasks--priority-mode)
+        (should (string-match-p "Submit +medium priority\n" (harness-ui-tasks-test--tail-text board)))
+        ;; Clicking still cycles the levels.
+        (harness-ui-tasks-cycle-new-priority)
+        (should (string-match-p "Submit +high priority\n" (harness-ui-tasks-test--tail-text board)))
         (harness-ui-tasks-cycle-new-priority)
         (should (string-match-p "Submit +low priority\n" (harness-ui-tasks-test--tail-text board)))
         (harness-ui-tasks-cycle-new-priority)
-        (should (string-match-p "Submit +medium priority\n" (harness-ui-tasks-test--tail-text board))))
+        (should (string-match-p "Submit +medium priority\n" (harness-ui-tasks-test--tail-text board)))
+        ;; [keep on] makes the choice sticky, so it survives a submit.
+        (harness-ui-tasks-cycle-new-priority)
+        (push-button (harness-ui-tasks-test--tail-button board "[keep on]"))
+        (should (eq harness-ui-tasks--priority-mode 'sticky)))
       (harness-ui-tasks-test--type-and-submit board "Whenever")
       (harness-ui-tasks-test--wait-text board "Pending  2\\(.\\|\n\\)*↑ Urgent fix\\(.\\|\n\\)*Whenever")
-      (should (eq 'medium (plist-get (cadr (harness-call 'task/list default-directory)) :priority))))))
+      (should (eq 'high (plist-get (cadr (harness-call 'task/list default-directory)) :priority)))
+      ;; Sticky stays, until it is clicked off.
+      (with-current-buffer board
+        (should (eq harness-ui-tasks--priority-mode 'sticky))
+        (push-button (harness-ui-tasks-test--tail-button board "[off]"))
+        (should-not harness-ui-tasks--priority-mode)
+        (should (string-match-p "Submit +medium priority\n" (harness-ui-tasks-test--tail-text board)))))))
 
 (declare-function harness-ui-tasks-bulk-priority "harness-ui-tasks")
 (declare-function harness-ui-tasks-toggle-bulk "harness-ui-tasks")
@@ -3195,6 +3227,200 @@ starts with it is checked in the supervisor suite)."
                       (string-match-p "· supervisor" (harness-ui-tasks-test--tail-text board))))
          5 "the settings line to say supervisor")
         (should (harness-json-true-p (plist-get harness-ui-tasks--new :supervisor)))))))
+
+;;;; One-shot and sticky submit modes, and what a card stopped part way offers
+
+(declare-function harness-ui-tasks-retry "harness-ui-tasks")
+(declare-function harness-ui-tasks--pausable-p "harness-ui-tasks")
+(declare-function harness-ui-tasks--no-merge-p "harness-ui-tasks")
+
+(ert-deftest harness-ui-tasks-main-tree-sticky-and-notice ()
+  "The main-tree toggle cycles once, sticky, off, with a notice saying which.
+The notice draws above the compose box, and its button keeps the choice
+on, or turns it off again."
+  (harness-ui-tasks-test-with
+    (with-current-buffer board
+      ;; A git project, where the switch applies; this test's dir is not one.
+      (setq harness-ui-tasks--settings
+            (plist-put (copy-sequence harness-ui-tasks--settings) :worktrees t))
+      (harness-ui-tasks--render-tail)
+      (should-not harness-ui-tasks--main-tree-mode)
+      ;; One toggle: the next task only, with a notice and a keep button.
+      (harness-ui-tasks-toggle-main-tree)
+      (should (eq 'once harness-ui-tasks--main-tree-mode))
+      (let ((tail (harness-ui-tasks-test--tail-text board)))
+        (should (string-match-p "Main tree for the next task only" tail))
+        (should (string-match-p "\\[keep on\\]" tail)))
+      ;; Another: every task, until it is clicked off.
+      (harness-ui-tasks-toggle-main-tree)
+      (should (eq 'sticky harness-ui-tasks--main-tree-mode))
+      (should (string-match-p "Main tree for every task until you click it off"
+                              (harness-ui-tasks-test--tail-text board)))
+      ;; The notice's [off] button turns it off, and the worktree is back.
+      (push-button (harness-ui-tasks-test--tail-button board "[off]"))
+      (should-not harness-ui-tasks--main-tree-mode)
+      (should (eq :false (plist-get harness-ui-tasks--new :main-tree)))
+      ;; A prefix argument arms the sticky mode at once.
+      (harness-ui-tasks-toggle-main-tree 4)
+      (should (eq 'sticky harness-ui-tasks--main-tree-mode))
+      (should (harness-json-true-p (plist-get harness-ui-tasks--new :main-tree))))))
+
+(ert-deftest harness-ui-tasks-main-tree-once-resets-after-submit ()
+  "A one-shot main-tree choice lasts one task: submitting it resets the box.
+The task submitted with it keeps the main tree, and the next task works
+in its own worktree again."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (with-current-buffer board
+        (setq harness-ui-tasks--settings
+              (plist-put (copy-sequence harness-ui-tasks--settings) :worktrees t))
+        (harness-ui-tasks--render-tail)
+        (harness-ui-tasks-toggle-main-tree)
+        (should (eq 'once harness-ui-tasks--main-tree-mode)))
+      (harness-ui-tasks-test--type-and-submit board "Clean the checkout")
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Clean the checkout")
+      ;; Spent: the mode is off and the box works in a worktree again.
+      (harness-test-wait
+       (lambda () (with-current-buffer board
+                    (and (null harness-ui-tasks--main-tree-mode)
+                         (not (harness-json-true-p (plist-get harness-ui-tasks--new :main-tree))))))
+       5 "the one-shot main-tree choice to reset")
+      ;; The task it was armed for kept the main tree.
+      (should (harness-json-true-p (plist-get (car (harness-call 'task/list default-directory))
+                                              :main-tree))))))
+
+(ert-deftest harness-ui-tasks-priority-once-resets-after-submit ()
+  "A one-shot priority lasts one task: the notice shows, and goes with it.
+The task submitted gets the high priority, and the button is back to
+medium for the next one."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (with-current-buffer board
+        (harness-ui-tasks-cycle-new-priority)
+        (should (eq 'once harness-ui-tasks--priority-mode))
+        (let ((tail (harness-ui-tasks-test--tail-text board)))
+          (should (string-match-p "High priority for the next task only" tail))
+          (should (string-match-p "\\[keep on\\]" tail))))
+      (harness-ui-tasks-test--type-and-submit board "Urgent fix")
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*↑ Urgent fix")
+      (should (eq 'high (plist-get (car (harness-call 'task/list default-directory)) :priority)))
+      ;; Spent: medium again, and the notice is gone.
+      (harness-test-wait
+       (lambda () (with-current-buffer board
+                    (and (null harness-ui-tasks--priority-mode)
+                         (string-match-p "Submit +medium priority\n"
+                                         (harness-ui-tasks-test--tail-text board)))))
+       5 "the one-shot priority to reset")
+      (should-not (string-match-p "priority for the next task only"
+                                  (harness-ui-tasks-test--tail-text board))))))
+
+(ert-deftest harness-ui-tasks-priority-sticky-keeps-across-submits ()
+  "Keeping the priority on makes every next task high, until clicked off.
+A click on the notice's [keep on] makes it sticky; it survives the tasks
+it applies to, and the notice stays until its [off] button is used."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (with-current-buffer board
+        (harness-ui-tasks-cycle-new-priority)
+        (push-button (harness-ui-tasks-test--tail-button board "[keep on]"))
+        (should (eq 'sticky harness-ui-tasks--priority-mode))
+        (should (string-match-p "High priority for every task until you click it off"
+                                (harness-ui-tasks-test--tail-text board))))
+      (harness-ui-tasks-test--type-and-submit board "First urgent")
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*↑ First urgent")
+      (should (string-match-p "High priority for every task until you click it off"
+                              (harness-ui-tasks-test--tail-text board)))
+      ;; A second submit goes high too, the notice still showing.
+      (harness-ui-tasks-test--type-and-submit board "Second urgent")
+      (harness-ui-tasks-test--wait-text board "Pending  2\\(.\\|\n\\)*First urgent\\(.\\|\n\\)*Second urgent")
+      (should (cl-every (lambda (task) (eq 'high (plist-get task :priority)))
+                        (harness-call 'task/list default-directory)))
+      (should (string-match-p "High priority for every task until you click it off"
+                              (harness-ui-tasks-test--tail-text board)))
+      ;; Off: medium again, and the notice is gone.
+      (with-current-buffer board
+        (push-button (harness-ui-tasks-test--tail-button board "[off]")))
+      (should-not harness-ui-tasks--priority-mode)
+      (with-current-buffer board
+        (should (equal "medium" (plist-get harness-ui-tasks--new :priority)))
+        (should (string-match-p "Submit +medium priority\n"
+                                (harness-ui-tasks-test--tail-text board)))))))
+
+(ert-deftest harness-ui-tasks-needs-input-sorts-by-priority ()
+  "Requires your input lists the tasks waiting there by priority, then oldest.
+A low task submitted first comes after a high one submitted later."
+  (harness-ui-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           '((:type text :delta "oops") (:type done :stop-reason error :error "boom"))))
+      (harness-call 'task/submit default-directory "Low, broken" (list :priority "low"))
+      (harness-call 'task/submit default-directory "High, broken" (list :priority "high"))
+      (harness-ui-tasks-test--wait-text
+       board "Requires your input  2\\(.\\|\n\\)*High, broken\\(.\\|\n\\)*Low, broken")
+      (should (string-match-p "Requires your input  2\\(.\\|\n\\)*High, broken\\(.\\|\n\\)*Low, broken"
+                              (harness-ui-tasks-test--board-text board))))))
+
+(ert-deftest harness-ui-tasks-card-actions-retry-and-pause ()
+  "A task that stopped part way offers Retry then Pause; a working one Pause.
+A task that said it cannot continue asks you to Reply first, and can
+still be paused; a card whose session waits on a request keeps the
+view's own answer buttons and gains Pause beside them."
+  (harness-ui-tasks-test-with
+    (with-current-buffer board
+      (setq harness-ui-tasks--tasks
+            (list (list :id "t-error" :state "active" :column "needs-input"
+                        :outcome "error" :prompt "Broke part way" :created 0)
+                  (list :id "t-working" :state "active" :column "active"
+                        :prompt "At work" :created 0)
+                  (list :id "t-cannot" :state "active" :column "needs-input"
+                        :outcome "cannot-continue" :prompt "Cannot finish" :created 0)))
+      (let* ((error-task (harness-ui-tasks--find "t-error"))
+             (working (harness-ui-tasks--find "t-working"))
+             (cannot (harness-ui-tasks--find "t-cannot")))
+        ;; A task stopped part way: Retry, then Pause, as its buttons too.
+        (should (equal '("Retry" "Pause")
+                       (take 2 (mapcar #'car (harness-ui-tasks--actions error-task)))))
+        (should (string-match-p "\\[Retry\\] \\[Pause\\]"
+                                (substring-no-properties (harness-ui-tasks--card-buttons error-task))))
+        ;; A task at work: Pause after Steer.
+        (let ((labels (mapcar #'car (harness-ui-tasks--actions working))))
+          (should (member "Pause" labels))
+          (should (> (cl-position "Pause" labels :test #'equal)
+                     (cl-position "Steer" labels :test #'equal))))
+        ;; A task that cannot continue: Reply first, and Pause is there.
+        (should (equal "Reply" (caar (harness-ui-tasks--actions cannot))))
+        (should (member "Pause" (mapcar #'car (harness-ui-tasks--actions cannot)))))
+      ;; A live request keeps its answer buttons and gains Pause.
+      (puthash "s-waits"
+               (list :id "s-waits" :name "Waiter" :status "blocked"
+                     :pending (list (list :id "p1" :kind "permission"
+                                          :payload (list :title "Bash: ls -la" :tool "bash"
+                                                         :options '("allow-once" "deny-once")))))
+               harness-ui--sessions)
+      (let* ((waiting (list :id "t-waits" :state "active" :column "needs-input"
+                            :session "s-waits" :prompt "Needs a permission" :created 0))
+             (buttons (substring-no-properties (harness-ui-tasks--card-buttons waiting))))
+        (should (string-match-p "\\[Allow\\]" buttons))
+        (should (string-match-p "\\[Deny\\]" buttons))
+        (should (string-match-p "\\[Pause\\]" buttons))))))
+
+(ert-deftest harness-ui-tasks-no-merge-card-says-so ()
+  "A card whose work needs no merge says so, in review and once done.
+In review, verifying accepts it, there being nothing to merge; in done,
+it says there was nothing to merge."
+  (harness-ui-tasks-test-with
+    (with-current-buffer board
+      (setq harness-ui-tasks--tasks
+            (list (list :id "t-nomerge-review" :state "review" :column "review"
+                        :no-merge t :prompt "Explain the flag" :created 0)
+                  (list :id "t-nomerge-done" :state "done" :column "done"
+                        :no-merge t :prompt "Document the flag" :created 0)))
+      (harness-ui-tasks--render))
+    (harness-ui-tasks-test--show-subtitle board "Explain the flag")
+    (should (string-match-p "nothing to merge: verifying accepts it"
+                            (harness-ui-tasks-test--card-text board "Explain the flag")))
+    (harness-ui-tasks-test--show-subtitle board "Document the flag")
+    (should (string-match-p "nothing to merge"
+                            (harness-ui-tasks-test--card-text board "Document the flag")))))
 
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here
