@@ -65,6 +65,9 @@
 (declare-function harness-ui-level-icon "harness-ui")
 (declare-function harness-quick-search "harness-ui-quick-search")
 (declare-function harness-quick-search-box-submit "harness-ui-quick-search")
+(declare-function harness-quick-search--reset-scan "harness-ui-quick-search")
+(declare-function harness-ui-visit-session "harness-ui")
+(declare-function harness-ui-chat-goto-node "harness-ui-chat")
 (declare-function harness-ui-tasks-search--banner "harness-ui-tasks-search")
 (declare-function harness-ui-tasks-search--done-text "harness-ui-tasks-search")
 (declare-function harness-ui-tasks-search--install "harness-ui-tasks-search")
@@ -145,7 +148,7 @@ an empty history of searches."
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
        ;; The UI modules load once the client list is clear, so their
        ;; connection is the one the harness events reach.
-       (dolist (m '(ui ui-compose ui-popout ui-tasks ui-quick-search ui-tasks-search))
+       (dolist (m '(ui ui-compose ui-popout ui-tasks ui-search ui-quick-search ui-tasks-search))
          (harness-test-load-module m))
        (clrhash harness-ui--sessions)
        (let ((board (harness-tasks dir)))
@@ -154,6 +157,9 @@ an empty history of searches."
                (harness-test-wait (lambda () (not (buffer-local-value 'harness-ui-tasks--loading board)))
                                   5 "the board to load")
                ,@body)
+           ;; No scan of the commands, and no idle job to build one, is left
+           ;; for the next test.
+           (harness-quick-search--reset-scan)
            (harness-ui-tasks-search--shutdown)
            (kill-buffer board)
            (dolist (c (copy-sequence harness-acp--clients))
@@ -625,6 +631,53 @@ the board."
         (harness-ui-tasks-search-test--push board "[Run]"))
       (should (equal session opened))
       (should (eq board ran)))))
+
+(ert-deftest harness-ui-tasks-search-banner-open-goes-to-the-match ()
+  "[Open] in the banner opens a session where the search found its words:
+at that node, the words found to be highlighted there.  A session named
+without a match in it opens as it is."
+  (harness-ui-tasks-search-test-with
+    (let* ((other (plist-get (harness-call 'session/create :cwd default-directory
+                                           :name "Debug the merge queue")
+                             :id))
+           (plain (plist-get (harness-call 'session/create :cwd default-directory
+                                           :name "Write the release notes")
+                             :id))
+           (node (plist-get (harness-call 'session/append other
+                                          (list :kind 'user :content "Why did the merge queue drop a commit?"))
+                            :id))
+           (visited nil)
+           (went nil))
+      ;; The model searched every session's transcript, and named both.
+      (setq harness-ui-tasks-search-test--replies
+            (list "{\"sessions\":\"merge queue\"}"
+                  (harness-json-encode-text (list :show nil :sessions (list other plain)))))
+      (harness-ui-tasks-search-test--search board "the merge queue")
+      (harness-ui-tasks-search-test--wait-status board 'done)
+      (let ((sessions (plist-get (harness-ui-tasks-search-test--state board) :sessions)))
+        (should (equal (list other plain) (mapcar (lambda (s) (plist-get s :id)) sessions)))
+        (should (equal node (plist-get (car sessions) :node)))
+        (should-not (plist-get (cadr sessions) :node)))
+      (cl-letf (((symbol-function 'harness-ui-visit-session)
+                 (lambda (sid &rest _) (push sid visited) nil))
+                ((symbol-function 'harness-ui-chat-goto-node)
+                 (lambda (&rest args) (push args went) nil)))
+        (harness-ui-tasks-search-test--push board "[Open]")
+        (should (equal (list other) visited))
+        (pcase-let ((`((,goto-node ,goto-session ,regexp)) went))
+          (should (equal node goto-node))
+          (should (equal other goto-session))
+          (should (string-match-p regexp "Merge"))
+          (should (string-match-p regexp "queue"))
+          (should-not (string-match-p regexp "commit")))
+        ;; The second session's [Open], which had no match to go to.
+        (with-current-buffer board
+          (goto-char (point-min))
+          (should (search-forward "[Open]" harness-ui-tasks--list-end t))
+          (should (search-forward "[Open]" harness-ui-tasks--list-end t))
+          (push-button (match-beginning 0)))
+        (should (equal (list plain other) visited))
+        (should (= 1 (length went)))))))
 
 (ert-deftest harness-ui-tasks-search-widened-answer-says-so ()
   "A search that matches nothing, even looking wider, says so in the

@@ -23,12 +23,21 @@
 ;; catalogue along (`harness-quick-search-commands'): the harness menu,
 ;; the keys under C-c h, the commands the harness's modes list for the
 ;; menu and every other harness command, each with its keys, where it
-;; applies and whether it runs where the search was opened.
+;; applies and whether it runs where the search was opened.  What takes
+;; long in it does not depend on the buffer: the walk over every symbol
+;; of Emacs, which grows with each package loaded, and each command's
+;; documentation.  It is done ahead of time, once Emacs has been idle a
+;; moment (typing stops it), and again after files load; a search only
+;; does what its buffer decides.
 ;;
 ;; What the model found shows in the popout, each line with its
 ;; buttons: [Run] runs a command in the buffer the search was opened
-;; from, [Describe] shows its documentation, [Open] opens a session and
-;; [Board] shows a task on its board.  An order to manage tasks ("stop
+;; from, [Describe] shows its documentation, [Open] opens a session --
+;; at the message where the search found its words, highlighted, when
+;; it found them in a transcript -- and [Board] shows a task on its
+;; board.  The Sessions heading has [All matches], which shows every
+;; match of the line in the sessions, with their snippets, as C-c h g
+;; does (`harness-search-sessions').  An order to manage tasks ("stop
 ;; the docs task") is only proposed here: [Do it] does it.
 ;;
 ;; On a task board, C-c h / is the board's own search
@@ -46,6 +55,7 @@
 (require 'harness-ui)
 (require 'harness-ui-compose)
 (require 'harness-ui-popout)
+(require 'harness-ui-search)
 
 (declare-function transient-get-suffix "transient")
 (declare-function transient-append-suffix "transient")
@@ -202,13 +212,6 @@ tree, commands anywhere else.  CONTEXT is what
 
 ;;;; The commands a search may name
 
-(defconst harness-quick-search--catalogue-ttl 60
-  "Seconds a catalogue of commands serves the buffers of the same modes.")
-
-(defvar harness-quick-search--catalogues (make-hash-table :test 'equal)
-  "Catalogues built lately: (MAJOR-MODE . MINOR-MODES) -> (TIME . CATALOGUE).
-MINOR-MODES are the minor modes on that list commands for the menu.")
-
 (defun harness-quick-search--text (value)
   "Return VALUE when it is a string with something in it, without properties."
   (and (stringp value) (not (string-blank-p value)) (substring-no-properties value)))
@@ -336,26 +339,126 @@ those that turn on a major mode."
                       (and (get mode 'harness-menu-group) (boundp mode) (symbol-value mode)))
                     minor-mode-list))
 
-(defun harness-quick-search--doc (command)
-  "Return the first line of COMMAND's documentation, or nil."
-  (when-let* ((doc (ignore-errors (documentation command t)))
-              (line (car (split-string doc "\n" t "[ \t]+"))))
-    (harness-quick-search--text
-     (if (string-search "\\" line)
-         (or (ignore-errors (substitute-command-keys line)) line)
-       line))))
+(defun harness-quick-search--doc-line (command)
+  "Return the first line of COMMAND's documentation as written, or nil.
+Reading it can take a file read, and the line does not depend on the
+buffer: the scan keeps it (`harness-quick-search--scan-build')."
+  (when-let* ((doc (ignore-errors (documentation command t))))
+    (car (split-string doc "\n" t "[ \t]+"))))
+
+(defun harness-quick-search--doc (line)
+  "Return LINE, a command's first line of documentation, as the catalogue says it.
+The keys the line refers to are told as the current buffer binds them;
+a line that refers to none is as written."
+  (harness-quick-search--text
+   (if (and line (string-search "\\" line))
+       (or (ignore-errors (substitute-command-keys line)) line)
+     line)))
+
+;;;;; The scan, built ahead
+;;
+;; The walk over every symbol of Emacs (`harness-quick-search--scan')
+;; finds the harness's modes and commands, and takes longer with each
+;; package loaded: a tenth of a second is plausible in a big Emacs.  It
+;; and each command's documentation do not depend on the buffer a search
+;; is for, so one scan serves every search.  It is built on an idle
+;; timer, in `while-no-input': typing stops it, and the next idle moment
+;; starts again.  A file that loads may define commands and modes, so
+;; it marks the scan stale and has one rebuild scheduled; the stale scan
+;; serves until then, and a command loaded a moment ago may be missing
+;; for a second.  Only a search that finds no scan at all builds one on
+;; the spot.
+
+(defconst harness-quick-search--idle-delay 1
+  "Seconds Emacs is idle before the scan of the symbols is built or rebuilt.")
+
+(defvar harness-quick-search--scan-cache nil
+  "What the last scan of the symbols found, or nil before the first.
+A plist: `:modes' and `:commands', as `harness-quick-search--scan'
+returns them, and `:docs', a table by command of the first line of its
+documentation as written (`harness-quick-search--doc-line').")
+
+(defvar harness-quick-search--scan-stale nil
+  "Non-nil when a file has loaded since the scan was begun.
+It may have defined commands or modes the scan lacks; the next idle
+moment builds the scan again.")
+
+(defvar harness-quick-search--scan-timer nil
+  "The idle timer that will build the scan, or nil when none waits.")
+
+(defun harness-quick-search--scan-build ()
+  "Scan the symbols and read each command's documentation; return the scan.
+That is what `harness-quick-search--scan-cache' keeps."
+  (let* ((scan (harness-quick-search--scan))
+         (docs (make-hash-table :test 'eq :size (max 100 (length (cdr scan))))))
+    (dolist (command (cdr scan))
+      (puthash command (harness-quick-search--doc-line command) docs))
+    (list :modes (car scan) :commands (cdr scan) :docs docs)))
+
+(defun harness-quick-search--scanned ()
+  "Return the scan of the symbols: the one built ahead, else one built now.
+A stale scan is still served: the idle job builds it again."
+  (or harness-quick-search--scan-cache
+      (progn
+        (setq harness-quick-search--scan-stale nil)
+        (setq harness-quick-search--scan-cache (harness-quick-search--scan-build)))))
+
+(defun harness-quick-search--schedule-scan ()
+  "Have the scan built once Emacs has been idle a moment.
+At most one timer waits, however often this is called."
+  (unless harness-quick-search--scan-timer
+    (setq harness-quick-search--scan-timer
+          (run-with-idle-timer harness-quick-search--idle-delay nil #'harness-quick-search--idle-build))))
+
+(defun harness-quick-search--idle-build ()
+  "Build the scan of the symbols now that Emacs is idle, if it is to be built.
+Typing stops the build, and the next idle moment begins it again.  A
+scan that is not stale is left as it is."
+  ;; The timer that runs this is gone already; one that waits is not
+  ;; needed any more, and would leave two.
+  (when (timerp harness-quick-search--scan-timer)
+    (cancel-timer harness-quick-search--scan-timer))
+  (setq harness-quick-search--scan-timer nil)
+  (when (or (null harness-quick-search--scan-cache) harness-quick-search--scan-stale)
+    ;; Fresh from here: a file loaded during the build marks it stale again.
+    (setq harness-quick-search--scan-stale nil)
+    (let ((scan (while-no-input (harness-quick-search--scan-build))))
+      (if (consp scan)
+          (setq harness-quick-search--scan-cache scan)
+        (setq harness-quick-search--scan-stale t)
+        (harness-quick-search--schedule-scan)))))
+
+(defun harness-quick-search--after-load (_file)
+  "Note that the file just loaded may have defined commands or modes.
+The scan is stale, and one idle job builds it again.  This is on
+`after-load-functions'."
+  (setq harness-quick-search--scan-stale t)
+  (harness-quick-search--schedule-scan))
+
+(defun harness-quick-search--reset-scan ()
+  "Forget the scan of the symbols, and the idle job that would build it."
+  (when (timerp harness-quick-search--scan-timer)
+    (cancel-timer harness-quick-search--scan-timer))
+  (setq harness-quick-search--scan-timer nil
+        harness-quick-search--scan-cache nil
+        harness-quick-search--scan-stale nil))
 
 (defun harness-quick-search--build-catalogue ()
   "Return the catalogue of commands as this buffer sees it.
-See `harness-quick-search-commands'."
+See `harness-quick-search-commands'.  The scan of the symbols and the
+commands' documentation are the ones built ahead
+\(`harness-quick-search--scanned'); what is left is the menu, the keys
+and the modes of this buffer."
   (let* ((table (make-hash-table :test 'eq))
          (order nil)
          (prefix (harness-quick-search--prefix-keys))
-         (scan (harness-quick-search--scan))
+         (scan (harness-quick-search--scanned))
+         (docs (plist-get scan :docs))
          (here-modes (append (harness-quick-search--minor-modes-on)
                              (cl-remove-if-not (lambda (mode) (get mode 'harness-menu-group))
                                                (harness-quick-search--mode-lineage))))
-         (modes (append here-modes (cl-remove-if (lambda (mode) (memq mode here-modes)) (car scan)))))
+         (modes (append here-modes
+                        (cl-remove-if (lambda (mode) (memq mode here-modes)) (plist-get scan :modes)))))
     (cl-flet ((add (command where keys label here)
                 (when (and command (symbolp command) (commandp command))
                   (let ((entry (gethash command table)))
@@ -388,17 +491,21 @@ See `harness-quick-search-commands'."
                 (add (nth 2 item) (car group) (harness-quick-search--group-key (car item))
                      (harness-quick-search--label (nth 1 item)) (and (memq mode here-modes) t)))))))
       ;; Every other harness command.
-      (dolist (command (cdr scan))
+      (dolist (command (plist-get scan :commands))
         (add command nil nil nil nil)))
     ;; A key bound here wins, and the command runs here.
     (mapcar (lambda (command)
               (let ((entry (gethash command table))
-                    (bound (where-is-internal command nil t)))
+                    (bound (where-is-internal command nil t))
+                    (line (gethash command docs :unread)))
+                ;; A command the scan did not list -- a menu's, say -- is read now.
+                (when (eq line :unread)
+                  (setq line (puthash command (harness-quick-search--doc-line command) docs)))
                 (list :command (symbol-name command)
                       :keys (if bound (key-description bound) (plist-get entry :keys))
                       :where (plist-get entry :where)
                       :label (plist-get entry :label)
-                      :doc (harness-quick-search--doc command)
+                      :doc (harness-quick-search--doc line)
                       :here (if (or bound (plist-get entry :here)) t :false))))
             (nreverse order))))
 
@@ -422,19 +529,19 @@ HERE), what `search/ask' takes as its `:commands', one entry a command:
 The commands come from the harness menu, `harness-ui-map', the
 `harness-menu-group' of every mode, and every other interactive
 harness command; a command found several ways takes each field from
-the first that has it.  The catalogue is kept a minute for buffers of
-the same modes: do not change it.  In the quick search's popout it is
-the one of the buffer the search was opened from."
+the first that has it.
+
+The walk over every symbol that finds the modes and the commands, and
+the first lines of their documentation, are built ahead, once Emacs has
+been idle a moment and again after files load, so a call only goes
+through the menu, the keys and the modes of BUFFER; a command defined a
+moment ago may be missing for a second.  A call before the first build
+builds it.  In the quick search's popout the catalogue is the one of
+the buffer the search was opened from."
   (with-current-buffer (or buffer (current-buffer))
     (if (and (harness-quick-search--quick-search-popout-p) harness-quick-search--catalogue)
         harness-quick-search--catalogue
-      (let* ((key (cons major-mode (harness-quick-search--minor-modes-on)))
-             (cached (gethash key harness-quick-search--catalogues)))
-        (if (and cached (< (- (float-time) (car cached)) harness-quick-search--catalogue-ttl))
-            (cdr cached)
-          (let ((catalogue (harness-quick-search--build-catalogue)))
-            (puthash key (cons (float-time) catalogue) harness-quick-search--catalogues)
-            catalogue))))))
+      (harness-quick-search--build-catalogue))))
 
 ;;;; The box
 
@@ -557,12 +664,13 @@ HELP is its tooltip."
 (defun harness-quick-search-session-line (session &optional button)
   "Return the line that shows SESSION as a search found it.
 SESSION is an entry of a plan's `:sessions': (:id :name :kind :status
-:project :cwd :updated :snippet :task).  The line has its status, its
-name, what it is, its project and when it was last active, then
-\[Open]; a passage the search found in it follows, dim, on a second
-line.  BUTTON makes the button: a function of LABEL, ACTION (a function
-of no arguments) and HELP returning its text,
-`harness-quick-search--button' by default."
+:project :cwd :updated :snippet :node :ranges :task).  The line has its
+status, its name, what it is, its project and when it was last active,
+then \[Open], which opens it at the node the search found its words in,
+when it did (`harness-quick-search-open-session'); a passage the search
+found in it follows, dim, on a second line.  BUTTON makes the button: a
+function of LABEL, ACTION (a function of no arguments) and HELP
+returning its text, `harness-quick-search--button' by default."
   (let* ((button (or button #'harness-quick-search--button))
          (id (plist-get session :id))
          (name (harness-ui-session-name id (harness-quick-search--text (plist-get session :name))))
@@ -577,8 +685,9 @@ of no arguments) and HELP returning its text,
       (concat (harness-ui-status-icon (plist-get session :status)) " "
               (propertize name 'face 'bold) "  "
               (propertize (string-join details " · ") 'face 'harness-dim-face) "  "
-              (funcall button "[Open]" (lambda () (harness-quick-search-open-session id))
-                       (format "Open the session %s" (harness-quick-search--quote name)))))
+              (funcall button "[Open]" (lambda () (harness-quick-search-open-session session))
+                       (format "Open the session %s%s" (harness-quick-search--quote name)
+                               (if (plist-get session :node) " where the search found its words" "")))))
      (if snippet
          (harness-quick-search--line
           (propertize (concat "  " (harness-truncate-end (harness-ui-one-line snippet) 160))
@@ -663,12 +772,31 @@ again, when it shows another now.  Return that buffer when it is live."
         (pop-to-buffer origin)))
     (and (buffer-live-p origin) origin)))
 
-(defun harness-quick-search-open-session (id)
-  "Open session ID, as a search found it.
+(defun harness-quick-search-open-session (session &optional node snippet ranges)
+  "Open SESSION, as a search found it, at its match when it found one.
+SESSION is an entry of a plan's `:sessions', which says where the
+search found its words: the `:node' that holds them, the `:snippet'
+around them and the `:ranges' of the snippet that matched.  It may also
+be a session's id, with that NODE, SNIPPET and RANGES.  The session
+opens at the node, point on the words found, which are highlighted
+\(`harness-ui-search-visit'); one found by its name only opens as it is.
 The quick search closes, and the session opens from the window it was
 opened from, as it would from there (`harness-ui-visit-session')."
+  (let* ((entry (if (stringp session)
+                    (list :id session :node node :snippet snippet :ranges ranges)
+                  session))
+         (node (plist-get entry :node)))
+    (harness-quick-search--leave)
+    (harness-ui-search-visit (plist-get entry :id) node
+                             (and node (harness-ui-search-hit-regexp entry)))))
+
+(defun harness-quick-search-all-matches (query)
+  "Show every match of QUERY in the sessions, as `harness-search-sessions' does.
+That is the session search's own view: each session that matches, with
+its snippets.  The quick search closes, and the view opens from the
+window it was opened from."
   (harness-quick-search--leave)
-  (harness-ui-visit-session id))
+  (harness-search-sessions query))
 
 (defun harness-quick-search-run-command (name)
   "Run the harness command NAME where the quick search was opened.
@@ -840,6 +968,18 @@ shows those tasks the way its own search would, where it can
   (not (or (plist-get plan :commands) (plist-get plan :sessions) (plist-get plan :tasks)
            (plist-get plan :ids) (plist-get plan :actions))))
 
+(defun harness-quick-search--heading (kind query)
+  "Return the heading of the things of KIND a search for QUERY found.
+The sessions' heading has [All matches], which shows every match of
+QUERY in the sessions (`harness-quick-search-all-matches')."
+  (concat "\n" (propertize (capitalize kind) 'face 'harness-quick-search-heading-face)
+          (if (equal kind "sessions")
+              (concat "  " (harness-quick-search--button
+                            "[All matches]" (lambda () (harness-quick-search-all-matches query))
+                            "Show every match of this search in the sessions, with its snippets"))
+            "")
+          "\n"))
+
 (defun harness-quick-search--insert-found (state)
   "Insert what STATE, a search that is done, found: its note, then each kind."
   (let ((plan (plist-get state :plan)))
@@ -856,7 +996,7 @@ shows those tasks the way its own search would, where it can
                          (propertize note 'face 'harness-dim-face)))))
       (dolist (kind (harness-quick-search--order (plist-get state :bias)))
         (when-let* ((found (harness-quick-search--found plan kind)))
-          (insert "\n" (propertize (capitalize kind) 'face 'harness-quick-search-heading-face) "\n")
+          (insert (harness-quick-search--heading kind (plist-get state :query)))
           (dolist (thing found)
             (insert (pcase kind
                       ("commands" (harness-quick-search-command-line thing))
@@ -1088,9 +1228,11 @@ queue?\", \"the task about the docs\".  \\`RET' there sends it, with where it
 was typed and the harness's commands, to a quick, cheap model
 \(`harness-tasks-search-model'), and the popout lists the commands,
 sessions and tasks it found, with buttons: [Run] runs a command in the
-buffer the search was opened from, [Open] opens a session, [Board]
-shows a task on its board.  The line stays in the box, to be refined;
-\\`M-p' and \\`M-n' bring back earlier searches.
+buffer the search was opened from, [Open] opens a session (at the
+message where the search found its words, when it did), [All matches]
+shows every match of the line in the sessions, with snippets, and
+[Board] shows a task on its board.  The line stays in the box, to be
+refined; \\`M-p' and \\`M-n' bring back earlier searches.
 
 What the search favours depends on where it was opened: commands, then
 sessions, in most buffers; sessions in the session list and a
@@ -1113,8 +1255,12 @@ Lisp, the search starts at once."
     (plist-get (harness-quick-search--suffix-plist suffix) :command)))
 
 (defun harness-quick-search--init ()
-  "Bind the quick search to / under the prefix and in the harness menu."
-  (clrhash harness-quick-search--catalogues)
+  "Bind the quick search to / under the prefix and in the harness menu.
+Also have the scan of the commands built when Emacs is idle, and built
+again after files load (`harness-quick-search--idle-build')."
+  (harness-quick-search--reset-scan)
+  (add-hook 'after-load-functions #'harness-quick-search--after-load)
+  (harness-quick-search--schedule-scan)
   (define-key harness-ui-map (kbd "/") #'harness-quick-search)
   (ignore-errors
     (when (ignore-errors (transient-get-suffix 'harness-menu "/"))
@@ -1122,17 +1268,19 @@ Lisp, the search starts at once."
     (transient-append-suffix 'harness-menu "a" '("/" "Quick search" harness-quick-search))))
 
 (defun harness-quick-search--shutdown ()
-  "Take the quick search off / under the prefix and out of the harness menu."
+  "Take the quick search off / under the prefix and out of the harness menu.
+Also stop building the scan of the commands, and forget it."
   (when (eq (lookup-key harness-ui-map (kbd "/")) #'harness-quick-search)
     (define-key harness-ui-map (kbd "/") nil t))
   (ignore-errors
     (when (eq (harness-quick-search--menu-command) 'harness-quick-search)
       (transient-remove-suffix 'harness-menu "/")))
-  (clrhash harness-quick-search--catalogues))
+  (remove-hook 'after-load-functions #'harness-quick-search--after-load)
+  (harness-quick-search--reset-scan))
 
 (harness-define-module 'ui-quick-search
   :doc "The quick search: find a session, a command or a task from anywhere, answered by a cheap model."
-  :requires '(ui ui-popout)
+  :requires '(ui ui-popout ui-search)
   :init #'harness-quick-search--init
   :shutdown #'harness-quick-search--shutdown)
 

@@ -47,6 +47,9 @@
 (defvar harness-quick-search--context)
 (defvar harness-quick-search--seq)
 (defvar harness-quick-search--origin)
+(defvar harness-quick-search--scan-cache)
+(defvar harness-quick-search--scan-stale)
+(defvar harness-quick-search--scan-timer)
 (declare-function harness-acp--drop-client "harness-acp")
 (declare-function harness-tasks--forget-stores "harness-tasks")
 (declare-function harness-tasks "harness-ui-tasks")
@@ -67,6 +70,17 @@
 (declare-function harness-quick-search--arrived "harness-ui-quick-search")
 (declare-function harness-quick-search--menu-command "harness-ui-quick-search")
 (declare-function harness-quick-search--task-target "harness-ui-quick-search")
+(declare-function harness-quick-search--scan "harness-ui-quick-search")
+(declare-function harness-quick-search--idle-build "harness-ui-quick-search")
+(declare-function harness-quick-search--after-load "harness-ui-quick-search")
+(declare-function harness-quick-search--reset-scan "harness-ui-quick-search")
+(declare-function harness-quick-search--init "harness-ui-quick-search")
+(declare-function harness-quick-search--shutdown "harness-ui-quick-search")
+(declare-function harness-quick-search--text "harness-ui-quick-search")
+(declare-function harness-quick-search-open-session "harness-ui-quick-search")
+(declare-function harness-search-sessions "harness-ui-search")
+(declare-function harness-ui-chat-goto-node "harness-ui-chat")
+(declare-function harness-ui-visit-session "harness-ui")
 (declare-function transient-get-suffix "transient")
 
 ;;;; A harmless command, and a mode that binds it
@@ -168,13 +182,16 @@ one window, closing every popout and board after."
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
        ;; The UI modules load once the client list is clear, so their
        ;; connection is the one the harness events reach.
-       (dolist (m '(ui ui-compose ui-popout ui-chat ui-tasks ui-quick-search))
+       (dolist (m '(ui ui-compose ui-popout ui-chat ui-tasks ui-search ui-quick-search))
          (harness-test-load-module m))
        (clrhash harness-ui--sessions)
        (unwind-protect
            (save-window-excursion
              (delete-other-windows)
              ,@body)
+         ;; No scan of the commands, and no idle job to build one, is left
+         ;; for the next test.
+         (harness-quick-search--reset-scan)
          ;; Dropping what its box holds: the next test's box starts empty.
          (harness-ui-popout-close '(quick-search) t)
          (dolist (b (buffer-list))
@@ -221,10 +238,12 @@ one window, closing every popout and board after."
   (with-current-buffer origin (harness-quick-search query))
   (harness-ui-quick-search-test--wait-status 'done))
 
-(defun harness-ui-quick-search-test--push (label)
-  "Push the button LABEL of the popout."
+(defun harness-ui-quick-search-test--push (label &optional nth)
+  "Push the button LABEL of the popout: the first, or with NTH the one after NTH."
   (with-current-buffer (harness-ui-quick-search-test--popout)
     (goto-char (point-min))
+    (dotimes (_ (or nth 0))
+      (should (search-forward label nil t)))
     (should (search-forward label nil t))
     (push-button (match-beginning 0))))
 
@@ -243,6 +262,19 @@ one window, closing every popout and board after."
 (defun harness-ui-quick-search-test--entry (name catalogue)
   "The entry of command NAME in CATALOGUE."
   (cl-find name catalogue :key (lambda (entry) (plist-get entry :command)) :test #'equal))
+
+(defmacro harness-ui-quick-search-test--counting-scans (var &rest body)
+  "Run BODY with VAR the number of walks over the symbols made so far."
+  (declare (indent 1))
+  `(let ((,var 0)
+         (walk (symbol-function 'harness-quick-search--scan)))
+     (cl-letf (((symbol-function 'harness-quick-search--scan)
+                (lambda () (cl-incf ,var) (funcall walk))))
+       ,@body)))
+
+(defun harness-ui-quick-search-test--timers ()
+  "How many idle timers wait to build the scan of the commands."
+  (cl-count #'harness-quick-search--idle-build timer-idle-list :key #'timer--function))
 
 ;;;; Where a search comes from
 
@@ -340,6 +372,147 @@ one window, closing every popout and board after."
     ;; C-c h / and the menu's / are the quick search.
     (should (eq 'harness-quick-search (lookup-key harness-ui-map (kbd "/"))))
     (should (eq 'harness-quick-search (harness-quick-search--menu-command)))))
+
+;;;; The scan of the commands, built ahead
+
+(ert-deftest harness-ui-quick-search-scans-once-when-nothing-is-built ()
+  "With no scan built, a catalogue builds it on the spot, once; none walks
+the symbols again, for this buffer or another."
+  (harness-ui-quick-search-test-with
+    (harness-quick-search--reset-scan)
+    (harness-ui-quick-search-test--counting-scans scans
+      (should (with-temp-buffer (text-mode) (harness-quick-search-commands)))
+      (should (= 1 scans))
+      (should harness-quick-search--scan-cache)
+      (should-not harness-quick-search--scan-stale)
+      (with-temp-buffer (harness-chat-mode) (harness-quick-search-commands))
+      (with-temp-buffer (text-mode) (harness-quick-search-commands))
+      (should (= 1 scans)))))
+
+(ert-deftest harness-ui-quick-search-idle-job-builds-the-scan-ahead ()
+  "Once the idle job has run, a catalogue walks no symbols, in any buffer,
+and is what the catalogue built on the spot was."
+  (harness-ui-quick-search-test-with
+    (harness-quick-search--reset-scan)
+    (let ((on-the-spot (with-temp-buffer (harness-chat-mode) (harness-quick-search-commands))))
+      (harness-quick-search--reset-scan)
+      (harness-ui-quick-search-test--counting-scans scans
+        (harness-quick-search--idle-build)
+        (should (= 1 scans))
+        (should harness-quick-search--scan-cache)
+        (should-not harness-quick-search--scan-timer)
+        (should-not harness-quick-search--scan-stale)
+        (let ((chat (with-temp-buffer (harness-chat-mode) (harness-quick-search-commands)))
+              (plain (with-temp-buffer (text-mode) (harness-quick-search-commands))))
+          (should (equal on-the-spot chat))
+          (should (harness-ui-quick-search-test--entry "harness-compose-add-attachment" plain))
+          ;; What the buffer decides is still the buffer's.
+          (should (eq t (plist-get (harness-ui-quick-search-test--entry "harness-compose-add-attachment" chat) :here)))
+          (should (eq :false (plist-get (harness-ui-quick-search-test--entry "harness-compose-add-attachment" plain) :here))))
+        (should (= 1 scans))))))
+
+(ert-deftest harness-ui-quick-search-a-load-marks-the-scan-stale ()
+  "A file that loads marks the scan stale and has one rebuild scheduled, however
+many load.  The stale scan serves, with no walk, and lacks what the file
+defined; the idle job builds it again, and it is there."
+  (harness-ui-quick-search-test-with
+    (harness-quick-search--reset-scan)
+    (harness-quick-search--idle-build)
+    (should-not harness-quick-search--scan-stale)
+    (should (= 0 (harness-ui-quick-search-test--timers)))
+    (let ((file (make-temp-file "harness-quick-search-test-" nil ".el"
+                                (concat ";;; -*- lexical-binding: t -*-\n"
+                                        "(defun harness-quick-search-test-loaded ()\n"
+                                        "  \"A command that loads late.\"\n  (interactive))\n"))))
+      (unwind-protect
+          (harness-ui-quick-search-test--counting-scans scans
+            (load file nil t)
+            (load file nil t)
+            (should harness-quick-search--scan-stale)
+            (should (= 1 (harness-ui-quick-search-test--timers)))
+            ;; Served as it is: no walk, and nothing the file defined yet.
+            (let ((stale (with-temp-buffer (text-mode) (harness-quick-search-commands))))
+              (should (= 0 scans))
+              (should-not (harness-ui-quick-search-test--entry "harness-quick-search-test-loaded" stale)))
+            ;; The idle job builds it again, once.
+            (harness-quick-search--idle-build)
+            (should (= 1 scans))
+            (should-not harness-quick-search--scan-stale)
+            (should (= 0 (harness-ui-quick-search-test--timers)))
+            (should (harness-ui-quick-search-test--entry
+                     "harness-quick-search-test-loaded"
+                     (with-temp-buffer (text-mode) (harness-quick-search-commands))))
+            ;; A scan that is not stale is left as it is.
+            (harness-quick-search--idle-build)
+            (should (= 1 scans)))
+        (delete-file file)
+        (fmakunbound 'harness-quick-search-test-loaded)))))
+
+(ert-deftest harness-ui-quick-search-typing-stops-the-idle-build ()
+  "A key waiting, or typed during the walk, stops the idle build; the scan
+that served stays, stale, and the next idle moment tries again."
+  (harness-ui-quick-search-test-with
+    (harness-quick-search--reset-scan)
+    ;; Nothing built yet, and a key waiting: no walk is begun.
+    (let ((unread-command-events (list ?a)))
+      (harness-ui-quick-search-test--counting-scans scans
+        (harness-quick-search--idle-build)
+        (should (= 0 scans))))
+    (should-not harness-quick-search--scan-cache)
+    (should (= 1 (harness-ui-quick-search-test--timers)))
+    ;; A scan built, a file loaded since.
+    (harness-quick-search--reset-scan)
+    (harness-quick-search--idle-build)
+    (harness-quick-search--after-load "x.el")
+    (let ((old harness-quick-search--scan-cache))
+      ;; A key typed during the walk: the walk stops, nothing half built is kept.
+      (let ((walks 0))
+        (cl-letf (((symbol-function 'harness-quick-search--scan)
+                   (lambda ()
+                     (cl-incf walks)
+                     (setq quit-flag throw-on-input)
+                     (dotimes (_ 10) (harness-quick-search--text "typing"))
+                     (error "The walk was not stopped"))))
+          (harness-quick-search--idle-build))
+        (should (= 1 walks)))
+      (should (eq old harness-quick-search--scan-cache))
+      (should harness-quick-search--scan-stale)
+      (should (= 1 (harness-ui-quick-search-test--timers)))
+      ;; At the next idle moment, nothing in the way, it builds.
+      (harness-quick-search--idle-build)
+      (should-not (eq old harness-quick-search--scan-cache))
+      (should-not harness-quick-search--scan-stale)
+      (should (= 0 (harness-ui-quick-search-test--timers))))))
+
+(ert-deftest harness-ui-quick-search-module-builds-the-scan-ahead ()
+  "The module's init forgets an earlier scan, hooks the loads and has the scan
+built when Emacs is idle, one timer however often it runs; its shutdown
+unhooks, cancels the timer and forgets the scan."
+  (harness-ui-quick-search-test-with
+    (unwind-protect
+        (progn
+          (setq harness-quick-search--scan-cache (list :modes nil :commands nil :docs (make-hash-table))
+                harness-quick-search--scan-stale t)
+          (harness-quick-search--init)
+          (should (memq #'harness-quick-search--after-load after-load-functions))
+          (should-not harness-quick-search--scan-cache)
+          (should-not harness-quick-search--scan-stale)
+          (should (= 1 (harness-ui-quick-search-test--timers)))
+          (harness-quick-search--init)
+          (should (= 1 (harness-ui-quick-search-test--timers)))
+          ;; Built, then a load: one timer waits.
+          (harness-quick-search--idle-build)
+          (should harness-quick-search--scan-cache)
+          (run-hook-with-args 'after-load-functions "x.el")
+          (should (= 1 (harness-ui-quick-search-test--timers)))
+          ;; Shut down.
+          (harness-quick-search--shutdown)
+          (should-not (memq #'harness-quick-search--after-load after-load-functions))
+          (should-not harness-quick-search--scan-cache)
+          (should (= 0 (harness-ui-quick-search-test--timers)))
+          (run-hook-with-args 'after-load-functions "y.el")
+          (should (= 0 (harness-ui-quick-search-test--timers))))
+      (harness-quick-search--init))))
 
 ;;;; The box
 
@@ -440,7 +613,7 @@ one window, closing every popout and board after."
         ;; Commands first, as a search from here favours them.
         (should (string-match-p "Commands\n.*C-c z Note the buffer this runs in.*(harness-quick-search-test-run)  \\[Run\\] \\[Describe\\]"
                                 text))
-        (should (string-match-p "Sessions\n.*Debug the merge queue  chat · .* · updated .*\\[Open\\]" text))
+        (should (string-match-p "Sessions  \\[All matches\\]\n.*Debug the merge queue  chat · .* · updated .*\\[Open\\]" text))
         (should (string-match-p (format "Tasks\n  %s Write the docs  .*\\[Board\\]" (regexp-quote task)) text))
         (should (< (string-search "Commands" text) (string-search "Sessions" text) (string-search "Tasks" text)))
         (should (string-match-p "\\[Search sessions\\] \\[Search commands\\]" text)))
@@ -452,6 +625,87 @@ one window, closing every popout and board after."
         (should (equal session (car (car visited))))
         (should (eq origin (cdr (car visited))))
         (should-not (harness-ui-quick-search-test--popout))))))
+
+(ert-deftest harness-ui-quick-search-open-goes-to-the-match ()
+  "[Open] on a session the search found in a transcript opens it at that
+message, the words found there to be highlighted; on one found by its name
+only it just opens.  An id with the node, the snippet and the ranges opens
+at the match too."
+  (harness-ui-quick-search-test-with
+    (let* ((merge (plist-get (harness-call 'session/create :cwd default-directory :name "Fix a thing") :id))
+           (notes (plist-get (harness-call 'session/create :cwd default-directory
+                                           :name "Write the release notes")
+                             :id))
+           (node (plist-get (harness-call 'session/append merge
+                                          (list :kind 'user :content "Why did the merge queue drop a commit?"))
+                            :id))
+           (origin (harness-ui-quick-search-test--origin))
+           (visited nil)
+           (went nil))
+      (cl-letf (((symbol-function 'harness-ui-visit-session)
+                 (lambda (id &rest _) (push (cons id (current-buffer)) visited) nil))
+                ((symbol-function 'harness-ui-chat-goto-node)
+                 (lambda (&rest args) (push args went) nil)))
+        ;; The model searched the transcripts, and named both sessions.
+        (harness-ui-quick-search-test--ask
+         origin "the queue that dropped a commit"
+         "{\"sessions\":\"merge queue\"}"
+         (format "{\"sessions\":[\"%s\",\"%s\"]}" (substring merge 0 8) (substring notes 0 8)))
+        (let ((entries (plist-get (plist-get (harness-ui-quick-search-test--state) :plan) :sessions)))
+          (should (equal (list merge notes) (mapcar (lambda (s) (plist-get s :id)) entries)))
+          (should (equal node (plist-get (car entries) :node)))
+          (should-not (plist-get (cadr entries) :node)))
+        ;; The first [Open]: the session, from where the search was opened,
+        ;; then its node, on the words found.
+        (harness-ui-quick-search-test--push "[Open]")
+        (should (equal (cons merge origin) (car visited)))
+        (should-not (harness-ui-quick-search-test--popout))
+        (should (= 1 (length went)))
+        (pcase-let ((`(,goto-node ,goto-session ,regexp) (car went)))
+          (should (equal node goto-node))
+          (should (equal merge goto-session))
+          (should (string-match-p regexp "Merge"))
+          (should (string-match-p regexp "queue"))
+          (should-not (string-match-p regexp "commit")))
+        ;; One found by its name only opens as it is.
+        (harness-ui-quick-search-test--ask origin "the release notes"
+                                           (format "{\"sessions\":[\"%s\"]}" (substring notes 0 8)))
+        (harness-ui-quick-search-test--push "[Open]")
+        (should (equal notes (car (car visited))))
+        (should (= 1 (length went)))
+        ;; An id with the parts of its match opens at it, an id alone does not.
+        (let* ((snippet "Why did the merge queue drop a commit?")
+               (from (string-search "merge queue" snippet)))
+          (harness-quick-search-open-session
+           merge node snippet (list (list from (+ from 5)) (list (+ from 6) (+ from 11)))))
+        (should (equal merge (car (car visited))))
+        (should (= 2 (length went)))
+        (should (equal (list node merge "merge\\|queue") (car went)))
+        (harness-quick-search-open-session notes)
+        (should (equal notes (car (car visited))))
+        (should (= 2 (length went)))))))
+
+(ert-deftest harness-ui-quick-search-all-matches-shows-every-match ()
+  "The Sessions heading has [All matches] when sessions were found: it
+closes the popout and has the session search show every match of the line,
+from where the quick search was opened.  With no session found there is none."
+  (harness-ui-quick-search-test-with
+    (let* ((session (plist-get (harness-call 'session/create :cwd default-directory
+                                             :name "Debug the merge queue")
+                               :id))
+           (origin (harness-ui-quick-search-test--origin))
+           (searched nil))
+      (harness-ui-quick-search-test--ask origin "the merge queue" (format "{\"sessions\":[\"%s\"]}" session))
+      (should (string-match-p "Sessions  \\[All matches\\]\n" (harness-ui-quick-search-test--text)))
+      (cl-letf (((symbol-function 'harness-search-sessions)
+                 (lambda (query &optional mode) (push (list query mode (current-buffer)) searched) nil)))
+        (harness-ui-quick-search-test--push "[All matches]"))
+      (should (equal (list (list "the merge queue" nil origin)) searched))
+      (should-not (harness-ui-quick-search-test--popout))
+      ;; Nothing found among the sessions: no button.
+      (harness-ui-quick-search-test--ask origin "run the test command"
+                                         "{\"commands\":[\"harness-quick-search-test-run\"]}")
+      (should-not (string-match-p "All matches" (harness-ui-quick-search-test--text))))))
 
 (ert-deftest harness-ui-quick-search-run-and-board ()
   "[Run] runs the command in the buffer the search was opened from; [Board] shows the task."

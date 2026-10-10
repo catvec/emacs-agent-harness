@@ -22,11 +22,12 @@
 ;; ones included, under a banner that says what it shows: the line, what
 ;; it matched, and what the model looked at besides the board.  The
 ;; sessions and commands it found follow, each on a line of its own with
-;; its buttons -- [Open] a session, [Run] or [Describe] a command -- and
-;; the model's note, or the search's when nothing matched and it looked
-;; wider.  C-g on the board, or [Clear], shows every task again.  The
-;; tasks stay shown while they change, so what an action does shows on
-;; their cards.
+;; its buttons -- [Open] a session, at the message where the search found
+;; its words when it did (`harness-quick-search-open-session'), [Run] or
+;; [Describe] a command -- and the model's note, or the search's when
+;; nothing matched and it looked wider.  C-g on the board, or [Clear],
+;; shows every task again.  The tasks stay shown while they change, so
+;; what an action does shows on their cards.
 ;;
 ;; An order runs at once when it is easily undone or does no harm --
 ;; archive (of a task not at work), restore, retry, start, a new
