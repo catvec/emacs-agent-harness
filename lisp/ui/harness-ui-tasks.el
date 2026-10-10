@@ -955,11 +955,12 @@ offers for it, the session list too (`harness-ui-pending-view-actions'):
 
 (defun harness-ui-tasks--card-buttons (task)
   "Buttons for TASK's two most useful actions besides opening it.
-A task that handed a report in (`hand_in') gets a [Review] button too:
-its final message and evidence, in a popout.  One whose turn ended
-without it gets [No report] there instead, which pops out what the
-harness recorded for it: that nothing was handed in, and the session's
-last message (`harness-tasks--missing-report').
+A task that handed a report in (`hand_in') gets a [Review Changes]
+button too: the changes, the final message and the evidence, in a
+popout.  One whose turn ended without it gets [No report] there
+instead, which pops out what the harness recorded for it: that nothing
+was handed in, and the session's last message
+\(`harness-tasks--missing-report').
 
 A card has no button for opening its session: a click on its title
 does that.  Nor for Open harness, which stays in the card's menu
@@ -969,15 +970,15 @@ harness (`harness-ui-tasks--open-harness-p')."
     (concat
      (harness-ui-tasks--action-buttons task)
      (when (and (plist-get task :report) (fboundp 'harness-ui-report-popout))
-       ;; [Review] rather than [Report], which reads as reporting the
-       ;; agent for something bad: the button opens the work it handed
-       ;; in, to look it over.
+       ;; [Review Changes] rather than [Report], which reads as
+       ;; reporting the agent for something bad: the button opens the
+       ;; changes and the work it handed in, to look them over.
        (concat " " (harness-ui-tasks--button
-                     (if missing "[No report]" "[Review]")
+                     (if missing "[No report]" "[Review Changes]")
                      (lambda () (harness-ui-report-popout task))
                      (if missing
                          "It handed no report in: no summary, no evidence; see what its session said last"
-                       "Review what it handed in: the final message and the evidence")
+                       "Review the changes and what it handed in: the final message and the evidence")
                      "report"))))))
 
 (defun harness-ui-tasks--subtitle-button (task shown)

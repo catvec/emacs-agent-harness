@@ -108,7 +108,9 @@ gives the task another script."
             (or harness-ui-review-test--script
                 '((:type text :delta "All done.\n")
                   (:type tool-call :id "h1" :name "hand_in"
-                         :input (:summary "# Done\n\nThe flaky test is fixed."
+                         :input (:problem "The flaky test fails in a random order."
+                                 :reproduction "Run the suite twice and watch the order change."
+                                 :summary "# Done\n\nThe flaky test is fixed."
                                  :evidence ("a note" (:code "(fix-flaky)" :language "elisp"
                                                  :caption "the fix")
                                             (:image "shot.svg" :caption "the board, fixed")
@@ -216,9 +218,9 @@ gives the task another script."
         (should-not (harness-ui-review-test--undefined-faces chat))
         ;; Text from before still shows: the old name is an alias.
         (should (facep 'harness-chat-key-face))
-        ;; The report pops out with [Review]: [Report] read as reporting
+        ;; The report pops out with [Review Changes]: [Report] read as reporting
         ;; the agent for something bad.
-        (should (string-search "[Review]" (buffer-string)))
+        (should (string-search "[Review Changes]" (buffer-string)))
         (should-not (string-search "[Report]" (buffer-string)))
         ;; It reads as the board's Ready for review: the review background,
         ;; not the chat panel's, so accepting work looks the same in both.
@@ -317,7 +319,7 @@ is found all the same, and the banner goes once the task leaves review."
       (should-not (string-match-p "Ready for review" (harness-ui-review-test--text chat))))))
 
 (ert-deftest harness-ui-review-report-popout ()
-  "[Review], and the board's item at point, show the report: the summary and the evidence."
+  "[Review Changes], and the board's item at point, show the report: the summary and the evidence."
   (harness-ui-review-test-with
     (let ((chat (harness-ui-review-test--open-session sid)))
       (harness-ui-review-test--wait-text chat "Ready for review")
@@ -329,6 +331,10 @@ is found all the same, and the banner goes once the task leaves review."
         (harness-test-wait (lambda () (string-match-p "Handed in" (harness-ui-review-test--text popout)))
                            5 "the report to draw")
         (let ((text (harness-ui-review-test--text popout)))
+          ;; The problem and its reproduction lead it, before the work.
+          (should (< (string-match-p "^Problem$" text) (string-match-p "^Handed in" text)))
+          (should (< (string-match-p "^Reproduction$" text) (string-match-p "^Handed in" text)))
+          (should (string-match-p "The flaky test fails in a random order\." text))
           (should (string-match-p "the flaky test is fixed" text))
           (should (string-match-p "Evidence (4)" text))
           (should (string-match-p "the board, fixed" text))
@@ -339,13 +345,13 @@ is found all the same, and the banner goes once the task leaves review."
           (should (string-match-p "\[tool call\]" text))
           (should (string-match-p "\[Open in the session\]" text))
           (should (string-match-p "Hand in the finished work" text)))
-        ;; The board offers it: a [Review] button on the card that has a
+        ;; The board offers it: a [Review Changes] button on the card that has a
         ;; report, and the item at point -- the shared command a view's
         ;; SPC delegates to -- popping the same report out again.
         (harness-ui-popout-close key)
         (with-current-buffer board
           (harness-ui-tasks--render)
-          (should (string-search "[Review]" (buffer-string)))
+          (should (string-search "[Review Changes]" (buffer-string)))
           (should-not (string-search "[Report]" (buffer-string)))
           (goto-char (point-min))
           (search-forward "Fix the flaky test")
@@ -372,12 +378,21 @@ shows it in full, expanded, between its heading and its buttons."
       (harness-ui-review-test--wait-report chat)
       (let* ((tail (harness-ui-review-test--tail chat))
              (at (lambda (text) (or (string-search text tail) (error "%S is not in the banner" text)))))
-        ;; In reading order: the heading, the report, then the buttons.
-        (should (< (funcall at "Ready for review") (funcall at "Handed in")
+        ;; In reading order: the heading, what the task is about -- the
+        ;; problem and its reproduction, above the work -- then the report
+        ;; and the buttons.
+        (should (< (funcall at "Ready for review") (funcall at "Problem")
+                   (funcall at "The flaky test fails in a random order.")
+                   (funcall at "Reproduction")
+                   (funcall at "Run the suite twice and watch the order change.")
+                   (funcall at "Handed in")
                    (funcall at "The flaky test is fixed.") (funcall at "Evidence (4)")
                    (funcall at "a note") (funcall at "(fix-flaky)") (funcall at "the fix")
                    (funcall at "[tool call]") (funcall at "[Open in the session]")
                    (funcall at "[Verify]")))
+        ;; The problem is its own labelled section, each on its own line.
+        (should (string-match-p "^Problem$" tail))
+        (should (string-match-p "^Reproduction$" tail))
         ;; Each piece of evidence starts a line of its own.
         (should (string-match-p "^a note$" tail))
         (should (string-match-p "^(fix-flaky)$" tail))
@@ -404,8 +419,9 @@ the quote."
       (harness-ui-review-test--wait-report chat)
       (with-current-buffer chat
         (goto-char harness-chat--transcript-end)
-        ;; The summary's, not the banner's "Fix the flaky test".
-        (let ((case-fold-search nil)) (search-forward "The flaky test"))
+        ;; The summary's, not the banner's "Fix the flaky test" nor the
+        ;; problem above it, which both hold "The flaky test".
+        (let ((case-fold-search nil)) (search-forward "The flaky test is fixed."))
         (should (eq 'harness-compose-quote-reply (key-binding (kbd "C-c >"))))
         (execute-kbd-macro (kbd "C-c >"))
         (should (equal quoted (harness-compose-text)))
@@ -561,8 +577,47 @@ line, and its text opens that session, like the chat's call block."
       ;; No report, nothing to draw.
       (should-not (harness-ui-report-string (list :id "t-none"))))))
 
+(ert-deftest harness-ui-review-report-leads-with-the-problem ()
+  "A report shows the problem, and its reproduction, above the work.
+They come first, rendered as markdown, so the user remembers what the
+task was about; a report without them -- one stored before they were
+required -- renders as it always did."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (let ((harness-acp--server-enabled nil))
+      (dolist (m '(acp ui ui-compose ui-markdown ui-popout ui-tasks ui-report))
+        (harness-test-load-module m)))
+    (let* ((task (list :id "t-problem" :session "s-report" :prompt "Fix it" :state "review"
+                       :report (list :summary "The parser is fixed."
+                                     :problem "Keys are compared with `==`, so **a wrong key leaks timing**."
+                                     :reproduction "Send two keys of equal length and time the compare."
+                                     :at 1.0
+                                     :evidence (list (list :kind "note" :text "a note")))))
+           (text (harness-ui-report-string task)))
+      ;; In reading order: the problem, its reproduction, then the work.
+      (should (string-match-p "^Problem$" text))
+      (should (string-match-p "^Reproduction$" text))
+      (should (< (string-match "^Problem$" text)
+                 (string-match "^Reproduction$" text)
+                 (string-match "^Handed in" text)))
+      ;; Rendered markdown, not its source.
+      (should-not (string-search "**" text))
+      (should (string-match-p "a wrong key leaks timing" text))
+      ;; The popout's drawing too, not only the string the session shows.
+      (should (with-temp-buffer
+                (harness-ui-report--insert task)
+                (string-match-p "^Problem$" (buffer-string)))))
+    ;; A report from before the field: no section, no error, the work as it was.
+    (let* ((plain (list :id "t-plain" :session "s-report"
+                        :report (list :summary "Done" :at 1.0
+                                      :evidence (list (list :kind "note" :text "a note")))))
+           (text (harness-ui-report-string plain)))
+      (should-not (string-search "Problem" text))
+      (should-not (string-search "Reproduction" text))
+      (should (string-match-p "^Handed in" text)))))
+
 (defun harness-ui-review-test--report (board id)
-  "Pop out the report of task ID as BOARD's [Review] does; return its buffer.
+  "Pop out the report of task ID as BOARD's [Review Changes] does; return its buffer.
 The board's record is the one the wire gives, as the UI sees it."
   (harness-ui-report-popout (with-current-buffer board (harness-ui-tasks--find id)))
   (let ((popout (harness-ui-popout-buffer (list 'report id))))
@@ -581,8 +636,8 @@ C-c C-v, anywhere in the popout, accepts the work, and the popout closes."
           (should (string-match-p "\\[Verify\\]" text))
           (should (string-match-p "\\[Send back\\]" text))
           (should (string-match-p "C-c C-c in the box sends what you write back to this task" text))
-          ;; The report shows already: its banner has no [Review].
-          (should-not (string-match-p "\\[Review\\]" text))
+          ;; The report shows already: its banner has no [Review Changes].
+          (should-not (string-match-p "\\[Review Changes\\]" text))
           ;; After the evidence, on the review background, as in the session.
           (let ((at (string-match "Ready for review" text)))
             (should (< (string-match "Evidence (4)" text) at))
@@ -719,14 +774,14 @@ lines are the ones that draw, each where its image goes."
                                                       (lambda (_ value) (eq 'image (car-safe value)))))))))))
 
 (ert-deftest harness-ui-review-verify-closes-the-report ()
-  "[Verify] in the session's banner closes the report its [Review] popped out.
+  "[Verify] in the session's banner closes the report its [Review Changes] popped out.
 The popout goes as the task turns verified: its buffer and its window."
   (harness-ui-review-test-with
     (let ((chat (harness-ui-review-test--open-session sid))
           (key (list 'report id)))
       (harness-ui-review-test--wait-text chat "Ready for review")
       (let ((windows (length (window-list nil 'nomini))))
-        (harness-ui-review-test--push chat "[Review]")
+        (harness-ui-review-test--push chat "[Review Changes]")
         (let ((popout (harness-ui-popout-buffer key)))
           (should popout)
           (should (get-buffer-window popout))
@@ -737,11 +792,11 @@ The popout goes as the task turns verified: its buffer and its window."
       (should (harness-json-true-p (plist-get (harness-call 'task/get id) :verified))))))
 
 (ert-deftest harness-ui-review-board-verify-closes-the-report ()
-  "[Verify] on the board's card closes the report its [Review] popped out."
+  "[Verify] on the board's card closes the report its [Review Changes] popped out."
   (harness-ui-review-test-with
     (let ((key (list 'report id)))
       (with-current-buffer board (harness-ui-tasks--render))
-      (harness-ui-review-test--push board "[Review]")
+      (harness-ui-review-test--push board "[Review Changes]")
       (let ((popout (harness-ui-popout-buffer key)))
         (should popout)
         (harness-ui-review-test--push board "[Verify]")
@@ -757,7 +812,7 @@ closes it."
     (let ((chat (harness-ui-review-test--open-session sid))
           (key (list 'report id)))
       (harness-ui-review-test--wait-text chat "Ready for review")
-      (harness-ui-review-test--push chat "[Review]")
+      (harness-ui-review-test--push chat "[Review Changes]")
       (let ((popout (harness-ui-popout-buffer key)))
         (should popout)
         (harness-ui-review-test--push chat "[Send back]")
@@ -771,11 +826,11 @@ closes it."
       (should (equal '("it still flakes on CI") (harness-ui-review-test--feedback id))))))
 
 (ert-deftest harness-ui-review-board-send-back-closes-the-report ()
-  "Sending the work back from the board's card closes the report its [Review] popped out."
+  "Sending the work back from the board's card closes the report its [Review Changes] popped out."
   (harness-ui-review-test-with
     (let ((key (list 'report id)))
       (with-current-buffer board (harness-ui-tasks--render))
-      (harness-ui-review-test--push board "[Review]")
+      (harness-ui-review-test--push board "[Review Changes]")
       (let ((popout (harness-ui-popout-buffer key)))
         (should popout)
         (harness-ui-review-test--push board "[Send back]")
@@ -824,10 +879,10 @@ It follows the task back to review, and closes once that review is decided."
 
 (ert-deftest harness-ui-review-missing-report-says-so ()
   "A task whose turn ended without hand_in says so wherever it is reviewed.
-Its card offers [No report] where [Review] would be, never a review
+Its card offers [No report] where [Review Changes] would be, never a review
 with nothing to read; the popout says it was not handed in, shows the
 session's last message and still verifies; the session's banner says it
-in a line, the message being right above, with no [Review]."
+in a line, the message being right above, with no [Review Changes]."
   (let ((harness-ui-review-test--script
          '((:type text :delta "I think the flaky test passes now.\n")
            (:type done :stop-reason end-turn))))
@@ -836,7 +891,7 @@ in a line, the message being right above, with no [Review]."
         (with-current-buffer board
           (harness-ui-tasks--render)
           (harness-ui-review-test--wait-text board "\\[No report\\]")
-          (should-not (string-search "[Review]" (buffer-string))))
+          (should-not (string-search "[Review Changes]" (buffer-string))))
         (harness-ui-review-test--push board "[No report]")
         (should (harness-ui-popout-buffer key))
         (let ((popout (harness-ui-popout-buffer key)))
@@ -858,7 +913,7 @@ in a line, the message being right above, with no [Review]."
                                                        (harness-ui-review-test--tail chat)))
                              5 "the banner to say no report was handed in")
           (let ((tail (harness-ui-review-test--tail chat)))
-            (should-not (string-search "[Review]" tail))
+            (should-not (string-search "[Review Changes]" tail))
             (should-not (string-search "Not handed in" tail))
             (should (string-search "[Verify]" tail))))))))
 

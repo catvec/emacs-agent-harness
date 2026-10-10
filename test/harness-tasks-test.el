@@ -2962,7 +2962,8 @@ user's feedback after that still sends it back, reject text and all."
     (harness-test-load-module 'tools-handin)
     (let ((harness-tasks-require-verification t)
           (harness-provider-demo-script-override
-           '((:type tool-call :id "h1" :name "hand_in" :input (:summary "# Done" :evidence ("looks good"))))))
+           '((:type tool-call :id "h1" :name "hand_in"
+              :input (:problem "Nested quotes break the parser" :summary "# Done" :evidence ("looks good"))))))
       (let* ((id (harness-tasks-test-submit "fix the parser"))
              (sid (plist-get (harness-tasks-test-task id) :session))
              (from harness-tasks-test--other)
@@ -3496,7 +3497,8 @@ The merge decides what happens to the task, whatever is outstanding."
 
 (defun harness-tasks-test--handin-input ()
   "Return the input of the test's hand_in call."
-  (list :summary "# Done\n\nThe parser handles nested quotes now."
+  (list :problem "Nested quotes in the parser"
+        :summary "# Done\n\nThe parser handles nested quotes now."
         :evidence (or harness-tasks-test--handin-evidence
                       (list (list :code "(parse \"a\\\"b\")" :language "elisp"
                                   :caption "The new case")))))
@@ -3509,7 +3511,10 @@ The tool alone ends the turn: the scripted provider never says done."
     (let ((harness-tasks-require-verification t)
           (harness-provider-demo-script-override
            '((:type text :delta "All done.\n")
-             (:type tool-call :id "h1" :name "hand_in" :input (:summary "# Done" :evidence ("looks good")))
+             (:type tool-call :id "h1" :name "hand_in"
+              :input (:problem "Nested quotes break the parser"
+                      :reproduction "Parse `(a \"b\")` and watch it stop at the quote."
+                      :summary "# Done" :evidence ("looks good")))
              ;; No `done' event: without hand_in ending the turn, this never finishes.
              (:type text :delta " this must not matter"))))
       (let* ((id (harness-tasks-test-submit "fix the parser"))
@@ -3524,6 +3529,9 @@ The tool alone ends the turn: the scripted provider never says done."
         (harness-tasks-test-wait-state id 'review)
         (let* ((task (harness-tasks-test-task id))
                (report (plist-get task :report)))
+          (should (equal "Nested quotes break the parser" (plist-get report :problem)))
+          (should (equal "Parse `(a \"b\")` and watch it stop at the quote."
+                         (plist-get report :reproduction)))
           (should (equal "# Done" (plist-get report :summary)))
           (should (numberp (plist-get report :at)))
           (should (equal '((:kind "note" :text "looks good")) (plist-get report :evidence)))
@@ -3533,14 +3541,18 @@ The tool alone ends the turn: the scripted provider never says done."
         (let ((result (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'tool-result)
                                                    (equal (plist-get n :call-id) "h1")))
                                   (harness-call 'session/nodes sid))))
-          (should (string-match-p "waits for the user's review" (plist-get result :output))))
+          (should (string-match-p "waits for the user's review" (plist-get result :output)))
+          ;; The report rides the result node, so the transcript can draw it
+          ;; after the task left review.
+          (should (equal (plist-get (harness-tasks-test-task id) :report)
+                         (plist-get (plist-get result :meta) :report))))
         ;; The user can verify it as any review.
         (harness-call 'task/verify id)
         (harness-tasks-test-wait-state id 'done)
         (should (plist-get (harness-tasks-test-task id) :verified))))))
 
 (ert-deftest harness-tasks-hand-in-needs-a-report ()
-  "A hand_in without a summary, without evidence, or with broken items is refused.
+  "A hand_in without a problem, a summary, without evidence, or with broken items is refused.
 The refusal says what to fix, and the task keeps working."
   (harness-tasks-test-with
     (harness-test-load-module 'tools-handin)
@@ -3552,17 +3564,23 @@ The refusal says what to fix, and the task keeps working."
       ;; error; the broken items are listed, one per line.
       (pcase-dolist (`(,input ,says)
                      '(((:summary "" :evidence ("x")) "\\`hand_in needs summary: ")
-                       ((:summary "done" :evidence nil) "\\`hand_in needs evidence: ")
-                       ((:summary "done" :evidence (1)) "\\`Evidence 1 is neither text nor an object\\'")
-                       ((:summary "done" :evidence ((:image "/no/such/file.png")))
+                       ;; The problem is required now, and checked next.
+                       ((:summary "done" :evidence ("x")) "\\`hand_in needs problem: ")
+                       ((:problem " " :summary "done" :evidence ("x")) "\\`hand_in needs problem: ")
+                       ((:problem "nested quotes" :summary "done" :evidence nil) "\\`hand_in needs evidence: ")
+                       ((:problem "nested quotes" :summary "done" :evidence (1))
+                        "\\`Evidence 1 is neither text nor an object\\'")
+                       ((:problem "nested quotes" :summary "done" :evidence ((:image "/no/such/file.png")))
                         "\\`Evidence 1: /no/such/file.png not found")
-                       ((:summary "done" :evidence ((:image "notes.txt"))) "\\`Evidence 1: notes.txt is not an image")
-                       ((:summary "done" :evidence ((:tool_call "nope"))) "\\`Evidence 1: no tool call nope in this session")
-                       ((:summary "done" :evidence ((:code "x" :note "y")))
+                       ((:problem "nested quotes" :summary "done" :evidence ((:image "notes.txt")))
+                        "\\`Evidence 1: notes.txt is not an image")
+                       ((:problem "nested quotes" :summary "done" :evidence ((:tool_call "nope")))
+                        "\\`Evidence 1: no tool call nope in this session")
+                       ((:problem "nested quotes" :summary "done" :evidence ((:code "x" :note "y")))
                         "\\`Evidence 1 gives code and note: give it exactly one of")
-                       ((:summary "done" :evidence ((:image "a.png" :tool_call "c1")))
+                       ((:problem "nested quotes" :summary "done" :evidence ((:image "a.png" :tool_call "c1")))
                         "\\`Evidence 1 gives image and tool_call: ")
-                       ((:summary "done" :evidence ("fine" 1 (:note " ")))
+                       ((:problem "nested quotes" :summary "done" :evidence ("fine" 1 (:note " ")))
                         "\\`Evidence 2 is neither text nor an object\nEvidence 3 says nothing: ")))
         (let ((result (harness-test-await (harness-call-async 'tools/execute sid (list :id "bad" :name "hand_in" :input input)))))
           (should (plist-get result :is-error))
@@ -3580,7 +3598,7 @@ The refusal says what to fix, and the task keeps working."
     (let* ((harness-provider-demo-script-override
             '((:type tool-call :id "c1" :name "echo_tool" :input (:text "hello"))
               (:type tool-call :id "h1" :name "hand_in"
-                     :input (:summary "Done" :evidence ((:tool_call "c1" :caption "the command"))))
+                     :input (:problem "The echo is quiet" :summary "Done" :evidence ((:tool_call "c1" :caption "the command"))))
               (:type done :stop-reason end-turn)))
            (id (harness-tasks-test-submit "run the command")))
       (harness-tasks-test-wait-state id 'done)
@@ -3685,7 +3703,8 @@ from before.  A round that hands in again gets its report as handed in."
     (let ((harness-tasks-require-verification t)
           (harness-provider-demo-script-override
            '((:type text :delta "First try.\n")
-             (:type tool-call :id "h1" :name "hand_in" :input (:summary "# Done" :evidence ("looks good"))))))
+             (:type tool-call :id "h1" :name "hand_in"
+              :input (:problem "Nested quotes break the parser" :summary "# Done" :evidence ("looks good"))))))
       (let ((id (harness-tasks-test-submit "fix the parser")))
         (harness-tasks-test-wait-state id 'review)
         (should (equal "# Done" (plist-get (harness-tasks-test--report id) :summary)))
@@ -3705,7 +3724,8 @@ from before.  A round that hands in again gets its report as handed in."
         (should-not (plist-get (harness-tasks-test--report id) :summary))
         ;; Handing in again, the report is the one handed in.
         (setq harness-provider-demo-script-override
-              '((:type tool-call :id "h2" :name "hand_in" :input (:summary "# Fixed" :evidence ("all cases")))))
+              '((:type tool-call :id "h2" :name "hand_in"
+              :input (:problem "Nested quotes break the parser" :summary "# Fixed" :evidence ("all cases")))))
         (harness-call 'task/reject id "one more go")
         (harness-tasks-test-wait-state id 'review)
         (should-not (harness-tasks-test--missing-p id))
@@ -3719,7 +3739,8 @@ hand_in, the report says so instead of standing on the first round's."
     (harness-test-load-module 'tools-handin)
     (let ((harness-tasks-require-verification t)
           (harness-provider-demo-script-override
-           '((:type tool-call :id "h1" :name "hand_in" :input (:summary "# Done" :evidence ("looks good"))))))
+           '((:type tool-call :id "h1" :name "hand_in"
+              :input (:problem "Nested quotes break the parser" :summary "# Done" :evidence ("looks good"))))))
       (let ((id (harness-tasks-test-submit "fix the parser")))
         (harness-tasks-test-wait-state id 'review)
         (harness-call 'task/verify id)
