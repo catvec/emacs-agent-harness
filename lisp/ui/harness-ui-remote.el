@@ -384,7 +384,7 @@
 
 (defvar harness-ui-remote-mode-map
   (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
+    (set-keymap-parent map harness-ui-view-map)
     (define-key map (kbd "TAB") #'harness-ui-remote-tab)
     (define-key map (kbd "<backtab>") #'backward-button)
     (define-key map (kbd "s") #'harness-ui-remote-toggle-serving)

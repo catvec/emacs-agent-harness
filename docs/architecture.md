@@ -6548,23 +6548,48 @@ usage dashboard, Insights report, worktree list, conversation tree and log open 
 `harness-ui-display-view`, replacing the session in their position (and
 returning to the position they had last); a session opened from a view
 (`harness-ui-session-opener`) replaces the view.  Menus, help and the
-BTW overlay keep their own windows.
+BTW overlay keep their own windows.  `harness-ui-display-buffer` and
+`harness-ui-display-view` take a frame (the selected one by default):
+the buffer shown in the position of that frame is the one replaced, one
+shown in the same position in another frame is left alone, and the
+frame's own fullscreen layout is the one consulted.  The
+`harness-ui-open-view-in-frame` command (`C-c h X`, via
+`harness-ui-read-frame` and `harness-ui-views`) shows a view in a frame
+chosen with completion, the frame of the last mouse event first.
+`harness-ui-view-p` says whether a buffer is a harness view -- a
+harness buffer that is not a session's conversation -- and such a view
+is what `q` buries (`harness-ui-quit-view`), which the view major modes
+get from the shared `harness-ui-view-map`.
 
-Fullscreen layout (`harness-fullscreen`, `F` on an overview, `C-c h F`):
-an overview -- a view that sets `harness-ui-overview-function`, the
-task board and the session list -- takes the left of the frame in a
-side window (`harness-ui-fullscreen-width`), and every other window but
-one, the slot, makes way for it.  The slot shows the session in sight,
-else the one the overview function names (at point, else the most
-recent).  While the layout lasts the `fullscreen` position is the
-default: sessions and views shown without a position take the slot, and
-an overview takes the left.  The layout is kept per frame in a weak
-table (`harness-ui--fullscreen-layouts`), with the window configuration
-from before it.  `harness-ui-bury` (`C-c C-z` in a chat, where plain
-keys type) puts the slot's buffer away and brings back the last buffer
-of the user's the slot showed, keeping the layout; `q` on the overview
-(`harness-ui-quit-view`) ends it, restoring the configuration, but for
-a buffer of the user's left in the slot, which stays in sight.
+Fullscreen layout (`harness-fullscreen`, `F` on an anchor, `C-c h F`):
+an anchor -- an overview (a view that sets `harness-ui-overview-function`:
+the task board, the session list) or a main session with no
+`:parent-id` (`harness-ui-anchor-p`) -- takes one side of the frame in
+a side window (`harness-ui-fullscreen-side`, left by default;
+`harness-ui-fullscreen-width`, clamped so the slot keeps a usable
+width), and every other window but one, the slot, makes way for it.
+The slot shows the session in sight, else the one the anchor names (the
+overview function's, at point or the most recent, or a main session's
+most recently updated child, BTW conversations aside).  While the
+layout lasts the `fullscreen` position is the default: sessions and
+views shown without a position take the slot, an anchor takes the
+anchor side, and `left` and `right` are the slot too, so the frame
+never grows a second skinny column; the `slot` position means the slot
+when there is a layout.  A window a popup was displayed in is not taken
+for the slot (`harness-ui--popup-window-p`).  The layout is kept per
+frame in a weak table (`harness-ui--fullscreen-layouts`), with the
+window configuration from before it.  `harness-ui-bury` (`C-c C-z` in a
+chat, where plain keys type) puts the slot's buffer away and brings
+back the last buffer of the user's the slot showed, keeping the layout;
+`q` on the anchor (`harness-ui-quit-view`) ends it, restoring the
+configuration, but for a buffer of the user's left in the slot, which
+stays in sight.  `q` on any other harness view buries that view instead
+(`harness-ui-quit-view`, `harness-ui-view-map`).  A layout whose
+anchor's window is gone -- the user closed it, or a project switch
+replaced the frame's windows (`harness-ui-visit-session`) -- is dropped
+(`harness-ui--fullscreen-drop`), and the buffers it showed get back
+the positions they had before it.  The session list shown for the
+sessions waiting for you shows in the slot when a layout is on.
 
 Settings page (`harness-ui-config`, `C-c h S`, `harness-settings`):
 every harness option on one page, like a customize buffer, about the

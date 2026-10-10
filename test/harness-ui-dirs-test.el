@@ -111,6 +111,8 @@ buffer follows; with a prefix argument the old one stays allowed."
       (harness-directories sid)
       (harness-test-wait (lambda () harness-ui-dirs--entries) 5 "directory rows")
       (should (eq 'harness-ui-dirs-move (key-binding (kbd "m"))))
+      ;; q buries the list rather than quitting its window.
+      (should (eq #'harness-ui-quit-view (key-binding (kbd "q"))))
       ;; The working directory's row says how.
       (goto-char (point-min))
       (should (search-forward "m to move" nil t))
