@@ -286,6 +286,21 @@ whose own group says d deletes the budget at point."
       (should (string-match-p "B +Delete budget" text))
       (should (string-match-p "\\. d +Delete budget (or fallback) at point" text)))))
 
+(ert-deftest harness-ui-menu-offers-the-supervisor-all-command-only-when-there ()
+  "The menu's V turns supervisor mode on or off for every session, beside
+the other for-all-sessions entries; a harness without the supervisor UI
+module leaves the entry out, so the menu is unharmed."
+  (harness-ui-test-with-menu-buffer #'fundamental-mode
+    ;; The UI here does not load ui-supervisor, so there is nothing to offer.
+    (should-not (fboundp 'harness-set-supervisor-all))
+    (should-not (string-match-p "Supervisor mode for all sessions" (harness-ui-test-menu)))
+    (unwind-protect
+        (progn
+          (require 'harness-ui-supervisor)
+          (should (string-match-p "V +Supervisor mode for all sessions" (harness-ui-test-menu))))
+      ;; Loaded only for this test: leave the UI as it was, unbound.
+      (fmakunbound 'harness-set-supervisor-all))))
+
 (ert-deftest harness-ui-menu-shows-the-chat-commands-in-a-chat ()
   (harness-ui-test-with-menu-buffer #'harness-chat-mode
     (let ((text (harness-ui-test-menu)))
@@ -1321,7 +1336,9 @@ project's .dir-locals.el and a directory's."
                        (aref column (1- (length column))))))
     (should (equal "Session settings" (plist-get (aref column (- (length column) 2)) :description)))
     (should (equal '("i" "I") (seq-take (member "i" keys) 2)))
-    (should (equal '("m" "M") (seq-take (member "m" keys) 2))))
+    (should (equal '("m" "M") (seq-take (member "m" keys) 2)))
+    ;; The supervisor's all-command sits with them, behind I.
+    (should (equal '("I" "V") (seq-take (member "I" keys) 2))))
   (harness-ui-test-with-all
       (list (cons "_harness/session/set-all" '("s1" "s2" "s3"))
             (cons "_harness/task/set-all" '("t1"))

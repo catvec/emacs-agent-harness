@@ -41,7 +41,8 @@
 ;; `harness-supervisor-tasks' (`task/changed'; the session that writes a
 ;; backlog task up only reads, and takes the setting when the task
 ;; starts), and a fork its parent's value.  Only the user changes it
-;; later, with `supervisor/set': there is no tool for it.  A change
+;; later, with `supervisor/set' for one session or `supervisor/set-all'
+;; for every governed one: there is no tool for it.  A change
 ;; takes effect at the next tool call, since the permission stage reads
 ;; the live session, and at the next step for the tool list.
 ;;
@@ -462,6 +463,17 @@ has no setting: sub-agents and side conversations are not governed, and
 neither is a session older than this module."
   (harness-supervisor--value (harness-call 'session/get session-id)))
 
+(defun harness-supervisor--set (session-id value)
+  "Set session SESSION-ID's supervisor mode to VALUE, t or `:false'.
+The one path of `supervisor/set' and `supervisor/set-all': store the
+setting in the session's `:ext', leave the transcript hint that says
+which it is now, and emit `supervisor/changed'.  Return the session
+plist."
+  (let ((session (harness-call 'session/set-ext session-id :supervisor value
+                               (if (eq value t) "Supervisor mode on" "Supervisor mode off"))))
+    (harness-emit 'supervisor/changed session-id value)
+    session))
+
 (harness-defmethod supervisor/set (session-id on)
   "Turn supervisor mode on or off for session SESSION-ID; return its plist.
 ON is true for on and `:false' or nil for off, which is stored as an
@@ -472,11 +484,31 @@ takes effect at the next tool call, which the permission stage checks
 against the session as it is then; off gives the tools back from the
 next step.  Only the user does this, over ACP as `_harness/supervisor/set'
 with `:sessionId' and `:on'; the agent has no tool for it."
-  (let* ((value (if (harness-json-true-p on) t :false))
-         (session (harness-call 'session/set-ext session-id :supervisor value
-                                (if (eq value t) "Supervisor mode on" "Supervisor mode off"))))
-    (harness-emit 'supervisor/changed session-id value)
-    session))
+  (harness-supervisor--set session-id (if (harness-json-true-p on) t :false)))
+
+(harness-defmethod supervisor/set-all (on &optional filter)
+  "Turn supervisor mode on or off for every governed session FILTER selects.
+ON is as for `supervisor/set': true is on, `:false' or nil is off,
+stored as an explicit off.  FILTER is the one of `session/select', as
+for `session/set-all': nil every session, `(:active t :tasks t)' the
+current ones, with the sessions of completed tasks left out.  Only a
+session the module governs changes: one whose `supervisor/get' is
+non-nil, a top-level session or a fork.  A sub-agent, a side
+conversation, a session from before the module and one already at the
+asked value are left alone.  Each change goes the way `supervisor/set'
+does -- the same `:ext' `:supervisor' setting, transcript hint and
+`supervisor/changed' event.  Only the user does this, over ACP as
+`_harness/supervisor/set-all' with `:on' and `:filter'; the agent has
+no tool for it.  Return the ids changed, newest first."
+  (let ((value (if (harness-json-true-p on) t :false))
+        changed)
+    (dolist (session (harness-call 'session/select filter))
+      (let ((id (plist-get session :id))
+            (governed (harness-supervisor--value session)))
+        (when (and governed (not (eq governed value)))
+          (harness-supervisor--set id value)
+          (push id changed))))
+    (nreverse changed)))
 
 (harness-declare-event 'supervisor/changed
                        "(SESSION-ID ON) when the user turned supervisor mode on (ON t) or off (ON :false) for a session")
