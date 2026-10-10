@@ -648,10 +648,12 @@ making each buffer current in turn."
   (interactive)
   (let* ((node (harness-ui-tree-node-at-point))
          (sid (plist-get node :session))
+         (id (plist-get node :id))
          (open (harness-ui-session-opener)))
     (funcall open sid)
-    (when (fboundp 'harness-ui-chat-goto-node)
-      (harness-ui-chat-goto-node (plist-get node :id)))))
+    ;; A fork with no node of its own yet has a row of the session instead.
+    (when (and (fboundp 'harness-ui-chat-goto-node) (not (string-prefix-p "session:" id)))
+      (harness-ui-chat-goto-node id sid))))
 
 (defun harness-ui-tree-mouse-open (event)
   "Open the session of the row clicked in EVENT."

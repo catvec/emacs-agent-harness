@@ -240,9 +240,9 @@ A chunk too long for the model's context fails however few go together;
 its first half, or quarter, embeds it near enough.")
 
 (defvar harness-session-search--vectors nil
-  "The vectors in memory, a plist: `:key' says of what, then `:nodes',
-`:sessions', `:kinds', `:parts', `:scales' and `:blobs', vectors of one
-element per chunk.")
+  "The vectors held in memory, a plist.
+`:key' says of what, then `:nodes', `:sessions', `:kinds', `:parts',
+`:scales' and `:blobs', vectors of one element per chunk.")
 
 (defvar harness-session-search--query-vectors nil
   "Recent query embeddings: ((KEY . VECTOR) ...), newest first.")
@@ -471,10 +471,11 @@ a message."
   (file-attribute-size (file-attributes (harness-session-search--log sid))))
 
 (defun harness-session-search--index-buffer (db sid)
-  "Return (ORDER . ENTRIES) of the log lines in the current buffer, of session SID.
-ENTRIES maps a node id to its index entry, updates merged; ORDER lists
-the ids in the order they came.  A line that does not parse is skipped,
-as the session's own loading skips it."
+  "Return (ORDER . ENTRIES) of the log lines of session SID in this buffer.
+ENTRIES maps a node id to its index entry, updates merged, an update
+of a node written before merged into its row in DB, the index; ORDER
+lists the ids in the order they came.  A line that does not parse is
+skipped, as the session's own loading skips it."
   (let ((entries (make-hash-table :test 'equal))
         (order nil))
     (goto-char (point-min))
@@ -516,7 +517,7 @@ as the session's own loading skips it."
                     (list sid offset))))
 
 (defun harness-session-search--read-chunk (db sid file offset size)
-  "Index the complete lines of FILE, SID's log of SIZE bytes, from byte OFFSET.
+  "Index in DB the complete lines of FILE, SID's log of SIZE bytes, from OFFSET.
 Read `harness-session-search--read-bytes' at a time, more for a longer
 line.  Return the offset after the last complete line read, OFFSET when
 there is none yet (a line still being written)."
@@ -592,7 +593,7 @@ how much of their logs is left."
     (cons (nreverse stale) bytes)))
 
 (defun harness-session-search--catch-up (db ids)
-  "Index what the logs of IDS gained since, when that is little.
+  "Index in DB what the logs of IDS gained since, when that is little.
 Return non-nil when the index is up to date with all of them; nil when
 too much is left, which the background goes on with."
   (pcase-let ((`(,stale . ,bytes) (harness-session-search--backlog db ids)))
@@ -609,7 +610,7 @@ too much is left, which the background goes on with."
     (and (> left 0) (> total 0) (floor (* 100 (- total left)) total))))
 
 (defun harness-session-search--gc (db)
-  "Have the background drop the rows of sessions that no longer exist."
+  "Have the background drop the rows in DB of sessions that no longer exist."
   (dolist (row (sqlite-select db "SELECT session FROM logs"))
     (unless (harness-call 'session/exists-p (car row))
       (cl-pushnew (car row) harness-session-search--doomed :test #'equal))))
@@ -677,7 +678,8 @@ never indexed, newest first; then the next embedding request starts."
     (harness-session-search--schedule harness-session-search--sync-delay)))
 
 (defun harness-session-search--on-node-updated (sid _node transient)
-  "Note a persisted update of a node of SID; streamed deltas are not written."
+  "Note a persisted update of a node of SID.
+A TRANSIENT update, a streamed delta, is not written, and is no news."
   (unless transient (harness-session-search--on-written sid)))
 
 (defun harness-session-search--on-forked (_parent child &rest _)
@@ -781,11 +783,12 @@ query that wraps the match in a subquery or an aggregate."
     (mapcar (lambda (s) (list (nth 0 s) (nth 1 s) (nth 2 s) (nreverse (nth 3 s)))) (nreverse out))))
 
 (defun harness-session-search--fts-snippets (db expr rowids)
-  "Return a table of the FTS5 snippets of ROWIDS where EXPR matches.
-It maps a rowid to (TEXT CUT-BEFORE CUT-AFTER).  TEXT marks each match with `harness-session-search--mark-start' and
-`--mark-end'.  A snippet longer than a few thousand characters (FTS5
-keeps a word of a megabyte whole) comes cut around its first match, and
-the flags say where it was cut."
+  "Return a table of the FTS5 snippets of ROWIDS of DB where EXPR matches.
+It maps a rowid to (TEXT CUT-BEFORE CUT-AFTER).  TEXT marks each
+match with `harness-session-search--mark-start' and `--mark-end'.  A
+snippet longer than a few thousand characters (FTS5 keeps a word of a
+megabyte whole) comes cut around its first match, and the flags say
+where it was cut."
   (let ((table (make-hash-table)))
     (when rowids
       (dolist (row (sqlite-select
@@ -1177,9 +1180,9 @@ less 128), times SCALE, is its cosine with VECTOR."
                harness-session-search--embed-backoff))))
 
 (defun harness-session-search--embed-next (db)
-  "Start the next embedding request of the background, when there is one to make.
-It embeds the chunks of the newest nodes without vectors; a chunk met
-before is not embedded again."
+  "Start the background's next embedding request, when there is one to make.
+DB is the index.  It embeds the chunks of the newest nodes without
+vectors; a chunk met before is not embedded again."
   (when (harness-session-search--embed-ready-p)
     (harness-session-search--check-model db)
     (let* ((rows (sqlite-select db "SELECT id, text FROM nodes WHERE embedded IS NULL ORDER BY id DESC LIMIT ?"
@@ -1293,10 +1296,10 @@ They are read again once the chunks changed."
     harness-session-search--vectors))
 
 (defun harness-session-search--nearest (db query-vector allowed kinds limit)
-  "Return the LIMIT nodes nearest QUERY-VECTOR, best first: ((ROWID SCORE PART) …).
-A node scores the cosine of its nearest chunk, PART.  Only the chunks
-of sessions in ALLOWED, a hash table (all when nil), and of nodes of
-KINDS (all when nil) count."
+  "Return the LIMIT nodes of DB nearest QUERY-VECTOR, best first.
+They come as ((ROWID SCORE PART) …).  A node scores the cosine of its
+nearest chunk, PART.  Only the chunks of sessions in ALLOWED, a hash
+table (all when nil), and of nodes of KINDS (all when nil) count."
   (let* ((v (harness-session-search--load-vectors db))
          (nodes (plist-get v :nodes)) (sessions (plist-get v :sessions)) (node-kinds (plist-get v :kinds))
          (parts (plist-get v :parts)) (scales (plist-get v :scales)) (blobs (plist-get v :blobs))
@@ -1361,7 +1364,7 @@ KINDS restrict them as `harness-session-search--nearest' says."
           (lambda (a b) (> (nth 1 a) (nth 1 b))))))
 
 (defun harness-session-search--semantic-snippets (db hits)
-  "Return a table of the snippets of semantic HITS, by rowid.
+  "Return a table of the snippets of semantic HITS, by their rowid in DB.
 A hit's snippet is the start of its nearest chunk."
   (let ((table (make-hash-table)))
     (when hits
@@ -1465,8 +1468,10 @@ PLIST adds `:note', `:loose' and `:total'."
         :sessions sessions))
 
 (defun harness-session-search--by-grep (query mode candidates opts &optional note)
-  "Return a promise of the result of literal or regexp search for QUERY.
-NOTE says why a text search came here instead."
+  "Return a promise of the result of a search for QUERY, in MODE.
+MODE is `literal' or `regexp'; CANDIDATES are the sessions to search,
+OPTS as `session/search' takes them.  NOTE says why a text search came
+here instead."
   (let* ((regexp (eq mode 'regexp))
          (emacs-re (and regexp (or (harness-session-search--valid-regexp
                                     (harness-session-search-emacs-regexp query))
@@ -1594,9 +1599,10 @@ of the best score: the rest are merely the least far."
 
 (defun harness-session-search--text (query db candidates opts vector)
   "Return the result of text search for QUERY in DB over CANDIDATES, or nil.
-VECTOR is the query's embedding, or nil: the nearest in meaning then
-rank the sessions that have the words, and stand in for them when none
-has.  Nil when QUERY has no word to search for and there is no VECTOR."
+OPTS are as `session/search' takes them.  VECTOR is the query's
+embedding, or nil: the nearest in meaning then rank the sessions that
+have the words, and stand in for them when none has.  Nil when QUERY
+has no word to search for and there is no VECTOR."
   (let* ((items (harness-session-search--parse-query query))
          (expr (harness-session-search--fts-expression items))
          (ids (harness-session-search--scope-ids opts candidates))
@@ -1625,7 +1631,9 @@ has.  Nil when QUERY has no word to search for and there is no VECTOR."
            :note (and near "No session has these words: these are the nearest in meaning")))))))
 
 (defun harness-session-search--semantic-search (query db candidates opts)
-  "Return a promise of the result of semantic search for QUERY in DB."
+  "Return a promise of the result of semantic search for QUERY in DB.
+CANDIDATES are the sessions to search, OPTS as `session/search' takes
+them."
   (cond
    ((null harness-session-search-embedding-model)
     (harness-session-search--fail "Semantic search needs an embedding model: set harness-session-search-embedding-model"))
@@ -1686,7 +1694,8 @@ The promise resolves to a plist:
     (error (harness-rejected err))))
 
 (defun harness-session-search--ranked-search (query mode candidates opts)
-  "Return a promise of the result of a text or semantic search for QUERY.
+  "Return a promise of the result of a search for QUERY in MODE.
+MODE is `text' or `semantic', OPTS as `session/search' takes them.
 Catch the index up with the logs of CANDIDATES first; fall back to grep
 for the text as typed when there is no index, or it is far behind."
   (let* ((db (harness-session-search--db))
