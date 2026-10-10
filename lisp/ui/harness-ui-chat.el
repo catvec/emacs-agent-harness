@@ -1365,20 +1365,24 @@ and in the message that attached it."
 The note the harness writes after a lasting permission answer (see
 `harness-node-permission') ends in an [Undo] button while the answer
 can be undone.  Once that was tried it says how it went: struck
-through when undone, else with the reason under it."
+through when undone, else with the reason under it.  The note that says
+how a new session's opening message was judged (see
+`harness-node-supervisor') carries the two things to do about the
+choice as buttons."
   (let* ((node (harness-chat-block-node block))
          (text (string-trim (or (plist-get node :content) "")))
          (record (harness-node-permission node))
-         (state (harness-permission-undo-state record)))
+         (state (harness-permission-undo-state record))
+         (judged (harness-node-supervisor node)))
     (harness-chat--margin
      (propertize
       (concat (propertize "    " 'face 'harness-hint-face)
               (propertize text 'face (if (eq state 'undone) 'harness-chat-undone-face 'harness-hint-face))
-              (pcase state
-                ('nil "")
-                ('offered (concat "  " (harness-chat--undo-button (plist-get node :id) record)))
-                ('undone (propertize "  undone" 'face 'harness-hint-face 'help-echo (plist-get record :result)))
-                (_ (propertize (format "\n    %s" (or (plist-get record :result) state)) 'face 'harness-hint-face)))
+              (cond
+               (judged (concat "  " (harness-chat--supervisor-buttons node judged)))
+               ((eq state 'offered) (concat "  " (harness-chat--undo-button (plist-get node :id) record)))
+               ((eq state 'undone) (propertize "  undone" 'face 'harness-hint-face 'help-echo (plist-get record :result)))
+               (record (propertize (format "\n    %s" (or (plist-get record :result) state)) 'face 'harness-hint-face)))
               (propertize "\n" 'face 'harness-hint-face))
       'wrap-prefix "    "))))
 
@@ -1398,6 +1402,37 @@ answer left it (`permission/undo'); the echo area says how that went,
 and the note changes when the harness updates it."
   (harness-ui-call "_harness/permission/undo" (list :session-id session-id :node-id node-id)
                    (lambda (result) (message "%s" (or (plist-get result :message) "Undone")))))
+
+(defun harness-chat--supervisor-buttons (node record)
+  "Return the buttons of the session judge's note NODE, RECORD being its record.
+Each of the note's actions (`harness-node-supervisor') is one button:
+the action itself while it was not taken, [undo: it] once it was, and
+[redo: it] once it was taken back again.  Clicking or RET on one asks
+the harness to move it on, and the note is redrawn with what it did."
+  (mapconcat
+   (lambda (action)
+     (let* ((name (format "%s" (plist-get action :action)))
+            (label (format "%s" (or (plist-get action :label) name)))
+            (state (plist-get action :state)))
+       (harness-chat--button
+        (format "[%s%s]" (pcase state ('done "undo: ") ('undone "redo: ") (_ "")) label)
+        (lambda () (harness-chat--supervisor-act (plist-get node :id) name))
+        :help (pcase state
+                ('done "Take this back")
+                ('undone "Do it again")
+                (_ (plist-get action :help))))))
+   (plist-get record :actions)
+   " "))
+
+(defun harness-chat--supervisor-act (node-id action)
+  "Ask the harness to move ACTION of the judge's note NODE-ID on.
+The harness does what the action says -- stop judging new sessions, or
+put this session in the other mode -- or takes it back when it was done
+\(`supervisor/act'), and updates the note, which the chat draws with its
+undo, or its redo once undone.  The echo area says what happened."
+  (harness-ui-call "_harness/supervisor/act"
+                   (list :session-id harness-ui-session-id :node-id node-id :action action)
+                   (lambda (result) (message "%s" (or (plist-get result :message) "Done")))))
 
 (defun harness-chat--render-compaction (block)
   "Return the body of compaction BLOCK.

@@ -36,8 +36,9 @@ OpenAI-compatible APIs and AWS Bedrock.
   `elisp`, `ssh`, `open_harness`) hold a slot per machine -- one per
   processor plus a slight burst (`harness-tool-slots-count`), so a task
   board full of agents cannot start processes without end -- and the
-  calls waiting go by session priority (low, medium or high; `C-c h p`,
-  `harness-set-priority`), so the commands of a task you marked high go
+  calls waiting go by session priority (low, medium or high; `C-c h +`
+  and `C-c h -` raise and lower it, `C-c h y` sets it, and a task's is
+  its session's), so the commands of a task you marked high go
   before a low one's. The limit follows the machine's load average too:
   under load fewer slots are handed out, down to one, and the full limit
   comes back as the load falls (`harness-tool-slots-load-high`,
@@ -51,8 +52,11 @@ OpenAI-compatible APIs and AWS Bedrock.
   coordinates while workers on cheaper models make the changes. The
   harness enforces it with tools rather than a prompt: the supervising
   session has no write tools, its shell is read-only and offline, and
-  every turn ends on a decision. On by default, and a click on the
-  header line (or `C-c h V`) switches a session to working hands-on.
+  every turn ends on a decision. A cheap model judges a new session's
+  opening message by default and starts it supervising or hands-on, and
+  a note in the harness's own voice says so, with buttons to stop the
+  judging for later sessions and to put this one in the other mode; a
+  click on the header line (or `C-c h V`) switches it at any time.
   Task sessions follow `harness-supervisor-tasks`, and the task board's
   settings line has the same switch for the task about to be submitted,
   or, in bulk edit, for every current task.
@@ -293,6 +297,8 @@ the menu's Version entry says so.
 | `C-c h l` | `harness-sessions` | Show the session list |
 | `SPC` | `harness-ui-sessions-requests` | Pop out what the session at point waits on |
 | `b` | `harness-ui-sessions-toggle-blocked` | In the session list, show only the sessions waiting for you, or every session again |
+| `+` / `-` | `harness-ui-sessions-raise-priority` / `harness-ui-sessions-lower-priority` | In the session list, raise or lower the priority of the session at point (with `C-u`, ask for the level) |
+| `p` | `harness-ui-sessions-set-priority` | In the session list, set the priority of the session at point |
 | `y` / `n` | `harness-ui-sessions-allow` / `harness-ui-sessions-deny` | On the lines of a listed session waiting on a permission request, answer it with Allow or Deny, as the request's own `y` and `n` do |
 | `C-c h a` | `harness-tasks` | Show the task board |
 | `C-c h /` | `harness-tasks-search` | Find tasks, or act on them, by saying so in words |
@@ -308,6 +314,9 @@ the menu's Version entry says so.
 | `C-c h T` | `harness-set-thinking` | Choose the thinking level |
 | `C-c h H` | `harness-set-thinking-all` | Choose a thinking level and set it on every current session and task of every project |
 | `C-c h p` | `harness-set-permission-mode` | Choose the permission mode |
+| `C-c h +` / `C-c h -` | `harness-priority-raise` / `harness-priority-lower` | Raise or lower the priority of the session in front of you: low, medium or high, the order the harness serves its commands in (with `C-u`, ask for the level) |
+| `C-c h y` | `harness-set-priority` | Set the priority of the session in front of you — a task's priority is its session's |
+| `C-c h Y` | `harness-set-priority-all` | Give every current session and task of every project one priority |
 | `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
 | `C-c h I` | `harness-set-non-interactive-all` | Turn non-interactive mode on or off for every current session and task of every project |
 | `C-c h V` | `harness-toggle-supervisor` | Toggle supervisor mode: a session that supervises plans and leaves the changes to workers on cheaper models, a hands-on one may change files itself (see [Supervisor mode](#supervisor-mode)) |
@@ -922,6 +931,10 @@ its cached prefix; a fresh child starts with the prompt alone.
 `worktree=true` gives the child a git worktree and branch of its own, so
 several children can change files at once; each branch merges back into
 the parent's working directory through the merge queue, one at a time.
+`thinking="high"` sets the child's thinking level, one the child's model
+offers (after any `model` override); without it the child thinks at this
+session's level. A level the model does not offer fails the call, naming
+the levels it does, so no child runs at a level its model cannot act on.
 To wait for some other session without blocking, `session_wait`
 registers a wake-up and returns at once: a message of the harness's own
 arrives when the session is done, and the registration outlives the
@@ -946,18 +959,49 @@ does the cheap work at the expensive price. A supervising session is not
 offered the tools that change things, and the permission layer denies a
 call to one anyway, in every permission mode.
 
-- **On by default.** New top-level sessions supervise
-  (`harness-supervisor`), and so do the sessions of the tasks the board
-  starts (`harness-supervisor-tasks`). Both are on the settings page,
-  under **Supervisor mode**, and `harness-supervisor` can be set per
-  project like the other settings of new sessions (see
-  [Configuration](#configuration)). They decide how a session starts;
+- **Judged by default: supervising or hands-on.** `harness-supervisor`
+  (new top-level sessions) and `harness-supervisor-tasks` (the sessions
+  of tasks) are each one of three, on the settings page under
+  **Supervisor mode**: `auto`, the default, has a cheap model read the
+  session's opening message and start it the way the message reads;
+  **Always supervise** and **Always hands-on** fix the mode instead.
+  Both can be set per project like the other settings of new sessions
+  (see [Configuration](#configuration)); the session of a task takes
+  `harness-supervisor-tasks` when its work starts, the write-up before
+  that only reading. They decide how a session starts;
   from then on each session has its own switch, and changing a setting
   leaves the sessions that exist as they are. A task can carry a mode
   of its own, set on the task board's settings line -- the next task, or,
   in bulk edit (`B`), the current ones: its session then starts with
   that, whatever the setting says. Sub-agents and BTW side conversations
   never supervise, and a fork starts as its parent is.
+
+- **The session judge.** Under `auto` the harness asks
+  `harness-supervisor-judge-model` (by default the session provider's
+  cheap model) one question about the opening message: a supervising job
+  or a hands-on one? It is a request of its own, tiny, with no tools and
+  no thinking, and it runs beside the session's first turn, which never
+  waits for it: the session starts supervising as new sessions always
+  did, and turns hands-on when the judge reads the message that way.
+  Either way a note in the harness's own voice says which, as the naming
+  of a session reads "renamed to X" rather than repeating what the model
+  said: "judged supervising (claude:claude-haiku)", or "judged hands-on
+  (…)", or "not judged (…): supervising as configured". The judge's own
+  answer is never shown, and the note never reaches the model. The note
+  carries the two things to do about the choice as buttons, like the
+  [Undo] of a lasting permission answer: one stops the judging of new
+  sessions, by writing the setting that decided this one at the project
+  it read, and one puts this session in the other mode, as `C-c h V`
+  does. Each click shows the way back, `[undo: …]`, and an undo the way
+  on, `[redo: …]`; the note records which state each action is in, so a
+  chat draws them again after a reload. The judge is
+  asked once, never for a session whose setting is not `auto`, and never
+  over a switch you made, before the message or after it: a flip drops
+  the pending judgement, and a verdict that arrives after it is ignored.
+  A model that is unavailable, answers something unusable or does not
+  answer in time leaves the configured default standing, and the note
+  says so. A plan call the model wrote before it turned hands-on is
+  refused, so nothing starts behind the mode's back.
 - **The header button and `C-c h V`.** The header line of a session
   starts with a `supervisor` badge, or a `hands-on` one once the mode is
   off; a window too narrow for the whole line drops it before the
@@ -1107,14 +1151,17 @@ call to one anyway, in every permission mode.
   worker's message also says which session, model and error the attempt
   before had, so it can read what was tried (`session_read`) and not
   repeat it.
-- **In tasks.** The session of a task supervises by default, and the
-  last step of its plan commits (`git add -A && git commit`). Once the
-  plan has finished and the supervisor has checked the result, it calls
-  `hand_in`; feedback from your review leads to a new plan that fixes
-  the work. While workers run, the task stays active, with a line of what
-  it waits for, instead of going to review when the turn that submitted
-  the plan ends. The session that writes a backlog task up only reads,
-  and takes the setting when the task starts.
+- **In tasks.** The session of a task starts as the task's own setting
+  says, else `harness-supervisor-tasks` (judged, by default, from the
+  message that starts the work), and a
+  supervising task session plans and delegates: the last step of its plan
+  commits (`git add -A && git commit`). Once the plan has finished and the
+  supervisor has checked the result, it calls `hand_in`; feedback from
+  your review leads to a new plan that fixes the work. While workers run,
+  the task stays active, with a line of what it waits for, instead of
+  going to review when the turn that submitted the plan ends. The session
+  that writes a backlog task up only reads, and takes the setting when
+  the task starts.
 - **Merging back.** The merge queue takes a target rather than a
   parent: the session a branch merges into, or the main checkout
   itself. A sub-agent started in a worktree (`spawn_agent` with
@@ -1152,6 +1199,41 @@ call to one anyway, in every permission mode.
   else works as before: no turn has to end on a decision, sessions keep
   every tool, and the header line shows no segment.
 
+### Priorities
+
+Every session has a **priority**: low, **medium** (the default) or
+**high**. It is always the session's own — a task's priority is its
+session's, and every task has that session from the moment it is
+submitted, so a task waiting for a slot already carries the priority it
+will start with, and setting a task's priority is setting its session's.
+The harness serves the work of a session by it: the tools that start
+processes hold a slot per machine and give the waiting calls to the
+highest priority session first (the "Polite with your machine" bullet in
+[Features](#features)), and the task board starts waiting tasks the same
+way (see [Task board](#task-board)).
+
+The commands take the session in front of you:
+
+- `C-c h +` and `C-c h -` raise and lower it a level and say what it is
+  now (`C-u` on either asks for the level);
+- `C-c h y` sets it, asking for the level (`harness-set-priority`);
+- `C-c h Y` gives every current session and task session of every
+  project the level you choose (`harness-set-priority-all`);
+- in the session list (`C-c h l`), a **Priority** column shows each
+  session's arrow -- up for high, down for low, nothing at medium, the
+  default -- and a click on it, `+`, `-` and `p` all ask for and set the
+  priority of the session on that row;
+- the chat's header line shows the same arrow beside the session's name
+  when the priority is not the default, and a click on it, like the
+  list's and a card's, offers the levels as a menu at the click.
+
+A session with no priority of its own takes its parent's, so the
+sub-agents and forks working for a task work at the task's priority. An
+agent sets one with the `set_priority` tool (a `session_id`, and
+`all=true` for every current session and task of every project at once),
+the session of a task being the one `task_list` shows for it;
+`task_control`'s `priority` action does the same for a task's session.
+
 ### Task board
 
 `C-c h a` opens the task board of the current project. Each task runs in
@@ -1169,16 +1251,21 @@ your checkout itself can be submitted to the **main tree** instead (the
   it, or write it up anyway), and the write-up names the tasks working
   on the same code, to coordinate with instead of redoing their work.
 - `harness-tasks-max-running` limits how many of a project's tasks work
-  at once (nil, the default, means no limit; the compose box notes it as
-  `N at a time`). Every project has that many slots of its own; a task
-  submitted while they are all taken waits in *Pending* and starts, by
-  priority and then oldest first, when one frees up, or at once with
-  `s`. Only top-level sessions are limited: a task takes a slot while
-  its own session works on it, running or waiting for your answer
-  mid-turn. The sessions working for it -- its sub-agents and forks, and
-  the sessions resolving its merge conflicts -- never take one, and
-  neither does a task in *Merging*, so the merge queue never holds up
-  the next task.
+  at once (nil, the default, means no limit). The settings line above
+  the compose box ends with it, as `N at a time`, or `all at once`
+  without a limit: click it to set another, a number or `no limit`.
+  Like the Review switch, that sets the option for every project and
+  saves it for later sessions. Raising the limit starts waiting tasks
+  at once, and lowering it stops no task at work; at `0` no task starts
+  by itself, and the button turns to a warning colour. Every project
+  has that many slots of its own; a task submitted while they are all
+  taken waits in *Pending* and starts, by priority and then oldest
+  first, when one frees up, or at once with `s`. Only top-level
+  sessions are limited: a task takes a slot while its own session
+  works on it, running or waiting for your answer mid-turn. The
+  sessions working for it -- its sub-agents and forks, and the sessions
+  resolving its merge conflicts -- never take one, and neither does a
+  task in *Merging*, so the merge queue never holds up the next task.
 - Each card is one line, with a subtitle that recaps the task: what it is
   doing or has done so far, written by a short model call and refreshed
   at the first of so many turns, seconds or tool calls since the last
@@ -1207,7 +1294,10 @@ your checkout itself can be submitted to the **main tree** instead (the
   as cleaning up uncommitted changes; those tasks show `main tree` on
   their card, and a refined task keeps the choice for when you start it.
   An agent can ask for the same thing with `task_submit`'s `main_tree`.
-- Every task has a **priority**: low, medium (the default) or high. It
+- Every task has a **priority**: low, medium (the default) or high. A
+  task has no priority of its own — it is its session's, which every
+  task gets as it is submitted, so setting a task's priority is setting
+  its session's (see [Priorities](#priorities)). It
   matters when `harness-tasks-max-running` limits how many of a
   project's tasks work at once: the others wait in *Pending*, and a
   free slot goes to the highest priority waiting, the oldest of those
@@ -1215,12 +1305,14 @@ your checkout itself can be submitted to the **main tree** instead (the
   never stops a task at work, and a backlog task still waits for you to
   start it. The `medium priority` button beside the Submit / Refine
   switch sets the next task's (a click cycles it through high and low);
-  `+` and `-` on a card raise and lower that task's, to reorder the
+  `+` and `-` on a card raise and lower that task's — the session's it
+  already has, waiting or not — to reorder the
   queue, and bulk edit (`B`) has a priority button that sets every
   current task's at once, only when you click it. A high task shows `↑`
   before its title and a low one `↓`. An
-  agent sets it with `task_submit`'s `priority` and `task_control`'s
-  `priority` action, and the board's search understands "do the docs
+  agent sets it with `task_submit`'s `priority`, `task_control`'s
+  `priority` action or `set_priority` on the task's session, and the
+  board's search understands "do the docs
   task first".
 - Task sessions run on at most 384k tokens of context
   (`harness-tasks-context-limit`): they compact sooner than interactive
@@ -1259,6 +1351,16 @@ your checkout itself can be submitted to the **main tree** instead (the
   on any card. The agent has the same as the `open_harness` tool, which
   starts such an instance for its own worktree and says how to drive it
   (`scripts/dev.sh` with its socket).
+- These instances stop by themselves once nothing needs them. One
+  opened for you to look at (Open harness, or the agent's
+  `open_harness` with `focus`) stays until its task is done, archived
+  or deleted. One the agent opened to test its work stops once that
+  work stops: when the task goes to review, is done, or stops on an
+  error or a cancel; when a sub-agent finishes; when a conversation is
+  closed or has been idle for an hour. Removing a worktree stops its
+  instance first, and every instance exits once the Emacs you run the
+  harness in quits. A sweep every ten minutes also stops the instances
+  of finished tasks that an older harness left running.
 - To skip review, press `V` or click `[Review: on]` in the board's
   header line. Finished tasks then merge and complete without waiting
   for you, and if tasks are already waiting for review, the board offers
@@ -1645,12 +1747,12 @@ shows where its effective value comes from.
 The page leads with the settings most people change, grouped by what
 they are for: **New sessions** (model, thinking, permission mode,
 non-interactive, supervisor mode), **Supervisor mode** (whether
-sessions and tasks supervise, the models of the tiers, the thinking
-levels of supervisors and their workers, the step budget),
-**Spending** (the budget, one for all sessions together),
-**Compaction** (what stands in for a conversation that grew
-too long, and which model writes a brief summary), **Files and safety**
-(directory access,
+sessions and tasks supervise or a cheap model judges them, the judge's
+model, the models of the tiers, the thinking levels of supervisors and
+their workers, the step budget), **Spending** (the
+budget, one for all sessions together), **Compaction** (what stands in
+for a conversation that grew too long, and which model writes a brief
+summary), **Files and safety** (directory access,
 sandbox policy, standing permission rules), **Task board** (what task
 sessions start with, and when their work counts as done),
 **Notifications** (which task events notify you, and through which
@@ -1692,8 +1794,9 @@ it is for. Each record in a list folds to one line; `Edit` opens it and
 `INS` adds one, filled in from what that kind of record starts as.
 
 Settings that name a model (the default model, the task, refine, recap,
-search and auto-mode judge models, Copilot's default model, and the
-fallback list) are dropdowns rather than text fields. The button names
+search, auto-mode judge and session judge models, Copilot's default
+model, and the fallback list) are dropdowns rather than text fields.
+The button names
 the model (`Fable 5.1 (Claude) ▾`), next to its id and context window,
 and opens a picker of the models the configured providers list, grouped
 by provider, with their context window and price. A pick saves at once.

@@ -9,6 +9,7 @@
 (defvar harness-sessions)
 (defvar harness-agent--turns)
 (defvar harness-tools-agent--questions)
+(defvar harness-agent--cancel-grace)
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
 (defvar harness-tasks--loaded)
@@ -28,7 +29,7 @@
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (dolist (m '(store project config provider provider-demo tools session agent tools-agent tasks tools-sessions))
+     (dolist (m '(store project config provider provider-demo tools session agent tools-agent priority tasks tools-sessions))
        (harness-test-load-module m))
      (clrhash harness-sessions)
      (clrhash harness-agent--turns)
@@ -74,12 +75,13 @@
   (harness-tools-sessions-test-with
     (let ((names (mapcar (lambda (s) (plist-get s :name)) (harness-call 'tools/list))))
       (dolist (n '("session_list" "session_search" "session_read" "session_history" "session_send" "session_control"
-                   "session_move" "set_non_interactive" "session_wait" "task_list" "task_submit" "task_control"
-                   "task_wait"))
+                   "session_move" "set_non_interactive" "set_priority" "session_wait" "task_list" "task_submit"
+                   "task_control" "task_wait"))
         (should (member n names))))
     (dolist (n '("session_list" "session_search" "session_read" "session_history" "session_wait" "task_list" "task_wait"))
       (should (eq 'read (plist-get (harness-call 'tools/get n) :kind))))
-    (dolist (n '("session_send" "session_control" "session_move" "set_non_interactive" "task_submit" "task_control"))
+    (dolist (n '("session_send" "session_control" "session_move" "set_non_interactive" "set_priority" "task_submit"
+                 "task_control"))
       (should (eq 'meta (plist-get (harness-call 'tools/get n) :kind))))))
 
 (ert-deftest harness-tools-sessions-list-and-filters ()
@@ -758,19 +760,95 @@ permission chain's: see the perms tests.)"
       (should-not (plist-get (harness-call 'session/get there) :non-interactive))
       (should (plist-get (harness-tools-sessions-test-run me "set_non_interactive" '(:enabled t :all t :session_id "Other"))
                          :is-error))
-      ;; Everything current, in every project: the session over there and
-      ;; the task waiting there.
+      ;; Everything current, in every project: the session over there,
+      ;; the session of the task waiting there -- every task has one from
+      ;; submission -- and that task itself.
       (let ((text (harness-tools-sessions-test-ok me "set_non_interactive" '(:enabled t :all t))))
-        (should (string-match-p "1 session and 1 task changed" text)))
+        (should (string-match-p "2 sessions and 1 task changed" text)))
       (should (plist-get (harness-call 'session/get there) :non-interactive))
       (should (eq t (plist-get (harness-call 'task/get waiting) :non-interactive)))
-      ;; Off, with JSON's false.
+      ;; Off, with JSON's false: the three sessions and the task's own.
       (let ((text (harness-tools-sessions-test-ok me "set_non_interactive" '(:enabled :false :all t))))
-        (should (string-match-p "\\`Non-interactive mode is off for every current session and task of every project: 3 sessions and 1 task changed" text)))
+        (should (string-match-p "\\`Non-interactive mode is off for every current session and task of every project: 4 sessions and 1 task changed" text)))
       (dolist (sid (list me other there))
         (should-not (plist-get (harness-call 'session/get sid) :non-interactive)))
       (should (eq :false (plist-get (harness-call 'task/get waiting) :non-interactive)))
       (harness-call 'task/cancel waiting))))
+
+(ert-deftest harness-tools-sessions-set-priority ()
+  "The set_priority tool gives one session a priority, or every current one.
+With all, every current session and task of every project takes the
+level; a task's priority is its session's, and the listing shows a
+priority that is not the default medium."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (me (harness-tools-sessions-test-session :name "Me"))
+           (other (harness-tools-sessions-test-session :name "Other"))
+           (spec (harness-call 'tools/get "set_priority")))
+      (should (eq 'meta (plist-get spec :kind)))
+      (should (equal '("priority") (plist-get (plist-get spec :schema) :required)))
+      ;; This session by default: a priority is the session's.
+      (should (equal "Priority is now high for this session."
+                     (harness-tools-sessions-test-ok me "set_priority" '(:priority "high"))))
+      (should (eq 'high (harness-priority-of me)))
+      (should (equal "high" (harness-call 'priority/get me)))
+      ;; A session that already carried it of its own is not changed.
+      (should (equal "Priority was already high for this session."
+                     (harness-tools-sessions-test-ok me "set_priority" '(:priority "high"))))
+      ;; Another one, by name, in any case.
+      (should (string-match-p "\\`Priority is now low for session .* \"Other\"\\.\\'"
+                              (harness-tools-sessions-test-ok me "set_priority"
+                                                              '(:priority "LOW" :session_id "Other"))))
+      (should (eq 'low (harness-priority-of other)))
+      ;; The listing says it, and the default medium goes without saying.
+      (let ((text (harness-tools-sessions-test-ok me "session_list" nil)))
+        (should (string-match-p (concat (regexp-quote me) ".*priority high") text))
+        (should (string-match-p (concat (regexp-quote other) ".*priority low") text)))
+      ;; Everything current: a session already at the level is left alone.
+      (let ((text (harness-tools-sessions-test-ok me "set_priority" '(:priority "medium" :all t))))
+        (should (string-match-p "2 sessions changed, the others already had it" text)))
+      (should (eq 'medium (harness-priority-of me)))
+      (should (eq 'medium (harness-priority-of other)))
+      (should (string-match-p "0 sessions changed"
+                              (harness-tools-sessions-test-ok me "set_priority" '(:priority "medium" :all t))))
+      ;; A task's priority is its session's, and every task has its
+      ;; session from submission, so set_priority takes that session.
+      (let* ((id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Urgent fix"))
+                                       :meta)
+                            :task-id))
+             (sid (plist-get (harness-call 'task/get id) :session)))
+        (should (stringp sid))
+        (should (string-match-p "\\`Priority is now high for session "
+                                (harness-tools-sessions-test-ok me "set_priority"
+                                                                (list :session_id sid :priority "high"))))
+        (should (eq 'high (plist-get (harness-call 'task/get id) :priority)))
+        (harness-call 'task/cancel id))
+      ;; It needs a priority, a level that exists, one target, and a session.
+      (should (plist-get (harness-tools-sessions-test-run me "set_priority" nil) :is-error))
+      (should (plist-get (harness-tools-sessions-test-run me "set_priority" '(:priority "urgent")) :is-error))
+      (should (plist-get (harness-tools-sessions-test-run me "set_priority"
+                                                          '(:priority "high" :all t :session_id "Other"))
+                         :is-error))
+      (should (plist-get (harness-tools-sessions-test-run me "set_priority"
+                                                          '(:priority "high" :session_id "Nobody"))
+                         :is-error))
+      ;; Nothing changed by the refusals.
+      (should (eq 'medium (harness-priority-of me)))
+      ;; A harness without the priority module says so, rather than
+      ;; failing on a method nothing implements.
+      (harness-unregister-method 'priority/set)
+      (harness-unregister-method 'priority/set-all)
+      (let ((r (harness-tools-sessions-test-run me "set_priority" '(:priority "high"))))
+        (should (plist-get r :is-error))
+        (should (string-match-p "priority module is not loaded" (plist-get r :content))))
+      (let* ((id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Later"))
+                                       :meta)
+                            :task-id))
+             (r (harness-tools-sessions-test-run me "task_control" (list :task_id id :action "priority"
+                                                                         :priority "high"))))
+        (should (plist-get r :is-error))
+        (should (string-match-p "priority module is not loaded" (plist-get r :content)))
+        (harness-call 'task/cancel id)))))
 
 (declare-function harness-provider-demo--script "harness-provider-demo" (request))
 
@@ -984,7 +1062,10 @@ the handler moves nothing the user did not confirm."
            (id (plist-get (plist-get submitted :meta) :task-id)))
       (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :name)) 5 "the task's name")
       (should (eq 'pending (plist-get (harness-call 'task/get id) :state)))
-      (should-not (plist-get (harness-call 'task/get id) :session))
+      ;; Every task has its session from submission, waiting for a slot.
+      (let ((sid (plist-get (harness-call 'task/get id) :session)))
+        (should (stringp sid))
+        (should (eq 'idle (plist-get (harness-call 'session/get sid) :status))))
       (should (string-match-p (concat (regexp-quote id) " +pending +\"Lexer fix\": Fix the lexer")
                               (harness-tools-sessions-test-ok me "task_list" nil))))))
 
@@ -1222,6 +1303,52 @@ task_list filters on it and task_wait can wait for it."
       (should (string-match-p "No tasks match" (harness-tools-sessions-test-ok me "task_list" '(:column "active"))))
       (should (string-match-p "Done waiting"
                               (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "merging")))))))
+
+(ert-deftest harness-tools-sessions-task-queue-suspend-and-resume ()
+  "task_control suspends and resumes a project's queue; task_list says so.
+An explicit start still starts a task while the queue is suspended."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (me (harness-tools-sessions-test-session))
+           (id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Waits for the queue"))
+                                     :meta)
+                          :task-id)))
+      (should (string-match-p "Queue suspended"
+                              (harness-tools-sessions-test-ok me "task_control" '(:action "suspend-queue"))))
+      (let ((listing (harness-tools-sessions-test-ok me "task_list" nil)))
+        (should (string-match-p "Queue suspended for" listing))
+        (should (string-match-p "waiting while the queue is suspended" listing)))
+      (should (eq 'pending (plist-get (harness-call 'task/get id) :state)))
+      ;; The suspension holds back the scheduler, never an explicit start.
+      (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "start"))
+      (should (eq 'active (plist-get (harness-call 'task/get id) :state)))
+      (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "done"))
+      (should (string-match-p "Queue resumed"
+                              (harness-tools-sessions-test-ok me "task_control" '(:action "resume-queue"))))
+      (should-not (string-match-p "Queue suspended" (harness-tools-sessions-test-ok me "task_list" nil))))))
+
+(ert-deftest harness-tools-sessions-task-return-to-pending ()
+  "task_control return-to-pending stops a working task's turn, keeping its session.
+The task waits in pending until the queue starts it again."
+  (harness-tools-sessions-test-with
+    (let* ((harness-agent--cancel-grace 0.05)
+           (harness-tasks-max-running 1)
+           (harness-provider-demo-script-override '((:type wait :seconds 30)))
+           (me (harness-tools-sessions-test-session))
+           (id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Long work"))
+                                     :meta)
+                          :task-id)))
+      (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :session)) 5 "a session")
+      (let* ((sid (plist-get (harness-call 'task/get id) :session))
+             (text (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "return-to-pending"))))
+        (should (string-match-p "Returned to pending" text))
+        (should (string-match-p (regexp-quote sid) text))
+        (let ((task (harness-call 'task/get id)))
+          (should (eq 'pending (plist-get task :state)))
+          (should (plist-get task :returned))
+          (should (equal sid (plist-get task :session)))))
+      ;; Nothing takes the freed slot on its own: the return started nothing.
+      (should (eq 'pending (plist-get (harness-call 'task/get id) :state))))))
 
 (provide 'harness-tools-sessions-test)
 ;;; harness-tools-sessions-test.el ends here

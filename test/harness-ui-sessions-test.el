@@ -36,6 +36,8 @@ tasks when they are `fail', fails.  Each request is recorded in
          (harness-resolved harness-ui-sessions-test--tasks))
         ((member method '("_harness/permission/answer" "_harness/question/answer"))
          (harness-resolved t))
+        ((equal method "_harness/priority/set")
+         (harness-resolved (plist-get params :priority)))
         ((equal method "_harness/session/move")
          (harness-resolved (harness-plist-merge (harness-ui-session (plist-get params :id))
                                                 (list :cwd (plist-get params :dir)
@@ -106,6 +108,38 @@ It is named ID unless PROPS, which go first, say otherwise."
     (let ((columns (cadr (assoc id tabulated-list-entries))))
       (list (substring-no-properties (aref columns 1))
             (substring-no-properties (aref columns 3))))))
+
+(defun harness-ui-sessions-test--cell (id column)
+  "Return the plain text of COLUMN in session ID's row, or nil without one."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (let* ((columns (cadr (assoc id tabulated-list-entries)))
+           (at (and columns (cl-position column tabulated-list-format
+                                         :key #'car :test #'equal))))
+      (and at (substring-no-properties (aref columns at))))))
+
+(defun harness-ui-sessions-test--arrow-position (id)
+  "Return the buffer position of the priority arrow in session ID's row."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (let ((start (harness-ui-sessions--position id))
+          (end (save-excursion (goto-char (harness-ui-sessions--position id))
+                               (line-end-position)))
+          (glyphs (list (harness-ui-icon 'harness-icon-priority-high)
+                        (harness-ui-icon 'harness-icon-priority-low)))
+          found)
+      (dolist (glyph glyphs)
+        (save-excursion
+          (goto-char start)
+          (when (search-forward glyph end t) (setq found (match-beginning 0)))))
+      found)))
+
+(defun harness-ui-sessions-test--message (thunk)
+  "Call THUNK and return the message it showed, or nil."
+  (let (said)
+    (cl-letf (((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (setq said (apply #'format format-string args)))))
+      (funcall thunk))
+    said))
 
 (defun harness-ui-sessions-test--blocked (id project kind &rest props)
   "Cache a session ID in PROJECT blocked on a request of KIND, as the wire has it.
@@ -445,6 +479,103 @@ harness cannot say, as one without tasks, the list names no task."
       (should (equal '("s-task") (harness-ui-sessions-test--shown)))
       (harness-ui-sessions-filter "")
       (should (equal '("s-guide" "s-task") (harness-ui-sessions-test--shown))))))
+
+;;;; Priority
+
+(ert-deftest harness-ui-sessions-show-the-priority-of-each-session ()
+  "The Priority column shows the level the harness serves a session at.
+Medium, the default, goes without saying and leaves its cell empty, as
+the chat header does; a session with none of its own shows its
+parent's, which is the level the harness serves its work at; and the
+column sorts, lowest first."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "high" root :ext '(:priority "high"))
+    (harness-ui-sessions-test--add "plain" root)
+    (harness-ui-sessions-test--add "low" root :ext '(:priority "low") :updated 400)
+    (harness-ui-sessions-test--add "child" root :parent-id "low" :updated 300)
+    (let ((default-directory root)) (harness-sessions))
+    (should (equal (harness-ui-icon 'harness-icon-priority-high)
+                   (harness-ui-sessions-test--cell "high" "Priority")))
+    (should (equal "" (harness-ui-sessions-test--cell "plain" "Priority")))
+    (should (equal (harness-ui-icon 'harness-icon-priority-low)
+                   (harness-ui-sessions-test--cell "low" "Priority")))
+    (should (equal (harness-ui-icon 'harness-icon-priority-low)
+                   (harness-ui-sessions-test--cell "child" "Priority")))
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (let* ((columns (cadr (assoc "high" tabulated-list-entries)))
+             (at (cl-position "Priority" tabulated-list-format :key #'car :test #'equal))
+             (cell (aref columns at)))
+        (should (eq 'harness-priority-high-face (get-text-property 0 'face cell)))
+        (should (string-match-p "serves this session's commands before lower ones'"
+                                (get-text-property 0 'help-echo cell)))
+        ;; The arrow is a button of its own, naming the session of its row.
+        (should (keymapp (get-text-property 0 'keymap cell)))
+        (should (equal "high" (get-text-property 0 'harness-priority-session cell)))))
+    ;; The column sorts by the level, lowest first.
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (should (equal '("low" "child" "plain" "high")
+                     (mapcar #'car (sort (copy-sequence tabulated-list-entries)
+                                         #'harness-ui-sessions--priority<)))))))
+
+(ert-deftest harness-ui-sessions-click-the-priority-arrow ()
+  "A click on a row's arrow asks for that session's priority, not point's.
+The arrow carries the session of its row, and the click reads it from
+the arrow, whatever row point is on."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--with-init
+      (harness-ui-sessions-test--add "high" root :ext '(:priority "high"))
+      (harness-ui-sessions-test--add "low" root :ext '(:priority "low") :updated 400)
+      (let ((default-directory root)) (harness-sessions))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "medium")))
+        (with-current-buffer harness-ui-sessions--buffer-name
+          ;; Point is on the low session; the arrow of the high one is clicked.
+          (harness-ui-sessions-test--goto "low")
+          (let ((arrow (harness-ui-sessions-test--arrow-position "high"))
+                (window (selected-window)))
+            (should arrow)
+            (should (equal "high" (get-text-property arrow 'harness-priority-session)))
+            (harness-ui-priority-click (list 'mouse-1 (list window arrow '(0 . 0) 0)))
+            (should (equal '(("_harness/priority/set" (:sessionId "high" :priority "medium")))
+                           (harness-ui-sessions-test--answers)))))))))
+
+(ert-deftest harness-ui-sessions-set-the-priority-of-the-session-at-point ()
+  "The priority of the session at point: p sets it, + and - step it.
+Each asks the harness for the level it reaches
+\(`_harness/priority/set'), and a prefix argument on + or - asks for a
+level instead."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--with-init
+      (harness-ui-sessions-test--add "high" root :ext '(:priority "high"))
+      (harness-ui-sessions-test--add "plain" root :updated 300)
+      (let ((default-directory root)) (harness-sessions))
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (harness-ui-sessions-test--goto "plain")
+        (should (eq 'harness-ui-sessions-raise-priority (key-binding (kbd "+"))))
+        (should (eq 'harness-ui-sessions-lower-priority (key-binding (kbd "-"))))
+        (should (eq 'harness-ui-sessions-set-priority (key-binding (kbd "p"))))
+        (should (equal "Priority raised to high"
+                       (harness-ui-sessions-test--message
+                        (lambda () (call-interactively (key-binding (kbd "+")))))))
+        (should (equal '(("_harness/priority/set" (:sessionId "plain" :priority "high")))
+                       (harness-ui-sessions-test--answers)))
+        (setq harness-ui-sessions-test--requests nil)
+        ;; Already high: the level does not go above it.
+        (harness-ui-sessions-test--goto "high")
+        (should (equal "Priority is high already"
+                       (harness-ui-sessions-test--message
+                        (lambda () (call-interactively (key-binding (kbd "+")))))))
+        (should-not (harness-ui-sessions-test--answers))
+        ;; p asks for the level, offering the session's own.
+        (let (asked)
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (prompt _collection &rest _) (setq asked prompt) "low")))
+            (harness-ui-sessions-test--goto "high")
+            (should (equal "Priority: low"
+                           (harness-ui-sessions-test--message
+                            (lambda () (call-interactively (key-binding (kbd "p"))))))))
+          (should (equal "Priority: " asked))
+          (should (equal '(("_harness/priority/set" (:sessionId "high" :priority "low")))
+                         (harness-ui-sessions-test--answers))))))))
 
 ;;;; Those waiting for you
 

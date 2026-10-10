@@ -1063,9 +1063,12 @@ continue it (`session/provider-state`), else nil.  A REQUEST may also carry
 `:builtin-tools`, a list of harness tool names (from `tools/builtin`):
 the provider turns on its own tools in their place for this request,
 and `:tools` lacks them.  `:no-thinking t` asks for no extended
-thinking (the auto-mode judge sends it); Claude Code, which takes no
-`:max-tokens`, then runs the CLI with `MAX_THINKING_TOKENS=0`, and
-other providers may ignore it.
+thinking, and wins over `:thinking` when both are sent.  Claude Code,
+which takes no `:max-tokens`, then runs the CLI with
+`MAX_THINKING_TOKENS=0`; a DeepSeek endpoint sends `reasoning_effort`
+"none", its off switch; an endpoint with no off switch sends nothing,
+so a model whose thinking is on by default may still think (see the
+auto-mode judge's retry below, which covers that).
 
 A REQUEST with `:ephemeral t` is a one-off question, such as the
 auto-mode judge's.  The provider answers it from the request alone, as
@@ -3094,7 +3097,10 @@ so switching to either loses nothing.
   - `worktree/remove` lifts a harness lock first, and puts it back when
     git still refuses (local changes).  FORCE is `git worktree remove -f
     -f`, past local changes and any lock.  Task archive and the worktree
-    list's `d` go through it.
+    list's `d` go through it.  Before git runs, the async filter
+    `worktree/before-remove` (value nil, args ROOT PATH) lets whatever
+    runs from the worktree let go of it: tools-dev stops the Emacs that
+    `open_harness` started there.
   - `worktree/prune` runs `git worktree prune -v` outside the sandbox,
     where git sees every worktree, so it prunes only worktrees really
     gone, and skips locked ones as git does.  It returns git's lines plus
@@ -3234,7 +3240,10 @@ sub-agents and forks working for a task work at the task's priority, and
 a chain with none is the default.
 
 Methods, reachable over ACP as `_harness/priority/get {sessionId}`,
-`.../rank {sessionId}` and `.../set {sessionId, priority}`:
+`.../rank {sessionId}`, `.../set {sessionId, priority}` and
+`.../set-all {priority, filter}`.  Every one of them takes a session:
+a priority is never a task's, nor a board's, but the session's, so the
+input to set or read one is always a session id.
 
 - `priority/get SESSION-ID` -> the priority as "low", "medium" or
   "high"; the session's own, else its parent's, else the default; the
@@ -3246,12 +3255,27 @@ Methods, reachable over ACP as `_harness/priority/get {sessionId}`,
   PRIORITY is read as `harness-priority-read' reads it, and a name no
   level has is refused (`session/set-ext' signals for a session nobody
   knows).
+- `priority/set-all PRIORITY &optional FILTER` -> the ids of the
+  sessions that changed, newest first.  The bulk way to give sessions a
+  priority, as `task/set-all' is for tasks: FILTER is the one
+  `session/select' takes (nil selects every session, `(:active t :tasks
+  t)' every current session and the session of every current task of
+  every project), PRIORITY is read before anything changes, and a
+  session already carrying that level of its own is left alone.
 
-Tasks keep their own priority in their record -- a task has one before
-it has a session, and the board queues by it -- and give it to their
-session, so the rest of the harness queues that session's work by the
-same thing (see tasks).  `ui-priority' shows and sets it in the chat
-header.
+A task has no priority of its own: a task's priority is its session's,
+and every task has that session from the moment it is submitted (see
+tasks).  `harness-priority-of-task TASK` reads the session its
+`:session' names; a record from before every task had one -- with its
+own `:priority' field (`harness-priority-task-key') -- is read once,
+for the session it gets, and only by that function;
+nothing writes a priority on a task's record any more.
+So setting a task's priority is setting its session's (`priority/set',
+`harness-priority-set-session'), and `task/set-all''s `:priority' is
+handed to each selected task's session; `task/set-priority' and every
+other route to a task's own field are gone.  `ui-priority' shows and
+sets a session's priority in the chat header, the session list and the
+harness keys.
 
 ### tasks
 
@@ -3260,7 +3284,6 @@ Task mode: one session per task.  TASK =
 :state pending|refining|active|merging|review|done
 :column pending|needs-input|active|review|merging|done
 :backlog BOOL :note "the words a backlog task was written up from" :refined F
-:priority low|medium|high
 :session SID :outcome nil|end-turn|error|cancelled|duplicate|merge-failed|merged|…
 :waiting nil|"what the session started runs outside its turn"
 :error "…" :duplicate-of ID :main-tree BOOL :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
@@ -3271,28 +3294,52 @@ blocked on a request or the task stopped part way, `merging` while its
 branch holds a place in the merge queue (`:merge-status` is queued,
 merging or conflict; `:merge-queued` is when it joined, which orders the
 board's section), `review` while its finished work waits for the user's
-verdict.  `:priority` is one of `harness-priority-levels`,
-a symbol in memory and a string on disk and the wire; every read has
-it, and a record from before priorities reads `medium` without being
-rewritten.  The task's priority is given to its session
-\(`harness-tasks--set-session-priority', `harness-tasks--priority-ext'
-at creation), where the rest of the harness reads it: the session's
-`:ext' `:priority' is the same level, and the queues the session's work
-waits in -- the tool slots above all -- are served by it (see
+verdict.  The record keeps no priority: a task's priority is its
+session's (`harness-priority-of-task'), and a read of a task has one
+all the same (`:priority' in `task/get''s and `task/list''s answer, the
+board's facts), computed from that session when it is asked for, never
+stored.  Every task gets its session at submission
+\(`harness-tasks--make-session'): in the task's `:cwd', idle, with the
+task's priority in its `:ext' (`harness-priority-ext') and the settings
+of what it does next -- a backlog task's write-up settings
+\(`harness-tasks--refine-settings'), any other's work settings
+\(`harness-tasks--work-settings') -- so a task waiting for a slot
+already has the
+session its priority lives on.  When the task starts, that session --
+the write-up's, for a backlog task -- moves to the worktree, takes the
+task's work settings (`harness-tasks--continue-session') and does
+the work; nothing waits for the start to make a session.  Only a record
+from before this -- one with no `:session' -- is read once for its own
+`:priority' field (`harness-priority-task-key'), and gets a session the
+way it always did when it starts.  The session's `:ext' `:priority' is
+the level the rest of the harness reads, and the queues the session's
+work waits in -- the tool slots above all -- are served by it (see
 priority).
 
 - `task/submit CWD PROMPT &optional (:attachments :model :permission-mode
   :thinking :non-interactive :supervisor :refine :main-tree :priority)` → task; it
   starts when one of its project's `harness-tasks-max-running` slots is
-  free.  A `:priority` is read as `harness-priority-read' reads it
-  (medium by default), orders the project's waiting tasks and reaches
-  the session the task gets (see priority).  The limit is per project: every project (a task's `:project`,
+  free.  Its session is made now, at the task's directory, idle, with
+  the task's priority and the settings of its first turn (a backlog
+  task's write-up settings) in it, so the task has somewhere to live --
+  and the priority has -- from the start; the work goes on in that
+  session when it starts, on the task's work settings.  A `:priority`
+  is read as
+  `harness-priority-read' reads it (medium by default) and given to that
+  session (`harness-priority-ext'): it orders the project's waiting
+  tasks, and it is what the queues the session's work waits in go by
+  (see priority).  The limit is per project: every project (a task's `:project`,
   the main checkout, else its `:cwd`) has that many slots of its own,
   and the scheduler (`harness-tasks--schedule`) starts each project's
   queued tasks in start order (`harness-tasks--start-order`: highest
   `:priority` first, oldest first among equals) while that project has
   slots left (`harness-tasks--free-slots PROJECT`), so a project at its
-  limit holds up only its own tasks.  Only top-level sessions take slots
+  limit holds up only its own tasks.  The limit (a `natnum`, or nil for
+  none; 0 starts nothing by itself) can change while tasks wait: its
+  `config/changed` runs the scheduler (`harness-tasks--on-config-changed`),
+  so a limit raised from a board's `N at a time` button or the settings
+  page starts the waiting tasks it lets through at once, and a lower one
+  stops no task at work.  Only top-level sessions take slots
   (`harness-tasks--holds-slot-p`): a task holds one while it starts,
   and while it is `active` with its own session -- one without a
   `:parent-id` -- running or blocked mid-turn, or idle with work it
@@ -3326,8 +3373,9 @@ priority).
   say.  The flag is explicit, never the default; the `task_submit` tool
   offers it as `main_tree` and the board as a worktree switch beside the
   other new-task settings.  A refined (`:refine`) task keeps it for when
-  it starts, and its session, made at the task's directory for the
-  write-up, then stays there rather than moving into a worktree.
+  it starts: the session it was submitted with writes it up at the
+  task's directory and then stays there rather than moving into a
+  worktree.
 - A task's session also runs on `harness-tasks-context-limit' (384000)
   tokens of context at most, so it compacts earlier than an interactive
   session; nil gives it the whole window.  A refined task's write-up
@@ -3336,7 +3384,7 @@ priority).
   except Claude Code, which is spawned with the limit as
   `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE' (see the claude provider).
 - Backlog refinement (once called grooming): a `:refine` task is
-  `refining` while a session at its directory -- `ask` and
+  `refining` while the session it was submitted with -- `ask` and
   non-interactive, `harness-tasks-refine-model` and
   `-refine-thinking` (low), read-only through the tasks module's
   `permission/decide` stage at 25, which denies (final) whatever the
@@ -3379,7 +3427,10 @@ priority).
   conversations per directory; the new one gets the transcript, the
   write-up's conversation, as text: see "Replay") and it is prompted with
   `harness-tasks--start-message`, the write-up and the quoted note, under the
-  task's own settings.  Dropping a backlog task deletes its session.
+  task's own settings.  Dropping a task that never started -- a backlog
+  one, or one waiting for a slot -- deletes its session with it: that
+  session holds the task's priority and nothing else, and the write-up's
+  transcript goes with the task it was written up for.
   The messages task mode composes itself (starting a written-up task,
   the restart resume, the nudge to finish a write-up) are marked as
   from `harness-sender-system "tasks"`; the task's prompt and
@@ -3391,15 +3442,20 @@ priority).
   message is the prompt; a worktree session keeps its worktree and merges
   like any task; an idle one waits in `needs-input` with `:outcome adopted`).
 - Starting: in a git project (`harness-tasks-worktrees`) `worktree/create`
-  on branch `harness-tasks-branch-prefix` + slug + id, then a session in
-  that worktree (`harness-tasks-permission-mode`, interactive by
-  default) prompted with the task; a system-prompt section tells it to
-  commit on its branch and not merge.  Outside git the session runs in CWD.
-  A `:main-tree` task skips the worktree: its session runs at the
-  project's main root, and the system prompt says the work takes effect
-  there, with no branch to make and nothing to merge.  The worktree
-  stays locked until its branch is merged; a follow-up to a merged task
-  locks it again (see worktree).
+  on branch `harness-tasks-branch-prefix` + slug + id, then the task's
+  session -- the one it has had since submission -- moves into that
+  worktree (`session/update :cwd :worktree`, `harness-tasks--continue-session')
+  and is prompted with the task, on the settings the work runs with
+  (`harness-tasks-permission-mode`, interactive by default); a
+  system-prompt section tells it to commit on its branch and not merge.
+  Outside git the session runs in CWD.  A `:main-tree` task skips the
+  worktree: its session runs at the project's main root, and the system
+  prompt says the work takes effect there, with no branch to make and
+  nothing to merge.  The worktree stays locked until its branch is
+  merged; a follow-up to a merged task locks it again (see worktree).
+  Only a record from before every task had a session is opened here
+  (`harness-tasks--open-session': a session made in the task's
+  directory, then prompted).
 - Titles: a task is named as soon as it is submitted, while it may wait
   for a slot: `task/submit` sends its prompt (a backlog task's `:note`)
   to `naming/title` with `:task ID` and the model its session will have,
@@ -3407,9 +3463,12 @@ priority).
   (nil for none), so the model titles it like a ticket.  The title
   becomes the task's `:name`; the board, `task_list`, the session list,
   search, notifications and insights show the session's name, else the
-  task's `:name`, else the prompt's first line.  The task's session is
-  created with `:name` (a backlog task's session, made at once, as it
-  starts its work when it has none), so it is not named again.  While
+  task's `:name`, else the prompt's first line.  The session the task
+  was submitted with is made before the request goes out, taking
+  `:name` when the task has a title by then (`harness-tasks--name-option'),
+  so a title that comes later names it through `session/update`
+  (`harness-tasks--named'); a task's session is never named again as its
+  turn starts.  While
   the request is out, the `naming/auto-p` filter keeps a session of the
   task from being named as its turn starts, and the title names it when
   it comes.  Nothing waits for a title: a failed request (or one that
@@ -3494,20 +3553,21 @@ priority).
   the `session/before-move` filter `harness-tasks--before-move` refuses,
   since the board files the task under its project and follows its work
   in its directory.  A task for the other directory is submitted there.
-- `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`,
+- `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`
+  (what new tasks start with, and `:max-running`, the limit, nil for
+  none),
   `task/start ID` (ignores the limit; not while a write-up runs),
-  `task/set-priority ID PRIORITY` (low, medium or high, as `task/submit`
-  reads it; any task, though it only matters to one still waiting; it
-  starts nothing, as no slot frees, and `task/changed` tells the board,
-  which reorders *Pending*),
   `task/update ID PROMPT` (not started only; writes a stopped write-up by
   hand; a task named from its prompt is named again), `task/set-all SETTINGS &optional FILTER` (apply `:model',
   `:thinking', `:permission-mode', `:non-interactive' and `:supervisor',
   with an explicit false for the last two meaning off, to every task
   FILTER selects and, when started, its session, and `:priority' to the
-  task alone; only the settings given change, so without `:priority' (or
-  with null) every task keeps its own, and a bad one is refused before
-  any task changes; FILTER is `:columns'
+  session of each: a task has no priority of its own
+  (`harness-priority-set-session'), so a task already at that level --
+  its session's, read through `harness-priority-of-task' -- is left
+  alone, and the priority is read and refused before any task changes;
+  only the settings given change, so without `:priority' (or
+  with null) every task keeps its own; FILTER is `:columns'
   (default `harness-tasks-bulk-columns': running, pending and blocked),
   `:ids', `:except' and `:cwd' (without it, every project), and review,
   done and archived tasks are never touched; a task already set so is
@@ -3621,8 +3681,9 @@ on them, answered by a cheap model that returns JSON only.
   one of `harness-tasks-search-actions` (`archive`, `restore`, `stop`,
   `retry`, `start`, `verify`, `complete`, `message`, `reject`,
   `priority`), TEXT the words a message or a send-back carries or the
-  priority a `priority` action gives (one naming none, or the task's own,
-  or for a done task, is dropped), and `:confirm` t for an action
+  priority a `priority` action gives (one naming none, or the level the
+  task's session already has, or for a done task, is dropped), and
+  `:confirm` t for an action
   that interrupts work, merges it or sends words to an agent (stop,
   verify, complete, message, reject, and archive of a working task),
   false for the rest.  `:shown` is what the board shows now, which
@@ -3663,11 +3724,12 @@ on them, answered by a cheap model that returns JSON only.
   a working task first and archives it once it stopped
   (`harness-tasks-search--stop-wait`), stop never drops a task that has
   not started, retry is `task/retry`, message is a follow-up to the
-  task's session (or words added to the prompt of a task with no session
-  yet), priority is `task/set-priority` (its result says the priority
-  given, as `:text`), and the rest are the tasks methods.  ARCHIVE and
-  RESTORE carry `:undo`, the action that undoes them, and PRIORITY the
-  priority action back to what the task had.
+  task's session (or words added to the prompt of a task still waiting
+  for a slot, a backlog task's), priority is `priority/set' on the
+  task's session -- a task's priority is its session's (its result says
+  the priority given, as `:text`), and the rest are the tasks methods.
+  ARCHIVE and RESTORE carry `:undo`, the action that undoes them, and
+  PRIORITY the priority action back to what the task had.
 - Searches are not sessions: their cost is recorded with `usage/record`
   under the board's project with `:session nil`.
 - Settings `harness-tasks-search-model`, `harness-tasks-search-thinking`;
@@ -3932,6 +3994,42 @@ task up only reads, so it
 has no setting and `:ext` `:supervisor-write-up` t until the task
 starts, when it takes the task's setting.  Only the user changes it later.
 
+`harness-supervisor` and `harness-supervisor-tasks` are each `auto` (the
+default), `t` or nil, both layered (`harness-config-keys`) so a project's
+.dir-locals.el can decide how its sessions and its tasks start.  `auto`
+starts the session supervising and sets `:ext` `:supervisor-judge` t,
+and a cheap model decides from the opening message: a subscriber of
+`agent/turn-started` sends an ephemeral request beside the session's
+first turn (no tools, no thinking, one word asked;
+`harness-supervisor-judge-model`, the provider's cheap tier by default)
+holding the message alone, so the turn never waits for it.  A verdict
+starts the session as `supervisor/set` would and writes the note that
+says so, with `supervisor/changed`; a provider error, an unusable word
+or `harness-supervisor--judge-timeout` takes `:supervisor-judge` away
+and leaves the mode it started with, with the note saying that too.  A setting that decides (`t`/nil) and `supervisor/set` both take
+`:supervisor-judge` away, so the user's switch is never judged and a
+verdict that arrives after it is dropped.  A `submit_plan` or
+`retry_step' call the model wrote while the judge was still reading (its
+tool list from before the flip) is refused by its handler
+(`harness-supervisor--hands-on-result'), so no plan starts behind the
+mode's back.  Deleting a session forgets its judgement.
+
+The note the judge leaves (`harness-supervisor--note') is a hint, which
+the model never gets, written in the harness's voice: what was decided,
+and what to do about it.  Its `:meta` `:supervisor' holds the record the
+chat draws its buttons from (`harness-node-supervisor',
+harness-util.el): the judgement, the mode, the setting that decides how
+sessions start here and where it is written, and the two actions, each
+with the state nil, `done' or `undone'.  `supervisor/act' (SESSION-ID
+NODE-ID ACTION) is what a button calls: `always' writes the setting with
+`config/set' -- `harness-supervisor' at the session's directory, or
+`harness-supervisor-tasks' at the project of the task whose session it
+is -- and takes it back out of that layer with `config/unset', `mode'
+switches the session as `supervisor/set' does.  Each call moves its
+action on, records the state in the note (`session/update-node', so the
+chat redraws it with its [undo], then [redo]) and answers with the state
+and a message for the echo area.  Only the user calls it.
+
 - `supervisor/set SESSION-ID ON` → session plist: ON `t` for on, `:false`
   or nil for off, stored as `:false`, never removed.  Adds the hint
   "Supervisor mode on" or "Supervisor mode off" and emits
@@ -3952,11 +4050,17 @@ starts, when it takes the task's setting.  Only the user changes it later.
   `supervisor/set`.  Only the user does this, over ACP as
   `_harness/supervisor/set-all` with `:on` and `:filter` (the UI's
   `harness-set-supervisor-all`, the menu's V); there is no tool.
-- Settings: `harness-supervisor` (t; layered like `harness-model`, see
-  config), `harness-supervisor-tasks` (t), `harness-supervisor-tiers`
+- Settings: `harness-supervisor` (`auto`: a cheap model judges the
+  session from its opening message; `t` always supervises and nil is
+  always hands-on; layered like `harness-model`, see config),
+  `harness-supervisor-tasks` (the same three, for the sessions of
+  tasks, also layered, so a project decides how its tasks start),
+  `harness-supervisor-judge-model`
+  (`auto`: the provider's cheap tier, else the session's own model),
+  `harness-supervisor-tiers`
   (nil: an alist from `mundane`, `standard` or `hard` to a model id),
   `harness-supervisor-thinking` (`((deepseek . "max"))`: an alist from a
-  provider id to the level its sessions run at while they supervise) and
+  provider id to the level its sessions run at while they supervise),
   `harness-supervisor-worker-thinking` (`((deepseek . "medium"))`: an
   alist from a provider id to the level workers on its models run at),
   and `harness-supervisor-step-budget` (80), in the settings section
@@ -3982,8 +4086,8 @@ starts, when it takes the task's setting.  Only the user changes it later.
   emacs_windows emacs_buffer emacs_describe emacs_find_definition
   emacs_messages emacs_open`), `web_fetch web_search`, the coordination
   tools (`ask_user todo_write hand_in notify session_control
-  session_send session_move set_non_interactive task_control
-  task_submit`), the tool that asks for a directory
+  session_send session_move set_non_interactive set_priority
+  task_control task_submit`), the tool that asks for a directory
   (`harness-perms-dir-tool`) and `harness-supervisor-tools`
   (`no_plan_needed submit_plan retry_step`), plus `bash` when
   `sandbox/confined-p` says its directory is confined.  Any other
@@ -4260,9 +4364,9 @@ TRAMP prefixes come from the session host):
 | `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`) |
 | `plan` | Plan | plan | meta |
 | `todo_write` | Todo list | todos | meta |
-| `spawn_agent` | Sub-agent | prompt, fork, model, name, cwd, worktree | meta (runs the child in the background and returns at once; the jail checks `cwd`, as it checks bash's) |
+| `spawn_agent` | Sub-agent | prompt, fork, model, thinking, name, cwd, worktree, priority (of the child's session: low/medium/high; default: what it inherits) | meta (runs the child in the background and returns at once; the jail checks `cwd`, as it checks bash's) |
 | `skill_search` / `skill_load` | Search skills / Load skill | query / name, file (one of the skill's supporting files) | read (needs no approval: `harness-perms--auto-allow-tools`) |
-| `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read (needs no approval: `harness-perms--inspection-tools`) |
+| `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit (a session's priority is shown in its line when it is not medium) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_read` | Read session | session_id, limit, before, kinds, max_chars | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_history` | Session history | query, regexp, node_id, before, limit, max_chars, kinds, all | read (this session's own conversation from before its last compaction or handoff; needs no approval: `harness-perms--inspection-tools`) |
@@ -4270,13 +4374,14 @@ TRAMP prefixes come from the session host):
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta (answer refuses the harness's cold-cache question, left to the user) |
 | `session_move` | Move session | directory, session_id (default: this session), keep_old_directory, reason | meta (the user confirms every call, in every mode; see perms, Confirmations, and `session/move`) |
 | `set_non_interactive` | Non-interactive mode | enabled, session_id (default: this session) or all (every current session and task of every project), reason | meta (perms module's away-request stage: turning it on is decided only by the user's answer, in every mode, and denied at once in a non-interactive session; turning it off is allowed at once) |
+| `set_priority` | Set priority | priority (low/medium/high), session_id (default: this session) or all (every current session and task of every project) | meta (a priority is the session's, and every input here is a session id; a task's priority is set through its session) |
 | `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds (optional: wake anyway after this long) | read (registers a wake-up prompt and returns at once; needs no approval: `harness-perms--inspection-tools`) |
 | `task_list` | List tasks | column (pending/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read (needs no approval: `harness-perms--inspection-tools`) |
-| `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: the order waiting tasks start in) | meta |
-| `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete/priority), message (the feedback, for reject), priority (low/medium/high, for priority) | meta |
+| `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: given to the session the task is submitted with, and the order waiting tasks start in) | meta |
+| `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete/priority), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
-| `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus | exec (tools-dev; offered in a checkout of the harness only; needs no approval: `harness-perms--auto-allow-tools`) |
+| `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus (for the user: stays until the task is done) | exec (tools-dev; offered in a checkout of the harness only; the instance stops by itself once nothing needs it; needs no approval: `harness-perms--auto-allow-tools`) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
 | `notification_providers` | Notification providers | (none) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `merge_done` | Finish merge | none | meta (merge module) |
@@ -4312,7 +4417,9 @@ checkout's own live development loop (`scripts/dev.sh start`) with
 `HARNESS_DEV_SOCKET=harness-dev-HASH`, a socket derived from the
 checkout's true name, so the same worktree reuses its instance and two
 worktrees never share one; the instance's state and compiled files stay
-in that checkout's `scripts/.dev/state-SOCKET`.  The result lists the
+in that checkout's `scripts/.dev/state-SOCKET`, passed as
+`HARNESS_DEV_STATE` (dev.sh keeps one it inherits, so an instance
+opened by the harness of another would share that one's state).  The result lists the
 `scripts/dev.sh` commands that drive it (shot, keys, eval, errors,
 reload, stop) prefixed with that socket.  `path` defaults to the
 session's worktree, else its cwd; a directory that is not a checkout
@@ -4323,6 +4430,77 @@ FOCUS` does the same for the UI (focus raises the frame); Open harness
 in the menu of a task board's review card calls it, and the tool
 is in `harness-perms--auto-allow-tools', so the agent needs no approval
 to use it.
+
+Instances stop once nothing needs them, since nothing inside one ever
+stops it.  `tools-dev` records each instance it opens, and who for, in
+`dev-instances.json` in the state directory: `(:socket :path :sessions
+:user :task :opened)`, plus `:adopted` for one the sweep found.
+`:sessions` holds the sessions whose agents opened it.  `:user` marks
+one opened for the user to look at (the board's Open harness, or the
+tool with `focus`), and `:task` is the task it shows: the task of the
+session or of a session it descends from, else the task whose worktree
+it runs from.  An instance is needed while one of these holds:
+
+- one of its sessions is at work: its turn runs or waits on the user,
+  or `agent/outstanding` has something;
+- for a task's session, its task works: active with no `:outcome`, or
+  its session at work (as when merging).  For a sub-agent nothing
+  further counts.  Any other session needs it while it is open and
+  active within `harness-tools-dev--idle-timeout` (an hour);
+- it is the user's and its task is not done, archived or deleted.
+  Without a task, a session that opened it, or one it descends from,
+  is still open;
+- a working task, or a session at work, has its checkout as worktree
+  (or cwd).  The instance belongs to the worktree, whichever agent
+  opened it.
+
+An instance whose checkout is gone is never needed.  The check runs
+`harness-tools-dev--check-delay` seconds after `agent/turn-ended`,
+`session/deactivated`, `session/deleted`, `task/review`, `task/done`,
+`task/deleted` or `worktree/removed`, and only while something is
+recorded.  Instances being started or stopped are skipped, and a start
+waits for a stop of the same socket.  The tool's result tells the
+model when its instance stops (`harness-tools-dev--lifetime`).
+
+The sweep (`harness-tools-dev--sweep`) runs a minute after the module
+starts and every ten minutes after that.  It reads the process table
+(`harness-tools-dev-processes`: this user's Emacs processes whose
+command line is `--daemon=harness-dev-HASH -l
+CHECKOUT/scripts/harness-dev.el`) and forgets the records of
+instances that no longer run.  It adopts an unrecorded instance whose
+checkout is the worktree of one of this harness's tasks or sessions,
+or is gone, then checks everything.  Any other instance is someone
+else's and stays, and so does the one this harness runs in (its
+`daemonp`, or its parent's command line, see
+`harness-tools-dev--own-socket`).
+
+Stopping (`harness-tools-dev--stop`) runs `emacsclient -a false -s
+SOCKET --eval (kill-emacs)`, from Emacs's own `invocation-directory`,
+so nothing of the checkout has to exist.  A daemon still running
+`harness-tools-dev--kill-grace` seconds later has its process tree
+killed with TERM, then KILL.  The record is forgotten and
+`harness-dev/stopped` (SOCKET PATH REASON) is emitted.  The
+`worktree/before-remove` filter stops the instance of a worktree before
+git removes it.  As a backstop, `scripts/dev.sh start` runs with
+`HARNESS_DEV_OWNER` set to the Emacs the user runs
+(`harness-tools-dev--owner`: the harness process's parent, named by
+HARNESS_SERVER_PARENT, else this Emacs), and `scripts/harness-dev.el`
+checks every ten seconds that it still runs (same pid and start time),
+calling `kill-emacs` once it is gone.  A restart of the harness process
+alone leaves the instances running; the new process reads the record.
+A daemon started by hand has no owner, so this backstop leaves it
+running.  Methods:
+
+- `harness-dev/instances`: the records, each with `:needed` and
+  `:reason` (why nothing needs it).
+- `harness-dev/stop PATH`: stops the instance of PATH, recorded or
+  not.  It resolves to non-nil when one was stopped.
+- `harness-dev/sweep`: sweeps now, and resolves to the sockets
+  stopped.
+
+Tests set `harness-tools-dev--processes-function` to `ignore` and
+`harness-tools-dev--first-sweep` to nil (test helpers), so that no test
+finds or stops an Emacs it did not start.
 
 `bash` (tools-shell) lets a module confine a session's commands further
 through the sync filter `tools/sandbox-options`, run before each command
@@ -4404,6 +4582,21 @@ plus the context `compaction/estimate` gives the compacted fork
 (`harness-tools-agent-context-limit SUPERVISOR t CONTEXT`), set with
 `session/update` `:silent t`, as the hint that follows says it.
 
+A sub-agent's thinking level starts from its parent's: `spawn_agent`
+passes it to `session/create`, and `session/fork` inherits it, so a
+child thinks as the session it is a child of.  `spawn_agent`'s
+`:thinking` names one of its own, checked against the model the child
+will run on -- the parent's model, or the `:model` the call gives it --
+with `harness-session--model-levels`.  A level the provider catalogue
+does not give that model fails the call (`harness-tool-error`;
+`harness-tools-agent--child-thinking` names the model, the level and the
+levels it does offer) rather than starting a child at a level its model
+cannot act on, as `harness-session--btw-thinking` and the session UI
+keep to the levels a model offers.  Only a level the call asked for is
+checked: without `:thinking` a child keeps the parent's level, a fresh
+one through `session/create` and a fork through its own default, even
+when a `:model` override does not list it.
+
 The note under a running call (module `tools`): a call that runs for a
 while says more than the one line of progress the activity line shows,
 under its own block in a chat.  A handler emits it with
@@ -4456,7 +4649,8 @@ A recap of a session that is no task's is written here too, by
 a task's, since the card shows it and already keeps it fresh, else the
 one kept for the session in `harness-recap--sessions' with the same
 short call a card's is (the `harness-tasks-recap-model' cheap tier, at
-most `harness-tasks-recap-max-tokens' tokens) and the same thresholds
+most `harness-tasks-recap-max-tokens' tokens, without thinking unless
+`harness-tasks-recap-thinking' names a level) and the same thresholds
 `harness-tasks-recap-turns', `harness-tasks-recap-seconds' and
 `harness-tasks-recap-tool-calls', measured from the session's start
 until the first recap and from the last one after that (FORCE skips
@@ -5587,22 +5781,58 @@ same plain message for a harness without the module.
 
 Session priority (`harness-ui-priority`, module `ui-priority`, which
 requires `ui` and `ui-chat`): a session whose `:ext' `:priority' is not
-the default, medium, shows it in the chat's header line after the
-supervisor segment, through `harness-chat-header-functions`:
-"priority: high" in `harness-priority-high-face' or "priority: low"
-in `harness-priority-low-face' (dim).  A session at the default, one
-whose priority the harness has not sent, and one whose priority this UI
-does not know, show nothing.  A click on the segment, and `p` in the
-harness keys (`C-c h p', `harness-set-priority'), set the priority -- a
-level is read in the minibuffer, offering the session's own as the
-default -- with `_harness/priority/set {sessionId, priority}', and say
-what it is now ("Priority: high").  The command takes the buffer's
-setting target like the other session settings, so it refuses a task
-with no session yet and a session the harness has not sent; a harness
-without the priority module does not know the method, which is said
-plainly ("Priority is not available") rather than as a failure.  The
-header follows the session as the harness announces it (a priority set
-on the board's task, or by another client, shows up on its own).
+the default, medium, shows it as an arrow, one arrow made in one place
+-- `harness-ui-priority-arrow', the arrow up of
+`harness-icon-priority-high' in `harness-priority-high-face', or the
+arrow down of `harness-icon-priority-low' in
+`harness-priority-low-face' (dim) -- which the chat's header line puts
+beside the session's name through `harness-chat-header-functions', the
+session list's Priority column shows in its row, and a board's cards
+carry before their title.  A session at the
+default, one whose priority the harness has not sent, and one whose
+priority this UI does not know, show nothing.  The arrow is a button
+(`harness-ui-priority-click', through `harness-ui-mouse-keymap'): it
+carries its session id in the `harness-priority-session' text property,
+so a click acts on the session of the arrow clicked rather than the one
+in front of you, and offers the possible levels as a menu at the click
+-- highest first, the level in force greyed out -- setting the one
+chosen (`harness-ui-priority--ask', `--menu'); a click that chooses
+nothing changes nothing.  `y` in the
+harness keys (`C-c h y', `harness-set-priority') does the same without
+a click, reading the level in the minibuffer with the session's own as
+the default (`harness-ui-priority--choose', the one place the levels'
+order and prompt live, which the board's bulk priority button reads
+through too); either way the request is
+`_harness/priority/set {sessionId, priority}', and the answer says what
+it is now ("Priority: high").  `+` and `-` in the harness keys
+(`C-c h +', `C-c h -', `harness-priority-raise' / `-lower') move the
+session in front of you one level up or down, saying so, and saying it
+is high or low already at the top and the bottom; with a prefix
+argument they ask for the level instead, as the setter does, and `Y'
+(`harness-set-priority-all') gives every current session and task
+session one at once (`_harness/priority/set-all {priority, filter}',
+the filter `(harness-ui--everything-filter)'), reporting how many
+changed.  The four are the menu's own "Priority" column, standing
+beside "Session settings" so the settings column keeps the room a
+short frame has: Raise priority (`+`), Lower priority (`-`), Set
+priority… (`y`) and Priority for all sessions… (`Y`).
+Every command takes the buffer's setting target like the
+other session settings, and every one of them works on a session: a
+priority is the session's, so the setter refuses the board's new-task
+settings (a task that has not started is set on its card, `+` or `-`)
+and a session the harness has not sent; a harness without the priority
+module does not know the method, which is said plainly ("Priority is
+not available") rather than as a failure.  No command of this
+module refreshes anything itself: `session/set-ext'
+announces every change of a session (a pushed `_harness/session', and
+`session/ext-changed'), the pushed session updates the UI's cache and
+redraws the header, and the module follows `session/ext-changed' for
+the priority's key by reloading that cache
+\(`harness-ui-refresh-sessions'), which is how a priority set from
+anywhere -- the board's task, another client, `set_priority' -- shows
+up in the header and the session list on its own.  `C-c h p' stays the
+permission mode: the priority commands took `+', `-', `y' and `Y'
+rather than it.
 
 Compose box (`harness-ui-compose`): the editable box shared by chat
 buffers and the task board.  A host calls `harness-compose-setup`
@@ -5893,6 +6123,19 @@ non-interactive and supervisor mode also whenever they are turned off.
 None of them rewrites
 a `.dir-locals.el`.
 
+`harness-set-priority-all` (`C-c h Y', "Priority for all sessions…" in
+the menu's "Priority" column, the four priority entries' own, beside
+"Session settings") is the fourth of them, and the simplest: a
+priority is the session's, a task's included, so it is one call to
+`_harness/priority/set-all {priority, filter}' with the same
+`harness-ui--everything-filter' -- every current session and every
+current task's session, of every project, at once -- and no task record
+is touched at all.  The method leaves out the sessions already
+carrying that level of their own, and the command says how many
+changed.  It sets no default for later work: a task submitted
+afterwards is submitted with the board's next-task priority, which the
+board's own button picks (see the task board).
+
 A model switch asks the harness first (`handoff/check`, or
 `handoff/check-all` for `harness-set-model-all`, which asks once for the
 whole batch).  A lossy one asks how to hand over through
@@ -6010,7 +6253,17 @@ project.  The header's Review switch
 off, finished tasks merge and complete by themselves, and Ready for
 review shows only while tasks from before still wait there; turning it
 off while tasks of the board wait for review offers to verify them.
-`config/changed` brings every board the new value.  RET opens the session, and
+The settings line under the New task label ends, in Submit mode, with
+how many of a project's tasks work at once, a button: `N at a time`, or
+`all at once` without a limit, in `harness-task-held-face` at 0, when
+no task starts by itself.  A click reads another limit in the
+minibuffer (a number or `no limit`, the limit now the default; an
+answer that is neither changes nothing) and saves it the same way
+(`harness-ui-tasks-set-max-running`, `harness-tasks-max-running`); the
+harness starts the waiting tasks a higher limit lets through at once.
+On a narrow board the settings before the button shorten first, down to
+`harness-ui-tasks--min-settings-room` columns, so the button stays
+whole.  `config/changed` brings every board the new values.  RET opens the session, and
 `C-c h a` there leads back to the open board listing its task, whatever
 directory the session works in; elsewhere a task's worktree belongs to
 the main checkout's board (`harness-files-main-root`).  Redraws, after
@@ -6054,11 +6307,17 @@ toggle.  A click reads low, medium or high
 (`harness-ui-tasks-bulk-priority`; no answer changes nothing) and sends
 `task/set-all` with `:priority` alone; it is the only bulk change that
 touches priorities, and the next task keeps its own.  `+` and `-` on a card raise and lower its task's priority
-(`harness-ui-tasks-raise-priority` / `-lower-priority`, through
-`task/set-priority`; a completed task refuses, as it no longer waits),
-and so do the card's menu entries while the task has not started.  A
-high task wears `↑` (`harness-icon-task-priority-high`) before its
-title and a low one `↓`, and their facts open with "high priority" or
+(`harness-ui-tasks-raise-priority` / `-lower-priority`), which is its
+session's: they send `_harness/priority/set {sessionId, priority}' with
+the task's session -- a waiting task's included, since it has one from
+submission (a completed task refuses, as it no longer waits), and the
+board follows `session/ext-changed' for the priority's key -- the
+harness announces a session setting rather than only returning it --
+and re-reads the tasks, so the card shows the new level.  The card's
+menu entries do the same, offered while the task has not started and it
+is not at the end of the range.  A high task wears `↑`
+(`harness-icon-task-priority-high`) before its title and a low one
+`↓`, and their facts open with "high priority" or
 "low priority" (`harness-task-priority-high-face` /
 `-low-face`); medium shows nothing.  `I` or
 [Add session] makes an ongoing session a task.  A card in Ready for
@@ -6067,7 +6326,8 @@ harness in its menu (`mouse-3`, `harness-ui-tasks-open-harness`; no
 button, the title's click opening the session as on every card): it
 starts the worktree's own live development loop in an Emacs of its
 own, frame raised, through `harness-dev/open`, so the work can be
-tried before it is verified.  `b` or [BTW] (or the
+tried before it is verified.  That instance stops once the task is
+done, archived or deleted (see tools-dev).  `b` or [BTW] (or the
 usual BTW command) opens a BTW side conversation over the board about
 its tasks (`task/btw`).  `SPC` over a card, or [Answer…] / [Request…]
 on it, pops out what the task at point needs -- the permission prompt or
@@ -6288,7 +6548,14 @@ is changed.
 Other buffers: settings page (`harness-ui-config`, above), sessions list (`tabulated-list-mode`, tree indentation for
 children, filter/sort by any column; the Context and Output columns show
 each session's token figures, which grow while it streams; a Tok/s column shows each session's
-output rate, dimmed while it is not running; SPC on a session pops out what it
+output rate, dimmed while it is not running; a Priority column shows
+each session's arrow (up for high, down for low, nothing at the default
+medium, as a task's card and a chat's header line do), and it is a
+button: a click asks for that row's session's priority as the header's
+arrow does; `+` and `-` raise and lower the session at point and `p` sets it
+(as the harness keys do, a prefix argument asking for the level, through
+`_harness/priority/set'; a priority is the session's, so a task is set
+on its own session); SPC on a session pops out what it
 waits on (a session that waits on nothing leaves SPC scrolling), its
 status cell's tooltip says so (`harness-ui-sessions-requests`);
 scoped to the current project, its

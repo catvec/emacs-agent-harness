@@ -18,14 +18,19 @@
 ;; the sub-agents and forks working for a task work at the task's
 ;; priority -- and the default when nothing up the chain has one.
 ;;
+;; A task has one too, and it is its session's: every task has a session
+;; from the moment it is submitted (see the tasks module), so the board
+;; shows and orders waiting tasks by what the queues the task's work
+;; waits in go by (`harness-priority-of-task' reads it).  Nothing about
+;; a priority is stored on a task, and no method gives a task one: a
+;; task's priority is set on its session, as any session's is.
+;;
 ;; This module is the one place that knows the levels, how a level is
-;; written and what is above what; everything else asks it.  Tasks keep
-;; their own priority in their record -- a task has one before it has a
-;; session -- and give it to their session, so the rest of the harness
-;; sees the same priority they queue by.
+;; written and what is above what; everything else asks it.
 ;;
 ;; Clients reach it over ACP as `_harness/priority/get {sessionId}',
-;; `.../rank {sessionId}' and `.../set {sessionId, priority}'.
+;; `.../rank {sessionId}', `.../set {sessionId, priority}' and
+;; `.../set-all {priority, filter}'.
 
 ;;; Code:
 
@@ -55,28 +60,30 @@ A cycle of `:parent-id's, which nothing should make, is cut off there.")
 VALUE is a symbol or a string in any case, \"med\" meaning medium, so a
 priority can come from JSON, a tool, a board command or a person.  nil
 is the default, `harness-priority-default'."
-  (let* ((name (downcase (string-trim (cond ((null value) (symbol-name harness-priority-default))
-                                            ((symbolp value) (symbol-name value))
-                                            ((stringp value) value)
-                                            (t (format "%s" value))))))
-         (level (intern (if (equal name "med") "medium" name))))
-    (or (car (memq level harness-priority-levels))
-        (error "Unknown priority %s; it is %s"
-               value (harness-priority-levels-text)))))
+  (or (harness-priority-known (if (null value) harness-priority-default value))
+      (error "Unknown priority %s; it is %s"
+             value (harness-priority-levels-text))))
 
 (defun harness-priority-levels-text ()
   "Return the levels as a sentence reads them: \"low, medium or high\"."
   (let ((names (mapcar #'symbol-name harness-priority-levels)))
     (format "%s or %s" (string-join (butlast names) ", ") (car (last names)))))
 
+(defun harness-priority--level-name (value)
+  "Return VALUE as a level symbol, or nil when it names none.
+VALUE is read as `harness-priority-read' reads it, \"med\" included;
+here a value that names no level is nil, never an error."
+  (let ((name (and value (or (stringp value) (symbolp value))
+                   (downcase (string-trim (if (symbolp value) (symbol-name value)
+                                            value))))))
+    (and name (intern (if (equal name "med") "medium" name)))))
+
 (defun harness-priority-known (value)
   "Return VALUE as one of `harness-priority-levels', or nil.
 Unlike `harness-priority-read' this never signals: a value that names
 no level -- a stored priority a later version does not know, say -- is
-nil, for the caller to fall back on."
-  (car (memq (or (and (symbolp value) value)
-                 (and (stringp value) (intern (downcase (string-trim value)))))
-             harness-priority-levels)))
+nil, for the caller to fall back on.  \"med\" is medium here too."
+  (car (memq (harness-priority--level-name value) harness-priority-levels)))
 
 (defun harness-priority-level (value)
   "Return the level VALUE stands for: one of `harness-priority-levels'.
@@ -147,6 +154,31 @@ module): the higher it is, the sooner its calls and its commands go."
                   (symbol-name level) hint)
     level))
 
+;;;; A task's priority
+;;
+;; A task has no priority of its own: it is the priority of the task's
+;; session, and every task has a session from the moment it is submitted
+;; (see the tasks module), so the board shows and orders by what the
+;; session's own queues go by.  Nothing about a priority is stored on a
+;; task: a task's priority is set on its session, as any session's is
+;; (`priority/set').
+
+(defconst harness-priority-task-key :priority
+  "The key a task's record used to keep its priority under.
+Before a priority lived on a task's session, a task kept it in its own
+record, under this key.  A record from before that is read once, for
+the session its task gets (`harness-priority-of-task'), and nothing
+writes it any more: a task submitted since has no such field.")
+
+(defun harness-priority-of-task (task)
+  "Return TASK's priority: the one its session has (`harness-priority-of').
+TASK is a task record or view (a plist).  A task with no session -- a
+record from before every task had one -- says the level its record kept
+then (`harness-priority-task-key'), or `harness-priority-default'."
+  (if-let* ((sid (plist-get task :session)))
+      (harness-priority-of sid)
+    (harness-priority-level (plist-get task harness-priority-task-key))))
+
 ;;;; Methods
 
 (harness-defmethod priority/get (session-id)
@@ -169,8 +201,26 @@ priority is the session's own from then on (see `priority/get'), and
 orders the queues its work waits in."
   (symbol-name (harness-priority-set-session session-id priority)))
 
+(harness-defmethod priority/set-all (priority &optional filter)
+  "Give every session FILTER selects PRIORITY; return the ids that changed.
+The bulk way to give sessions a priority, as `task/set-all' is for
+tasks.  FILTER is the one of `session/select' (`session/set-all''s);
+nil selects every session.  PRIORITY is read as
+`harness-priority-read' reads it.  A session already carrying that
+level of its own is left alone.  The ids come newest first, as
+`session/set-all' returns them."
+  (unless (harness-method-exists-p 'session/select)
+    (error "The sessions module is not loaded, so sessions have no priority"))
+  (let ((level (harness-priority-read priority)) changed)
+    (dolist (s (harness-call 'session/select filter))
+      (let ((sid (plist-get s :id)))
+        (unless (eq level (harness-priority-of-ext (plist-get s :ext)))
+          (harness-priority-set-session sid (symbol-name level))
+          (push sid changed))))
+    (nreverse changed)))
+
 (harness-define-module 'priority
-  :doc "Session priority: low, medium or high, and the one vocabulary for it.")
+  :doc "Session priority (a task's is its session's): low, medium or high, and the one vocabulary for it.")
 
 (provide 'harness-priority)
 ;;; harness-priority.el ends here

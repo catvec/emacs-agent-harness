@@ -5,7 +5,8 @@
 ;; The priority plugin (lisp/modules/harness-priority.el) owns the
 ;; levels, and keeps a session's priority in the session's `:ext': any
 ;; session can have one, a session with none of its own takes its
-;; parent's, and the tasks and the tool slots queue by it.
+;; parent's, a task's is its session's, and the tasks and the tool
+;; slots queue by it.
 
 ;;; Code:
 
@@ -134,13 +135,65 @@
       ;; A stored session keeps it: it is in the record, not the runtime.
       (should (equal '(:priority "high") (plist-get (harness-call 'session/get id) :ext))))))
 
+(ert-deftest harness-priority-set-all-reaches-what-it-selects ()
+  "`priority/set-all' gives one level to the sessions `session/select' picks."
+  (harness-priority-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (plain (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (one (plist-get (harness-call 'session/create :cwd cwd :kind 'subagent) :id))
+           (two (plist-get (harness-call 'session/create :cwd cwd :kind 'subagent) :id)))
+      (harness-call 'priority/set one "high")
+      (harness-call 'priority/set two "low")
+      ;; The filter is `session/select''s: here the sub-agents, and the
+      ;; ids that come back are the ones that changed -- a session
+      ;; already at that level of its own is left alone.
+      (should (equal (list two) (harness-call 'priority/set-all "high" (list :kind 'subagent))))
+      (should (equal "high" (harness-call 'priority/get two)))
+      (should (equal "high" (harness-call 'priority/get one)))
+      (should (equal nil (harness-call 'priority/set-all "high" (list :kind 'subagent))))
+      ;; A session the filter leaves out keeps its own.
+      (should (equal "medium" (harness-call 'priority/get plain)))
+      ;; A name no level has is refused before anything changes.
+      (should-error (harness-call 'priority/set-all "urgent" (list :kind 'subagent)))
+      (should (equal "high" (harness-call 'priority/get one)))
+      ;; Both sub-agents are changed, and reported, this time.
+      (let ((changed (harness-call 'priority/set-all "low" (list :kind 'subagent))))
+        (should (= 2 (length changed)))
+        (should (member one changed))
+        (should (member two changed)))
+      (should (equal "low" (harness-call 'priority/get one)))
+      (should (equal "medium" (harness-call 'priority/get plain)))
+      ;; Without a filter it is every session of the store.
+      (let ((changed (harness-call 'priority/set-all "high")))
+        (should (member plain changed))
+        (should (member one changed))
+        (should (member two changed)))
+      (should (equal "high" (harness-call 'priority/get plain))))))
+
+(ert-deftest harness-priority-a-task-has-its-sessions ()
+  "A task's priority is its session's; a record from before says its own."
+  (harness-priority-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (id (plist-get (harness-call 'session/create :cwd cwd) :id)))
+      (harness-call 'priority/set id "high")
+      (should (eq 'high (harness-priority-of-task (list :id "t-1" :session id))))
+      ;; A task from before every task had a session kept its own field
+      ;; (`harness-priority-task-key'), which nothing writes any more.
+      (should (eq 'low (harness-priority-of-task (list :id "t-2" :priority "low"))))
+      (should (eq 'medium (harness-priority-of-task (list :id "t-3"))))
+      ;; A stale value of such a record is the default, never an error.
+      (should (eq 'medium (harness-priority-of-task (list :id "t-4" :priority "urgent"))))
+      ;; A task whose session the harness does not know either.
+      (should (eq 'medium (harness-priority-of-task (list :id "t-5" :session "no-such-session")))))))
+
 (ert-deftest harness-priority-clients-reach-the-priorities ()
   "A client reaches them over ACP as `_harness/priority/...'."
   (harness-priority-test-with
     (harness-test-load-module 'acp)
     (should (member "priority/get" (harness-acp--extension-methods)))
     (should (member "priority/rank" (harness-acp--extension-methods)))
-    (should (member "priority/set" (harness-acp--extension-methods)))))
+    (should (member "priority/set" (harness-acp--extension-methods)))
+    (should (member "priority/set-all" (harness-acp--extension-methods)))))
 
 (provide 'harness-priority-test)
 ;;; harness-priority-test.el ends here

@@ -15,7 +15,7 @@
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (dolist (m '(store project config provider provider-demo tools session agent tools-agent))
+     (dolist (m '(store project config provider provider-demo tools session agent tools-agent priority))
        (harness-test-load-module m))
      (clrhash harness-sessions)
      (clrhash harness-agent--turns)
@@ -415,6 +415,150 @@ and the caller hears the answer, or that it was dismissed."
            (result (harness-test-await (harness-tools-agent-test-run sid "spawn_agent" '(:prompt "  ")))))
       (should (plist-get result :is-error))
       (should (string-match-p "needs a prompt" (plist-get result :content))))))
+
+(ert-deftest harness-tools-agent-spawn-priority ()
+  "The spawn_agent tool gives the child session a priority of its own.
+A level no level has is refused before any child is made; without the
+option the child works at what it inherits."
+  (harness-tools-agent-test-with
+    (let* ((sid (harness-tools-agent-test-session))
+           (children (lambda () (harness-call 'session/list (list :parent-id sid))))
+           (spawn (lambda (&rest plist)
+                    (plist-get (plist-get (harness-test-await
+                                           (harness-tools-agent-test-run
+                                            sid "spawn_agent"
+                                            (append '(:prompt "hi" :name "kid") plist)))
+                                          :meta)
+                               :child-id))))
+      ;; The parent works at high; a child without a priority of its own
+      ;; inherits it (see `harness-priority-session').
+      (harness-call 'priority/set sid "high")
+      (let ((cid (funcall spawn)))
+        (should (eq 'high (harness-priority-of cid)))
+        (should-not (harness-priority-of-ext (plist-get (harness-call 'session/get cid) :ext))))
+      ;; Its own, whatever the parent works at, in any case.
+      (let ((cid (funcall spawn :priority "LOW")))
+        (should (eq 'low (harness-priority-of cid)))
+        (should (eq 'low (harness-priority-of-ext (plist-get (harness-call 'session/get cid) :ext)))))
+      ;; A level no level has is refused, and no child is made.
+      (let ((r (harness-test-await (harness-tools-agent-test-run sid "spawn_agent"
+                                                                 '(:prompt "hi" :priority "urgent")))))
+        (should (plist-get r :is-error))
+        (should (string-match-p "Unknown priority" (plist-get r :content))))
+      (should (= 2 (length (funcall children)))))))
+
+;;;; The thinking level of a sub-agent
+
+(defvar harness-providers)
+
+(defmacro harness-tools-agent-test-with-thinker (&rest body)
+  "Run BODY in `harness-tools-agent-test-with' with a provider `test-think'.
+Its model `thinker' offers the thinking levels low, medium and high; its
+model `plain' offers none."
+  (declare (indent 0))
+  `(harness-tools-agent-test-with
+     (unwind-protect
+         (progn
+           (harness-define-provider 'test-think
+             :complete #'ignore
+             :models (lambda ()
+                       (harness-resolved (list (list :name "thinker" :thinking-levels '("low" "medium" "high"))
+                                               (list :name "plain")))))
+           ,@body)
+       (remhash 'test-think harness-providers)
+       (harness-provider--forget 'test-think))))
+
+(defun harness-tools-agent-test-thinking (sid level)
+  "Give SID the thinking level LEVEL, with no hint."
+  (harness-call 'session/update sid :thinking level :silent t))
+
+(defun harness-tools-agent-test-spawned (sid input)
+  "Spawn INPUT in SID, and return the child session plist."
+  (harness-call 'session/get (harness-tools-agent-test-spawn sid input)))
+
+(ert-deftest harness-tools-agent-spawn-child-thinks-at-its-parents-level ()
+  "Without `:thinking' a child thinks at its parent's level, fresh and forked."
+  (harness-tools-agent-test-with
+    (let ((sid (harness-tools-agent-test-session)))
+      (harness-tools-agent-test-thinking sid "high")
+      (should (equal "high" (plist-get (harness-tools-agent-test-spawned sid '(:prompt "hi")) :thinking)))
+      (should (equal "high" (plist-get (harness-tools-agent-test-spawned
+                                        sid '(:prompt "carry on" :fork t))
+                                       :thinking)))
+      (should (equal "high" (plist-get (harness-call 'session/get sid) :thinking))))))
+
+(ert-deftest harness-tools-agent-spawn-child-thinks-at-the-level-it-is-asked-for ()
+  "An explicit `:thinking' is the child's level, fresh and forked, and
+the fork's is the level it was asked for rather than its parent's."
+  (harness-tools-agent-test-with
+    (let ((sid (harness-tools-agent-test-session)))
+      (harness-tools-agent-test-thinking sid "low")
+      (let ((fresh (harness-tools-agent-test-spawned sid '(:prompt "hi" :thinking "high"))))
+        (should (eq 'subagent (plist-get fresh :kind)))
+        (should (equal "high" (plist-get fresh :thinking))))
+      (let ((forked (harness-tools-agent-test-spawned
+                     sid '(:prompt "carry on" :fork t :thinking "high"))))
+        (should (equal "high" (plist-get forked :thinking)))
+        ;; The fork shares the parent's conversation, its own thinking aside.
+        (should (equal (plist-get (harness-call 'session/get sid) :id)
+                       (plist-get forked :parent-id))))
+      ;; The parent keeps the level it had.
+      (should (equal "low" (plist-get (harness-call 'session/get sid) :thinking))))))
+
+(ert-deftest harness-tools-agent-spawn-thinking-is-checked-against-the-childs-model ()
+  "A level is checked against the model the child will run on: the
+parent's, or the `:model' the call gives it."
+  (harness-tools-agent-test-with-thinker
+    (let ((sid (harness-tools-agent-test-session)))
+      (harness-tools-agent-test-thinking sid "high")
+      ;; The child's model offers the level, the parent's does not.
+      (let ((child (harness-tools-agent-test-spawned
+                    sid '(:prompt "hi" :model "test-think:thinker" :thinking "medium"))))
+        (should (equal "test-think:thinker" (plist-get child :model)))
+        (should (equal "medium" (plist-get child :thinking))))
+      ;; A fork on another model takes the level the same way.
+      (let ((child (harness-tools-agent-test-spawned
+                    sid '(:prompt "carry on" :fork t :model "test-think:thinker"
+                          :thinking "medium"))))
+        (should (equal "test-think:thinker" (plist-get child :model)))
+        (should (equal "medium" (plist-get child :thinking))))
+      ;; Without a level the parent's stands, even one the child's model
+      ;; does not list: only a level the call asked for is checked.
+      (let ((child (harness-tools-agent-test-spawned
+                    sid '(:prompt "hi" :model "test-think:plain"))))
+        (should (equal "test-think:plain" (plist-get child :model)))
+        (should (equal "high" (plist-get child :thinking)))))))
+
+(ert-deftest harness-tools-agent-spawn-refuses-a-thinking-level-the-model-lacks ()
+  "A level the child's model does not offer fails the call, naming the
+levels it does, and no child starts."
+  (harness-tools-agent-test-with-thinker
+    (let* ((sid (harness-tools-agent-test-session))
+           (try (lambda (input)
+                  (harness-test-await (harness-tools-agent-test-run sid "spawn_agent" input)))))
+      ;; The demo model offers low and high, not medium.
+      (let ((result (funcall try '(:prompt "hi" :thinking "medium"))))
+        (should (plist-get result :is-error))
+        (should (string-match-p "Model demo:scripted does not offer the thinking level medium"
+                                (plist-get result :content)))
+        (should (string-match-p "it offers low, high" (plist-get result :content)))
+        (should (string-match-p "Leave :thinking out" (plist-get result :content))))
+      ;; A fork is refused the same way.
+      (should (plist-get (funcall try '(:prompt "hi" :fork t :thinking "max")) :is-error))
+      ;; A model the catalogue gives no levels at all.
+      (let ((result (funcall try '(:prompt "hi" :model "test-think:plain" :thinking "low"))))
+        (should (plist-get result :is-error))
+        (should (string-match-p "Model test-think:plain does not offer the thinking level low"
+                                (plist-get result :content)))
+        (should (string-match-p "it offers none" (plist-get result :content))))
+      ;; The model the check names is the child's, `:model' included: this
+      ;; level is one the parent's model lists.
+      (let ((result (funcall try '(:prompt "hi" :model "test-think:thinker" :thinking "max"))))
+        (should (plist-get result :is-error))
+        (should (string-match-p "Model test-think:thinker does not offer the thinking level max"
+                                (plist-get result :content))))
+      (should-not (harness-call 'session/list (list :parent-id sid)))
+      (should-not (harness-call 'agent/outstanding sid)))))
 
 (defun harness-tools-agent-test-record-call (sid call-id input)
   "Record a spawn_agent call CALL-ID with INPUT in SID, as the agent does."

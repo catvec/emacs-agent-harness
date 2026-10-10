@@ -206,7 +206,10 @@ The request is the one a card's recap is: `harness-recap--system-prompt'
 and what `harness-recap--prompt' makes of TASK and SESSION, at most
 `harness-tasks-recap-max-tokens' tokens, on the cheap tier of
 `harness-tasks-recap-model', with the thinking level of
-`harness-tasks-recap-thinking'.  ON-DONE is called once, with RECAP (the
+`harness-tasks-recap-thinking'.  A recap is one short line, so a nil
+level asks for no thinking (`:no-thinking'): a model whose thinking is
+on by default would spend the whole budget on the reasoning and stop at
+`max-tokens' with no line.  ON-DONE is called once, with RECAP (the
 text the model wrote and `harness-recap-sanitise' accepted, nil when it
 wrote none or failed), the provider's REASON for stopping and its ERROR
 when it failed.  Return the promise of the call, which resolves to
@@ -235,6 +238,11 @@ RECAP, or rejects with why there is none."
                                                                     :text (harness-recap--prompt task session)))))
                          :tools nil
                          :max-tokens harness-tasks-recap-max-tokens
+                         ;; A recap is one short line: without a level of
+                         ;; the user's, ask for no thinking (a model that
+                         ;; thinks by default would spend the whole budget
+                         ;; on the reasoning and stop at `max-tokens').
+                         :no-thinking (null harness-tasks-recap-thinking)
                          :on-event
                          (lambda (ev)
                            (pcase (plist-get ev :type)
