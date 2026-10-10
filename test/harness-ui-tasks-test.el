@@ -1487,7 +1487,7 @@ tests that check a card's detail line show it first."
       (harness-ui-tasks--render))))
 
 (ert-deftest harness-ui-tasks-refine-toggle-fills-the-backlog ()
-  "With the toggle on Refine a new task is written up and waits in Pending for its start."
+  "With the toggle on Refine a new task is written up and waits in the Backlog for its start."
   (harness-ui-tasks-test-with
     (let ((harness-provider-demo-script-override
            '((:type text :delta "Fix nested quotes in the parser\n\nHandle them in parse-args.")
@@ -1509,7 +1509,7 @@ tests that check a card's detail line show it first."
         ;; The toggle stays on Refine for the next one.
         (should harness-ui-tasks--refine))
       (harness-ui-tasks-test--wait-text
-       board "Pending  1\\(.\\|\n\\)*Fix nested quotes in the parser")
+       board "Backlog  1\\(.\\|\n\\)*Fix nested quotes in the parser")
       (harness-ui-tasks-test--show-subtitle board "Fix nested quotes in the parser")
       (harness-ui-tasks-test--wait-text board "refined, start it when ready")
       (should (string-match-p "In progress  0" (harness-ui-tasks-test--board-text board)))
@@ -1520,7 +1520,8 @@ tests that check a card's detail line show it first."
       ;; Its card starts it, and its session does the work.
       (harness-ui-tasks-test--goto-card board "Fix nested quotes")
       (with-current-buffer board
-        (should (equal '("Start now" "Edit")
+        ;; The backlog's way out: the queue first, then an explicit start.
+        (should (equal '("Queue it" "Start now")
                        (take 2 (mapcar #'car (harness-ui-tasks--actions (harness-ui-tasks--task))))))
         (should (eq 'harness-ui-tasks-refine (key-binding (kbd "r"))))
         (harness-ui-tasks-start))
@@ -1540,7 +1541,7 @@ tests that check a card's detail line show it first."
            '((:type text :delta "First write-up") (:type done :stop-reason end-turn))))
       (with-current-buffer board (harness-ui-tasks-toggle-refine))
       (harness-ui-tasks-test--type-and-submit board "An idea")
-      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*First write-up")
+      (harness-ui-tasks-test--wait-text board "Backlog  1\\(.\\|\n\\)*First write-up")
       (let ((harness-provider-demo-script-override
              '((:type text :delta "Second write-up") (:type done :stop-reason end-turn))))
         (harness-ui-tasks-test--goto-card board "First write-up")
@@ -1551,7 +1552,7 @@ tests that check a card's detail line show it first."
           (insert "call it the second")
           (harness-ui-tasks-submit)
           (should-not harness-ui-tasks--target))
-        (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Second write-up")))))
+        (harness-ui-tasks-test--wait-text board "Backlog  1\\(.\\|\n\\)*Second write-up")))))
 
 (ert-deftest harness-ui-tasks-refine-failure-needs-input ()
   "A write-up that stops asks for you; written by hand, the task waits in the backlog."
@@ -1570,7 +1571,7 @@ tests that check a card's detail line show it first."
         (goto-char harness-compose-start)
         (insert "Make the shaky idea solid")
         (harness-ui-tasks-submit))
-      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Make the shaky idea solid")
+      (harness-ui-tasks-test--wait-text board "Backlog  1\\(.\\|\n\\)*Make the shaky idea solid")
       (harness-ui-tasks-test--show-subtitle board "Make the shaky idea solid")
       (harness-ui-tasks-test--wait-text board "on hold"))))
 
@@ -1606,7 +1607,7 @@ tests that check a card's detail line show it first."
                (:type done :stop-reason end-turn))))
         (harness-ui-tasks-test--goto-card board "duplicate of")
         (with-current-buffer board (harness-ui-tasks-refine))
-        (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Export the reports as CSV")))))
+        (harness-ui-tasks-test--wait-text board "Backlog  1\\(.\\|\n\\)*Export the reports as CSV")))))
 
 (ert-deftest harness-ui-tasks-toggle-shows-the-current-mode ()
   "The toggle is one button naming the current mode; a click switches to the other."
@@ -2996,6 +2997,77 @@ Pressing it again resumes, and the waiting task starts."
           (execute-kbd-macro "P"))
         (harness-test-wait (lambda () (eq 'active (plist-get (harness-call 'task/get id) :state)))
                            5 "the waiting task to start")))))
+
+(declare-function harness-tasks--schedule "harness-tasks")
+
+(ert-deftest harness-ui-tasks-backlog-is-its-own-section ()
+  "A backlog task waits in Backlog; Pending holds only what the queue starts.
+The pending heading says the queue is suspended only when it really is,
+and a queued task still drains from Pending to In progress while the
+backlog task stays where it is."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-provider-demo-script-override
+           '((:type text :delta "Fix the lexer\n\nIt drops the last token.") (:type done :stop-reason end-turn))))
+      ;; A queued task (0 at a time, so it waits) and one for the backlog.
+      (harness-ui-tasks-test--type-and-submit board "Waits for a slot")
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Waits for a slot")
+      (with-current-buffer board (harness-ui-tasks-toggle-refine))
+      (harness-ui-tasks-test--type-and-submit board "jot the lexer down")
+      (harness-ui-tasks-test--wait-text board "Backlog  1\\(.\\|\n\\)*Fix the lexer")
+      (let ((text (harness-ui-tasks-test--board-text board)))
+        ;; The queued task is Pending; the backlog has a section of its own,
+        ;; saying only you start one, with no suspended-queue notice.
+        (should (string-match-p "Pending  1\\(.\\|\n\\)*Waits for a slot" text))
+        (should (string-match-p "Backlog  1  · start one when ready\\(.\\|\n\\)*Fix the lexer" text))
+        (should-not (string-match-p "queue suspended" text)))
+      ;; Refined: the card says it waits to be started, not for a slot.
+      (harness-ui-tasks-test--show-subtitle board "Fix the lexer")
+      (should (string-match-p "refined, start it when ready"
+                              (harness-ui-tasks-test--card-text board "Fix the lexer")))
+      ;; Suspended: Pending says so; the backlog, which never drains on its
+      ;; own, waits for you either way.
+      (with-current-buffer board (harness-ui-tasks-toggle-queue))
+      (harness-ui-tasks-test--wait-text board "Pending  1  · queue suspended: nothing starts on its own")
+      (should (string-match-p "Backlog  1  · start one when ready\\(.\\|\n\\)*Fix the lexer"
+                              (harness-ui-tasks-test--board-text board)))
+      ;; A free slot does not start either while the queue is suspended.
+      (setq harness-tasks-max-running 1)
+      (harness-tasks--schedule)
+      (should (string-match-p "Pending  1\\(.\\|\n\\)*Waits for a slot"
+                              (harness-ui-tasks-test--board-text board)))
+      ;; Resuming starts the queued task; the backlog task stays, waiting
+      ;; for its start by hand.
+      (with-current-buffer board (harness-ui-tasks-toggle-queue))
+      (harness-ui-tasks-test--wait-text board "Pending  0")
+      (should (string-match-p "Backlog  1\\(.\\|\n\\)*Fix the lexer"
+                              (harness-ui-tasks-test--board-text board))))))
+
+(ert-deftest harness-ui-tasks-queue-a-backlog-task ()
+  "Queue it on a backlog card moves it to Pending, where the queue starts it."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-provider-demo-script-override
+           '((:type text :delta "Fix the lexer\n\nIt drops the last token.") (:type done :stop-reason end-turn))))
+      (with-current-buffer board (harness-ui-tasks-toggle-refine))
+      (harness-ui-tasks-test--type-and-submit board "jot the lexer down")
+      (harness-ui-tasks-test--wait-text board "Backlog  1\\(.\\|\n\\)*Fix the lexer")
+      ;; The card offers the queue first, and the board key does the same.
+      (harness-ui-tasks-test--goto-card board "Fix the lexer")
+      (with-current-buffer board
+        (should (equal '("Queue it" "Start now")
+                       (take 2 (mapcar #'car
+                                       (cl-remove 'harness-ui-tasks-open
+                                                  (harness-ui-tasks--actions (harness-ui-tasks--task))
+                                                  :key #'cadr)))))
+        (should (eq 'harness-ui-tasks-queue (key-binding (kbd "Q"))))
+        (harness-ui-tasks-queue))
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Fix the lexer")
+      (let ((task (car (harness-call 'task/list default-directory))))
+        (should (eq 'pending (plist-get task :state)))
+        (should (eq 'pending (plist-get task :column)))
+        (should-not (plist-get task :backlog)))
+      (should (string-match-p "Backlog  0" (harness-ui-tasks-test--board-text board))))))
 
 (ert-deftest harness-ui-tasks-return-to-pending-from-the-card ()
   "u returns the task at point to the pending queue, keeping its session.

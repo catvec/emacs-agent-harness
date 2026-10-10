@@ -549,7 +549,8 @@ happened, or remarks on the longest word of the user's last message."
     ("^needs input" "blocked" "stuck" "waiting" "need me" "needs me")
     ("^review" "review" "to review" "reviewed")
     ("^in progress" "running" "working" "in progress" "active")
-    ("^pending" "pending" "queued" "backlog")
+    ("^pending" "pending" "queued")
+    ("^backlog" "backlog")
     ("^done" "done" "completed" "finished" "merged"))
   "Words of a search that name a state, with the regexp of the states they mean.")
 
