@@ -212,6 +212,8 @@ DOC is its documentation."
 (harness-ui-define-icon harness-icon-running "running" "►" "run" "Running session.")
 (harness-ui-define-icon harness-icon-blocked "blocked" "‖" "wait" "Blocked session.")
 (harness-ui-define-icon harness-icon-inactive "inactive" "○" "off" "Inactive session.")
+(harness-ui-define-icon harness-icon-up "up" "↑" "up"
+                        "The session a child session was started from.")
 (harness-ui-define-icon harness-icon-user "user" "◆" "you" "The user.")
 (harness-ui-define-icon harness-icon-agent "agent" "◇" "agent" "The agent.")
 (harness-ui-define-icon harness-icon-system "system" "⚙" "sys" "The harness, sending a message on its own.")
