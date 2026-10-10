@@ -18,6 +18,7 @@
 (defvar harness-sessions)
 (defvar harness-tools)
 (defvar harness-agent--turns)
+(defvar harness-agent--cancel-grace)
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
 (defvar harness-tasks--loaded)
@@ -2728,6 +2729,81 @@ q on the board ends it.  C-c C-z does q's job from the compose box."
 
 (declare-function harness-toggle-supervisor "harness-ui-supervisor")
 (declare-function harness-ui-tasks--supervisor-p "harness-ui-tasks")
+
+(ert-deftest harness-ui-tasks-queue-suspends-from-the-board ()
+  "P suspends the board's queue: the header, the Pending heading and the box say so.
+Pressing it again resumes, and the waiting task starts."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 1))
+      (harness-ui-tasks-test--type-and-submit board "First task")
+      (harness-ui-tasks-test--type-and-submit board "Waiting task")
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Waiting task")
+      (with-current-buffer board
+        (goto-char (point-min))
+        (should (eq 'harness-ui-tasks-toggle-queue (key-binding (kbd "P"))))
+        (should (string-match-p "Queue: running" (harness-ui-tasks--header most-positive-fixnum)))
+        (execute-kbd-macro "P"))
+      ;; Suspended: the header says so, and so do the heading and the box.
+      (harness-test-wait
+       (lambda () (with-current-buffer board
+                    (harness-ui-tasks--render)
+                    (string-match-p "Queue suspended" (harness-ui-tasks--header most-positive-fixnum))))
+       5 "the queue to be suspended")
+      (harness-ui-tasks-test--wait-text board "queue suspended: nothing starts on its own")
+      (with-current-buffer board
+        (should (string-match-p "queue suspended" (harness-ui-tasks--new-settings-line))))
+      ;; The waiting task stays pending while the queue is suspended, and
+      ;; its card says so, the facts coming with the tasks a moment later.
+      (let ((id (harness-ui-tasks-test--card-id board "Waiting task")))
+        (should (eq 'pending (plist-get (harness-call 'task/get id) :state)))
+        (harness-test-wait
+         (lambda () (with-current-buffer board
+                      (plist-get (cl-find id harness-ui-tasks--tasks
+                                          :key (lambda (task) (plist-get task :id)) :test #'equal)
+                                 :queue-suspended)))
+         5 "the board to hear the queue is suspended")
+        (harness-ui-tasks-test--show-subtitle board "Waiting task")
+        (should (string-match-p "queue suspended" (harness-ui-tasks-test--card-text board "Waiting task")))
+        ;; Resuming starts it.
+        (with-current-buffer board
+          (goto-char (point-min))
+          (execute-kbd-macro "P"))
+        (harness-test-wait (lambda () (eq 'active (plist-get (harness-call 'task/get id) :state)))
+                           5 "the waiting task to start")))))
+
+(ert-deftest harness-ui-tasks-return-to-pending-from-the-card ()
+  "u returns the task at point to the pending queue, keeping its session.
+It waits there, its card saying it carries on where it stopped; s starts
+it again."
+  (harness-ui-tasks-test-with
+    (let ((harness-agent--cancel-grace 0.05)
+          (harness-provider-demo-script-override '((:type wait :seconds 30))))
+      (harness-ui-tasks-test--type-and-submit board "Long work")
+      (harness-ui-tasks-test--wait-text board "In progress  1\\(.\\|\n\\)*Long work")
+      (let ((id (harness-ui-tasks-test--card-id board "Long work")))
+        (let ((sid (plist-get (harness-call 'task/get id) :session)))
+          (with-current-buffer board
+            (harness-ui-tasks-test--goto-card board "Long work")
+            (should (eq 'harness-ui-tasks-return-to-pending (key-binding (kbd "u"))))
+            (execute-kbd-macro "u"))
+          ;; The card moves to Pending, stopped, with its session kept.
+          (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Long work")
+          (let ((task (harness-call 'task/get id)))
+            (should (eq 'pending (plist-get task :state)))
+            (should (plist-get task :returned))
+            (should (equal sid (plist-get task :session))))
+          (harness-ui-tasks-test--show-subtitle board "Long work")
+          (should (string-match-p "returned, carries on where it stopped"
+                                  (harness-ui-tasks-test--card-text board "Long work")))
+          ;; The return started nothing, and s starts it again.
+          (harness-test-wait (lambda () (not (harness-call 'agent/running sid))) 5 "its turn to stop")
+          (should (eq 'pending (plist-get (harness-call 'task/get id) :state)))
+          (with-current-buffer board
+            (harness-ui-tasks-test--goto-card board "Long work")
+            (execute-kbd-macro "s"))
+          (harness-test-wait (lambda () (eq 'active (plist-get (harness-call 'task/get id) :state)))
+                             5 "the task to start again")
+          (should (equal sid (plist-get (harness-call 'task/get id) :session))))))))
 
 (ert-deftest harness-ui-tasks-supervisor-switch ()
   "The settings line turns supervisor mode for the next task, and in bulk.

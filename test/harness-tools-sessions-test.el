@@ -9,6 +9,7 @@
 (defvar harness-sessions)
 (defvar harness-agent--turns)
 (defvar harness-tools-agent--questions)
+(defvar harness-agent--cancel-grace)
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
 (defvar harness-tasks--loaded)
@@ -1222,6 +1223,52 @@ task_list filters on it and task_wait can wait for it."
       (should (string-match-p "No tasks match" (harness-tools-sessions-test-ok me "task_list" '(:column "active"))))
       (should (string-match-p "Done waiting"
                               (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "merging")))))))
+
+(ert-deftest harness-tools-sessions-task-queue-suspend-and-resume ()
+  "task_control suspends and resumes a project's queue; task_list says so.
+An explicit start still starts a task while the queue is suspended."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (me (harness-tools-sessions-test-session))
+           (id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Waits for the queue"))
+                                     :meta)
+                          :task-id)))
+      (should (string-match-p "Queue suspended"
+                              (harness-tools-sessions-test-ok me "task_control" '(:action "suspend-queue"))))
+      (let ((listing (harness-tools-sessions-test-ok me "task_list" nil)))
+        (should (string-match-p "Queue suspended for" listing))
+        (should (string-match-p "waiting while the queue is suspended" listing)))
+      (should (eq 'pending (plist-get (harness-call 'task/get id) :state)))
+      ;; The suspension holds back the scheduler, never an explicit start.
+      (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "start"))
+      (should (eq 'active (plist-get (harness-call 'task/get id) :state)))
+      (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "done"))
+      (should (string-match-p "Queue resumed"
+                              (harness-tools-sessions-test-ok me "task_control" '(:action "resume-queue"))))
+      (should-not (string-match-p "Queue suspended" (harness-tools-sessions-test-ok me "task_list" nil))))))
+
+(ert-deftest harness-tools-sessions-task-return-to-pending ()
+  "task_control return-to-pending stops a working task's turn, keeping its session.
+The task waits in pending until the queue starts it again."
+  (harness-tools-sessions-test-with
+    (let* ((harness-agent--cancel-grace 0.05)
+           (harness-tasks-max-running 1)
+           (harness-provider-demo-script-override '((:type wait :seconds 30)))
+           (me (harness-tools-sessions-test-session))
+           (id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Long work"))
+                                     :meta)
+                          :task-id)))
+      (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :session)) 5 "a session")
+      (let* ((sid (plist-get (harness-call 'task/get id) :session))
+             (text (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "return-to-pending"))))
+        (should (string-match-p "Returned to pending" text))
+        (should (string-match-p (regexp-quote sid) text))
+        (let ((task (harness-call 'task/get id)))
+          (should (eq 'pending (plist-get task :state)))
+          (should (plist-get task :returned))
+          (should (equal sid (plist-get task :session)))))
+      ;; Nothing takes the freed slot on its own: the return started nothing.
+      (should (eq 'pending (plist-get (harness-call 'task/get id) :state))))))
 
 (provide 'harness-tools-sessions-test)
 ;;; harness-tools-sessions-test.el ends here

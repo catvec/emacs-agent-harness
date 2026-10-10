@@ -134,6 +134,9 @@ Either way the toggle above the compose box switches it per board."
 (define-icon harness-icon-task-stopped nil
   '((symbol "■") (text "stop"))
   "Stopped task." :version "29.1")
+(define-icon harness-icon-task-paused nil
+  `((symbol ,(string #x23f8)) (text "pause"))
+  "Task waiting while its project's queue is suspended: a pause bar." :version "29.1")
 (define-icon harness-icon-task-review nil
   `((symbol ,(string #x2691)) (text "review"))
   "Task waiting for your review: a flag." :version "29.1")
@@ -587,7 +590,8 @@ card shows its subtitle by default, a merging card when you show it."
 POSITION is its place in line among queued tasks; TODOS its session's.
 A queued task NAMED (its name is the card's title) has the first line of
 its prompt after its place in line, else the line after it, as a backlog
-task's write-up has, its first line being a title."
+task's write-up has, its first line being a title.  A task returned to
+pending says it carries on where it stopped."
   (let ((body (harness-ui-tasks--body-line task))
         (sep (concat " " harness-ui-tasks--dot " ")))
     (cond
@@ -596,6 +600,9 @@ task's write-up has, its first line being a title."
      ((harness-ui-tasks--backlog-p task)
       (concat (if (plist-get task :refined) "refined, start it when ready" "on hold")
               (if body (concat sep body) "")))
+     ((plist-get task :returned)
+      (format "#%d in line%s" (or position 1)
+              (concat sep "returned, carries on where it stopped")))
      (t (let ((line (if named (harness-first-line (plist-get task :prompt) 70) body)))
           (format "#%d in line%s" (or position 1) (if line (concat sep line) "")))))))
 
@@ -666,7 +673,12 @@ has written, unless LEAN, which a narrow card falls back on."
                                          (format "refined %s" (harness-relative-time (plist-get task :refined))))
                                         ((harness-ui-tasks--backlog-p task)
                                          (format "added %s" (harness-relative-time (plist-get task :created))))
-                                        (t (format "queued %s" (harness-relative-time (plist-get task :created))))))
+                                        (t (let ((queued (format "queued %s" (harness-relative-time (plist-get task :created)))))
+                                             ;; The queue being suspended holds it
+                                             ;; back, which the card says.
+                                             (if (harness-json-true-p (plist-get task :queue-suspended))
+                                                 (concat queued " · queue suspended")
+                                               queued)))))
                         ('review (and (plist-get task :finished)
                                       (format "ready %s" (harness-relative-time (plist-get task :finished)))))
                         ('merging (let ((queued (harness-ui-tasks--merge-queued task)))
@@ -739,6 +751,11 @@ on a narrow board.  See `harness-ui-tasks--shown-priority'."
          ((harness-ui-tasks--refining-p task)
           '(("Open" harness-ui-tasks-open) ("Steer" harness-ui-tasks-reply)
             ("Stop" harness-ui-tasks-cancel)))
+         ;; Returned to pending: it has a session with the work in it, so
+         ;; starting it carries on rather than opens it.
+         ((plist-get task :returned)
+          '(("Start now" harness-ui-tasks-start) ("Open" harness-ui-tasks-open)
+            ("Reply" harness-ui-tasks-reply) ("Drop" harness-ui-tasks-cancel)))
          ((plist-get task :session)
           '(("Start now" harness-ui-tasks-start) ("Edit" harness-ui-tasks-edit)
             ("Open" harness-ui-tasks-open) ("Refine" harness-ui-tasks-refine)
@@ -1350,7 +1367,11 @@ the window is too small for."
                                             ('needs-input '(harness-task-attention-face harness-task-section-face))
                                             ('review '(harness-task-review-face harness-task-section-face))
                                             (_ 'harness-task-section-face)))
-            (propertize (format "  %d" (length tasks)) 'face 'harness-dim-face))
+            (propertize (format "  %d" (length tasks)) 'face 'harness-dim-face)
+            (if (and (eq column 'pending) (harness-ui-tasks--queue-suspended-p))
+                (propertize "  · queue suspended: nothing starts on its own"
+                            'face 'harness-task-attention-face)
+              ""))
     (when (and (eq column 'done) tasks (not folded))
       (let ((b (harness-ui-tasks--button "[Archive all]" #'harness-ui-tasks-archive-done
                                          "Archive every completed task" 'harness-ui-tasks-archive-done)))
@@ -1943,7 +1964,8 @@ new task's."
            (propertize "   new tasks keep their own settings" 'face 'harness-dim-face)
          (let ((notes (if harness-ui-tasks--refine
                           (list "an agent writes it up; you start it")
-                        (delq nil (list (and (plist-get s :max-running)
+                        (delq nil (list (and (harness-ui-tasks--queue-suspended-p) "queue suspended")
+                                        (and (plist-get s :max-running)
                                              (format "%s at a time" (plist-get s :max-running))))))))
            (if notes
                (propertize (concat "   " (string-join notes " · ")) 'face 'harness-dim-face)
@@ -2308,6 +2330,36 @@ it stands out: work then merges without anyone looking at it."
                                (propertize "[Review: off]" 'face 'harness-task-review-off-face))
                              #'harness-ui-tasks-toggle-review #'harness-ui-tasks--review-help))
 
+(defun harness-ui-tasks--queue-suspended-p ()
+  "Non-nil when the board's project has its pending queue suspended.
+That is the harness's `task/settings' as last fetched: the queue is
+running until they say otherwise."
+  (harness-json-true-p (plist-get harness-ui-tasks--settings :queue-suspended)))
+
+(defun harness-ui-tasks--queue-help (window _object _pos)
+  "The tooltip of the queue switch in WINDOW's header line.
+It says what the switch does now and how to turn it.  A `help-echo'
+function, so the keymaps are searched on hover, not on every redisplay
+of the header line."
+  (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
+    (let ((keys (substitute-command-keys
+                 "\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-queue]" t)))
+      (if (harness-ui-tasks--queue-suspended-p)
+          (format "The queue is suspended: no waiting task of this project starts on its own, so the board is clear for one urgent task -- [Start now], and task_control start, still start one.  Tasks already at work go on, and returning one to pending does not start another.  Click or %s to let the waiting tasks start again, by priority." keys)
+        (format "The queue is running: waiting tasks start by themselves as slots free, by priority.  Click or %s to suspend it, so none starts on its own until you resume it or start one by hand." keys)))))
+
+(defun harness-ui-tasks--queue-segment ()
+  "The header's queue switch: whether waiting tasks start on their own.
+A click suspends or resumes the board's project queue
+\(`harness-ui-tasks-toggle-queue').  Suspended, it stands out: the
+board then waits for you."
+  (harness-ui-tasks--segment
+   (if (harness-ui-tasks--queue-suspended-p)
+       (concat (propertize (harness-ui-icon 'harness-icon-task-paused) 'face 'harness-task-attention-face)
+               (propertize " Queue suspended" 'face 'harness-task-attention-face))
+     "[Queue: running]")
+   #'harness-ui-tasks-toggle-queue #'harness-ui-tasks--queue-help))
+
 (defun harness-ui-tasks--spend (groups)
   "Return what the tasks of GROUPS cost and who pays, for the header.
 GROUPS is what `harness-ui-tasks--visible' returns.  As a chat's header
@@ -2384,6 +2436,10 @@ WIDTH is as `harness-ui-fit-header' takes it."
                           (propertize (format "%s %d to review" (harness-ui-icon 'harness-icon-task-review) review)
                                       'face 'harness-task-review-face))
                   88))
+       ;; The queue switch: conspicuous while the queue is suspended, and
+       ;; among the first to go when it is running.
+       (list (concat (funcall gap) (harness-ui-tasks--queue-segment))
+             (if (harness-ui-tasks--queue-suspended-p) 92 30))
        (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-running) (alist-get 'active counts)) 45)
        (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-merging) (alist-get 'merging counts))
              42)
@@ -2507,11 +2563,12 @@ It is drawn 0.1 seconds after the last call, if it is still a board."
   '("merge/queued" "merge/started" "merge/conflict" "merge/finished"
     "agent/turn-started" "agent/turn-ended" "session/status" "session/pending-changed"
     "session/created" "session/deleted" "worktree/created" "worktree/removed"
-    "harness/reloaded" "config/changed" "usage/budgets-changed" "usage/budget-warning")
+    "harness/reloaded" "config/changed" "task/queue" "usage/budgets-changed" "usage/budget-warning")
   "Events after which every board quietly reloads its tasks and budgets.
 `task/changed' and `task/deleted' update a board directly; these catch
 anything that moves a task without one, so a board never drifts.  A
-turn's end and the budget events also change what its budgets show.")
+turn's end and the budget events also change what its budgets show, and
+`task/queue' changes the queue switch's state in the settings.")
 
 (defun harness-ui-tasks--refresh-soon (buffer)
   "Reload BUFFER's tasks in the background, once a burst of events settles."
@@ -2665,6 +2722,8 @@ so they type, into the compose box (`harness-compose-acts-p')."
   (define-key map (kbd "n") #'harness-ui-tasks-deny)
   (define-key map (kbd "+") #'harness-ui-tasks-raise-priority)
   (define-key map (kbd "-") #'harness-ui-tasks-lower-priority)
+  (define-key map (kbd "u") #'harness-ui-tasks-return-to-pending)
+  (define-key map (kbd "P") #'harness-ui-tasks-toggle-queue)
   (define-key map (kbd "k") #'harness-ui-tasks-cancel)
   (define-key map (kbd "d") #'harness-ui-tasks-complete)
   (define-key map (kbd "v") #'harness-ui-tasks-verify)
@@ -2752,6 +2811,7 @@ task's key typed off a card.
         (". n" "Deny request" harness-ui-tasks-deny)]
        ["Finish"
         (". k" "Stop or drop" harness-ui-tasks-cancel)
+        (". u" "Return to pending" harness-ui-tasks-return-to-pending)
         (". v" "Verify (accept)" harness-ui-tasks-verify)
         (". R" "Send back with feedback" harness-ui-tasks-reject)
         (". d" "Mark completed" harness-ui-tasks-complete)
@@ -2764,6 +2824,7 @@ task's key typed off a card.
         (". I" "Adopt a session" harness-ui-tasks-adopt)
         (". X" "Archive completed" harness-ui-tasks-archive-done)
         (". A" "Show archived" harness-ui-tasks-toggle-archived)
+        (". P" "Suspend or resume the queue" harness-ui-tasks-toggle-queue)
         (". V" "Review on or off" harness-ui-tasks-toggle-review)
         (". B" "Bulk edit current tasks" harness-ui-tasks-toggle-bulk)
         (". F" "Fullscreen layout" harness-fullscreen)
@@ -3060,9 +3121,13 @@ A new task is refined for the backlog when REFINE is non-nil."
                                        "Editing the task")
        (message "Task updated"))
       (`(reply . ,id)
-       (harness-ui-tasks--request-then "_harness/task/prompt" (list :id id :text expanded :attachments atts)
-                                       "Sending the message")
-       (message "Sent to the task's session"))
+       (let ((kept (and (plist-get (harness-ui-tasks--find id) :returned)
+                        (harness-ui-tasks--queue-suspended-p))))
+         (harness-ui-tasks--request-then "_harness/task/prompt" (list :id id :text expanded :attachments atts)
+                                         "Sending the message")
+         (message "%s" (if kept
+                           "Kept: the queue starts the task with your message when you resume it"
+                         "Sent to the task's session"))))
       (`(refine . ,id)
        (harness-ui-tasks--request-then "_harness/task/prompt" (list :id id :text expanded :attachments atts)
                                        "Sending the feedback")
@@ -3096,10 +3161,30 @@ A new task is refined for the backlog when REFINE is non-nil."
               (harness-ui-tasks--fail buffer "Submitting the task" e)))))))))
 
 (defun harness-ui-tasks-start ()
-  "Start the pending task at point now, even when every slot is busy."
+  "Start the pending task at point now, even when every slot is busy.
+A task returned to pending carries on in the session that already
+worked on it, where it stopped."
   (interactive)
   (harness-ui-tasks--request-then "_harness/task/start" (list :id (plist-get (harness-ui-tasks--task) :id))
                                   "Starting the task"))
+
+(defun harness-ui-tasks-return-to-pending ()
+  "Stop the turn of the task at point and put it back in the pending queue.
+The task keeps its session, branch and worktree, so when it starts
+again it carries on where it stopped (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-start], or the
+queue starting it).  It goes to the front of its priority's queue,
+ahead of the tasks that never started, behind only tasks of a higher
+priority.  Returning it frees its slot for the other waiting tasks and
+starts nothing itself: with the queue suspended
+\(\\[harness-ui-tasks-toggle-queue]) nothing starts at all until you resume it."
+  (interactive)
+  (let ((task (harness-ui-tasks--task)))
+    (unless (equal (plist-get task :state) "active")
+      (user-error "Only a task at work can be returned to pending; this one is %s"
+                  (plist-get task :state)))
+    (harness-ui-tasks--request-then "_harness/task/return-to-pending" (list :id (plist-get task :id))
+                                    "Returning the task to pending")
+    (message "Returned to pending: it carries on where it stopped when it starts again")))
 
 (defun harness-ui-tasks--shift-priority (step)
   "Move the priority of the task at point STEP places: 1 up, -1 down.
@@ -3149,13 +3234,16 @@ For a backlog task, or one whose write-up stopped or refused it as a
 duplicate, that is feedback on its write-up, which is written again (see
 `harness-ui-tasks-refine').  For a task waiting for your review it is
 the feedback that sends it back, as any message you send its session is
-\(see `harness-ui-tasks-reject')."
+\(see `harness-ui-tasks-reject').  For a task returned to pending the
+message starts it again, as an explicit start would -- or is kept for
+its next start while the queue is suspended."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
     (unless (plist-get task :session) (user-error "This task has not started yet"))
     (harness-ui-tasks--set-compose
      "" (cons (cond ((equal (plist-get (harness-ui-tasks--pending task) :kind) "question") 'answer)
                     ((equal (plist-get task :state) "review") 'reject)
+                    ((plist-get task :returned) 'reply)
                     ((or (equal (plist-get task :state) "pending")
                          (and (harness-ui-tasks--refining-p task) (not (harness-ui-tasks--writing-p task))))
                      'refine)
@@ -3335,6 +3423,46 @@ this one does not wait for them."
           (plist-put (copy-sequence harness-ui-tasks--settings) :require-verification (if on t :false)))
     (harness-ui-tasks--render)
     (harness-ui-tasks--refit-tail)))
+
+(defun harness-ui-tasks--show-queue (suspended)
+  "Show SUSPENDED (non-nil) or running on this board, as the harness has it now.
+Its `task/queue' event brings every board the settings again shortly;
+this one does not wait for them."
+  (when harness-ui-tasks--settings
+    (setq harness-ui-tasks--settings
+          (plist-put (copy-sequence harness-ui-tasks--settings) :queue-suspended (if suspended t :false)))
+    (harness-ui-tasks--render)
+    (harness-ui-tasks--refit-tail)
+    (force-mode-line-update)))
+
+(defun harness-ui-tasks-toggle-queue (&optional arg)
+  "Suspend the pending queue of the board's project, or resume it.
+While the queue is suspended, no waiting task of the project starts on
+its own: the board is clear for one urgent task, which [Start now]
+\(\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-start]) still starts, as task_control start
+does.  A task at work goes on; returning one to pending
+\(\\[harness-ui-tasks-return-to-pending]) frees its slot, and no waiting task takes it
+while the queue is suspended.  Resuming lets the waiting tasks start
+again at once, by priority, the tasks returned to pending first.
+
+The suspension is per project, like the concurrency limit, and kept
+across restarts.  With a prefix ARG, suspend when ARG is positive and
+resume otherwise."
+  (interactive "P")
+  (let* ((buffer (current-buffer))
+         (suspend (if arg (> (prefix-numeric-value arg) 0)
+                    (not (harness-ui-tasks--queue-suspended-p))))
+         (what (if suspend "Suspending the queue" "Resuming the queue")))
+    (harness-ui-tasks--show-queue suspend)
+    (harness-ui-tasks--request-then
+     "_harness/task/toggle-queue" (list :cwd harness-ui-tasks--dir) what
+     (lambda (state)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (harness-ui-tasks--show-queue (harness-json-true-p (plist-get state :suspended)))))))
+    (message "%s" (if suspend
+                       "Queue suspended: nothing starts on its own; s starts one by hand"
+                     "Queue resumed: waiting tasks start again, by priority"))))
 
 (defun harness-ui-tasks-toggle-review (&optional arg)
   "Turn the review of finished tasks off, or back on.

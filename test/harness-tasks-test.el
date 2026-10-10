@@ -24,6 +24,8 @@
 (defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
+(defvar harness-agent--cancel-grace)
+(defvar harness-tasks--paused-message)
 (declare-function harness-tasks--save "harness-tasks")
 (declare-function harness-tasks--forget-stores "harness-tasks")
 (declare-function harness-acp-connect "harness-acp")
@@ -3485,6 +3487,209 @@ hand_in, the report says so instead of standing on the first round's."
           (should (= 1700000000.0 (plist-get task :recap-at)))
           (should (= 2 (plist-get task :recap-turns)))
           (should (= 3 (plist-get task :recap-tools))))))))
+
+;;;; Queue suspension and return to pending
+
+(defun harness-tasks-test--queue-suspended-p (&optional cwd)
+  "Whether the queue of CWD's project is suspended, as `task/settings' says."
+  (harness-json-true-p (plist-get (harness-call 'task/settings (or cwd default-directory)) :queue-suspended)))
+
+(defun harness-tasks-test--idle (id)
+  "Non-nil once task ID's session has no turn running."
+  (let ((sid (plist-get (harness-tasks-test-task id) :session)))
+    (and sid (not (harness-call 'agent/running sid)))))
+
+(ert-deftest harness-tasks-suspend-queue-holds-back-starts ()
+  "A suspended queue starts nothing on its own; an explicit start still works.
+Resuming starts the waiting tasks again, up to the limit."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-tasks-max-running 1) a b c d)
+      (setq a (harness-tasks-test-submit "first")
+            b (harness-tasks-test-submit "second"))
+      (should (eq 'active (harness-tasks-test-state a)))
+      (should (eq 'pending (harness-tasks-test-state b)))
+      (harness-call 'task/suspend-queue default-directory)
+      (should (harness-tasks-test--queue-suspended-p))
+      ;; The slot the first task frees starts nothing: the queue is suspended.
+      (harness-tasks-test-wait-state a 'done)
+      (should (eq 'pending (harness-tasks-test-state b)))
+      (should-not (plist-get (harness-tasks-test-task b) :session))
+      ;; An explicit start goes ahead all the same.
+      (harness-call 'task/start b)
+      (should (eq 'active (harness-tasks-test-state b)))
+      (harness-tasks-test-wait-state b 'done)
+      ;; Two more wait; resuming starts one, the limit's worth.
+      (setq c (harness-tasks-test-submit "third")
+            d (harness-tasks-test-submit "fourth"))
+      (should (eq 'pending (harness-tasks-test-state c)))
+      (harness-call 'task/resume-queue default-directory)
+      (should-not (harness-tasks-test--queue-suspended-p))
+      (should (eq 'active (harness-tasks-test-state c)))
+      (should (eq 'pending (harness-tasks-test-state d)))
+      (dolist (id (list c d)) (harness-tasks-test-wait-state id 'done)))))
+
+(ert-deftest harness-tasks-suspended-queue-is-kept-per-project ()
+  "Which queues are suspended is kept, per project, across a restart."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((other (harness-test-temp-dir)) id)
+      (let ((harness-tasks-max-running 0))
+        (harness-call 'task/suspend-queue default-directory)
+        (setq id (harness-tasks-test-submit "waits for the queue"))
+        (should (eq 'pending (harness-tasks-test-state id))))
+      (harness-tasks-test--restart)
+      ;; The suspension came back with the records, and it is this
+      ;; project's: the other project's queue runs.
+      (should (harness-tasks-test--queue-suspended-p))
+      (should-not (harness-tasks-test--queue-suspended-p other))
+      (should (eq 'pending (harness-tasks-test-state id)))
+      ;; Resuming starts the task it held back.
+      (harness-call 'task/resume-queue default-directory)
+      (should-not (harness-tasks-test--queue-suspended-p))
+      (harness-tasks-test-wait-state id 'done))))
+
+(ert-deftest harness-tasks-returned-tasks-lead-their-priority-queue ()
+  "A returned task starts ahead of the never-started ones of its priority.
+Higher priority still goes first, and among returned tasks the first
+returned starts first."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-agent--cancel-grace 0.05)
+          (harness-tasks-max-running 0)
+          (harness-provider-demo-script-override '((:type wait :seconds 30)))
+          first second returned1 returned2 high)
+      (setq first (harness-tasks-test-submit "never started, first")
+            second (harness-tasks-test-submit "never started, second")
+            returned1 (harness-tasks-test-submit "returned, first")
+            returned2 (harness-tasks-test-submit "returned, second")
+            high (harness-tasks-test-submit-at "never started, high" "high"))
+      ;; Two start by hand (no slot is free for the queue) and are
+      ;; returned, in order.
+      (dolist (id (list returned1 returned2)) (harness-call 'task/start id))
+      (should (eq 'active (harness-tasks-test-state returned1)))
+      (harness-call 'task/return-to-pending returned1)
+      (harness-call 'task/return-to-pending returned2)
+      (dolist (id (list returned1 returned2))
+        (should (eq 'pending (harness-tasks-test-state id)))
+        (harness-test-wait (lambda () (harness-tasks-test--idle id)) 5 "its turn to stop"))
+      ;; A quick script for the runs that follow.
+      (setq harness-provider-demo-script-override
+            '((:type text :delta "Done.\n") (:type done :stop-reason end-turn)))
+      (let ((harness-tasks-max-running 1))
+        (harness-tasks--schedule)
+        ;; The high one goes first; then the returned ones, in the order
+        ;; they were returned; then the never-started ones, oldest first.
+        (should (eq 'active (harness-tasks-test-state high)))
+        (should (eq 'pending (harness-tasks-test-state returned1)))
+        (dolist (id (list first second returned1 returned2 high)) (harness-tasks-test-wait-state id 'done))
+        (should (equal (list high returned1 returned2 first second)
+                       (harness-tasks-test-start-order (list first second returned1 returned2 high))))))))
+
+(ert-deftest harness-tasks-returned-task-keeps-a-message-until-it-starts ()
+  "A message to a returned task is kept while its queue is suspended.
+The task stays pending and its prompt is not rewritten; the message
+goes to its session with the start, when the queue resumes."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-agent--cancel-grace 0.05)
+          (harness-tasks-max-running 1)
+          (harness-provider-demo-script-override '((:type wait :seconds 30))))
+      (let ((id (harness-tasks-test-submit "first")))
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :session)) 5 "a session")
+        (let ((sid (plist-get (harness-tasks-test-task id) :session)))
+          (harness-call 'task/suspend-queue default-directory)
+          (harness-call 'task/return-to-pending id)
+          (harness-test-wait (lambda () (harness-tasks-test--idle id)) 5 "its turn to stop")
+          (harness-call 'task/prompt id "also update the docs")
+          (let ((task (harness-tasks-test-task id)))
+            (should (eq 'pending (plist-get task :state)))
+            (should (equal "first" (plist-get task :prompt)))
+            (should (equal "also update the docs" (plist-get (car (plist-get task :queued)) :text)))
+            (should (equal sid (plist-get task :session))))
+          ;; Resuming starts it and delivers the message with the start.
+          (setq harness-provider-demo-script-override
+                '((:type text :delta "Carried on.\n") (:type done :stop-reason end-turn)))
+          (harness-call 'task/resume-queue default-directory)
+          (harness-test-wait
+           (lambda ()
+             (and (harness-tasks-test--node sid (lambda (n) (equal "also update the docs" (plist-get n :content))))
+                  (harness-tasks-test--node sid (lambda (n) (equal harness-tasks--paused-message (plist-get n :content))))))
+           10 "the kept message and the carry-on")
+          (should-not (plist-get (harness-tasks-test-task id) :queued))
+          (harness-tasks-test-wait-state id 'done))))))
+
+(ert-deftest harness-tasks-reject-waits-while-the-queue-is-suspended ()
+  "Sending a task back while the queue is suspended puts it back in pending.
+Its feedback is kept, and goes to its session when the queue starts it."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-tasks-require-verification t)
+          (harness-provider-demo-script-override
+           '((:type text :delta "Done.\n") (:type done :stop-reason end-turn))))
+      (let ((id (harness-tasks-test-submit "fix the parser")))
+        (harness-tasks-test-wait-state id 'review)
+        (let ((sid (plist-get (harness-tasks-test-task id) :session)))
+          (harness-call 'task/suspend-queue default-directory)
+          (harness-call 'task/reject id "handle tabs too")
+          (let ((task (harness-tasks-test-task id)))
+            (should (eq 'pending (plist-get task :state)))
+            (should (plist-get task :returned))
+            (should (equal sid (plist-get task :session)))
+            (should (equal "handle tabs too" (plist-get (car (last (plist-get task :feedback))) :text)))
+            (should (equal (harness-tasks--reject-text "handle tabs too")
+                           (plist-get (car (plist-get task :queued)) :text))))
+          ;; It waits: the queue is suspended.
+          (should (eq 'pending (harness-tasks-test-state id)))
+          (harness-call 'task/resume-queue default-directory)
+          (harness-test-wait
+           (lambda () (harness-tasks-test--node sid (lambda (n) (equal (harness-tasks--reject-text "handle tabs too")
+                                                                       (plist-get n :content)))))
+           10 "the kept feedback")
+          (harness-tasks-test-wait-state id 'review))))))
+
+(ert-deftest harness-tasks-returned-task-carries-on-in-its-session ()
+  "A returned task keeps its session, branch and worktree.
+Starting it again has that session carry on where it stopped, told so
+by the harness; no new session or worktree is made."
+  (harness-tasks-test-with-git
+    (harness-tasks-test--settle)
+    (let ((harness-agent--cancel-grace 0.05)
+          (harness-tasks-max-running 1)
+          (harness-provider-demo-script-override '((:type wait :seconds 30))))
+      (let ((id (harness-tasks-test-submit "Change the shared file")))
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :session)) 5 "a session")
+        (let* ((task (harness-tasks-test-task id))
+               (sid (plist-get task :session))
+               (worktree (plist-get task :worktree))
+               (branch (plist-get task :branch))
+               (sessions (length (harness-call 'session/list))))
+          (should (file-directory-p worktree))
+          (harness-call 'task/return-to-pending id)
+          (let ((stopped (harness-tasks-test-task id)))
+            (should (eq 'pending (plist-get stopped :state)))
+            (should (plist-get stopped :returned))
+            (should (equal sid (plist-get stopped :session)))
+            (should (equal branch (plist-get stopped :branch)))
+            (should (equal worktree (plist-get stopped :worktree))))
+          (harness-test-wait (lambda () (harness-tasks-test--idle id)) 5 "its turn to stop")
+          ;; It waits: the return itself started nothing.
+          (should (eq 'pending (harness-tasks-test-state id)))
+          ;; Starting it again carries on in the same session and worktree.
+          (setq harness-provider-demo-script-override
+                '((:type tool-call :id "c1" :name "change_shared" :input (:text "two"))
+                  (:type text :delta "Carried on.\n")
+                  (:type done :stop-reason end-turn)))
+          (harness-call 'task/start id)
+          (should (eq 'active (harness-tasks-test-state id)))
+          (should (equal sid (plist-get (harness-tasks-test-task id) :session)))
+          (should (= sessions (length (harness-call 'session/list))))
+          (should (equal worktree (plist-get (harness-call 'session/get sid) :cwd)))
+          (harness-test-wait
+           (lambda () (harness-tasks-test--node sid (lambda (n) (equal harness-tasks--paused-message (plist-get n :content)))))
+           10 "the carry-on message")
+          (harness-tasks-test-wait-state id 'done)
+          (should (equal "two\n" (harness-tasks-test--main-text root))))))))
 
 (provide 'harness-tasks-test)
 ;;; harness-tasks-test.el ends here
