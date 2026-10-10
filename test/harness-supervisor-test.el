@@ -579,7 +579,7 @@ Return a function that gives the requests it got, newest first."
     "request_directory_access"
     "web_fetch" "web_search"
     "ask_user" "todo_write" "hand_in" "notify" "session_control" "session_send" "session_move"
-    "set_non_interactive" "task_control" "task_submit"
+    "set_non_interactive" "set_priority" "task_control" "task_submit"
     "no_plan_needed" "submit_plan" "retry_step")
   "The tools a supervising session is offered, bash apart: the contract.")
 

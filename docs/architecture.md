@@ -3948,8 +3948,8 @@ starts.  Only the user changes it later.
   emacs_windows emacs_buffer emacs_describe emacs_find_definition
   emacs_messages emacs_open`), `web_fetch web_search`, the coordination
   tools (`ask_user todo_write hand_in notify session_control
-  session_send session_move set_non_interactive task_control
-  task_submit`), the tool that asks for a directory
+  session_send session_move set_non_interactive set_priority
+  task_control task_submit`), the tool that asks for a directory
   (`harness-perms-dir-tool`) and `harness-supervisor-tools`
   (`no_plan_needed submit_plan retry_step`), plus `bash` when
   `sandbox/confined-p` says its directory is confined.  Any other

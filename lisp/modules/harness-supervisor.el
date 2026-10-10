@@ -240,7 +240,7 @@ another session or task.")
 
 (defconst harness-supervisor--coordination-tools
   '("ask_user" "todo_write" "hand_in" "notify" "session_control" "session_send" "session_move"
-    "set_non_interactive" "task_control" "task_submit")
+    "set_non_interactive" "set_priority" "task_control" "task_submit")
   "Tools a supervising session uses to coordinate with the user and other sessions.")
 
 (defun harness-supervisor--allowed-tools ()
