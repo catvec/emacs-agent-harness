@@ -779,7 +779,7 @@ absent."
           (number 0))
       (insert (propertize
                (if entries
-                   "  sessions carry on with the first entry that has not run out; their own model comes first\n"
+                   "  the list is the order of preference, first used to last; sessions move back up it as entries come back\n"
                  "  sessions stop when their provider runs out — add where to carry on\n")
                'face 'harness-dim-face))
       (dolist (entry entries)
