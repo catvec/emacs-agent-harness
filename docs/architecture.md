@@ -3352,7 +3352,8 @@ priority).
   writing a backlog task up (`refining`).  `:priority` is `low`, `medium`
   (the default; `med` reads as it) or `high`, a symbol or a string in
   any case; anything else is refused before the task is made.  A
-  priority only orders the queue: it never stops a task at work, and a
+  priority orders the queue, and stops a task at work only for work
+  sent back from review that outranks it (pre-emption, below); a
   backlog task still waits for `task/start`.  Missing options come from
   `harness-tasks-model`, `-permission-mode` (auto), `-thinking` and
   `-non-interactive` (off), else from what the directory configures, so
@@ -3546,6 +3547,46 @@ priority).
   false rather than nil), and a board's Review switch turns it off and
   on with `config/set`, globally and saved; tasks already in review wait
   on until verified.
+- Pre-emption: work sent back from review keeps to
+  `harness-tasks-max-running`, though its slot may have gone to another
+  task while it waited for review.  `harness-tasks--make-room` finds it
+  one: a free slot, else the slot of a task at work it outranks
+  (`harness-tasks--outranks-p`: a lower priority, or its own priority
+  when that task is not work sent back itself, `:sent-back` being when
+  it was).  Of those, `harness-tasks--victim` takes the lowest priority,
+  then work that is not feedback, then the one at work since last; a
+  task waiting on work its session left running (`:waiting`), another
+  project's task, and any task while the limit is 0 give none up.  The
+  victim is pre-empted (`harness-tasks--preempt`): returned to pending
+  with `:return-reason` `preempted` and `:preempted-by` the task sent
+  back, its turn stopped, and a hint in its session once the turn has
+  ended ("Task pre-empted: ...").  A task still starting (its worktree
+  being made) is pre-empted the same way: its start launches nothing
+  (`harness-tasks--start-current-p`), and its next start reuses the
+  worktree being made (`harness-tasks--worktree-promise`).  When a slot
+  frees, it carries on in its session, prompted with
+  `harness-tasks--preempted-message`, as a task returned to pending is
+  with `harness-tasks--paused-message`.  With no task it outranks, or
+  its queue suspended, the task sent back waits instead
+  (`harness-tasks--hold-back`): pending, `:return-reason` `sent-back`,
+  its round kept in `:feedback` and the reject text queued (`:queued`)
+  for its start, which opens with `harness-tasks--sent-back-message`.
+  It leads its priority in the queue (`harness-tasks--start-order`), and
+  while its queue runs the scheduler lets it pre-empt as soon as it
+  outranks a task at work: its priority raised, or that task's lowered
+  (`harness-tasks--on-priority-changed` runs a pass).  No other waiting
+  task pre-empts.  `task/reject` returns the task, active or pending,
+  for the client to say which; `task/prompt` to a task waiting that way
+  queues its message.  Feedback typed in the chat of a task in review
+  sends it back too: with no slot to take, the message is recorded but
+  its turn refused by the tasks module's `agent/before-turn` filter
+  (`harness-tasks--before-turn`, "Turn not started: its task ... waits
+  in the queue ..."), and the message reaches the model with the turn
+  that starts the task.  That filter refuses the turn of any other
+  sender (another session's agent, the harness) to a task returned to
+  pending, pre-empted or sent back while it waits; the user's own
+  message to a returned or pre-empted task starts it, as `task/start`
+  would.  A task that never started is left alone.
 - A turn starting in a task's session makes the task active again, so a
   message sent from a done task's chat buffer reopens it; an archived task
   comes back to the board.

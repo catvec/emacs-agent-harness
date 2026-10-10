@@ -3033,6 +3033,33 @@ it again."
                              5 "the task to start again")
           (should (equal sid (plist-get (harness-call 'task/get id) :session))))))))
 
+(declare-function harness-ui-tasks--returned-why "harness-ui-tasks")
+(declare-function harness-ui-tasks--sent-back-message "harness-ui-tasks")
+
+(ert-deftest harness-ui-tasks-says-why-a-returned-task-waits ()
+  "A returned task's card says why it waits; sending work back says where it went.
+A task pre-empted names the task sent back from review that took its
+slot, by its title when the board has that task; one sent back while no
+slot could take it waits with the feedback.  The tasks have the shape
+the wire gives them, symbols as strings."
+  (harness-ui-tasks-test-with
+    (with-temp-buffer
+      (setq-local harness-ui-tasks--tasks (list (list :id "t-1" :prompt "Fix the parser\nand the lexer")))
+      (should (equal "pre-empted by \"Fix the parser\", carries on where it stopped"
+                     (harness-ui-tasks--returned-why '(:returned t :return-reason "preempted" :preempted-by "t-1"))))
+      (should (equal "pre-empted by t-2, carries on where it stopped"
+                     (harness-ui-tasks--returned-why '(:returned t :return-reason "preempted" :preempted-by "t-2"))))
+      (should (equal "sent back from review, waits for a slot with your feedback"
+                     (harness-ui-tasks--returned-why '(:returned t :return-reason "sent-back"))))
+      (dolist (task '((:returned t :return-reason "returned") (:returned t)))
+        (should (equal "returned, carries on where it stopped" (harness-ui-tasks--returned-why task)))))
+    (should (equal "Sent back: its session works on your feedback"
+                   (harness-ui-tasks--sent-back-message '(:state "active"))))
+    (should (string-match-p "no slot is free for it, so it waits in the queue"
+                            (harness-ui-tasks--sent-back-message '(:state "pending"))))
+    (should (string-match-p "waits in the suspended queue"
+                            (harness-ui-tasks--sent-back-message '(:state "pending" :queue-suspended t))))))
+
 (ert-deftest harness-ui-tasks-supervisor-switch ()
   "The settings line turns supervisor mode for the next task, and in bulk.
 The button appears only while the harness has the supervisor module,

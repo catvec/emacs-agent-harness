@@ -26,6 +26,8 @@
 (defvar harness-acp-token)
 (defvar harness-agent--cancel-grace)
 (defvar harness-tasks--paused-message)
+(defvar harness-tasks--preempted-message)
+(defvar harness-tasks--sent-back-message)
 (declare-function harness-tasks--save "harness-tasks")
 (declare-function harness-tasks--forget-stores "harness-tasks")
 (declare-function harness-acp-connect "harness-acp")
@@ -3899,6 +3901,356 @@ by the harness; no new session or worktree is made."
            10 "the carry-on message")
           (harness-tasks-test-wait-state id 'done)
           (should (equal "two\n" (harness-tasks-test--main-text root))))))))
+
+;;;; Pre-emption: work sent back from review keeps to the limit
+
+(declare-function harness-tasks--outranks-p "harness-tasks")
+(declare-function harness-tasks--victim "harness-tasks")
+(declare-function harness-tasks--worktree-promise "harness-tasks")
+(declare-function harness-tasks--by-session "harness-tasks")
+
+(defconst harness-tasks-test--quick
+  '((:type text :delta "Done.\n") (:type done :stop-reason end-turn))
+  "A demo script whose turn ends at once.")
+
+(defvar harness-tasks-test--slow nil
+  "The prompts of the tasks whose turns run on until they are stopped.
+Read by `harness-tasks-test--slow-script'.")
+
+(defun harness-tasks-test--slow-script (request)
+  "Return the demo script for REQUEST: slow for a task of `harness-tasks-test--slow'.
+A turn of a task whose prompt is in that list runs on until it is
+stopped; any other ends at once.  The task is told by its prompt rather
+than its session: a task that starts at once makes its first request
+before `task/submit' returns, so before the test knows its session."
+  (let ((task (harness-tasks--by-session (plist-get (plist-get request :session) :id))))
+    (if (and task (member (plist-get task :prompt) harness-tasks-test--slow))
+        '((:type wait :seconds 30))
+      harness-tasks-test--quick)))
+
+(defun harness-tasks-test--hint-p (sid prefix)
+  "Non-nil when session SID has a hint that starts with PREFIX."
+  (cl-some (lambda (hint) (and (stringp hint) (string-prefix-p prefix hint)))
+           (harness-tasks-test-hints sid)))
+
+(defun harness-tasks-test--said (sid text)
+  "The user messages of session SID that say TEXT."
+  (cl-remove-if-not (lambda (n) (equal text (plist-get n :content))) (harness-tasks-test-user-nodes sid)))
+
+(defun harness-tasks-test--running-p (sid)
+  "Non-nil once session SID runs a turn that began."
+  (eq 'running (plist-get (harness-call 'session/get sid) :status)))
+
+(ert-deftest harness-tasks-preempts-the-lowest-ranked-task-it-outranks ()
+  "Work sent back from review outranks a lower priority, or its own unless sent back.
+Of the tasks at work it outranks, the one that gives its slot up has
+the lowest priority, then is work that only started rather than
+feedback, then began last.  A task waiting on work its session left
+running, another project's task, and any task while the limit is 0
+give none up."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 1)
+          (other (file-name-as-directory (harness-test-temp-dir))))
+      (cl-flet ((at-work (priority &rest plist)
+                  ;; Starting, it holds a slot; without a session, its
+                  ;; record says its priority.
+                  (let ((task (append plist
+                                      (list :id (concat "t-" (harness-short-id 8))
+                                            :project default-directory :cwd default-directory
+                                            :prompt "at it" :state 'active :priority priority
+                                            :created (float-time)))))
+                    (puthash (plist-get task :id) task harness-tasks--table)
+                    (puthash (plist-get task :id) t harness-tasks--starting)
+                    task))
+                (victim (task) (plist-get (harness-tasks--victim task) :id)))
+        (let* ((reviewed (list :id "t-reviewed" :project default-directory :cwd default-directory
+                               :state 'review :priority "medium"))
+               (high (at-work "high" :started 10.0))
+               (fed-back (at-work "medium" :started 20.0 :sent-back 600.0))
+               (older (at-work "medium" :started 100.0))
+               (newer (at-work "medium" :started 200.0))
+               (low (at-work "low" :started 300.0))
+               ;; Were they candidates, these would go first: they began last.
+               (_waiting (at-work "low" :started 400.0 :waiting "2 workers"))
+               (_elsewhere (at-work "low" :started 500.0 :project other)))
+          (should (harness-tasks--outranks-p reviewed low))
+          (should (harness-tasks--outranks-p reviewed older))
+          (should-not (harness-tasks--outranks-p reviewed fed-back))
+          (should-not (harness-tasks--outranks-p reviewed high))
+          ;; The lowest priority first ...
+          (should (equal (plist-get low :id) (victim reviewed)))
+          ;; ... then, of its own priority, the work that began last.
+          (remhash (plist-get low :id) harness-tasks--table)
+          (should (equal (plist-get newer :id) (victim reviewed)))
+          (remhash (plist-get newer :id) harness-tasks--table)
+          (should (equal (plist-get older :id) (victim reviewed)))
+          ;; Feedback of its priority, and a higher priority, keep their slots.
+          (remhash (plist-get older :id) harness-tasks--table)
+          (should-not (victim reviewed))
+          ;; Feedback of a higher priority takes the lower priority's slot
+          ;; first, feedback or not; its own priority's work that only
+          ;; started is next.
+          (let ((urgent (plist-put (copy-sequence reviewed) :priority "high")))
+            (should (equal (plist-get fed-back :id) (victim urgent)))
+            (remhash (plist-get fed-back :id) harness-tasks--table)
+            (should (equal (plist-get high :id) (victim urgent)))
+            (let ((harness-tasks-max-running 0))
+              (should-not (victim urgent)))))))))
+
+(ert-deftest harness-tasks-sent-back-task-preempts-work-that-just-started ()
+  "Work sent back from review takes the slot of work of its priority that just started.
+Its slot went to a new task while it waited for review: sending it back
+pre-empts that task.  The task pre-empted goes back to the queue, its
+turn stopped, and its session says why; once a slot frees it carries on
+in that session, told so by the harness."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let* ((harness-tasks-test--slow (list "write the docs"))
+           (harness-agent--cancel-grace 0.05)
+           (harness-tasks-max-running 1)
+           (harness-tasks-require-verification t)
+           (harness-provider-demo-script-override #'harness-tasks-test--slow-script)
+           (reviewed (harness-tasks-test-submit "fix the parser"))
+           (rsid (harness-tasks-test-session-id reviewed)))
+      (harness-tasks-test-wait-state reviewed 'review)
+      (let* ((fresh (harness-tasks-test-submit "write the docs"))
+             (fsid (harness-tasks-test-session-id fresh)))
+        (harness-test-wait (lambda () (harness-tasks-test--running-p fsid)) 5 "the new task at work")
+        (harness-call 'task/reject reviewed "handle tabs too")
+        ;; The task sent back has the slot; the new task is back in line.
+        (let ((back (harness-tasks-test-task reviewed))
+              (preempted (harness-tasks-test-task fresh)))
+          (should (eq 'active (plist-get back :state)))
+          (should (eq 'active (plist-get back :column)))
+          (should (plist-get back :sent-back))
+          (should (eq 'pending (plist-get preempted :state)))
+          (should (plist-get preempted :returned))
+          (should (eq 'preempted (plist-get preempted :return-reason)))
+          (should (equal reviewed (plist-get preempted :preempted-by)))
+          (should (= 0 (harness-tasks--free-slots (harness-tasks--slot-project back)))))
+        ;; Its next turn ends at once.
+        (setq harness-tasks-test--slow nil)
+        ;; Its turn stops, and its session says why, once it has.
+        (harness-test-wait (lambda () (harness-tasks-test--hint-p fsid "Task pre-empted: task ")) 5
+                           "the pre-emption said")
+        (should-not (harness-call 'agent/running fsid))
+        ;; The task sent back works on the feedback, and is back in review.
+        (harness-tasks-test-wait-state reviewed 'review)
+        (should (harness-tasks-test--said rsid (harness-tasks--reject-text "handle tabs too")))
+        (should-not (plist-get (harness-tasks-test-task reviewed) :sent-back))
+        ;; The slot it frees goes to the task it pre-empted, which carries
+        ;; on in its own session, told why by the harness.
+        (harness-tasks-test-wait-state fresh 'review)
+        (let ((opening (car (harness-tasks-test--said fsid harness-tasks--preempted-message))))
+          (should opening)
+          (should (eq 'system (harness-sender-kind (harness-node-sender opening)))))
+        (let ((carried (harness-tasks-test-task fresh)))
+          (should (equal fsid (plist-get carried :session)))
+          (should-not (plist-get carried :return-reason))
+          (should-not (plist-get carried :preempted-by)))))))
+
+(ert-deftest harness-tasks-sent-back-task-waits-behind-higher-priority-work ()
+  "Work sent back from review waits when every task at work outranks it.
+A task of a higher priority keeps its slot: the task sent back goes to
+the front of the queue with its feedback kept, and once a slot frees
+its session gets the feedback, after the harness says why it waited."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let* ((harness-tasks-test--slow (list "write the docs"))
+           (harness-agent--cancel-grace 0.05)
+           (harness-tasks-max-running 1)
+           (harness-tasks-require-verification t)
+           (harness-provider-demo-script-override #'harness-tasks-test--slow-script)
+           (reviewed (harness-tasks-test-submit-at "fix the parser" "low"))
+           (rsid (harness-tasks-test-session-id reviewed)))
+      (harness-tasks-test-wait-state reviewed 'review)
+      (let* ((busy (harness-tasks-test-submit "write the docs"))
+             (bsid (harness-tasks-test-session-id busy)))
+        (harness-test-wait (lambda () (harness-tasks-test--running-p bsid)) 5 "the other task at work")
+        ;; What `task/reject' returns says so, for the board to tell the user.
+        (should (eq 'pending (plist-get (harness-call 'task/reject reviewed "handle tabs too") :state)))
+        (let ((waiting (harness-tasks-test-task reviewed)))
+          (should (eq 'pending (plist-get waiting :state)))
+          (should (eq 'pending (plist-get waiting :column)))
+          (should (eq 'sent-back (plist-get waiting :return-reason)))
+          (should (plist-get waiting :sent-back))
+          (should (equal "handle tabs too" (plist-get (car (last (plist-get waiting :feedback))) :text)))
+          (should (equal (harness-tasks--reject-text "handle tabs too")
+                         (plist-get (car (plist-get waiting :queued)) :text))))
+        ;; The task at work goes on.
+        (should (eq 'active (harness-tasks-test-state busy)))
+        (should (harness-tasks-test--running-p bsid))
+        (should-not (harness-tasks-test--said rsid (harness-tasks--reject-text "handle tabs too")))
+        ;; Its turn stopped, it frees the slot for the task sent back.
+        (harness-call 'task/cancel busy)
+        (harness-tasks-test-wait-state reviewed 'review)
+        (should (harness-tasks-test--said rsid (harness-tasks--reject-text "handle tabs too")))
+        (let ((opening (car (harness-tasks-test--said rsid harness-tasks--sent-back-message))))
+          (should opening)
+          (should (eq 'system (harness-sender-kind (harness-node-sender opening)))))
+        (should-not (plist-get (harness-tasks-test-task reviewed) :queued))))))
+
+(ert-deftest harness-tasks-sent-back-task-waits-behind-feedback-of-its-priority ()
+  "Feedback does not pre-empt other feedback of its priority, wherever it was written.
+Two tasks of one priority wait for review with one slot: the first sent
+back works on its feedback.  The user's message to the second's session
+sends it back too, but it waits in the queue: the message stays in the
+transcript, its turn refused, and a later message is kept for the
+start.  When the slot frees, the harness starts it, saying why it
+waited, and the feedback reaches the agent once."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let* ((harness-tasks-test--slow nil)
+           (harness-agent--cancel-grace 0.05)
+           (harness-tasks-max-running 1)
+           (harness-tasks-require-verification t)
+           (harness-provider-demo-script-override #'harness-tasks-test--slow-script)
+           (first (harness-tasks-test-submit "fix the parser"))
+           (second (harness-tasks-test-submit "fix the lexer"))
+           (fsid (harness-tasks-test-session-id first))
+           (ssid (harness-tasks-test-session-id second))
+           (feedback (harness-tasks--reject-text "Nested quotes still break.")))
+      (harness-tasks-test-wait-state first 'review)
+      (harness-tasks-test-wait-state second 'review)
+      (push "fix the parser" harness-tasks-test--slow)
+      (harness-call 'task/reject first "handle tabs too")
+      (harness-test-wait (lambda () (harness-tasks-test--running-p fsid)) 5 "the first at work on its feedback")
+      ;; Typed in the second's chat: sent back, but it waits.
+      (harness-call 'agent/prompt ssid "  Nested quotes still break.  ")
+      (let ((waiting (harness-tasks-test-task second)))
+        (should (eq 'pending (plist-get waiting :state)))
+        (should (eq 'sent-back (plist-get waiting :return-reason)))
+        (should (equal "Nested quotes still break." (plist-get (car (last (plist-get waiting :feedback))) :text))))
+      (harness-test-wait (lambda () (harness-tasks-test--hint-p ssid "Turn not started: its task ")) 5
+                         "the turn refused")
+      (should (harness-tasks-test--said ssid feedback))
+      (should-not (harness-call 'agent/running ssid))
+      ;; The refused turn says nothing about the task, which waits on.
+      (harness-tasks-test--settle)
+      (let ((waiting (harness-tasks-test-task second)))
+        (should (eq 'pending (plist-get waiting :state)))
+        (should-not (plist-get waiting :outcome)))
+      (should (eq 'active (harness-tasks-test-state first)))
+      ;; More from the board is kept for its start.
+      (harness-call 'task/prompt second "And the docs.")
+      (should (equal "And the docs." (plist-get (car (plist-get (harness-tasks-test-task second) :queued)) :text)))
+      (should (eq 'pending (harness-tasks-test-state second)))
+      ;; The first stops: the second gets the slot and its feedback.
+      (harness-call 'task/cancel first)
+      (harness-tasks-test-wait-state second 'review)
+      (should (harness-tasks-test--said ssid harness-tasks--sent-back-message))
+      (should (harness-tasks-test--said ssid "And the docs."))
+      (should (= 1 (length (harness-tasks-test--said ssid feedback)))))))
+
+(ert-deftest harness-tasks-sent-back-task-preempts-once-it-outranks ()
+  "Feedback waiting for a slot takes one as soon as it outranks a task at work.
+Raising its priority above the task at work pre-empts that task."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let* ((harness-tasks-test--slow (list "write the docs"))
+           (harness-agent--cancel-grace 0.05)
+           (harness-tasks-max-running 1)
+           (harness-tasks-require-verification t)
+           (harness-provider-demo-script-override #'harness-tasks-test--slow-script)
+           (reviewed (harness-tasks-test-submit-at "fix the parser" "low"))
+           (rsid (harness-tasks-test-session-id reviewed)))
+      (harness-tasks-test-wait-state reviewed 'review)
+      (let* ((busy (harness-tasks-test-submit "write the docs"))
+             (bsid (harness-tasks-test-session-id busy)))
+        (harness-test-wait (lambda () (harness-tasks-test--running-p bsid)) 5 "the other task at work")
+        (harness-call 'task/reject reviewed "handle tabs too")
+        (should (eq 'pending (harness-tasks-test-state reviewed)))
+        (harness-tasks-test--settle)
+        (should (eq 'pending (harness-tasks-test-state reviewed)))
+        ;; Now above the task at work, it takes that task's slot.
+        (harness-call 'priority/set rsid "high")
+        (harness-test-wait (lambda () (eq 'pending (harness-tasks-test-state busy))) 5 "the task at work pre-empted")
+        (should (equal reviewed (plist-get (harness-tasks-test-task busy) :preempted-by)))
+        (should (memq (harness-tasks-test-state reviewed) '(active review)))
+        (setq harness-tasks-test--slow nil)
+        (harness-tasks-test-wait-state reviewed 'review)
+        (should (harness-tasks-test--said rsid harness-tasks--sent-back-message))
+        (should (harness-tasks-test--said rsid (harness-tasks--reject-text "handle tabs too")))
+        (harness-tasks-test-wait-state busy 'review)
+        (should (harness-tasks-test--said bsid harness-tasks--preempted-message))))))
+
+(ert-deftest harness-tasks-waiting-task-takes-no-turn-of-its-own ()
+  "The session of a task waiting in the queue takes no turn something else starts.
+A message from another session's agent to a task returned to pending
+stays in the transcript, its turn refused, and the task waits on; the
+user's own message starts it, as `task/start' would."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-agent--cancel-grace 0.05)
+          (harness-tasks-max-running 0)
+          (harness-provider-demo-script-override '((:type wait :seconds 30))))
+      (let* ((id (harness-tasks-test-submit "write the docs"))
+             (sid (harness-tasks-test-session-id id))
+             (other (harness-call 'session/create :cwd default-directory :model "demo:scripted")))
+        (harness-call 'task/start id)
+        (harness-test-wait (lambda () (harness-tasks-test--running-p sid)) 5 "the task at work")
+        (harness-call 'task/return-to-pending id)
+        (harness-test-wait (lambda () (harness-tasks-test--idle id)) 5 "its turn to stop")
+        (harness-call 'agent/prompt sid "Here is what I found." (list :from (harness-sender-session other)))
+        (harness-test-wait (lambda () (harness-tasks-test--hint-p sid "Turn not started: its task ")) 5
+                           "the turn refused")
+        (should (harness-tasks-test--said sid "Here is what I found."))
+        (harness-tasks-test--settle)
+        (should (eq 'pending (harness-tasks-test-state id)))
+        (should-not (plist-get (harness-tasks-test-task id) :outcome))
+        ;; The user's own message starts it.
+        (harness-call 'agent/prompt sid "Go on.")
+        (harness-test-wait (lambda () (eq 'active (harness-tasks-test-state id))) 5 "the task started")
+        (harness-test-wait (lambda () (harness-tasks-test--running-p sid)) 5 "its turn")
+        (should-not (plist-get (harness-tasks-test-task id) :return-reason))
+        (harness-call 'task/cancel id)))))
+
+(ert-deftest harness-tasks-worktree-made-once-for-starts-that-wait ()
+  "Starts of a task that wait for its worktree share the one being made.
+A task pre-empted while its worktree was being made, then started
+again, must not ask git for a second worktree on the same branch."
+  (harness-tasks-test-with
+    (let* ((made 0)
+           (promise (harness-make-promise))
+           (task (list :id "t-one")))
+      (cl-letf (((symbol-function 'harness-tasks--make-worktree)
+                 (lambda (_task) (cl-incf made) promise)))
+        (should (eq (harness-tasks--worktree-promise task) (harness-tasks--worktree-promise task)))
+        (should (= 1 made))
+        (harness-resolve promise (list :path default-directory :branch "task/one"))
+        (harness-tasks-test--settle)
+        ;; Made, it is no longer shared: a later start asks for its own.
+        (harness-tasks--worktree-promise task)
+        (should (= 2 made))))))
+
+(ert-deftest harness-tasks-preempted-while-starting-launches-nothing ()
+  "A task pre-empted while its worktree is being made launches nothing.
+Its worktree is kept for its next start, which gives its session the
+task afresh: its work never began."
+  (harness-tasks-test-with-git
+    (harness-tasks-test--settle)
+    (let ((harness-agent--cancel-grace 0.05)
+          (harness-tasks-max-running 1)
+          (harness-tasks-require-verification t)
+          (harness-provider-demo-script-override harness-tasks-test--quick))
+      (let ((reviewed (harness-tasks-test-submit "fix the parser")))
+        (harness-tasks-test-wait-state reviewed 'review)
+        ;; Its worktree is still being made when the reviewed task is sent back.
+        (let* ((fresh (harness-tasks-test-submit "write the docs"))
+               (fsid (harness-tasks-test-session-id fresh)))
+          (should-not (plist-get (harness-tasks-test-task fresh) :worktree))
+          (harness-call 'task/reject reviewed "handle tabs too")
+          (should (eq 'pending (harness-tasks-test-state fresh)))
+          (should (eq 'preempted (plist-get (harness-tasks-test-task fresh) :return-reason)))
+          (harness-tasks-test-wait-state reviewed 'review)
+          ;; Then it starts again, in the worktree made for it, with the task.
+          (harness-tasks-test-wait-state fresh 'review)
+          (let ((task (harness-tasks-test-task fresh)))
+            (should (file-directory-p (plist-get task :worktree)))
+            (should-not (plist-get task :error))
+            (should (equal (file-name-as-directory (plist-get task :worktree))
+                           (file-name-as-directory (plist-get (harness-call 'session/get fsid) :cwd)))))
+          (should (equal '("write the docs") (harness-tasks-test-user-texts fsid))))))))
 
 (provide 'harness-tasks-test)
 ;;; harness-tasks-test.el ends here

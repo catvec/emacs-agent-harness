@@ -1302,9 +1302,11 @@ your checkout itself can be submitted to the **main tree** instead (the
   project's tasks work at once: the others wait in *Pending*, and a
   free slot goes to the highest priority waiting, the oldest of those
   first, which is also the order *Pending* lists them in. A priority
-  never stops a task at work, and a backlog task still waits for you to
-  start it. The `medium priority` button beside the Submit / Refine
-  switch sets the next task's (a click cycles it through high and low);
+  stops a task at work only for work you send back from review, which
+  can take the slot of a task it outranks (see *Ready for review*
+  below); a backlog task still waits for you to start it. The
+  `medium priority` button beside the Submit / Refine switch sets the
+  next task's (a click cycles it through high and low);
   `+` and `-` on a card raise and lower that task's — the session's it
   already has, waiting or not — to reorder the
   queue, and bulk edit (`B`) has a priority button that sets every
@@ -1336,8 +1338,25 @@ your checkout itself can be submitted to the **main tree** instead (the
   for review sends it back the same way, with your message as the
   feedback, wherever you write it: in the task's session (no need to
   press `[Send back]` first), with `m` on the board, or from another
-  device. The task goes back to work at once and comes back for review
-  when it is done. Only you review: a message another session's agent
+  device. The task goes back to work and comes back for review when it
+  is done, within `harness-tasks-max-running`: its slot may have gone
+  to another task while it waited for review. With no slot free it
+  **pre-empts** a task at work that it outranks -- one of a lower
+  priority, or one of its own priority that is not itself work sent
+  back from review, so a task that just started gives way to your
+  feedback -- taking the lowest-ranked such task's slot, the one that
+  started last among equals. The task pre-empted goes back to
+  *Pending*, its turn stopped, and carries on where it stopped when a
+  slot frees, its session told why, as a session is after a restart.
+  When every task at work outranks it (a higher priority, or other
+  feedback of its priority), the task sent back waits at the front of
+  its priority in *Pending* with your feedback, which reaches its
+  session when it starts, with anything else you send it meanwhile;
+  raising its priority above a task at work starts it at once. A
+  suspended queue holds it too, until you resume the queue or start it
+  with `s`. A pending card says why the task waits: pre-empted by
+  which task, or sent back and waiting for a slot. Only you review: a
+  message another session's agent
   sends the task (`session_send`, or `task_control`'s message) reaches
   it as that session's, not as your feedback. The task deals with it
   and waits for review again, its report standing unless it hands in a
