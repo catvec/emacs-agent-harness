@@ -1904,6 +1904,112 @@ argument says which way to turn it, and turning it on asks nothing."
           (should (eq 'done (plist-get task :state)))
           (should (plist-get task :verified)))))))
 
+;;;; How many tasks work at once: the limit's button
+
+(declare-function harness-ui-tasks-set-max-running "harness-ui-tasks")
+
+(defun harness-ui-tasks-test--limit (board)
+  "Return (TEXT HELP POS) of BOARD's limit button, above the compose box, or nil."
+  (with-current-buffer board
+    (save-excursion
+      (goto-char harness-ui-tasks--list-end)
+      (when-let* ((match (text-property-search-forward
+                          'harness-task-button 'harness-ui-tasks-set-max-running #'eq)))
+        (let ((pos (prop-match-beginning match)))
+          (list (buffer-substring-no-properties pos (prop-match-end match))
+                (get-text-property pos 'help-echo)
+                pos))))))
+
+(defun harness-ui-tasks-test--limit-says (board text)
+  "Wait until BOARD's limit button says TEXT."
+  (harness-test-wait (lambda () (equal text (car (harness-ui-tasks-test--limit board))))
+                     5 (format "the limit's button to say %s" text)))
+
+(ert-deftest harness-ui-tasks-limit-button ()
+  "\"N at a time\" is a button: a click sets how many tasks work at once.
+It is the harness option, saved for every project, and a higher limit
+starts the waiting tasks at once.  No limit shows as \"all at once\",
+an answer that is no number changes nothing, and so does the limit
+there is now.  Refine, whose tasks wait for you anyway, shows none."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (saved nil)
+          (answer nil)
+          (asked nil))
+      (cl-letf (((symbol-function 'harness-save-user-option)
+                 (lambda (symbol value) (set symbol value) (push (cons symbol value) saved)))
+                ((symbol-function 'completing-read)
+                 (lambda (prompt _table &optional _pred _require _initial _history default &rest _)
+                   (push prompt asked)
+                   (if (functionp answer) (funcall answer default) answer))))
+        ;; The board came up with the 3 of the tests' setup.
+        (harness-ui-tasks-test--limit-says board "3 at a time")
+        (with-current-buffer board (harness-ui-tasks-refresh))
+        (harness-ui-tasks-test--type-and-submit board "First waiting task")
+        (harness-ui-tasks-test--type-and-submit board "Second waiting task")
+        (harness-ui-tasks-test--wait-text board "Pending  2")
+        ;; 0: nothing starts by itself, and the button stands out.
+        (harness-ui-tasks-test--limit-says board "0 at a time")
+        (pcase-let ((`(,_ ,help ,pos) (harness-ui-tasks-test--limit board)))
+          (should (string-search "no task starts by itself" help))
+          (should (string-search "Click to change it, for every project" help))
+          (should (eq 'harness-task-held-face (get-text-property pos 'face board)))
+          ;; A click asks, the limit now the default; 2 lets both tasks start.
+          (setq answer "2")
+          (with-current-buffer board
+            (should (eq board (window-buffer (selected-window))))
+            (harness-test-click pos)))
+        (should (equal '("Tasks of a project working at once (default 0): ") asked))
+        (harness-test-wait (lambda () (equal '((harness-tasks-max-running . 2)) saved)) 5 "the limit to be saved")
+        (should (eql 2 harness-tasks-max-running))
+        (harness-ui-tasks-test--limit-says board "2 at a time")
+        (should (eq 'harness-dim-face (get-text-property (nth 2 (harness-ui-tasks-test--limit board)) 'face board)))
+        (should (string-search "At most 2 of this project's tasks work at once"
+                               (nth 1 (harness-ui-tasks-test--limit board))))
+        ;; At once: the waiting tasks need no other task to end.
+        (harness-ui-tasks-test--wait-text board "Pending  0")
+        ;; No limit, by name: all at once.
+        (setq answer "no limit")
+        (with-current-buffer board (push-button (nth 2 (harness-ui-tasks-test--limit board))))
+        (harness-ui-tasks-test--limit-says board "all at once")
+        (should (equal '(harness-tasks-max-running) (car saved)))
+        (should-not harness-tasks-max-running)
+        (should (string-search "No limit" (nth 1 (harness-ui-tasks-test--limit board))))
+        ;; The limit there is now, the default, saves nothing; nor does an
+        ;; answer that is no number of tasks.
+        (dolist (a (list (lambda (default) default) "" "lots" "-2"))
+          (setq answer a)
+          (with-current-buffer board
+            (if (member a '("lots" "-2"))
+                (should-error (push-button (nth 2 (harness-ui-tasks-test--limit board))) :type 'user-error)
+              (push-button (nth 2 (harness-ui-tasks-test--limit board))))))
+        (accept-process-output nil 0.05)
+        (should (= 2 (length saved)))
+        (should (equal "all at once" (car (harness-ui-tasks-test--limit board))))
+        ;; The button's words read back as the number.
+        (setq answer "4 at a time")
+        (with-current-buffer board (push-button (nth 2 (harness-ui-tasks-test--limit board))))
+        (harness-ui-tasks-test--limit-says board "4 at a time")
+        (should (eql 4 harness-tasks-max-running))
+        ;; A narrow board shortens the settings first: the button stays
+        ;; whole, to be clicked, until the settings would be too short.
+        (with-current-buffer board
+          (let ((line (harness-ui-tasks--new-settings-line 44)))
+            (should (= 44 (string-width line)))
+            (should (string-suffix-p "…   4 at a time" line))
+            (should (eq 'harness-ui-tasks-set-max-running
+                        (get-text-property (1- (length line)) 'harness-task-button line))))
+          (let ((line (harness-ui-tasks--new-settings-line 30)))
+            (should (<= (string-width line) 30))
+            (should-not (string-search "4 at a time" line))))
+        ;; Refine starts nothing by itself: no limit to show.
+        (with-current-buffer board
+          (harness-ui-tasks-toggle-refine)
+          (should-not (harness-ui-tasks-test--limit board))
+          (should (string-search "an agent writes it up" (harness-ui-tasks-test--tail-text board)))
+          (harness-ui-tasks-toggle-refine))
+        (harness-ui-tasks-test--limit-says board "4 at a time")))))
+
 ;;;; In the merge queue
 
 (defun harness-ui-tasks-test--card-text (board text)

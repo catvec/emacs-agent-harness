@@ -3239,7 +3239,12 @@ record from before priorities reads `medium` without being rewritten.
   queued tasks in start order (`harness-tasks--start-order`: highest
   `:priority` first, oldest first among equals) while that project has
   slots left (`harness-tasks--free-slots PROJECT`), so a project at its
-  limit holds up only its own tasks.  Only top-level sessions take slots
+  limit holds up only its own tasks.  The limit (a `natnum`, or nil for
+  none; 0 starts nothing by itself) can change while tasks wait: its
+  `config/changed` runs the scheduler (`harness-tasks--on-config-changed`),
+  so a limit raised from a board's `N at a time` button or the settings
+  page starts the waiting tasks it lets through at once, and a lower one
+  stops no task at work.  Only top-level sessions take slots
   (`harness-tasks--holds-slot-p`): a task holds one while it starts,
   and while it is `active` with its own session -- one without a
   `:parent-id` -- running or blocked mid-turn, or idle with work it
@@ -3441,7 +3446,9 @@ record from before priorities reads `medium` without being rewritten.
   the `session/before-move` filter `harness-tasks--before-move` refuses,
   since the board files the task under its project and follows its work
   in its directory.  A task for the other directory is submitted there.
-- `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`,
+- `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`
+  (what new tasks start with, and `:max-running`, the limit, nil for
+  none),
   `task/start ID` (ignores the limit; not while a write-up runs),
   `task/set-priority ID PRIORITY` (low, medium or high, as `task/submit`
   reads it; any task, though it only matters to one still waiting; it
@@ -5925,7 +5932,17 @@ project.  The header's Review switch
 off, finished tasks merge and complete by themselves, and Ready for
 review shows only while tasks from before still wait there; turning it
 off while tasks of the board wait for review offers to verify them.
-`config/changed` brings every board the new value.  RET opens the session, and
+The settings line under the New task label ends, in Submit mode, with
+how many of a project's tasks work at once, a button: `N at a time`, or
+`all at once` without a limit, in `harness-task-held-face` at 0, when
+no task starts by itself.  A click reads another limit in the
+minibuffer (a number or `no limit`, the limit now the default; an
+answer that is neither changes nothing) and saves it the same way
+(`harness-ui-tasks-set-max-running`, `harness-tasks-max-running`); the
+harness starts the waiting tasks a higher limit lets through at once.
+On a narrow board the settings before the button shorten first, down to
+`harness-ui-tasks--min-settings-room` columns, so the button stays
+whole.  `config/changed` brings every board the new values.  RET opens the session, and
 `C-c h a` there leads back to the open board listing its task, whatever
 directory the session works in; elsewhere a task's worktree belongs to
 the main checkout's board (`harness-files-main-root`).  Redraws, after

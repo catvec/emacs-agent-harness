@@ -318,6 +318,53 @@ A task's project is its `:project', else its `:cwd'."
         (harness-tasks-test-wait-state id 'done)
         (should-error (harness-call 'task/start id))))))
 
+(ert-deftest harness-tasks-limit-changed-starts-waiting-tasks ()
+  "A limit raised through `config/set', as the board's button sets it, starts waiting tasks.
+At once, not when a task at work ends: here none ever does.  A lower
+limit stops no task at work, no limit lets every waiting task start,
+and a limit below 0 is refused."
+  (harness-tasks-test-with
+    ;; Turns that never end: only a new limit can start a task.
+    (let ((harness-provider-demo-script-override '((:type text :delta "Working on it.")))
+          (harness-tasks-max-running 0)
+          (passes 0)
+          (schedule (symbol-function 'harness-tasks--schedule)))
+      (cl-letf (((symbol-function 'harness-save-user-option) (lambda (symbol value) (set symbol value)))
+                ((symbol-function 'harness-tasks--schedule)
+                 (lambda () (cl-incf passes) (funcall schedule))))
+        (let ((a (harness-tasks-test-submit "first"))
+              (b (harness-tasks-test-submit "second"))
+              (c (harness-tasks-test-submit "third"))
+              (limit (lambda (value)
+                       (let ((before passes))
+                         (harness-call 'config/set "harness-tasks-max-running" value :printed t :scope 'global)
+                         ;; The scheduler runs once the change is announced.
+                         (harness-test-wait (lambda () (> passes before)) 5 "a scheduling pass")))))
+          (unwind-protect
+              (progn
+                ;; The pass the module's start queued is over: what runs
+                ;; the scheduler from here on is the new limit.
+                (accept-process-output nil 0.05)
+                (dolist (id (list a b c)) (should (eq 'pending (harness-tasks-test-state id))))
+                ;; Two slots: the two oldest start, the third waits.
+                (funcall limit "2")
+                (should (eql 2 harness-tasks-max-running))
+                (should (eq 'active (harness-tasks-test-state a)))
+                (should (eq 'active (harness-tasks-test-state b)))
+                (should (eq 'pending (harness-tasks-test-state c)))
+                ;; One: the two at work go on, and the third still waits.
+                (funcall limit "1")
+                (dolist (id (list a b)) (should (eq 'active (harness-tasks-test-state id))))
+                (should (eq 'pending (harness-tasks-test-state c)))
+                ;; No limit: the third starts too.
+                (funcall limit "nil")
+                (should-not harness-tasks-max-running)
+                (should (eq 'active (harness-tasks-test-state c)))
+                ;; A number of tasks is never negative.
+                (should-error (harness-call 'config/set "harness-tasks-max-running" "-1" :printed t :scope 'global))
+                (should-not harness-tasks-max-running))
+            (dolist (id (list a b c)) (ignore-errors (harness-call 'task/cancel id)))))))))
+
 (declare-function harness-tasks--holds-slot-p "harness-tasks")
 (declare-function harness-tasks--put "harness-tasks")
 (declare-function harness-provider-demo--last-user-text "harness-provider-demo")
