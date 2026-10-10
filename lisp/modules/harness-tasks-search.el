@@ -913,8 +913,8 @@ priority it had for priority).  The actions mean what a search's model
 was told: archive stops a task at work first and archives it once
 stopped, stop never drops a pending task, retry is `task/retry',
 message is a follow-up to the session (or words added to the prompt of
-a task with no session yet), priority is `task/set-priority' with the
-action's text."
+a backlog task still being written up), priority is `priority/set' on
+the task's session, which is where a task's priority lives."
   (let ((results nil)
         (chain (harness-resolved nil)))
     (dolist (action actions)
