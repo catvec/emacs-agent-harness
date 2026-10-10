@@ -2027,9 +2027,10 @@ never made it (`harness-outside-node-p')."
           ('user (user n))
           ('compaction (flush)
                        (add 'user (list :type "text"
-                                        :text (if (member (harness-node-compaction-kind n) '("transcript" "fresh"))
+                                        :text (if (member (harness-node-compaction-kind n) '("transcript" "fresh" "truncate"))
                                                   ;; A note pointing at the file, or saying
-                                                  ;; nothing was carried over: no summary.
+                                                  ;; nothing was carried over, or that the
+                                                  ;; oldest nodes were cut: no summary.
                                                   (plist-get n :content)
                                                 (concat "Summary of the conversation so far:\n\n"
                                                         (plist-get n :content))))))

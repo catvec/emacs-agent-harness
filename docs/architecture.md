@@ -19,7 +19,7 @@ module needs something more, add it here first.
                 provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval,
                 tools-web, tools-agent, tools-sessions, tools-notify, tools-handin,
-                tools-dev
+                tools-compact, tools-dev
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE,
@@ -2841,6 +2841,18 @@ a request whose own timeout fired are never retried.
     over, and telling the model to look back at what it needs with
     session_history (`harness-compaction--fresh-note`), or, without
     that tool, to ask the user.
+  - `truncate`: no request and no file either.  The oldest nodes are
+    dropped and the most recent ones are kept, as they were, whole tool
+    exchanges at a time: the nodes are chosen newest first
+    (`harness-compaction--truncate-plan`, `harness-compaction--node-units`)
+    up to `harness-compaction--truncate-keep` of the usable window and
+    re-appended after the node, which carries a note
+    (`harness-compaction--truncate-note`) saying how many nodes of
+    about how many tokens went and that the most recent are kept below.
+    It is what a conversation too big to summarise gets: nothing has to
+    be read to make it, and `:meta` records `:truncate-dropped`,
+    `:truncate-kept` and `:dropped-tokens`.  It refuses (`harness-error`)
+    when nothing would be dropped, since then there is nothing to cut.
   Every kind but `fresh`, whose note says so already, ends in a line
   pointing the model at the session_history tool
   (`harness-compaction-history-tool`, `harness-compaction--history-note`):
@@ -2868,10 +2880,28 @@ a request whose own timeout fired are never retried.
   with the compaction instead of adding it to the old one, whose
   context is what compacting was for.  The state of another provider,
   left by a handoff, stays.  One compaction runs per session at a time,
-  a second call returning the running promise; OPTS `:idle` refuses a
+  a second call returning the running promise.  OPTS `:idle` refuses a
   session running a turn (`agent/running`), whose turn would go on
   writing after the conversation it replaces, as compacting by hand
   does.
+
+  OPTS `:queue` and `:interrupt` are for just that session instead of a
+  refusal.  While a turn runs, `:queue` records the compaction in
+  `harness-compaction--pending` and returns at once -- it must not wait
+  for the compaction, since the compaction waits for the same turn: the
+  promise resolves to `(:queued t :kind KIND :interrupt BOOL)`, never to
+  the node the compaction later appends.  `:interrupt` also cancels the
+  running turn (`agent/cancel`) after storing the entry, so the
+  compaction runs once the turn is over; the step in flight and
+  anything it had not recorded are lost.  The queued compaction runs at
+  the session's next boundary: the `agent/step` and `agent/before-turn`
+  gates (`harness-compaction--gate`, priority 12, ahead of cowboy's 15
+  and automatic compaction's 20, so the fresh context is what those see)
+  run it, or, for a turn that ends first (a `cancelled` one included),
+  the `agent/turn-ended` handler does.  A `:queue` or `:interrupt` call
+  to an idle session compacts at once, like any other.  A compaction
+  already waiting is replaced; the pending entry lives in the harness
+  process and is dropped when the session is.
 - `compaction/estimate SESSION-ID` → `(:context :model :model-label
   :messages :cached :carry-on :carry-on-cached :compacting :kind
   :kinds)`: the context the next message sends, how many messages it
@@ -2887,12 +2917,15 @@ a request whose own timeout fired are never retried.
   for writes (DeepSeek, priced 0) still charges the input.  A brief
   summary reads the system prompt, the sample and the ask; either
   writes up to the summary's budget
-  (`harness-compaction--summary-output`).  A transcript and a fresh
-  start cost nothing and leave their note (`:after`) in place of the
-  context.
+  (`harness-compaction--summary-output`).  A transcript, a fresh start
+  and a truncation cost nothing and leave their note (`:after`) in place
+  of the context; a truncation's entry also carries `:kept` and
+  `:dropped` (how many nodes each) and `:kept-tokens` and
+  `:dropped-tokens`, with `:after` the note plus what is kept, and
+  `:dropped` 0 when nothing can be cut (`:after` is then the context).
 - Settings (section "Compaction"): `harness-compaction-kind`, the kind
-  automatic compaction makes (`summary`), and
-  `harness-compaction-brief-model`.
+  automatic compaction makes (`summary`; any of the kinds, `truncate`
+  included), and `harness-compaction-brief-model`.
 - Auto: `agent/before-turn` compacts, as `harness-compaction-kind`
   says, when the context comes within
   `harness-compaction--context-reserve` of the window unless the provider
@@ -4451,7 +4484,7 @@ names its own working and temporary directories.
   on `:parent-id` (the merge queue, say) sees the seed as their parent.
   The supervisor module forks its workers this way.
 
-### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval, tools-web, tools-agent, tools-sessions, tools-notify, tools-handin
+### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval, tools-web, tools-agent, tools-sessions, tools-notify, tools-handin, tools-compact
 
 Tool names, labels and inputs (all paths relative to cwd or absolute;
 TRAMP prefixes come from the session host):
@@ -4502,6 +4535,7 @@ TRAMP prefixes come from the session host):
 | `task_control` | Control task | task_id, action (start/queue/message/cancel/merge/verify/reject/complete/archive/restore/delete/priority), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
+| `compact` | Compact the conversation | kind (summary/brief/transcript/fresh/truncate, default summary), mode (queue/interrupt, default queue), reason | meta (tools-compact; offered to every session, so an agent compacts its own conversation) |
 | `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus (for the user: stays until the task is done) | exec (tools-dev; offered in a checkout of the harness only; the instance stops by itself once nothing needs it; needs no approval: `harness-perms--auto-allow-tools`) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
 | `notification_providers` | Notification providers | (none) | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -4530,6 +4564,24 @@ session's own branch is built on has to be in it first.  Evidence is required: a
 session's roots), a file, code, a note, or `tool_call' naming an
 earlier call of the session, which is copied into the report as a
 snapshot so the view can show it as the link it is.
+
+`compact` (`tools-compact`) lets an agent compact its own conversation
+when it sees the context filling up mid-task, and lets the harness ask
+for one the same way: the handler calls the core `compaction/compact`
+with OPTS `:kind` (`harness-compaction-kinds`: summary (the default),
+brief, transcript, fresh or truncate), `:reason` (kept on the node's
+`:meta`) and `:mode` for what a running turn means.  `queue`, the
+default, registers the compaction for the turn's next boundary and lets
+the turn go on; `interrupt` cancels the running turn first
+(`agent/cancel`) and compacts as soon as it is over, losing the step in
+flight, so a tool call never kills its own turn unless asked to.  With a
+turn running, either answer returns at once with what was queued (a
+tool that waited for the compaction would hold open the step the
+compaction waits for); an idle session compacts at once.  A
+compaction already under way (`harness-compaction-busy-p`) makes the
+call a no-op that says so.  The tool has no `agent/tools` filter, so
+every session is offered it except a session in supervisor mode, whose
+allowlist does not name it.
 
 `open_harness` (`tools-dev`) opens a second Emacs running the harness
 from a checkout of this project -- a task's worktree, say -- so harness
