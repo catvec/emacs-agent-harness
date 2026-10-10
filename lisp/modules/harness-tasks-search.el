@@ -2,67 +2,65 @@
 
 ;;; Commentary:
 
-;; The task board's search, a command palette run by a model.  A line
-;; typed on the board -- a question about the tasks ("did I have a task
-;; about the question button?") or an order to manage some ("get rid of
+;; The harness's search, a command palette run by a model.  A line typed
+;; on the task board or anywhere else in the harness -- a question about
+;; the tasks ("did I have a task about the question button?"), the
+;; sessions ("where did I debug the merge queue?") or the commands ("how
+;; do I attach a file?"), or an order to manage some tasks ("get rid of
 ;; the mq land task", "restart the errored tasks") -- goes, with a
-;; compact dump of the board, to the cheapest model of the user's
-;; provider.  It answers in one line of JSON and nothing else: which
-;; tasks the line is about, and what to do with them.  No prose comes
-;; back: the board shows the answer by showing only those tasks, and
-;; says what the actions did.
+;; compact dump of the board, the other sessions and the commands, to
+;; the cheapest model of the user's provider.  It answers in one line of
+;; JSON and nothing else: which tasks, sessions and commands the line is
+;; about, and what to do with the tasks.  No prose comes back: the board
+;; shows the answer by showing only those tasks, and says what the
+;; actions did.
 ;;
-;; `task/search CWD QUERY' runs a search and returns its plan without
-;; changing anything: the tasks to show, best match first, and the
-;; actions the model proposes, each marked `:confirm' when it waits for
-;; the user's OK.  Those are the ones that interrupt work, merge it or
-;; send words to an agent (stop, verify, complete, message, reject, and
-;; archiving a task at work); the others (archive, restore, retry,
-;; start, priority) undo easily or do no harm, and a board runs them at
-;; once.
+;; `search/ask CWD QUERY OPTS' runs a search and returns its plan without
+;; changing anything: the tasks to show, best match first, the sessions
+;; to open, the commands to run, and the actions the model proposes, each
+;; marked `:confirm' when it waits for the user's OK.  Those are the ones
+;; that interrupt work, merge it or send words to an agent (stop, verify,
+;; complete, message, reject, and archiving a task at work); the others
+;; (archive, restore, retry, start, priority) undo easily or do no harm,
+;; and a board runs them at once.
 ;; `task/search-apply ACTIONS' runs actions and says how each went, with
 ;; the action that undoes it where there is one.
 ;;
-;; The model reads the board only, as a rule.  When the board does not
-;; say enough it may ask once to look further, instead of answering: the
-;; sessions whose transcripts mention a text (by `session/search', its
-;; words in any form, best match first; by grep over the logs, for the
-;; text as typed, without that module), or the latest transcript of up
-;; to three tasks; then it must answer.
+;; The sessions are every project's: chats, side conversations,
+;; sub-agents, forks.  The commands are the UI's to know -- its menu,
+;; keymaps and modes -- so it sends their catalogue along (OPTS
+;; `:commands'), as the server may be another Emacs.  Where the query was
+;; typed (OPTS `:context') sets what the search favours, its bias: tasks
+;; on the board, sessions in the session list or a conversation tree,
+;; commands anywhere else.  Favoured, not alone: the model reads the rest
+;; too.  A search favouring sessions searches their transcripts for the
+;; query's words before the model reads anything, so the model gets the
+;; sessions that mention them as well as those whose names match.
+;;
+;; The model reads what it is given, as a rule.  When that does not say
+;; enough it may ask once to look further, instead of answering: the
+;; transcripts of the tasks or of every session that mention a text, the
+;; latest transcript of up to three tasks, or more commands; then it must
+;; answer.  Transcripts are searched by `session/search'
+;; (harness-session-search.el), full text: the words in any form, best
+;; match first.  A search does not settle for nothing.  Told to look
+;; beyond what it favours when that has no answer, the model widens the
+;; search itself and says so in a note; when it still answers with
+;; nothing, the search adds the nearest sessions and commands it finds
+;; itself, with no third call of the model, and says so.
 ;;
 ;; Every search runs under a session id of its own, so a provider that
 ;; keeps a process per session (the Claude CLI) gives each search a
 ;; fresh conversation, closed when the search ends (`provider/close').
-;; `task/search-warm CWD', which a board calls as its search opens,
-;; starts the process for the next search ahead (`provider/warm'), so it
-;; is ready by the time the line is typed; one left unused is closed
-;; after `harness-tasks-search--warm-idle' seconds.  The process works
-;; in a directory of its own under the state directory: a search needs
-;; no files, and the project's own history and instructions stay out of
-;; it.  What a search costs goes to the usage records (`usage/record'),
-;; under the board's project.
-;;
-;; The same search answers anywhere in the harness: `search/ask CWD
-;; QUERY OPTS' reads, besides the board's tasks, the other sessions
-;; (chats, side conversations, sub-agents, forks, of every project) and
-;; the harness's commands, and its plan names sessions to open and
-;; commands to run as well as tasks.  The commands are the UI's to know
-;; -- its menu, keymaps and modes -- so it sends their catalogue along
-;; (OPTS `:commands'), as the server may be another Emacs.  Where the
-;; query was typed (OPTS `:context') sets what the search favours, its
-;; bias: tasks on the board, sessions in the session list or a
-;; conversation tree, commands anywhere else.  Favoured, not alone: the
-;; model reads the rest too, and its one look further may search every
-;; session's transcripts (`session/search', where that module is
-;; loaded; their names otherwise) or the commands.  A search does not
-;; settle for nothing.  Told to look beyond what it favours when that
-;; has no answer, the model widens the search itself and says so in a
-;; note; when it still answers with nothing, the search adds the nearest
-;; sessions and commands it finds itself, with no third call of the
-;; model, and says so.  `task/search' is the board's own search:
-;; `search/ask' favouring tasks, which never widens by itself.  Both
-;; share one system prompt, so the process `task/search-warm' starts
-;; serves either.
+;; `search/warm CWD', which a search box calls as it opens, starts the
+;; process for the next search ahead (`provider/warm'), so it is ready by
+;; the time the line is typed; one left unused is closed after
+;; `harness-tasks-search--warm-idle' seconds.  Every search has the same
+;; system prompt, so that process serves it whatever it favours.  The
+;; process works in a directory of its own under the state directory: a
+;; search needs no files, and the project's own history and instructions
+;; stay out of it.  What a search costs goes to the usage records
+;; (`usage/record'), under the project it was typed in.
 
 ;;; Code:
 
@@ -151,7 +149,9 @@ the menu's commands make the list up to
     "did" "had" "have" "that" "this" "there" "was" "were" "open" "show" "find" "get" "look"
     "looking" "session" "sessions" "command" "commands" "task" "tasks" "please")
   "Words of a query that say nothing about what it looks for.
-Matching names and commands by the words of a query leaves them out.")
+Matching names and commands by the words of a query leaves them out,
+and so does searching the transcripts for them
+\(`harness-tasks-search--content').")
 
 (defconst harness-tasks-search--max-tokens 2000
   "Output budget of a search's model: a list of ids and a few actions.")
@@ -165,9 +165,6 @@ After that it is closed.")
 
 (defconst harness-tasks-search--read-nodes 14
   "Transcript entries a search reads of each task.")
-
-(defconst harness-tasks-search--grep-program "grep"
-  "Program that searches the transcript logs.")
 
 (defconst harness-tasks-search--stop-wait 20
   "Seconds archiving a task at work waits for it to stop.")
@@ -204,13 +201,13 @@ Favour what the context line names; the other lists may hold answers too.
 
 Match loosely: words in any order, abbreviations (mq = merge queue), typos, synonyms; titles, requests, todos, summaries and branches all count. \"Errored\", \"failed\" or \"broken\" tasks are those whose state says error or failed. \"Them\", \"those\" and \"these\" are the tasks shown on the board now. Act only on tasks the query clearly means; when unsure, show them and do nothing.
 
-Most queries need nothing but what you got. When it does not say enough, you may ask once to look further instead of answering, with one JSON object holding any of: {\"grep\":\"TEXT\"} the tasks whose session transcripts mention TEXT; {\"read\":[\"TASK-ID\",...]} the latest transcript of up to 3 tasks; {\"sessions\":\"TEXT\"} every session, not only the tasks', whose transcript or name mentions TEXT; {\"commands\":\"TEXT\"} more commands matching TEXT. Then you answer.
+Most queries need nothing but what you got. When it does not say enough, you may ask once to look further instead of answering, with one JSON object holding any of: {\"grep\":\"TEXT\"} the tasks whose session transcripts mention TEXT; {\"read\":[\"TASK-ID\",...]} the latest transcript of up to 3 tasks; {\"sessions\":\"TEXT\"} every session, not only the tasks', whose transcript or name mentions TEXT; {\"commands\":\"TEXT\"} more commands matching TEXT. \"grep\" and \"sessions\" are full-text searches, best match first: words match in any form and every word must match; \"quoted words\" match as a phrase, word* as a prefix, a OR b either one, and -word leaves out what has it. Then you answer.
 
 Do not give up at once: when the favoured data has nothing for the query, use that one look to search beyond it, sessions and commands, and answer with what comes nearest, saying so in note. Only when that finds nothing either, answer with empty lists."
   "System prompt of a search's model, on the board and anywhere else.
 It never changes, so a model process started ahead for a search
-\(`task/search-warm') has the settings the search comes with, whichever
-method (`task/search', `search/ask') runs it.")
+\(`search/warm') has the settings the search comes with, whatever it
+favours.")
 
 (defconst harness-tasks-search--final-text
   "That is all there is to look at. Now answer the query with one line of JSON: {\"show\":[...],\"sessions\":[...],\"commands\":[...],\"do\":[...],\"note\":\"...\"}."
@@ -457,15 +454,6 @@ there is no task board at all: task mode is off."
                 "Answer with one line of JSON.")))
    "\n\n"))
 
-(defun harness-tasks-search--board-text (root tasks query shown)
-  "The message that gives the model the board of ROOT, its TASKS, and QUERY.
-TASKS come newest first; SHOWN lists the ids the board shows now, when
-it shows only some.  That is the first message of a search on the
-board with no sessions or commands to add; see
-`harness-tasks-search--text'."
-  (harness-tasks-search--text root tasks query shown
-                              (harness-tasks-search--context-line '(:view "board") "tasks" root)))
-
 ;;;; Words
 
 (defun harness-tasks-search--words (text)
@@ -500,8 +488,9 @@ A word matches when TEXT has a word starting with its stem (see
 ;; (`harness-tasks-search--search'), holds what these read: `:sessions',
 ;; every session there is; `:board', the project's tasks by session id;
 ;; `:exclude', the session the engineer is in; `:found', the sessions a
-;; look found, by id, each with the first `:snippet' that matched;
-;; `:projects', project names by root, as they are worked out.
+;; search of the transcripts found, by id, each with where its first
+;; match is (`harness-tasks-search--remember'); `:projects', project
+;; names by root, as they are worked out.
 
 (defun harness-tasks-search--all-sessions ()
   "Every session there is, newest first; nil without the session module."
@@ -592,17 +581,20 @@ Return a list of (SCORE . SESSION).  SEARCH is the search's state."
 
 (defun harness-tasks-search--sessions-block (search)
   "The sessions SEARCH shows its model besides its board's tasks, or nil.
-Every session but the one the engineer is in and those of the tasks it
-shows, ranked by how well their names match the query, then newest
-first: `harness-tasks-search--max-sessions' of them, or, when the
-search favours tasks, only those whose names match, at most
-`harness-tasks-search--max-sessions-matching'."
+Every session but the one the engineer is in, those of the tasks it
+shows and those its search of the transcripts listed already (see
+`harness-tasks-search--upfront'), ranked by how well their names match
+the query, then newest first: `harness-tasks-search--max-sessions' of
+them, or, when the search favours tasks, only those whose names match,
+at most `harness-tasks-search--max-sessions-matching'."
   (let* ((listed (delq nil (mapcar (lambda (task) (harness-tasks-search--str (plist-get task :session)))
                                    (plist-get search :tasks))))
+         (found (plist-get search :found))
          (exclude (plist-get search :exclude))
          (candidates (cl-remove-if (lambda (session)
                                      (let ((id (plist-get session :id)))
-                                       (or (not (stringp id)) (equal id exclude) (member id listed))))
+                                       (or (not (stringp id)) (equal id exclude) (member id listed)
+                                           (and (hash-table-p found) (gethash id found)))))
                                    (plist-get search :sessions)))
          (ranked (harness-tasks-search--rank-sessions
                   (harness-tasks-search--words (plist-get search :query)) candidates search))
@@ -634,17 +626,29 @@ exactly one, at least six characters long: the model is shown eight."
                (let ((hits (cl-remove-if-not (lambda (id) (string-prefix-p ref id t)) ids)))
                  (and (= 1 (length hits)) (car hits))))))))
 
-(defun harness-tasks-search--remember (session snippet search)
-  "Remember that a look of SEARCH found SESSION, with its first SNIPPET."
+(defun harness-tasks-search--remember (session search)
+  "Remember in SEARCH that a search of the transcripts found SESSION.
+SESSION is as `session/search' gives it.  What is kept of its first hit
+is where it is: `:node', the id of the node; `:snippet', the passage
+around the match, on one line; `:ranges', where the matches are in that
+snippet, each (START END).  A session found by its name only has none
+of them."
   (let ((found (plist-get search :found))
         (id (harness-tasks-search--str (plist-get session :id))))
     (when (and id (hash-table-p found) (not (gethash id found)))
-      (puthash id (append (list :snippet snippet) (harness-plist-remove session :snippet)) found))))
+      (let* ((hit (car (plist-get session :hits)))
+             (snippet (plist-get hit :snippet))
+             (snippet (and (stringp snippet) (not (string-blank-p snippet)) snippet)))
+        (puthash id (append (list :node (plist-get hit :node) :snippet snippet
+                                  :ranges (and snippet (plist-get hit :ranges)))
+                            (harness-plist-remove session :hits :node :snippet :ranges))
+                 found)))))
 
 (defun harness-tasks-search--found-text (text result search)
   "Say what RESULT, what `session/search' found for TEXT, holds.
 Return (WORDS . SESSIONS): the text for the model and the sessions
-found, best first, remembered in SEARCH with their first snippet."
+found, best first, remembered in SEARCH with where their first match
+is."
   (let* ((sessions (seq-take (cl-remove-if-not (lambda (s) (stringp (plist-get s :id)))
                                                (plist-get result :sessions))
                              harness-tasks-search--max-found))
@@ -655,7 +659,7 @@ found, best first, remembered in SEARCH with their first snippet."
                                                 (harness-tasks-search--squash snippet 200))))
                                        (seq-take (plist-get s :hits) 2))))))
     (dolist (s sessions)
-      (harness-tasks-search--remember s (car (funcall snippets s)) search))
+      (harness-tasks-search--remember s search))
     (cons (if (null sessions)
               (format "No session mentions %S." text)
             (concat (format (cond ((equal (harness-tasks-search--str (plist-get result :engine)) "vectors")
@@ -673,54 +677,59 @@ found, best first, remembered in SEARCH with their first snippet."
                                sessions "")))
           sessions)))
 
-(defun harness-tasks-search--names-text (text search &optional max)
-  "Say which sessions have names that mention TEXT, without searching transcripts.
-The fallback without the session search.  Return (WORDS . SESSIONS),
-at most MAX of them (default `harness-tasks-search--max-found'),
-remembered in SEARCH."
-  (let* ((words (harness-tasks-search--words text))
-         (exclude (plist-get search :exclude))
-         (candidates (cl-remove-if (lambda (s) (or (not (stringp (plist-get s :id))) (equal (plist-get s :id) exclude)))
-                                   (plist-get search :sessions)))
-         (sessions (and words
-                        (mapcar #'cdr (seq-take (cl-remove-if-not (lambda (x) (> (car x) 0))
-                                                                  (harness-tasks-search--rank-sessions words candidates search))
-                                                (or max harness-tasks-search--max-found))))))
-    (dolist (s sessions) (harness-tasks-search--remember s nil search))
-    (cons (if sessions
-              (concat (format "Sessions whose names mention %S (their transcripts were not searched):" text)
-                      (mapconcat (lambda (s) (concat "\n" (harness-tasks-search--session-line s search))) sessions ""))
-            (format "No session name mentions %S." text))
-          sessions)))
+(defun harness-tasks-search--search-failed (text err)
+  "Log that the session search for TEXT failed with ERR; say so to the model."
+  (let ((msg (string-remove-suffix "." (string-trim (harness-error-message err)))))
+    (harness-log 'warn "search: the session search for %S failed: %s" text msg)
+    (format "The session search failed: %s." msg)))
 
 (defun harness-tasks-search--find-sessions (text search &optional max)
   "Return a promise of what the sessions say of TEXT, for SEARCH.
 That is (WORDS . SESSIONS), the text for the model and the sessions
 found, best first, at most MAX (default `harness-tasks-search--max-found').
-Every session but the one the engineer is in is searched: by
-`session/search', their transcripts and names, where that module is
-loaded; else only their names (`harness-tasks-search--names-text')."
-  (let ((max (or max harness-tasks-search--max-found)))
-    (if (not (harness-method-exists-p 'session/search))
-        (harness-resolved (harness-tasks-search--names-text text search max))
-      (harness-then
-       (harness-call-async 'session/search text
-                           (list :mode 'text :exclude (delq nil (list (plist-get search :exclude)))
-                                 :max-sessions max :max-matches 2))
-       (lambda (result)
-         (if (keywordp (car-safe result))
-             (harness-tasks-search--found-text text result search)
-           (harness-tasks-search--found-text text nil search)))
-       (lambda (err)
-         (harness-log 'warn "search: the session search for %S failed: %s" text (harness-error-message err))
-         (harness-tasks-search--names-text text search max))))))
+Every session but the one the engineer is in is searched by
+`session/search', transcripts and names.  When that fails, WORDS says
+so and SESSIONS is nil."
+  (harness-then
+   (harness-call-async 'session/search text
+                       (list :mode 'text :exclude (delq nil (list (plist-get search :exclude)))
+                             :max-sessions (or max harness-tasks-search--max-found) :max-matches 2))
+   (lambda (result)
+     (harness-tasks-search--found-text text (and (keywordp (car-safe result)) result) search))
+   (lambda (err)
+     (cons (harness-tasks-search--search-failed text err) nil))))
+
+(defun harness-tasks-search--content (query)
+  "The words of QUERY a search of the transcripts looks for, or nil.
+Those that say something (`harness-tasks-search--words'): the others
+would only keep a full-text search, which wants every word, from
+finding anything, or find everything once it settles for some."
+  (when-let* ((words (harness-tasks-search--words query)))
+    (string-join words " ")))
+
+(defun harness-tasks-search--upfront (search)
+  "Return a promise of what the transcripts say of SEARCH's query, or nil.
+A search favouring sessions searches every session for the words of
+its query that say something (`harness-tasks-search--content') before
+its model reads anything: the text that says what it found goes to the
+model with the rest, and the sessions it lists are remembered in
+SEARCH.  Any other search, or a query without such words, resolves to
+nil."
+  (let ((text (and (equal (plist-get search :bias) "sessions")
+                   (harness-tasks-search--content (plist-get search :query)))))
+    (if text
+        (harness-then (harness-tasks-search--find-sessions text search) #'car)
+      (harness-resolved nil))))
 
 (defun harness-tasks-search--session-entry (id search)
   "Session ID as a plan names it, from what SEARCH knows of it.
-That is (:id :name :kind :status :project :cwd :updated :snippet
-:task): `:project' the project's name, `:snippet' the first snippet a
-look found in it or nil, `:task' the id of the task of the board it
-works on or nil."
+That is (:id :name :kind :status :project :cwd :updated :snippet :node
+:ranges :task): `:project' the project's name; `:snippet' the passage
+around the first match a search of the transcripts found in it, on one
+line, `:node' the id of the node that holds it and `:ranges' where the
+matches are in the snippet, each (START END), all three nil for a
+session found by its name only; `:task' the id of the task of the
+board it works on or nil."
   (let* ((found (and (hash-table-p (plist-get search :found)) (gethash id (plist-get search :found))))
          (session (or (cl-find id (plist-get search :sessions)
                                :key (lambda (s) (plist-get s :id)) :test #'equal)
@@ -735,6 +744,8 @@ works on or nil."
           :cwd (plist-get session :cwd)
           :updated (plist-get session :updated)
           :snippet (plist-get found :snippet)
+          :node (plist-get found :node)
+          :ranges (plist-get found :ranges)
           :task (and task (plist-get task :id)))))
 
 ;;;; Commands
@@ -1066,23 +1077,13 @@ one that names a session or a command SEARCH knows of answers too."
                                                (harness-tasks-search--squash (harness-tasks-search--node-text n) 300)))
                            nodes "")))))))
 
-(defun harness-tasks-search--snippet (text needle)
-  "The part of TEXT around NEEDLE, on one line."
-  (let* ((case-fold-search t)
-         (text (harness-tasks-search--squash text 100000))
-         (pos (string-search (downcase needle) (downcase text))))
-    (if (not pos)
-        (harness-truncate-end text 160)
-      (let ((from (max 0 (- pos 70)))
-            (to (min (length text) (+ pos (length needle) 90))))
-        (concat (if (> from 0) "…" "") (substring text from to) (if (< to (length text)) "…" ""))))))
-
 (defun harness-tasks-search--find (needle tasks)
   "Return a promise of the text saying which of TASKS' transcripts mention NEEDLE.
 They are searched by `session/search', for NEEDLE's words in any form,
 best match first.  When no transcript has every word, the text says the
 ones listed have some of them; when none has any, and an embedding
-model is set, that they are the nearest in meaning."
+model is set, that they are the nearest in meaning.  When the search
+fails, the text says so."
   (let ((by-session (make-hash-table :test 'equal)))
     (dolist (task tasks)
       (when (stringp (plist-get task :session))
@@ -1090,9 +1091,9 @@ model is set, that they are the nearest in meaning."
     (if (zerop (hash-table-count by-session))
         (harness-resolved (format "No task session mentions %S." needle))
       (harness-then
-       (harness-call 'session/search needle
-                     (list :mode 'text :sessions (hash-table-keys by-session)
-                           :max-sessions (hash-table-count by-session) :max-matches 2))
+       (harness-call-async 'session/search needle
+                           (list :mode 'text :sessions (hash-table-keys by-session)
+                                 :max-sessions (hash-table-count by-session) :max-matches 2))
        (lambda (result)
          (let ((found (cl-remove-if-not (lambda (s) (plist-get s :hits)) (plist-get result :sessions))))
            (if (null found)
@@ -1106,59 +1107,8 @@ model is set, that they are the nearest in meaning."
                      (mapconcat (lambda (s)
                                   (format "\n%s: %s" (plist-get (gethash (plist-get s :id) by-session) :id)
                                           (mapconcat (lambda (h) (plist-get h :snippet)) (plist-get s :hits) " | ")))
-                                found "")))))))))
-
-(defun harness-tasks-search--grep (needle tasks)
-  "Return a promise of the text saying which of TASKS' transcripts mention NEEDLE.
-With the session search (harness-session-search.el) that is
-`harness-tasks-search--find'.  Without it, the node logs are searched by
-`harness-tasks-search--grep-program', in a process: transcripts are
-never loaded just to be searched."
-  (if (harness-method-exists-p 'session/search)
-      (harness-tasks-search--find needle tasks)
-    (harness-tasks-search--grep-logs needle tasks)))
-
-(defun harness-tasks-search--grep-logs (needle tasks)
-  "Return a promise of the text saying which of TASKS' logs hold NEEDLE, by grep."
-  (let* ((dir (expand-file-name "sessions" harness-state-directory))
-         (by-session (make-hash-table :test 'equal))
-         (files (cl-loop for task in tasks
-                         for sid = (plist-get task :session)
-                         for file = (and sid (expand-file-name (format "%s.nodes.jsonl" sid) dir))
-                         when (and file (file-exists-p file))
-                         do (puthash sid task by-session)
-                         and collect file))
-         ;; In a log, text sits inside JSON strings.
-         (fragment (let ((json (json-serialize needle)))
-                     (substring (if (multibyte-string-p json) json (decode-coding-string json 'utf-8)) 1 -1))))
-    (if (null files)
-        (harness-resolved (format "No task session mentions %S." needle))
-      (harness-then
-       (harness-run-command (append (list harness-tasks-search--grep-program "-i" "-H" "-F" "--max-count=3"
-                                          "-e" fragment "--")
-                                    files)
-                            :cwd dir :timeout 20 :name "harness-task-search-grep")
-       (lambda (r)
-         (let ((hits (make-hash-table :test 'equal)) order)
-           (dolist (line (split-string (or (plist-get r :stdout) "") "\n" t))
-             ;; A line holds a whole node, which can be megabytes long:
-             ;; `harness-grep-hit' splits it without a regexp.
-             (when-let* ((hit (harness-grep-hit line ".nodes.jsonl")))
-               (let ((task (gethash (car hit) by-session))
-                     (node (ignore-errors (harness-json-parse (cdr hit)))))
-                 (when (and task node)
-                   (let ((id (plist-get task :id)))
-                     (unless (gethash id hits) (push id order))
-                     (puthash id (append (gethash id hits)
-                                         (list (harness-tasks-search--snippet
-                                                (harness-tasks-search--node-text node) needle)))
-                              hits))))))
-           (if (null order)
-               (format "No task session mentions %S." needle)
-             (concat (format "Task sessions that mention %S:" needle)
-                     (mapconcat (lambda (id)
-                                  (format "\n%s: %s" id (string-join (seq-take (gethash id hits) 2) " | ")))
-                                (nreverse order) "")))))))))
+                                found "")))))
+       (lambda (err) (harness-tasks-search--search-failed needle err))))))
 
 (defun harness-tasks-search--look (wants tasks &optional search)
   "Return a promise of the text of what WANTS asked to see of TASKS.
@@ -1173,7 +1123,7 @@ remembered there."
                        (plist-get wants :read))))
     (harness-then (harness-all
                    (list (if (plist-get wants :grep)
-                             (harness-tasks-search--grep (plist-get wants :grep) tasks)
+                             (harness-tasks-search--find (plist-get wants :grep) tasks)
                            (harness-resolved nil))
                          (if (plist-get wants :sessions)
                              (harness-then (harness-tasks-search--find-sessions (plist-get wants :sessions) search)
@@ -1320,7 +1270,7 @@ provider ends the request with an error."
 
 (defvar harness-tasks-search--warm (make-hash-table :test 'equal)
   "Project root -> (:session ID :model MODEL :timer TIMER).
-A model process started for the next search of that project's board.")
+A model process started for the next search typed in that project.")
 
 (defun harness-tasks-search--new-session ()
   "A session id of a search's own."
@@ -1343,20 +1293,21 @@ there was none."
     (harness-tasks-search--drop-warm root)))
 
 (defun harness-tasks-search--take-session (root model)
-  "Return the session id a search of ROOT's board with MODEL runs under.
+  "Return the session id a search in ROOT's project with MODEL runs under.
 The one warmed for it when its model is MODEL, else a new one."
   (let ((entry (gethash root harness-tasks-search--warm)))
     (if (and entry (equal (plist-get entry :model) model))
         (harness-tasks-search--drop-warm root t)
       (harness-tasks-search--new-session))))
 
-(harness-defmethod task/search-warm (cwd)
-  "Start the model process the next search of CWD's board will use.
+(harness-defmethod search/warm (cwd)
+  "Start the model process the next search typed at CWD will use.
 Return (:model MODEL :warm BOOL), MODEL being the model that will
 answer and BOOL t when a process is ready for it, else false; nil when
-there is no model to search with.  A board calls this as its search
-opens, so the process is up by the time the line is typed.  Only a
-provider that keeps a process per session prepares anything (see
+there is no model to search with.  A search box calls this as it
+opens, so the process is up by the time the line is typed.  Searches
+of the same project share it, whatever they favour.  Only a provider
+that keeps a process per session prepares anything (see
 `provider/warm'); a process left unused is closed after
 `harness-tasks-search--warm-idle' seconds."
   (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
@@ -1387,11 +1338,6 @@ provider that keeps a process per session prepares anything (see
 
 ;;;; Searching
 
-(defun harness-tasks-search--board (cwd)
-  "Return the tasks of CWD's board a search reads: the newest first."
-  (let ((tasks (harness-call 'task/list cwd)))
-    (reverse (last tasks harness-tasks-search--max-tasks))))
-
 (defun harness-tasks-search--empty-p (plan)
   "Non-nil when PLAN shows, names and does nothing."
   (not (or (plist-get plan :ids) (plist-get plan :actions)
@@ -1400,13 +1346,17 @@ provider that keeps a process per session prepares anything (see
 (defun harness-tasks-search--nearest (search)
   "Return a promise of what comes nearest the query of SEARCH, which found nothing.
 That is (:sessions SESSIONS :commands COMMANDS :note NOTE :widened t):
-the sessions a look at them for the whole query finds and the commands
-it matches, at most `harness-tasks-search--max-nearest' of each, and
-NOTE saying so, or saying nothing matched at all.  The model is not
-asked again."
-  (let ((query (plist-get search :query)))
+the sessions a search of the transcripts for the words of the query
+that say something finds (`harness-tasks-search--content') and the
+commands the query matches, at most `harness-tasks-search--max-nearest'
+of each, and NOTE saying so, or saying nothing matched at all.  The
+model is not asked again."
+  (let* ((query (plist-get search :query))
+         (text (harness-tasks-search--content query)))
     (harness-then
-     (harness-tasks-search--find-sessions query search harness-tasks-search--max-nearest)
+     (if text
+         (harness-tasks-search--find-sessions text search harness-tasks-search--max-nearest)
+       (harness-resolved nil))
      (lambda (found)
        (let ((sessions (delq nil (mapcar (lambda (s)
                                            (let ((id (plist-get s :id)))
@@ -1426,7 +1376,10 @@ asked again."
 
 (defun harness-tasks-search--search (cwd query opts)
   "Run the search of QUERY typed at CWD; return a promise of its plan.
-OPTS are what `search/ask' takes, and the plan what it returns."
+OPTS are what `search/ask' takes, and the plan what it returns.  The
+model reads what the transcripts say first, when the search favours
+sessions (`harness-tasks-search--upfront'), so its process is taken
+only once that is known."
   (condition-case err
       (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
              (root (harness-tasks-search--root cwd))
@@ -1442,7 +1395,6 @@ OPTS are what `search/ask' takes, and the plan what it returns."
              (shown (delq nil (mapcar (lambda (ref) (harness-tasks-search--resolve ref tasks))
                                       (harness-tasks-search--list (plist-get opts :shown)))))
              (query (string-trim query))
-             (widen (if (plist-member opts :widen) (harness-json-true-p (plist-get opts :widen)) t))
              (state (list :root root :model model :query query :bias bias :context context
                           :exclude (harness-tasks-search--field context :session)
                           :tasks tasks :board (harness-tasks-search--by-session board)
@@ -1450,73 +1402,79 @@ OPTS are what `search/ask' takes, and the plan what it returns."
                           :catalogue (harness-tasks-search--catalogue (plist-get opts :commands))
                           :found (make-hash-table :test 'equal)
                           :projects (make-hash-table :test 'equal)))
-             (first (list (harness-tasks-search--user
-                           (harness-tasks-search--text
-                            root tasks query shown
-                            (harness-tasks-search--context-line context bias root)
-                            (list (harness-tasks-search--sessions-block state)
-                                  (harness-tasks-search--commands-block state))
-                            no-board))))
-             ;; Taken last, so that nothing fails between taking the
-             ;; process and the search's closing it.
-             (search (append (list :session (harness-tasks-search--take-session root model)) state))
-             (start (float-time))
-             (looked nil)
-             (finish
-              (lambda (answer)
-                (let ((plan (harness-tasks-search--plan answer tasks search)))
-                  (harness-then
-                   (if (and widen (harness-tasks-search--empty-p plan))
-                       ;; Nothing: what comes nearest, rather than no answer.
-                       (harness-then (harness-tasks-search--nearest search)
-                                     (lambda (nearest) (harness-plist-merge plan nearest)))
-                     (harness-resolved (append plan (list :widened :false))))
-                   (lambda (plan)
-                     (harness-log 'info "search %S, favouring %s: %s, %s, %s, %s%s (%s, %.1fs)"
-                                  query bias
-                                  (harness-tasks-search--count (length (plist-get plan :ids)) "task")
-                                  (harness-tasks-search--count (length (plist-get plan :sessions)) "session")
-                                  (harness-tasks-search--count (length (plist-get plan :commands)) "command")
-                                  (harness-tasks-search--count (length (plist-get plan :actions)) "action")
-                                  (if (eq t (plist-get plan :widened)) ", widened" "")
-                                  model (- (float-time) start))
-                     (append (list :query query :model model :bias bias :looked looked) plan))))))
-             (promise
-              (harness-then
-               (harness-tasks-search--ask search first)
-               (lambda (reply)
-                 (let* ((answer (harness-tasks-search--json reply))
-                        (wants (and answer (harness-tasks-search--wants answer tasks search))))
-                   (cond
-                    ((null answer) (harness-tasks-search--no-answer reply))
-                    ((not wants) (funcall finish answer))
-                    (t
-                     (setq looked (harness-tasks-search--looked wants))
-                     (harness-then
-                      (harness-tasks-search--look wants tasks search)
-                      (lambda (found)
-                        (harness-then
-                         (harness-tasks-search--ask
-                          search (append first (list (list :role 'assistant
-                                                           :content (list (list :type "text" :text reply)))
-                                                     (harness-tasks-search--user found))))
-                         (lambda (again)
-                           (let ((answer (harness-tasks-search--json again)))
-                             (cond
-                              ((null answer) (harness-tasks-search--no-answer again))
-                              ;; It looks further once only.
-                              ((harness-tasks-search--wants answer tasks search)
-                               (harness-rejected (list 'error "The model asked to look further again instead of answering")))
-                              (t (funcall finish answer)))))))))))))))
-        ;; Every search has a process of its own: it goes with the search.
-        (harness-then promise
-                      (lambda (plan)
-                        (harness-call 'provider/close model (plist-get search :session))
-                        plan)
-                      (lambda (e)
-                        (harness-call 'provider/close model (plist-get search :session))
-                        (harness-log 'warn "search %S failed: %s" query (harness-error-message e))
-                        (harness-rejected e))))
+             (start (float-time)))
+        (harness-then
+         (harness-tasks-search--upfront state)
+         (lambda (upfront)
+           (let* ((first (list (harness-tasks-search--user
+                                (harness-tasks-search--text
+                                 root tasks query shown
+                                 (harness-tasks-search--context-line context bias root)
+                                 ;; The sessions block leaves out those
+                                 ;; the transcripts' text lists.
+                                 (list upfront
+                                       (harness-tasks-search--sessions-block state)
+                                       (harness-tasks-search--commands-block state))
+                                 no-board))))
+                  ;; Taken last, so that nothing fails between taking the
+                  ;; process and the search's closing it.
+                  (search (append (list :session (harness-tasks-search--take-session root model)) state))
+                  (looked nil)
+                  (finish
+                   (lambda (answer)
+                     (let ((plan (harness-tasks-search--plan answer tasks search)))
+                       (harness-then
+                        (if (harness-tasks-search--empty-p plan)
+                            ;; Nothing: what comes nearest, rather than no answer.
+                            (harness-then (harness-tasks-search--nearest search)
+                                          (lambda (nearest) (harness-plist-merge plan nearest)))
+                          (harness-resolved (append plan (list :widened :false))))
+                        (lambda (plan)
+                          (harness-log 'info "search %S, favouring %s: %s, %s, %s, %s%s (%s, %.1fs)"
+                                       query bias
+                                       (harness-tasks-search--count (length (plist-get plan :ids)) "task")
+                                       (harness-tasks-search--count (length (plist-get plan :sessions)) "session")
+                                       (harness-tasks-search--count (length (plist-get plan :commands)) "command")
+                                       (harness-tasks-search--count (length (plist-get plan :actions)) "action")
+                                       (if (eq t (plist-get plan :widened)) ", widened" "")
+                                       model (- (float-time) start))
+                          (append (list :query query :model model :bias bias :looked looked) plan))))))
+                  (promise
+                   (harness-then
+                    (harness-tasks-search--ask search first)
+                    (lambda (reply)
+                      (let* ((answer (harness-tasks-search--json reply))
+                             (wants (and answer (harness-tasks-search--wants answer tasks search))))
+                        (cond
+                         ((null answer) (harness-tasks-search--no-answer reply))
+                         ((not wants) (funcall finish answer))
+                         (t
+                          (setq looked (harness-tasks-search--looked wants))
+                          (harness-then
+                           (harness-tasks-search--look wants tasks search)
+                           (lambda (found)
+                             (harness-then
+                              (harness-tasks-search--ask
+                               search (append first (list (list :role 'assistant
+                                                                :content (list (list :type "text" :text reply)))
+                                                          (harness-tasks-search--user found))))
+                              (lambda (again)
+                                (let ((answer (harness-tasks-search--json again)))
+                                  (cond
+                                   ((null answer) (harness-tasks-search--no-answer again))
+                                   ;; It looks further once only.
+                                   ((harness-tasks-search--wants answer tasks search)
+                                    (harness-rejected (list 'error "The model asked to look further again instead of answering")))
+                                   (t (funcall finish answer)))))))))))))))
+             ;; Every search has a process of its own: it goes with the search.
+             (harness-then promise
+                           (lambda (plan)
+                             (harness-call 'provider/close model (plist-get search :session))
+                             plan)
+                           (lambda (e)
+                             (harness-call 'provider/close model (plist-get search :session))
+                             (harness-log 'warn "search %S failed: %s" query (harness-error-message e))
+                             (harness-rejected e)))))))
     (error (harness-rejected err))))
 
 (harness-defmethod search/ask (cwd query &optional opts)
@@ -1526,15 +1484,27 @@ Return a promise of the plan: (:query QUERY :model MODEL :bias BIAS
 :tasks TASKS :sessions SESSIONS :commands COMMANDS).  Nothing changes
 yet.
 
-IDS and ACTIONS are what `task/search' says of CWD's board: the tasks
-QUERY is about, best match first, and the actions it orders, which
-`task/search-apply' runs.  TASKS are those tasks again, each (:id
-:title :status :session), for a view without the board.  SESSIONS
-are the sessions, of any project, QUERY is about, best first, each
-\(:id :name :kind :status :project :cwd :updated :snippet :task):
-`:project' its project's name, `:snippet' a passage a look found in it
-or nil, `:task' the task of the board it works on or nil.  COMMANDS are
-the entries of OPTS `:commands' that do what QUERY asks, best first.
+IDS are the tasks of CWD's board QUERY is about, best match first,
+archived ones included: a board shows only those.  ACTIONS are what
+QUERY orders, in order, each (:task ID :action NAME :text TEXT :title
+TITLE :confirm BOOL), NAME being one of `harness-tasks-search-actions'
+and TEXT the words a message or a send-back carries, or the priority a
+priority action gives (low, medium or high); `:confirm' is t for an
+action that waits for the user's OK (see
+`harness-tasks-search--confirm-actions'), else false.
+`task/search-apply' runs them.  TASKS are the tasks of IDS again, each
+\(:id :title :status :session), for a view without the board.
+
+SESSIONS are the sessions, of any project, QUERY is about, best first,
+each (:id :name :kind :status :project :cwd :updated :snippet :node
+:ranges :task): `:project' its project's name; `:snippet' the passage
+around the first match a search of the transcripts found in it, on one
+line, `:node' the id of the node that holds it, where a view can open
+the session, and `:ranges' where the matches are in the snippet, each
+\(START END), all three nil for a session found by its name only;
+`:task' the task of the board it works on or nil.  COMMANDS are the
+entries of OPTS `:commands' that do what QUERY asks, best first.
+
 BIAS is what the search favoured.  LOOKED says what the model looked
 at besides what it was given, when it did.  NOTE is the model's word on
 its answer (\"No task matched; these sessions mention it.\"), else nil.
@@ -1545,8 +1515,10 @@ so; else false.
 The model is `harness-tasks-search-model'.  It reads the board's
 tasks, the other sessions and the commands, and answers in JSON, at
 most once after looking further: into the tasks' transcripts, every
-session's (`session/search' where it is loaded, their names otherwise)
-or the commands.  OPTS:
+session's or the commands.  Transcripts are searched by
+`session/search', full text.  A search favouring sessions searches
+every session's transcripts for QUERY's words before the model reads
+anything, and the model reads what that finds too.  OPTS:
   :bias      what to favour: \"tasks\", \"sessions\" or \"commands\";
              by default what the view of `:context' suggests: tasks on
              the board, sessions in the session list or a conversation
@@ -1560,49 +1532,10 @@ or the commands.  OPTS:
   :commands  the commands the model may name, the UI's catalogue: each
              (:command NAME :keys KEYS :where WHERE :label LABEL :doc
              DOC :here HERE), HERE true when it runs where QUERY was
-             typed
-  :widen     false keeps the search from adding what comes nearest
-             when the model finds nothing; true by default"
+             typed"
   (if (or (not (stringp query)) (string-blank-p query))
       (harness-rejected (list 'error "Nothing to search for"))
     (harness-tasks-search--search cwd query opts)))
-
-(defun harness-tasks-search--board-opts (opts)
-  "OPTS of `task/search' as `search/ask' takes them.
-The search favours tasks, is seen from the board and never widens by
-itself."
-  (let ((context (let ((context (plist-get opts :context))) (and (keywordp (car-safe context)) context))))
-    (append (list :bias "tasks" :widen :false
-                  :context (append (list :view "board") (harness-plist-remove context :view)))
-            (harness-plist-remove opts :bias :widen :context))))
-
-(harness-defmethod task/search (cwd query &optional opts)
-  "Ask the search model about QUERY on the task board of CWD's project.
-Return a promise of the plan: (:query QUERY :ids IDS :actions ACTIONS
-:model MODEL :looked LOOKED), with what `search/ask' adds.  Nothing
-changes yet.
-
-IDS are the tasks QUERY is about, best match first, archived ones
-included: the board shows only those.  ACTIONS are what QUERY orders,
-in order, each (:task ID :action NAME :text TEXT :title TITLE :confirm
-BOOL), NAME being one of `harness-tasks-search-actions' and TEXT the
-words a message or a send-back carries, or the priority a priority
-action gives (low, medium or high); `:confirm' is t for an action
-that waits for the user's OK (see `harness-tasks-search--confirm-actions'),
-else false.  `task/search-apply' runs them.  LOOKED says what the model
-looked at besides the board, when it did.
-
-The model is `harness-tasks-search-model'; it reads a dump of the board
-and answers in JSON, at most once after looking further.  OPTS:
-`:shown', the ids the board shows now, which \"them\" in QUERY means,
-and `:commands', as `search/ask' takes them.  This is `search/ask'
-favouring tasks, seen from the board, that never widens by itself: what
-it finds is what the model answers."
-  (cond
-   ((or (not (stringp query)) (string-blank-p query)) (harness-rejected (list 'error "Nothing to search for")))
-   ((not (harness-method-exists-p 'task/list))
-    (harness-rejected (list 'error "Task mode (the tasks module) is not loaded")))
-   (t (harness-tasks-search--search cwd query (harness-tasks-search--board-opts opts)))))
 
 ;;;; Acting
 
@@ -1653,7 +1586,7 @@ Never `task/cancel' on a task that is not at work: that drops a pending one."
       (harness-call 'task/prompt id text))))
 
 (defun harness-tasks-search--run (action)
-  "Run ACTION, as `task/search' proposes it; return a promise of how it went.
+  "Run ACTION, as `search/ask' proposes it; return a promise of how it went.
 That is ACTION's `:task' and `:action' with `:ok' t, or false and
 `:error' the reason, `:title' the task's title, and `:undo' the action
 that undoes it, when there is one; a priority action's `:text' is the
@@ -1710,7 +1643,7 @@ board can say \"Could not retry “Fix X”: it is working already\"."
           (t (concat (downcase (substring msg 0 1)) (substring msg 1))))))
 
 (harness-defmethod task/search-apply (actions)
-  "Run ACTIONS, as `task/search' proposed them, one after the other.
+  "Run ACTIONS, as `search/ask' proposed them, one after the other.
 Return a promise of how each went: its `:task' and `:action', `:ok' t
 or false with `:error', its `:title', and `:undo', the action that
 undoes it when there is one (restore for archive and back, the
@@ -1738,7 +1671,7 @@ the task's session, which is where a task's priority lives."
 
 (harness-define-module 'tasks-search
   :doc "Search the harness with a cheap model, in JSON only: tasks and actions on them, sessions and commands."
-  :requires '(tasks provider)
+  :requires '(tasks provider session-search)
   :shutdown #'harness-tasks-search--shutdown)
 
 (provide 'harness-tasks-search)

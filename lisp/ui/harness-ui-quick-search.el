@@ -117,7 +117,7 @@ opened from.")
 Answers to earlier ones are dropped.")
 
 (defvar-local harness-quick-search--model nil
-  "The model that answers this popout's searches, as `task/search-warm' said.")
+  "The model that answers this popout's searches, as `search/warm' said.")
 
 (defun harness-quick-search--session-name (id)
   "Return the name of session ID as the UI's cache has it, or nil."
@@ -981,7 +981,7 @@ alone."
 It also says which model answers, which the popout names while it asks."
   (let ((popout (current-buffer))
         (project (or (plist-get harness-quick-search--context :project) default-directory)))
-    (harness-ui-call "_harness/task/search-warm" (list :cwd project)
+    (harness-ui-call "_harness/search/warm" (list :cwd project)
                      (lambda (reply)
                        (when (and (buffer-live-p popout) (stringp (plist-get reply :model)))
                          (with-current-buffer popout

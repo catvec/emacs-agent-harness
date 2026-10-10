@@ -39,9 +39,9 @@
 ;; does it and one that skips it, and / then RET on an empty box does
 ;; it too, as the search box's placeholder says.
 ;;
-;; The model's process starts as the search box opens
-;; (`task/search-warm'), so the answer comes sooner, and the header
-;; line's [Search] spins while the model works.
+;; The model's process starts as the search box opens (`search/warm'),
+;; so the answer comes sooner, and the header line's [Search] spins
+;; while the model works.
 
 ;;; Code:
 
@@ -62,19 +62,6 @@
 (defface harness-task-search-proposal-face '((t :inherit harness-task-attention-face))
   "What a board's search proposes to do, waiting for your OK."
   :group 'harness-ui-tasks)
-
-;; The board's searches and the quick search's are one history: M-p in
-;; either box brings back both.  What an older version kept under the
-;; board's own name -- savehist may have restored it before this file
-;; loads -- joins it, so that making the alias neither loses it nor
-;; warns that it is overwritten.
-(when (and (boundp 'harness-ui-tasks-search-history)
-           (not (eq (indirect-variable 'harness-ui-tasks-search-history) 'harness-quick-search-history)))
-  (setq harness-quick-search-history
-        (delete-dups (append harness-quick-search-history
-                             (copy-sequence (symbol-value 'harness-ui-tasks-search-history)))))
-  (makunbound 'harness-ui-tasks-search-history))
-(define-obsolete-variable-alias 'harness-ui-tasks-search-history 'harness-quick-search-history "3.1")
 
 (defvar-local harness-ui-tasks-search--state nil
   "This board's search, or nil.  A plist:
@@ -100,7 +87,7 @@
   "The number of this board's latest search.  Answers to earlier ones are dropped.")
 
 (defvar-local harness-ui-tasks-search--model nil
-  "The model that answers this board's searches, as `task/search-warm' said.")
+  "The model that answers this board's searches, as `search/warm' said.")
 
 (defvar-local harness-ui-tasks-search--draft nil
   "What this board's compose box held when it turned into a search box.
@@ -493,7 +480,7 @@ A search the board dropped, or one asked after, is left alone."
   "Have the harness start the model of this board's next search now.
 It also says which model answers, which the banner names."
   (let ((board (current-buffer)))
-    (harness-ui-call "_harness/task/search-warm" (list :cwd harness-ui-tasks--dir)
+    (harness-ui-call "_harness/search/warm" (list :cwd harness-ui-tasks--dir)
                      (lambda (r)
                        (when (and (buffer-live-p board) (plist-get r :model))
                          (with-current-buffer board

@@ -631,8 +631,11 @@ when the search favours tasks."
            (shown (mapcar (lambda (s) (nth 1 s))
                           (cond ((and (null words) (or state favours-tasks)) (mapcar (lambda (e) (cons 0 e)) in-state))
                                 ((> best 0) (cl-remove-if-not (lambda (s) (= (car s) best)) scored)))))
+           ;; The sessions a search of the transcripts found, then the rest.
            (sessions (and words (harness-provider-demo--search-best
-                                 words (harness-provider-demo--search-lines text "Sessions besides the board's tasks")
+                                 words (mapcan (lambda (header) (harness-provider-demo--search-lines text header))
+                                               '("Sessions that mention" "No session mentions"
+                                                 "Sessions besides the board's tasks"))
                                  5)))
            (commands (and words (harness-provider-demo--search-best
                                  words (harness-provider-demo--search-lines text "Commands (name | keys")

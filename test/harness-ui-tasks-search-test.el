@@ -117,7 +117,7 @@ an empty history of searches."
      (harness-test-reset-bus)
      (let ((harness-acp--server-enabled nil))
        (dolist (m '(store project config provider provider-demo tools session agent priority tasks
-                          tasks-search acp))
+                          session-search tasks-search acp))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
      (clrhash harness-tools)

@@ -2,11 +2,11 @@
 
 ;;; Commentary:
 
-;; Drives `task/search', `task/search-apply' and `task/search-warm'
-;; against the real state layer and the demo provider, whose replies a
-;; test scripts per request: the board the model reads, the plan made of
-;; its answer, looking further once, failures, the actions, the model
-;; process of each search and what a search costs.
+;; Drives `search/ask', `task/search-apply' and `search/warm' against the
+;; real state layer, the session search and the demo provider, whose
+;; replies a test scripts per request: the board the model reads, the
+;; plan made of its answer, looking further once, failures, the actions,
+;; the model process of each search and what a search costs.
 
 ;;; Code:
 
@@ -76,19 +76,15 @@ A task asked to stay busy never ends its turn; one asked to fail fails."
 
 (declare-function harness-provider-demo--last-user-text "harness-provider-demo")
 
-(defvar harness-tasks-search-test--modules nil
-  "Modules a test loads besides those every test of the suite loads.")
-
 (defmacro harness-tasks-search-test-with (&rest body)
   "Load the state layer, tasks and their search with the demo provider; run BODY.
-The modules of `harness-tasks-search-test--modules' are loaded too."
+The session search, which searches the transcripts, loads too."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
      (let ((harness-acp--server-enabled nil))
-       (dolist (m (append '(store project config provider provider-demo tools session agent priority
-                                  tasks tasks-search acp)
-                          harness-tasks-search-test--modules))
+       (dolist (m '(store project config provider provider-demo tools session agent priority
+                          tasks session-search tasks-search acp))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
      (clrhash harness-tools)
@@ -138,9 +134,9 @@ The modules of `harness-tasks-search-test--modules' are loaded too."
     (harness-tasks-search-test--wait id (lambda (task) (eq 'done (plist-get task :state))) "done")))
 
 (defun harness-tasks-search-test--search (query &rest replies)
-  "Run a search of QUERY whose model answers REPLIES; return its plan."
+  "Search for QUERY favouring tasks, the model answering REPLIES; return the plan."
   (setq harness-tasks-search-test--replies replies)
-  (harness-test-await (harness-call 'task/search default-directory query) 10))
+  (harness-test-await (harness-call 'search/ask default-directory query '(:bias "tasks")) 10))
 
 (defun harness-tasks-search-test--asked (request)
   "The text of the last message REQUEST sent the model."
@@ -276,55 +272,31 @@ then answers; the plan says what it looked at."
                                           (regexp-quote b))
                                   (harness-tasks-search-test--asked (car harness-tasks-search-test--requests)))))))))
 
-(ert-deftest harness-tasks-search-greps-very-long-lines ()
-  "A node of megabytes does not fail a search of the transcripts.
-grep prints the node's whole line of the log, and the regexp that split
-the file name off it backtracked over all of it: \"Stack overflow in
-regexp matcher\" once a line passed some hundred thousand characters."
+(ert-deftest harness-tasks-search-looks-further-by-the-session-search ()
+  "The transcripts are searched for the words in any form, best match
+first; when none has every word, the model is told the ones listed have
+some of them, and when none has any, that none does."
   (harness-tasks-search-test-with
-    (let ((a (harness-tasks-search-test--submit "Document the parser"))
+    (let ((a (harness-tasks-search-test--submit "The parser chokes on nested quotes"))
           (b (harness-tasks-search-test--submit "Speed up the test suite")))
       (harness-tasks-search-test--done a b)
-      (harness-call 'session/append (plist-get (harness-tasks-search-test--task a) :session)
-                    (list :kind 'tool-result
-                          :output (concat (make-string 1000 ?x) " see README.md for details "
-                                          (make-string 1500000 ?y))))
       (let ((plan (harness-tasks-search-test--search
-                   "which one touched the readme?"
-                   "{\"grep\":\"readme.md\"}"
+                   "which one was about quoting?" "{\"grep\":\"quoting parsers\"}"
                    (format "{\"show\":[\"%s\"]}" a))))
         (should (equal (list a) (plist-get plan :ids)))
         (let ((text (harness-tasks-search-test--asked (car harness-tasks-search-test--requests))))
-          (should (string-match-p (format "^%s: …x+ see README\\.md for details y+…$" (regexp-quote a)) text))
-          (should-not (string-match-p (regexp-quote b) text))
-          (should (< (length text) 1000)))))))
-
-(ert-deftest harness-tasks-search-looks-further-by-the-session-search ()
-  "With the session search, the transcripts are searched for the words in
-any form, best match first; when none has every word, the model is told
-the ones listed have some of them, and when none has any, that none does."
-  (let ((harness-tasks-search-test--modules '(session-search)))
-    (harness-tasks-search-test-with
-      (let ((a (harness-tasks-search-test--submit "The parser chokes on nested quotes"))
-            (b (harness-tasks-search-test--submit "Speed up the test suite")))
-        (harness-tasks-search-test--done a b)
-        (let ((plan (harness-tasks-search-test--search
-                     "which one was about quoting?" "{\"grep\":\"quoting parsers\"}"
-                     (format "{\"show\":[\"%s\"]}" a))))
-          (should (equal (list a) (plist-get plan :ids)))
-          (let ((text (harness-tasks-search-test--asked (car harness-tasks-search-test--requests))))
-            (should (string-match-p "^Task sessions that mention \"quoting parsers\":$" text))
-            (should (string-match-p (format "^%s: .*parser chokes on nested quotes" (regexp-quote a)) text))
-            (should-not (string-match-p (regexp-quote b) text))))
-        (harness-tasks-search-test--search "q" "{\"grep\":\"suite giraffe\"}" "{\"show\":[]}")
-        (let ((text (harness-tasks-search-test--asked (car harness-tasks-search-test--requests))))
-          (should (string-match-p "^No task session mentions all of \"suite giraffe\"; these mention some of it:$"
-                                  text))
-          (should (string-match-p (format "^%s: .*Speed up the test suite" (regexp-quote b)) text))
-          (should-not (string-match-p (regexp-quote a) text)))
-        (harness-tasks-search-test--search "q" "{\"grep\":\"giraffe\"}" "{\"show\":[]}")
-        (should (string-match-p "^No task session mentions \"giraffe\"\\.$"
-                                (harness-tasks-search-test--asked (car harness-tasks-search-test--requests))))))))
+          (should (string-match-p "^Task sessions that mention \"quoting parsers\":$" text))
+          (should (string-match-p (format "^%s: .*parser chokes on nested quotes" (regexp-quote a)) text))
+          (should-not (string-match-p (regexp-quote b) text))))
+      (harness-tasks-search-test--search "q" "{\"grep\":\"suite giraffe\"}" "{\"show\":[]}")
+      (let ((text (harness-tasks-search-test--asked (car harness-tasks-search-test--requests))))
+        (should (string-match-p "^No task session mentions all of \"suite giraffe\"; these mention some of it:$"
+                                text))
+        (should (string-match-p (format "^%s: .*Speed up the test suite" (regexp-quote b)) text))
+        (should-not (string-match-p (regexp-quote a) text)))
+      (harness-tasks-search-test--search "q" "{\"grep\":\"giraffe\"}" "{\"show\":[]}")
+      (should (string-match-p "^No task session mentions \"giraffe\"\\.$"
+                              (harness-tasks-search-test--asked (car harness-tasks-search-test--requests)))))))
 
 ;;;; Failures
 
@@ -334,7 +306,9 @@ empty query fail the search, saying why."
   (harness-tasks-search-test-with
     (cl-flet ((fails (pattern &rest replies)
                 (setq harness-tasks-search-test--replies replies)
-                (let ((err (should-error (harness-test-await (harness-call 'task/search default-directory "q") 10))))
+                (let ((err (should-error (harness-test-await
+                                          (harness-call 'search/ask default-directory "q" '(:bias "tasks"))
+                                          10))))
                   (should (string-match-p pattern (harness-error-message err))))))
       (fails "did not answer in JSON: Sure! Here are" "Sure! Here are your tasks.")
       (fails "gave no answer" "  ")
@@ -344,7 +318,7 @@ empty query fail the search, saying why."
         (fails "took longer than" '((:type text :delta "{\"show\":"))))
       ;; It looks further once only.
       (fails "asked to look further again" "{\"grep\":\"x\"}" "{\"grep\":\"y\"}"))
-    (should-error (harness-test-await (harness-call 'task/search default-directory "   ")))))
+    (should-error (harness-test-await (harness-call 'search/ask default-directory "   " '(:bias "tasks"))))))
 
 ;;;; Acting
 
@@ -476,20 +450,21 @@ and never used is closed after a while."
                                            (funcall on-event '(:type done :stop-reason end-turn)))))
                           (list :cancel #'ignore)))
             (let ((harness-tasks-search-model "test-search:m"))
-              (should (equal '(:model "test-search:m" :warm t) (harness-call 'task/search-warm default-directory)))
+              (should (equal '(:model "test-search:m" :warm t) (harness-call 'search/warm default-directory)))
               ;; Ready already.
-              (should (equal '(:model "test-search:m" :warm t) (harness-call 'task/search-warm default-directory)))
+              (should (equal '(:model "test-search:m" :warm t) (harness-call 'search/warm default-directory)))
               (should (= 1 (length warmed)))
-              (harness-test-await (harness-call 'task/search default-directory "q"))
+              ;; The process serves a search whatever it favours.
+              (harness-test-await (harness-call 'search/ask default-directory "q" '(:bias "commands")))
               (should (equal warmed asked))
               (should (equal warmed closed))
               ;; Not warmed: a new id, closed too.
-              (harness-test-await (harness-call 'task/search default-directory "q"))
+              (harness-test-await (harness-call 'search/ask default-directory "q" '(:bias "tasks")))
               (should (= 2 (length (delete-dups (copy-sequence asked)))))
               (should (equal asked closed))
               ;; Warmed and never used.
               (let ((harness-tasks-search--warm-idle 0.2))
-                (harness-call 'task/search-warm default-directory)
+                (harness-call 'search/warm default-directory)
                 (harness-test-wait (lambda () (member (car warmed) closed)) 3 "the idle process to close"))))
         (remhash 'test-search harness-providers)
         (harness-provider--forget 'test-search)))))
@@ -522,7 +497,7 @@ the board's search works offline: topics, states and orders."
         (harness-tasks-search-test--done button land)
         (let ((failed (harness-tasks-search-test--submit "fail now: the parser")))
           (harness-tasks-search-test--wait failed (lambda (task) (plist-get task :outcome)) "failed")
-          (cl-flet ((search (q) (harness-test-await (harness-call 'task/search default-directory q) 10)))
+          (cl-flet ((search (q) (harness-test-await (harness-call 'search/ask default-directory q '(:bias "tasks")) 10)))
             (should (equal (list button) (plist-get (search "did I have a task about adding the question button") :ids)))
             (let ((plan (search "get rid of mq land task")))
               (should (equal (list land) (plist-get plan :ids)))
@@ -582,20 +557,15 @@ The model answers REPLIES in turn."
   (mapcar (lambda (thing) (plist-get thing :id)) things))
 
 (defmacro harness-tasks-search-test-with-session-search (fn &rest body)
-  "Run BODY with FN standing in for `session/search'.
-The test is skipped where the session search itself is loaded."
+  "Run BODY with FN standing in for `session/search'."
   (declare (indent 1))
-  `(progn
-     (when (harness-method-exists-p 'session/search)
-       (ert-skip "The session search is loaded, not stubbed"))
-     (harness-register-method 'session/search ,fn)
-     (unwind-protect (progn ,@body)
-       (harness-unregister-method 'session/search))))
+  `(cl-letf (((symbol-function 'harness-method/session/search) ,fn))
+     ,@body))
 
 (ert-deftest harness-tasks-search-ask-favours-tasks-on-the-board ()
   "On the board the search favours tasks: the model is told so, reads the
-board as `task/search' has it read, and the plan shows the task, with
-what a view without the board shows of it."
+board, and the plan shows the task, with what a view without the board
+shows of it."
   (harness-tasks-search-test-with
     (let ((button (harness-tasks-search-test--submit "Add a question button to the chat"))
           (land (harness-tasks-search-test--submit "Remove the mq land skill")))
@@ -675,6 +645,105 @@ in stays out of it."
                                             merge8)
                                     again))
             (should (string-match-p "Now answer the query" again))))))))
+
+(defun harness-tasks-search-test--count (regexp text)
+  "How many times REGEXP matches in TEXT."
+  (let ((n 0) (start 0))
+    (while (string-match regexp text start)
+      (setq n (1+ n) start (match-end 0)))
+    n))
+
+(ert-deftest harness-tasks-search-ask-says-where-a-session-matched ()
+  "A session a look at the transcripts found says where it matched: the
+node its first match is in, the passage around it and where the words
+are in that passage.  One the model named from the list, which no look
+found, says nothing of the kind."
+  (harness-tasks-search-test-with
+    (let* ((merge (harness-tasks-search-test--session "Fix a thing"))
+           (notes (harness-tasks-search-test--session "Write the release notes"))
+           (node (plist-get (harness-call 'session/append merge
+                                          (list :kind 'user :content "Why did the merge queue drop a commit?"))
+                            :id))
+           (plan (harness-tasks-search-test--ask
+                  "the queue that dropped a commit"
+                  (list :context (list :view "chat"))
+                  "{\"sessions\":\"merge queue\"}"
+                  (format "{\"sessions\":[\"%s\",\"%s\"]}" (substring merge 0 8) (substring notes 0 8)))))
+      (should (equal (list merge notes) (harness-tasks-search-test--ids (plist-get plan :sessions))))
+      (pcase-let ((`(,found ,named) (plist-get plan :sessions)))
+        (let ((snippet (plist-get found :snippet))
+              (ranges (plist-get found :ranges)))
+          (should (equal node (plist-get found :node)))
+          (should (string-match-p "merge queue drop a commit" snippet))
+          ;; The words, one range each or one for both.
+          (should ranges)
+          (should (equal "merge queue" (downcase (substring snippet (car (car ranges)) (cadr (car (last ranges))))))))
+        (should (equal "Write the release notes" (plist-get named :name)))
+        (should-not (plist-get named :node))
+        (should-not (plist-get named :snippet))
+        (should-not (plist-get named :ranges))))))
+
+(ert-deftest harness-tasks-search-ask-searches-the-transcripts-first-for-sessions ()
+  "Favouring sessions, the search searches every transcript for the
+query's words before the model reads anything: a session whose
+transcript mentions them, not its name, is in the first message with
+what it says, and not again among the sessions ranked by name; the
+model names it at once.  A query of nothing but words that say nothing
+searches no transcript, and no other bias does."
+  (harness-tasks-search-test-with
+    (let* ((merge (harness-tasks-search-test--session "Fix a thing"))
+           (notes (harness-tasks-search-test--session "Write the release notes"))
+           (merge8 (substring merge 0 8))
+           (calls 0))
+      (harness-call 'session/append merge (list :kind 'user :content "Why did the merge queue drop a commit?"))
+      (let ((plan (harness-tasks-search-test--ask
+                   "where did the merge queue drop a commit?"
+                   (list :context (list :view "sessions"))
+                   (format "{\"sessions\":[\"%s\"]}" merge8)))
+            (first (harness-tasks-search-test--first)))
+        (should (equal "sessions" (plist-get plan :bias)))
+        (should (equal (list merge) (harness-tasks-search-test--ids (plist-get plan :sessions))))
+        (should (plist-get (car (plist-get plan :sessions)) :node))
+        (should-not (plist-get plan :looked))
+        (should (= 1 (length harness-tasks-search-test--requests)))
+        (should (string-match-p "^Context: the session list\\. Favour sessions, then commands; tasks count too\\.$"
+                                first))
+        (should (string-match-p
+                 (format "^Sessions that mention \"merge queue drop commit\", best first:\n%s | chat | idle | [^|]+ | Fix a thing: .*merge queue drop a commit"
+                         merge8)
+                 first))
+        ;; Listed once: the sessions ranked by name leave it out.
+        (should (= 1 (harness-tasks-search-test--count (format "^%s | " merge8) first)))
+        (should (string-match-p (format "^Sessions besides the board's tasks .*:\n%s | chat | idle | " (substring notes 0 8))
+                                first))
+        ;; What the transcripts say comes before the sessions ranked by name.
+        (should (< (string-search "Sessions that mention" first) (string-search "Sessions besides" first))))
+      (harness-tasks-search-test-with-session-search
+          (lambda (&rest _) (cl-incf calls) (harness-resolved (list :engine "fts" :sessions nil)))
+        (harness-tasks-search-test--ask "open the session please" (list :context (list :view "sessions"))
+                                        "{\"sessions\":[]}")
+        (should-not (string-match-p "mention" (harness-tasks-search-test--first)))
+        (harness-tasks-search-test--ask "the merge queue" (list :context (list :view "board")) "{\"show\":[]}")
+        (should-not (string-match-p "mention" (harness-tasks-search-test--first)))
+        ;; Only the board's search looked for what comes nearest, once its
+        ;; model answered with nothing: the other query has no word to
+        ;; look for.
+        (should (= 1 calls))))))
+
+(ert-deftest harness-tasks-search-ask-says-when-the-session-search-fails ()
+  "A session search that fails fails no search: the model is told so, up
+front and when it looks further, and answers from the rest."
+  (harness-tasks-search-test-with
+    (harness-tasks-search-test-with-session-search
+        (lambda (&rest _) (harness-rejected (list 'error "The index is gone.")))
+      (let ((plan (harness-tasks-search-test--ask
+                   "the merge queue" (list :context (list :view "sessions"))
+                   "{\"sessions\":\"merge queue\"}" "{\"sessions\":[]}")))
+        (should (eq t (plist-get plan :widened)))
+        (should (equal "searched the sessions for \"merge queue\"" (plist-get plan :looked)))
+        (should (string-match-p "^The session search failed: The index is gone\\.$" (harness-tasks-search-test--first)))
+        (should (string-match-p "^The session search failed: The index is gone\\.$"
+                                (harness-tasks-search-test--asked (car harness-tasks-search-test--requests))))))))
 
 (ert-deftest harness-tasks-search-ask-finds-commands ()
   "Asked how to do something, the search shows the model the commands
@@ -769,46 +838,6 @@ that says so, not in an error."
           ;; was asked once.
           (should (equal '("zxqv blorp") (mapcar #'car calls)))
           (should (= 1 (length harness-tasks-search-test--requests))))))))
-
-(ert-deftest harness-tasks-search-ask-reads-session-names-without-the-session-search ()
-  "Without the session search, a look at the sessions reads their names,
-and says the transcripts were not searched; a session is named by six
-characters of its id or more."
-  (harness-tasks-search-test-with
-    (let ((merge (harness-tasks-search-test--session "Debug the merge queue"))
-          (other (harness-tasks-search-test--session "Write the release notes")))
-      (should-not (harness-method-exists-p 'session/search))
-      (let ((plan (harness-tasks-search-test--ask
-                   "where did I debug the merge queue?"
-                   (list :context (list :view "sessions"))
-                   "{\"sessions\":\"merge queue\"}"
-                   (format "{\"sessions\":[\"%s\"]}" (substring merge 0 7)))))
-        (should (equal "sessions" (plist-get plan :bias)))
-        (should (equal (list merge) (harness-tasks-search-test--ids (plist-get plan :sessions))))
-        (should-not (plist-get (car (plist-get plan :sessions)) :snippet))
-        (let ((again (harness-tasks-search-test--asked (car harness-tasks-search-test--requests))))
-          (should (string-match-p (format "^Sessions whose names mention \"merge queue\" (their transcripts were not searched):\n%s | chat | idle | [^|]+ | updated [^|]+ | Debug the merge queue$"
-                                          (substring merge 0 8))
-                                  again))
-          (should-not (string-match-p (regexp-quote (substring other 0 8)) again)))
-        (should (string-match-p "^Context: the session list\\. Favour sessions, then commands; tasks count too\\.$"
-                                (harness-tasks-search-test--first)))))))
-
-(ert-deftest harness-tasks-search-task-search-never-widens ()
-  "The board's own search answers with what the model found and no more,
-however little that is."
-  (harness-tasks-search-test-with
-    (let ((suite (harness-tasks-search-test--submit "Speed up the test suite")))
-      (harness-tasks-search-test--done suite)
-      (harness-tasks-search-test--session "Debug the flaky login test")
-      (setq harness-tasks-search-test--requests nil)
-      (let ((plan (harness-tasks-search-test--search "the flaky login" "{\"show\":[]}")))
-        (should (equal "tasks" (plist-get plan :bias)))
-        (should (eq :false (plist-get plan :widened)))
-        (should-not (plist-get plan :note))
-        (should-not (plist-get plan :sessions))
-        (should (string-match-p "^Context: the task board of project .*Favour tasks"
-                                (harness-tasks-search-test--asked (car harness-tasks-search-test--requests))))))))
 
 (ert-deftest harness-tasks-search-matches-words-by-their-stems ()
   "Names and commands match a query's words by their stems, leaving out
