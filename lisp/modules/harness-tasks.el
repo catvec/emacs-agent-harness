@@ -202,9 +202,10 @@ merges the branch and completes the task; sending it back with
 feedback (`task/reject') has its session work on it again.  With nil a
 task is done once its branch merges, or outside git once its turn ends.
 
-The task board turns review off and on again with its Review switch,
-for every project.  Turning it off leaves the tasks that already wait
-for review where they are, for the user to verify."
+The settings page has it under Task board, and the task board's V key
+turns it off and on again, for every project.  Turning it off leaves
+the tasks that already wait for review where they are, for the user to
+verify."
   :type 'boolean :group 'harness)
 
 (defcustom harness-tasks-permission-mode 'auto

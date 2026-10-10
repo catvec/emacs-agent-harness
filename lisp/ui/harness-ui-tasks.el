@@ -50,20 +50,22 @@
 ;; bulk mode (B) a priority button on the settings line gives every
 ;; current task one; the other bulk settings leave priorities alone.
 ;;
-;; Review can be turned off (V, or the [Review: on] switch in the header
-;; line): finished tasks then merge and complete by themselves, and Ready
-;; for review shows only while tasks from before still wait there.  The
-;; switch is the harness option `harness-tasks-require-verification', so
-;; it holds for every board and across restarts.
+;; Review can be turned off (V, or `harness-tasks-require-verification'
+;; on the settings page): finished tasks then merge and complete by
+;; themselves, and Ready for review shows only while tasks from before
+;; still wait there.  It is a harness option, so it holds for every
+;; board and across restarts.
 ;;
-;; The header line counts the tasks of each column and, as a chat's
-;; header does for its session, says what they cost and who pays: their
-;; summed cost, or the plan that pays for them with its quota windows,
-;; then the fullest budget that applies to the project.  A click there
-;; opens the usage dashboard.
+;; The header line holds what the board does not show -- each column's
+;; heading counts its own tasks.  As a chat's header does for its
+;; session, it says what the tasks cost and who pays: their summed cost,
+;; or the plan that pays for them with its quota windows, then the
+;; fullest budget that applies to the project.  A click there opens the
+;; usage dashboard.  Its buttons follow: [Bulk edit], [Search], [BTW],
+;; [Add session], [Archived] and [Refresh].
 ;;
 ;; Everything comes over ACP (`_harness/task/…', `_harness/config/set'
-;; for the Review switch, `_harness/usage/project-budgets' for the
+;; for turning review off, `_harness/usage/project-budgets' for the
 ;; header's budgets, plus the session cache), so the board works
 ;; against a remote harness too.  The list region is
 ;; redrawn as a whole when anything changes -- a board holds tens of
@@ -110,8 +112,6 @@ Either way the toggle above the compose box switches it per board."
   "The completed mark." :group 'harness-ui-tasks)
 (defface harness-task-review-face '((t :inherit success :weight bold))
   "Tasks waiting for your review: their mark, heading and count." :group 'harness-ui-tasks)
-(defface harness-task-review-off-face '((t :inherit warning))
-  "The Review switch while finished tasks merge without your review." :group 'harness-ui-tasks)
 (defface harness-task-merging-face '((t :inherit harness-dim-face))
   "The mark of a task waiting in the merge queue." :group 'harness-ui-tasks)
 (defface harness-task-choice-face '((t :inherit bold))
@@ -1990,29 +1990,6 @@ the box, or on the same line above it (`harness-ui-tasks--anchor')."
   (propertize text 'mouse-face 'mode-line-highlight 'help-echo help
               'keymap (harness-ui-mouse-keymap command)))
 
-(defun harness-ui-tasks--review-help (window _object _pos)
-  "The tooltip of the Review switch in WINDOW's header line.
-It says what the switch does now and how to turn it.  A `help-echo'
-function, so the keymaps are searched on hover, not on every redisplay
-of the header line."
-  (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
-    (let ((keys (substitute-command-keys
-                 "\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-review]" t)))
-      (if (harness-ui-tasks--review-p)
-          (format "Review is on: finished tasks wait in Ready for review until you verify them, which merges them, or send them back.  Click or %s to turn it off, for every project: finished tasks then merge and complete by themselves."
-                  keys)
-        (format "Review is off: finished tasks merge and complete by themselves, without waiting for you to verify them.  Click or %s to turn it on again, for every project."
-                keys)))))
-
-(defun harness-ui-tasks--review-segment ()
-  "The header's Review switch: whether finished tasks wait for your review.
-A click turns it the other way (`harness-ui-tasks-toggle-review').  Off,
-it stands out: work then merges without anyone looking at it."
-  (harness-ui-tasks--segment (if (harness-ui-tasks--review-p)
-                                 "[Review: on]"
-                               (propertize "[Review: off]" 'face 'harness-task-review-off-face))
-                             #'harness-ui-tasks-toggle-review #'harness-ui-tasks--review-help))
-
 (defun harness-ui-tasks--spend (groups)
   "Return what the tasks of GROUPS cost and who pays, for the header.
 GROUPS is what `harness-ui-tasks--visible' returns.  As a chat's header
@@ -2029,8 +2006,8 @@ provider whose account stands for them all."
   "Return the header's (TEXT PRIORITY MIN) of what the tasks of GROUPS cost.
 TEXT, after SEP, is `harness-ui-tasks--spend' and the fullest budget
 that applies to the project; MIN leaves the budget out.  A click on
-either opens the usage dashboard.  It stays longer than the counts and
-most buttons: the board says nowhere else how much of the plan is left."
+either opens the usage dashboard.  It stays longer than most buttons:
+the board says nowhere else how much of the plan is left."
   (let ((spend (harness-ui-tasks--spend groups))
         (budgets (harness-ui-format-budgets harness-ui-tasks--budgets)))
     (list (concat sep (harness-ui-spend-segment
@@ -2040,27 +2017,26 @@ most buttons: the board says nowhere else how much of the plan is left."
 
 (defun harness-ui-tasks--header (&optional width)
   "Return the header line, fitted to WIDTH, its window's by default.
+It holds what the board below does not show: the project, what its
+tasks cost and the board's buttons.  How many tasks each column holds
+is on the column's heading, and whether finished work waits for review
+is a setting (`harness-tasks-require-verification', on the settings
+page; \\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-review] here).
+
 In a window too narrow for all of it, [Add session] goes first, then
-the counts of completed, merging, pending and working tasks and the
-bulk-edit segment; the project's name shortens after those, then the
-other modules' segments (`harness-ui-tasks-header-functions', the
-search's [Search]) and [BTW] and [Archived], then the Review switch.
-What the tasks cost and the plan's quota stay longer, the budget going
-first (`harness-ui-tasks--spend-segment'); what needs you, what waits
-for your review, [Refresh] and a board still loading stay longest.
-WIDTH is as `harness-ui-fit-header' takes it."
+[Bulk edit]; the project's name shortens after those, then [Archived],
+[BTW] and the other modules' segments (`harness-ui-tasks-header-functions',
+the search's [Search]) go.  What the tasks cost and the plan's quota
+stay longer, the budget going first (`harness-ui-tasks--spend-segment');
+bulk editing while it is on, [Refresh] and a board still loading stay
+longest.  WIDTH is as `harness-ui-fit-header' takes it."
   (let* ((groups (harness-ui-tasks--visible))
-         (counts (mapcar (lambda (g) (cons (car g) (length (cdr g)))) groups))
-         (needs (alist-get 'needs-input counts))
-         (review (alist-get 'review counts))
          (name (if harness-ui-tasks--project
                    (file-name-nondirectory (directory-file-name harness-ui-tasks--project))
                  (abbreviate-file-name (or harness-ui-tasks--dir ""))))
-         (n (length (harness-ui-tasks--bulk-tasks)))
+         ;; How many tasks it edits is the banner's, above the box.
          (bulk (harness-ui-tasks--segment
-                (if harness-ui-tasks--bulk
-                    (format "[Bulk: editing %d task%s]" n (if (= 1 n) "" "s"))
-                  (format "[Bulk edit: %d task%s]" n (if (= 1 n) "" "s")))
+                (if harness-ui-tasks--bulk "[Bulk edit: on]" "[Bulk edit]")
                 #'harness-ui-tasks-toggle-bulk
                 "Bulk edit: apply the model, effort, permission mode, interactivity or priority you change to every running, pending and blocked task"))
          (sep "   ")
@@ -2070,28 +2046,10 @@ WIDTH is as `harness-ui-fit-header' takes it."
       (concat " " (propertize "Tasks" 'face 'bold))
       (list (concat " " (propertize name 'face 'harness-dim-face))
             50 (concat " " (propertize (harness-truncate-end name 6) 'face 'harness-dim-face)))
-      (and (> needs 0)
-           (list (concat (funcall gap)
-                         (propertize (format "%s %d need you" (harness-ui-icon 'harness-icon-blocked) needs)
-                                     'face 'harness-status-blocked-face))
-                 90))
-      (and (> review 0)
-           (list (concat (funcall gap)
-                         (propertize (format "%s %d to review" (harness-ui-icon 'harness-icon-task-review) review)
-                                     'face 'harness-task-review-face))
-                 88))
-      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-running) (alist-get 'active counts)) 45)
-      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-merging) (alist-get 'merging counts))
-            42)
-      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-pending) (alist-get 'pending counts))
-            40)
-      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-done) (alist-get 'done counts)) 25)
       (harness-ui-tasks--spend-segment groups (funcall gap))
       (list (concat (funcall gap)
                     (if harness-ui-tasks--bulk (propertize bulk 'face 'harness-task-attention-face) bulk))
             (if harness-ui-tasks--bulk 82 30))
-      ;; Shown once the harness said how it is, so it never shows the wrong way.
-      (and harness-ui-tasks--settings (list (concat (funcall gap) (harness-ui-tasks--review-segment)) 70))
       ;; Other modules' segments, the search's say.
       (let ((segments (delq nil (mapcar (lambda (fn) (ignore-errors (funcall fn)))
                                         harness-ui-tasks-header-functions))))
@@ -2143,12 +2101,10 @@ QUIET refreshes in the background, without the loading indicator."
                                        (with-current-buffer buffer
                                          (let ((review (harness-ui-tasks--review-p)))
                                            (setq harness-ui-tasks--settings s)
-                                           ;; The Review switch decides whether the board
-                                           ;; shows Ready for review when it is empty.
+                                           ;; Review decides whether the board shows
+                                           ;; Ready for review when it is empty.
                                            (unless (eq review (harness-ui-tasks--review-p))
                                              (harness-ui-tasks--render)))
-                                         ;; The header shows the switch.
-                                         (force-mode-line-update)
                                          (unless harness-ui-tasks--new
                                            (setq harness-ui-tasks--new
                                                  (list :model (plist-get s :model)
@@ -2156,6 +2112,8 @@ QUIET refreshes in the background, without the loading indicator."
                                                        :permission-mode (plist-get s :permission-mode)
                                                        :non-interactive (harness-json-true-p
                                                                          (plist-get s :non-interactive)))))
+                                         ;; The header's spend goes by the new tasks' model.
+                                         (force-mode-line-update)
                                          (when (and (harness-compose-live-p) (null harness-ui-tasks--target))
                                            (harness-ui-tasks--render-tail)))))
                          #'ignore)
@@ -3010,10 +2968,10 @@ as it is finished, and the task is done.  The board then shows no Ready
 for review column, unless tasks still wait there.  Turning review off
 while tasks of this board wait for it offers to verify them too.
 
-The switch is the harness option `harness-tasks-require-verification',
-saved as the settings page saves it: for every project, and across
-restarts.  With a prefix ARG, turn review on when ARG is positive and
-off otherwise."
+It sets the harness option `harness-tasks-require-verification', which
+the settings page has under Task board, and saves it as that page does:
+for every project, and across restarts.  With a prefix ARG, turn review
+on when ARG is positive and off otherwise."
   (interactive "P")
   (let* ((buffer (current-buffer))
          (on (if arg (> (prefix-numeric-value arg) 0) (not (harness-ui-tasks--review-p))))

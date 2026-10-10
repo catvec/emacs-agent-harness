@@ -3158,9 +3158,9 @@ record from before priorities reads `medium` without being rewritten.
   `task/archive-done` leaves those tasks alone.  With the option nil a
   task is done once merged, or outside git once its turn ends.
   `task/settings` reports the option as `:require-verification` (t, or
-  false rather than nil), and a board's Review switch turns it off and
-  on with `config/set`, globally and saved; tasks already in review wait
-  on until verified.
+  false rather than nil), and a board's `V` turns it off and on with
+  `config/set`, globally and saved, as the settings page does; tasks
+  already in review wait on until verified.
 - A turn starting in a task's session makes the task active again, so a
   message sent from a done task's chat buffer reopens it; an archived task
   comes back to the board.
@@ -4421,7 +4421,7 @@ in `harness-tool-subject-face` (the faces stand in for the colon of the
 title), a summary block counts the calls by label ("5 tool calls: Read
 file ×3, Search files, Find files", then " · thinking ×2" for the
 thinking folded in with them), and so do the permission panel,
-the activity line and the mode line.  A title recorded before tools had
+the activity line and the spinner's tooltip.  A title recorded before tools had
 labels starts with the tool's name ("read_file x.el"), which the label
 replaces, so old transcripts read the same.  Under a folded call's
 header one dim line sums up the input its title leaves out
@@ -4444,7 +4444,8 @@ tool call (with the size of its input so far), running one (with the
 last line it reported), checking its permission, or compacting, behind
 a spinner.  It is an overlay string redrawn by the spinner's timer, so
 it ticks without editing the buffer; a blocked session shows its panel
-instead, and the mode line names the phase too.  It has a background of
+instead.  The mode line's spinner gives the phase only in its tooltip:
+this line is where it shows.  It has a background of
 its own (`harness-chat-activity-face`) and a blank line under it, which
 set it apart from the compose box: an overlay string is drawn over the
 face of the text it precedes, the box's prompt, so both lines are drawn
@@ -4455,20 +4456,26 @@ signals is shown unformatted with a note, so one bad node never costs the
 buffer the rest of its transcript or its compose box.  Opening a session
 from any view never resumes it: an inactive session shows its transcript,
 a notice and the compose box, and the first message sent from it resumes
-it (through `agent/prompt`).  The header line shows the session's
-status, name, model, permission mode, whether it is non-interactive
-("non-interactive" in `harness-non-interactive-face`, else a dim
-"interactive"), thinking level, context, output tokens, output rate,
-cost and [menu]; clicking a setting changes it, and the non-interactive
-one toggles.  The output
+it (through `agent/prompt`).  The header and mode lines hold only what
+the buffer does not show, and what matters.  The header line shows the
+session's name, model, permission mode, "non-interactive" (in
+`harness-non-interactive-face`) while it is, thinking level, context,
+cost and [menu]; clicking a setting changes it, and "non-interactive"
+makes the session interactive again.  A narrow window drops the cost
+first, then the thinking level, the context and the model.  The mode
+line has the status: its icon and word, the spinner while a turn runs
+(its tooltip says what the turn does), and the turn's duration while it
+runs or blocks.  The todo list is left to its panel above the compose
+box, what the turn does to the activity line, and the output tokens and
+rate to the session list and a running task's card.  The output
 rate ("48 tok/s", `harness-ui-format-rate`) is the session's rate as the
 usage module measured it. It is dimmed when the session is not running,
 because it is then the last rate measured. The session has no rate
-until it has been measured, and a narrow window drops the rate first.
+until it has been measured.
 The UI keeps the rates in a cache (`harness-ui-session-rate`). It is
 filled with `_harness/usage/rates` on connect and kept current by
 `usage/rate-updated`. Every change runs `harness-ui-rate-functions`,
-which redraws the chat headers, the session list and the task board.
+which redraws the session list and the task board.
 The context ("12.3k/200k", `harness-ui-format-context`) and the output
 tokens ("3.4k out", `harness-ui-format-output`, none until the session
 wrote some) read `harness-ui-session-tokens`: the session's totals, or
@@ -4880,14 +4887,16 @@ and it moves to completed.  A card of a task that handed a report in
 also shows [Review], popping the report out; it is one of the items
 `harness-ui-popout-at-point-functions' offers.  While the task waits
 for review, the report ends with the banner of its session, [Verify]
-and [Send back], and a box for the feedback.  The header counts the
-tasks to review, and `task/review` says in the echo area that one is
-ready (`harness-ui-tasks--notify-review`).  The header also says, as a
-chat's does for its session, what the board's tasks cost and who pays
-(see Cost display below), then the fullest budget that applies to the
-project.  The header's Review switch
-([Review: on], `V`) turns review off and on again for every project
-(`harness-tasks-require-verification`, saved through `config/set`):
+and [Send back], and a box for the feedback.  Ready for review's
+heading counts the tasks to review, as each column's heading counts its
+own, and `task/review` says in the echo area that one is ready
+(`harness-ui-tasks--notify-review`).  The header line holds only what
+the board does not show: the project, and, as a chat's does for its
+session, what the board's tasks cost and who pays (see Cost display
+below), then the fullest budget that applies to the project, then the
+board's buttons.  `V` turns review off and on again for every project
+(`harness-tasks-require-verification`, saved through `config/set`, the
+option the settings page has under Task board):
 off, finished tasks merge and complete by themselves, and Ready for
 review shows only while tasks from before still wait there; turning it
 off while tasks of the board wait for review offers to verify them.
@@ -5088,15 +5097,15 @@ are too; `t` the period, `p` the project, `n` the summary again, `g`
 all again, RET a session or task line's session; a redraw keeps every
 window's start and point lines), worktrees (`harness-ui-worktree`),
 notifier
-(`harness-ui-notify`: global mode-line segment with blocked/running/idle
-counts, clickable), BTW side window (`harness-ui-btw`: a new, empty
+(`harness-ui-notify`: global mode-line segment with blocked and running
+counts, idle ones too with `harness-ui-notify-show-idle`, clickable), BTW side window (`harness-ui-btw`: a new, empty
 session listed under the session it is opened over but sharing nothing
 with it or with other BTWs (`session/btw`), or, over a view that sets
 `harness-ui-btw-start-function`, a new conversation the view starts, shown
 in the session's own chat buffer with point in its compose box, so the
 question is written and sent like any message; nothing is read in the
 minibuffer.  The buffer is the full chat: its header line (model,
-permission mode, non-interactive, thinking, context, output tokens, output rate, cost, [menu]),
+permission mode, non-interactive while it is, thinking, context, cost, [menu]),
 keys and menu are a session's, `harness-ui-btw-minor-mode` only adding a BTW segment in
 front of the header through `harness-chat-header-functions` (what it
 is about, [close], [keep]) and `C-c C-k`/`C-c C-o` to close and keep

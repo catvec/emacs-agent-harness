@@ -435,10 +435,10 @@ open with `SPC`, and a request shown whole in one shows whole in the
 other.
 
 While the agent works through a todo list (`todo_write`), the list stays
-in view: the header line names the progress and the item in hand, and a
-panel above the compose box lists every item with its state. `C-c C-t`,
-a click on the header segment, or `TAB` on the panel folds the items
-away and brings them back; the list disappears when the agent clears it.
+in view: a panel above the compose box gives the progress and lists
+every item with its state. `C-c C-t`, `TAB` on the panel, or a click on
+its fold button folds it to the progress and the item in hand and
+brings the items back; the list disappears when the agent clears it.
 
 A session may use its working directory, its worktree, the directories
 in `harness-allowed-directories` and the ones you grant it. It also has
@@ -588,11 +588,15 @@ Both views also answer in place, with the same buttons from the same
 code: a blocked session's row in the session list and a task's card on
 the board carry `[Allow]` and `[Deny]`, or `[Answer…]`.
 
-The header line shows the session's status, name, todo progress while
-it has one, model, permission mode, whether it is `non-interactive` or
-`interactive`, thinking level, context and cost. Click the model, the
-permission mode, the non-interactive switch or the thinking level to
-change it. Switching a session that waits on a permission prompt to
+The header line shows the session's name, model, permission mode,
+thinking level, context and cost, and `non-interactive` while the
+session is. Click the name, the model, the permission mode or the
+thinking level to change it, and `non-interactive` to make the session
+interactive again; `C-c h i` or the menu turns the mode on. The mode
+line shows the session's status, a spinner while a turn runs, and how
+long the turn has gone on. Neither repeats what the buffer shows: the
+todo list has its panel and what the turn does now has the activity
+line, both above the compose box. Switching a session that waits on a permission prompt to
 YOLO answers the prompt, since yolo would have allowed the call
 anyway; a directory prompt still waits for your answer. A
 non-interactive session never waits for you, which suits a session you
@@ -943,12 +947,13 @@ your checkout itself can be submitted to the **main tree** instead (the
   on any card. The agent has the same as the `open_harness` tool, which
   starts such an instance for its own worktree and says how to drive it
   (`scripts/dev.sh` with its socket).
-- To skip review, press `V` or click `[Review: on]` in the board's
-  header line. Finished tasks then merge and complete without waiting
-  for you, and if tasks are already waiting for review, the board offers
-  to verify them. The switch sets `harness-tasks-require-verification`,
-  so it applies to every project and is saved for later sessions. Press
-  `V` again to turn review back on.
+- To skip review, press `V` on the board, or turn off *Require
+  verification* under Task board on the settings page. Finished tasks
+  then merge and complete without waiting for you, and if tasks are
+  already waiting for review, `V` offers to verify them. Both set
+  `harness-tasks-require-verification`, so it applies to every project
+  and is saved for later sessions. Press `V` again to turn review back
+  on.
 - A verified task waits in *Merging* while its branch goes through the
   merge queue: queued for the queue's turn, merging, or, when the merge
   conflicts, a fresh session the harness starts in its worktree
@@ -1034,8 +1039,9 @@ your checkout itself can be submitted to the **main tree** instead (the
 - The header line shows what the board's tasks cost or, when a
   subscription pays, the plan with its 5-hour and weekly quota, as a
   chat's header does, then the fullest budget of the project. Click it
-  to open the usage dashboard. A narrow window keeps it after the
-  counts and most buttons are gone.
+  to open the usage dashboard. A narrow window keeps it after most
+  buttons are gone. The header does not count the tasks: each column's
+  heading counts its own.
 - `RET` opens the session of the task at point. From that session,
   `C-c h a` leads back to the board. `F` lays the board out fullscreen,
   with that session beside it (see
@@ -1538,7 +1544,7 @@ other ran a step in the session (it resumes its own conversation) loses
 nothing and does not ask.
 
 The task board has the same thing scoped to its tasks: turn on bulk edit
-(`B`, or `[Bulk edit: N tasks]` in the board's header) and the model,
+(`B`, or `[Bulk edit]` in the board's header) and the model,
 thinking, permission-mode and interactivity buttons then change every
 running, pending and blocked task at once. A priority button joins them
 (`high priority`, or `mixed priority` while the tasks differ): click it
