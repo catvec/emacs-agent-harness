@@ -77,6 +77,7 @@ one worked, without filling its context; the oldest go first.")
   session-id promise handle (steps 0) cancelled
   steering                              ; pending (:node ID :text TEXT), oldest first
   text-node text-buf think-node think-buf
+  step-nodes                            ; the nodes this step wrote, for a retry
   (pending 0) waiting-done stop-reason error hosted last-usage started
   ending)                               ; a tool ended the turn (hand_in)
 
@@ -825,6 +826,7 @@ the state."
       (harness-agent--take-steering turn)
       (setf (harness-agent-turn-text-node turn) nil (harness-agent-turn-text-buf turn) nil
             (harness-agent-turn-think-node turn) nil (harness-agent-turn-think-buf turn) nil
+            (harness-agent-turn-step-nodes turn) nil
             (harness-agent-turn-pending turn) 0 (harness-agent-turn-waiting-done turn) nil
             (harness-agent-turn-stop-reason turn) nil (harness-agent-turn-error turn) nil)
       (let* ((model (plist-get (harness-call 'session/get sid) :model))
@@ -969,6 +971,9 @@ before a tool call never becomes an empty message."
          (t
           (setq node-id (plist-get (harness-call 'session/append sid (list :kind kind :content buf)) :id))
           (puthash sid node-id harness-agent--open-nodes)
+          ;; Kept for a step that fails and is tried again: the partial
+          ;; answer it streamed is dropped before the next try.
+          (push node-id (harness-agent-turn-step-nodes turn))
           (if thinking
               (setf (harness-agent-turn-think-node turn) node-id)
             (setf (harness-agent-turn-text-node turn) node-id))
@@ -1352,14 +1357,46 @@ See `harness-agent--stopped'.  A failure to go on ends the turn, logged."
              nil)))
    (t (harness-agent--end turn 'end-turn))))
 
+(defun harness-agent--rewind-step (turn)
+  "Drop what TURN's failed step already streamed, before it is tried again.
+The text and thinking nodes the step wrote go (see
+`session/discard-nodes'): no partial answer is then sent to the model
+twice, and the retry writes its own.  Tool calls the step made, and
+their results, stay where they are, re-parented to the last node kept
+before them, so the model goes on from the work they did.
+
+A hosted-loop provider keeps its own conversation, which this cannot
+rewind, so nothing is dropped for one: the provider carries on from
+what it already produced, and the retry continues it.  A failure to
+drop the nodes is logged and the turn goes on as it did before -- the
+retry may then repeat the partial answer, but never the work a tool
+already did."
+  (let ((sid (harness-agent-turn-session-id turn))
+        (nodes (harness-agent-turn-step-nodes turn)))
+    (when (and nodes (harness-call 'session/exists-p sid)
+               (not (harness-agent--hosted-p (harness-call 'session/get sid))))
+      (condition-case err
+          (let ((dropped (harness-call 'session/discard-nodes sid nodes)))
+            (when dropped
+              (harness-log 'info "agent: %s failed a step; dropped %d partial node(s) before trying again"
+                           sid (length dropped))))
+        (error (harness-log 'warn "agent: dropping the partial output of %s failed: %S" sid err))))
+    (setf (harness-agent-turn-step-nodes turn) nil
+          (harness-agent-turn-text-node turn) nil (harness-agent-turn-text-buf turn) nil
+          (harness-agent-turn-think-node turn) nil (harness-agent-turn-think-buf turn) nil)
+    (remhash sid harness-agent--open-nodes)))
+
 (defun harness-agent--step-failed (turn)
   "Decide what follows TURN's failed step: another try, or the turn's end.
 The async filter `agent/step-error' gets (:retry nil), the session and
 the FAILURE (the `done' event's keys, `:model' and `:step').  A handler
 that answers (:retry t) -- the fallback module, having moved the
-session to another provider -- has the step run again, at most
-`harness-agent--max-error-retries' times a turn.  Otherwise, and once
-the turn was cancelled, it ends with `error'."
+session to another provider, or `harness-retry', for a failure a
+connection or a rate limit caused -- has the step run again, at most
+`harness-agent--max-error-retries' times a turn.  The partial answer
+the failed step had streamed is dropped first
+\(`harness-agent--rewind-step'), so the retry cannot send it twice.
+Otherwise, and once the turn was cancelled, it ends with `error'."
   (let* ((sid (harness-agent-turn-session-id turn))
          (error (harness-agent-turn-error turn))
          (failure (or (gethash sid harness-agent--failures) (list :error error)))
@@ -1377,7 +1414,8 @@ the turn was cancelled, it ends with `error'."
            (if (and (plist-get decision :retry)
                     (not (harness-agent-turn-cancelled turn))
                     (harness-call 'session/exists-p sid))
-               (progn (puthash sid (1+ count) harness-agent--retries)
+               (progn (harness-agent--rewind-step turn)
+                      (puthash sid (1+ count) harness-agent--retries)
                       (harness-agent--step turn))
              (harness-agent--end turn 'error error))))
        (lambda (err)
