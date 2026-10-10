@@ -200,7 +200,10 @@ asked for a false."
            (skip (plist-get (harness-call 'session/create :cwd cwd) :id)))
       (harness-call 'session/deactivate task)
       (harness-call 'session/deactivate left)
-      (harness-register-method 'task/session-ids (lambda (&optional _filter) (list task skip "gone")))
+      (harness-register-method 'task/session-ids
+                               (lambda (&optional filter)
+                                 (unless (equal '("done") (plist-get filter :columns))
+                                   (list task skip "gone"))))
       (should (equal (sort (list open skip task) #'string<)
                      (sort (mapcar (lambda (s) (plist-get s :id))
                                    (harness-call 'session/select (list :active t :tasks t)))
@@ -212,6 +215,32 @@ asked for a false."
         (should (harness-json-true-p (plist-get (harness-call 'session/get task) :non-interactive)))
         (should-not (plist-get (harness-call 'session/get left) :non-interactive))
         (should-not (plist-get (harness-call 'session/get skip) :non-interactive))))))
+
+(ert-deftest harness-session-select-leaves-out-the-sessions-of-done-tasks ()
+  "With `:tasks', a completed task's session is left out of the selection,
+and so of every bulk change, even while that session is active and of
+every project; the current tasks' sessions stay in."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (open (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (done (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (task (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (everything (list :active t :tasks t)))
+      (harness-call 'session/deactivate task)
+      (harness-register-method 'task/session-ids
+                               (lambda (&optional filter)
+                                 (if (equal '("done") (plist-get filter :columns))
+                                     (list done)
+                                   (list task))))
+      (should (equal (sort (list open task) #'string<)
+                     (sort (mapcar (lambda (s) (plist-get s :id))
+                                   (harness-call 'session/select everything))
+                           #'string<)))
+      (should (equal (sort (list open task) #'string<)
+                     (sort (harness-call 'session/set-all (list :non-interactive t) everything)
+                           #'string<)))
+      (should-not (plist-get (harness-call 'session/get done) :non-interactive))
+      (should (harness-json-true-p (plist-get (harness-call 'session/get open) :non-interactive))))))
 
 (ert-deftest harness-session-non-interactive-is-its-own-switch ()
   "A session's non-interactive switch starts from the setting, unless an

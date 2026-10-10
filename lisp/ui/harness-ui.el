@@ -3415,7 +3415,9 @@ fails is logged and the others still run."
 Every active session (idle, running or blocked) of every project, and
 the session of every current task whatever its status: a task's session
 may be closed, after a restart say, and still be where the task goes
-on.  Inactive sessions of no current task are history."
+on.  Inactive sessions of no current task are history.  A completed
+task's session, in the board's done column, is left out by the
+selection itself (`session/select'), even an active one."
   (list :active t :tasks t))
 
 (defun harness-ui--count (n word)
@@ -4205,6 +4207,8 @@ leaves the buffer's commands out, never the whole menu."
     ("d" "Directory access" harness-directories :if (lambda () (harness-ui--command-available-p 'harness-directories)))
     ("i" (lambda () (harness-ui--non-interactive-menu-label)) harness-toggle-non-interactive)
     ("I" "Non-interactive for all sessions" harness-set-non-interactive-all)
+    ("V" "Supervisor mode for all sessions" harness-set-supervisor-all
+     :if (lambda () (harness-ui--command-available-p 'harness-set-supervisor-all)))
     ("r" "Rename" harness-rename-session)
     ("W" "Move to another directory" harness-move-session)]
    ["Tools"

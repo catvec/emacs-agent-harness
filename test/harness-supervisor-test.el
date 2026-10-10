@@ -426,6 +426,69 @@ DeepSeek supervisors think at max, their workers at medium."
       (let ((stored (harness-json-parse (harness-json-encode (plist-get (harness-call 'session/get sid) :ext)))))
         (should (eq t (plist-get stored :supervisor)))))))
 
+;;;; Methods, for every session at once
+
+(ert-deftest harness-supervisor-set-all-changes-the-governed ()
+  "`supervisor/set-all' turns the mode on or off for every governed session
+the filter selects, and for no other: a sub-agent, a side conversation
+and a session already at the asked value keep theirs.  Each change is
+the hint and the event of `supervisor/set', and the ids changed come
+back, newest first."
+  (harness-supervisor-test-with
+    (let* ((one (harness-supervisor-test-session :ext '(:supervisor :false)))
+           (two (harness-supervisor-test-session :ext '(:supervisor :false)))
+           (on (harness-supervisor-test-session))
+           (sub (harness-supervisor-test-session :kind 'subagent :parent-id one))
+           (btw (harness-supervisor-test-session :kind 'btw :parent-id one))
+           (events nil))
+      (harness-on 'supervisor/changed (lambda (id on) (push (list id on) events)))
+      (let ((changed (harness-call 'supervisor/set-all t (list :active t))))
+        (should (equal (sort (list one two) #'string<) (sort changed #'string<))))
+      (dolist (sid (list one two))
+        (should (eq t (harness-supervisor-test-get sid)))
+        (should (equal '("Supervisor mode on") (harness-supervisor-test-hints sid))))
+      (dolist (sid (list sub btw))
+        (should-not (harness-supervisor-test-get sid))
+        (should-not (harness-supervisor-test-hints sid)))
+      (should (equal (sort (list (list one t) (list two t))
+                           (lambda (a b) (string< (car a) (car b))))
+                     (sort events (lambda (a b) (string< (car a) (car b))))))
+      ;; Already on, and ungoverned: asking again changes nothing.
+      (setq events nil)
+      (should-not (harness-call 'supervisor/set-all t (list :active t)))
+      (should-not events)
+      ;; Off, as `supervisor/set' stores it, for every governed session.
+      (should (equal (sort (list one two on) #'string<)
+                     (sort (harness-call 'supervisor/set-all :false (list :active t)) #'string<)))
+      (dolist (sid (list one two on))
+        (should (eq :false (harness-supervisor-test-get sid))))
+      (should (equal '("Supervisor mode on" "Supervisor mode off")
+                     (harness-supervisor-test-hints one)))
+      ;; A session that is not there is not selected, and no error.
+      (should-not (harness-call 'supervisor/set-all nil (list :active t :except (list one two on)))))))
+
+(ert-deftest harness-supervisor-set-all-takes-the-filter-and-every-session-without-one ()
+  "`supervisor/set-all' changes what the filter selects: `:except' skips a
+session, `:active' an inactive one, and without a filter every governed
+session changes, an inactive one too, as `session/set-all' does."
+  (harness-supervisor-test-with
+    (let ((here (harness-supervisor-test-session :ext '(:supervisor :false)))
+          (away (harness-supervisor-test-session :ext '(:supervisor :false)))
+          (left (harness-supervisor-test-session :ext '(:supervisor :false))))
+      (harness-call 'supervisor/set-all t (list :active t :except (list left)))
+      (should (eq t (harness-supervisor-test-get here)))
+      (should (eq :false (harness-supervisor-test-get left)))
+      ;; Inactive, and so out of an active-only filter.
+      (harness-call 'session/deactivate away)
+      (harness-call 'supervisor/set away :false)
+      (should-not (harness-call 'supervisor/set-all t (list :active t :except (list left))))
+      (should (eq :false (harness-supervisor-test-get away)))
+      ;; Without a filter, every governed session changes, inactive included.
+      (should (equal (sort (list away left) #'string<)
+                     (sort (harness-call 'supervisor/set-all t) #'string<)))
+      (should (eq t (harness-supervisor-test-get away)))
+      (should (eq t (harness-supervisor-test-get left))))))
+
 ;;;; The ACP call
 
 (defvar harness-supervisor-test--messages nil
@@ -478,6 +541,32 @@ DeepSeek supervisors think at max, their workers at medium."
       (should (harness-test-await
                (harness-acp-request conn "_harness/supervisor/active-p" (list :sessionId sid))))
       (should (equal '("Supervisor mode off" "Supervisor mode on") (harness-supervisor-test-hints sid))))))
+
+(ert-deftest harness-supervisor-acp-call-from-the-ui-all ()
+  "The call the UI makes, `_harness/supervisor/set-all' with `:on' and `:filter', works."
+  (harness-supervisor-test-with-acp
+    (let* ((conn (harness-supervisor-test-connect))
+           (one (harness-supervisor-test-session :ext '(:supervisor :false)))
+           (two (harness-supervisor-test-session :ext '(:supervisor :false)))
+           (sub (harness-supervisor-test-session :kind 'subagent :parent-id one)))
+      (let ((changed (harness-test-await
+                      (harness-acp-request conn "_harness/supervisor/set-all"
+                                           (list :on t :filter (list :active t))))))
+        (should (equal (sort (list one two) #'string<) (sort changed #'string<))))
+      (should (eq t (harness-supervisor-test-get one)))
+      (should (eq t (harness-supervisor-test-get two)))
+      (should-not (harness-supervisor-test-get sub))
+      (should (equal (sort (list (list one t) (list two t))
+                           (lambda (a b) (string< (car a) (car b))))
+                     (sort (harness-supervisor-test-events "supervisor/changed")
+                           (lambda (a b) (string< (car a) (car b))))))
+      ;; Off for one of them: the filter reaches exactly what it names.
+      (should (equal (list one)
+                     (harness-test-await
+                      (harness-acp-request conn "_harness/supervisor/set-all"
+                                           (list :on :false :filter (list :active t :except (list two)))))))
+      (should (eq :false (harness-supervisor-test-get one)))
+      (should (eq t (harness-supervisor-test-get two))))))
 
 (ert-deftest harness-supervisor-acp-call-needs-its-arguments ()
   "A call without the session or without the switch is refused, and changes nothing."
@@ -633,6 +722,30 @@ DeepSeek supervisors think at max, their workers at medium."
       (harness-call 'supervisor/set sid t)
       (harness-supervisor--on-task-changed (list :id "t-y" :session sid :state 'active))
       (should (eq t (harness-supervisor-test-get sid))))))
+
+(ert-deftest harness-supervisor-set-all-leaves-a-completed-tasks-session-alone ()
+  "With the everything filter, a done task's session is left alone by
+`supervisor/set-all', even though it is still active and would be
+selected by `:active' alone; the active sessions change as ever."
+  (harness-supervisor-test-with-tasks
+    (let* ((done-task (plist-get (harness-call 'task/submit default-directory "finish this") :id))
+           (done-sid (harness-supervisor-test-task-session done-task))
+           (open (harness-supervisor-test-session)))
+      (harness-supervisor-test-wait-task done-task 'done)
+      (should (eq 'done (plist-get (harness-supervisor-test-task done-task) :column)))
+      ;; The session of the finished task is still active, and supervises.
+      (should-not (eq 'inactive (plist-get (harness-call 'session/get done-sid) :status)))
+      (should (eq t (harness-supervisor-test-get done-sid)))
+      (let ((changed (harness-call 'supervisor/set-all :false (list :active t :tasks t))))
+        (should (member open changed))
+        (should-not (member done-sid changed)))
+      (should (eq t (harness-supervisor-test-get done-sid)))
+      (should (eq :false (harness-supervisor-test-get open)))
+      ;; Wanted on again: the finished task's session stays hands-on.
+      (harness-call 'supervisor/set done-sid :false)
+      (harness-call 'supervisor/set-all t (list :active t :tasks t))
+      (should (eq :false (harness-supervisor-test-get done-sid)))
+      (should (eq t (harness-supervisor-test-get open))))))
 
 ;;;; The allowlist
 

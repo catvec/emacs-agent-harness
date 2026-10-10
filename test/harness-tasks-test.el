@@ -577,6 +577,52 @@ each change adds exactly one hint, whichever comes first."
             (should (eq :false (plist-get (harness-tasks-test-task id) :non-interactive)))))
         (dolist (id (list here there)) (harness-call 'task/cancel id))))))
 
+(ert-deftest harness-tasks-all-commands-leave-a-done-tasks-session-alone ()
+  "A completed task is over: its session is left out with `:tasks', and so
+changes no more, even while that session is active and `:active' alone
+would select it.  The active sessions and the current tasks change as
+ever, their records too, and `task/set-all' leaves a done task alone."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 3)
+          ;; Sessions start interactive, so an all-command changes them.
+          (harness-tasks-non-interactive nil)
+          (everything '(:active t :tasks t))
+          (sorted (lambda (ids) (sort (copy-sequence ids) #'string<))))
+      (let* ((done (harness-tasks-test-submit "finish this")))
+        (harness-tasks-test-wait-state done 'done)
+        (let* ((done-sid (plist-get (harness-tasks-test-task done) :session))
+               ;; A current task that keeps running, and a plain session.
+               (running (let ((harness-provider-demo--delay 5))
+                          (harness-tasks-test-submit "keep working")))
+               (running-sid (plist-get (harness-tasks-test-task running) :session))
+               (plain (plist-get (harness-call 'session/create :cwd default-directory
+                                               :model "demo:scripted")
+                                 :id)))
+          (should (eq 'done (plist-get (harness-tasks-test-task done) :column)))
+          ;; The finished task's session is still active: `:active' alone
+          ;; selects it, `:tasks' takes it out again.
+          (should (member done-sid (harness-tasks-test--ids (harness-call 'session/list '(:active t)))))
+          (should (equal (funcall sorted (list running-sid plain))
+                         (funcall sorted (harness-tasks-test--ids (harness-call 'session/select everything)))))
+          ;; The all-commands' sessions change, the finished task's does not.
+          (should (equal (funcall sorted (list running-sid plain))
+                         (funcall sorted (harness-call 'session/set-all '(:non-interactive t)
+                                                       everything))))
+          (should (plist-get (harness-call 'session/get running-sid) :non-interactive))
+          (should (plist-get (harness-call 'session/get plain) :non-interactive))
+          (should-not (plist-get (harness-call 'session/get done-sid) :non-interactive))
+          (should (zerop (harness-tasks-test--count-hints done-sid "non-interactive on")))
+          ;; Nor does `task/set-all' reach the finished task's record.
+          (should (equal (list running) (harness-call 'task/set-all '(:non-interactive t))))
+          (should (eq t (plist-get (harness-tasks-test-task running) :non-interactive)))
+          (should-not (plist-member (harness-tasks-test-task done) :non-interactive))
+          ;; Turning it off again is the same: only the current work.
+          (should (equal (funcall sorted (list running-sid plain))
+                         (funcall sorted (harness-call 'session/set-all '(:non-interactive :false)
+                                                       everything))))
+          (should (equal (list running) (harness-call 'task/set-all '(:non-interactive :false))))
+          (harness-call 'task/cancel running))))))
+
 (ert-deftest harness-tasks-set-all-off-reaches-tasks-the-defaults-turn-on ()
   "Turning non-interactive off reaches a task with no setting of its own
 that would start non-interactive all the same: the task default, or its

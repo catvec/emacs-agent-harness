@@ -763,7 +763,10 @@ its sender, and the hint says so (`harness-session--requeue`).
 - `session/select &optional FILTER` → the session plists FILTER selects,
   newest first: `session/list`'s filter plus `:except` ids, and `:tasks`
   non-nil to add the sessions of the current tasks of every project
-  (`task/session-ids`), even an inactive one a task goes on in.  It is
+  (`task/session-ids`), even an inactive one a task goes on in, and to
+  leave out those of completed tasks, the board's done column
+  (`task/session-ids` with `:columns '("done")`), an active one
+  included: a bulk change must not reach a task that is over.  It is
   the selection of `session/set-all`, `handoff/check-all` and
   `handoff/switch-all`.
 - `session/set-all SETTINGS &optional FILTER` — the same change on every
@@ -3438,7 +3441,9 @@ record from before priorities reads `medium` without being rewritten.
   second hint; this is the board's bulk edit, and the all-sessions
   commands' and `set_non_interactive`'s reach into tasks),
   `task/session-ids &optional FILTER` (the sessions of the tasks FILTER
-  selects, whatever their status: `session/select`'s `:tasks`),
+  selects, whatever their status; `session/select`'s `:tasks` adds
+  those of the current tasks and subtracts those of the done column's
+  with `:columns '("done")`),
   `task/prompt ID TEXT &optional ATTACHMENTS OPTS` (follow-up or
   steering; reopens; OPTS `:from` is the sender, as `agent/prompt` takes it; in review the
   user's sends the task back and another session's does not, as above), `task/refine ID &optional TEXT`,
@@ -3831,6 +3836,17 @@ starts.  Only the user changes it later.
   supervises (nil for a session that is not there).  On takes effect at
   the next tool call, since the permission stage reads the live session,
   off at the next step, for the tool list.
+- `supervisor/set-all ON &optional FILTER` → the ids changed, newest
+  first: `supervisor/set` for every governed session (`supervisor/get`
+  non-nil: a top-level session or a fork) FILTER of `session/select`
+  selects, the same filter as `session/set-all`, `(:active t :tasks t)`
+  from the UI, completed tasks' sessions left out by the selection.  A
+  sub-agent, a side conversation, a session from before the module and
+  one already at the asked value are left alone; each change is the
+  same `:ext` setting, hint and `supervisor/changed` event as
+  `supervisor/set`.  Only the user does this, over ACP as
+  `_harness/supervisor/set-all` with `:on` and `:filter` (the UI's
+  `harness-set-supervisor-all`, the menu's V); there is no tool.
 - Settings: `harness-supervisor` (t; layered like `harness-model`, see
   config), `harness-supervisor-tasks` (t), `harness-supervisor-tiers`
   (nil: an alist from `mundane`, `standard` or `hard` to a model id),
@@ -4627,7 +4643,9 @@ layer maps positional bus signatures through a small table.
 `harness/modules` → `[{name, state, doc, file, error}]`, every module
 of the harness, as `harness-describe-modules` lists them.  The
 supervisor module's methods are `_harness/supervisor/set {sessionId, on}`
-(the UI's `harness-toggle-supervisor`), `.../get` and `.../active-p`,
+(the UI's `harness-toggle-supervisor`), `.../set-all {on, filter}` (the
+UI's `harness-set-supervisor-all`, the menu's V, for every governed
+session at once), `.../get` and `.../active-p`,
 and the seed module's `_harness/seed/fork` and `.../list`.
 
 The bus events of `harness-acp--forwarded-events` and
@@ -5233,6 +5251,19 @@ one the plugin does not govern; a harness without the supervisor module
 does not know the method, which is said plainly ("Supervisor mode is not
 available") rather than as a failure.
 
+`harness-set-supervisor-all` is the mode's "for all sessions" command
+(the menu's V, beside I), and is autoloaded like the others: it asks on
+or off, offering on first, and calls `_harness/supervisor/set-all
+{on, filter}` with `harness-ui--everything-filter`, so every governed
+session changes, a completed task's left alone, and a sub-agent or side
+conversation untouched.  Unless a prefix argument says otherwise it
+also sets `harness-supervisor` and `harness-supervisor-tasks` globally
+through `config/set`, so new top-level and task sessions follow, then
+reports how many sessions changed with `harness-ui--new-work-text` and
+`harness-ui--report-all` (what a project's `.dir-locals.el` still says
+otherwise).  Its failures go to `harness-ui-supervisor--failed`, the
+same plain message for a harness without the module.
+
 Compose box (`harness-ui-compose`): the editable box shared by chat
 buffers and the task board.  A host calls `harness-compose-setup`
 (`:project`, `:placeholder`, `:redraw` functions; `:bottom` keeps the box at
@@ -5488,15 +5519,21 @@ session.  The menu's `i` entry says whether that is non-interactive
 ask for a session.
 
 The all-sessions commands, `harness-set-model-all`,
-`harness-set-thinking-all` and `harness-set-non-interactive-all`
-(`C-c h M` `H` `A`, the menu's "Session settings" column), reach every
+`harness-set-thinking-all`, `harness-set-non-interactive-all` and
+`harness-set-supervisor-all`
+(`C-c h M` `H` `I`, the menu's "Session settings" column, where the
+supervisor one is V beside I; see also supervisor), reach every
 project.  They change the sessions first, every active one and those of
 the current tasks (`harness-ui--everything-filter`, `(:active t :tasks
 t)`, through `session/set-all`, or `handoff/switch-all` for a model so
 no lossy switch escapes the handoff), then the current tasks of every
 project (`task/set-all` without `:cwd`), whose sessions hold the value
 by then and so are not changed or told twice
-(`harness-ui--apply-everywhere`).  `harness-ui-set-all-functions` lets
+(`harness-ui--apply-everywhere`).  A session whose task is completed,
+in the board's done column, is left alone by all of them, even an
+active one: the selection subtracts the done tasks' sessions
+(`session/select`), and `task/set-all` never touches review, done or
+archived tasks.  `harness-ui-set-all-functions` lets
 what starts later follow, and returns the directories it changed
 something for: the task board's `harness-ui-tasks--set-all` sets the
 new-task settings of every open board -- for a model or a thinking
@@ -5504,13 +5541,16 @@ level only when the default changes, for non-interactive always.
 Unless a prefix argument says otherwise the value becomes the global
 default (`config/set` `:scope global`; for non-interactive only after
 the tasks changed, since a task without a setting of its own follows the
-default and is compared with how it would have started).  Then they say
+default and is compared with how it would have started; the supervisor
+one sets `harness-supervisor` and `harness-supervisor-tasks` and has no
+task records to change).  Then they say
 how many sessions and tasks changed and, from `config/overrides` (with
 the boards' directories), what keeps new work from following: the
 projects whose `.dir-locals.el` sets the key otherwise, at the project
 or the directory layer, and the task default that wins over it.  A
 model or a thinking level reports that when the default changed;
-non-interactive also whenever it is turned off.  None of them rewrites
+non-interactive and supervisor mode also whenever they are turned off.
+None of them rewrites
 a `.dir-locals.el`.
 
 A model switch asks the harness first (`handoff/check`, or
