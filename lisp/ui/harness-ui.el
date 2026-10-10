@@ -2052,6 +2052,16 @@ under a dark theme."
                  (cons :tag "Other colours" (color :tag "Foreground") (color :tag "Background")))
   :group 'harness-ui)
 
+(defcustom harness-ui-image-load-delay 0.05
+  "Seconds between drawing the images a view is loading.
+Drawing an image decodes it, which a full-size screenshot takes long
+enough for that a view drawing several of them in one go -- a report
+with a handful of screenshots -- would open frozen.  Each is drawn on a
+timer of its own, this far after the one before: the buffer appears at
+once, with a line where each image goes, and stays responsive while
+they come in."
+  :type 'number :group 'harness-ui)
+
 (defun harness-ui-image-color-props ()
   "Return the `create-image' properties colouring an image, or nil.
 They follow `harness-ui-image-colors'."
@@ -2286,6 +2296,111 @@ line saying so, a button opening it outside Emacs."
      (too-large (concat (propertize (harness-ui-image-too-large-label label too-large) 'face 'harness-dim-face) "\n"))
      (open (concat (harness-ui-action-button label open :help (format "Open %s" path)) "\n"))
      (t (concat (propertize label 'face 'harness-dim-face) "\n")))))
+
+;;;; Images drawn after the buffer is up
+;;
+;; A buffer that shows a screenshot is showing something Emacs only
+;; decodes when it draws it, and a full-size one takes long enough for
+;; that the buffer would appear to hang before it is even shown: a
+;; report popout decodes its images while it fits its window.  So a view
+;; that has several puts a line where each image goes, says it is
+;; loading, and draws it a moment later, one image at a time.
+
+(defvar-local harness-ui-image-loads nil
+  "The images this buffer is showing a loading line for, oldest first.
+Each entry is (START END DRAW): the markers where the line sits, and the
+function that draws the image in its place.")
+
+(defvar-local harness-ui-image-load--timer nil
+  "The timer drawing this buffer's next image, while one waits.")
+
+(defvar-local harness-ui-image-load-reflow nil
+  "Function fitting this buffer's windows to it once an image is drawn.
+Called with no arguments, the buffer current: an image takes more room
+than the line that said it was loading, and the window grows to show it.
+Nil leaves the windows as they are.")
+
+(defun harness-ui-image-load (placeholder draw)
+  "Insert PLACEHOLDER at point, and draw the image DRAW draws in its place.
+DRAW, a function of no arguments, is called with this buffer current and
+point where the placeholder was, the placeholder deleted: it inserts the
+image.  The call comes a moment later, and one image at a time
+\(`harness-ui-image-load-delay'), so a view that shows several of them
+-- a report with a handful of screenshots -- appears at once instead of
+opening frozen while they are decoded.  PLACEHOLDER should read as the
+line the image will take, ending in a newline.
+
+A redraw of the buffer drops what still waits
+\(`harness-ui-image-load-cancel'), and a placeholder edited away is
+never drawn over: drawing checks the placeholder is still there."
+  (let ((start (point))
+        (entry (list nil nil draw)))
+    (insert placeholder)
+    (put-text-property start (point) 'harness-ui-image-loading entry)
+    (setcar entry (copy-marker start))
+    (setcar (cdr entry) (copy-marker (point)))
+    (setq harness-ui-image-loads (nconc harness-ui-image-loads (list entry))))
+  (unless harness-ui-image-load--timer
+    (harness-ui-image-load--schedule)))
+
+(defun harness-ui-image-load--schedule ()
+  "Draw this buffer's next image once the UI has had a moment to settle."
+  (setq harness-ui-image-load--timer
+        (run-at-time harness-ui-image-load-delay nil
+                     #'harness-ui-image-load--step (current-buffer))))
+
+(defun harness-ui-image-load--draw-next ()
+  "Draw this buffer's next waiting image, and return non-nil when one was drawn.
+An entry whose loading line is gone -- the buffer was drawn again, or
+the text around it was edited away -- is dropped without drawing."
+  (let (drawn)
+    (while (and harness-ui-image-loads (not drawn))
+      (let* ((entry (pop harness-ui-image-loads))
+             (start (car entry))
+             (end (nth 1 entry))
+             (place (marker-position start)))
+        (when (and place (marker-position end)
+                   (eq (get-text-property place 'harness-ui-image-loading) entry))
+          (let ((inhibit-read-only t) (buffer-undo-list t))
+            (goto-char start)
+            (delete-region start end)
+            (goto-char start)
+            (funcall (nth 2 entry)))
+          (setq drawn t))))
+    drawn))
+
+(defun harness-ui-image-load--step (buffer)
+  "Draw the next image of BUFFER, and time the one after it."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq harness-ui-image-load--timer nil)
+      (when (harness-ui-image-load--draw-next)
+        (when harness-ui-image-load-reflow (funcall harness-ui-image-load-reflow)))
+      (when harness-ui-image-loads (harness-ui-image-load--schedule)))))
+
+(defun harness-ui-image-load-cancel ()
+  "Drop the images this buffer still waits to draw, and their timer.
+What is drawn already stays.  A redraw calls this before it erases the
+buffer: the loading lines go with the text, and the draw that follows
+puts a fresh line where each image goes."
+  (when (and harness-ui-image-load--timer (timerp harness-ui-image-load--timer))
+    (cancel-timer harness-ui-image-load--timer))
+  (setq harness-ui-image-load--timer nil
+        harness-ui-image-loads nil))
+
+(defun harness-ui-image-load-flush ()
+  "Draw the images this buffer waits on now, in the order they came.
+What waited no longer, and the windows are fitted once at the end.  For
+a caller that needs the buffer complete before it goes on -- a string
+drawn from it, say -- and for tests, which do not wait on timers."
+  (when (and harness-ui-image-load--timer (timerp harness-ui-image-load--timer))
+    (cancel-timer harness-ui-image-load--timer))
+  (setq harness-ui-image-load--timer nil)
+  (let (drawn)
+    (while harness-ui-image-loads
+      (when (harness-ui-image-load--draw-next) (setq drawn t)))
+    (when (and drawn harness-ui-image-load-reflow)
+      (funcall harness-ui-image-load-reflow))))
 
 (defun harness-ui-format-value (value)
   "Return VALUE for display in a tool input listing."

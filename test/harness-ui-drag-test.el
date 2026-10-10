@@ -34,6 +34,7 @@
 (declare-function harness-compose--file-attachment "harness-ui-compose")
 (declare-function harness-compose-insert-attachments "harness-ui-compose")
 (declare-function harness-ui-image-string "harness-ui")
+(declare-function harness-ui-image-load-flush "harness-ui")
 (declare-function harness-ui-popout--insert-image "harness-ui-popout")
 (declare-function harness-ui-connection "harness-ui")
 
@@ -442,6 +443,9 @@ A click on the name still opens it."
           (harness-ui-drag-test-in-buffer ""
             (goto-char pos)
             (harness-ui-popout--insert-image file)
+            ;; The image is drawn a moment after the popout shows, for a
+            ;; display: here, now.
+            (harness-ui-image-load-flush)
             (let* ((at (text-property-any (point-min) (point-max) 'harness-ui-drag file))
                    (keymap (get-text-property at 'keymap)))
               (should at)
