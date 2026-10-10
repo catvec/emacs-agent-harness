@@ -22,6 +22,9 @@
 (declare-function harness-naming--init "harness-naming")
 (declare-function harness-naming--shutdown "harness-naming")
 (declare-function harness-naming--name-running "harness-naming")
+(declare-function harness-openai-register-endpoint "harness-provider-openai")
+(defvar harness-http-retry-delay)
+(defvar harness-http-retry-jitter)
 
 (defmacro harness-naming-test-with (&rest body)
   "Load the state layer with the demo provider and naming, run BODY."
@@ -126,7 +129,7 @@ at once; a turn waits until `harness-naming-test-release' ends it."
 
 (defmacro harness-naming-test-with-held (&rest body)
   "Run BODY with the provider `naming-held' defined, then drop it.
-Its models are \"big\" and \"small\", its cheap tier; see
+Its models are \"big\" and \"small\", its simple tier; see
 `harness-naming-test--held-complete' for how it answers."
   (declare (indent 0))
   `(progn
@@ -139,7 +142,7 @@ Its models are \"big\" and \"small\", its cheap tier; see
        :models (lambda () (harness-resolved
                            (list (list :name "big" :pricing '(:input 10.0 :output 50.0))
                                  (list :name "small" :pricing '(:input 1.0 :output 5.0)))))
-       :tiers '(:cheap "small")
+       :tiers '(:simple "small")
        :complete #'harness-naming-test--held-complete
        :close (lambda (id) (push id harness-naming-test--closed) t))
      (unwind-protect (progn ,@body)
@@ -265,7 +268,7 @@ question, ephemeral, with no provider state."
     (harness-naming-test-with-held
       (let ((session (list :model "naming-held:big")))
         (should (equal "naming-held:small" (harness-naming--model session)))
-        ;; A provider that names no cheap model leaves the session's own.
+        ;; A provider that names no simple model leaves the session's own.
         (should (equal "nobody:m" (harness-naming--model (list :model "nobody:m"))))
         (let ((harness-naming-model nil))
           (should (equal "naming-held:big" (harness-naming--model session))))
@@ -538,6 +541,49 @@ must not keep a session nameless, which its next turn names again."
           (should (member "Naming failed: the model took too long" (harness-naming-test-hints id)))
           (should (= 2 harness-naming-test--cancelled))
           (should (zerop (hash-table-count harness-naming--running))))))))
+
+;;;; A title request is retried by the layer below it
+
+(ert-deftest harness-naming-title-is-retried-by-the-transport-layer ()
+  "`naming/title' needs no retry of its own: the HTTP layer retries its request.
+The request is an ordinary `provider/complete' request, like the one of
+a turn, so an OpenAI-compatible provider asks the HTTP layer to repeat
+it when the connection is lost before the answer began.  The server
+resets the first connection here; the title comes back from the second
+attempt, and the naming module made one request all the same."
+  (skip-unless (executable-find "curl"))
+  (harness-naming-test-with
+    (let* ((attempts 0)
+           (completes 0)
+           (answer (concat "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Fix the parser\"}}]}\n\n"
+                           "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+                           "data: [DONE]\n\n"))
+           (server (harness-test-http-serve
+                    `(("/chat/completions"
+                       . ,(lambda (attempt)
+                            (setq attempts attempt)
+                            (if (= attempt 1)
+                                'reset
+                              (list 200 '(("Content-Type" . "text/event-stream")) answer)))))))
+           (harness-http-retry-delay 0.01)
+           (harness-http-retry-jitter 0))
+      (unwind-protect
+          (progn
+            (harness-test-load-module 'provider-openai)
+            (harness-openai-register-endpoint
+             (list :id 'naminglocal :label "Local test server"
+                   :base-url (harness-test-http-url server "") :api-key "sk-test"))
+            (let ((harness-naming-model "naminglocal:local-model"))
+              (harness-naming-test-counting-completes completes
+                (should (equal "Fix the parser"
+                               (harness-await
+                                (harness-call 'naming/title "fix the parser, it drops comments"
+                                              '(:model "naminglocal:local-model")))))))
+            (should (= 2 attempts))
+            (should (= 1 completes)))
+        (delete-process server)
+        (remhash 'naminglocal harness-providers)
+        (harness-provider--forget 'naminglocal)))))
 
 ;;;; Who is named
 

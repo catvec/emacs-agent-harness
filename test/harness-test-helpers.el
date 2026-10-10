@@ -104,6 +104,14 @@ before, so no other test sees it."
 ;; Tests of repository stores bind it in repositories of their own.
 (setq harness-tasks-store-in-repository nil)
 
+(defvar harness-tools-dev--processes-function)
+(defvar harness-tools-dev--first-sweep)
+;; No test looks for the machine's harness instances, nor sweeps them on
+;; a timer: only an instance a test started itself may be stopped.
+;; Tests of the sweep give it the instances to find.
+(setq harness-tools-dev--processes-function #'ignore
+      harness-tools-dev--first-sweep nil)
+
 (add-hook 'kill-emacs-hook
           (lambda () (ignore-errors (delete-directory harness-test-state-root t)))
           ;; Appended, so the modules' exit flushes write here first.
@@ -164,27 +172,45 @@ Signal an error mentioning MESSAGE on timeout.  Return PRED's value."
 ROUTES maps a path to (STATUS HEADERS BODY . OPTIONS): HEADERS an alist
 sent as given, BODY a string of bytes.  OPTIONS is a plist: :chunks
 splits the body in that many pieces sent :delay seconds apart (the
-first one after :delay too), :no-length leaves Content-Length out.  A
-path ROUTES lacks gets a 404.  `harness-test-http-url' makes addresses."
-  (make-network-process
-   :name "harness-test-http" :server t :host "127.0.0.1" :service t :family 'ipv4
-   :coding 'binary :noquery t
-   :log (lambda (_server connection _message) (set-process-query-on-exit-flag connection nil))
-   :filter (lambda (proc data)
-             (let ((text (concat (or (process-get proc 'text) "") data)))
-               (process-put proc 'text text)
-               (when (and (string-match-p "\r\n\r\n" text) (not (process-get proc 'answered)))
-                 (process-put proc 'answered t)
-                 (let ((path (nth 1 (split-string (car (split-string text "\r\n")) " "))))
-                   (harness-test--http-answer
-                    proc (or (cdr (assoc path routes))
-                             (list 404 '(("Content-Type" . "text/plain")) "not found")))))))))
+first one after :delay too), :no-length leaves Content-Length out,
+:reset-after K cuts the connection with a reset once K pieces went (0
+cuts it right after the headers).  A path's value may instead be a
+function of the number of requests that path has been sent so far (1
+the first), returning such a route, the symbol `reset' (answer nothing,
+closing the connection with a reset, as a proxy dropping it does) or
+`close' (close it, answering nothing).  A path ROUTES lacks gets a 404.
+`harness-test-http-url' makes addresses."
+  (let ((attempts (make-hash-table :test 'equal)))
+    (make-network-process
+     :name "harness-test-http" :server t :host "127.0.0.1" :service t :family 'ipv4
+     :coding 'binary :noquery t
+     :log (lambda (_server connection _message) (set-process-query-on-exit-flag connection nil))
+     :filter (lambda (proc data)
+               (let ((text (concat (or (process-get proc 'text) "") data)))
+                 (process-put proc 'text text)
+                 (when (and (string-match-p "\r\n\r\n" text) (not (process-get proc 'answered)))
+                   (process-put proc 'answered t)
+                   (let* ((path (nth 1 (split-string (car (split-string text "\r\n")) " ")))
+                          (attempt (puthash path (1+ (gethash path attempts 0)) attempts))
+                          (route (or (cdr (assoc path routes))
+                                     (list 404 '(("Content-Type" . "text/plain")) "not found")))
+                          (route (if (functionp route) (funcall route attempt) route)))
+                     (pcase route
+                       ('reset (harness-test--http-reset proc))
+                       ('close (delete-process proc))
+                       (_ (harness-test--http-answer proc route))))))))))
+
+(defun harness-test--http-reset (proc)
+  "Close PROC so that curl sees a connection reset, as a dropped one does."
+  (ignore-errors (set-network-process-option proc :linger (cons 1 0)))
+  (delete-process proc))
 
 (defun harness-test--http-answer (proc route)
   "Send PROC the answer ROUTE describes (see `harness-test-http-serve')."
   (pcase-let* ((`(,status ,headers ,body . ,options) route)
                (chunks (max 1 (or (plist-get options :chunks) 1)))
                (delay (or (plist-get options :delay) 0))
+               (reset-after (plist-get options :reset-after))
                (size (length body))
                (step (max 1 (ceiling size chunks)))
                (pieces (let (out (i 0))
@@ -200,10 +226,13 @@ path ROUTES lacks gets a 404.  `harness-test-http-url' makes addresses."
                   "Connection: close\r\n\r\n"))
     (setq send (lambda ()
                  (when (process-live-p proc)
-                   (if pieces
+                   (if (and pieces (or (null reset-after)
+                                       (> (length pieces) (- chunks reset-after))))
                        (progn (ignore-errors (process-send-string proc (pop pieces)))
                               (if (> delay 0) (run-at-time delay nil send) (funcall send)))
-                     (ignore-errors (process-send-eof proc))))))
+                     (if reset-after
+                         (harness-test--http-reset proc)
+                       (ignore-errors (process-send-eof proc)))))))
     (if (> delay 0) (run-at-time delay nil send) (funcall send))))
 
 (defun harness-test-http-url (server path)
@@ -227,8 +256,9 @@ session's sandbox, where $HOME is the sandbox's own empty home."
 (defun harness-test-harness-checkout ()
   "Make a directory that looks like a checkout of the harness.
 harness.el and an executable scripts/dev.sh are there; the script
-appends its cwd, arguments and HARNESS_DEV_SOCKET to invocation.log in
-the checkout and exits 0.  Return the directory."
+appends its cwd, arguments, HARNESS_DEV_SOCKET, HARNESS_DEV_OWNER and
+HARNESS_DEV_STATE to invocation.log in the checkout and exits 0.
+Return the directory."
   (let* ((dir (file-name-as-directory (make-temp-file "harness-checkout-" t)))
          (scripts (expand-file-name "scripts/" dir))
          (script (expand-file-name "dev.sh" scripts)))
@@ -240,13 +270,16 @@ the checkout and exits 0.  Return the directory."
               "printf 'cwd=%s\\n' \"$PWD\" >> \"$PWD/invocation.log\"\n"
               "printf 'args=%s\\n' \"$*\" >> \"$PWD/invocation.log\"\n"
               "printf 'socket=%s\\n' \"$HARNESS_DEV_SOCKET\" >> \"$PWD/invocation.log\"\n"
+              "printf 'owner=%s\\n' \"$HARNESS_DEV_OWNER\" >> \"$PWD/invocation.log\"\n"
+              "printf 'state=%s\\n' \"$HARNESS_DEV_STATE\" >> \"$PWD/invocation.log\"\n"
               "exit 0\n"))
     (set-file-modes script #o755)
     dir))
 
 (defun harness-test-dev-invocations (dir)
   "Return the fake dev loop's invocations recorded in DIR, oldest first.
-Each invocation is an alist of the script's fields (cwd, args, socket)."
+Each invocation is an alist of the script's fields (cwd, args, socket,
+owner, state)."
   (let ((log (expand-file-name "invocation.log" dir)))
     (when (file-exists-p log)
       (with-temp-buffer

@@ -157,5 +157,134 @@ array), as OpenAI did for hand_in, whose evidence item requires no key."
     (should (equal '("path") (plist-get (plist-get (harness-call 'tools/get "t_needs") :schema)
                                         :required)))))
 
+;;;; Notes under running calls
+
+(defvar harness-sessions)
+(defvar harness-agent--turns)
+(defvar harness-agent--activities)
+(declare-function harness-provider-demo--last-user-text "harness-provider-demo")
+
+(defmacro harness-tools-test-with-sessions (&rest body)
+  "Run BODY with the tools, session and agent modules on a fresh bus."
+  (declare (indent 0))
+  `(harness-test-with-temp-state
+     (harness-test-reset-bus)
+     (dolist (m '(store project config provider provider-demo tools session agent))
+       (harness-test-load-module m))
+     (clrhash harness-sessions)
+     (clrhash harness-agent--turns)
+     (clrhash harness-agent--activities)
+     (let ((default-directory dir))
+       ,@body)))
+
+(defun harness-tools-test-session (&optional plist)
+  "Create a demo session with PLIST overrides; return its id."
+  (plist-get (apply #'harness-call 'session/create
+                    (append plist (list :cwd (harness-test-temp-dir) :model "demo:scripted")))
+             :id))
+
+(ert-deftest harness-tools-tail-line ()
+  "The last visible line of tool output, without colour or control codes."
+  (should (equal "PASS b.test" (harness-tools-tail-line "\e[32mPASS\e[0m a.test\nPASS b.test\n")))
+  (should (equal "half" (harness-tools-tail-line "10%\r50%\rhalf")))
+  (should (equal "text" (harness-tools-tail-line "text")))
+  (should-not (harness-tools-tail-line "  \n \n"))
+  (should-not (harness-tools-tail-line nil)))
+
+(ert-deftest harness-tools-session-facts ()
+  "The facts line: tokens against the compaction window, turns, steps, tools."
+  (harness-tools-test-with-sessions
+    (let ((sid (harness-tools-test-session '(:context-window 256000))))
+      ;; A session that has done nothing says nothing.
+      (should-not (harness-tools-session-facts (harness-call 'session/get sid) 0))
+      (harness-call 'session/usage-add sid '(:context 12300 :last-output 0 :turns 3))
+      (should (equal "12.3k/256k before compact · 3 turns · 7 steps"
+                     (harness-tools-session-facts (harness-call 'session/get sid) 7)))
+      ;; Tool calls are counted in the transcript.
+      (harness-call 'session/append sid '(:kind tool-call :tool "read_file" :call-id "c1"))
+      (should (equal "12.3k/256k before compact · 3 turns · 7 steps · 1 tool call"
+                     (harness-tools-session-facts (harness-call 'session/get sid) 7)))
+      ;; Without a caller's count, the steps come from the events.
+      (harness-emit 'agent/step-started sid 5)
+      (should (equal "12.3k/256k before compact · 3 turns · 5 steps · 1 tool call"
+                     (harness-tools-session-facts (harness-call 'session/get sid))))
+      ;; A turn that starts counts its steps from zero again.
+      (harness-emit 'agent/turn-started sid)
+      (should (equal "12.3k/256k before compact · 3 turns · 1 tool call"
+                     (harness-tools-session-facts (harness-call 'session/get sid)))))))
+
+(ert-deftest harness-tools-session-note ()
+  "The note under a call: what the session does, its recap, its facts."
+  (harness-tools-test-with-sessions
+    (let ((sid (harness-tools-test-session '(:context-window 256000))))
+      (harness-call 'session/append sid '(:kind user :content "do the thing"))
+      ;; A prompt with nothing after it yet: a sub-agent just started.
+      (should (equal "starting" (harness-tools-session-note sid)))
+      ;; What a running turn does comes first, with the title it reports.
+      (puthash sid (list :phase 'tool :tool "bash" :title "Bash: npm test" :since (float-time))
+               harness-agent--activities)
+      (harness-call 'session/usage-add sid '(:context 12300 :last-output 0 :turns 2))
+      (should (equal "running Bash: npm test\n12.3k/256k before compact · 2 turns"
+                     (harness-tools-session-note sid)))
+      ;; A title prefixes the note, for a wait over several sessions.
+      (should (equal "explorer (45ab12cd): running Bash: npm test\n12.3k/256k before compact · 2 turns"
+                     (harness-tools-session-note sid '(:title "explorer (45ab12cd): "))))
+      ;; A session that is gone has no note; a call with a title says so.
+      (should-not (harness-tools-session-note "nobody"))
+      (should (equal "explorer (45ab12cd): gone"
+                     (harness-tools-session-note "nobody" '(:title "explorer (45ab12cd): ")))))))
+
+(ert-deftest harness-tools-activity-phrase ()
+  "What the running turn does, said in a phrase for the note."
+  (harness-tools-test-with-sessions
+    (should (equal "running Bash: npm test"
+                   (harness-tools--activity-phrase '(:phase tool :tool "bash" :title "Bash: npm test"))))
+    (should (equal "checking permission for Bash: npm test"
+                   (harness-tools--activity-phrase '(:phase tool :tool "bash" :title "Bash: npm test" :checking t))))
+    (should (equal "running Bash: npm test and 2 more"
+                   (harness-tools--activity-phrase '(:phase tool :tool "bash" :title "Bash: npm test" :count 3))))
+    (should (equal "thinking" (harness-tools--activity-phrase '(:phase thinking))))
+    ;; A tool nobody registered goes by its name; a title is used as it is.
+    (should (equal "preparing bash" (harness-tools--activity-phrase '(:phase tool-input :tool "bash"))))
+    (should (equal "preparing Bash: npm test"
+                   (harness-tools--activity-phrase '(:phase tool-input :tool "bash" :title "Bash: npm test"))))
+    (should (equal "waiting for the model" (harness-tools--activity-phrase '(:phase waiting))))
+    (should (equal "compacting the conversation" (harness-tools--activity-phrase '(:phase compacting))))
+    (should (equal "working" (harness-tools--activity-phrase nil)))))
+
+(ert-deftest harness-tools-session-doing ()
+  "A session that waits on the user says so; another says what it last did."
+  (harness-tools-test-with-sessions
+    (let ((sid (harness-tools-test-session)))
+      (harness-call 'session/append sid '(:kind user :content "do the thing"))
+      (harness-call 'session/append sid '(:kind assistant :content "Done: the widget works."))
+      (should (equal "last said: Done: the widget works."
+                     (harness-tools-session-doing (harness-call 'session/get sid))))
+      ;; A tool call it ran last reads as its title.
+      (harness-call 'session/append sid '(:kind tool-call :tool "bash" :call-id "c1" :title "Bash: make test"))
+      (should (equal "last ran Bash: make test"
+                     (harness-tools-session-doing (harness-call 'session/get sid)))))))
+
+(ert-deftest harness-tools-watch-session-reports-changes ()
+  "A watcher hears the note at once, and again only when it changed."
+  (harness-tools-test-with-sessions
+    (let* ((sid (harness-tools-test-session))
+           (seen nil)
+           (stop nil))
+      (harness-call 'session/append sid '(:kind user :content "go"))
+      (setq stop (harness-tools-watch-session sid (lambda (text) (push text seen))))
+      (should (equal '("starting") seen))
+      (puthash sid (list :phase 'thinking :since (float-time)) harness-agent--activities)
+      (harness-emit 'agent/activity-changed sid (gethash sid harness-agent--activities))
+      (should (equal '("thinking" "starting") seen))
+      ;; Nothing changed: nothing is said again.
+      (harness-emit 'agent/activity-changed sid (gethash sid harness-agent--activities))
+      (should (equal '("thinking" "starting") seen))
+      ;; The tool that asked can stop the watching.
+      (funcall stop)
+      (puthash sid (list :phase 'writing :since (float-time)) harness-agent--activities)
+      (harness-emit 'agent/activity-changed sid (gethash sid harness-agent--activities))
+      (should (equal '("thinking" "starting") seen)))))
+
 (provide 'harness-tools-test)
 ;;; harness-tools-test.el ends here

@@ -6,19 +6,25 @@
 ;; the verdict, the origins and the commits the harness lacks, the hints
 ;; on what to do, the commit this Emacs loaded beside the harness
 ;; process's.  Then how it follows the harness: reports announced, a
-;; new connection, failed checks.  Last, the whole way: the UI asking
-;; the version module over its ACP connection about real repositories.
+;; new connection, failed checks.  Then the icon nagging while the
+;; harness is behind, in the mode line notifier and the header lines of
+;; chats and the board.  Last, the whole way: the UI asking the version
+;; module over its ACP connection about real repositories.
 
 ;;; Code:
 
 (require 'harness-test-helpers)
 (require 'harness-revision)
 (require 'harness-ui)
+(require 'harness-ui-chat)
+(require 'harness-ui-tasks)
+(require 'harness-ui-notify)
 (require 'harness-ui-version)
 
 (defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-version-origins)
+(defvar harness-ui--sessions)
 (declare-function harness-acp--drop-client "harness-acp")
 
 ;;;; Reports
@@ -80,6 +86,10 @@ The harness runs in this Emacs unless BODY binds the address."
          (harness-ui-version--checking nil)
          (harness-ui-version--error nil)
          (harness-ui-version--waiting-for nil)
+         (harness-ui-version--reloaded nil)
+         (harness-ui-version--nag-shown nil)
+         (harness--last-update nil)
+         (harness--updating nil)
          (harness-ui-connection-address nil)
          (buffer (get-buffer-create "*harness version test*")))
      (unwind-protect
@@ -146,11 +156,10 @@ The harness runs in this Emacs unless BODY binds the address."
       (should (string-match-p "the same commits as local" text))
       (should (= 1 (harness-ui-version-test--count "Second")))
       (should (string-match-p "Checked just now; the harness checks by itself every half hour\\." text))
-      (should (equal '("[Check now]") (harness-ui-version-test--buttons))))
-    ;; What to do: the remote has them, so pull them into the clone.
-    (should (string-match-p (concat "To run the commits of sourcehut, pull them into "
-                                    (regexp-quote harness-ui-version-test--clone) ", then reload\\.")
-                            (harness-ui-version-test--prose)))))
+      ;; The Update section is the way: the page is local, so no pull hint.
+      (should (equal '("[Update harness]" "[Check now]") (harness-ui-version-test--buttons))))
+    (should (string-match-p "^ Update$" (harness-ui-version-test--text)))
+    (should-not (string-match-p "pull them" (harness-ui-version-test--prose)))))
 
 (ert-deftest harness-ui-version-draws-a-report-that-came-as-json ()
   ;; From the harness process the report comes over TCP, as JSON: nil
@@ -170,11 +179,29 @@ The harness runs in this Emacs unless BODY binds the address."
     (harness-ui-version-test-with-page sent
       (should (equal direct (harness-ui-version-test--text))))))
 
-(ert-deftest harness-ui-version-says-how-to-pull-into-straight ()
-  (let ((harness-directory "/srv/straight/build-31.1/harness/"))
+(ert-deftest harness-ui-version-updates-a-straight-install-from-the-page ()
+  "A straight.el install is updated from the page, package and all.
+straight's repos clone, which `harness-directory' really is (its build
+directory is a tree of links into it), counts as much as its build."
+  (dolist (dir '("/srv/straight/repos/harness/" "/srv/straight/build-31.1/harness/"))
+    (let ((harness-directory dir))
+      (should (equal "harness" (harness--straight-package)))
+      (should (equal "harness" (harness-ui-version--straight-package)))
+      (harness-ui-version-test-with-page (harness-ui-version-test--behind)
+        (should (member "[Update harness]" (harness-ui-version-test--buttons)))
+        (should-not (string-match-p "pull them" (harness-ui-version-test--prose)))))))
+
+(ert-deftest harness-ui-version-says-how-to-pull-a-remote-straight-install ()
+  "A harness that runs elsewhere is not updated from here: the text says how."
+  (let ((harness-directory "/srv/straight/repos/harness/"))
     (harness-ui-version-test-with-page (harness-ui-version-test--behind)
-      (should (string-match-p "pull them into /srv/straight/repos/harness/ (M-x straight-pull-package RET harness), then reload\\."
-                              (harness-ui-version-test--prose))))))
+      (let ((harness-ui-connection-address "box:7000"))
+        (harness-ui-version--render)
+        (should (string-match-p (concat "To run the commits of sourcehut, pull them into "
+                                        (regexp-quote harness-ui-version-test--clone)
+                                        " (M-x straight-pull-package RET harness), then reload\\.")
+                                (harness-ui-version-test--prose)))
+        (should-not (member "[Update harness]" (harness-ui-version-test--buttons)))))))
 
 (ert-deftest harness-ui-version-shows-commits-not-fetched-yet ()
   ;; The repository the clone pulls from, GitHub here, has a commit no
@@ -193,9 +220,8 @@ The harness runs in this Emacs unless BODY binds the address."
         (should (string-match-p (concat "^ +https://github.com/catvec/emacs-agent-harness.git, main, "
                                         "which the loaded checkout pulls from$")
                                 text)))
-      (should (string-match-p (concat "To run the commits of github, pull them into /srv/straight/repos/harness/ "
-                                      "(M-x straight-pull-package RET harness), then reload\\.")
-                              (harness-ui-version-test--prose))))))
+      (should (member "[Update harness]" (harness-ui-version-test--buttons)))
+      (should-not (string-match-p "pull them" (harness-ui-version-test--prose))))))
 
 (ert-deftest harness-ui-version-says-to-reload-a-checkout-that-moved-on ()
   (harness-ui-version-test-with-page
@@ -212,13 +238,17 @@ The harness runs in this Emacs unless BODY binds the address."
                               prose))
       ;; Pulling would not help: the checkout has them already.
       (should-not (string-match-p "pull them" prose)))
-    (should (equal '("[Reload harness]" "[Check now]") (harness-ui-version-test--buttons)))
+    (should (equal '("[Update harness]" "[Reload harness]" "[Check now]")
+                   (harness-ui-version-test--buttons)))
     (should (eq #'harness-reload
-                (save-excursion (goto-char (next-button (point-min)))
-                                (let ((called nil))
-                                  (cl-letf (((symbol-function 'harness-reload) (lambda () (interactive) (setq called 'harness-reload))))
-                                    (push-button)
-                                    (and called #'harness-reload))))))
+                (save-excursion
+                  (goto-char (point-min))
+                  (search-forward "[Reload harness]")
+                  (let ((pos (match-beginning 0))
+                        (called nil))
+                    (cl-letf (((symbol-function 'harness-reload) (lambda () (interactive) (setq called 'harness-reload))))
+                      (push-button pos)
+                      (and called #'harness-reload))))))
     ;; A harness elsewhere is not reloaded from here.
     (let ((harness-ui-connection-address "box:7000"))
       (harness-ui-version--render)
@@ -295,6 +325,64 @@ The harness runs in this Emacs unless BODY binds the address."
       (should (string-match-p "sourcehut +ccccccc  cannot be compared" text))
       (should-not (string-match-p "pull them" text)))))
 
+(ert-deftest harness-ui-version-updates-the-harness-from-the-page ()
+  "The Update button runs `harness-update'; a harness elsewhere is not updated here."
+  (harness-ui-version-test-with-page (harness-ui-version-test--behind)
+    (let ((called 0))
+      (cl-letf (((symbol-function 'harness-update) (lambda () (interactive) (cl-incf called))))
+        (harness-ui-version-update)
+        (should (= 1 called))
+        (save-excursion
+          (goto-char (point-min))
+          (search-forward "[Update harness]")
+          (push-button (match-beginning 0)))
+        (should (= 2 called))))
+    ;; While an update runs, the page says so instead of offering another.
+    (let ((harness--updating t))
+      (harness-ui-version--render)
+      (should-not (member "[Update harness]" (harness-ui-version-test--buttons)))
+      (should (string-match-p "Updating the harness" (harness-ui-version-test--text))))
+    (let ((harness-ui-connection-address "box:7000"))
+      (harness-ui-version--render)
+      (should-not (member "[Update harness]" (harness-ui-version-test--buttons)))
+      (should-error (harness-ui-version-update) :type 'user-error))))
+
+(ert-deftest harness-ui-version-shows-what-an-update-brought ()
+  "An update's outcome and the commits it brought, with their message bodies."
+  (let ((result (list :state "updated"
+                      :message "Harness updated from aaaaaaa to bbbbbbb (2 commits) and reloaded"
+                      :count 2
+                      :commits (list (list :commit (harness-ui-version-test--hash ?b)
+                                           :subject "Second"
+                                           :date (- (float-time) 60)
+                                           :body "Why it was done.\n\nHow it was done.")
+                                     (list :commit (harness-ui-version-test--hash ?a)
+                                           :subject "First"
+                                           :date (- (float-time) 120)
+                                           :body "A first body.")))))
+    (harness-ui-version-test-with-page (harness-ui-version-test--report "latest" (harness-ui-version-test--loaded))
+      (setq harness--last-update result)
+      (harness-ui-version--render)
+      (let ((text (harness-ui-version-test--text)))
+        (should (string-match-p "Harness updated from aaaaaaa to bbbbbbb (2 commits) and reloaded" text))
+        (should (eq 'harness-success-face (harness-ui-version-test--face-of "Harness updated")))
+        (should (string-match-p "bbbbbbb  Second" text))
+        (should (string-match-p "Why it was done\\." text))
+        (should (string-match-p "How it was done\\." text))
+        (should (string-match-p "A first body\\." text))
+        ;; A commit is its message: no diff or file statistics.
+        (should-not (string-match-p "diff --git\\|files changed\\|insertions(+)\\|deletions(-)" text)))))
+  ;; Up to date: the message only, no changelog.
+  (harness-ui-version-test-with-page (harness-ui-version-test--report "latest" (harness-ui-version-test--loaded))
+    (setq harness--last-update (list :state "up-to-date" :message "Harness is up to date (bbbbbbb)" :count 0))
+    (harness-ui-version--render)
+    (should (string-match-p "Harness is up to date (bbbbbbb)" (harness-ui-version-test--text))))
+  ;; Failed: its message in the failure face.
+  (harness-ui-version-test-with-page (harness-ui-version-test--report "latest" (harness-ui-version-test--loaded))
+    (setq harness--last-update (list :state "failed" :message "Harness update failed: it has local changes"))
+    (harness-ui-version--render)
+    (should (eq 'harness-failure-face (harness-ui-version-test--face-of "Harness update failed")))))
+
 (ert-deftest harness-ui-version-compares-this-emacs-with-the-harness-process ()
   (let ((harness-revision--loaded (harness-resolved (list :directory harness-ui-version-test--clone
                                                           :loaded (- (float-time) 120)
@@ -307,7 +395,8 @@ The harness runs in this Emacs unless BODY binds the address."
         (let ((text (harness-ui-version-test--text)))
           (should (string-match-p "^ +the harness process, loaded 2h ago$" text))
           (should (string-match-p "this Emacs runs 9999999, loaded 2m ago: not the harness process's commit\\." text))
-          (should (equal '("[Reload harness]" "[Check now]") (harness-ui-version-test--buttons)))))
+          (should (equal '("[Reload harness]" "[Update harness]" "[Check now]")
+                         (harness-ui-version-test--buttons)))))
       ;; A harness elsewhere: this Emacs cannot reload it.
       (let ((harness-ui-connection-address "box:7000"))
         (harness-ui-version--render)
@@ -368,10 +457,216 @@ The harness runs in this Emacs unless BODY binds the address."
 
 (ert-deftest harness-ui-version-page-keys ()
   (should (eq #'harness-ui-version-refresh (lookup-key harness-ui-version-mode-map (kbd "g"))))
+  (should (eq #'harness-ui-version-update (lookup-key harness-ui-version-mode-map (kbd "u"))))
   (should (eq #'harness-menu (lookup-key harness-ui-version-mode-map (kbd "?"))))
   (should (eq #'forward-button (lookup-key harness-ui-version-mode-map (kbd "TAB"))))
   (should (eq #'quit-window (lookup-key harness-ui-version-mode-map (kbd "q"))))
-  (should (equal "Version" (car (get 'harness-ui-version-mode 'harness-menu-group)))))
+  (should (equal "Version" (car (get 'harness-ui-version-mode 'harness-menu-group))))
+  (should (equal '(". u" "Update harness" harness-ui-version-update)
+                 (aref (cadr (get 'harness-ui-version-mode 'harness-menu-group)) 2))))
+
+;;;; The nag icon
+
+(defmacro harness-ui-version-test-with-nag (report &rest body)
+  "Run BODY with REPORT the last report and the nag icon in all its places.
+No page shows.  The mode line notifier is on, with no session active."
+  (declare (indent 1))
+  `(let ((harness-ui-version--report ,report)
+         (harness-ui-version--checking nil)
+         (harness-ui-version--error nil)
+         (harness-ui-version--waiting-for nil)
+         (harness-ui-version--reloaded nil)
+         (harness-ui-version--nag-shown nil)
+         (harness-ui-version-nag-places '(mode-line chat-header board-header))
+         (harness-chat-header-end-functions nil)
+         (harness-ui-tasks-header-functions nil)
+         (harness-ui-notify-segment-functions nil)
+         (harness-notify-mode t)
+         (harness-ui-notify--string "")
+         (harness-ui--sessions (make-hash-table :test 'equal)))
+     (harness-ui-version--init-nag)
+     ,@body))
+
+(defun harness-ui-version-test--icon ()
+  "The nag icon's text, as it reads in batch: its symbol fallback."
+  (substring-no-properties (harness-ui-icon 'harness-icon-update)))
+
+(defun harness-ui-version-test--places ()
+  "Where the nag icon shows now: a list of mode-line, chat-header, board-header."
+  (let ((icon (regexp-quote (harness-ui-version-test--icon))))
+    (append
+     (and (string-match-p (concat "\\` harness " icon " \\'") harness-ui-notify--string)
+          '(mode-line))
+     (and (string-match-p (concat "  " icon "  \\[menu\\]")
+                          (with-temp-buffer (harness-chat--header most-positive-fixnum)))
+          '(chat-header))
+     (and (string-match-p (concat "  " icon "  \\[BTW\\]")
+                          (with-temp-buffer (harness-ui-tasks--header most-positive-fixnum)))
+          '(board-header)))))
+
+(ert-deftest harness-ui-version-nag-icon ()
+  "While the harness is behind, the icon nags; hovering says why, a click shows the page."
+  (harness-ui-version-test-with-nag (harness-ui-version-test--behind)
+    (let ((nag (harness-ui-version-nag))
+          (shown 0))
+      (should (equal (harness-ui-version-test--icon) nag))
+      (should (eq 'harness-caution-face (get-text-property 0 'face nag)))
+      ;; An image with `mouse-face' shows as a box.
+      (should-not (get-text-property 0 'mouse-face nag))
+      (should (equal "The harness is not the latest: local and sourcehut have commits it lacks (mouse-1: what to do)"
+                     (funcall (get-text-property 0 'help-echo nag) nil nil 0)))
+      (cl-letf (((symbol-function 'harness-version) (lambda () (interactive) (cl-incf shown))))
+        (dolist (key (list [header-line mouse-1] [mode-line mouse-1] [mouse-1] (kbd "RET")))
+          (funcall (lookup-key (get-text-property 0 'local-map nag) key))))
+      (should (= 4 shown)))
+    ;; One origin with commits the harness lacks.
+    (setq harness-ui-version--report
+          (harness-ui-version-test--report "behind" (harness-ui-version-test--loaded)
+                                           (harness-ui-version-test--newer "sourcehut" "remote")))
+    (should (equal "The harness is not the latest: sourcehut has commits it lacks (mouse-1: what to do)"
+                   (harness-ui-version--nag-help)))))
+
+(ert-deftest harness-ui-version-nags-only-while-behind ()
+  (dolist (report (list nil
+                        (harness-ui-version-test--report "latest" (harness-ui-version-test--loaded))
+                        (harness-ui-version-test--report
+                         "unknown" (harness-ui-version-test--loaded)
+                         (harness-ui-version-test--origin "sourcehut" "remote" "unknown"))))
+    (harness-ui-version-test-with-nag report
+      (should-not (harness-ui-version-nag))
+      (harness-ui-notify-refresh)
+      (should-not (harness-ui-version-test--places))
+      ;; The notifier has nothing to show either.
+      (should (equal "" harness-ui-notify--string)))))
+
+(ert-deftest harness-ui-version-nags-in-every-place ()
+  "The icon shows in the notifier, a chat's header before [menu], and the board's."
+  (harness-ui-version-test-with-nag nil
+    (harness-ui-notify-refresh)
+    (should-not (harness-ui-version-test--places))
+    ;; A report finding the harness behind: the icon shows at once, the
+    ;; notifier too though no session is active.
+    (harness-ui-version--on-event "version/checked" (list (harness-ui-version-test--behind)))
+    (should (equal '(mode-line chat-header board-header) (harness-ui-version-test--places)))
+    (should (equal "Version (not the latest)" (substring-no-properties (harness-ui-version-menu-label))))
+    ;; In a narrow chat it makes room after the spend, before the name.
+    (with-temp-buffer
+      (let* ((full (harness-chat--header most-positive-fixnum))
+             (gone (lambda (regexp)
+                     ;; The widest header without REGEXP.
+                     (cl-loop for width downfrom (harness-ui-header-string-width full) to 1
+                              unless (string-match-p regexp (harness-chat--header width))
+                              return width))))
+        (should (> (funcall gone "\\$0")
+                   (funcall gone (regexp-quote (harness-ui-version-test--icon)))
+                   (funcall gone "unnamed")))))
+    ;; With sessions, it shows before their counts.
+    (puthash "s1" '(:session-id "s1" :status "running") harness-ui--sessions)
+    (harness-ui-notify-refresh)
+    (should (string-match-p (concat "\\` harness " (regexp-quote (harness-ui-version-test--icon)) " .+1 \\'")
+                            harness-ui-notify--string))
+    (clrhash harness-ui--sessions)
+    ;; A report finding it the latest: the icon goes.
+    (harness-ui-version--on-event "version/checked"
+                                  (list (harness-ui-version-test--report "latest" (harness-ui-version-test--loaded))))
+    (should-not (harness-ui-version-test--places))
+    (should (equal "" harness-ui-notify--string))
+    (should (equal "Version" (harness-ui-version-menu-label)))))
+
+(ert-deftest harness-ui-version-nag-goes-when-the-harness-reloads ()
+  "The harness may run the commits it lacked once it reloads: the icon goes until it checks again."
+  (harness-ui-version-test-with-nag nil
+    (harness-ui-version--on-event "version/checked" (list (harness-ui-version-test--behind)))
+    (should (equal '(mode-line chat-header board-header) (harness-ui-version-test--places)))
+    (harness-ui-version--on-event "harness/reloaded" nil)
+    (should-not (harness-ui-version-nag))
+    (should-not (harness-ui-version-test--places))
+    (should (equal "" harness-ui-notify--string))
+    (should (equal "Version" (harness-ui-version-menu-label)))
+    ;; The check after the reload still finds it behind: back it comes.
+    (harness-ui-version--on-event "version/checked" (list (harness-ui-version-test--behind)))
+    (should (equal '(mode-line chat-header board-header) (harness-ui-version-test--places)))))
+
+(ert-deftest harness-ui-version-nag-places ()
+  (harness-ui-version-test-with-nag (harness-ui-version-test--behind)
+    (dolist (places '((mode-line) (chat-header) (board-header) (chat-header board-header)))
+      (setq harness-ui-version-nag-places places)
+      (harness-ui-version--nag-changed t)
+      (should (equal places (harness-ui-version-test--places))))
+    ;; Nowhere: the harness menu still says so.
+    (setq harness-ui-version-nag-places nil)
+    (harness-ui-version--nag-changed t)
+    (should-not (harness-ui-version-test--places))
+    (should (equal "" harness-ui-notify--string))
+    (should (equal "Version (not the latest)" (substring-no-properties (harness-ui-version-menu-label))))))
+
+(ert-deftest harness-ui-version-nag-on-connecting ()
+  "A UI connecting asks the harness for its last report, which checks nothing."
+  (let ((requests nil)
+        (answer nil))
+    (cl-letf (((symbol-function 'harness-ui-request)
+               (lambda (method params)
+                 (push (list method params) requests)
+                 (setq answer (harness-make-promise)))))
+      (harness-ui-version-test-with-nag (harness-ui-version-test--behind)
+        ;; Another harness: the last one's report is forgotten, with its icon.
+        (harness-ui-version--on-connected)
+        (should (equal '(("_harness/version/report" nil)) requests))
+        (should-not (harness-ui-version-test--places))
+        (harness-resolve answer (harness-ui-version-test--behind))
+        (should (equal '(mode-line chat-header board-header) (harness-ui-version-test--places)))
+        ;; A harness that has not checked yet answers nil: the icon waits.
+        (harness-ui-version--on-connected)
+        (harness-resolve answer nil)
+        (should-not harness-ui-version--report)
+        (should-not (harness-ui-version-test--places))
+        ;; A report announced before the answer is newer than it.
+        (harness-ui-version--on-connected)
+        (harness-ui-version--on-event "version/checked"
+                                      (list (harness-ui-version-test--report "latest" (harness-ui-version-test--loaded))))
+        (harness-resolve answer (harness-ui-version-test--behind))
+        (should (equal "latest" (plist-get harness-ui-version--report :verdict)))
+        (should-not (harness-ui-version-test--places))
+        ;; A harness without `version/report': nothing to show, nothing said.
+        (harness-ui-version--on-connected)
+        (harness-reject answer '(harness-error "no such method"))
+        (should-not harness-ui-version--error)
+        (should-not (harness-ui-version-test--places))))))
+
+(ert-deftest harness-ui-version-nag-wiring ()
+  "The module adds the icon's hooks as it starts, and takes them away as it stops."
+  (let ((requests nil)
+        (harness-ui-event-functions nil)
+        (harness-ui-redraw-hook nil)
+        (harness-ui-connected-hook nil)
+        (harness-update-hook nil)
+        (harness-ui-map (make-sparse-keymap)))
+    (cl-letf (((symbol-function 'harness-ui-request)
+               (lambda (method params)
+                 (push (list method params) requests)
+                 (harness-resolved (harness-ui-version-test--behind))))
+              ((symbol-function 'harness-ui-connected-p) (lambda () t)))
+      (harness-ui-version-test-with-nag nil
+        (setq harness-chat-header-end-functions nil
+              harness-ui-tasks-header-functions nil
+              harness-ui-notify-segment-functions nil)
+        ;; Started while connected: it asks for the last report.
+        (harness-ui-version--init)
+        (should (equal '(("_harness/version/report" nil)) requests))
+        (should (memq #'harness-ui-version--chat-header harness-chat-header-end-functions))
+        (should (memq #'harness-ui-version--board-header harness-ui-tasks-header-functions))
+        (should (memq #'harness-ui-version--notify-segment harness-ui-notify-segment-functions))
+        (should (memq #'harness-ui-version--on-event harness-ui-event-functions))
+        (should (memq #'harness-ui-version--on-update harness-update-hook))
+        (should (equal '(mode-line chat-header board-header) (harness-ui-version-test--places)))
+        (harness-ui-version--shutdown)
+        (should-not harness-chat-header-end-functions)
+        (should-not harness-ui-tasks-header-functions)
+        (should-not harness-ui-notify-segment-functions)
+        (should-not harness-ui-event-functions)
+        (should-not harness-update-hook)
+        (should-not harness-ui-version--report)
+        (should (equal "" harness-ui-notify--string))))))
 
 ;;;; The whole way
 
@@ -425,6 +720,10 @@ recipe's, so its main tracks that URL."
            (harness-ui-version--checking nil)
            (harness-ui-version--error nil)
            (harness-ui-version--waiting-for nil)
+           (harness-ui-version--reloaded nil)
+           (harness-ui-version--nag-shown nil)
+           (harness--last-update nil)
+           (harness--updating nil)
            (page nil))
       (cl-flet ((wait-for (regexp)
                   (harness-test-wait (lambda ()
@@ -446,6 +745,14 @@ recipe's, so its main tracks that URL."
                                                 ", main, which the loaded checkout pulls from$")
                                         (harness-ui-version-test--text)))
                 (should (string-match-p "  second  " (harness-ui-version-test--text))))
+              ;; The icon nags.  A UI connecting now is given the report
+              ;; as it is.
+              (should (harness-ui-version-nag))
+              (let ((harness-ui-version--report nil))
+                (harness-ui-version--fetch)
+                (harness-test-wait (lambda () harness-ui-version--report) 10 "the last report")
+                (should (equal "behind" (plist-get harness-ui-version--report :verdict)))
+                (should (harness-ui-version-nag)))
               ;; A check the harness makes by itself reaches the page.
               (harness-ui-version-test--commit-in upstream "third")
               (harness-call 'version/check 0)

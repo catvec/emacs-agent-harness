@@ -138,7 +138,7 @@ is refused rather than freeze it moving the text.")
   "Return the ACP `clientCapabilities' of an Emacs lending itself to the harness.
 This client offers none of ACP's own (`fs', `terminal'); `_harness.emacs'
 says that it is an Emacs the harness's narrow tools may read and drive
-(see the Commentary)."
+\(see the Commentary)."
   (list :fs (list :readTextFile :false :writeTextFile :false)
         :terminal :false
         :_harness (list :emacs (list :version emacs-version
@@ -306,7 +306,7 @@ prompt or wait on a network or a huge read."
       (error "Refusing to open %s: it is on another host, and visiting it could block this Emacs; read it with read_file instead"
              (abbreviate-file-name path)))
      ((file-directory-p path)
-      (error "%s is a directory; list it with list_dir, or open it in dired yourself"
+      (error "%s is a directory; list it with list_dir, or open it in Dired yourself"
              (abbreviate-file-name path)))
      ((not (file-exists-p path))
       (error "No buffer named %S and no file at %s" name (abbreviate-file-name path)))
@@ -348,7 +348,7 @@ edit: a tool call must not corrupt them or the UI reading them."
     (cond ((or (null value) (string-empty-p name) (equal name "point")) 'point)
           ((equal name "start") 'start)
           ((equal name "end") 'end)
-          (t (error "position must be point, start or end, not %S" value)))))
+          (t (error "The position must be point, start or end, not %S" value)))))
 
 (defun harness-emacs-endpoint--insert (params)
   "Insert the `:text' of PARAMS into a buffer: what `insert' answers.
@@ -388,7 +388,7 @@ would freeze this Emacs behind a prompt the model cannot see."
   (error "Save stopped at a question (%s)" (apply #'format-message prompt args)))
 
 (defun harness-emacs-endpoint--save (params)
-  "Save a buffer to the file it visits: what `save' answers.
+  "Save the buffer PARAMS names to the file it visits: what `save' answers.
 The buffer must be live and visiting a local file that has not changed
 on disk since it was read.  Every question `save-buffer' could ask --
 a lock, a missing directory, a changed file -- becomes an error instead

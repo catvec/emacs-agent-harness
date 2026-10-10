@@ -81,14 +81,14 @@ Each is a list of events; a request past the last gets no reply."
         harness-tools-emacs-eval-test--cancelled nil))
 
 (defun harness-tools-emacs-eval-test--define-judge ()
-  "Define the provider `judge', whose cheap tier is judge:small.
+  "Define the provider `judge', whose simple tier is judge:small.
 Each request gets the next of `harness-tools-emacs-eval-test--replies',
 from a timer, as a provider's events come."
   (harness-define-provider 'judge
     :label "Judge"
     :models (lambda () (harness-resolved (list (list :name "big" :pricing '(:input 10.0 :output 50.0))
                                                (list :name "small" :pricing '(:input 1.0 :output 5.0)))))
-    :tiers '(:cheap "small")
+    :tiers '(:simple "small")
     :complete (lambda (req)
                 (push req harness-tools-emacs-eval-test--requests)
                 (let ((events (pop harness-tools-emacs-eval-test--replies))
@@ -168,7 +168,7 @@ HANDLER is called as (METHOD PARAMS RESPOND).  Return the connection."
 (ert-deftest harness-tools-emacs-eval-runs-code-the-judge-calls-fast ()
   "Code the judge calls fast runs in the user's Emacs, and the result reads
 as the elisp tool's.  The judge is asked as the auto-mode permission
-judge is: once, ephemeral, on the cheap tier of the session's provider,
+judge is: once, ephemeral, on the simple tier of the session's provider,
 without tools or thinking, about the very code that runs."
   (harness-tools-emacs-eval-test--with
     (harness-tools-emacs-eval-test--judge-says

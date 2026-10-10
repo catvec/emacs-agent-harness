@@ -784,5 +784,279 @@ was somewhere else."
                                         (buffer-string))))))
         (delete-directory cwd t)))))
 
+;;;; Read-only commands
+
+(defun harness-sandbox-test--rw-binds (cmd)
+  "Return the writable bind mounts of bwrap command line CMD."
+  (cl-remove-if-not (lambda (bind) (equal (car bind) "--bind")) (harness-sandbox-test--binds cmd)))
+
+(ert-deftest harness-sandbox-read-only-bwrap-arguments ()
+  "With :read-only the working directory and the writable mounts are read-only."
+  (harness-sandbox-test--setup)
+  (harness-sandbox-test-with-home home
+    (let* ((cwd (harness-test-temp-dir))
+           (extra (harness-test-temp-dir))
+           (cwd-bind (directory-file-name cwd))
+           (extra-bind (directory-file-name extra))
+           (harness-sandbox-policy 'preferred)
+           (harness-sandbox-backend 'auto)
+           (command '("sh" "-c" "true")))
+      (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+        ;; Read-write as before when it is not asked for, and for a JSON false.
+        (dolist (opts '(nil (:read-only nil) (:read-only :false)))
+          (let ((cmd (apply #'harness-call 'sandbox/wrap cwd command :writable (list extra) opts)))
+            (should (harness-sandbox-test--subseq-p (list "--bind" cwd-bind cwd-bind) cmd))
+            (should (harness-sandbox-test--subseq-p (list "--bind" extra-bind extra-bind) cmd))))
+        (let ((cmd (harness-call 'sandbox/wrap cwd command :writable (list extra) :read-only t)))
+          (should (equal "/usr/bin/bwrap" (car cmd)))
+          ;; No mount of the file system is writable: the working
+          ;; directory and the granted one are bound read-only.
+          (should (harness-sandbox-test--subseq-p (list "--ro-bind" cwd-bind cwd-bind) cmd))
+          (should (harness-sandbox-test--subseq-p (list "--ro-bind" extra-bind extra-bind) cmd))
+          (should-not (harness-sandbox-test--rw-binds cmd))
+          (should-not (member "--bind" cmd))
+          ;; What the command writes goes to the sandbox's private /tmp.
+          (should (harness-sandbox-test--subseq-p '("--tmpfs" "/tmp") cmd))
+          ;; The working directory is still mounted last, over the others.
+          (should (equal (list "--ro-bind" cwd-bind cwd-bind)
+                         (car (last (harness-sandbox-test--binds cmd)))))
+          (dolist (flag '("--unshare-pid" "--unshare-ipc" "--unshare-uts" "--die-with-parent" "--new-session"))
+            (should (member flag cmd)))
+          (should (harness-sandbox-test--subseq-p (list "--chdir" cwd-bind) cmd))
+          (should (equal command (cdr (member "--" cmd)))))
+        ;; The other options go on working.
+        (let ((cmd (harness-call 'sandbox/wrap cwd command :read-only t :network nil
+                                 :readable (list extra))))
+          (should (member "--unshare-net" cmd))
+          (should-not (harness-sandbox-test--rw-binds cmd))
+          (should (harness-sandbox-test--subseq-p (list "--ro-bind" extra-bind extra-bind) cmd)))
+        ;; Granted directories that hold the working directory, and the
+        ;; one inside it, are read-only too.
+        (let* ((inner (file-name-as-directory (expand-file-name "inner" cwd)))
+               (cmd (progn (make-directory inner)
+                           (harness-call 'sandbox/wrap inner command
+                                         :writable (list cwd) :read-only t))))
+          (should (harness-sandbox-test--subseq-p
+                   (list "--ro-bind" cwd-bind cwd-bind) cmd))
+          (should-not (harness-sandbox-test--rw-binds cmd))
+          (should (equal (list "--ro-bind" (directory-file-name inner) (directory-file-name inner))
+                         (car (last (harness-sandbox-test--binds cmd)))))))
+      (harness-sandbox-detect)
+      (delete-directory cwd t)
+      (delete-directory extra t))))
+
+(ert-deftest harness-sandbox-read-only-systemd-arguments ()
+  "With :read-only systemd binds read-only, sets no ReadWritePaths= and protects the rest."
+  (harness-sandbox-test--setup)
+  (let* ((cwd (harness-test-temp-dir))
+         (extra (harness-test-temp-dir))
+         (cwd-path (directory-file-name cwd))
+         (extra-path (directory-file-name extra))
+         (harness-sandbox-policy 'preferred)
+         (harness-sandbox-backend 'auto)
+         (command '("sh" "-c" "true")))
+    (harness-sandbox-test-with-executables '(("systemd-run" . "/usr/bin/systemd-run"))
+      (let ((cmd (harness-call 'sandbox/wrap cwd command :writable (list extra))))
+        (should (member (concat "BindPaths=" cwd-path) cmd))
+        (should (member (concat "ReadWritePaths=" cwd-path) cmd))
+        (should (member (concat "BindPaths=" extra-path) cmd))
+        (should-not (member "ProtectSystem=strict" cmd)))
+      (let ((cmd (harness-call 'sandbox/wrap cwd command :writable (list extra) :read-only t)))
+        (should (equal "/usr/bin/systemd-run" (car cmd)))
+        (should (harness-sandbox-test--subseq-p (list "-p" (concat "BindReadOnlyPaths=" cwd-path)) cmd))
+        (should (harness-sandbox-test--subseq-p (list "-p" (concat "BindReadOnlyPaths=" extra-path)) cmd))
+        (should (harness-sandbox-test--subseq-p '("-p" "ProtectSystem=strict") cmd))
+        (should (harness-sandbox-test--subseq-p '("-p" "PrivateTmp=yes") cmd))
+        (should (harness-sandbox-test--subseq-p '("-p" "ProtectHome=tmpfs") cmd))
+        ;; Nothing is made writable.
+        (should-not (cl-some (lambda (a) (string-match-p "\\`\\(BindPaths\\|ReadWritePaths\\)=" a)) cmd))
+        (should (member (concat "--working-directory=" cwd-path) cmd))
+        (should-not (member "PrivateNetwork=yes" cmd))
+        (should (equal command (cdr (member "--" cmd)))))
+      (should (harness-sandbox-test--subseq-p
+               '("-p" "PrivateNetwork=yes")
+               (harness-call 'sandbox/wrap cwd command :read-only t :network nil))))
+    (harness-sandbox-detect)
+    (delete-directory cwd t)
+    (delete-directory extra t)))
+
+(ert-deftest harness-sandbox-read-only-shows-the-git-directory-read-only ()
+  "A worktree's git directory is read-only whole, with no overlay on its hooks."
+  (harness-sandbox-test--setup)
+  (let* ((repo (harness-sandbox-test--worktree))
+         (wt (cdr repo))
+         (wt-path (directory-file-name wt))
+         (common (directory-file-name (expand-file-name ".git" (car repo))))
+         (harness-sandbox-policy 'preferred)
+         (harness-sandbox-backend 'auto))
+    (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+      (let ((cmd (harness-call 'sandbox/wrap wt '("true") :read-only t)))
+        (should (harness-sandbox-test--subseq-p (list "--ro-bind" common common) cmd))
+        (should (harness-sandbox-test--subseq-p (list "--ro-bind" wt-path wt-path) cmd))
+        (should-not (harness-sandbox-test--rw-binds cmd))
+        ;; The git directory is one read-only mount, after the working
+        ;; directory's: no overlay of its hooks, config, index or HEAD,
+        ;; which it shows as they are.
+        (should (equal (list (list "--ro-bind" wt-path wt-path) (list "--ro-bind" common common))
+                       (cl-remove-if-not (lambda (bind) (member (cadr bind) (list common wt-path)))
+                                         (harness-sandbox-test--binds cmd))))
+        (dolist (name '("hooks" "config" "index" "HEAD"))
+          (should-not (member (concat common "/" name) cmd)))
+        ;; git still has the commit identity of the host.
+        (should (harness-sandbox-test--subseq-p '("--setenv" "GIT_AUTHOR_NAME" "Sandbox Test") cmd)))
+      ;; Not read-only, it is read-write with the overlay as it was.
+      (let ((cmd (harness-call 'sandbox/wrap wt '("true"))))
+        (should (harness-sandbox-test--subseq-p (list "--bind" common common) cmd))
+        (should (member (concat common "/hooks") cmd))))
+    (harness-sandbox-test-with-executables '(("systemd-run" . "/usr/bin/systemd-run"))
+      (let ((cmd (harness-call 'sandbox/wrap wt '("true") :read-only t)))
+        (should (harness-sandbox-test--subseq-p (list "-p" (concat "BindReadOnlyPaths=" common)) cmd))
+        (should (harness-sandbox-test--subseq-p (list "-p" (concat "BindReadOnlyPaths=" wt-path)) cmd))
+        (should-not (cl-some (lambda (a) (string-match-p "\\`\\(BindPaths\\|ReadWritePaths\\)=" a)) cmd))
+        (should-not (member (concat "BindReadOnlyPaths=" common "/hooks") cmd))
+        (should (member "--setenv=GIT_AUTHOR_NAME=Sandbox Test" cmd)))
+      (should (member (concat "BindPaths=" common)
+                      (harness-call 'sandbox/wrap wt '("true")))))
+    (harness-sandbox-detect)))
+
+(ert-deftest harness-sandbox-read-only-fails-closed ()
+  "A read-only command never runs unconfined, whatever the policy."
+  (harness-sandbox-test--setup)
+  (let* ((cwd (harness-test-temp-dir))
+         (harness-sandbox-backend 'auto)
+         (remote "/ssh:example.invalid:/tmp/")
+         (command '("sh" "-c" "true"))
+         (logged nil)
+         (harness-log-hook (list (lambda (level message) (push (cons level message) logged)))))
+    (cl-flet ((refused (&rest args)
+                (setq logged nil)
+                (should-error (apply #'harness-call 'sandbox/wrap args) :type 'harness-sandbox-unavailable)
+                (should (cl-some (lambda (entry)
+                                   (and (eq (car entry) 'error)
+                                        (string-match-p "read-only command needs the sandbox" (cdr entry))))
+                                 logged))))
+      ;; The policy off.
+      (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+        (let ((harness-sandbox-policy 'off))
+          (refused cwd command :read-only t)
+          (should (equal command (harness-call 'sandbox/wrap cwd command)))
+          (should (equal command (harness-call 'sandbox/wrap cwd command :read-only nil)))
+          (should (equal command (harness-call 'sandbox/wrap cwd command :read-only :false))))
+        ;; A remote working directory, which is never wrapped.
+        (dolist (policy '(preferred required off))
+          (let ((harness-sandbox-policy policy))
+            (refused remote command :read-only t)
+            (unless (eq policy 'off)
+              (should (equal command (harness-call 'sandbox/wrap remote command)))))))
+      ;; No backend, even where the policy lets other commands run unconfined.
+      (harness-sandbox-test-with-executables nil
+        (let ((harness-sandbox-policy 'preferred))
+          (refused cwd command :read-only t)
+          (refused cwd command :read-only t :writable (list cwd))
+          (should (equal command (harness-call 'sandbox/wrap cwd command))))
+        (let ((harness-sandbox-policy 'required))
+          (refused cwd command :read-only t)
+          (should-error (harness-call 'sandbox/wrap cwd command) :type 'harness-sandbox-unavailable)))
+      ;; Before the module has chosen a backend.
+      (let ((harness-sandbox--backend nil)
+            (harness-sandbox-policy 'preferred))
+        (refused cwd command :read-only t)))
+    (harness-sandbox-detect)
+    (delete-directory cwd t)))
+
+(ert-deftest harness-sandbox-read-only-reads-the-policy-of-the-directory ()
+  "The policy the working directory's settings give is the one that decides."
+  (harness-sandbox-test--setup)
+  (let* ((cwd (harness-test-temp-dir))
+         (harness-sandbox-policy 'preferred)
+         (command '("true")))
+    (with-temp-file (expand-file-name ".dir-locals.el" cwd)
+      (insert "((nil . ((harness-sandbox-policy . off))))"))
+    (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+      (should (equal command (harness-call 'sandbox/wrap cwd command)))
+      (should-error (harness-call 'sandbox/wrap cwd command :read-only t)
+                    :type 'harness-sandbox-unavailable))
+    (harness-sandbox-detect)
+    (delete-directory cwd t)))
+
+(ert-deftest harness-sandbox-bwrap-real-run-read-only ()
+  "Under the real bwrap a :read-only command reads the directory and writes nothing there."
+  (harness-sandbox-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (let* ((cwd (harness-test-temp-dir))
+         (granted (harness-test-temp-dir))
+         (harness-sandbox-policy 'required)
+         (script (mapconcat
+                  #'identity
+                  (list "cat seen.txt"
+                        (format "cat %snote.txt" granted)
+                        "echo x > new.txt 2>/dev/null && echo cwd-written || echo cwd-refused"
+                        "echo x >> seen.txt 2>/dev/null && echo cwd-appended || echo append-refused"
+                        "rm seen.txt 2>/dev/null && echo cwd-removed || echo remove-refused"
+                        (format "echo x > %snew.txt 2>/dev/null && echo granted-written || echo granted-refused" granted)
+                        "echo x > /tmp/scratch && cat /tmp/scratch")
+                  "; ")))
+    (harness-sandbox-test--write (expand-file-name "seen.txt" cwd) "seen\n")
+    (harness-sandbox-test--write (expand-file-name "note.txt" granted) "note\n")
+    (unwind-protect
+        (let ((probe (harness-await (harness-run-command (harness-call 'sandbox/wrap cwd '("true"))
+                                                         :cwd cwd :timeout 20))))
+          (unless (eql 0 (plist-get probe :exit))
+            (ert-skip (format "bwrap cannot start here: %s" (string-trim (plist-get probe :stderr)))))
+          (let* ((cmd (harness-call 'sandbox/wrap cwd (list "sh" "-c" script)
+                                    :writable (list granted) :read-only t))
+                 (r (harness-await (harness-run-command cmd :cwd cwd :timeout 20))))
+            (should (equal "seen\nnote\ncwd-refused\nappend-refused\nremove-refused\ngranted-refused\nx\n"
+                           (plist-get r :stdout)))
+            (should (eql 0 (plist-get r :exit)))
+            ;; Nothing the command tried reached either directory.
+            (should (equal '("seen.txt") (directory-files cwd nil "\\`[^.]")))
+            (should (equal "seen\n" (with-temp-buffer
+                                      (insert-file-contents (expand-file-name "seen.txt" cwd))
+                                      (buffer-string))))
+            (should (equal '("note.txt") (directory-files granted nil "\\`[^.]")))
+            ;; The same command, not read-only, writes both.
+            (let ((r (harness-await
+                      (harness-run-command (harness-call 'sandbox/wrap cwd (list "sh" "-c" script)
+                                                         :writable (list granted))
+                                           :cwd cwd :timeout 20))))
+              (should (string-match-p "cwd-written" (plist-get r :stdout)))
+              (should (string-match-p "granted-written" (plist-get r :stdout)))
+              (should (file-exists-p (expand-file-name "new.txt" cwd)))
+              (should (file-exists-p (expand-file-name "new.txt" granted))))))
+      (delete-directory cwd t)
+      (delete-directory granted t))))
+
+(ert-deftest harness-sandbox-bwrap-real-run-read-only-worktree ()
+  "Under the real bwrap git reads a worktree's repository and changes none of it."
+  (harness-sandbox-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (let* ((repo (harness-sandbox-test--worktree))
+         (root (car repo))
+         (wt (cdr repo))
+         (hook (expand-file-name ".git/hooks/post-merge" root))
+         (before (harness-sandbox-test--git wt "rev-parse" "HEAD"))
+         (harness-sandbox-policy 'required)
+         (cmd (harness-call
+               'sandbox/wrap wt
+               (list "sh" "-c"
+                     (format "git log -1 --format=%%s; git diff --stat; git status --short; echo change > f 2>/dev/null || echo cwd-refused; git -c commit.gpgsign=false commit -q --allow-empty -m inside 2>/dev/null && echo committed || echo commit-refused; git branch inside 2>/dev/null && echo branched || echo branch-refused; echo x > %s 2>/dev/null || echo hook-refused"
+                             (shell-quote-argument hook)))
+               :read-only t))
+         (r (harness-await (harness-run-command cmd :cwd wt :timeout 20))))
+    (when (and (not (eql 0 (plist-get r :exit))) (string-match-p "bwrap:" (plist-get r :stderr)))
+      (ert-skip (format "bwrap cannot start here: %s" (string-trim (plist-get r :stderr)))))
+    (should (equal "initial\ncwd-refused\ncommit-refused\nbranch-refused\nhook-refused\n"
+                   (plist-get r :stdout)))
+    (should-not (file-exists-p hook))
+    (should-not (file-exists-p (expand-file-name "f" wt)))
+    (should (equal before (harness-sandbox-test--git wt "rev-parse" "HEAD")))
+    (should (string-empty-p (harness-sandbox-test--git wt "status" "--porcelain")))
+    (should-not (string-match-p "inside" (harness-sandbox-test--git root "branch" "--list")))))
+
 (provide 'harness-sandbox-test)
 ;;; harness-sandbox-test.el ends here

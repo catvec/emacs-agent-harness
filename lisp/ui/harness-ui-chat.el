@@ -4,10 +4,10 @@
 
 ;; One buffer per session, "*harness: NAME*", laid out top to bottom:
 ;;
-;;   header line   status, name, todo progress, model, permission mode,
-;;                 non-interactive or interactive, thinking, context,
-;;                 output rate (tokens per second), cost, menu, after what
-;;                 `harness-chat-header-functions' put in front (a BTW's buttons)
+;;   header line   name, model, permission mode, non-interactive (only
+;;                 while it is on), thinking, context, cost, menu, after what
+;;                 `harness-chat-header-functions' put in front (a BTW's
+;;                 buttons); what the buffer shows already, it leaves out
 ;;   transcript    one block per node, rendered incrementally with markers
 ;;   activity      while a turn runs, what it does and for how long, on a
 ;;                 background of its own, then a blank line
@@ -19,7 +19,7 @@
 ;;   attachments   chips for files attached to the next message
 ;;   notice        the session was deleted, or is inactive (sending resumes it)
 ;;   compose       an editable region; C-c C-c sends, RET adds a newline
-;;   mode line     status, turn duration
+;;   mode line     status (the spinner while a turn runs), turn duration
 ;;
 ;; The transcript is never re-rendered on a delta: every node owns a
 ;; region delimited by two markers, streaming text is appended at the
@@ -63,6 +63,8 @@
 
 (declare-function harness-ui-media-render-attachment "harness-ui-media" (attachment))
 (defvar harness-state-directory)
+(defvar harness-ui-markdown-table-width)
+(defvar harness-ui-markdown-hard-breaks)
 
 (defgroup harness-ui-chat nil
   "The chat buffer." :group 'harness-ui :prefix "harness-chat-")
@@ -82,6 +84,17 @@ Once two pages of nodes lie above every window, all but one are dropped.")
 (defconst harness-chat--tool-output-limit 3000
   "Characters of tool output shown before a \"show all\" button.")
 
+(defconst harness-chat--message-limit 20000
+  "Characters of a message shown before a \"show more\" button.
+A message longer than this shows its first `harness-chat--message-limit'
+characters and a button that shows as much again, press by press.  A
+message of hundreds of kilobytes -- the plan, a step prompt or a report
+the supervisor sends a worker, or a model's own long answer -- would
+otherwise sit in the buffer whole: redisplay wraps it, `recenter' and
+`harness-ui-text-height' lay it out, and Emacs freezes for seconds
+every time the chat is opened or scrolled.  Tool output has its own,
+smaller, threshold (`harness-chat--tool-output-limit').")
+
 (defconst harness-chat--render-interval 0.3
   "Seconds between Markdown re-renders of a streaming block.")
 
@@ -91,9 +104,18 @@ When that is longer than `harness-chat--render-interval', it is the
 wait: re-rendering a long message as it streams in then takes a sixth
 of Emacs's time at most.")
 
-(defconst harness-chat--coalesce-threshold 3
+(defconst harness-chat--coalesce-threshold 1
   "Coalescable tool calls a run needs to fold into one summary block.
-Thinking between the calls does not break the run and is not counted.")
+The first call opens a collapsed run; every later call, and the
+thinking between the calls, is added to it.  Thinking does not break
+the run and is not counted.")
+
+(defconst harness-chat--dismissed-answer "The user dismissed the question"
+  "The text `question/cancel' (harness-tools-agent.el) gives an ask_user call.
+A dismissed question's call ends with it, as an ordinary result.  It is
+the harness's text, not the user's, so the call's block shows no answer
+of the user's for it.  It is matched here because the UI may run apart
+from the harness and does not load that module.")
 
 (defconst harness-chat--image-max-height 400
   "Maximum pixel height of inline images.")
@@ -158,7 +180,7 @@ See `harness-ui-chat-goto-node'." :group 'harness-ui-chat)
 
 (cl-defstruct (harness-chat-block (:constructor harness-chat--make-block) (:copier nil))
   "One rendered node."
-  id kind node result start end fold collapsed show-all content streamed group
+  id kind node result start end fold collapsed show-all shown content streamed group
   head)                                 ; non-nil: first agent block of a turn, carries the sender name
 
 (cl-defstruct (harness-chat-group (:constructor harness-chat--make-group-record) (:copier nil))
@@ -170,7 +192,8 @@ thinking between them."
 (defvar harness-chat--buffers (make-hash-table :test 'equal)
   "Session id -> chat buffer.")
 
-(defvar harness-chat--spinner-timer nil "Timer animating the header spinner.")
+(defvar harness-chat--spinner-timer nil
+  "Timer animating the spinners: the mode line's and the activity line's.")
 (defvar harness-chat--spinner-index 0)
 (defvar harness-chat--segment-maps (make-hash-table :test 'eq) "Command -> header segment keymap.")
 (defvar harness-chat--batch nil "Non-nil while many blocks are inserted at once (no auto-scroll).")
@@ -196,6 +219,11 @@ the panels this buffer draws and for redraw decisions.")
 (defvar-local harness-chat--coalescable nil "Names of coalescable tools.")
 (defvar-local harness-chat--turn-start nil "Float time the running turn started.")
 (defvar-local harness-chat--unseen nil "Non-nil when content arrived while scrolled up.")
+(defvar-local harness-chat--notice nil
+  "Non-nil while the newer-messages notice is drawn.
+`harness-chat--update-notice' keeps it, from the post-command hook and
+`window-scroll-functions'; the header line (`harness-chat--header')
+reads it, as it must not measure the window itself.")
 (defvar-local harness-chat--dead nil "Non-nil once the session was deleted.")
 (defvar-local harness-chat--render-timers nil "Node id -> throttle timer.")
 (defvar-local harness-chat--render-cost 0
@@ -222,6 +250,9 @@ A plist: `:id' the node's id, `:regexp' what to find in it.  See
   "Non-nil when the todo panel shows its title line alone.")
 (defvar-local harness-chat--activity nil
   "What the running turn does, as `agent/activity' last said (wire shape).")
+(defvar-local harness-chat--notes nil
+  "Tool call id -> the note the running turn's activity gives the call.
+The note is drawn under the call's own block (see `harness-chat--note-lines').")
 (defvar-local harness-chat--activity-overlay nil
   "Overlay at the end of the transcript whose `before-string' is the activity line.")
 
@@ -608,20 +639,53 @@ scrolls forward."
   (put command 'scroll-command t)
   (put command 'isearch-scroll t))
 
+(defconst harness-chat--cursor-line-limit 10000
+  "Longest line `harness-chat--cursor-line-fully-visible' brings into view.
+A longer line is left as it is: it cannot fit whole, and asking
+redisplay to try would rescan all of it on every redisplay.")
+
+(defun harness-chat--line-at-most-p (position limit)
+  "Non-nil when the line at POSITION is at most LIMIT characters long.
+Looks at most LIMIT characters either side of POSITION, never the whole
+line."
+  (save-excursion
+    (goto-char position)
+    (let ((back (let ((found (search-backward "\n" (max (point-min) (- position limit)) t)))
+                  (if found (- position (1+ found)) (- position (point-min))))))
+      (and (<= back limit)
+           (let ((end (min (point-max) (+ position (max 0 (- limit back))))))
+             (or (search-forward "\n" end t)
+                 (= end (point-max))))))))
+
 (defun harness-chat--cursor-line-fully-visible (window)
   "The chat's `make-cursor-line-fully-visible', for WINDOW.
 Point's line is brought into full view, as by default, unless WINDOW
 is scrolled partway into a tall line: that would undo the scroll.
 `pixel-scroll-precision-mode' turns the option off everywhere for this
-\(bug#65214)."
-  (zerop (window-vscroll window t)))
+\(bug#65214).
+
+Redisplay asks this for every window it draws, so it must not look at
+the line at all: a chat can hold a line megabytes long (a model wrote a
+whole file, or a failure carried a request body), and measuring it
+\(`line-end-position', `pos-visible-in-window-p', `line-pixel-height')
+would rescan all of it on every redisplay.  Only `window-vscroll', which
+is O(1), and a look at most `harness-chat--cursor-line-limit'
+characters along the line are taken; a line longer than that is left as
+it is rather than asked to be shown whole."
+  (and (zerop (window-vscroll window t))
+       (with-current-buffer (window-buffer window)
+         (harness-chat--line-at-most-p (window-point window) harness-chat--cursor-line-limit))))
 
 ;;;; Auto-scroll
 
 (defun harness-chat--at-bottom-p (&optional window)
   "Non-nil when WINDOW shows the end of the transcript.
 WINDOW defaults to the first window showing the buffer; without one
-the buffer counts as at the bottom."
+the buffer counts as at the bottom.
+Never call this from a header-line or mode-line `:eval': it measures
+the window (`pos-visible-in-window-p'), which formats those lines, so
+the call would run again inside itself, without end.  The header reads
+`harness-chat--notice' instead."
   (let ((w (or window (car (harness-chat--windows)))))
     (or (null w)
         (not (eq (window-buffer w) (current-buffer)))
@@ -687,10 +751,32 @@ On `harness-acp-received-hook'."
           (setq harness-chat--unseen t)
           (force-mode-line-update))))))
 
+(defun harness-chat--scrolled-up-p ()
+  "Non-nil when a window on this buffer is not at the newest message.
+Never call this from a header-line or mode-line `:eval': measuring a
+window formats those lines, which would call it again, without end (see
+`harness-chat--at-bottom-p').  The header reads `harness-chat--notice',
+which `harness-chat--update-notice' sets from this."
+  (cl-some (lambda (w) (not (harness-chat--at-bottom-p w)))
+           (harness-chat--windows)))
+
+(defun harness-chat--update-notice (&rest _)
+  "Show or hide the newer-messages notice as the window's position is now.
+The header line draws the notice from `harness-chat--notice', which
+this sets: the header cannot measure the window itself (see
+`harness-chat--at-bottom-p').  Emacs redraws the header only when told
+to; this forces one redraw exactly when the notice changes.  Runs from
+`harness-chat--post-command' and from `window-scroll-functions'."
+  (let ((show (or harness-chat--unseen (harness-chat--scrolled-up-p))))
+    (unless (eq show harness-chat--notice)
+      (setq harness-chat--notice show)
+      (force-mode-line-update))))
+
 (defun harness-chat-scroll-to-bottom ()
   "Show the newest messages and put point in the compose box."
   (interactive)
-  (setq harness-chat--unseen nil)
+  (setq harness-chat--unseen nil
+        harness-chat--notice nil)
   (goto-char (or harness-compose-end (point-max)))
   (dolist (w (harness-chat--windows))
     (set-window-point w (point))
@@ -754,6 +840,62 @@ found again after the transcript is rebuilt."
 (defun harness-chat--plain (text)
   "Return TEXT as wrapped plain paragraphs."
   (harness-chat--ensure-newline (or text "")))
+
+(defvar-local harness-chat--table-width nil
+  "Columns Markdown tables were last rendered at in this buffer.
+`harness-ui-markdown-table-width' is bound to this while a block is
+rendered; a window resized later renders its tables again at the new
+width (`harness-chat--refresh-tables').")
+
+(defun harness-chat--content-width ()
+  "Return the columns a block's text has to fit in.
+That is the width of a window showing the chat, less the margin bar
+and a column or two; a buffer no window shows gets a width its tables
+still fit when one does."
+  (if-let* ((window (car (harness-chat--windows))))
+      (max 20 (- (window-body-width window) 4))
+    80))
+
+(defun harness-chat--render-markdown (text)
+  "Return TEXT rendered as Markdown, its tables fitted to the window.
+The width used is remembered in `harness-chat--table-width', so that a
+window resized after the render draws the tables again at the new
+width."
+  (let ((harness-ui-markdown-table-width (harness-chat--content-width)))
+    (setq harness-chat--table-width harness-ui-markdown-table-width)
+    (harness-ui-markdown-render text)))
+
+(defun harness-chat--block-has-table-p (block)
+  "Non-nil when the rendering of BLOCK holds a Markdown table."
+  (save-excursion
+    (goto-char (harness-chat-block-start block))
+    (and (text-property-search-forward 'harness-md-block 'table t)
+         (<= (point) (harness-chat-block-end block)))))
+
+(defun harness-chat--on-window-size (&optional _window)
+  "Have the tables drawn again when a window gives them different room.
+Runs from `window-size-change-functions'."
+  (when (and harness-chat--table-width
+             (not (equal (harness-chat--content-width) harness-chat--table-width)))
+    (harness-debounce (list 'harness-chat-tables (current-buffer)) 0.2
+                      #'harness-chat--refresh-tables (current-buffer))))
+
+(defun harness-chat--refresh-tables (buffer)
+  "Render again the table-holding blocks of BUFFER at its window's width."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (and harness-chat--table-width harness-chat--blocks
+                 (not harness-chat--loading))
+        (let ((width (harness-chat--content-width)))
+          (when (not (equal width harness-chat--table-width))
+            ;; Bind the new width while rerendering, so a rerender does
+            ;; not schedule another pass of its own.
+            (let ((harness-chat--table-width width))
+              (dolist (id harness-chat--order)
+                (when-let* ((block (gethash id harness-chat--blocks)))
+                  (when (harness-chat--block-has-table-p block)
+                    (harness-chat--rerender block)))))
+            (setq harness-chat--table-width width)))))))
 
 (defun harness-chat--attachment-mime (att)
   "Return the MIME type of the attachment plist ATT.
@@ -956,19 +1098,64 @@ an ask_user option, goes under its key, indented."
                         out)))
     (apply #'concat (nreverse out))))
 
+;;;; Showing long messages
+
+(defun harness-chat--message-text (block)
+  "Return the whole message BLOCK holds, whether or not it is all shown."
+  (let ((text (harness-chat-block-content block)))
+    (if (stringp text)
+        text
+      (or (plist-get (harness-chat-block-node block) :content) ""))))
+
+(defun harness-chat--page-limit (block)
+  "Return how many characters of its message BLOCK shows.
+The default page, or as many pages as `harness-chat--show-more' has
+been asked for."
+  (or (harness-chat-block-shown block) harness-chat--message-limit))
+
+(defun harness-chat--page (block)
+  "Return the part of BLOCK's message it shows now.
+Everything, for a message no longer than `harness-chat--message-limit';
+else its first `harness-chat--page-limit' characters, the rest waiting
+behind the button `harness-chat--more-button' returns."
+  (let* ((text (harness-chat--message-text block))
+         (limit (harness-chat--page-limit block)))
+    (if (> (length text) limit) (substring text 0 limit) text)))
+
+(defun harness-chat--show-more (id)
+  "Show another page of the message of block ID."
+  (when-let* ((block (gethash id harness-chat--blocks)))
+    (setf (harness-chat-block-shown block)
+          (+ (harness-chat--page-limit block) harness-chat--message-limit))
+    (harness-chat--rerender block)))
+
+(defun harness-chat--more-button (block)
+  "Return BLOCK's button for the rest of its message, or nil.
+Nil while the whole message shows."
+  (let* ((text (harness-chat--message-text block))
+         (rest (- (length text) (harness-chat--page-limit block))))
+    (when (> rest 0)
+      (harness-chat--button
+       (format "show %s (%d more chars)"
+               (if (> rest harness-chat--message-limit) "more" "the rest")
+               rest)
+       (lambda () (harness-chat--show-more (harness-chat-block-id block)))
+       :help (format "Show the next %d characters of this message" harness-chat--message-limit)))))
+
+(defun harness-chat--more-line (block)
+  "Return the line holding BLOCK's \"show more\" button, or \"\"."
+  (if-let* ((button (harness-chat--more-button block)))
+      (concat "  " button "\n")
+    ""))
+
 ;;;; Rendering: blocks
 
 (defun harness-chat--sender (text face)
   "Return a sender line naming TEXT in FACE."
   (concat (propertize text 'face face) "\n"))
 
-(defun harness-chat--session-name (id &optional name)
-  "Return the name of session ID to show: its name now, else NAME, else a short id."
-  (let ((name (or (plist-get (and id (harness-ui-session id)) :name) name))
-        (id (or id "?")))
-    (if (and (stringp name) (not (string-blank-p name)))
-        name
-      (substring id 0 (min 8 (length id))))))
+(defalias 'harness-chat--session-name #'harness-ui-session-name
+  "Alias of `harness-ui-session-name'.")
 
 (defun harness-chat--from-line (from)
   "Return the sender line of a message FROM sent, rather than the user.
@@ -1020,12 +1207,18 @@ transcript it points the new model at."
          (from (harness-node-sender node))
          (handoff (harness-node-handoff node))
          (face (if from 'harness-system-face 'harness-user-face))
-         (text (harness-chat--mark-image-tokens (harness-chat--plain (plist-get node :content))
-                                                (plist-get node :blocks)))
+         ;; A line break typed in the box is one: a pasted log, or items
+         ;; without bullets, keep their lines.
+         (text (harness-chat--mark-image-tokens
+                (harness-chat--ensure-newline
+                 (let ((harness-ui-markdown-hard-breaks t))
+                   (harness-chat--render-markdown (harness-chat--page block))))
+                (plist-get node :blocks)))
          (body (concat (if from
                            (harness-chat--from-line from)
                          (harness-chat--sender harness-chat-user-label 'harness-user-label-face))
                        (if (string-blank-p text) "" text)
+                       (harness-chat--more-line block)
                        (if handoff (harness-chat--handoff-line handoff) "")
                        (harness-chat--blocks-string (plist-get node :blocks)))))
     (harness-chat--margin (harness-chat--face body face) face
@@ -1035,7 +1228,7 @@ transcript it points the new model at."
   "Block kinds the agent produces; a run of them is one agent turn.")
 
 (defun harness-chat--head-p (kind previous)
-  "Non-nil when a KIND block after a PREVIOUS-kind block starts an agent turn.
+  "Non-nil when a KIND block after one of kind PREVIOUS starts an agent turn.
 Pass the kinds `harness-chat--turn-kind' gives."
   (and (member kind harness-chat--agent-kinds)
        (not (member previous harness-chat--agent-kinds))))
@@ -1065,25 +1258,28 @@ agent's header would stand."
 
 (defun harness-chat--render-assistant (block)
   "Return the body of assistant BLOCK."
-  (let ((content (or (harness-chat-block-content block) "")))
+  (let ((content (harness-chat--page block)))
     (harness-chat--margin
      (if (string-blank-p content)
          "\n"
-       (harness-chat--face (harness-chat--ensure-newline (harness-ui-markdown-render content))
-                           'harness-agent-face)))))
+       (concat (harness-chat--face (harness-chat--ensure-newline (harness-chat--render-markdown content))
+                                   'harness-agent-face)
+               (harness-chat--more-line block))))))
 
 (defun harness-chat--render-thinking (block)
   "Return the body of thinking BLOCK."
   (let* ((id (harness-chat-block-id block))
-         (content (or (harness-chat-block-content block) ""))
+         (content (harness-chat--page block))
          (header (concat (harness-chat--fold-button (harness-chat-block-collapsed block)
                                                     (lambda () (interactive) (harness-chat-toggle-block id)))
                          " "
                          (propertize (format "%s thinking (%d words)" (harness-ui-icon 'harness-icon-thinking)
-                                             (harness-chat--words content))
+                                             (harness-chat--words (harness-chat--message-text block)))
                                      'face 'harness-thinking-face)
                          "\n"))
-         (body (harness-chat--foldable (harness-chat--face (harness-chat--plain content) 'harness-thinking-face))))
+         (body (harness-chat--foldable
+                (concat (harness-chat--face (harness-chat--plain content) 'harness-thinking-face)
+                        (harness-chat--more-line block)))))
     (harness-chat--margin (concat header body))))
 
 (defun harness-chat--status (level word help)
@@ -1119,20 +1315,77 @@ the session does, until the harness records its result."
           ((memq outcome '(failed denied)) (harness-chat--outcome-status outcome))
           (t (harness-chat--status 'success nil "The tool ran and reported no error")))))
 
+(defun harness-chat--child-id (call result)
+  "Return the id of the session a tool call started, or nil.
+That is the sub-agent of a spawn_agent call: the `:child-id' in the
+`:meta' of CALL, the call's node, or of RESULT, its result.  A call the
+harness recorded (`harness-outside-node-p') names its child from the
+start, and a model's spawn_agent call does from the moment the child
+exists (`harness-tools-agent--name-child'); its result names it too."
+  (let ((id (or (plist-get (plist-get call :meta) :child-id)
+                (plist-get (plist-get result :meta) :child-id))))
+    (and (stringp id) (not (string-empty-p id)) id)))
+
+(defun harness-chat--block-child (block)
+  "Return the id of the session BLOCK's tool call started, or nil.
+Only a tool call's block names one (`harness-chat--child-id')."
+  (and (member (harness-chat-block-kind block) '("tool-call" "tool-result"))
+       (harness-chat--child-id (harness-chat-block-node block)
+                               (harness-chat-block-result block))))
+
 (defun harness-chat--child-line (call result)
   "Return the line linking the session a tool call started, or \"\".
 That is the sub-agent of a spawn_agent call, the `:child-id' in the
-`:meta' of CALL or of RESULT: the merge queue's call names its conflict
-resolver from the start, a model's spawn_agent call once it returns."
-  (let ((id (or (plist-get (plist-get call :meta) :child-id)
-                (plist-get (plist-get result :meta) :child-id))))
-    (if (and (stringp id) (not (string-empty-p id)))
-        (let ((name (harness-chat--session-name id (plist-get (plist-get call :input) :name))))
-          (concat (propertize "  session: " 'face 'harness-dim-face)
-                  (harness-chat--button name (lambda () (harness-open-session id))
-                                        :help (format "Open the session %s" name))
-                  "\n"))
+`:meta' of CALL or of RESULT: the merge queue's and the supervisor's
+calls name their child from the start, and so does a model's
+spawn_agent call from the moment its child exists."
+  (if-let* ((id (harness-chat--child-id call result)))
+      (let ((name (harness-chat--session-name id (plist-get (plist-get call :input) :name))))
+        (concat (propertize "  session: " 'face 'harness-dim-face)
+                (harness-chat--button name (lambda () (harness-open-session id))
+                                      :help (format "Open the session %s" name))
+                "\n"))
+    ""))
+
+(defun harness-chat--note-lines (call)
+  "Return the note under running CALL, dim and indented, or \"\".
+The note is what the running turn's activity carries for the call's id:
+a short report of what the call is doing -- a sub-agent's work, the
+sessions a wait waits on, a long command's output -- which the harness
+makes again as the call goes on (`harness-tools-watch-session')."
+  (let* ((id (plist-get call :call-id))
+         (note (and id harness-chat--notes (gethash id harness-chat--notes))))
+    (if (and (stringp note) (not (string-blank-p note)))
+        (mapconcat (lambda (line)
+                     (concat (propertize "  " 'face 'harness-dim-face)
+                             (propertize line 'face 'harness-dim-face)
+                             "\n"))
+                   (split-string note "\n")
+                   "")
       "")))
+
+(defun harness-chat--set-notes (activity)
+  "Take the notes ACTIVITY carries and redraw the calls whose note changed.
+The activity of a running `tool' phase carries `:calls', one plist per
+running call, each with its `:note' when it has one (see
+`agent/activity')."
+  (let ((new (make-hash-table :test 'equal))
+        (old (or harness-chat--notes (make-hash-table :test 'equal)))
+        (changed nil))
+    (dolist (call (append (plist-get activity :calls) nil))
+      (let ((id (plist-get call :call-id))
+            (note (plist-get call :note)))
+        (when (and (stringp id) (stringp note) (not (string-blank-p note)))
+          (puthash id note new))))
+    (dolist (id (delete-dups (append (hash-table-keys old) (hash-table-keys new))))
+      (unless (equal (gethash id old) (gethash id new))
+        (push id changed)))
+    (when (or changed (not harness-chat--notes))
+      (setq harness-chat--notes new)
+      (dolist (id changed)
+        (when-let* ((block (gethash (gethash id harness-chat--calls) harness-chat--blocks)))
+          (harness-chat--rerender block)
+          (harness-chat--refresh-group-of block))))))
 
 (defun harness-chat--render-tool (block)
   "Return the body of tool-call BLOCK (its result rendered with it)."
@@ -1154,16 +1407,56 @@ resolver from the start, a model's spawn_agent call once it returns."
          (limit harness-chat--tool-output-limit)
          (long (and (not (harness-chat-block-show-all block)) (> (length output) limit)))
          (shown (if long (substring output 0 limit) output))
+         (ask (and call-only (equal (plist-get node :tool) "ask_user")
+                   (plist-get input :question)))
          (header (concat (harness-chat--fold-button (harness-chat-block-collapsed block)
                                                     (lambda () (interactive) (harness-chat-toggle-block id)))
-                         " " (harness-ui-icon 'harness-icon-tool) " "
-                         (if call-only
-                             (harness-ui-tool-title-string (plist-get node :tool) (plist-get node :title) 120)
-                           (propertize title 'face 'harness-tool-title-face))
+                         " " (if ask
+                                  (harness-ui-icon 'harness-icon-question)
+                                (harness-ui-icon 'harness-icon-tool))
+                         " "
+                         (if ask
+                             (propertize (harness-ui-tool-label "ask_user") 'face 'harness-tool-title-face)
+                           (if call-only
+                               (harness-ui-tool-title-string (plist-get node :tool) (plist-get node :title) 120)
+                             (propertize title 'face 'harness-tool-title-face)))
                          "  " (harness-chat--tool-status result (and call-only node)) "\n"))
          (line (and input (harness-chat--input-summary input title)))
-         (summary (concat (if line (concat (propertize (concat "  " line) 'face 'harness-dim-face) "\n") "")
-                          (harness-chat--child-line node result)))
+         (question (when ask
+                     (propertize (harness-chat--ensure-newline
+                                  (harness-chat--render-markdown (plist-get input :question)))
+                                 'line-prefix indent 'wrap-prefix indent)))
+         ;; Only what the user gave is their answer.  A call that failed
+         ;; or was refused ends with an error or the permission system's
+         ;; reason, which stay under the fold, and a dismissed question
+         ;; with the harness's own words.
+         (dismissed (and ask (eq outcome 'ok)
+                         (equal (string-trim output) harness-chat--dismissed-answer)))
+         (answer (when (and ask (eq outcome 'ok) (not dismissed) (not (string-blank-p output)))
+                   (harness-chat--margin
+                    (harness-chat--face
+                     (concat (harness-chat--sender harness-chat-user-label 'harness-user-label-face)
+                             ;; Typed, as a message in the box is: its
+                             ;; line breaks are the user's.
+                             (harness-chat--ensure-newline
+                              (let ((harness-ui-markdown-hard-breaks t))
+                                (harness-chat--render-markdown output))))
+                     'harness-user-face)
+                    'harness-user-face 'harness-user-bar-face)))
+         ;; The block's last lines, after its details and outside the
+         ;; fold, so a folded block still shows them.  Not above the fold:
+         ;; a row is drawn to the window's edge in the face of the newline
+         ;; that ends it, and the fold hides the newline before the
+         ;; details (see `harness-chat--make-fold'), so the answer's last
+         ;; row would end on the fold's own newline, in the tool's colour.
+         (reply (cond (answer)
+                      (dismissed (propertize "  dismissed\n" 'face 'harness-dim-face))
+                      (t "")))
+         (summary (concat (if ask
+                              question
+                            (if line (concat (propertize (concat "  " line) 'face 'harness-dim-face) "\n") ""))
+                          (harness-chat--child-line node result)
+                          (harness-chat--note-lines node)))
          ;; What the user is shown of the result -- an image, a video
          ;; poster, an audio player -- stays above the fold: a folded
          ;; tool call still shows the picture it read.
@@ -1175,6 +1468,10 @@ resolver from the start, a model's spawn_agent call once it returns."
                              (propertize (harness-chat--input-listing input) 'line-prefix indent 'wrap-prefix indent))
              "")
            (cond
+            ;; A question's answer, or its dismissal, is the block's
+            ;; reply, after the fold and outside it; the error of one that
+            ;; failed and the reason of one refused fold as any call's do.
+            ((and ask (not (memq outcome '(failed denied)))) "")
             ((null result) "")
             ((string-empty-p output) (propertize "  (no output)\n" 'face 'harness-dim-face))
             ;; A refused call never ran: its text is the permission
@@ -1192,7 +1489,7 @@ resolver from the start, a model's spawn_agent call once it returns."
                                    "\n")
                          "")))))))
     (harness-chat--margin
-     (harness-chat--face (concat header summary media (harness-chat--foldable details)) bg)
+     (harness-chat--face (concat header summary media (harness-chat--foldable details) reply) bg)
      bg)))
 
 (defun harness-chat--rerender-media (id)
@@ -1225,20 +1522,24 @@ and in the message that attached it."
 The note the harness writes after a lasting permission answer (see
 `harness-node-permission') ends in an [Undo] button while the answer
 can be undone.  Once that was tried it says how it went: struck
-through when undone, else with the reason under it."
+through when undone, else with the reason under it.  The note that says
+how a new session's opening message was judged (see
+`harness-node-supervisor') carries the two things to do about the
+choice as buttons."
   (let* ((node (harness-chat-block-node block))
          (text (string-trim (or (plist-get node :content) "")))
          (record (harness-node-permission node))
-         (state (harness-permission-undo-state record)))
+         (state (harness-permission-undo-state record))
+         (judged (harness-node-supervisor node)))
     (harness-chat--margin
      (propertize
       (concat (propertize "    " 'face 'harness-hint-face)
               (propertize text 'face (if (eq state 'undone) 'harness-chat-undone-face 'harness-hint-face))
-              (pcase state
-                ('nil "")
-                ('offered (concat "  " (harness-chat--undo-button (plist-get node :id) record)))
-                ('undone (propertize "  undone" 'face 'harness-hint-face 'help-echo (plist-get record :result)))
-                (_ (propertize (format "\n    %s" (or (plist-get record :result) state)) 'face 'harness-hint-face)))
+              (cond
+               (judged (concat "  " (harness-chat--supervisor-buttons node judged)))
+               ((eq state 'offered) (concat "  " (harness-chat--undo-button (plist-get node :id) record)))
+               ((eq state 'undone) (propertize "  undone" 'face 'harness-hint-face 'help-echo (plist-get record :result)))
+               (record (propertize (format "\n    %s" (or (plist-get record :result) state)) 'face 'harness-hint-face)))
               (propertize "\n" 'face 'harness-hint-face))
       'wrap-prefix "    "))))
 
@@ -1259,13 +1560,46 @@ and the note changes when the harness updates it."
   (harness-ui-call "_harness/permission/undo" (list :session-id session-id :node-id node-id)
                    (lambda (result) (message "%s" (or (plist-get result :message) "Undone")))))
 
+(defun harness-chat--supervisor-buttons (node record)
+  "Return the buttons of the session judge's note NODE, RECORD being its record.
+Each of the note's actions (`harness-node-supervisor') is one button:
+the action itself while it was not taken, [undo: it] once it was, and
+[redo: it] once it was taken back again.  Clicking or RET on one asks
+the harness to move it on, and the note is redrawn with what it did."
+  (mapconcat
+   (lambda (action)
+     (let* ((name (format "%s" (plist-get action :action)))
+            (label (format "%s" (or (plist-get action :label) name)))
+            (state (plist-get action :state)))
+       (harness-chat--button
+        (format "[%s%s]" (pcase state ('done "undo: ") ('undone "redo: ") (_ "")) label)
+        (lambda () (harness-chat--supervisor-act (plist-get node :id) name))
+        :help (pcase state
+                ('done "Take this back")
+                ('undone "Do it again")
+                (_ (plist-get action :help))))))
+   (plist-get record :actions)
+   " "))
+
+(defun harness-chat--supervisor-act (node-id action)
+  "Ask the harness to move ACTION of the judge's note NODE-ID on.
+The harness does what the action says -- stop judging new sessions, or
+put this session in the other mode -- or takes it back when it was done
+\(`supervisor/act'), and updates the note, which the chat draws with its
+undo, or its redo once undone.  The echo area says what happened."
+  (harness-ui-call "_harness/supervisor/act"
+                   (list :session-id harness-ui-session-id :node-id node-id :action action)
+                   (lambda (result) (message "%s" (or (plist-get result :message) "Done")))))
+
 (defun harness-chat--render-compaction (block)
   "Return the body of compaction BLOCK.
 A summary made to hand the conversation over to a model of another
 provider says which (see `harness-node-handoff').  Otherwise the header
 says what kind of compaction it was (`harness-node-compaction-kind'): a
-brief summary names the model that wrote it, and a transcript file
-offers to open the file."
+brief summary names the model that wrote it, a transcript file offers
+to open the file, a fresh start says so, and a cut old context says the
+oldest of it went.  One made because a message met a cold prompt cache
+\(harness-cowboy.el) says that too."
   (let* ((id (harness-chat-block-id block))
          (node (harness-chat-block-node block))
          (content (or (plist-get node :content) ""))
@@ -1276,7 +1610,7 @@ offers to open the file."
          (header (concat (harness-chat--fold-button (harness-chat-block-collapsed block)
                                                     (lambda () (interactive) (harness-chat-toggle-block id)))
                          " "
-                         (propertize (format "%s context compacted%s (%d words)"
+                         (propertize (format "%s context compacted%s%s (%d words)"
                                              (harness-ui-icon 'harness-chat-icon-compaction)
                                              (cond
                                               (handoff
@@ -1286,7 +1620,12 @@ offers to open the file."
                                                (format " into a brief summary by %s"
                                                        (harness-ui-model-label (plist-get meta :model))))
                                               ((equal kind "transcript") " into a transcript file")
+                                              ((equal kind "fresh") " to start afresh")
+                                              ((equal kind "truncate") " by cutting its oldest context away")
                                               (t ""))
+                                             (if (consp (plist-get meta :cowboy))
+                                                 ", the prompt cache being cold"
+                                               "")
                                              (harness-chat--words content))
                                      'face 'harness-summary-face)
                          (if (and (stringp file) (not (string-empty-p file)))
@@ -1297,34 +1636,41 @@ offers to open the file."
                            "")
                          "\n"))
          (body (harness-chat--foldable
-                (harness-chat--face (harness-chat--ensure-newline (harness-ui-markdown-render content))
-                                    'harness-thinking-face))))
+                (concat (harness-chat--face (harness-chat--ensure-newline
+                                             (harness-chat--render-markdown (harness-chat--page block)))
+                                            'harness-thinking-face)
+                        (harness-chat--more-line block)))))
     (harness-chat--margin (concat header body))))
 
 (defun harness-chat--render-plan (block)
   "Return the body of plan BLOCK."
-  (let* ((content (or (plist-get (harness-chat-block-node block) :content) ""))
-         (body (concat (harness-chat--label 'harness-chat-icon-plan "plan")
-                       (harness-chat--ensure-newline (harness-ui-markdown-render content)))))
+  (let ((body (concat (harness-chat--label 'harness-chat-icon-plan "plan")
+                      (harness-chat--ensure-newline
+                       (harness-chat--render-markdown (harness-chat--page block)))
+                      (harness-chat--more-line block))))
     (harness-chat--margin (harness-chat--face body 'harness-chat-plan-face) 'harness-chat-plan-face)))
 
 (defun harness-chat--render-error (block)
   "Return the body of local error BLOCK."
   (harness-chat--margin
    (propertize (concat (harness-ui-icon 'harness-icon-warning) " "
-                       (or (plist-get (harness-chat-block-node block) :content) "") "\n")
+                       (harness-chat--page block) "\n"
+                       (harness-chat--more-line block))
                'face 'error)))
 
 (defun harness-chat--render-failed (block err)
   "Return the body of BLOCK, whose renderer signalled ERR, as plain text.
 A block that cannot be rendered must not take the rest of the buffer
 down with it: the transcript below it and the compose box still draw."
-  (let ((node (harness-chat-block-node block)))
+  (let* ((node (harness-chat-block-node block))
+         (text (harness-chat--page block)))
     (harness-chat--margin
-     (concat (harness-chat--plain (or (harness-chat-block-content block)
-                                      (plist-get node :content) (plist-get node :title)
-                                      (format "[%s]" (harness-chat-block-kind block))))
-             (propertize (format "(shown unformatted: rendering failed with %s)\n" (error-message-string err))
+     (concat (harness-chat--plain (if (string-empty-p text)
+                                      (or (plist-get node :title) (format "[%s]" (harness-chat-block-kind block)))
+                                    text))
+             (harness-chat--more-line block)
+             (propertize (format "(shown unformatted: rendering failed with %s)\n"
+                                 (harness-error-short-message err))
                          'face 'harness-dim-face)))))
 
 (defun harness-chat--group-calls (group)
@@ -1347,10 +1693,13 @@ Empty when none failed or was denied; a collapsed group would hide them."
 
 (defun harness-chat--render-group (group)
   "Return the body of the summary block of GROUP.
-It counts the calls by label, then the thinking folded between them."
+It counts the calls by label, then the thinking folded between them.
+A run of one call names it as its header does, label and subject:
+\"1 tool call: Read file x.el\"."
   (let* ((gid (harness-chat-group-id group))
+         (calls (harness-chat--group-calls group))
          (names (mapcar (lambda (b) (harness-ui-tool-label (plist-get (harness-chat-block-node b) :tool)))
-                        (harness-chat--group-calls group)))
+                        calls))
          (thoughts (cl-count-if #'harness-chat--thinking-block-p (harness-chat-group-members group)))
          (counts nil))
     (dolist (n names)
@@ -1366,9 +1715,17 @@ It counts the calls by label, then the thinking folded between them."
                                         (lambda () (interactive) (harness-chat-toggle-group gid))
                                         "mouse-1, TAB: show or hide the individual tool calls")
              " "
-             (propertize (format "%s %d tool calls: %s%s" (harness-ui-icon 'harness-icon-tool) (length names)
-                                 (mapconcat (lambda (c) (if (> (cdr c) 1) (format "%s ×%d" (car c) (cdr c)) (car c)))
-                                            counts ", ")
+             (propertize (format "%s %d tool call%s: %s%s" (harness-ui-icon 'harness-icon-tool) (length names)
+                                 (if (= (length names) 1) "" "s")
+                                 (if (= (length calls) 1)
+                                     ;; What the lone call is about, as its
+                                     ;; own header would say it.
+                                     (let ((node (harness-chat-block-node (car calls))))
+                                       (substring-no-properties
+                                        (harness-ui-tool-title-string (plist-get node :tool)
+                                                                      (plist-get node :title) 100)))
+                                   (mapconcat (lambda (c) (if (> (cdr c) 1) (format "%s ×%d" (car c) (cdr c)) (car c)))
+                                              counts ", "))
                                  (pcase thoughts
                                    (0 "")
                                    (1 " · thinking")
@@ -1395,9 +1752,12 @@ It counts the calls by label, then the thinking folded between them."
                       ("compaction" (harness-chat--render-compaction block))
                       ("plan" (harness-chat--render-plan block))
                       ("error" (harness-chat--render-error block))
-                      (_ (harness-chat--margin
-                          (harness-chat--plain (or (plist-get (harness-chat-block-node block) :content)
-                                                   (format "[%s]" kind))))))
+                      (_ (let ((text (harness-chat--page block)))
+                           (harness-chat--margin
+                            (concat (harness-chat--plain (if (string-empty-p text)
+                                                             (format "[%s]" kind)
+                                                           text))
+                                    (harness-chat--more-line block))))))
                   (error (harness-chat--render-failed block err)))))
          (text (concat (cond ((harness-chat-block-group block) "")
                              ((harness-chat--outside-header block))
@@ -1407,6 +1767,14 @@ It counts the calls by label, then the thinking folded between them."
     (add-text-properties 0 (length text)
                          (list 'harness-chat-node (harness-chat-block-id block) 'read-only t 'rear-nonsticky t)
                          text)
+    ;; A call that started a sub-agent opens its session from anywhere on
+    ;; the block, not only from its session line: mouse-1 or RET on the
+    ;; title, the input, the output.  Buttons keep their own keys.
+    (when-let* ((child (harness-chat--block-child block)))
+      (harness-ui-add-session-keys
+       text child
+       (harness-chat--session-name
+        child (plist-get (plist-get (harness-chat-block-node block) :input) :name))))
     text))
 
 ;;;; Folding
@@ -1888,7 +2256,10 @@ the thinking before its first call and after its last stays out."
             (harness-chat-block-content block) (plist-get node :content)
             (harness-chat-block-streamed block) t)
       (harness-chat--cancel-render id)
-      (harness-chat--rerender block))
+      (harness-chat--rerender block)
+      ;; The summary of a run of one call shows the call's title.
+      (when (equal kind "tool-call")
+        (harness-chat--refresh-group-of block)))
      (t
       (let ((windows (harness-chat--bottom-windows)))
         (harness-chat--append-block (harness-chat--new-block node))
@@ -1916,11 +2287,20 @@ the thinking before its first call and after its last stays out."
       (let* ((before (or (harness-chat-block-content block) ""))
              (lead (if (and (string-suffix-p "\n" before)
                             (not (eq (char-before (- (marker-position (harness-chat-block-end block)) 2)) ?\n)))
-                       "\n" "")))
+                       "\n" ""))
+             ;; Only the page is drawn: the rest waits behind the block's
+             ;; button (see `harness-chat--message-limit'), which the next
+             ;; re-render draws.  Appending it all would put the enormous
+             ;; message in the buffer regardless.
+             (room (max 0 (- (harness-chat--page-limit block) (length before) (length lead))))
+             (text (if (or (zerop room) (string-empty-p delta))
+                       ""
+                     (concat lead (substring delta 0 (min room (length delta)))))))
         (setf (harness-chat-block-streamed block) t
               (harness-chat-block-content block) (concat before delta))
-        (harness-chat--append-delta block (concat lead delta)
-                                    (if (equal kind "thinking") 'harness-thinking-face 'harness-agent-face))
+        (unless (string-empty-p text)
+          (harness-chat--append-delta block text
+                                      (if (equal kind "thinking") 'harness-thinking-face 'harness-agent-face)))
         (harness-chat--schedule-render block))))))
 
 (defun harness-chat--on-session (session)
@@ -2052,17 +2432,19 @@ edits the same request the same way."
   (harness-ui-pending-edit-pattern pid))
 
 (defun harness-chat-next-diagram (&optional n)
-  "Show the diagram of the next option of the question waiting with diagrams."
+  "Show the diagram of the next option of the question waiting with diagrams.
+With prefix argument N, move N options on; a negative N moves back."
   (interactive "p")
   (harness-ui-pending-next-diagram n))
 
 (defun harness-chat-previous-diagram (&optional n)
-  "Show the diagram of the previous option of the question waiting with diagrams."
+  "Show the diagram of the previous option of the question waiting with diagrams.
+With prefix argument N, move N options back."
   (interactive "p")
   (harness-ui-pending-previous-diagram n))
 
 (defun harness-chat--on-pending-changed (sid)
-  "Mirror SESSION-ID's requests and redraw the tail showing them.
+  "Mirror the requests of session SID and redraw the tail showing them.
 On `harness-ui-pending-changed-hook'."
   (when-let* ((buf (harness-chat--buffer-for sid)))
     (with-current-buffer buf
@@ -2131,9 +2513,10 @@ The store is the one source of truth; the chat's mirror follows it."
 ;; the harness emits `session/todos' for it, and ACP announces the same
 ;; list as a plan update.  The chat renders it from that data, never by
 ;; reading a tool block (those fold, and at work the list is the point):
-;; a header segment with the progress and the item in hand, always on
-;; screen, and a panel above the compose box with one line and a status
-;; icon per item, which folds away or disappears with the list.
+;; a panel above the compose box with the progress and one line and a
+;; status icon per item, which folds away to the progress and the item
+;; in hand, or disappears with the list.  The header line leaves it to
+;; the panel, right above the box.
 
 (defconst harness-chat--todos-limit 20
   "Most todo items the panel lists before it counts the rest.")
@@ -2166,7 +2549,7 @@ way, and an entry without an id is as good as one with."
 (defun harness-chat--todo-summary ()
   "Return (DONE TOTAL CURRENT) for the session's todo list, or nil.
 CURRENT is the item in progress, else the first one not done, as the
-header names it."
+folded panel names it."
   (when harness-chat--todos
     (let* ((status (lambda (item) (plist-get item :status)))
            (current (or (cl-find "in-progress" harness-chat--todos :key status :test #'equal)
@@ -2191,8 +2574,7 @@ it redraw once, not twice."
 This is the live signal of a `todo_write' call, ahead of the debounced
 session plist that repeats it."
   (when (harness-chat--set-todos (plist-get update :entries))
-    (harness-chat--render-tail)
-    (force-mode-line-update)))
+    (harness-chat--render-tail)))
 
 (defun harness-chat--todo-mark (status)
   "Return (ICON . FACE) marking a todo in STATUS."
@@ -2200,37 +2582,6 @@ session plist that repeats it."
     ("done" '(harness-icon-success . harness-success-face))
     ("in-progress" '(harness-icon-running . harness-status-running-face))
     (_ '(harness-icon-idle . harness-dim-face))))
-
-(defun harness-chat--todos-help ()
-  "Return the tooltip of the header's todo segment: every item, marked."
-  (let ((summary (harness-chat--todo-summary)))
-    (concat (format "Todo list (%d/%d) — mouse-1, C-c C-t: show or hide it"
-                    (nth 0 summary) (nth 1 summary))
-            "\n"
-            (mapconcat (lambda (item)
-                         (format "%s %s"
-                                 (pcase (plist-get item :status)
-                                   ("done" "[x]") ("in-progress" "[~]") (_ "[ ]"))
-                                 (harness-chat--todo-text item)))
-                       harness-chat--todos "\n"))))
-
-(defun harness-chat--todos-segment ()
-  "Return the header segment for the session's todo list, or nil.
-It names the progress and the item in hand, so a running turn's plan
-is on screen without opening its `todo_write' block."
-  (when-let* ((summary (harness-chat--todo-summary)))
-    (let* ((done (nth 0 summary))
-           (total (nth 1 summary))
-           (current (nth 2 summary))
-           (text (concat (harness-ui-icon 'harness-chat-icon-plan)
-                         (format " %d/%d" done total)
-                         (cond (current (concat " \N{U+00B7} " (harness-first-line current 34)))
-                               ((= done total) " done")
-                               (t "")))))
-      (concat (harness-chat--segment text #'harness-chat-toggle-todos
-                                     (harness-chat--todos-help)
-                                     (and (= done total) 'harness-dim-face))
-              "  "))))
 
 (defun harness-chat--insert-todos ()
   "Insert the panel listing the session's todo items.
@@ -2279,8 +2630,7 @@ the one in progress in bold and the rest dim.  A list longer than
   (interactive)
   (unless harness-chat--todos (user-error "This session has no todo list"))
   (setq harness-chat--todos-collapsed (not harness-chat--todos-collapsed))
-  (harness-chat--render-tail)
-  (force-mode-line-update))
+  (harness-chat--render-tail))
 
 (defvar harness-chat-panel-functions nil
   "Functions putting a panel of their own below the transcript.
@@ -2293,10 +2643,12 @@ redefines it.  The task module shows its review banner this way.")
 (defun harness-chat--insert-panels ()
   "Insert what `harness-chat-panel-functions' return, in order.
 Each string gets the panel background, which its own properties may
-override, as the pending panel's do."
+override, as the pending panel's do.  A function cannot move point,
+where its panel goes: it may measure text in a window, which takes the
+window's point."
   (run-hook-wrapped 'harness-chat-panel-functions
                     (lambda (fn)
-                      (when-let* ((text (funcall fn)))
+                      (when-let* ((text (save-excursion (funcall fn))))
                         (unless (string-empty-p text)
                           (insert (harness-chat--face text 'harness-chat-panel-face))))
                       nil)))
@@ -2827,10 +3179,11 @@ A function of TEXT and ATTACHMENTS, called in the chat buffer with what
 the box held, after it is emptied.  It sends them wherever they belong
 instead of prompting the session, for a module showing something of its
 own in the buffer (see `harness-chat-panel-functions').  An answer to a
-waiting question still goes to the question, and C-c C-q queues and
-C-c C-k cancels as usual.  A task in review is no such thing: the
-harness takes any message the user sends its session for the feedback
-that sends it back (`harness-tasks--on-message').")
+waiting question still goes to the question, and\\<harness-chat-mode-map>
+\\[harness-chat-queue] queues and \\[harness-chat-cancel] cancels as usual.
+A task in review is no such thing: the harness takes any message the
+user sends its session for the feedback that sends it back
+\(`harness-tasks--on-message').")
 
 (defvar harness-chat-send-functions nil
   "Functions run with the TEXT and ATTACHMENTS of each message sent.
@@ -3021,16 +3374,6 @@ that does not report one, it is \"Working\"."
        (_ "Working"))
      "\N{U+2026}")))
 
-(defun harness-chat--activity-label (activity)
-  "Return a word or two for ACTIVITY, for the mode line: \"thinking\", \"Bash\".
-A tool goes by its label."
-  (let ((tool (if (plist-get activity :tool) (harness-ui-tool-label (plist-get activity :tool)) "a call")))
-    (pcase (plist-get activity :phase)
-      ("tool-input" (concat "preparing " tool))
-      ("tool" (if (harness-json-true-p (plist-get activity :checking)) (concat "checking " tool) tool))
-      ((and (pred stringp) phase) phase)
-      (_ "working"))))
-
 (defun harness-chat--activity-details (activity)
   "Return what shows ACTIVITY progressing, as a list of strings.
 The size of the tool input written so far, the latest line a tool reported."
@@ -3110,6 +3453,7 @@ the end keep showing it."
 (defun harness-chat--on-activity (activity)
   "Note that the running turn now does ACTIVITY (nil once it ended)."
   (setq harness-chat--activity activity)
+  (harness-chat--set-notes activity)
   (when (and activity (equal (plist-get (harness-chat--session) :status) "running"))
     (harness-chat--start-spinner))
   (harness-chat--refresh-activity)
@@ -3144,11 +3488,16 @@ COMMAND runs with the clicked window selected."
 (defun harness-chat--segment (text command help &optional face)
   "Return TEXT as a clickable segment running COMMAND, with HELP and FACE.
 HELP is the `help-echo': a string, or a function computing one on hover.
-Icons in TEXT stay clickable but are not hover-highlighted: an SVG keeps
-the background it was rendered on, so it would show as a dark box."
-  (let ((text (propertize text 'face face 'help-echo help 'mouse-face 'mode-line-highlight
+FACE is applied over TEXT when non-nil, so a figure that brings its own
+face keeps it.  Icons in TEXT stay clickable but are not
+hover-highlighted: an SVG keeps the background it was rendered on, so
+it would show as a dark box."
+  (let ((text (propertize text 'help-echo help 'mouse-face 'mode-line-highlight
                           'local-map (harness-chat--segment-map command)))
         (pos 0))
+    ;; Face only when given: a segment around a figure that brings its
+    ;; own face, as the context one does, must not wipe it.
+    (when face (put-text-property 0 (length text) 'face face text))
     (while (< pos (length text))
       (let ((next (next-single-property-change pos 'display text (length text))))
         (when (eq (car-safe (get-text-property pos 'display text)) 'image)
@@ -3175,126 +3524,235 @@ quota.  Clicking it opens the usage dashboard (`harness-ui-spend-segment')."
   (harness-ui-spend-segment (harness-ui-format-spend session t)))
 
 (defun harness-chat--non-interactive-segment (session)
-  "Return the header segment saying whether SESSION waits for the user.
-It reads \"non-interactive\" or \"interactive\"; clicking it toggles."
+  "Return the header segment saying SESSION never waits for the user, or nil.
+It reads \"non-interactive\" while SESSION is, and a click makes it
+interactive again.  An interactive session, the usual kind, has no
+segment: `harness-toggle-non-interactive' (`i' after the harness prefix
+key, or the menu) turns the mode on."
   (let ((value (plist-get session :non-interactive)))
-    (harness-chat--segment (harness-ui-non-interactive-label value)
-                           #'harness-toggle-non-interactive
-                           (concat (harness-ui-non-interactive-help value)
-                                   (if (harness-json-true-p value)
-                                       " (mouse-1: make it interactive)"
-                                     " (mouse-1: make it non-interactive)"))
-                           (if (harness-json-true-p value) 'harness-non-interactive-face 'harness-dim-face))))
+    (when (harness-json-true-p value)
+      (harness-chat--segment (harness-ui-non-interactive-label value)
+                             #'harness-toggle-non-interactive
+                             (concat (harness-ui-non-interactive-help value)
+                                     " (mouse-1: make it interactive)")
+                             'harness-non-interactive-face))))
 
 (defun harness-chat--on-quota (_provider _quota)
   "Redraw the header lines, which show the plan's quota."
   (force-mode-line-update t))
 
-(defun harness-chat--on-rate (id _rate)
-  "Redraw the header line of session ID's chat, which shows its output rate.
-ID nil, after every rate was fetched again, redraws them all."
+(defun harness-chat--on-live (id _live)
+  "Redraw the header line of session ID's chat, which shows its context in use.
+It grows while its turn streams, a few times a second at most.  ID
+nil, after every session's figures were fetched again, redraws them all."
   (if (null id)
       (force-mode-line-update t)
     (when-let* ((buf (harness-chat--buffer-for id)))
       (with-current-buffer buf (force-mode-line-update)))))
 
-(defun harness-chat--on-live (id _live)
-  "Redraw the header line of session ID's chat, which shows its token figures.
-They grow while its turn streams, a few times a second at most.  ID
-nil, after every session's figures were fetched again, redraws them all."
-  (harness-chat--on-rate id nil))
+;;;; The session this one was started from
+
+;; A fork, a sub-agent, a BTW and a session the merge queue started to
+;; resolve a conflict all record the session they were started from as
+;; their `:parent-id' (see `session/fork', `session/btw' and
+;; `harness-session-parent-id').  The header line says which session that
+;; is and what the relation is, and clicking it goes up to it: a child
+;; session tells you where it came from and leads back there
+;; (`harness-up-to-parent').
+
+(defconst harness-chat--parent-labels
+  '((fork . "fork of")
+    (subagent . "sub-agent of")
+    (btw . "opened over"))
+  "How the header reads the session a child session was started from.
+The kind of the child names the relation; any other kind with a parent
+is a \"child of\" it.")
+
+(defun harness-chat--parent-label (kind)
+  "Return how the header names the parent of a child session of KIND.
+KIND is the child's `:kind' as the session cache holds it, a symbol or,
+over ACP, a string."
+  (or (alist-get (if (stringp kind) (intern kind) kind) harness-chat--parent-labels)
+      "child of"))
+
+(defun harness-chat--parent-id ()
+  "Return the id of the session this buffer's session was started from, or nil.
+See `harness-chat--parent-label'."
+  (let ((id (plist-get (harness-chat--session) :parent-id)))
+    (and (stringp id) (not (string-empty-p id)) id)))
+
+(defun harness-chat--parent-help (window _object _pos)
+  "Return the tooltip of the parent segment in WINDOW's header line.
+A `help-echo' function, so the keys are searched on hover, not on every
+redisplay of the header line."
+  (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
+    (substitute-command-keys
+     "The session this one was started from (mouse-1: go up to it, \\[harness-up-to-parent])" t)))
+
+(defun harness-chat--parent-segment ()
+  "Return the header segment leading to this session's parent, or nil.
+A fork, a sub-agent and a BTW name the session they were started from,
+and the name opens it (`harness-up-to-parent').  A session with no
+parent, or whose parent the harness no longer has, has no segment."
+  (when-let* ((id (harness-chat--parent-id))
+              (parent (harness-ui-session id)))
+    (let* ((label (harness-chat--parent-label (plist-get (harness-chat--session) :kind)))
+           (name (harness-chat--session-name id))
+           (segment (lambda (name)
+                      (concat "  " (harness-ui-icon 'harness-icon-up) " "
+                              (propertize (concat label " ") 'face 'harness-dim-face)
+                              (harness-chat--segment name #'harness-up-to-parent
+                                                     #'harness-chat--parent-help)))))
+      ;; Shown after the session's own name, which matters more: a narrow
+      ;; window drops this before the name, and shortens it before that.
+      (list (funcall segment name) 65 (funcall segment (harness-truncate-end name 12))))))
 
 (defvar harness-chat-header-functions nil
   "Functions putting segments in front of the chat header line.
 Each is called without arguments in the chat buffer whenever the header
-line is drawn, and returns a string, or nil for nothing.  The header
-shows their strings first, in order, then the session's own segments:
-status, name, model, permission mode, non-interactive and the rest.  Add to it
-buffer-locally, so only that buffer's header changes, and with a
-symbol, so a reload redefines it.  The BTW module marks a side
-conversation and gives it its [close] and [keep] buttons this way.")
+line is drawn, and returns a string, or (TEXT PRIORITY MIN) as
+`harness-ui-fit-header' takes it, or nil for nothing.  The header shows
+their segments first, in order, then the session's own segments:
+name, model, permission mode and the rest.  A
+segment with a low PRIORITY makes room before any of the session's own
+do in a narrow window.  Add to it buffer-locally, so only that buffer's
+header changes, and with a symbol, so a reload redefines it.  The BTW
+module marks a side conversation and gives it its [close] and [keep]
+buttons this way.")
 
-(defun harness-chat--header-prefix ()
-  "Return what `harness-chat-header-functions' put in front of the header."
+(defun harness-chat--header-prefix-segments ()
+  "Return what `harness-chat-header-functions' put in front of the header.
+Each is a string, or (TEXT PRIORITY MIN) as `harness-ui-fit-header' takes
+it, in the order the functions add them."
   (let ((segments nil))
     (run-hook-wrapped 'harness-chat-header-functions
                       (lambda (fn)
                         (when-let* ((segment (funcall fn)))
                           (push segment segments))
                         nil))
-    (apply #'concat (nreverse segments))))
+    (nreverse segments)))
+
+(defun harness-chat--header-prefix ()
+  "Return what `harness-chat-header-functions' put in front, as one string.
+That is the text of `harness-chat--header-prefix-segments', for a caller
+that wants the whole prefix as text: the header line itself fits the
+segments one by one, each with the priority its function gave it."
+  (mapconcat (lambda (segment)
+               (if (consp segment) (car segment) segment))
+             (harness-chat--header-prefix-segments)
+             ""))
+
+(defvar harness-chat-header-end-functions nil
+  "Functions adding segments of their own to the chat header line.
+Each is called without arguments in the chat buffer whenever the header
+line is drawn, and returns a segment as `harness-ui-fit-header' takes
+it -- a string, or (TEXT PRIORITY MIN) -- or nil for nothing.  TEXT
+carries its separator in front.  The segments show after the session's
+own, before [menu], in order; one with a low PRIORITY makes room before
+the session's own do in a narrow window.  Add to it buffer-locally or
+globally, with a symbol, so a reload redefines it.  The companion pet
+shows its face this way.")
+
+(defun harness-chat--header-end ()
+  "Return the segments `harness-chat-header-end-functions' add, in order."
+  (let ((segments nil))
+    (run-hook-wrapped 'harness-chat-header-end-functions
+                      (lambda (fn)
+                        (when-let* ((segment (ignore-errors (funcall fn))))
+                          (push segment segments))
+                        nil))
+    (nreverse segments)))
 
 (defun harness-chat--header (&optional width)
   "Return the header line, fitted to WIDTH, its window's by default.
-In a window too narrow for all of it, the output rate goes first, then
-the output tokens, the spend, the thinking level, the context, the
-non-interactive mode, the model and the todos; the name shortens after
-those.  What `harness-chat-header-functions' put in front, the status,
-the permission mode, [menu] and the notice of new messages stay.  WIDTH
-is as `harness-ui-fit-header' takes it."
+It holds what the buffer below does not show and is worth a glance:
+the session's name, the session it was started from, model, permission
+mode, non-interactive mode while it is on, thinking level, context and
+spend.  The status is the mode line's (`harness-chat--mode-line'), the
+todo list the panel's above the compose box, and the output tokens and
+rate the session list's.
+
+In a window too narrow for all of it, the spend goes first, then the
+thinking level, the context, the non-interactive mode and the model;
+the name and the session it was started from shorten after those.
+What `harness-chat-header-functions' put in front leads the line and
+makes room as its own priorities say, before any of the session's own
+do; the permission mode, [menu] and the newer-messages notice stay.
+What `harness-chat-header-end-functions' add shows before [menu],
+making room as its priorities say.  WIDTH is as
+`harness-ui-fit-header' takes it."
   (let* ((s (harness-chat--session))
-         (status (or (plist-get s :status) "idle"))
-         (running (equal status "running"))
-         (todos (harness-chat--todos-segment))
-         (rate (harness-ui-format-rate s))
-         (output (harness-ui-format-output s))
+         (non-interactive (harness-chat--non-interactive-segment s))
          (name (or (plist-get s :name) "unnamed")))
     (harness-ui-fit-header
-     (list
-      (harness-chat--header-prefix)
-      (concat " "
-              (if running
-                  (propertize (harness-chat--spinner-frame)
-                              'face 'harness-status-running-face
-                              'help-echo (harness-chat--activity-text harness-chat--activity))
-                (propertize (harness-ui-status-icon status) 'help-echo status)))
-      (list (concat " " (harness-chat--segment name #'harness-rename-session
-                                               "Session name (mouse-1: rename)" 'bold))
-            70 (concat " " (harness-chat--segment (harness-truncate-end name 8) #'harness-rename-session
-                                                 "Session name (mouse-1: rename)" 'bold)))
-      ;; The segment ends in two spaces of its own; the list takes them
-      ;; as the separator, as the plain header line did.
-      (and todos (list (concat "  " (string-trim-right todos " +")) 55))
-      (list (concat "  " (harness-chat--segment (harness-ui-model-label (plist-get s :model)) #'harness-set-model
-                                                "Model (mouse-1: change)" 'harness-dim-face))
-            50)
-      (list (concat "  " (harness-chat--segment (harness-ui-permission-mode-label (plist-get s :permission-mode))
-                                                #'harness-set-permission-mode
-                                                "Permission mode (mouse-1: change)"))
-            90)
-      (list (concat "  " (harness-chat--non-interactive-segment s)) 40)
-      (list (concat "  " (harness-chat--segment (harness-ui-thinking-label (plist-get s :thinking))
-                                                #'harness-set-thinking "Thinking level (mouse-1: change)"
-                                                'harness-dim-face))
-            20)
-      (list (concat "  " (harness-ui-format-context s)) 30)
-      (and output (list (concat "  " output) 7))
-      (and rate (list (concat "  " rate) 5))
-      (list (concat "  " (harness-chat--spend-segment s)) 10)
-      (list (concat "  " (harness-chat--segment "[menu]" #'harness-menu #'harness-chat--menu-help 'harness-dim-face))
-            95)
-      (and harness-chat--unseen
-           (list (concat "  " (harness-chat--segment "↓ new messages" #'harness-chat-scroll-to-bottom
-                                                     "New content below (mouse-1: jump to it)"
-                                                     'harness-status-blocked-face))
-                 88)))
+     (append
+      ;; Other modules' leading segments, each as the fit takes it: a
+      ;; string for a BTW's buttons, (TEXT PRIORITY MIN) for a badge
+      ;; that gives way before the session's own do.
+      (harness-chat--header-prefix-segments)
+      (list
+       (list (concat " " (harness-chat--segment name #'harness-rename-session
+                                                "Session name (mouse-1: rename)" 'bold))
+             70 (concat " " (harness-chat--segment (harness-truncate-end name 8) #'harness-rename-session
+                                                  "Session name (mouse-1: rename)" 'bold)))
+       ;; Where the session came from, right after its own name.
+       (harness-chat--parent-segment)
+       (list (concat "  " (harness-chat--segment (harness-ui-model-label (plist-get s :model)) #'harness-set-model
+                                                 "Model (mouse-1: change)" 'harness-dim-face))
+             50)
+       (list (concat "  " (harness-chat--segment (harness-ui-permission-mode-label (plist-get s :permission-mode))
+                                                 #'harness-set-permission-mode
+                                                 "Permission mode (mouse-1: change)"))
+             90)
+       (and non-interactive (list (concat "  " non-interactive) 40))
+       (list (concat "  " (harness-chat--segment (harness-ui-thinking-label (plist-get s :thinking))
+                                                 #'harness-set-thinking "Thinking level (mouse-1: change)"
+                                                 'harness-dim-face))
+             20)
+       (list (concat "  " (harness-chat--segment
+                           (harness-ui-format-context s)
+                           #'harness-set-context-limit
+                           (harness-ui-context-limit-help
+                            s (harness-ui-model-context-window (plist-get s :model)))))
+             30)
+       (list (concat "  " (harness-chat--spend-segment s)) 10))
+      ;; Other modules' segments, the companion pet's face say.
+      (harness-chat--header-end)
+      (list
+       (list (concat "  " (harness-chat--segment "[menu]" #'harness-menu #'harness-chat--menu-help 'harness-dim-face))
+             95)
+       ;; The cached flag, never `harness-chat--scrolled-up-p': measuring
+       ;; the window (`pos-visible-in-window-p') formats its header line,
+       ;; which would evaluate this again, and again, until
+       ;; `max-lisp-eval-depth' -- the header drawn empty, and a redisplay
+       ;; taking seconds.  `harness-chat--update-notice' keeps it current.
+       (and (or harness-chat--unseen harness-chat--notice)
+            (list (concat "  " (harness-chat--segment "↓ newer messages" #'harness-chat-scroll-to-bottom
+                                                      "Newer content below (mouse-1: jump to it)"
+                                                      'harness-status-blocked-face))
+                  88))))
      width)))
 
 (defun harness-chat--mode-line ()
-  "Return the mode line text."
+  "Return the mode line text: the session's status and the turn's clock.
+This is the one place a chat shows its status: the spinner and the word
+while a turn runs, else the status's icon and word, then how long the
+turn has gone on while it runs.  A session blocked on a question waits
+with no clock, however long it takes.  What the turn does now is the
+activity line's, above the compose box, and the spinner's tooltip."
   (let* ((s (harness-chat--session))
-         (status (or (plist-get s :status) "idle")))
+         (status (or (plist-get s :status) "idle"))
+         (running (equal status "running"))
+         (help (if running (harness-chat--activity-text harness-chat--activity) status)))
     (concat
-     (harness-ui-status-icon status) " "
-     (propertize status 'face (harness-ui-status-face status))
-     (if (and harness-chat--turn-start (member status '("running" "blocked")))
+     (if running
+         (propertize (harness-chat--spinner-frame) 'face 'harness-status-running-face 'help-echo help)
+       (propertize (harness-ui-status-icon status) 'help-echo help))
+     " "
+     (propertize status 'face (harness-ui-status-face status) 'help-echo help)
+     (if (and harness-chat--turn-start running)
          (propertize (format " %s" (harness-format-duration (- (float-time) harness-chat--turn-start)))
                      'face 'harness-dim-face 'help-echo "Turn duration")
-       "")
-     (if (and harness-chat--activity (equal status "running"))
-         (propertize (concat " \N{U+00B7} " (harness-chat--activity-label harness-chat--activity))
-                     'face 'harness-dim-face
-                     'help-echo (harness-chat--activity-text harness-chat--activity))
        ""))))
 
 (defun harness-chat-reposition (position)
@@ -3329,6 +3787,107 @@ keeps it only while it is visible."
   "Start the spinner timer when it is not running."
   (unless harness-chat--spinner-timer
     (setq harness-chat--spinner-timer (run-at-time 0.1 0.1 #'harness-chat--spinner-tick))))
+
+;;;; Jumping between blocks
+
+(defconst harness-chat--message-kinds '("user" "assistant" "plan")
+  "Node kinds of the transcript's real messages.
+What you and the agent wrote, the agent's plan included.  Thinking, tool
+calls and their results, hints and compactions are the agent's work and
+the harness's notes, not messages.")
+
+(defconst harness-chat--action-kinds '("thinking" "tool-call" "tool-result")
+  "Node kinds of the agent's work between messages.
+A tool result is its call's block, so `tool-result' is here for the
+result of a call the transcript does not show.")
+
+(defun harness-chat--jump-stops (kinds)
+  "Return where the buffer shows the blocks of KINDS, oldest first.
+A run of blocks folded into a collapsed group is one stop, on its
+summary line; expanded, its blocks are stops of their own.  A block the
+buffer does not show yet -- one still streaming, say -- is no stop."
+  (let ((stops nil) (groups nil))
+    ;; Newest first in `harness-chat--order'; the stops are collected
+    ;; oldest first, so a collapsed group is met before its members.
+    (dolist (id (reverse harness-chat--order))
+      (let* ((block (gethash id harness-chat--blocks))
+             (kind (and block (harness-chat-block-kind block))))
+        (when (member kind kinds)
+          (let* ((gid (harness-chat-block-group block))
+                 (group (and gid (gethash gid harness-chat--groups)))
+                 (pos (marker-position (harness-chat-block-start block))))
+            (cond
+             ;; The run's blocks are hidden under one summary line: that
+             ;; line is what a jump can show the reader.
+             ((and group (not (harness-chat-group-expanded group)))
+              (unless (member gid groups)
+                (push gid groups)
+                (when-let* ((start (marker-position (harness-chat-group-start group))))
+                  (push start stops))))
+             (pos (push pos stops)))))))
+    (nreverse stops)))
+
+(defun harness-chat--jump (kinds n what)
+  "Move point N blocks of KINDS on, back when N is negative.
+WHAT names the class of block in the error when the transcript has none
+left that way.  Point lands where the target block starts; a block it is
+already on is passed over, not counted again."
+  (let ((forward (> n 0))
+        (stops (harness-chat--jump-stops kinds)))
+    (unless forward (setq stops (reverse stops)))
+    (dotimes (_ (abs n))
+      (let ((target (cl-find-if (if forward
+                                    (lambda (pos) (> pos (point)))
+                                  (lambda (pos) (< pos (point))))
+                                stops)))
+        (unless target
+          (user-error "No %s %s" what (if forward "below" "above")))
+        (goto-char target)))))
+
+(defun harness-chat-next-message (&optional n)
+  "Move point to the next real message.
+A real message is what you or the agent wrote, the agent's plan
+included; thinking, tool calls and their results are passed over.  With
+prefix argument N, move N messages on; a negative N moves back."
+  (interactive "p")
+  (harness-chat--jump harness-chat--message-kinds (or n 1) "message"))
+
+(defun harness-chat-previous-message (&optional n)
+  "Move point to the previous real message.
+With prefix argument N, move N messages back; a negative N moves on.
+See `harness-chat-next-message'."
+  (interactive "p")
+  (harness-chat--jump harness-chat--message-kinds (- (or n 1)) "message"))
+
+(defun harness-chat-next-user-message (&optional n)
+  "Move point to the next message of your side of the conversation.
+The agent's messages, thinking and tool calls are passed over, so the
+first of them is the prompt the session started with.  With a prefix
+argument N, move N messages on; a negative N moves back."
+  (interactive "p")
+  (harness-chat--jump '("user") (or n 1) "message of yours"))
+
+(defun harness-chat-previous-user-message (&optional n)
+  "Move point to the previous message of your side of the conversation.
+With prefix argument N, move N messages back; a negative N moves on.
+See `harness-chat-next-user-message'."
+  (interactive "p")
+  (harness-chat--jump '("user") (- (or n 1)) "message of yours"))
+
+(defun harness-chat-next-action (&optional n)
+  "Move point to the next tool call or thinking block.
+A run of tool calls folded under one summary line is one stop, however
+many calls it holds.  With a prefix argument N, move N blocks on; a
+negative N moves back."
+  (interactive "p")
+  (harness-chat--jump harness-chat--action-kinds (or n 1) "tool call or thinking"))
+
+(defun harness-chat-previous-action (&optional n)
+  "Move point to the previous tool call or thinking block.
+With prefix argument N, move N blocks back; a negative N moves on.
+See `harness-chat-next-action'."
+  (interactive "p")
+  (harness-chat--jump harness-chat--action-kinds (- (or n 1)) "tool call or thinking"))
 
 ;;;; Other commands
 
@@ -3389,6 +3948,30 @@ nearest above point, so the agent's last one from the box.  The chat's
   (harness-chat--load (harness-chat--at-bottom-p)))
 
 ;;;###autoload
+(defun harness-up-to-parent ()
+  "Show the session this one was started from, and return its buffer.
+A fork, a sub-agent and a BTW record the session they were started from
+as their parent (`:parent-id'); the header line names it, and this
+command, like a click on that name, goes up to it.  The window that
+shows the parent already is selected when there is one; a parent in no
+window opens where this session is shown.  A session that was not
+started from another, or whose parent the harness no longer has, says
+so instead."
+  (interactive)
+  (let ((id (harness-chat--parent-id)))
+    (unless id
+      (user-error "This session was not started from another"))
+    (unless (harness-ui-session id)
+      (user-error "The session this one was started from is gone (%s)"
+                  (harness-chat--session-name id)))
+    (unless harness-ui-open-session-function
+      (user-error "No chat module loaded"))
+    (let ((buffer (funcall harness-ui-open-session-function id)))
+      (if-let* ((window (get-buffer-window buffer)))
+          (progn (select-window window) buffer)
+        (harness-ui-display-buffer buffer harness-ui-position)))))
+
+;;;###autoload
 (defun harness-open-session (id &optional position)
   "Open session ID in POSITION.
 An inactive session opens as it is, compose box included; the first
@@ -3436,8 +4019,18 @@ message sent from it resumes it."
   (define-key map (kbd "C-c C-p") #'harness-chat-edit-permission-pattern)
   (define-key map (kbd "C-c C-f") #'harness-chat-next-diagram)
   (define-key map (kbd "C-c C-b") #'harness-chat-previous-diagram)
+  ;; Moving by block: M-n and M-p by message, M-N and M-P by one of
+  ;; yours, C-M-n and C-M-p by tool call or thinking.  No printable key,
+  ;; so typing still goes to the box wherever point is.
+  (define-key map (kbd "M-n") #'harness-chat-next-message)
+  (define-key map (kbd "M-p") #'harness-chat-previous-message)
+  (define-key map (kbd "M-N") #'harness-chat-next-user-message)
+  (define-key map (kbd "M-P") #'harness-chat-previous-user-message)
+  (define-key map (kbd "C-M-n") #'harness-chat-next-action)
+  (define-key map (kbd "C-M-p") #'harness-chat-previous-action)
   (define-key map (kbd "C-c C-w") #'harness-chat-copy-last-response)
   (define-key map (kbd "C-c C-t") #'harness-chat-toggle-todos)
+  (define-key map (kbd "C-c C-u") #'harness-up-to-parent)
   (define-key map (kbd "C-c C-r") #'harness-chat-redraw)
   (define-key map (kbd "C-c C-e") #'harness-chat-scroll-to-bottom)
   ;; Plain q is typing here.
@@ -3454,6 +4047,16 @@ e when it has a pattern to edit.
 
 \\[harness-compose-quote-reply] quotes the region, or the agent's message at point, in
 the box, to reply to it; from the box, the agent's last message.
+
+Point moves from block to block without a mouse:
+\\[harness-chat-next-message] and \\[harness-chat-previous-message] go to the next and previous
+real message -- what you or the agent wrote, plans included -- past
+thinking and tool calls;
+\\[harness-chat-next-user-message] and \\[harness-chat-previous-user-message] to the next and
+previous message of your own, the prompt the session started with
+included; \\[harness-chat-next-action] and \\[harness-chat-previous-action] to the next and
+previous tool call or thinking block.  A run of tool calls folded under
+one summary line is one stop.
 
 \\{harness-chat-mode-map}"
   (setq buffer-read-only nil)
@@ -3472,6 +4075,8 @@ the box, to reply to it; from the box, the agent's last message.
   (add-hook 'post-command-hook #'harness-chat--post-command nil t)
   (add-hook 'window-buffer-change-functions #'harness-chat--on-window-buffer-change nil t)
   (add-hook 'window-scroll-functions #'harness-chat--schedule-history nil t)
+  (add-hook 'window-scroll-functions #'harness-chat--update-notice nil t)
+  (add-hook 'window-size-change-functions #'harness-chat--on-window-size nil t)
   ;; The wheel scrolls by pixels too (see "Scrolling by pixels").
   (setq-local mwheel-scroll-up-function #'harness-chat-scroll-forward
               mwheel-scroll-down-function #'harness-chat-scroll-back
@@ -3495,8 +4100,16 @@ the box, to reply to it; from the box, the agent's last message.
         ("C-c C-b" "Previous diagram" harness-chat-previous-diagram)
         ("C-c C-t" "Show or hide the todo list" harness-chat-toggle-todos)
         ("C-c C-k" "Cancel turn" harness-chat-cancel)]
+       ["Session"
+        ("C-c C-u" "Go to the session this one came from" harness-up-to-parent)]
        ["Transcript"
         (". TAB" "Fold block" harness-chat-tab)
+        ("M-n" "Next message" harness-chat-next-message)
+        ("M-p" "Previous message" harness-chat-previous-message)
+        ("M-N" "Next message you wrote" harness-chat-next-user-message)
+        ("M-P" "Previous message you wrote" harness-chat-previous-user-message)
+        ("C-M-n" "Next tool call or thinking" harness-chat-next-action)
+        ("C-M-p" "Previous tool call or thinking" harness-chat-previous-action)
         ("C-c C-s" "Search" harness-chat-search)
         ("C-c C-w" "Copy last reply" harness-chat-copy-last-response)
         ("C-c C-e" "Jump to bottom" harness-chat-scroll-to-bottom)
@@ -3504,11 +4117,11 @@ the box, to reply to it; from the box, the agent's last message.
         ("C-c C-z" "Bury: back to the buffer before" harness-ui-bury)]))
 
 (defun harness-chat--post-command ()
-  "Keep the new-messages indicator current.
+  "Keep the newer-messages notice current.
 Point moved onto an option of a question with diagrams shows its diagram."
   (when (and harness-chat--unseen (harness-chat--at-bottom-p (selected-window)))
-    (setq harness-chat--unseen nil)
-    (force-mode-line-update))
+    (setq harness-chat--unseen nil))
+  (harness-chat--update-notice)
   (with-demoted-errors "harness-chat: %S"
     (harness-ui-pending--follow-option)))
 
@@ -3542,7 +4155,6 @@ Point moved onto an option of a question with diagrams shows its diagram."
   (add-hook 'harness-ui-update-functions #'harness-chat--on-update)
   (add-hook 'harness-ui-event-functions #'harness-chat--on-event)
   (add-hook 'harness-ui-quota-functions #'harness-chat--on-quota)
-  (add-hook 'harness-ui-rate-functions #'harness-chat--on-rate)
   (add-hook 'harness-ui-live-functions #'harness-chat--on-live)
   ;; The pending module owns the requests themselves (it registers with
   ;; `harness-ui-permission-functions' and `harness-ui-question-functions');

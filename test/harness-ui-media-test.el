@@ -164,6 +164,12 @@ plain card, and a terminal shows the caption alone."
       (let ((svg (harness-ui-media-test--poster-svg (harness-ui-media--poster-image nil 320 180 t nil))))
         (should-not (string-match-p "<polygon" svg))
         (should-not (string-match-p "<text" svg)))
+      ;; A thumbnail still being made says so on the card, where it will show.
+      (let ((svg (harness-ui-media-test--poster-svg (harness-ui-media--poster-image nil 320 180 nil nil t))))
+        ;; SVG escapes the ellipsis: `loading&#8230;'.
+        (should (string-match-p ">loading&#8230;<" svg)))
+      (let ((svg (harness-ui-media-test--poster-svg (harness-ui-media--poster-image thumb 320 180 nil 42 t))))
+        (should-not (string-match-p ">loading&#8230;<" svg)))
       (cl-letf (((symbol-function 'executable-find) (lambda (&rest _) nil)))
         (let* ((s (harness-ui-media-render-attachment (list :path video :mime "video/mp4" :size 1024 :name "movie.mp4")))
                (plain (substring-no-properties s)))

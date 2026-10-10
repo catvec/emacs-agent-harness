@@ -12,12 +12,23 @@
 ;;                       answer decides; turning it off needs none
 ;;    7 sandbox-guard    shell commands the sandbox would make destructive
 ;;                       (`git worktree prune' and the like) are refused
+;;    8 supervisor       a plugin's stage, not this module's (see below): a
+;;                       session in supervisor mode is denied, for good,
+;;                       every tool but the ones it plans and coordinates
+;;                       with, and bash where the sandbox cannot confine it;
+;;                       it only refuses, and allows nothing
 ;;   10 jail             every path must lie inside an allowed root, or,
 ;;                       for a call that only reads, in the harness itself
 ;;                       or a skills directory; otherwise the user is asked
 ;;                       for the directory
 ;;   20 mode             ask / accept-edits / auto / yolo, plus standing rules
 ;;                       and the tools and reads that never need approval
+;;   28 supervisor approval
+;;                       a plugin's stage (see below): a supervising
+;;                       session's plan (submit_plan, retry_step) asks the
+;;                       user in ask mode only; in every other mode, and
+;;                       when the user is away, it is allowed, so the judge
+;;                       never rules on a plan
 ;;   30 auto             a cheap model judges what is still undecided, in
 ;;                       auto mode and in every non-interactive session;
 ;;                       a denial is put to the user when one is present
@@ -31,9 +42,16 @@
 ;; `:hint', because a denial the model can act on is the difference
 ;; between an autonomous session and one that stalls.  Other modules
 ;; add stages of their own: the session tools have the user confirm
-;; session_move at 6 (`harness-perms-confirm', see Confirmations), and
-;; the tasks module keeps the turns that write a backlog task up
-;; read-only at 25.
+;; session_move at 6 (`harness-perms-confirm', see Confirmations), the
+;; supervisor module denies a supervising session what it may not use at
+;; 8, ahead of the jail and every question, the tasks module keeps the
+;; turns that write a backlog task up read-only at 25, and the supervisor
+;; module has the user alone approve a plan at 28.  A plan changes nothing
+;; by itself, since every call of its workers is decided in the worker's
+;; own session, so `submit_plan' and `retry_step' ask the user in ask mode
+;; only; in accept-edits, auto and yolo mode, and in a non-interactive
+;; session whatever its mode, they are allowed, and the judge never rules
+;; on them.  A standing deny rule still denies them.
 ;;
 ;; Non-interactive mode (the user is away) is no permission policy of
 ;; its own: what the session's mode would ask the user, the auto-mode
@@ -198,7 +216,7 @@ these tools.")
 
 (defconst harness-perms--inspection-tools
   '("emacs_buffers" "emacs_buffer" "emacs_windows" "emacs_describe" "emacs_find_definition" "emacs_messages"
-    "session_info" "session_list" "session_read" "session_search" "session_wait"
+    "session_info" "session_list" "session_read" "session_search" "session_history" "session_wait"
     "task_list" "task_wait" "notification_providers")
   "Tools that only inspect the harness itself or the user's live Emacs.
 Inspecting its own harness is one of the things that make the harness
@@ -270,12 +288,12 @@ take such a rule back (`permission/undo')."
   "Model that judges tool calls, as PROVIDER:NAME, or `auto'.
 It judges in `auto' mode, and in every mode for a non-interactive
 session, deciding what would ask the user while they are away.
-`auto' (the default) asks the session's provider for its `cheap' tier
+`auto' (the default) asks the session's provider for its `simple' tier
 \(see `harness-provider-tier-model'), so the judge runs on a model the
 session's provider can actually serve, falling back to the session's
 own model when the provider names none and its prices are unknown.  A
 PROVIDER:NAME forces that model, and nil uses the session's own model."
-  :type '(choice (const :tag "The session provider's cheap model" auto)
+  :type '(choice (const :tag "The session provider's simple model" auto)
                  (const :tag "The session's own model" nil)
                  (string :tag "Model" :names model))
   :group 'harness)
@@ -1522,7 +1540,7 @@ CTX names the session."
          (entry (and dir (cl-find-if (lambda (e) (harness-perms--within-p (plist-get e :dir) dir)) entries)))
          (shown (and dir (abbreviate-file-name dir))))
     (cond
-     ((null dir) (harness-tool-error "Give path, the directory you need."))
+     ((null dir) (harness-tool-error "Give path, the directory you need"))
      ;; The user edited the prompt's pattern: say what they granted.
      ((and grant (not (equal (plist-get grant :dir) dir)))
       (let ((glob (harness-perms--glob-p (plist-get grant :dir))))
@@ -1689,7 +1707,7 @@ deny rule also stops it for a path it names inside them."
          (deny (eq (harness-perms--sym (plist-get rule :behavior)) 'deny))
          (pattern (harness-perms--rule-pattern rule (plist-get request :session))))
     (and (or (null tool) (equal tool (plist-get request :tool)))
-         (or (null kind) (eq kind (harness-perms--sym (plist-get request :kind))))
+         (or (null kind) (eq kind (harness-perms--call-kind request)))
          (or (null pattern)
              (let ((paths (if deny (harness-perms--every-path request) (harness-perms--subject-paths request))))
                (and paths
@@ -1787,12 +1805,37 @@ session, and the note says so.  Return RULE."
     (harness-perms--note-recorded session-id (list :scope scope :rule rule) new)
     rule))
 
+(defun harness-perms--settings-read-p (input)
+  "Non-nil when a `session_settings' call with INPUT only reads.
+A read shows a session's settings and changes nothing; a set changes
+harness state.  Anything but an explicit read action is no read: a call
+with no action, or one this module does not know, is left to the chain
+to refuse."
+  (let ((action (and (listp input) (plist-get input :action))))
+    (and (stringp action) (equal (downcase (string-trim action)) "read"))))
+
+(defun harness-perms--call-kind (request)
+  "Return the kind of REQUEST as the mode and the standing rules weigh it.
+A `session_settings' call that only reads is a read: it shows settings
+and changes nothing, so ask mode (and accept-edits) allows it as it
+allows any other read inside the roots, and no judge sees it.  A call
+that changes settings keeps the kind its tool declares (`meta'), so ask
+mode asks the user about it and the judge weighs it -- the same guard
+`session_send' and `session_control' get for another session.  The tool
+is declared `meta' and not `read' on purpose: were this classification
+ever missing, a set would ask rather than pass as a read."
+  (let ((kind (harness-perms--sym (plist-get request :kind))))
+    (if (and (equal (plist-get request :tool) "session_settings")
+             (harness-perms--settings-read-p (plist-get request :input)))
+        'read
+      kind)))
+
 (defun harness-perms--mode-decision (decision request)
   "Return the decision for REQUEST from the mode and the standing rules.
 DECISION is returned unchanged when the mode leaves the question open."
   (let* ((session (plist-get request :session))
          (tool (plist-get request :tool))
-         (kind (harness-perms--sym (plist-get request :kind)))
+         (kind (harness-perms--call-kind request))
          (mode (harness-perms--mode-of session))
          (rule (harness-perms--find-rule request)))
     (cond
@@ -2018,7 +2061,7 @@ one, and quotes the start of TEXT, what the judge replied."
 (defun harness-perms--judge-model (session)
   "Return the model the auto-mode judge uses for SESSION.
 `harness-perms-auto-model' names one, `auto' asks the session's own
-provider for its cheap tier (falling back to the session's model), and
+provider for its simple tier (falling back to the session's model), and
 nil uses the session's model."
   (let* ((session-model (or (plist-get session :model)
                             (harness-perms--config 'harness-model session)))
@@ -2028,7 +2071,7 @@ nil uses the session's model."
     (cond
      (automatic
       (or (and session-model (harness-method-exists-p 'provider/tier-model)
-               (harness-call 'provider/tier-model session-model 'cheap))
+               (harness-call 'provider/tier-model session-model 'simple))
           session-model))
      ((stringp choice) choice)
      (t session-model))))

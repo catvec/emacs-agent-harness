@@ -67,6 +67,7 @@
 ;;;; Inline rendering
 
 (defun harness-ui-markdown--add-face (string face)
+  "Return a copy of STRING with FACE added to the faces of all of it."
   (let ((s (copy-sequence string)))
     (add-face-text-property 0 (length s) face t s)
     s))
@@ -242,6 +243,9 @@ The string may be shared with other renderings: change a copy of it."
     (error code)))
 
 (defun harness-ui-markdown--code-block (code lang)
+  "Render fenced block CODE, in language LANG (a string or nil), as text.
+The code is fontified for LANG where possible and indented, under a
+line naming LANG when it is given."
   (let* ((body (harness-ui-markdown--fontify-code (string-trim-right code) lang))
          (label (if (and lang (not (string-empty-p lang)))
                     (propertize (concat lang "\n") 'face 'harness-md-code-lang)
@@ -256,10 +260,96 @@ The string may be shared with other renderings: change a copy of it."
     (add-text-properties 0 (length s) (list 'wrap-prefix prefix) s)
     s))
 
+(defconst harness-ui-markdown--table-min-column 6
+  "Narrowest a table column gets when a table is fitted to a width.
+Below this cells would wrap into single words.")
+
+(defvar harness-ui-markdown-table-width nil
+  "Columns a Markdown table may take at most, or nil for its natural width.
+A table wider than this is wrapped cell by cell, so the columns stay
+aligned and it fits a window instead of wrapping mid-cell.  A caller
+that knows how much room its window gives binds this around
+`harness-ui-markdown-render'.")
+
+(defvar harness-ui-markdown-hard-breaks nil
+  "Non-nil keeps each line break inside a paragraph, as GitHub comments do.
+Markdown joins the lines of a paragraph with spaces, which suits what a
+model writes; a person typing means a line break as one.  A caller
+rendering what a person typed binds this around
+`harness-ui-markdown-render'.  Only paragraphs change, a quote's
+among them: lists, code blocks and tables render the same either way.")
+
+(defun harness-ui-markdown--cell-words (cell)
+  "Return the words of CELL, a rendered cell, as propertized strings."
+  (let ((words nil) (start 0) (len (length cell)))
+    (while (< start len)
+      (let ((end (or (string-search " " cell start) len)))
+        (when (> end start)
+          (push (substring cell start end) words))
+        (setq start (1+ end))))
+    (nreverse words)))
+
+(defun harness-ui-markdown--break-word (word width)
+  "Return WORD as propertized pieces, none wider than WIDTH columns."
+  (let ((pieces nil) (pos 0) (len (length word)))
+    (while (< pos len)
+      (let ((end pos) (used 0))
+        (while (and (< end len)
+                    (<= (+ used (char-width (aref word end))) width))
+          (setq used (+ used (char-width (aref word end)))
+                end (1+ end)))
+        (when (= end pos)
+          ;; A single character wider than the column is taken whole.
+          (setq end (1+ pos)))
+        (push (substring word pos end) pieces)
+        (setq pos end)))
+    (nreverse pieces)))
+
+(defun harness-ui-markdown--wrap-cell (cell width)
+  "Return CELL, a rendered cell, as lines none wider than WIDTH columns.
+Words too wide for the column are broken; the lines keep CELL's faces."
+  (let ((lines nil) (line "") (line-width 0))
+    (cl-flet ((flush ()
+                (push line lines)
+                (setq line "" line-width 0)))
+      (dolist (word (harness-ui-markdown--cell-words cell))
+        (dolist (piece (if (<= (string-width word) width)
+                           (list word)
+                         (harness-ui-markdown--break-word word width)))
+          (let ((piece-width (string-width piece)))
+            (cond ((= line-width 0)
+                   (setq line piece line-width piece-width))
+                  ((<= (+ line-width 1 piece-width) width)
+                   (setq line (concat line " " piece)
+                         line-width (+ line-width 1 piece-width)))
+                  (t (flush)
+                     (setq line piece line-width piece-width))))))
+      (flush))
+    (nreverse lines)))
+
+(defun harness-ui-markdown--fit-widths (widths room)
+  "Return WIDTHS (a vector) shrunk to sum to at most ROOM.
+The widest column gives way first; none goes below
+`harness-ui-markdown--table-min-column'."
+  (let ((widths (copy-sequence widths))
+        (min harness-ui-markdown--table-min-column))
+    (cl-block nil
+      (while (> (apply #'+ (append widths nil)) room)
+        (let* ((list (append widths nil))
+               (i (cl-position (apply #'max list) list))
+               (roomy (cl-count-if (lambda (w) (> w min)) list)))
+          (when (zerop roomy) (cl-return))
+          (let ((step (max 1 (ceiling (- (apply #'+ list) room) roomy))))
+            (aset widths i (max min (- (aref widths i) step)))))))
+    widths))
+
 (defun harness-ui-markdown--table (lines)
   "Render table LINES (strings with | separators) as an aligned text table.
 Cells are measured as rendered: the markers of inline markup, such as
-the backquotes of `code', take no room."
+the backquotes of `code', take no room.  A table wider than
+`harness-ui-markdown-table-width', when that is non-nil, is wrapped cell
+by cell so it fits a window with its columns still aligned; a column is
+never narrower than `harness-ui-markdown--table-min-column'."
   (let* ((rows (mapcar (lambda (l)
                          (mapcar #'string-trim
                                  (split-string (string-trim (string-trim l) "|" "|") "|")))
@@ -272,17 +362,59 @@ the backquotes of `code', take no room."
     (dolist (r rows)
       (cl-loop for c in r for i from 0
                do (aset widths i (max (aref widths i) (string-width c)))))
+    (when harness-ui-markdown-table-width
+      (setq widths (harness-ui-markdown--fit-widths
+                    widths
+                    (max harness-ui-markdown--table-min-column
+                         (- harness-ui-markdown-table-width
+                            1 (* 3 (1- ncols)))))))
     (let ((out nil) (first (and sep-index t)))
       (dolist (r rows)
-        (let ((cells (cl-loop for i from 0 below ncols
-                              for c = (or (nth i r) "")
-                              collect (concat c (make-string (- (aref widths i) (string-width c)) ?\s)))))
-          (let ((line (concat " " (string-join cells " │ ") "\n")))
-            (when first
-              (add-face-text-property 0 (length line) 'harness-md-table-header t line)
-              (setq first nil))
-            (push line out))))
+        (let* ((cells (cl-loop for i from 0 below ncols
+                               for c = (or (nth i r) "")
+                               collect (harness-ui-markdown--wrap-cell c (max 1 (aref widths i)))))
+               (height (apply #'max 1 (mapcar #'length cells))))
+          (dotimes (line height)
+            (let ((text (concat
+                         " "
+                         (string-join
+                          (cl-loop for i from 0 below ncols
+                                   for piece = (or (nth line (nth i cells)) "")
+                                   collect (concat piece (make-string (max 0 (- (aref widths i) (string-width piece))) ?\s)))
+                          " │ ")
+                         "\n")))
+              (when first
+                (add-face-text-property 0 (length text) 'harness-md-table-header t text))
+              (push text out)))
+          (setq first nil)))
       (propertize (apply #'concat (nreverse out)) 'harness-md-block 'table))))
+
+(defun harness-ui-markdown--rule-p (line)
+  "Non-nil when LINE is a Markdown horizontal rule.
+Three or more of the same \"-\", \"*\" or \"_\", spaces allowed between
+them, up to three leading spaces.  Checked by hand rather than with the
+equivalent regexp, which backtracks its way through a line of a hundred
+thousand characters until the regexp engine gives up with a \"Stack
+overflow in regexp matcher\": a single enormous line, such as a message
+the harness sends itself, would take the whole rendering down."
+  (let ((end (length line))
+        (i 0)
+        (char nil)
+        (count 0)
+        (rule t))
+    ;; Up to three leading spaces; a fourth makes it an indented code line.
+    (while (and (< i end) (eq (aref line i) ?\s) (< i 3))
+      (cl-incf i))
+    (if (and (< i end) (eq (aref line i) ?\s))
+        nil
+      (while (and rule (< i end))
+        (let ((c (aref line i)))
+          (cond ((memq c '(?- ?* ?_))
+                 (setq char (or char c))
+                 (if (eq c char) (cl-incf count) (setq rule nil)))
+                ((not (eq c ?\s)) (setq rule nil))))
+        (cl-incf i))
+      (and rule (>= count 3)))))
 
 (defun harness-ui-markdown-render (text)
   "Render Markdown TEXT into a propertized string."
@@ -296,7 +428,10 @@ the backquotes of `code', take no room."
            ;; match data alone.
            (when para
              (save-match-data
-               (push (concat (harness-ui-markdown-inline (string-join (nreverse para) " ")) "\n") out))
+               (push (concat (harness-ui-markdown-inline
+                              (string-join (nreverse para) (if harness-ui-markdown-hard-breaks "\n" " ")))
+                             "\n")
+                     out))
              (setq para nil)))
          (emit (s) (push s out)))
       (while lines
@@ -318,7 +453,7 @@ the backquotes of `code', take no room."
                                 (3 'harness-md-heading-3) (_ 'harness-md-heading-4))))
               (emit (concat (harness-ui-markdown--add-face (harness-ui-markdown-inline (match-string 2 line)) face) "\n"))))
            ;; Horizontal rule
-           ((string-match-p "\\`[ ]\\{0,3\\}\\([-*_]\\)\\([ ]*\\1\\)\\{2,\\}[ ]*\\'" line)
+           ((harness-ui-markdown--rule-p line)
             (flush-para)
             (emit (propertize (concat (make-string 40 ?\s) "\n") 'face 'harness-md-rule)))
            ;; Table (a line with pipes followed by a separator line)

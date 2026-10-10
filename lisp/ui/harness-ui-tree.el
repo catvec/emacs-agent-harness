@@ -57,6 +57,14 @@
 (defconst harness-ui-tree--expand-limit 6000
   "Characters of node content shown when a row is expanded.")
 
+(defconst harness-ui-tree--node-text-limit 20000
+  "Characters of one string a tree node keeps.
+A row carries its node as a text property, and a node's content, tool
+input or output can be a whole file, a dumped error or a request body;
+keeping all of it would make the buffer -- and the undo list, where a
+text property's value is recorded -- hold megabytes.  What the expanded
+row shows is cut again to `harness-ui-tree--expand-limit'.")
+
 (defface harness-tree-id-face '((t :inherit shadow :family "Monospace"))
   "Short node ids." :group 'harness-ui-tree)
 (defface harness-tree-fork-face '((t :inherit bold))
@@ -70,6 +78,29 @@
 
 (harness-ui-define-icon harness-icon-hint "hint" "ⓘ" "hint" "A harness hint.")
 (harness-ui-define-icon harness-icon-fork "fork" "↱" "fork" "A fork begins.")
+
+(defun harness-ui-tree--clip-value (value)
+  "Return VALUE with strings longer than `harness-ui-tree--node-text-limit' cut.
+Lists and vectors are walked, so a node's content, the input of its tool
+call and a tool result are all bounded."
+  (cond ((stringp value)
+         (if (> (length value) harness-ui-tree--node-text-limit)
+             (concat (substring value 0 harness-ui-tree--node-text-limit) "…")
+           value))
+        ((consp value) (mapcar #'harness-ui-tree--clip-value value))
+        ((vectorp value) (apply #'vector
+                                (mapcar #'harness-ui-tree--clip-value (append value nil))))
+        (t value)))
+
+(defun harness-ui-tree--bounded-data (data)
+  "Return DATA with the text of every node bounded.
+The buffer keeps its nodes in its data and in text properties, so a
+node holding megabytes (`harness-ui-tree--node-text-limit') would be
+copied into both, and into the undo list on every redraw, all the same."
+  (let ((nodes (plist-get data :nodes)))
+    (if nodes
+        (plist-put (copy-sequence data) :nodes (mapcar #'harness-ui-tree--clip-value nodes))
+      data)))
 
 ;;;; Buffer state
 
@@ -386,9 +417,15 @@ triangle when it failed.  That icon has a face of its own."
     (insert (propertize " " 'display `(space :align-to (- right ,(1+ (length time)))))
             (propertize time 'face 'harness-dim-face)
             "\n")
-    (add-text-properties start (point)
+    ;; The row's properties stop before its newline: Emacs highlights
+    ;; every contiguous character that shares a `mouse-face' value, so a
+    ;; row whose newline carried the same value as the next row would
+    ;; join it, and hovering anywhere would light up every node at once.
+    ;; Each row also gets a value of its own, so no two can merge even
+    ;; if the newline ever did carry one.
+    (add-text-properties start (1- (point))
                          (list 'harness-ui-tree-node node 'harness-ui-tree-row row
-                               'mouse-face 'highlight
+                               'mouse-face (list 'highlight)
                                'help-echo "mouse-1: open the session here; c: check out; f: fork; TAB: expand"))
     (when (equal sid harness-ui-tree--session-id)
       (add-face-text-property start (point) 'harness-tree-current-line-face t))
@@ -527,7 +564,7 @@ making each buffer current in turn."
        (lambda (results)
          (when (buffer-live-p buffer)
            (with-current-buffer buffer
-             (setq harness-ui-tree--data (car results)
+             (setq harness-ui-tree--data (harness-ui-tree--bounded-data (car results))
                    harness-ui-tree--family (mapcar (lambda (s) (plist-get s :id))
                                                    (plist-get harness-ui-tree--data :sessions))
                    harness-ui-tree--loading nil)
@@ -537,7 +574,7 @@ making each buffer current in turn."
        (lambda (e)
          (when (buffer-live-p buffer)
            (with-current-buffer buffer
-             (setq harness-ui-tree--loading nil harness-ui-tree--error (harness-error-message e))
+             (setq harness-ui-tree--loading nil harness-ui-tree--error (harness-error-short-message e))
              (harness-ui-tree--render))))))))
 
 (defun harness-ui-tree--refresh-buffer (buffer)
@@ -586,6 +623,11 @@ making each buffer current in turn."
   (setq truncate-lines t
         buffer-read-only t
         cursor-type 'bar)
+  ;; The buffer is generated afresh on every update, and its rows carry
+  ;; whole nodes as text properties: recording that for undo grows by
+  ;; megabytes within a few redraws (and warns when it passes
+  ;; `undo-outer-limit'), and a redraw cannot be undone in any case.
+  (buffer-disable-undo)
   (setq-local harness-ui-session-id nil)
   (add-hook 'window-configuration-change-hook #'harness-ui-tree--on-resize nil t))
 
@@ -707,17 +749,20 @@ the node's session is left as it is, its head included."
                           (message "Forked %s" (substring (plist-get child :id) 0 8))
                           (when harness-ui-open-session-function
                             (funcall open (plist-get child :id))))))
-                     (lambda (e) (message "Fork failed: %s" (harness-error-message e))))))
+                     (lambda (e) (message "Fork failed: %s" (harness-error-short-message e))))))
 
 (defun harness-ui-tree-btw ()
   "Start a BTW side conversation over the session of the node at point.
 Like every BTW it is a new session, listed under that session but
 sharing nothing with it, so the node only says which session: its head
 stays where it is.  It opens blank, over the tree, for a question
-written in its compose box."
+written in its compose box.  Like any BTW it runs on a cheap model
+\(`harness-btw-model'); with a prefix argument it asks which model to
+run this one on."
   (interactive)
   (unless (fboundp 'harness-btw) (user-error "The BTW module is not loaded"))
-  (harness-btw (plist-get (harness-ui-tree-node-at-point) :session)))
+  (harness-btw (plist-get (harness-ui-tree-node-at-point) :session) nil
+               (and current-prefix-arg 'choose)))
 
 (defun harness-ui-tree-toggle ()
   "Expand or collapse the node at point."

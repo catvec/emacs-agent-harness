@@ -300,5 +300,198 @@ oldest first."
           (should (= 1 calls)))
       (delete-process server))))
 
+
+;;;; Retrying transient failures
+
+(defun harness-http-test--request (url &rest args)
+  "Request URL with ARGS; wait for the callback, return (STATUS HEADERS BODY ERROR)."
+  (let ((done nil))
+    (apply #'harness-http-request url
+           :callback (lambda (status headers body err) (setq done (list status headers body err)))
+           args)
+    (harness-test-wait (lambda () done) 20 "the request")
+    done))
+
+(ert-deftest harness-http-retries-a-transient-failure ()
+  "A reset connection is tried again, and the request then answers.
+A POST opts in (`:retry t'): a provider's completion is worth repeating,
+while an ordinary POST is not retried by default (below)."
+  (skip-unless (executable-find "curl"))
+  (let* ((attempts (cons 0 0))
+         (server (harness-test-http-serve
+                  `(("/x" . ,(lambda (n)
+                               (setcar attempts n)
+                               (if (= n 1)
+                                   'reset
+                                 (list 200 '(("Content-Type" . "text/plain")) "hello")))))))
+         (harness-http-retry-delay 0.01) (harness-http-retry-jitter 0))
+    (unwind-protect
+        (pcase-let ((`(,status ,_headers ,body ,err)
+                     (harness-http-test--request (harness-test-http-url server "/x")
+                                                 :method "POST" :body "q" :retry t)))
+          (should-not err)
+          (should (equal 200 status))
+          (should (equal "hello" body))
+          (should (equal 2 (car attempts))))
+      (delete-process server))))
+
+(ert-deftest harness-http-gives-up-after-the-bounded-retries ()
+  "A persistent reset fails once the attempts are used up, with a plain message."
+  (skip-unless (executable-find "curl"))
+  (let* ((attempts (cons 0 0))
+         (server (harness-test-http-serve
+                  `(("/x" . ,(lambda (n) (setcar attempts n) 'reset)))))
+         (harness-http-retry-delay 0.01) (harness-http-retry-jitter 0))
+    (unwind-protect
+        (pcase-let ((`(,_status ,_headers ,_body ,err)
+                     (harness-http-test--request (harness-test-http-url server "/x") :retry 2)))
+          (should (equal 3 (car attempts)))     ; the first attempt and two retries
+          (should (harness-http-transient-error-p err))
+          (should (eq 'transport (plist-get err :kind)))
+          (let ((code (plist-get err :code)))
+            (should (memq code harness-http--transient-curl-exits))
+            ;; The message says what happened, not just the exit status.
+            (should (equal (cdr (assq code harness-http--curl-explanations))
+                           (car (split-string (cadr err) " (curl"))))))
+      (delete-process server))))
+
+(ert-deftest harness-http-does-not-retry-what-it-already-streamed ()
+  "A reset after some body reached the caller is not repeated: that would duplicate it."
+  (skip-unless (executable-find "curl"))
+  (let* ((attempts (cons 0 0))
+         (server (harness-test-http-serve
+                  `(("/x" . ,(lambda (n) (setcar attempts n)
+                               (list 200 '(("Content-Type" . "text/plain")) "abcdefghij"
+                                     :chunks 2 :reset-after 1))))))
+         (chunks nil)
+         (harness-http-retry-delay 0.01) (harness-http-retry-jitter 0))
+    (unwind-protect
+        (pcase-let ((`(,_status ,_headers ,_body ,err)
+                     (harness-http-test--request (harness-test-http-url server "/x") :retry t
+                                                 :on-chunk (lambda (chunk) (push chunk chunks)))))
+          (should (harness-http-transient-error-p err))
+          (should (equal 1 (car attempts)))     ; nothing was tried again
+          (should (equal '("abcde") (nreverse chunks))))
+      (delete-process server))))
+
+(ert-deftest harness-http-no-retry-by-default-for-a-post ()
+  "A POST is not retried unless it asks: the server may have acted on it."
+  (skip-unless (executable-find "curl"))
+  (let* ((attempts (cons 0 0))
+         (server (harness-test-http-serve
+                  `(("/x" . ,(lambda (n) (setcar attempts n) 'reset)))))
+         (harness-http-retry-delay 0.01) (harness-http-retry-jitter 0))
+    (unwind-protect
+        (pcase-let ((`(,_status ,_headers ,_body ,err)
+                     (harness-http-test--request (harness-test-http-url server "/x")
+                                                 :method "POST" :body "q")))
+          (should err)
+          (should (equal 1 (car attempts))))
+      (delete-process server))))
+
+(ert-deftest harness-http-retries-a-retryable-status ()
+  "429 and 5xx are tried again, with no on-chunk to duplicate, and Retry-After is read."
+  (skip-unless (executable-find "curl"))
+  (let* ((attempts (cons 0 0))
+         (server (harness-test-http-serve
+                  `(("/busy" . ,(lambda (n) (setcar attempts n)
+                                  (if (= n 1)
+                                      (list 429 '(("Retry-After" . "0")) "slow down")
+                                    (list 200 '(("Content-Type" . "text/plain")) "at last"))))
+                    ("/gone" 404 (("Content-Type" . "text/plain")) "no"))))
+         (harness-http-retry-delay 0.01) (harness-http-retry-jitter 0))
+    (unwind-protect
+        (progn
+          (pcase-let ((`(,status ,_headers ,body ,err)
+                       (harness-http-test--request (harness-test-http-url server "/busy"))))
+            (should-not err)
+            (should (equal 200 status))
+            (should (equal "at last" body))
+            (should (equal 2 (car attempts))))
+          ;; A 404 is an answer, not a failure to get past.
+          (pcase-let ((`(,status ,_headers ,body ,err)
+                       (harness-http-test--request (harness-test-http-url server "/gone"))))
+            (should-not err)
+            (should (equal 404 status))
+            (should (equal "no" body))))
+      (delete-process server)))
+  ;; The delay a server asked for is read, and only in its seconds form.
+  (should (= 3 (harness-http-retry-after '(("retry-after" . " 3 ")))))
+  (should-not (harness-http-retry-after '(("retry-after" . "Wed, 21 Oct 2015 07:28:00 GMT"))))
+  (should-not (harness-http-retry-after nil))
+  (should (harness-http--retryable-status-p 429))
+  (should (harness-http--retryable-status-p 503))
+  (should-not (harness-http--retryable-status-p 404))
+  (should-not (harness-http--retryable-status-p nil)))
+
+(ert-deftest harness-http-cancelling-while-it-waits-to-retry-stops-it ()
+  "A cancelled request is never tried again, not even from the retry it waited for."
+  (skip-unless (executable-find "curl"))
+  (let* ((attempts (cons 0 0))
+         (server (harness-test-http-serve
+                  `(("/x" . ,(lambda (n) (setcar attempts n) 'reset)))))
+         (harness-http-retry-delay 0.3) (harness-http-retry-jitter 0)
+         (result nil))
+    (unwind-protect
+        (progn
+          (let ((handle (harness-http-request (harness-test-http-url server "/x")
+                                              :retry 3
+                                              :callback (lambda (_s _h _b e) (setq result (list e))))))
+            (harness-test-wait (lambda () (= 1 (car attempts))) 10 "the first attempt")
+            ;; Let curl die and the retry be scheduled, then cancel it.
+            (harness-test-wait (lambda () (harness-http-handle-retry-timer handle)) 5 "the retry")
+            (harness-http-cancel handle)
+            (should (eq 'cancelled (car (car result))))
+            (accept-process-output nil 0.6)     ; well past the retry delay
+            (should (equal 1 (car attempts)))))
+      (delete-process server))))
+
+(ert-deftest harness-http-download-restarts-after-a-cut-transfer ()
+  "A download cut by a reset is started over, and the file is whole."
+  (skip-unless (executable-find "curl"))
+  (let* ((attempts (cons 0 0))
+         (server (harness-test-http-serve
+                  `(("/pic" . ,(lambda (n) (setcar attempts n)
+                                 (if (= n 1)
+                                     'reset
+                                   (list 200 '(("Content-Type" . "image/png")) "PNGBYTES")))))))
+         (file (expand-file-name "x.part" (harness-test-temp-dir)))
+         (harness-http-retry-delay 0.01) (harness-http-retry-jitter 0))
+    (unwind-protect
+        (pcase-let ((`(,_dl ,err ,headers . ,_)
+                     (harness-http-test--download (harness-test-http-url server "/pic") file)))
+          (should-not err)
+          (should (equal 2 (car attempts)))
+          (should (= 1 headers))               ; told once, not once per attempt
+          (should (equal "PNGBYTES"
+                         (with-temp-buffer (insert-file-contents-literally file) (buffer-string)))))
+      (delete-process server))
+    ;; Cut in the middle of the body: the partial file is dropped and the
+    ;; download starts over rather than keeping half a file.
+    (let* ((attempts (cons 0 0))
+           (server (harness-test-http-serve
+                    `(("/pic" . ,(lambda (n) (setcar attempts n)
+                                   (list 200 '(("Content-Type" . "image/png"))
+                                         (if (= n 1) "abcdefghij" "0123456789")
+                                         :chunks 2 :reset-after (and (= n 1) 1))))))))
+      (unwind-protect
+          (pcase-let ((`(,_dl ,err . ,_) (harness-http-test--download (harness-test-http-url server "/pic") file)))
+            (should-not err)
+            (should (equal 2 (car attempts)))
+            (should (equal "0123456789"
+                           (with-temp-buffer (insert-file-contents-literally file) (buffer-string)))))
+        (delete-process server)))
+    ;; With no retries asked for, a cut download fails and leaves no file.
+    (let* ((attempts (cons 0 0))
+           (server (harness-test-http-serve `(("/pic" . ,(lambda (n) (setcar attempts n) 'reset)))))
+           (harness-http-retry-delay 0.01) (harness-http-retry-jitter 0))
+      (unwind-protect
+          (pcase-let ((`(,_dl ,err . ,_) (harness-http-test--download (harness-test-http-url server "/pic") file
+                                                                      :retry 0)))
+            (should (stringp err))
+            (should (equal 1 (car attempts)))
+            (should-not (file-exists-p file)))
+        (delete-process server)))))
+
 (provide 'harness-http-test)
 ;;; harness-http-test.el ends here

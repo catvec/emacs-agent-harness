@@ -85,15 +85,38 @@
 (defcustom harness-btw-thinking "low"
   "Thinking level BTW side conversations start at, or nil for the usual one.
 A BTW is for quick questions on the side, so by default it thinks
-little.  It starts at this level only when its model offers it.
-Otherwise, and always with nil, it starts at the level of the session
-it is opened over; a BTW about a task board starts at
+little.  A model that lacks this level gets the nearest one it offers
+below it, or its weakest when it has none below: DeepSeek, which has
+low, high and max, thinks at low for medium.  So a BTW thinks no harder
+than its model has to, on the session's own model as on a cheaper one
+\(`harness-btw-model'), whatever level the session thinks at.  With nil,
+and with a model that lists no levels, it starts at the level of the
+session it is opened over; a BTW about a task board starts at
 `harness-thinking'.  The level can be changed in the BTW like in any
 session."
   :type '(choice (const :tag "Same as the session" nil) (const :tag "Low" "low")
                  (const :tag "Medium" "medium") (const :tag "High" "high")
                  (const :tag "Extra high" "xhigh") (const :tag "Max" "max"))
   :safe (lambda (v) (or (null v) (member v '("low" "medium" "high" "xhigh" "max"))))
+  :group 'harness)
+
+(defcustom harness-btw-model 'auto
+  "Model BTW side conversations run on, as PROVIDER:NAME, or `auto'.
+A BTW is for quick questions on the side, so by default (`auto') it
+runs on the simple tier of the provider of the model it would
+otherwise use (see `harness-provider-tier-model'): the model of the
+session it is opened over, or `harness-model' as configured for a BTW
+about a task board.  It keeps that model when the provider names no
+simple one.  A PROVIDER:NAME forces that model, and nil keeps the
+model of the session.  How hard it thinks is `harness-btw-thinking',
+a setting of its own.  Either can be changed in the BTW like in any
+session, and one BTW can start on another model: a prefix argument to
+`harness-btw' asks for it.  A policy that fixes `harness-model' fixes
+a BTW's model too, and this setting then changes nothing."
+  :type '(choice (const :tag "The session provider's cheap model" auto)
+                 (const :tag "The session's own model" nil)
+                 (string :tag "Model" :names model))
+  :safe (lambda (v) (or (null v) (eq v 'auto) (stringp v)))
   :group 'harness)
 
 (defcustom harness-allowed-directories nil
@@ -108,14 +131,14 @@ directories."
 (defcustom harness-budget nil
   "One budget for all sessions together, as (:amount USD :hard BOOL), or nil.
 It counts everything the harness recorded, every session of every
-project, and applies to every session: a hard one stops the next turn
-of each once it is spent, a soft one only warns.  It has a global
-value only.  Budgets for one project, one session or a calendar period
-are made in the usage dashboard (`harness-usage')."
+project, and applies to every session: a hard one stops the turn of each
+once it is spent, mid-turn included, a soft one only warns.  It has a
+global value only.  Budgets for one project, one session or a calendar
+period are made in the usage dashboard (`harness-usage')."
   :type '(choice (const :tag "No budget" nil)
                  (plist :tag "Budget" :key-type symbol :value-type sexp
                         :options ((:amount (number :tag "Amount (USD)"))
-                                  (:hard (boolean :tag "Hard (stop the next turn once spent)")))))
+                                  (:hard (boolean :tag "Hard (stop the turn once spent)")))))
   :safe (lambda (v) (or (null v) (and (listp v) (numberp (plist-get v :amount)))))
   :group 'harness)
 
@@ -134,24 +157,39 @@ A non-interactive session never waits for the user: the auto-mode
 judge decides what would ask them for permission, whatever the
 permission mode, and after a denial the agent is told to find another
 way.  Directories are still granted by the user only.  From then on
-each session has its own switch, which its header line shows and
-`harness-toggle-non-interactive' flips; changing this setting leaves
-the sessions that exist as they are.  Task sessions follow it too,
+each session has its own switch, which `harness-toggle-non-interactive'
+flips and its header line shows while it is on; changing this setting
+leaves the sessions that exist as they are.  Task sessions follow it too,
 unless `harness-tasks-non-interactive' is on: then they start
 non-interactive anyway."
   :type 'boolean :safe #'booleanp :group 'harness)
 
 (defconst harness-config-keys
   '(harness-model harness-permission-mode harness-thinking harness-btw-thinking
-    harness-allowed-directories harness-sandbox-policy harness-non-interactive)
-  "Settings that take part in layering.")
+    harness-btw-model
+    harness-allowed-directories harness-sandbox-policy harness-non-interactive
+    harness-supervisor harness-supervisor-tasks)
+  "Settings that take part in layering.
+A module defines some of them, `harness-supervisor' the supervisor
+plugin: until it is loaded the key takes part in nothing, and every
+reader of the layers skips it (see `harness-config--layered-keys').")
 
 (defconst harness-config-sections
   '((sessions
      :title "New sessions"
      :doc "What a new session starts with.  A project can override these in its .dir-locals.el."
-     :keys (harness-model harness-thinking harness-btw-thinking harness-permission-mode
-            harness-non-interactive))
+     :keys (harness-model harness-thinking harness-btw-thinking harness-btw-model
+            harness-permission-mode harness-non-interactive harness-supervisor))
+    (supervisor
+     :title "Supervisor mode"
+     :doc "Top-level sessions plan and delegate: the session's model investigates and writes a plan, and worker sub-agents on cheaper models carry it out. The supervisor cannot change files itself."
+     :keys (harness-supervisor harness-supervisor-tasks harness-supervisor-judge-model
+            harness-supervisor-tiers harness-supervisor-step-budget))
+    (tiers
+     :title "Model tiers"
+     :doc "Which model of each provider does which work, and at what thinking level.  Simple runs the small jobs the harness does on its own (the auto-mode judge, naming, summaries) and the simple steps of a plan; medium the everyday steps; hard is what a supervisor plans on, and what a step its worker was not up to is retried on.  Frontier is the very top model: only you pick it, the harness never does."
+     :keys (harness-provider-claude-tiers harness-deepseek-tiers harness-bedrock-tiers
+            harness-provider-copilot-tiers))
     (spending
      :title "Spending"
      :doc "What all sessions together may spend.  Budgets for one project, one session or a calendar period are made in the usage dashboard."
@@ -160,6 +198,10 @@ non-interactive anyway."
      :title "Compaction"
      :doc "What stands in for a conversation that grew too long, and which model writes a brief summary of one.  Compacting by hand offers every kind, with what each costs."
      :keys (harness-compaction-kind harness-compaction-brief-model))
+    (cowboy
+     :title "Cold cache"
+     :doc "What a message to a session whose prompt cache went cold does first.  A provider caches a conversation for a while after each request; a message after that sends all of it again, uncached.  The session asks, with what each choice costs, unless asking is off or it never waits for you: then the default goes first.  Answering \"always\" with a choice makes it the default and stops the asking."
+     :keys (harness-cowboy-ask harness-cowboy-default harness-cowboy-min-context))
     (safety
      :title "Files and safety"
      :doc "What sessions may reach, and what may run without asking you."
@@ -188,10 +230,13 @@ non-interactive anyway."
 Each entry is (NAME :title TITLE :doc DOC :keys OPTIONS).
 `config/describe' lists these options first, in this order, each with
 its section; every other option it lists is an advanced one.  An option
-no loaded module defines is left out, and so is a section left empty.")
+no loaded module defines is left out, and so is a section left empty.
+An option two sections name, such as `harness-supervisor', is listed
+once, in the first.")
 
 (defconst harness-config-hidden-options
-  '(harness-process harness-module-directories harness-enabled-modules harness-disabled-modules
+  '(harness-process harness-module-directories harness-extra-module-directories
+    harness-enabled-modules harness-disabled-modules
     harness-state-directory harness-server-emacs harness-server-forward-variables
     harness-server-init-file harness-corporate-mode)
   "Harness options `config/describe' leaves out, besides the `harness-acp-' ones.
@@ -271,18 +316,32 @@ the harness modules and core, not those of the UI (its own groups)."
           (cl-pushnew sym out))))
     (sort out (lambda (a b) (string< (symbol-name a) (symbol-name b))))))
 
+(defun harness-config--layered-keys ()
+  "Return the keys of `harness-config-keys' that some loaded module defines.
+A key whose module is not loaded yet has no value to read, so it takes
+part in no layer and no description until the module is."
+  (cl-remove-if-not #'boundp harness-config-keys))
+
+(defun harness-config--layered-p (key)
+  "Non-nil when KEY is a layered setting that a loaded module defines."
+  (and (memq key harness-config-keys) (boundp key) t))
+
 (defun harness-config--describable-p (key)
   "Non-nil when `config/describe' lists option KEY."
-  (or (memq key harness-config-keys) (harness-config--listed-p key)))
+  (or (harness-config--layered-p key) (harness-config--listed-p key)))
 
 (defun harness-config--placed ()
   "Return ((KEY . SECTION) ...) for the options `harness-config-sections' shows.
 In the order of the sections, then of their keys, without the options
-that no loaded module defines."
-  (cl-loop for (section . props) in harness-config-sections
-           append (cl-loop for key in (plist-get props :keys)
-                           when (and (boundp key) (harness-config--describable-p key))
-                           collect (cons key section))))
+that no loaded module defines.  An option that two sections name is
+placed in the first only, so that it is described once."
+  (let (placed)
+    (cl-loop for (section . props) in harness-config-sections
+             do (dolist (key (plist-get props :keys))
+                  (when (and (boundp key) (harness-config--describable-p key)
+                             (not (assq key placed)))
+                    (push (cons key section) placed))))
+    (nreverse placed)))
 
 (defun harness-config--key (key)
   "Return the option KEY names, a symbol or its name; signal for anything else.
@@ -292,7 +351,7 @@ init file only."
                    ((stringp key) (intern-soft key)))))
     (when (and sym (memq sym harness-config-hidden-options))
       (error "%s is set in the init file only" sym))
-    (unless (and sym (or (memq sym harness-config-keys) (harness-config--listed-p sym)))
+    (unless (and sym (harness-config--describable-p sym))
       (error "Unknown config key %s" key))
     sym))
 
@@ -457,19 +516,21 @@ Each V is a plist of KEY VALUE for the config keys set at that layer;
 global always lists every key.  The policy layer, which wins over the
 others, lists the keys the policy sets (see harness-policy.el); the
 project and directory layers list what their files say, even where the
-policy overrides it."
+policy overrides it.  A key that no loaded module defines (see
+`harness-config--layered-keys') is in none of them."
   (let* ((cwd (file-name-as-directory (expand-file-name cwd)))
          (root (harness-config--root cwd))
-         (policy (cl-loop for k in harness-config-keys
+         (keys (harness-config--layered-keys))
+         (policy (cl-loop for k in keys
                           for v = (harness-policy-entry k)
                           when v append (list k (cdr v))))
-         (global (cl-loop for k in harness-config-keys
+         (global (cl-loop for k in keys
                           append (list k (symbol-value k))))
-         (project (cl-loop for k in harness-config-keys
+         (project (cl-loop for k in keys
                            for v = (harness-config--layer-value root k)
                            when v append (list k (cdr v))))
          (directory (and (not (string= cwd root))
-                         (cl-loop for k in harness-config-keys
+                         (cl-loop for k in keys
                                   for v = (harness-config--layer-value cwd k)
                                   when v append (list k (cdr v))))))
     (list (cons 'policy policy) (cons 'global global) (cons 'project project)
@@ -594,7 +655,7 @@ does not survive printing (a function object, say)."
                        (append (harness-config--describe-key
                                 key layered (and layered project) (and layered directory))
                                (list :section (and section (symbol-name section)))))))
-         (advanced (cl-loop for k in (append harness-config-keys (harness-config--global-options))
+         (advanced (cl-loop for k in (append (harness-config--layered-keys) (harness-config--global-options))
                             unless (assq k placed) collect k))
          (settings (append (mapcar (lambda (cell) (funcall describe (car cell) (cdr cell))) placed)
                            (mapcar (lambda (k) (funcall describe k nil)) advanced))))

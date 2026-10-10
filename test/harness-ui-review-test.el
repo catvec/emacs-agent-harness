@@ -42,6 +42,9 @@
 (defvar harness-ui-popout--max-height)
 (defvar harness-ui-report-max-height)
 (defvar harness-ui-report--reports)
+(defvar harness-ui-image-loads)
+(declare-function harness-ui-image-load-flush "harness-ui")
+(declare-function harness-ui-popout--render "harness-ui-popout")
 (declare-function harness-ui-popout--header "harness-ui-popout")
 (declare-function harness-ui-popout-pixel-width "harness-ui-popout")
 (declare-function harness-ui-report--placeholder "harness-ui-report")
@@ -486,7 +489,8 @@ a reader of a long report keeps their place."
   "The session's drawing of a report is the popout's, expanded: a call's
 whole output where the popout caps it.  A button sits after its
 indentation with nothing after it, and each piece of evidence starts a
-line of its own."
+line of its own.  A call that started a sub-agent names it in a session
+line, and its text opens that session, like the chat's call block."
   (harness-test-with-temp-state
     (harness-test-reset-bus)
     (let ((harness-acp--server-enabled nil))
@@ -501,7 +505,8 @@ line of its own."
                                                      (list :kind "tool-call" :id "n-1" :call-id "c-report"
                                                            :tool "bash" :title "bash: make test"
                                                            :input "{\"command\":\"make test\"}"
-                                                           :output output)))))
+                                                           :output output
+                                                           :child-id "kid12345")))))
            (full (harness-ui-report-string task))
            (capped (with-temp-buffer (harness-ui-report--insert task) (buffer-string))))
       (should (string-search "end of the output" full))
@@ -513,12 +518,46 @@ line of its own."
         (should (string-match-p "^a note$" text))
         (should (string-match-p "^(fix)$" text))
         (should (string-match-p "^  the fix$" text))
+        (should (string-match-p "^  session: kid12345$" text))
         (should (string-match-p "^  \\[Open in the session\\]$" text))
         ;; A blank line between pieces of evidence, a caption with its own.
         (should (string-match-p "^a note\n\n" text))
         (should (string-match-p "^(fix)\n  the fix\n\n  \\[tool call\\]" text)))
       ;; None after the last: what follows the report keeps its own spacing.
       (should (string-suffix-p "  [Open in the session]\n" full))
+      ;; The session line opens the sub-agent, and so does the call's text.
+      (with-temp-buffer
+        (harness-ui-report--insert task)
+        (let ((opened nil))
+          (goto-char (point-min))
+          (should (search-forward "kid12345" nil t))
+          (cl-letf (((symbol-function 'harness-ui-display-session)
+                     (lambda (id &rest _) (setq opened id))))
+            (should (get-text-property (match-beginning 0) 'button))
+            (push-button (match-beginning 0))
+            (should (equal "kid12345" opened))
+            (setq opened nil)
+            (goto-char (point-min))
+            (search-forward "bash: make test")
+            (call-interactively (lookup-key (get-text-property (match-beginning 0) 'keymap)
+                                            (kbd "RET")))
+            (should (equal "kid12345" opened))
+            (setq opened nil)
+            (call-interactively (lookup-key (get-text-property (match-beginning 0) 'keymap)
+                                            [mouse-1]))
+            (should (equal "kid12345" opened)))))
+      ;; A call that started none names no session and takes no keys.
+      (let* ((plain (list :kind "tool-call" :id "n-2" :call-id "c-plain"
+                          :tool "bash" :title "bash: make test"
+                          :input "{\"command\":\"make test\"}" :output "ok\n"))
+             (task2 (list :id "t-plain" :session "s-report"
+                          :report (list :summary "Done" :at 1.0 :evidence (list plain)))))
+        (with-temp-buffer
+          (harness-ui-report--insert task2)
+          (goto-char (point-min))
+          (should (search-forward "bash: make test" nil t))
+          (should-not (get-text-property (match-beginning 0) 'keymap))
+          (should-not (string-search "session:" (buffer-string)))))
       ;; No report, nothing to draw.
       (should-not (harness-ui-report-string (list :id "t-none"))))))
 
@@ -604,7 +643,8 @@ report opens anew."
   "An image of a report is as wide as the popout and much of the frame
 high; RET on it shows it larger in a popout of its own, and q goes back.
 It drags its file into other applications (the popout's image does too:
-see harness-ui-drag-test.el)."
+see harness-ui-drag-test.el).  The popout opens before the image is
+drawn: a line where it goes says it is loading."
   (harness-ui-review-test-with
     (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
               ((symbol-function 'harness-ui-drag-available-p) (lambda () t)))
@@ -614,6 +654,15 @@ see harness-ui-drag-test.el)."
         ;; The report grows taller than other popouts, for its images.
         (should (= harness-ui-report-max-height (buffer-local-value 'harness-ui-popout--max-height popout)))
         (with-current-buffer popout
+          ;; Decoding an image is what would hold the popout back: it opens
+          ;; first, saying where the image goes that it is loading.
+          (should (string-match-p "shot.svg.*loading…" (buffer-string)))
+          (should (buffer-local-value 'harness-ui-image-loads popout))
+          (harness-test-wait (lambda ()
+                               (with-current-buffer popout
+                                 (and (null harness-ui-image-loads)
+                                      (not (string-match-p "loading…" (buffer-string))))))
+                             5 "the report's image to be drawn")
           (goto-char (point-min))
           (let ((match (text-property-search-forward 'display nil
                                                      (lambda (_ value) (eq 'image (car-safe value))))))
@@ -641,6 +690,33 @@ see harness-ui-drag-test.el)."
             (execute-kbd-macro (kbd "q")))
           (should-not (buffer-live-p viewer))
           (should (eq popout (window-buffer window))))))))
+
+(ert-deftest harness-ui-review-report-image-load-dropped-by-a-redraw ()
+  "A redraw drops the images the draw before waited on.
+They are not drawn over the text the redraw wrote: the fresh loading
+lines are the ones that draw, each where its image goes."
+  (harness-ui-review-test-with
+    (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))
+      (let ((popout (harness-ui-review-test--report board id))
+            (file (expand-file-name "shot.svg" dir)))
+        (with-current-buffer popout
+          (should (buffer-local-value 'harness-ui-image-loads popout))
+          ;; Drawn again before the image came, as g does.
+          (harness-ui-popout--render)
+          (harness-ui-image-load-flush)
+          (should-not (buffer-local-value 'harness-ui-image-loads popout))
+          (should-not (string-match-p "loading…" (buffer-string)))
+          ;; One image, where the report draws the evidence: the marker of
+          ;; the dropped draw sat at the start of the buffer.
+          (goto-char (point-min))
+          (let ((match (text-property-search-forward 'display nil
+                                                     (lambda (_ value) (eq 'image (car-safe value))))))
+            (should match)
+            (should (< (save-excursion (goto-char (point-min)) (search-forward "Handed in") (point))
+                       (prop-match-beginning match)))
+            (should (equal file (plist-get (cdr (get-text-property (prop-match-beginning match) 'display)) :file)))
+            (should-not (text-property-search-forward 'display nil
+                                                      (lambda (_ value) (eq 'image (car-safe value)))))))))))
 
 (ert-deftest harness-ui-review-verify-closes-the-report ()
   "[Verify] in the session's banner closes the report its [Review] popped out.

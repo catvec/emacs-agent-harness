@@ -11,6 +11,10 @@
 ;; Nothing here touches sessions; the session module gives a session
 ;; created with `:worktree PATH' that path as its cwd, and the merge
 ;; module merges a worktree's branch back into its parent's cwd.
+;; Whatever else runs from a worktree lets go of it in the
+;; `worktree/before-remove' filter, which `worktree/remove' runs before
+;; git deletes the directory: the Emacs that `open_harness' started
+;; there, say (harness-tools-dev.el).
 ;;
 ;; Locks.  Every worktree the harness creates is locked (`git worktree
 ;; add --lock'), its lock reason starting with
@@ -349,17 +353,25 @@ refuse, it stays unlocked as they left it."
 A lock the harness made is lifted first, and put back should git still
 refuse because the worktree has local changes.  With FORCE the worktree
 goes even with local changes or a lock of someone else (`git worktree
-remove -f -f').  Return a promise of PATH.  Emits `worktree/removed'."
+remove -f -f').  Return a promise of PATH.  Emits `worktree/removed'.
+
+Before git runs, the asynchronous filter `worktree/before-remove' runs
+from nil with ROOT and PATH (see `harness-run-filter-async'): it is
+for what must let go of the directory first, such as an Emacs running
+the harness from it (harness-tools-dev.el)."
   (let ((path (file-name-as-directory (expand-file-name path))))
     (harness-then
-     (if force
-         (harness-worktree--on root "remove" path "-f" "-f")
-       (harness-then
-        (harness-worktree--find root path)
-        (lambda (wt)
-          (if (harness-worktree-harness-lock-p wt)
-              (harness-worktree--remove-unlocking root path wt)
-            (harness-worktree--on root "remove" path)))))
+     (harness-then
+      (harness-run-filter-async 'worktree/before-remove nil root path)
+      (lambda (_)
+        (if force
+            (harness-worktree--on root "remove" path "-f" "-f")
+          (harness-then
+           (harness-worktree--find root path)
+           (lambda (wt)
+             (if (harness-worktree-harness-lock-p wt)
+                 (harness-worktree--remove-unlocking root path wt)
+               (harness-worktree--on root "remove" path)))))))
      (lambda (_)
        (harness-emit 'worktree/removed root path)
        path))))

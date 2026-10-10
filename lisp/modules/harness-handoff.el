@@ -21,9 +21,10 @@
 ;;   (`compaction/compact'); `session/messages' turns the compaction
 ;;   node into the user message that opens the new conversation.
 ;;   `compact-new' has the *new* model write the summary instead, from
-;;   only the first and last messages of the session: the old provider
-;;   may not be able to answer at all (its plan ran out, it is down),
-;;   and a bounded context keeps the job cheap.  `transcript' writes the
+;;   the conversation's narrative -- every user and assistant message,
+;;   each tool call and result in a line --: the old provider may not be
+;;   able to answer at all (its plan ran out, it is down), and a bounded
+;;   context keeps the job cheap.  `transcript' writes the
 ;;   whole transcript (`session/write-transcript') to a file in the
 ;;   session's directory, which its tools may read and the new
 ;;   provider's cache holds as it reads, and leaves a user message
@@ -258,23 +259,38 @@ asks the model to re-investigate rather than trust it."
                (format "it is a summary %s wrote just before the handoff, not the conversation itself"
                        (harness-handoff--model-label (plist-get plan :from))))
               ('compact-new
-               (format (concat "it is a summary %s wrote from only the first and the most recent messages,"
-                               " so most of the middle of the conversation is not in it")
+               (format (concat "it is a summary %s wrote from the conversation's narrative, each tool call and"
+                               " result named in a line rather than in full, so what tools read and wrote is not in it")
                        (harness-handoff--model-label (plist-get plan :to))))
               (_ "the whole conversation reached you as text, without the other provider's own state, tool-call structure or thinking")))))
 
-(defun harness-handoff--note (plan file lines)
+(declare-function harness-compaction-history-p "harness-compaction" (session-id))
+(declare-function harness-compaction--history-note "harness-compaction" ())
+
+(defun harness-handoff--history-note (session-id)
+  "Return the line saying SESSION-ID's conversation stays searchable, or nil.
+That is the line every compaction ends with, when the session's model
+has the session_history tool (see harness-compaction.el)."
+  (and (fboundp 'harness-compaction-history-p)
+       (harness-compaction-history-p session-id)
+       (harness-compaction--history-note)))
+
+(defun harness-handoff--note (plan file lines &optional history)
   "Return the user node pointing the new model at transcript FILE of LINES lines.
 PLAN is the handoff.  The model is told the file's name on the
-session's host; the node's `:handoff' keeps FILE as this Emacs opens it."
+session's host; the node's `:handoff' keeps FILE as this Emacs opens it.
+HISTORY, when non-nil, is a line to end the note with: the one saying
+the conversation can be searched with the session_history tool."
   (list :kind 'user
-        :content (format (concat "This conversation was handed over to you from %s, so you start without any of it."
-                                 " Before you answer, read %s: it is the whole conversation so far, oldest first"
-                                 " (%d lines; read all of it, in parts if it is long).  Then carry on where it left off."
-                                 "\n\n%s")
-                         (harness-handoff--model-label (plist-get plan :from))
-                         (if (file-remote-p file) (file-local-name file) file)
-                         lines (harness-handoff--caveat plan 'transcript))
+        :content (concat
+                  (format (concat "This conversation was handed over to you from %s, so you start without any of it."
+                                  " Before you answer, read %s: it is the whole conversation so far, oldest first"
+                                  " (%d lines; read all of it, in parts if it is long).  Then carry on where it left off."
+                                  "\n\n%s")
+                          (harness-handoff--model-label (plist-get plan :from))
+                          (if (file-remote-p file) (file-local-name file) file)
+                          lines (harness-handoff--caveat plan 'transcript))
+                  (if history (concat "\n\n" history) ""))
         :meta (list :from (harness-sender-system harness-handoff--sender)
                     :handoff (list :mode "transcript" :file file
                                    :from (plist-get plan :from) :to (plist-get plan :to)))))
@@ -292,7 +308,8 @@ Return (:mode transcript :file FILE :node ID)."
                                                      (format-time-string "%Y-%m-%d %H:%M %Z")))))
          (file (plist-get written :file))
          (node (harness-call 'session/append session-id
-                             (harness-handoff--note plan file (plist-get written :lines)))))
+                             (harness-handoff--note plan file (plist-get written :lines)
+                                                    (harness-handoff--history-note session-id)))))
     (harness-log 'info "handoff: %s handed over to %s in %s" session-id (plist-get plan :to) file)
     (list :mode 'transcript :file (plist-get (harness-node-handoff node) :file) :node (plist-get node :id))))
 
@@ -305,7 +322,7 @@ resolves with `:error'."
       (let ((result (harness-handoff--write-transcript session-id plan)))
         (harness-resolved (if why (append result (list :fallback why)) result)))
     (error
-     (let ((msg (harness-error-message err)))
+     (let ((msg (harness-error-short-message err)))
        (harness-log 'warn "handoff: %s: the transcript could not be handed over: %s" session-id msg)
        (ignore-errors
          (harness-call 'session/hint session-id
@@ -317,9 +334,10 @@ resolves with `:error'."
   "Hand SESSION-ID's conversation over as a summary made on SUMMARIZER.
 CONTEXT is what SUMMARIZER is given (see `compaction/compact'):
 `full' for the old model, which has the conversation -- a `summary' --
-or `sample' for the new one, which does not and gets only the first and
-last messages -- a `brief' summary, as ordinary compaction makes on a
-cheap model.  The summary ends in the handoff's caveat and its node
+or `sample' for the new one, which does not and gets the conversation's
+narrative, each tool call and result in a line -- a `brief' summary, as
+ordinary compaction makes on a cheap model.  The summary ends in the
+handoff's caveat and its node
 records the handoff (`:handoff').  PLAN is the handoff.  When no summary
 can be made, the transcript goes over instead.  Return a promise of the
 result."
@@ -337,7 +355,7 @@ result."
      (list :mode (plist-get plan :mode) :summarizer summarizer :context context
            :node (plist-get node :id)))
    (lambda (err)
-     (let ((msg (harness-error-message err)))
+     (let ((msg (harness-error-short-message err)))
        (ignore-errors
          (harness-call 'session/hint session-id
                        (format "No summary from %s (%s): handing the whole transcript over instead"
@@ -353,7 +371,7 @@ The promise never rejects: a failure is reported to the session."
         ('compact-new (harness-handoff--compact session-id plan (plist-get plan :to) 'sample))
         ('transcript (harness-handoff--transcript session-id plan))
         (_ (harness-resolved (list :mode 'none))))
-    (error (harness-resolved (list :mode 'none :error (harness-error-message err))))))
+    (error (harness-resolved (list :mode 'none :error (harness-error-short-message err))))))
 
 (defun harness-handoff--run (session-id)
   "Carry out the handoff waiting for SESSION-ID; return a promise of its result.
@@ -412,9 +430,10 @@ Return a promise of the result; see `handoff/switch'."
 (harness-defmethod handoff/switch (session-id model &optional mode)
   "Switch SESSION-ID to MODEL, handing its conversation over as MODE says.
 MODE is `compact' (the current model summarises first), `compact-new'
-\(the new model summarises, from only the first and last messages of the
-session: use it when the current provider cannot answer, its plan having
-run out, or to keep the job small), `transcript' (a file in the
+\(the new model summarises, from the conversation's narrative -- every
+user and assistant message, each tool call and result in a line: use it
+when the current provider cannot answer, its plan having run out, or to
+keep the job small), `transcript' (a file in the
 session's directory, and a note telling the new model to read it) or
 `none' (nil: only switch); see the Commentary.  A switch `handoff/check'
 does not find lossy is a plain switch whatever MODE says.  The model
@@ -438,7 +457,7 @@ running on their own.  Return the ids switched, newest first."
       (unless (equal (plist-get s :model) model)
         (let* ((id (plist-get s :id))
                (fail (lambda (err)
-                       (harness-log 'warn "handoff: switching %s failed: %s" id (harness-error-message err))
+                       (harness-log 'warn "handoff: switching %s failed: %s" id (harness-error-short-message err))
                        nil)))
           (condition-case err
               (harness-catch (harness-handoff--switch s model mode) fail)

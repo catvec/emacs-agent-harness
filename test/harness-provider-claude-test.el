@@ -162,9 +162,21 @@ tool is answered with \"echo: TEXT\"."
       (should (plist-get caps :cost-reported)))
     ;; The provider names its tiers, so the judge does not sort prices.
     (should (equal "claude:claude-haiku-4-5-20251001"
-                   (harness-call 'provider/tier-model "claude:claude-opus-5-5" 'cheap)))
+                   (harness-call 'provider/tier-model "claude:claude-opus-5-5" 'simple)))
+    (should (equal "claude:claude-sonnet-5"
+                   (harness-call 'provider/tier-model "claude:claude-opus-5-5" 'medium)))
     (should (equal "claude:claude-opus-5-5"
-                   (harness-call 'provider/tier-model "claude:claude-haiku-4-5-20251001" 'frontier)))))
+                   (harness-call 'provider/tier-model "claude:claude-haiku-4-5-20251001" 'hard)))
+    (should (equal "claude:claude-fable-5-1"
+                   (harness-call 'provider/tier-model "claude:claude-haiku-4-5-20251001" 'frontier)))
+    ;; Each model is labelled with its own tier: Opus 5.5 is hard, the
+    ;; strongest the harness picks on its own, and only Fable is frontier.
+    (should (equal '(simple medium hard frontier)
+                   (mapcar (lambda (id) (harness-call 'provider/model-tier id))
+                           '("claude:claude-haiku-4-5-20251001" "claude:claude-sonnet-5"
+                             "claude:claude-opus-5-5" "claude:claude-fable-5-1"))))
+    ;; No tier names a thinking level: the session's own decides.
+    (should-not (harness-call 'provider/tier-thinking "claude:claude-opus-5-5" 'hard))))
 
 (ert-deftest harness-provider-claude-model-known-without-a-listing ()
   "Every Claude model has its window from the moment the provider is defined.
@@ -243,10 +255,15 @@ too, with an estimated window; the models known before stay."
     ;; What was known before stays.
     (should (funcall get "claude-fable-5-1"))
     (should (funcall get "claude-haiku-4-5-20251001"))
-    ;; The tiers name the CLI's aliases, the newest of each family.
-    (should (equal "claude:haiku" (harness-call 'provider/tier-model "claude" :cheap)))
-    (should (equal "claude:sonnet" (harness-call 'provider/tier-model "claude" :balanced)))
-    (should (equal "claude:opus" (harness-call 'provider/tier-model "claude" :frontier)))
+    ;; The tiers name the CLI's aliases, the newest of each family, and the
+    ;; frontier model the CLI does not alias.
+    (should (equal "claude:haiku" (harness-call 'provider/tier-model "claude" :simple)))
+    (should (equal "claude:sonnet" (harness-call 'provider/tier-model "claude" :medium)))
+    (should (equal "claude:opus" (harness-call 'provider/tier-model "claude" :hard)))
+    (should (equal "claude:claude-fable-5-1" (harness-call 'provider/tier-model "claude" :frontier)))
+    ;; The default alias stands for Opus 5.5, so it is hard too.
+    (should (eq 'hard (harness-call 'provider/model-tier "claude:default")))
+    (should (eq 'frontier (harness-call 'provider/model-tier "claude:claude-fable-5-1")))
     ;; The listing is kept, for the next start.
     (should (file-exists-p (expand-file-name "claude-models.json" harness-state-directory)))
     (setq harness-provider-claude--listing 'unread)
@@ -1385,11 +1402,11 @@ returning the user messages every CLI got so far."
       (should (equal "claude" (plist-get (plist-get (harness-call 'session/get sid) :provider-state) :provider))))))
 
 (ert-deftest harness-provider-claude-handoff-summary-by-the-new-model ()
-  "Compact-new: the new CLI session writes the summary, from a bounded context.
+  "Compact-new: the new CLI session writes the summary, from the narrative.
 The old provider cannot answer in the incident this guards (its plan ran
-out), so the new model makes the summary itself: the first and last
-messages of the session reach it inside one message, since a hosted loop
-with no state of the session is sent no ordinary transcript."
+out), so the new model makes the summary itself: the conversation's
+narrative reaches it inside one message, since a hosted loop with no
+state of the session is sent no ordinary transcript."
   (harness-provider-claude-test-with-handoff
     (let* ((sid (harness-provider-claude-test--demo-session cwd))
            (claude "claude:claude-fable-5-1")
@@ -1476,7 +1493,7 @@ which has the whole conversation, and the session's own is let go."
 
 (ert-deftest harness-provider-claude-brief-compaction-on-the-cheap-model ()
   "A brief compaction of a Claude Code session is the cheap model's, beside the session.
-Haiku gets the first and last messages as text in a CLI session of its
+Haiku gets the conversation's narrative as text in a CLI session of its
 own, the session's own process untouched until the next turn, which
 starts a new CLI session that the brief summary opens."
   (harness-provider-claude-test-with-handoff
@@ -1495,7 +1512,7 @@ starts a new CLI session that the brief summary opens."
         (should (member "claude-haiku-4-5-20251001" argv))
         (should-not (plist-get asked :resumed))
         (should (string-match-p "\\`### user\n\nfix the parser" (plist-get asked :text)))
-        (should (string-match-p "Claude Haiku 4.5 wrote this summary from only the first and the most recent"
+        (should (string-match-p "Claude Haiku 4.5 wrote this summary from the conversation's user and assistant"
                                 (plist-get node :content)))
         ;; The summariser's process was its own: the session's was let go
         ;; only with the conversation it held.
@@ -2032,6 +2049,31 @@ is back and the CLI searches no more."
       (should (= 1790847600.0 (plist-get (car merged) :resets)))
       (should (equal "Current session (5 hours)" (plist-get (car merged) :label))))))
 
+(ert-deftest harness-provider-claude-windows-never-tick-down ()
+  "A quota window's usage only accrues: a later, lower snapshot of the
+same window is stale and the higher figure stands.  Once the reset time
+moved later the window is a new one, which may start lower."
+  (harness-provider-claude-test--setup)
+  (let* ((old (list (list :name "5h" :label "Current session (5 hours)"
+                          :used 0.9 :resets 1790847600.0)
+                    (list :name "7d" :label "This week, all models"
+                          :used 0.57 :resets 1791039600.0)))
+         (same (harness-provider-claude--merge-windows
+                old
+                (harness-provider-claude--windows
+                 '(:unifiedWindows (:five_hour (:utilization 0.1 :resetsAt 1790847601)
+                                    :seven_day_opus (:utilization 0.05 :resetsAt 1791039600))))))
+         (reset (harness-provider-claude--merge-windows
+                 old
+                 (harness-provider-claude--windows
+                  '(:unifiedWindows (:five_hour (:utilization 0.1 :resetsAt 1791027600)))))))
+    ;; Same window (a second of rounding between the report and the event):
+    ;; the stale lower 5h figure does not lower what the window shows.
+    (should (= 0.9 (plist-get (car same) :used)))
+    ;; A later reset is a new window: the lower figure stands.
+    (should (= 0.1 (plist-get (car reset) :used)))
+    (should (= 1791027600.0 (plist-get (car reset) :resets)))))
+
 (ert-deftest harness-provider-claude-subscription-turns-cost-nothing ()
   "A Claude subscription pays: turns cost 0, with their API price as list cost."
   (harness-provider-claude-test--setup)
@@ -2327,6 +2369,7 @@ what a user would see."
   ;; Earlier tests point the program at the fixture; use the real CLI here.
   (setq harness-provider-claude-program
         (eval (car (get 'harness-provider-claude-program 'standard-value)) t))
+  (skip-unless (executable-find harness-provider-claude-program))
   (clrhash harness-provider-claude--sessions)
   (let* ((calls nil)
          (request (harness-provider-claude-test--request

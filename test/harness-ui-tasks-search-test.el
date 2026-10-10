@@ -90,12 +90,14 @@ The last one answers every request after it.")
 
 (defmacro harness-ui-tasks-search-test-with (&rest body)
   "Load the state layer, the board and its search with the demo provider.
-Run BODY with `board' open, with review off unless BODY turns it on."
+The priority plugin is in there too: a task's priority is its session's,
+so the search's priority action goes through `priority/set'.  Run BODY
+with `board' open, with review off unless BODY turns it on."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
      (let ((harness-acp--server-enabled nil))
-       (dolist (m '(store project config provider provider-demo tools session agent tasks
+       (dolist (m '(store project config provider provider-demo tools session agent priority tasks
                           tasks-search acp))
          (harness-test-load-module m)))
      (clrhash harness-sessions)

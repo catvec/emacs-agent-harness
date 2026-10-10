@@ -3,12 +3,21 @@
 ;;; Commentary:
 
 ;; A `tabulated-list-mode' buffer of sessions: status, name, kind,
-;; model, permission mode, context, output rate (tokens per second,
-;; dimmed once the session is idle), cost, age and project.  Child
-;; sessions (forks, BTW conversations, sub-agents) are indented under
-;; their parents.  Scoped to the current project by default; `a'
+;; model, permission mode, priority, context, output rate (tokens per
+;; second, dimmed once the session is idle), cost, age and project.
+;; Child sessions (forks, BTW conversations, sub-agents) are indented
+;; under their parents.  Scoped to the current project by default; `a'
 ;; toggles all projects; `b' shows only the sessions waiting for you;
 ;; `/' filters fuzzily; column headers sort.
+;;
+;; The Priority column shows the arrow for the level the harness serves
+;; the session's work at -- up for high, down for low, the default,
+;; medium, left out as it is everywhere else -- and the arrow is a
+;; button: a click asks for that session's priority
+;; (`harness-ui-priority-arrow').  + and - raise and lower the priority
+;; of the session at point, p sets it, and C-u on + or - asks for the
+;; level instead (`harness-ui-sessions-raise-priority' and the two
+;; beside it); the levels are the priority UI's (`harness-set-priority').
 ;;
 ;; m moves the session at point to another working directory, and the
 ;; list then shows it under that directory's project
@@ -55,6 +64,10 @@
 (require 'harness-ui)
 (require 'harness-files)
 (require 'harness-ui-pending)
+;; The priority UI knows what a priority is and how it is set; the list
+;; shows it and sets it through that, so it offers no vocabulary of its
+;; own (`harness-ui-priority-level-of', `harness-set-priority').
+(require 'harness-ui-priority)
 
 (declare-function harness-ui-popout-try-at-point "harness-ui-popout")
 
@@ -150,7 +163,32 @@ model, status, kind and permission mode."
         (walk r 0)))
     (nreverse out)))
 
+(defun harness-ui-sessions--priority (s)
+  "Return the priority SESSION S is served at, a level name.
+That is the one the harness serves its work at: its own, or its
+parent's when it has none of its own (`harness-ui-priority-level-of'),
+and medium, the default, for a harness without the priority plugin."
+  (harness-ui-priority-level-of s))
+
+(defun harness-ui-sessions--priority-cell (s)
+  "Return the Priority cell of session S: its arrow, or nothing.
+The arrow `harness-ui-priority-arrow' makes -- up for high, down for
+low -- which the chat's header line and a board's cards show too; medium,
+the default, goes without saying as it does everywhere, so its cell is
+empty.  A click on the arrow asks for that session's priority."
+  (or (harness-ui-priority-arrow (harness-ui-sessions--priority s) (plist-get s :id))
+      ""))
+
+(defun harness-ui-sessions--priority< (a b)
+  "Order entries A and B by their sessions' priorities, lowest first."
+  (< (cl-position (harness-ui-sessions--priority (harness-ui-session (car a)))
+                  harness-ui-priority-levels :test #'equal)
+     (cl-position (harness-ui-sessions--priority (harness-ui-session (car b)))
+                  harness-ui-priority-levels :test #'equal)))
+
 (defun harness-ui-sessions--entry (depth s)
+  "Return the entry of session S in `tabulated-list-entries'.
+Its name is indented DEPTH levels under its parents."
   (let* ((name (or (harness-ui-sessions--name s) (propertize "unnamed" 'face 'harness-dim-face)))
          (status (plist-get s :status))
          (kind (harness-ui-sessions--kind s)))
@@ -165,6 +203,7 @@ model, status, kind and permission mode."
            (if (equal kind "main") "" kind)
            (harness-ui-model-label (plist-get s :model))
            (if-let* ((m (plist-get s :permission-mode))) (harness-ui-permission-mode-label m) "")
+           (harness-ui-sessions--priority-cell s)
            (harness-ui-format-context s)
            (or (harness-ui-format-output s t) "")
            (or (harness-ui-format-rate s t) "")
@@ -173,6 +212,9 @@ model, status, kind and permission mode."
            (propertize (file-name-nondirectory (directory-file-name (or (plist-get s :project) ""))) 'face 'harness-dim-face)))))
 
 (defun harness-ui-sessions--refresh ()
+  "Compute the rows of the list from the session cache, then its mode line.
+The mode line says the scope and the filter, and whether the list hides
+inactive sessions or shows only those waiting for you."
   (let ((ordered (harness-ui-sessions--ordered)))
     (setq harness-ui-sessions--depths (make-hash-table :test 'equal))
     (dolist (cell ordered)
@@ -292,6 +334,9 @@ which is the session's too: RET opens it, SPC pops its request out."
       (or found first (point-min)))))
 
 (defun harness-ui-sessions--number< (col)
+  "Return a predicate ordering entries by the number at COL in their sessions.
+COL is a list of keywords, as `harness-plist-get-in' takes; a session
+without that number sorts as 0."
   (lambda (a b)
     (let ((x (harness-ui-session (car a))) (y (harness-ui-session (car b))))
       (< (or (harness-plist-get-in x col) 0) (or (harness-plist-get-in y col) 0)))))
@@ -344,6 +389,9 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
 (define-key harness-ui-sessions-mode-map (kbd "C-c C-z") #'harness-ui-bury)
 (define-key harness-ui-sessions-mode-map (kbd "b") #'harness-ui-sessions-toggle-blocked)
 (define-key harness-ui-sessions-mode-map (kbd "m") #'harness-ui-sessions-move)
+(define-key harness-ui-sessions-mode-map (kbd "+") #'harness-ui-sessions-raise-priority)
+(define-key harness-ui-sessions-mode-map (kbd "-") #'harness-ui-sessions-lower-priority)
+(define-key harness-ui-sessions-mode-map (kbd "p") #'harness-ui-sessions-set-priority)
 
 (define-derived-mode harness-ui-sessions-mode tabulated-list-mode "Sessions"
   "Major mode listing harness sessions."
@@ -354,6 +402,7 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
                 (list "Kind" 9 t)
                 (list "Model" 26 t)
                 (list "Mode" 13 t)
+                (list "Priority" 9 #'harness-ui-sessions--priority<)
                 (list "Context" 13 (harness-ui-sessions--tokens< :context))
                 (list "Output" 7 (harness-ui-sessions--tokens< :output) :right-align t)
                 (list "Tok/s" 6 #'harness-ui-sessions--rate< :right-align t)
@@ -387,6 +436,9 @@ Sessions a plan pays for cost nothing but still sort by how much they used."
         (". y" "Allow request" harness-ui-sessions-allow)
         (". n" "Deny request" harness-ui-sessions-deny)
         (". T" "Make it a task" harness-ui-sessions-make-task)
+        (". +" "Raise priority" harness-ui-sessions-raise-priority)
+        (". -" "Lower priority" harness-ui-sessions-lower-priority)
+        (". p" "Set priority…" harness-ui-sessions-set-priority)
         (". d" "Delete" harness-ui-sessions-delete)]
        ["List"
         (". /" "Filter" harness-ui-sessions-filter)
@@ -426,6 +478,7 @@ whose session is gone goes to the first row."
             (set-window-point window (harness-ui-sessions--position at))))))))
 
 (defun harness-ui-sessions--on-changed ()
+  "Redraw the list shortly, once for a burst of changes."
   (harness-debounce 'harness-ui-sessions 0.15 #'harness-ui-sessions--redraw))
 
 (defun harness-ui-sessions--on-rate (_id _rate)
@@ -501,7 +554,9 @@ fails, as on a harness without tasks, the list names no task."
 
 (defun harness-ui-sessions--on-event (event args)
   "Follow the tasks in the list: `task/changed' (TASK) and `task/deleted' (ID).
-A task changes session when it starts, so it is looked up by its id."
+EVENT names a harness event and ARGS are its arguments, as
+`harness-ui-event-functions' gets them.  A task changes session when it
+starts, so it is looked up by its id."
   (when-let* ((buf (and (member event '("task/changed" "task/deleted"))
                         (get-buffer harness-ui-sessions--buffer-name))))
     (with-current-buffer buf
@@ -561,6 +616,7 @@ POSITION, as `harness-sessions' has it."
   (harness-sessions t position t))
 
 (defun harness-ui-sessions--id ()
+  "Return the id of the session on this line, or signal a user error."
   (or (tabulated-list-get-id) (user-error "No session on this line")))
 
 (defun harness-ui-sessions-open (&optional position)
@@ -613,6 +669,32 @@ KEEP-OLD its old working directory stays allowed to it.  See
   "Cancel the running turn of the session at point."
   (interactive)
   (harness-cancel-turn (harness-ui-sessions--id)))
+
+(defun harness-ui-sessions-set-priority ()
+  "Ask for the priority of the session at point and set it.
+A priority is the session's -- low, medium or high -- and orders the
+queues its work waits in, the tool slots above all (the priority UI,
+`harness-set-priority')."
+  (interactive)
+  (harness-set-priority (harness-ui-sessions--id)))
+
+(defun harness-ui-sessions-raise-priority (&optional ask)
+  "Raise the priority of the session at point one level.
+That is low to medium, medium to high.  With a prefix argument, ASK
+which level instead."
+  (interactive "P")
+  (if ask
+      (harness-ui-sessions-set-priority)
+    (harness-priority-shift-session (harness-ui-sessions--id) 1)))
+
+(defun harness-ui-sessions-lower-priority (&optional ask)
+  "Lower the priority of the session at point one level.
+That is high to medium, medium to low.  With a prefix argument, ASK
+which level instead."
+  (interactive "P")
+  (if ask
+      (harness-ui-sessions-set-priority)
+    (harness-priority-shift-session (harness-ui-sessions--id) -1)))
 
 (defun harness-ui-sessions-make-task ()
   "Make the session at point a task, shown on its project's task board."
@@ -708,6 +790,10 @@ the list at once, before its session says it is no longer blocked."
     (harness-ui-sessions--on-changed)))
 
 (defun harness-ui-sessions--init ()
+  "Wire the session list into the UI.
+The list redraws as sessions, what they wait on, their output rates and
+their live token figures change, and follows the tasks; l in
+`harness-ui-map' opens it."
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-sessions--on-changed)
   (add-hook 'harness-ui-pending-changed-hook #'harness-ui-sessions--on-pending)
   (add-hook 'harness-ui-rate-functions #'harness-ui-sessions--on-rate)

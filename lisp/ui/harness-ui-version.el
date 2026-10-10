@@ -10,8 +10,14 @@
 ;; the package manager's recipe named), the local checkouts of the
 ;; harness that sessions work in, and any `harness-version-origins'.
 ;; An origin with commits the harness lacks lists the newest of them,
-;; when a local repository has them, and the page says what to do about
-;; it: reload, pull, or push first.
+;; when a local repository has them, each a changelog entry: its subject
+;; and message body, never a diff or file statistics.  The page says
+;; what to do about it: reload, update -- the Update section's button
+;; runs `harness-update', which updates the checkout the way it was
+;; installed (straight.el's own pull for a straight.el install), checks
+;; the commit and reloads -- or push first.  What an update brought is
+;; shown the same way, from `harness--last-update', which
+;; `harness-update-hook' reports as it settles.
 ;;
 ;; The checks run in the background, in the harness process.  The page
 ;; shows the last report at once and asks for a fresh one only when it
@@ -20,6 +26,17 @@
 ;; after it starts or reloads and every half hour, redraw the page as
 ;; they come, and the harness menu's Version entry says when the last
 ;; one found the harness behind.
+;;
+;; So does a small icon, an arrow up in a circle, in the places
+;; `harness-ui-version-nag-places' names: the mode line notifier, after
+;; its "harness", and the header lines of chats and the task board.  It
+;; nags while the last report found the harness behind, and goes as
+;; soon as the harness reloads, to come back only if the check the
+;; harness makes a few seconds later finds it behind still.  Hovering
+;; names the origins with commits the harness lacks, and a click opens
+;; the page, which says what to do.  A UI connecting to a harness asks
+;; it for its last report (`version/report', which checks nothing), so
+;; the icon shows at once rather than at the next check.
 ;;
 ;; Beside the harness process, the page shows the commit this Emacs
 ;; loaded the UI from (harness-revision.el): the two load their files
@@ -37,10 +54,48 @@
 
 (defvar harness-version)
 (defvar harness-directory)
+(defvar harness-notify-mode)
+(defvar harness--last-update)
+(defvar harness--updating)
+(defvar harness-update-hook)
 (declare-function harness-reload "harness")
+(declare-function harness-update "harness")
+(declare-function harness--straight-package "harness")
+(declare-function harness-ui-notify-refresh "harness-ui-notify")
 
 (defface harness-version-heading-face '((t :inherit bold :height 1.05))
   "Headings of the version page." :group 'harness-ui)
+
+(harness-ui-define-icon harness-icon-update "update" "↑" "update"
+                        "Not the latest: the harness has a newer version to run.")
+
+(defcustom harness-ui-version-nag-places '(mode-line chat-header board-header)
+  "Where a small icon nags while the harness is not the latest.
+The icon, an arrow up in a circle, shows once a check of the running
+harness against its origins (see `harness-version') finds one with
+commits the harness lacks.  The harness checks by itself shortly after
+it starts or reloads and every half hour.  The icon goes as soon as the
+harness reloads, and comes back only if the check after the reload
+finds the harness behind still.  Hovering over it names the origins
+with commits the harness lacks, and a click shows the version page,
+which says what to do.  A list of:
+
+- `mode-line': in the mode line notifier, after its \"harness\",
+  visible from any buffer (`harness-notify-mode'); the notifier then
+  shows even when no session is active;
+- `chat-header': in each chat's header line, before [menu];
+- `board-header': in the task board's header line.
+
+nil shows it nowhere; the harness menu's Version entry still says
+\"not the latest\"."
+  :type '(set (const :tag "The mode line notifier" mode-line)
+              (const :tag "Chat header lines" chat-header)
+              (const :tag "The task board's header line" board-header))
+  :initialize #'custom-initialize-default
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         (when (fboundp 'harness-ui-version--nag-changed) (harness-ui-version--nag-changed t)))
+  :group 'harness-ui)
 
 (defconst harness-ui-version--buffer-name "*harness version*"
   "Name of the version page's buffer.")
@@ -57,6 +112,9 @@ with its connection.")
 (defconst harness-ui-version--indent 22
   "Column where an entry's details start, under its commit.")
 
+(defconst harness-ui-version--body-lines 12
+  "How many lines of a commit's message body the page shows.")
+
 (defvar harness-ui-version--report nil
   "The last report from the harness, for the page and the menu.")
 
@@ -68,6 +126,20 @@ with its connection.")
 
 (defvar harness-ui-version--waiting-for nil
   "The revision promise of this Emacs the page waits on, or nil.")
+
+(defvar harness-ui-version--reloaded nil
+  "Non-nil when the harness reloaded since the last report.
+The report is about the commit that ran before; the harness checks again
+a few seconds after a reload.")
+
+(defvar harness-ui-version--nag-shown nil
+  "Whether the nag icon showed when its places were last redrawn for it.")
+
+(defconst harness-ui-version--nag-priority 65
+  "How long the nag icon stays in a narrow header line.
+As `harness-ui-fit-header' takes it: the icon makes room after a chat's
+model and todos and the board's counts, and before a chat's name and
+the board's spend.")
 
 ;;;; Helpers
 
@@ -176,10 +248,9 @@ Otherwise wait for it in the background and redraw the pages then."
              nil))))
 
 (defun harness-ui-version--straight-package ()
-  "Return the straight.el package name of this harness, or nil."
-  (when (and (boundp 'harness-directory) (stringp harness-directory)
-             (string-match-p "/straight/build[^/]*/" harness-directory))
-    (file-name-nondirectory (directory-file-name harness-directory))))
+  "Return the straight.el package name of this harness, or nil.
+See `harness--straight-package', which the update command uses too."
+  (harness--straight-package))
 
 (defun harness-ui-version--checking-p ()
   "Non-nil while the page waits for a check it asked for."
@@ -216,7 +287,7 @@ Otherwise wait for it in the background and redraw the pages then."
 (defun harness-ui-version--header ()
   "Return the header line."
   (let ((report harness-ui-version--report))
-    (list (propertize " Harness version " 'face 'harness-version-heading-face)
+    (list (propertize " Harness version and update " 'face 'harness-version-heading-face)
           (propertize (format "%s " (or (plist-get report :version)
                                         (and (boundp 'harness-version) harness-version)
                                         ""))
@@ -285,11 +356,33 @@ Otherwise wait for it in the background and redraw the pages then."
           (when (harness-ui-version--reloadable-p)
             (harness-ui-version--details #'harness-ui-version--reload-button))))))))
 
+(defun harness-ui-version--insert-paragraph (text width)
+  "Insert TEXT as one filled paragraph at the details column, then a newline."
+  (let ((start (point))
+        (prefix (make-string harness-ui-version--indent ?\s)))
+    (insert prefix text "\n")
+    (let ((fill-column width) (fill-prefix prefix))
+      (fill-region start (point)))))
+
+(defun harness-ui-version--insert-body (body width)
+  "Insert BODY, a commit message's body, as changelog lines at the details column.
+At most `harness-ui-version--body-lines' lines of it are shown."
+  (let* ((lines (cl-remove-if #'string-empty-p
+                              (mapcar #'string-trim (split-string (or body "") "\n"))))
+         (shown (cl-subseq lines 0 (min (length lines) harness-ui-version--body-lines))))
+    (dolist (line shown)
+      (harness-ui-version--insert-paragraph (propertize line 'face 'harness-dim-face) width))
+    (when (> (length lines) harness-ui-version--body-lines)
+      (harness-ui-version--details (propertize "…" 'face 'harness-dim-face)))))
+
 (defun harness-ui-version--insert-commits (commits more width)
-  "Insert COMMITS, then a line for MORE commits not listed; fit WIDTH."
+  "Insert COMMITS, then a line for MORE commits not listed; fit WIDTH.
+A commit is its message: its subject, and its body under it as the
+changelog entry.  No diff or file statistics are shown."
   (dolist (c commits)
     (harness-ui-version--details
-     (harness-ui-version--commit-line (plist-get c :commit) (plist-get c :subject) (plist-get c :date) width)))
+     (harness-ui-version--commit-line (plist-get c :commit) (plist-get c :subject) (plist-get c :date) width))
+    (harness-ui-version--insert-body (plist-get c :body) width))
   (when (> more 0)
     (harness-ui-version--details
      (propertize (format "and %d more, merges included" more) 'face 'harness-dim-face))))
@@ -346,7 +439,8 @@ Otherwise wait for it in the background and redraw the pages then."
       (push (cons "The checkout the harness was loaded from has moved on: reload to run what it holds now."
                   (and (harness-ui-version--reloadable-p) #'harness-ui-version--reload-button))
             hints))
-    (when (and newer-remotes (not moved) (plist-get running :commit))
+    (when (and newer-remotes (not moved) (plist-get running :commit)
+               (not (harness-ui-version--reloadable-p)))
       (push (list (format "To run the commits of %s, pull them into %s%s, then reload."
                           (harness-ui-version--names newer-remotes) dir
                           (if package (format " (M-x straight-pull-package RET %s)" package) "")))
@@ -372,6 +466,65 @@ Otherwise wait for it in the background and redraw the pages then."
       (funcall button)
       (insert "\n"))))
 
+(defun harness-ui-version--updating-p ()
+  "Non-nil while `harness-update' runs in this Emacs."
+  (and (boundp 'harness--updating) harness--updating))
+
+(defun harness-ui-version--last-update ()
+  "The last update's outcome, when this Emacs made one, else nil."
+  (and (boundp 'harness--last-update) harness--last-update))
+
+(defun harness-ui-version--update-button ()
+  "Insert the action that updates the harness, or why there is none."
+  (cond
+   ((harness-ui-version--updating-p)
+    (insert (propertize "Updating the harness…" 'face 'harness-dim-face)))
+   ((harness-ui-version--reloadable-p)
+    (harness-ui-button "[Update harness]" #'harness-ui-version-update
+                       :help "Fetch the harness's new commits, check them, install them and reload"))
+   (t
+    (insert (propertize "The harness runs elsewhere; update it where it runs."
+                        'face 'harness-dim-face)))))
+
+(defun harness-ui-version-update ()
+  "Update the harness from its checkout, as `harness-update' does.
+The checkout is updated the way it was installed -- straight.el's own
+pull for a straight.el install -- the commit is checked, and the harness
+is reloaded.  The page says what came in when the update settles, and
+the harness menu's `U' runs the same update."
+  (interactive)
+  (unless (harness-ui-version--reloadable-p)
+    (user-error "The harness runs elsewhere; update it where it runs"))
+  (harness-update)
+  (harness-ui-version--redraw-all))
+
+(defun harness-ui-version--insert-update (width)
+  "Insert the update section: the action, and what the last update did."
+  (insert "\n " (propertize "Update" 'face 'harness-version-heading-face) "\n")
+  (insert " ")
+  (harness-ui-version--update-button)
+  (insert "\n")
+  (when-let* ((result (harness-ui-version--last-update)))
+    (harness-ui-version--insert-update-result result width)))
+
+(defun harness-ui-version--insert-update-result (result width)
+  "Insert the outcome RESULT of the last update, filled to WIDTH."
+  (let ((state (plist-get result :state))
+        (text (or (plist-get result :message) "")))
+    (unless (string-empty-p text)
+      (let ((start (point))
+            (face (pcase state
+                    ("updated" 'harness-success-face)
+                    ("failed" 'harness-failure-face)
+                    (_ 'harness-dim-face))))
+        (insert " " (propertize text 'face face) "\n")
+        (let ((fill-column width) (fill-prefix " "))
+          (fill-region start (point)))))
+    (when (equal state "updated")
+      (let* ((commits (plist-get result :commits))
+             (count (or (plist-get result :count) (length commits))))
+        (harness-ui-version--insert-commits commits (- count (length commits)) width)))))
+
 (defun harness-ui-version--render ()
   "Redraw the page from the last report, keeping the line."
   (let ((inhibit-read-only t)
@@ -382,17 +535,20 @@ Otherwise wait for it in the background and redraw the pages then."
     (setq header-line-format (harness-ui-version--header))
     (insert "\n")
     (if (null report)
-        (insert " " (propertize (if (and harness-ui-version--error (not (harness-ui-version--checking-p)))
-                                    (format "The check failed: %s" harness-ui-version--error)
-                                  "Checking the running harness against its origins…")
-                                'face (if (and harness-ui-version--error (not (harness-ui-version--checking-p)))
-                                          'harness-failure-face 'harness-dim-face))
-                "\n")
+        (progn
+          (insert " " (propertize (if (and harness-ui-version--error (not (harness-ui-version--checking-p)))
+                                      (format "The check failed: %s" harness-ui-version--error)
+                                    "Checking the running harness against its origins…")
+                                  'face (if (and harness-ui-version--error (not (harness-ui-version--checking-p)))
+                                            'harness-failure-face 'harness-dim-face))
+                  "\n")
+          (harness-ui-version--insert-update width))
       (pcase-let ((`(,level . ,text) (harness-ui-version--verdict report)))
         (insert " " (harness-ui-level-icon level) " " (propertize text 'face (harness-ui-level-face level)) "\n\n"))
       (harness-ui-version--insert-running report)
       (insert "\n")
       (harness-ui-version--insert-origins report)
+      (harness-ui-version--insert-update width)
       (when-let* ((hints (harness-ui-version--hints report)))
         (insert "\n")
         (harness-ui-version--insert-hints hints width))
@@ -418,6 +574,14 @@ Otherwise wait for it in the background and redraw the pages then."
 
 ;;;; Talking to the harness
 
+(defun harness-ui-version--take (report)
+  "Keep REPORT, the harness's newest, and show it wherever it shows."
+  (setq harness-ui-version--report report
+        harness-ui-version--error nil
+        harness-ui-version--reloaded nil)
+  (harness-ui-version--redraw-all)
+  (harness-ui-version--nag-changed))
+
 (defun harness-ui-version--check (max-age)
   "Ask the harness for a report at most MAX-AGE seconds old; redraw on the answer.
 The harness answers from its last report when that is fresh enough,
@@ -431,9 +595,7 @@ meanwhile."
                     (lambda (report)
                       (when (eql harness-ui-version--checking asked)
                         (setq harness-ui-version--checking nil))
-                      (setq harness-ui-version--report report
-                            harness-ui-version--error nil)
-                      (harness-ui-version--redraw-all)
+                      (harness-ui-version--take report)
                       nil)
                     (lambda (err)
                       (when (eql harness-ui-version--checking asked)
@@ -443,12 +605,100 @@ meanwhile."
                       (harness-ui-version--redraw-all)
                       nil)))))
 
+(defun harness-ui-version--fetch ()
+  "Ask the harness for the last report it made, without a check.
+So the nag icon shows as soon as the UI connects to a harness that
+found itself behind, rather than at its next check, while a harness
+just starting checks when it means to.  With no report yet, or from a
+harness without `version/report', the icon waits for the next report
+the harness announces."
+  (harness-then (harness-ui-request "_harness/version/report" nil)
+                (lambda (report)
+                  ;; One announced meanwhile is newer.
+                  (when (and (consp report) (null harness-ui-version--report))
+                    (harness-ui-version--take report))
+                  nil)
+                #'ignore))
+
+(defun harness-ui-version-behind-p ()
+  "Non-nil when the harness is not the latest, as far as the UI knows.
+That is, the last report found an origin with commits the harness
+lacks, and the harness has not reloaded since: it may run them now."
+  (and (not harness-ui-version--reloaded)
+       (listp harness-ui-version--report)
+       (equal (plist-get harness-ui-version--report :verdict) "behind")))
+
 (defun harness-ui-version-menu-label ()
   "Return the harness menu's label for the version page.
 It says so when the last report found the harness behind."
-  (if (equal (plist-get harness-ui-version--report :verdict) "behind")
+  (if (harness-ui-version-behind-p)
       (concat "Version " (propertize "(not the latest)" 'face 'harness-caution-face))
     "Version"))
+
+;;;; The nag icon
+
+(defun harness-ui-version--nag-help (&rest _)
+  "The tooltip of the nag icon: which origins have commits the harness lacks.
+A `help-echo' function, so it is worked out on hover only."
+  (let ((newer (harness-ui-version--status-in (plist-get harness-ui-version--report :origins)
+                                              "newer" "diverged" "ahead")))
+    (harness-ui-one-line
+     (format "The harness is not the latest: %s %s commits it lacks (mouse-1: what to do)"
+             (or (harness-ui-version--names newer) "an origin")
+             (if (cdr newer) "have" "has")))))
+
+(defvar harness-ui-version--nag-map nil
+  "Keymap of the nag icon: a click shows the version page.")
+
+;; Made at top level, not in the `defvar', so a reload updates it.
+(setq harness-ui-version--nag-map (harness-ui-mouse-keymap #'harness-version))
+
+(defun harness-ui-version-nag ()
+  "Return the nag icon while the harness is not the latest, else nil.
+The icon in the caution face; hovering names the origins with commits
+the harness lacks, and a click shows the version page.  Where it shows
+is `harness-ui-version-nag-places'."
+  (when (harness-ui-version-behind-p)
+    ;; No `mouse-face': an image keeps the background it was drawn on,
+    ;; which would show as a box.
+    (propertize (harness-ui-icon 'harness-icon-update)
+                'face 'harness-caution-face
+                'help-echo #'harness-ui-version--nag-help
+                'local-map harness-ui-version--nag-map)))
+
+(defun harness-ui-version--nag-in (place)
+  "Return the nag icon when it shows in PLACE now, else nil.
+PLACE is one of `harness-ui-version-nag-places'."
+  (and (memq place harness-ui-version-nag-places) (harness-ui-version-nag)))
+
+(defun harness-ui-version--chat-header ()
+  "The nag icon's segment of a chat's header line, or nil.
+On `harness-chat-header-end-functions'."
+  (when-let* ((nag (harness-ui-version--nag-in 'chat-header)))
+    (list (concat "  " nag) harness-ui-version--nag-priority)))
+
+(defun harness-ui-version--board-header ()
+  "The nag icon's segment of the task board's header line, or nil.
+On `harness-ui-tasks-header-functions'."
+  (when-let* ((nag (harness-ui-version--nag-in 'board-header)))
+    (list nag harness-ui-version--nag-priority)))
+
+(defun harness-ui-version--notify-segment ()
+  "The nag icon's segment of the mode line notifier, or nil.
+On `harness-ui-notify-segment-functions'."
+  (when-let* ((nag (harness-ui-version--nag-in 'mode-line)))
+    (concat " " nag)))
+
+(defun harness-ui-version--nag-changed (&optional force)
+  "Redraw the places of the nag icon when it came or went, or when FORCE.
+The header lines draw it as they are drawn; the mode line notifier
+works its text out again."
+  (let ((shown (and harness-ui-version-nag-places (harness-ui-version-behind-p) t)))
+    (when (or force (not (eq shown harness-ui-version--nag-shown)))
+      (setq harness-ui-version--nag-shown shown)
+      (when (and (bound-and-true-p harness-notify-mode) (fboundp 'harness-ui-notify-refresh))
+        (harness-ui-notify-refresh))
+      (force-mode-line-update t))))
 
 ;;;; Commands
 
@@ -463,6 +713,7 @@ It says so when the last report found the harness behind."
     (define-key map (kbd "TAB") #'forward-button)
     (define-key map (kbd "<backtab>") #'backward-button)
     (define-key map (kbd "g") #'harness-ui-version-refresh)
+    (define-key map (kbd "u") #'harness-ui-version-update)
     (define-key map (kbd "?") #'harness-menu)
     map)
   "Keymap of `harness-ui-version-mode'.")
@@ -475,8 +726,9 @@ It says so when the last report found the harness behind."
 ;; The page's keys in the harness menu, behind `.'.
 (put 'harness-ui-version-mode 'harness-menu-group
      '("Version"
-       ["Version"
-        (". g" "Check again" harness-ui-version-refresh)]))
+       ["Version and update"
+        (". g" "Check again" harness-ui-version-refresh)
+        (". u" "Update harness" harness-ui-version-update)]))
 
 ;;;###autoload
 (defun harness-version ()
@@ -496,31 +748,79 @@ checks run in the background: the page shows the last report at once."
 ;;;; Following the harness
 
 (defun harness-ui-version--on-event (event args)
-  "Follow EVENT with ARGS: keep the report `version/checked' brings."
-  (when (equal event "version/checked")
-    (setq harness-ui-version--report (car args)
-          harness-ui-version--error nil)
-    (harness-ui-version--redraw-all)))
+  "Follow EVENT with ARGS: keep the report `version/checked' brings.
+After `harness/reloaded' the harness may run another commit, so the nag
+icon goes until the check it makes a few seconds later."
+  (pcase event
+    ("version/checked" (harness-ui-version--take (car args)))
+    ("harness/reloaded"
+     (setq harness-ui-version--reloaded t)
+     (harness-ui-version--nag-changed))))
+
+(defun harness-ui-version--on-update (&rest _)
+  "Redraw the page after an update settles.
+The harness checks itself again a few seconds after the reload, so the
+report follows on its own."
+  (harness-ui-version--redraw-all))
 
 (defun harness-ui-version--on-connected ()
-  "Forget the report of the harness the UI was connected to before."
+  "Forget the report of the harness the UI was connected to before.
+Ask the harness for its own: a fresh enough one while a page shows,
+else the last one it made, for the nag icon."
   (setq harness-ui-version--report nil
         harness-ui-version--checking nil
-        harness-ui-version--error nil)
-  (when (harness-ui-version--buffers)
-    (harness-ui-version--check harness-ui-version--max-age)))
+        harness-ui-version--error nil
+        harness-ui-version--reloaded nil)
+  (harness-ui-version--nag-changed)
+  (if (harness-ui-version--buffers)
+      (harness-ui-version--check harness-ui-version--max-age)
+    (harness-ui-version--fetch)))
 
 (defun harness-ui-version--init ()
-  "Wire the page into the UI."
+  "Wire the page and the nag icon into the UI."
   (add-hook 'harness-ui-event-functions #'harness-ui-version--on-event)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-version--redraw-all)
   (add-hook 'harness-ui-connected-hook #'harness-ui-version--on-connected)
-  (define-key harness-ui-map (kbd "v") #'harness-version))
+  (add-hook 'harness-update-hook #'harness-ui-version--on-update)
+  (define-key harness-ui-map (kbd "v") #'harness-version)
+  (harness-ui-version--init-nag)
+  ;; Started again while connected, as after `harness-stop': no
+  ;; connection opens to ask for the report.
+  (when (and (harness-ui-connected-p) (null harness-ui-version--report))
+    (harness-ui-version--fetch)))
+
+(defun harness-ui-version--init-nag ()
+  "Add the hooks the nag icon shows through, after the other segments there.
+A reload does not initialise a running module again, so the file adds
+them itself when the module is ready (below)."
+  (add-hook 'harness-chat-header-end-functions #'harness-ui-version--chat-header 95)
+  (add-hook 'harness-ui-tasks-header-functions #'harness-ui-version--board-header 95)
+  (add-hook 'harness-ui-notify-segment-functions #'harness-ui-version--notify-segment)
+  (harness-ui-version--nag-changed t))
+
+(defun harness-ui-version--shutdown ()
+  "Unwire the page and the nag icon, and forget the last report."
+  (remove-hook 'harness-ui-event-functions #'harness-ui-version--on-event)
+  (remove-hook 'harness-ui-redraw-hook #'harness-ui-version--redraw-all)
+  (remove-hook 'harness-ui-connected-hook #'harness-ui-version--on-connected)
+  (remove-hook 'harness-update-hook #'harness-ui-version--on-update)
+  (remove-hook 'harness-chat-header-end-functions #'harness-ui-version--chat-header)
+  (remove-hook 'harness-ui-tasks-header-functions #'harness-ui-version--board-header)
+  (remove-hook 'harness-ui-notify-segment-functions #'harness-ui-version--notify-segment)
+  (setq harness-ui-version--report nil
+        harness-ui-version--checking nil
+        harness-ui-version--error nil
+        harness-ui-version--reloaded nil)
+  (harness-ui-version--nag-changed t))
 
 (harness-define-module 'ui-version
   :doc "Version page: whether the running harness is the latest, against its origins."
   :requires '(ui)
-  :init #'harness-ui-version--init)
+  :init #'harness-ui-version--init
+  :shutdown #'harness-ui-version--shutdown)
+
+(when (harness-module-ready-p 'ui-version)
+  (harness-ui-version--init-nag))
 
 (provide 'harness-ui-version)
 ;;; harness-ui-version.el ends here

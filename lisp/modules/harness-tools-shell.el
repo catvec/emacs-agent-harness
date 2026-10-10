@@ -23,13 +23,29 @@
 ;;   its own path, and ~ keeps the real home directory's path with only
 ;;   those inside it, so `cat ~/.claude/skills/x/SKILL.md' or `ls
 ;;   ~/granted' works in there as it does outside while the rest of the
-;;   home directory stays hidden.  Remote (TRAMP) directories run
-;;   the command on that host, unwrapped, as the ssh tool does
-;;   (tools-ssh): through `harness-tools-shell-remote-command', with
-;;   bash, or sh on a host that has none, and standard input from
-;;   /dev/null.  TRAMP runs a remote process on a pty that never passes
-;;   the end of input on, so a command reading its input would wait for
-;;   its timeout.
+;;   home directory stays hidden.
+;;
+;;   A module can confine a session's commands further.  The sync
+;;   filter `tools/sandbox-options' runs before each command, with the
+;;   value nil and the session id as its argument.  A handler returns
+;;   the plist of options for `sandbox/wrap' that it was given with its
+;;   own put over them, such as (:read-only t :network nil), so that a
+;;   later handler's options win over an earlier one's.  The options
+;;   go to `sandbox/wrap' with the directories above, to whose lists a
+;;   handler's own `:writable' and `:readable' join.  With `:read-only'
+;;   every one of those directories goes as `:readable' and none as
+;;   `:writable': the command looks at what its session may touch and
+;;   changes none of it.  Options ask for the sandbox, so a command that
+;;   cannot have it fails with an error rather than run unconfined: with
+;;   no `sandbox/wrap' method, whatever the policy, or in a remote
+;;   directory.  With no handler the command runs as it always did.
+;;
+;;   Remote (TRAMP) directories run the command on that host,
+;;   unwrapped, as the ssh tool does (tools-ssh): through
+;;   `harness-tools-shell-remote-command', with bash, or sh on a host
+;;   that has none, and standard input from /dev/null.  TRAMP runs a
+;;   remote process on a pty that never passes the end of input on, so
+;;   a command reading its input would wait for its timeout.
 ;;
 ;; - `elisp' evaluates Emacs Lisp, the Emacs-native alternative to a
 ;;   shell: the value of the last form, anything printed to
@@ -159,16 +175,68 @@ is no config module."
                      (and (boundp 'harness-sandbox-policy) (symbol-value 'harness-sandbox-policy)))))
     (equal (format "%s" policy) "required")))
 
-(defun harness-tools-shell--wrap (cwd command &optional writable readable)
+(defun harness-tools-shell--options-p (options)
+  "Non-nil when OPTIONS is a plist whose keys are all keywords."
+  (and (proper-list-p options)
+       (cl-evenp (length options))
+       (cl-loop for (key) on options by #'cddr always (keywordp key))))
+
+(defun harness-tools-shell--sandbox-options (ctx)
+  "Return the extra `sandbox/wrap' options a bash call under CTX must run with.
+They are what the `tools/sandbox-options' filter makes of nil, with the
+session id as its argument: a handler returns the plist it was given
+with its own options set over it, such as (:read-only t :network nil),
+so that a later handler's options win over an earlier one's.  Nil
+without a handler.  A value that is no plist of options signals an
+error, so that a faulty handler cannot let a command run with fewer
+restrictions than it meant."
+  (let ((options (harness-run-filter 'tools/sandbox-options nil (plist-get ctx :session-id))))
+    (unless (harness-tools-shell--options-p options)
+      (error "The handlers of tools/sandbox-options gave %S, not a plist of sandbox options" options))
+    options))
+
+(defun harness-tools-shell--wrap-options (writable readable options)
+  "Return the `sandbox/wrap' options for the directories WRITABLE and READABLE.
+OPTIONS, the plist of extra ones, go with them, and its own `:writable'
+and `:readable' directories join the lists.  With `:read-only' in
+OPTIONS none is writable: all the directories go as readable, so that
+the command is shown what its session may touch and changes none of it."
+  (let ((writable (append writable (plist-get options :writable)))
+        (readable (append readable (plist-get options :readable))))
+    (when (harness-json-true-p (plist-get options :read-only))
+      (setq readable (delete-dups (append writable readable))
+            writable nil))
+    (append (list :writable writable :readable readable)
+            (cl-loop for (key value) on options by #'cddr
+                     unless (memq key '(:writable :readable)) append (list key value)))))
+
+(defun harness-tools-shell--refuse-unconfined (options why)
+  "Signal an error: a command that needs sandbox OPTIONS cannot have the sandbox.
+WHY says what stands in the way."
+  (error "A command that needs the sandbox options %S cannot run unconfined, but %s"
+         options why))
+
+(defun harness-tools-shell--wrap (cwd command &optional writable readable options)
   "Return COMMAND wrapped by the sandbox for CWD when the sandbox module is loaded.
 WRITABLE lists other directories the command may write to, READABLE
-directories it may read.  Without the sandbox module a `required'
-`harness-sandbox-policy' signals an error rather than letting COMMAND
-run unconfined, as the sandbox does when it has no backend."
+directories it may read.  OPTIONS are the extra `sandbox/wrap' options
+asked for (see `harness-tools-shell--sandbox-options'); they are given
+to it with the directories (see `harness-tools-shell--wrap-options').
+Without the sandbox module a `required' `harness-sandbox-policy'
+signals an error rather than letting COMMAND run unconfined, as the
+sandbox does when it has no backend.  OPTIONS ask for the sandbox
+whatever the policy: the error comes too when the module is not loaded
+or CWD is remote."
   (cond
+   ((and options (file-remote-p cwd))
+    (harness-tools-shell--refuse-unconfined
+     options (format "%s is on another host, where the sandbox does not reach" cwd)))
    ((file-remote-p cwd) command)
    ((harness-method-exists-p 'sandbox/wrap)
-    (harness-call 'sandbox/wrap cwd command :writable writable :readable readable))
+    (apply #'harness-call 'sandbox/wrap cwd command
+           (harness-tools-shell--wrap-options writable readable options)))
+   (options
+    (harness-tools-shell--refuse-unconfined options "the sandbox module is not loaded"))
    ((harness-tools-shell--sandbox-required-p cwd)
     (error "The sandbox is required (harness-sandbox-policy), but the sandbox module is not loaded"))
    (t command)))
@@ -189,6 +257,24 @@ run unconfined, as the sandbox does when it has no backend."
           parts)
     (string-join (nreverse parts) "\n")))
 
+(defconst harness-tools-shell--note-interval 0.25
+  "Seconds between updates of the note under a running bash call.
+The command's output can arrive in many chunks a second; the note names
+the lines so far and the latest one, and nothing needs that per chunk.")
+
+(defun harness-tools-shell--bash-note (lines tail)
+  "Return the note under a running bash call.
+LINES is how many newlines its output has, TAIL the last of it: the
+note says it is still running and how many lines it has written, and
+opens the latest line under that."
+  (let* ((last (harness-tools-tail-line tail))
+         (open (and (stringp tail) (not (string-empty-p tail)) (not (string-suffix-p "\n" tail))))
+         (n (+ (or lines 0) (if open 1 0))))
+    (concat (if (> n 0)
+                (format "still running \N{U+00B7} %s so far" (harness-tools-count-phrase n "line"))
+              "still running \N{U+00B7} no output yet")
+            (if last (concat "\n" last) ""))))
+
 (defun harness-tools-shell--bash (input ctx)
   "Handler for the bash tool with INPUT under CTX; returns a promise."
   (let* ((command (plist-get input :command))
@@ -196,7 +282,11 @@ run unconfined, as the sandbox does when it has no backend."
                        (max 1 (harness-tools-shell--number (plist-get input :timeout)
                                                            harness-tools-shell--default-timeout))))
          (cwd (harness-tools-shell--bash-cwd input ctx))
-         (report (plist-get ctx :report)))
+         (report (plist-get ctx :report))
+         (note (plist-get ctx :note))
+         ;; The note's own counters: the command's output arrives in
+         ;; chunks, and its size is not ours to keep whole.
+         (lines 0) (tail "") (noted 0))
     (cond
      ((or (not (stringp command)) (string-blank-p command))
       (harness-tool-error "Missing command"))
@@ -205,25 +295,42 @@ run unconfined, as the sandbox does when it has no backend."
      (t
       (let* ((remote (file-remote-p cwd))
              (cmd (condition-case err
-                      (if remote
-                          (harness-tools-shell-remote-command command)
-                        ;; Not a login shell: the harness already has the user's
-                        ;; environment, and a login profile's side effects (starting
-                        ;; an ssh-agent, importing keys) go wrong in a sandbox, whose
-                        ;; PID namespace hides the user's processes from it.
-                        (let ((dirs (harness-tools-shell--session-dirs ctx)))
-                          (harness-tools-shell--wrap
-                           cwd (list harness-tools-shell--program "-c" command)
-                           (delete-dups (delq nil (cons (harness-tools-shell--tmp-dir ctx) (car dirs))))
-                           (append (harness-tools-shell--skill-dirs ctx) (cdr dirs)))))
+                      (let ((options (harness-tools-shell--sandbox-options ctx)))
+                        ;; A remote command runs unwrapped, so one that needs
+                        ;; the sandbox goes to `harness-tools-shell--wrap', which
+                        ;; refuses it.
+                        (if (and remote (null options))
+                            (harness-tools-shell-remote-command command)
+                          ;; Not a login shell: the harness already has the user's
+                          ;; environment, and a login profile's side effects (starting
+                          ;; an ssh-agent, importing keys) go wrong in a sandbox, whose
+                          ;; PID namespace hides the user's processes from it.
+                          (let ((dirs (harness-tools-shell--session-dirs ctx)))
+                            (harness-tools-shell--wrap
+                             cwd (list harness-tools-shell--program "-c" command)
+                             (delete-dups (delq nil (cons (harness-tools-shell--tmp-dir ctx) (car dirs))))
+                             (append (harness-tools-shell--skill-dirs ctx) (cdr dirs))
+                             options))))
                     (error (list :error (harness-error-message err))))))
         (if (and (consp cmd) (eq (car cmd) :error))
             (harness-tool-error (format "Cannot run command: %s" (plist-get cmd :error)))
           (let ((started (float-time)))
+            (harness-tools-note ctx (harness-tools-shell--bash-note 0 ""))
             (harness-then
              (harness-run-command cmd :cwd cwd :timeout timeout :name "harness-bash"
                                   :merge-remote-stderr t
-                                  :on-output (and report (lambda (chunk) (funcall report chunk))))
+                                  :on-output
+                                  (lambda (chunk)
+                                    (when report (funcall report chunk))
+                                    (setq lines (+ lines (cl-count ?\n chunk))
+                                          tail (let ((text (concat tail chunk)))
+                                                 (if (> (length text) 4000)
+                                                     (substring text (- (length text) 4000))
+                                                   text)))
+                                    (let ((now (float-time)))
+                                      (when (and note (> (- now noted) harness-tools-shell--note-interval))
+                                        (setq noted now)
+                                        (harness-tools-note ctx (harness-tools-shell--bash-note lines tail))))))
              (lambda (r)
                (let ((exit (plist-get r :exit)))
                  (funcall (if (eql exit 0) #'harness-tool-ok #'harness-tool-error)

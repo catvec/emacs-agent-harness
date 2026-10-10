@@ -194,6 +194,12 @@ in a request.  Anything else compares with `equal'."
           ((< n 1000000) (format "%dk" (round (/ n 1000.0))))
           (t (format "%.2fM" (/ n 1000000.0))))))
 
+(defun harness-format-tokens-compact (n)
+  "Format token count N as `harness-format-tokens' does, but \"96k\" for \"96.0k\".
+Whole thousands read without the decimal part, which a hint about a
+window or a limit is easier to read as."
+  (replace-regexp-in-string "\\.0+\\([kM]\\)\\'" "\\1" (harness-format-tokens n)))
+
 (defun harness-format-cost (usd)
   "Format USD amount compactly."
   (let ((usd (or usd 0)))
@@ -360,6 +366,51 @@ The harness reads \"the harness (SOURCE)\", another session's agent
     ('nil "the user")
     (kind (format "the %s" kind))))
 
+;;;; Thinking levels
+
+(defconst harness-thinking-level-order
+  '("none" "minimal" "low" "medium" "high" "xhigh" "max")
+  "Every thinking level the harness knows, weakest first.
+A model offers some of these (its `:thinking-levels'), and whatever has
+to order levels or tell which of two is stronger -- the thinking menu,
+the level a BTW is given, the effort a provider asks a model for --
+goes by this one list, so there is a single idea of what is stronger.
+A level that is not in it ranks after all that are (see
+`harness-thinking-level-rank').")
+
+(defun harness-thinking-level-rank (level)
+  "Return how strong thinking LEVEL is, as a number: a higher one thinks harder.
+That is its place in `harness-thinking-level-order'.  A level that is
+not there ranks after every one that is."
+  (or (cl-position level harness-thinking-level-order :test #'equal)
+      most-positive-fixnum))
+
+(defun harness-thinking-level-fit (level levels)
+  "Return the one of thinking LEVELS that stands for LEVEL, or nil.
+This is the one rule the harness fits a level to what a model offers
+by: a BTW's level, the reasoning effort Copilot is asked for and the
+effort Bedrock's adaptive models are asked for all go through it, so
+that nothing thinks harder than it was asked to.  LEVELS are what a
+model offers (its `:thinking-levels').  That is LEVEL itself when
+LEVELS has it; else the strongest of LEVELS weaker than LEVEL, the
+nearest the model comes to it without thinking harder; else, every one
+of LEVELS being stronger, the weakest of them.  Strength is that of
+`harness-thinking-level-order': a level that is not in it ranks after
+every one that is.  Entries of LEVELS that are not strings are ignored.
+nil when LEVEL is not a string or LEVELS has no string."
+  (let ((levels (cl-remove-if-not #'stringp levels)))
+    (when (and (stringp level) levels)
+      (if (member level levels)
+          level
+        (let* ((rank (harness-thinking-level-rank level))
+               ;; Weakest first, the order of LEVELS kept among equals.
+               (sorted (sort (copy-sequence levels)
+                             (lambda (a b) (< (harness-thinking-level-rank a)
+                                              (harness-thinking-level-rank b)))))
+               (weaker (cl-remove-if-not (lambda (l) (< (harness-thinking-level-rank l) rank))
+                                         sorted)))
+          (if weaker (car (last weaker)) (car sorted)))))))
+
 ;;;; Models and provider state
 ;;
 ;; A model id is "PROVIDER:NAME".  A session's provider state (the CLI
@@ -404,9 +455,12 @@ model of another provider holds (:mode transcript|compact :file PATH
 
 (defun harness-node-compaction-kind (node)
   "Return the kind of compaction NODE is, as a string, or nil for no compaction.
-That is its `:meta' `:compaction': \"summary\", \"brief\" (a summary of
-only the first and last messages) or \"transcript\" (a note pointing at
-the conversation written to the file of its `:meta' `:file').  A
+That is its `:meta' `:compaction': \"summary\", \"brief\" (a summary of the
+conversation's narrative, tool calls in brief), \"transcript\" (a note
+pointing at
+the conversation written to the file of its `:meta' `:file'),
+\"fresh\" (a note saying nothing of the conversation was carried over)
+or \"truncate\" (a note saying the oldest nodes were cut).  A
 compaction node from before there were kinds is a \"summary\"; so is
 one a handoff's old model wrote, while the new model's is \"brief\".
 NODE's kind may be the symbol or, as a client hears it, its name."
@@ -446,6 +500,50 @@ RECORD is what `harness-node-permission' returns."
   (let ((u (and (consp record) (plist-get record :undo))))
     (cond ((and (stringp u) (not (string-empty-p u))) (intern u))
           ((and u (symbolp u) (not (memq u '(t :false :null)))) u))))
+
+;;;; The note of the session judge
+
+;; A new session's opening message may be judged -- read by a cheap model
+;; that says whether the job is a supervising one or a hands-on one
+;; (harness-supervisor.el).  The harness then writes a hint into the
+;; session's transcript saying how the message was read, in its own
+;; voice, and the hint holds in its `:meta' `:supervisor' what the chat's
+;; buttons act on: the two things the user can do about the choice, and
+;; how far each has got.  `harness-node-supervisor' reads it, the chat
+;; draws the buttons from it (harness-ui-chat.el), and `supervisor/act'
+;; is what they call.
+
+(defun harness-node-supervisor (node)
+  "Return the session judge's note record of NODE, or nil.
+NODE is the hint written when a session's opening message was judged.
+Its `:meta' `:supervisor' holds
+
+  (:judged t|:false   ; what the judge read; absent when it gave no answer
+   :model MODEL       ; the model that read the message
+   :mode t|:false     ; the mode the note left the session in
+   :setting KEY       ; the setting that decides how sessions start
+   :cwd DIR           ; where that setting is written
+   :actions ACTIONS)  ; (:action NAME :label LABEL :help HELP :state STATE)
+
+where each action's STATE is nil while it was not taken, `done' once it
+was, and `undone' once it was taken back, and NAME, with \"always\" and
+\"mode\" the two of them, is what `supervisor/act' is asked to do.
+Names, labels and symbols may have travelled as strings; the states read
+back as symbols."
+  (let ((record (plist-get (plist-get node :meta) :supervisor)))
+    (when (and (consp record) (plist-get record :actions))
+      (plist-put (copy-sequence record) :actions
+                 (mapcar (lambda (action)
+                           (plist-put (copy-sequence action) :state
+                                      (harness-supervisor-note-state (plist-get action :state))))
+                         (plist-get record :actions))))))
+
+(defun harness-supervisor-note-state (value)
+  "Return the judge's note action state VALUE names, a symbol, or nil.
+VALUE may have travelled over JSON, as a string."
+  (let ((s (cond ((and (stringp value) (not (string-empty-p value))) (intern value))
+                 ((and value (symbolp value) (not (memq value '(t :false :null)))) value))))
+    (and (memq s '(done undone)) s)))
 
 ;;;; Paths
 
@@ -632,7 +730,7 @@ KEY extracts the string to match; LIMIT caps the result count."
   (or (null s) (string-blank-p s)))
 
 (defun harness-safe-substring (string from &optional to)
-  "Like `substring' but clamps FROM and TO into range."
+  "Like `substring' on STRING, but clamps FROM and TO into its range."
   (let* ((len (length string))
          (from (max 0 (min from len)))
          (to (if to (max from (min to len)) len)))
@@ -682,7 +780,7 @@ walking the process table catches it."
 (defun harness-kill-process-tree (tree &optional signal)
   "Send SIGNAL (TERM by default) to every process in TREE.
 TREE is what `harness-process-tree' returned: the root and its group
-(when local) and the descendants collected with it.  Best-effort: a
+\(when local) and the descendants collected with it.  Best-effort: a
 process that is already gone is not an error."
   (let ((sig (or signal 'term))
         (pid (plist-get tree :pid))
@@ -825,18 +923,103 @@ logged."
         (error (harness-log 'warn "could not save %s: %S" symbol err)))))
   nil)
 
+(defun harness-renew-default (symbol &rest old)
+  "Give option SYMBOL its default again when it holds one of OLD.
+OLD are the defaults it had before.  A reload evaluates a `defcustom'
+again without changing the value it has, so a default that changed
+would stay as it was until Emacs restarts, and would look like a choice
+of the user's meanwhile, which the UI passes on to its harness process.
+A value the user saved through Customize is theirs and stays; so does
+any other value.  Return non-nil when the default was given again."
+  (when (and (default-boundp symbol)
+             (member (default-value symbol) old)
+             (get symbol 'standard-value))
+    (custom-reevaluate-setting symbol)
+    t))
+
 ;;;; Errors
 
 (defun harness-error-message (err)
   "Return a readable message for ERR (an error data list or string).
-An ACP error, (acp-error CODE MESSAGE DATA), reads as its MESSAGE."
+An ACP error, (acp-error CODE MESSAGE DATA), reads as its MESSAGE.  A
+list whose first element is no defined error type and whose second is a
+string, (curl MESSAGE :code 56), reads as that string: the details would
+otherwise print as \"peculiar error: \\\"...\\\", :code, 56\".  A defined
+error type keeps its own message, (harness-no-such-method NAME) reading
+as \"No such harness method: NAME\"."
   (cond ((stringp err) err)
         ((and (eq (car-safe err) 'acp-error) (stringp (nth 2 err)) (not (string-empty-p (nth 2 err))))
          (nth 2 err))
+        ((and (consp err) (symbolp (car err)) (stringp (cadr err))
+              (not (get (car err) 'error-conditions)))
+         (cadr err))
         ((and (consp err) (symbolp (car err)))
          (condition-case nil (error-message-string err)
            (error (format "%S" err))))
         (t (format "%S" err))))
+
+(defconst harness-error-message-limit 200
+  "Longest error text the harness reports, in characters.
+A message longer than this is cut where it is logged, hinted and shown:
+an error that carries a whole transcript, prompt or request body as its
+data would otherwise be repeated whole in *Messages*, in a session's
+history and in the tree.")
+
+(defun harness-error--cut (text limit)
+  "Return TEXT cut to LIMIT characters, with an ellipsis when it was."
+  (if (and (stringp text) (> (length text) limit))
+      (concat (substring text 0 (max 0 (1- (max 1 limit)))) "…")
+    text))
+
+(defun harness-error--short-data (data limit &optional depth)
+  "Return error DATA with long strings cut to LIMIT characters.
+Lists and vectors are walked, so a string nested in a plist an error
+carries is cut too.  DEPTH bounds the walk; deep data is left as a
+placeholder rather than walked at all."
+  (cond ((> (or depth 0) 4) (if (stringp data) (harness-error--cut data limit) "…"))
+        ((stringp data) (harness-error--cut data limit))
+        ((consp data)
+         (let ((items nil) (rest data) (n 0))
+           (while (and (consp rest) (< n 20))
+             (push (harness-error--short-data (car rest) limit (1+ (or depth 0))) items)
+             (setq rest (cdr rest) n (1+ n)))
+           (let ((items (nreverse items)))
+             (if (null rest) items
+               (append items (harness-error--short-data rest limit (1+ (or depth 0))))))))
+        ((vectorp data)
+         (apply #'vector
+                (mapcar (lambda (d) (harness-error--short-data d limit (1+ (or depth 0))))
+                        (cl-subseq (append data nil) 0 (min 20 (length data))))))
+        (t data)))
+
+(defun harness-error--one-line (text)
+  "Return TEXT with runs of whitespace, newlines included, as single spaces.
+A message reported in *Messages*, a hint or a tree row reads as one
+line; the transcript an error may quote is full of newlines."
+  (string-trim (replace-regexp-in-string "[ \t\n\r\f\v]+" " " (or text ""))))
+
+(defun harness-error-short-message (err &optional limit)
+  "Return a short, readable message for ERR, an error data list or string.
+Like `harness-error-message', but long strings among ERR's data are cut
+to LIMIT characters (`harness-error-message-limit' by default) and so is
+the message.  An error whose data carries a whole transcript or request
+body -- a `json-value-p' failure, say -- then reads in one short line in
+*Messages*, in a session hint and in the tree, rather than repeating it."
+  (let* ((limit (max 16 (or limit harness-error-message-limit)))
+         (msg (cond ((stringp err) err)
+                    ((and (eq (car-safe err) 'acp-error) (stringp (nth 2 err))
+                          (not (string-empty-p (nth 2 err))))
+                     (nth 2 err))
+                    ((and (consp err) (symbolp (car err)))
+                     (condition-case nil
+                         (error-message-string (cons (car err) (harness-error--short-data (cdr err) limit)))
+                       (error (harness-error--cut (let ((print-length 20) (print-level 6))
+                                                    (format "%S" err))
+                                                  limit))))
+                    (t (harness-error--cut (let ((print-length 20) (print-level 6))
+                                             (format "%S" err))
+                                           limit)))))
+    (harness-error--one-line (harness-error--cut msg limit))))
 
 (defmacro harness-ignore-errors-logged (context &rest body)
   "Run BODY, logging any error with CONTEXT instead of signalling."

@@ -146,10 +146,19 @@ Claude Code drops every tool of the harness from the turn."
                                     paths coalescable subject timeout)
   "Register tool NAME.  See docs/architecture.md for the keyword arguments.
 LABEL is required: the name people read, such as \"Read file\" for
-read_file, which the UI shows wherever it names the tool.  SUBJECT is
-a function of a call's input returning what the call is about (the
-path it reads, the command it runs) or nil; it follows the label in
-the call's title (see `harness-tool-title')."
+read_file, which the UI shows wherever it names the tool.  DESCRIPTION
+is what the model reads about the tool, and SCHEMA the JSON schema of
+its input, as a plist (by default an object without properties).
+HANDLER, required too, is called with the input and context of a call
+and returns a RESULT plist, a string, or a promise of one.  KIND is the
+permission class of the tool: read, write, exec, net or meta, the
+default.  PATHS is a function of a call's input returning the paths
+the call touches, for the jail, and COALESCABLE non-nil lets the UI
+fold the tool's calls into a summary block.  SUBJECT is a function of
+a call's input returning what the call is about (the path it reads,
+the command it runs) or nil; it follows the label in the call's title,
+see `harness-tool-title'.  TIMEOUT is how many seconds a call may run,
+by default `harness-tools--timeout'."
   (unless (functionp handler) (error "Tool %s needs a handler" name))
   (unless (and (stringp label) (not (harness-string-blank-p label)))
     (error "Tool %s needs a :label, the name people read (such as \"Read file\")" name))
@@ -227,7 +236,7 @@ call is about nothing in particular."
   (append (list :content (if (stringp content) content (format "%S" content)) :is-error nil) props))
 
 (defun harness-tool-error (message &rest props)
-  "Return an error RESULT with MESSAGE."
+  "Return an error RESULT with MESSAGE and extra PROPS."
   (append (list :content message :is-error t) props))
 
 ;;;; The user's Emacs
@@ -276,6 +285,10 @@ unresponsive UI."
      "the user's Emacs")))
 
 (defun harness-tools--normalise-result (value)
+  "Return VALUE, what a tool handler gave, as a RESULT.
+A RESULT plist has its `:is-error' made t or nil; a string becomes the
+content of a successful result, nil an empty one, and anything else its
+printed form."
   (cond ((and (listp value) (plist-member value :content))
          (plist-put (copy-sequence value) :is-error (and (plist-get value :is-error) t)))
         ((stringp value) (harness-tool-ok value))
@@ -283,7 +296,9 @@ unresponsive UI."
         (t (harness-tool-ok (format "%S" value)))))
 
 (defun harness-tools--guard-size (result call-id)
-  "Truncate an oversized RESULT, saving the full text for range reads."
+  "Truncate an oversized RESULT, saving the full text for range reads.
+The text is saved as CALL-ID.txt, or under a fresh id without one, in
+the outputs directory of `harness-state-directory'."
   (let ((content (plist-get result :content)))
     (if (<= (length content) harness-tools-max-output-chars)
         result
@@ -301,6 +316,9 @@ unresponsive UI."
 ;;;; Context
 
 (defun harness-tools--session (session-id)
+  "Return the plist of session SESSION-ID, as `session/get' gives it.
+Without the session, or the session module, return a stand-in that has
+SESSION-ID and `default-directory' as its `:cwd'."
   (or (and session-id (harness-method-exists-p 'session/get)
            (ignore-errors (harness-call 'session/get session-id)))
       (list :id session-id :cwd (file-name-as-directory (expand-file-name default-directory)))))
@@ -315,11 +333,276 @@ unresponsive UI."
       p)))
 
 (defun harness-tools--paths (tool input ctx)
+  "Return the paths a call of TOOL with INPUT touches, absolute under CTX.
+They are what its paths function says, resolved by
+`harness-tools-resolve-path'; nil without that function, or when it
+fails, which is logged."
   (when (harness-tool-paths-fn tool)
     (condition-case err
         (mapcar (lambda (p) (harness-tools-resolve-path p ctx))
                 (delq nil (funcall (harness-tool-paths-fn tool) input)))
       (error (harness-log 'warn "tool %s: paths function failed: %S" (harness-tool-name tool) err) nil))))
+
+;;;; Notes under running calls
+;;
+;; A tool that runs for a while can say more about itself than the one
+;; line of progress the activity line shows: the chat draws a note under
+;; the call, the way a task card shows its recap and its facts.
+;; `tools/execute' gives every call a `:note' function, as it gives it
+;; `:report'; a handler calls it with text for people to read, a line or
+;; a few.  The agent keeps the note on the call and gives it to the UI
+;; with the running turn's activity (`agent/activity', its `:calls').
+;;
+;; The notes of the calls that show a session -- spawn_agent's child,
+;; the sessions session_wait waits on -- are made here, of the session:
+;; what it does now, a recap when there is one (harness-recap.el), and
+;; its facts, the tokens it holds against the window it compacts at, its
+;; turns, steps and tool calls.  Nothing polls: a watcher
+;; (`harness-tools-watch-session') is asked to make the note again when
+;; an event about the session arrives, and the chat redraws what
+;; changed.
+
+(defun harness-tools-note (ctx text)
+  "Say TEXT as the note of the call CTX runs.
+Nothing happens when CTX has no note function (a handler called
+outside `tools/execute') or TEXT has no words in it."
+  (let ((note (plist-get ctx :note)))
+    (when (and note (stringp text) (not (harness-string-blank-p text)))
+      (funcall note text))))
+
+(defun harness-tools-short-id (id)
+  "Return the first eight characters of session ID."
+  (if (stringp id) (substring id 0 (min 8 (length id))) ""))
+
+(defun harness-tools-count-phrase (n singular &optional plural)
+  "Return N with SINGULAR, or PLURAL, as \"1 turn\" or \"2 turns\"."
+  (format "%d %s" n (if (= n 1) singular (or plural (concat singular "s")))))
+
+(defun harness-tools-tail-line (text)
+  "Return the last visible line of TEXT, or nil when there is none.
+Terminal colour codes and other control characters go; a progress bar
+redrawn with carriage returns gives its latest state.  The line is cut
+to 80 columns."
+  (let* ((text (replace-regexp-in-string "\e\\[[0-9;?]*[A-Za-z]" "" (or text "")))
+         (lines (split-string text "[\n\r]+" t "[ \t]+"))
+         (line (and lines (string-trim (replace-regexp-in-string "[[:cntrl:]]+" " " (car (last lines)))))))
+    (unless (or (null line) (string-empty-p line))
+      (harness-truncate-end line 80))))
+
+;;;; What a session is doing, for a note
+
+(defvar harness-tools--session-steps (make-hash-table :test 'equal)
+  "Session id -> the model calls its running turn has made.
+Its last turn's count stays once the turn ends, and
+`harness-tools--forget-steps' drops it with the session.")
+
+(defun harness-tools-session-steps (session-id)
+  "Return the model calls SESSION-ID's turn has made, or its last turn's."
+  (or (gethash session-id harness-tools--session-steps) 0))
+
+(defun harness-tools--reset-steps (session-id &rest _)
+  "Note that SESSION-ID's new turn has made no model call yet."
+  (puthash session-id 0 harness-tools--session-steps))
+
+(defun harness-tools--count-steps (session-id steps &rest _)
+  "Note that SESSION-ID's turn began its STEPSth model call."
+  (puthash session-id (max 0 (or steps 0)) harness-tools--session-steps))
+
+(defun harness-tools--forget-steps (session-id &rest _)
+  "Forget what the notes kept about SESSION-ID, which is gone."
+  (remhash session-id harness-tools--session-steps))
+
+(defun harness-tools--known-session (session-id)
+  "Return the plist of session SESSION-ID, or nil when there is none."
+  (and session-id (harness-method-exists-p 'session/exists-p)
+       (ignore-errors (harness-call 'session/exists-p session-id))
+       (ignore-errors (harness-call 'session/get session-id))))
+
+(defun harness-tools-session-activity (session-id)
+  "Return what SESSION-ID's running turn does now, or nil."
+  (and (harness-method-exists-p 'agent/activity)
+       (ignore-errors (harness-call 'agent/activity session-id))))
+
+(defun harness-tools--activity-phrase (activity)
+  "Return a phrase saying what ACTIVITY, as `agent/activity' gives it, is."
+  (let* ((phase (format "%s" (or (plist-get activity :phase) "")))
+         (tool (plist-get activity :tool))
+         (title (plist-get activity :title))
+         (count (plist-get activity :count))
+         (name (lambda () (or title (and tool (harness-tools-label tool)) "a tool")))
+         (more (if (and (numberp count) (> count 1)) (format " and %d more" (1- count)) "")))
+    (pcase phase
+      ("waiting" "waiting for the model")
+      ("thinking" "thinking")
+      ("writing" "writing")
+      ("compacting" "compacting the conversation")
+      ("tool-input" (concat "preparing " (funcall name)))
+      ("tool" (concat (if (harness-json-true-p (plist-get activity :checking))
+                          "checking permission for "
+                        "running ")
+                      (funcall name) more))
+      (_ "working"))))
+
+(defun harness-tools--pending-phrase (session)
+  "Return what SESSION waits on, as \"waiting on you: a question\", or nil."
+  (when-let* ((item (car (plist-get session :pending))))
+    (let ((payload (plist-get item :payload)))
+      (pcase (format "%s" (plist-get item :kind))
+        ("question"
+         (format "waiting on you: %s"
+                 (harness-truncate-end (harness-first-line (or (plist-get payload :question) "a question")) 60)))
+        ("permission"
+         (format "waiting on you: permission for %s" (or (plist-get payload :tool) "a tool")))
+        (_ "waiting on you")))))
+
+(defun harness-tools--last-node-phrase (session-id)
+  "Return the last thing in SESSION-ID's transcript, as a phrase, or nil."
+  (let ((nodes (ignore-errors (harness-call 'session/nodes session-id (list :limit 20)))))
+    (when-let* ((node (cl-find-if (lambda (n) (not (memq (plist-get n :kind) '(hint plan))))
+                                  (reverse nodes))))
+      (pcase (plist-get node :kind)
+        ('assistant (format "last said: %s"
+                            (harness-truncate-end (harness-first-line (plist-get node :content)) 80)))
+        ('tool-call (format "last ran %s" (or (plist-get node :title) (plist-get node :tool))))
+        ('tool-result "last finished a tool call")
+        ;; A prompt with no work after it yet: a sub-agent just started.
+        ('user (if (cl-find-if (lambda (n) (memq (plist-get n :kind) '(assistant tool-call)))
+                               nodes)
+                   "last took a message"
+                 "starting"))
+        (_ nil)))))
+
+(defun harness-tools-session-doing (session &optional activity)
+  "Return a phrase saying what SESSION does now, or last did.
+ACTIVITY is what `agent/activity' says of it, when the caller has it
+already; without one it is asked for here.  A session that runs says
+what its turn is doing; one that waits on the user says so; any other
+says the last thing in its transcript."
+  (let ((activity (or activity (harness-tools-session-activity (plist-get session :id)))))
+    (cond
+     (activity (harness-tools--activity-phrase activity))
+     ((eq (plist-get session :status) 'blocked)
+      (or (harness-tools--pending-phrase session) "waiting on you"))
+     (t (or (harness-tools--last-node-phrase (plist-get session :id))
+            (if (eq (plist-get session :status) 'running) "working" "idle"))))))
+
+(defun harness-tools-session-tool-calls (session-id)
+  "Return the number of tool calls in SESSION-ID's transcript."
+  (let ((nodes (ignore-errors (harness-call 'session/nodes session-id))))
+    (cl-count 'tool-call nodes :key (lambda (node) (plist-get node :kind)))))
+
+(defun harness-tools-session-facts (session &optional steps)
+  "Return SESSION's facts as one line, or nil when there is nothing to say.
+The line reads \"12.3k/256k before compact · 2 turns · 7 steps · 9 tool
+calls\": the tokens its conversation holds against the window it
+compacts at, its turns, the model calls its running turn has made
+\(STEPS, default `harness-tools-session-steps') and its tool calls.
+SESSION is a plist as `session/get' gives it; the tool calls are counted
+in its transcript."
+  (let* ((id (plist-get session :id))
+         (usage (plist-get session :usage))
+         (used (+ (or (plist-get usage :context) 0) (or (plist-get usage :last-output) 0)))
+         (window (plist-get session :context-window))
+         (turns (or (plist-get usage :turns) 0))
+         (steps (or steps (harness-tools-session-steps id) 0))
+         (tools (harness-tools-session-tool-calls id))
+         (parts (delq nil (list (and (> used 0)
+                                     (concat (harness-format-tokens used)
+                                             (if (numberp window) (concat "/" (harness-format-tokens window)) "")
+                                             " before compact"))
+                                (and (> turns 0) (harness-tools-count-phrase turns "turn"))
+                                (and (> steps 0) (harness-tools-count-phrase steps "step"))
+                                (and (> tools 0) (harness-tools-count-phrase tools "tool call"))))))
+    (and parts (string-join parts " \N{U+00B7} "))))
+
+(defun harness-tools-session-recap (session-id force)
+  "Return the recap of SESSION-ID to show, or nil (see `harness-recap-session').
+A recap is asked for again, and made when due, only when the recap
+module is loaded and its setting is on."
+  (when (and (fboundp 'harness-recap-session) (bound-and-true-p harness-tasks-recap))
+    (ignore-errors (harness-recap-session session-id force))))
+
+(defun harness-tools-session-note (session-id &optional options)
+  "Return the note under a running call that shows SESSION-ID, or nil.
+The note is up to three lines: what the session does now (or last did),
+a recap of it when there is one (`harness-recap-session'), and its
+facts (`harness-tools-session-facts': the tokens it holds against the
+window it compacts at, its turns, steps and tool calls).  Nil when the
+session is gone.
+
+OPTIONS is a plist:
+  :title TEXT  opens the note with TEXT, as \"explorer (45ab12cd): \";
+               nil, the default, leaves it out for a call that names
+               the session itself.
+  :recap BOOL  asks for a recap of the session, and shows it when one
+               comes; the recap module makes one for a sub-agent's
+               session when it is stale, and shows a task card's or one
+               already made otherwise."
+  (let* ((options (or options nil))
+         (title (plist-get options :title))
+         (session (harness-tools--known-session session-id))
+         (doing (if session (harness-tools-session-doing session) "gone"))
+         (recap (and session (plist-get options :recap)
+                     (harness-tools-session-recap session-id nil)))
+         (facts (and session (harness-tools-session-facts session))))
+    (when (or session (stringp title))
+      (string-join
+       (delq nil (list (concat (if (harness-string-blank-p title) "" title) doing)
+                       (let ((text (plist-get recap :text)))
+                         (and (stringp text) (not (harness-string-blank-p text))
+                              (concat "recap: " text)))
+                       facts))
+       "\n"))))
+
+(defvar harness-tools--watchers (make-hash-table :test 'equal)
+  "Session id -> list of (:id N :push FN :options PLIST :last TEXT).
+What `harness-tools-watch-session' keeps for a session the notes show.")
+
+(defvar harness-tools--watcher-id 0
+  "The id given to the last watcher.")
+
+(defun harness-tools--refresh-watchers (session-id)
+  "Tell the watchers of SESSION-ID what its note is now, when it changed."
+  (dolist (entry (gethash session-id harness-tools--watchers))
+    (let ((text (harness-tools-session-note session-id (plist-get entry :options))))
+      (unless (equal text (plist-get entry :last))
+        (plist-put entry :last text)
+        (when text (funcall (plist-get entry :push) text))))))
+
+(defun harness-tools--on-watched-event (session-id &rest _)
+  "Note that something of SESSION-ID changed; its watchers make their note again.
+Subscribed to the events a note is about: its turn's activity and
+steps, its tool calls, its usage, status and pending requests, and a
+recap of it."
+  (harness-tools--refresh-watchers session-id))
+
+(defun harness-tools-watch-session (session-id push &optional options)
+  "Call PUSH with a note about SESSION-ID, at once and when it changes.
+The note is what `harness-tools-session-note' makes of SESSION-ID and
+OPTIONS; PUSH is called with it only when the text changed.  The return
+value stops the watching.  Nothing polls: the note is made again when
+an event about SESSION-ID arrives (its activity, steps, tool calls,
+usage, status or pending requests, a recap of it, its end)."
+  (let* ((id (cl-incf harness-tools--watcher-id))
+         (entry (list :id id :push push :options options :last nil)))
+    (push entry (gethash session-id harness-tools--watchers))
+    (harness-tools--refresh-watchers session-id)
+    (lambda ()
+      (let ((rest (cl-remove id (gethash session-id harness-tools--watchers) :key (lambda (e) (plist-get e :id)))))
+        (if rest
+            (puthash session-id rest harness-tools--watchers)
+          (remhash session-id harness-tools--watchers))))))
+
+;; The counters and watchers of the notes are kept from the events the
+;; bus already carries; nothing here asks any session anything.
+(harness-on 'agent/turn-started #'harness-tools--reset-steps 40)
+(harness-on 'agent/step-started #'harness-tools--count-steps 40)
+(harness-on 'session/deleted #'harness-tools--forget-steps)
+(dolist (event '(agent/activity-changed agent/turn-started agent/step-started
+                 agent/tool-call agent/tool-result agent/turn-ended session/usage
+                 session/status session/changed session/pending-changed session/deleted
+                 recap/done recap/session-done))
+  (harness-on event #'harness-tools--on-watched-event))
 
 ;;;; Remote hosts
 
@@ -675,7 +958,9 @@ search, and so is a call of ssh (`harness-tools--corporate-refusal')."
          (ctx (list :session-id session-id :cwd (plist-get session :cwd)
                     :host (plist-get session :host) :call-id call-id
                     :report (lambda (text)
-                              (harness-emit 'tools/progress session-id call-id text)))))
+                              (harness-emit 'tools/progress session-id call-id text))
+                    :note (lambda (text)
+                            (harness-emit 'tools/note session-id call-id text)))))
     (harness-emit 'tools/started session-id call)
     (cond
      ((null tool)
@@ -708,6 +993,8 @@ search, and so is a call of ssh (`harness-tools--corporate-refusal')."
 
 (harness-declare-event 'tools/started "(SESSION-ID CALL) before permission and execution.")
 (harness-declare-event 'tools/progress "(SESSION-ID CALL-ID TEXT) progress from a running tool.")
+(harness-declare-event 'tools/note
+  "(SESSION-ID CALL-ID TEXT) what a running tool shows under its call: a line or a few for people to read, which the agent keeps on the call and the chat draws (see `harness-tools-watch-session').")
 (harness-declare-event 'tools/finished "(SESSION-ID CALL RESULT) after execution or denial.")
 (harness-declare-event 'tools/file-written "(PATH) after a tool wrote PATH; the UI reverts buffers visiting it.")
 (harness-declare-event 'permission/decided "(SESSION-ID REQUEST DECISION) after the permission chain.")

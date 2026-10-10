@@ -37,9 +37,13 @@
 ;; A session's own `:budget' plist is an implicit hard-or-soft budget
 ;; with scope session, and the Budget setting (`harness-budget') one
 ;; implicit budget, "settings", for all sessions together: it counts
-;; everything recorded.  Hard budgets stop the next turn through the
-;; `agent/before-turn' filter; every budget warns once at 80% and soft
-;; ones once more at 100%, as an event and as a session hint.
+;; everything recorded.  Hard budgets stop a turn: the
+;; `agent/before-turn' gate refuses to start one, and the `agent/step'
+;; gate refuses the next step of a running one, so a long turn cannot
+;; spend far past its cap (the step in flight finishes, then the turn
+;; ends `blocked' with the reason as a hint).  Every budget warns once at
+;; 80% and soft ones once more at 100%, as an event and as a session
+;; hint.
 ;;
 ;; Storage is one code path: rows are loaded from whichever backend is
 ;; in use into plists and aggregated in Lisp.  SQLite only narrows the
@@ -1655,7 +1659,7 @@ Emits `usage/budget-warning' with STATUS and adds TEXT as a hint."
 
 (defun harness-usage--check (session &optional now)
   "Evaluate SESSION's budgets as of NOW; warn on crossings.
-Return the reason a hard budget blocks the next turn, or nil."
+Return the reason a hard budget blocks a new turn or the next step, or nil."
   (let ((sid (plist-get session :id)) reason)
     (dolist (b (harness-usage--session-budgets session))
       (let* ((st (harness-usage--budget-status b now))
@@ -1681,9 +1685,12 @@ Return the reason a hard budget blocks the next turn, or nil."
                                        label (round (* 100 fraction)) spent amount))))))
     reason))
 
-(defun harness-usage--before-turn (value next session)
-  "`agent/before-turn' handler: refuse the turn when a hard budget is spent.
-VALUE is the gate so far, NEXT continues the chain, SESSION is the plist."
+(defun harness-usage--gate (value next session)
+  "`agent/before-turn' and `agent/step' handler: stop when a hard budget is spent.
+The `agent/before-turn' gate refuses a new turn; the `agent/step' gate
+refuses the next step of a running one, which then ends `blocked' with
+the reason as a hint (the step in flight finishes first).  VALUE is the
+gate so far, NEXT continues the chain, SESSION is the plist."
   (if (not (plist-get value :proceed))
       (funcall next value)
     (let ((reason (condition-case err (harness-usage--check session)
@@ -1701,7 +1708,8 @@ VALUE is the gate so far, NEXT continues the chain, SESSION is the plist."
   (harness-on 'provider/quota-updated #'harness-usage--on-quota-updated)
   (harness-usage--watch-rates)
   (harness-usage--watch-live)
-  (harness-add-filter 'agent/before-turn #'harness-usage--before-turn 30))
+  (harness-add-filter 'agent/before-turn #'harness-usage--gate 30)
+  (harness-add-filter 'agent/step #'harness-usage--gate 30))
 
 (harness-declare-event 'usage/recorded "(ROW) after a usage row is stored.")
 (harness-declare-event 'usage/budget-warning "(SESSION-ID BUDGET STATUS) when a budget crosses 80% or 100%.")
@@ -1723,7 +1731,9 @@ VALUE is the gate so far, NEXT continues the chain, SESSION is the plist."
 (when (harness-module-ready-p 'usage)
   (harness-on 'provider/quota-updated #'harness-usage--on-quota-updated)
   (harness-usage--watch-rates)
-  (harness-usage--watch-live))
+  (harness-usage--watch-live)
+  (harness-add-filter 'agent/before-turn #'harness-usage--gate 30)
+  (harness-add-filter 'agent/step #'harness-usage--gate 30))
 
 (provide 'harness-usage)
 ;;; harness-usage.el ends here

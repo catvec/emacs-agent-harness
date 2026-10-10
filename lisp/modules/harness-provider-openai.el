@@ -131,8 +131,10 @@ Every entry is a plist with these keys:
                    an official DeepSeek host gets its handling anyway;
                    see `harness-openai--deepseek-p')
   :capabilities    static capability plist overriding the flavor default
-  :tiers           model names per tier (:cheap :balanced :frontier), as
-                   `harness-define-provider' takes them; without one the
+  :tiers           a model name per tier (:simple :medium :hard
+                   :frontier), perhaps with a thinking level, as
+                   `harness-define-provider' takes them (see
+                   `harness-provider-tiers-type'); without one the
                    tier comes from the catalogue's prices
 
 When neither :api-key nor :api-key-env yields a key, auth-source is
@@ -597,12 +599,21 @@ sent."
   (cdr (assoc (harness-openai--string level) harness-openai--deepseek-effort-map)))
 
 (defun harness-openai--body (endpoint name request)
-  "Build the chat completions body for model NAME at ENDPOINT from REQUEST."
+  "Build the chat completions body for model NAME at ENDPOINT from REQUEST.
+A request that asks for no thinking with `:no-thinking' says so on the
+wire: `:no-thinking' wins over `:thinking', as it does for the Claude
+provider (`harness-provider-claude--effort'), and a DeepSeek endpoint
+gets `reasoning_effort' \"none\", its off switch.  Without it a model
+whose thinking is on by default spends a short output budget on the
+reasoning and stops at `max-tokens' with no text, as a naming request's
+40 tokens did.  An endpoint with no off switch sends no effort, as
+before."
   (let* ((openrouter (harness-openai--openrouter-p endpoint))
          (deepseek (harness-openai--deepseek-p endpoint))
+         (level (if (plist-get request :no-thinking) "none" (plist-get request :thinking)))
          (effort (if deepseek
-                     (harness-openai--deepseek-effort (plist-get request :thinking))
-                   (harness-openai--effort (plist-get request :thinking))))
+                     (harness-openai--deepseek-effort level)
+                   (harness-openai--effort level)))
          (tools (harness-openai--tools (plist-get request :tools)))
          (body (list :model name
                      :messages (harness-openai--messages request endpoint)
@@ -646,7 +657,9 @@ sent."
   "Accumulated state of one streamed completion."
   on-event calls finish-reason usage error (finished nil) http endpoint
   ;; Slots added later go last, though only a request in flight holds one.
-  status)                ; HTTP status of the response, once headers arrived
+  status                 ; HTTP status of the response, once headers arrived
+  error-kind             ; transport failure the HTTP layer reported
+  retry-after)           ; seconds a rate limit asked the caller to wait
 
 (defun harness-openai--stream-tool-call (stream index call)
   "Merge fragment CALL at INDEX into STREAM's accumulated tool calls."
@@ -745,15 +758,30 @@ an official host, or by the cache fields the server reports."
           :billing 'api
           :context (if deepseek (+ miss hit) input))))
 
+(defconst harness-openai--transport-patterns
+  (concat "connection reset\\|recv failure\\|send failure\\|empty reply\\|broken pipe"
+          "\\|could not connect\\|connection refused\\|connection timed out\\|timed out"
+          "\\|no response headers"
+          "\\|could not resolve\\|name or service not known\\|temporary failure in name resolution"
+          "\\|ssl connect error\\|tls\\|eof occurred\\|network is unreachable\\|transport")
+  "Regexps in an error's text that say the transport, not the request, failed.
+A provider that goes on another host, or a gateway answering for one,
+may report a connection failure in words rather than as an HTTP status;
+a step that failed that way is worth trying again.")
+
 (defun harness-openai--failure-kind (stream error)
   "Return the kind of failure STREAM ended with ERROR, or nil.
-An HTTP 402 is out of money, a 401 or 403 a refused login, and a 429
-a short-term rate limit, unless its body says the account's quota is
-used up (`insufficient_quota', DeepSeek's \"Insufficient Balance\").
-Without a status, the error's text is read the same way."
+An HTTP 402 is out of money, a 401 or 403 a refused login, a 429 a
+short-term rate limit unless its body says the account's quota is used
+up (`insufficient_quota', DeepSeek's \"Insufficient Balance\"), and a
+5xx or a connection-level failure (`transport') one another try may get
+past.  Without a status, the error's text is read the same way."
   (let ((status (harness-openai--stream-status stream))
-        (text (downcase (or error ""))))
+        (text (downcase (or error "")))
+        (reported (harness-openai--stream-error-kind stream)))
     (cond
+     ((and (eq reported 'transport) 'transport))
+     ((and (integerp status) (or (= status 408) (<= 500 status 599))) 'transport)
      ((equal status 402) 'billing)
      ((member status '(401 403)) 'auth)
      ((equal status 429)
@@ -764,6 +792,7 @@ Without a status, the error's text is read the same way."
      ((string-match-p "insufficient[ _-]\\(balance\\|credits\\|funds\\)\\|no \\(?:ai \\)?credits\\|out of credits" text)
       'billing)
      ((string-match-p "rate[ _-]limit\\|too many requests" text) 'rate-limit)
+     ((string-match-p harness-openai--transport-patterns text) 'transport)
      (t nil))))
 
 (defun harness-openai--stream-finish (stream reason &optional error)
@@ -786,7 +815,9 @@ Without a status, the error's text is read the same way."
       (funcall on-event (if error
                             (append (list :type 'done :stop-reason reason :error error)
                                     (when-let* ((kind (harness-openai--failure-kind stream error)))
-                                      (list :error-kind kind)))
+                                      (list :error-kind kind))
+                                    (when-let* ((after (harness-openai--stream-retry-after stream)))
+                                      (list :retry-after after)))
                           (list :type 'done :stop-reason reason))))))
 
 (defun harness-openai--stream-complete (stream)
@@ -829,9 +860,17 @@ Without a status, the error's text is read the same way."
                  :headers (harness-openai--headers endpoint key)
                  :json (harness-openai--body endpoint name request)
                  :timeout harness-openai--request-timeout
-                 :on-headers (lambda (s _headers)
+                 ;; A completion is worth repeating: a connection reset
+                 ;; before any of the answer arrived is tried again by the
+                 ;; HTTP layer, and one that got further is retried as a
+                 ;; step, with the partial answer discarded (see
+                 ;; `harness-retry').
+                 :retry t
+                 :on-headers (lambda (s headers)
                                (setq status s)
-                               (setf (harness-openai--stream-status stream) s))
+                               (setf (harness-openai--stream-status stream) s)
+                               (when-let* ((after (harness-http-retry-after headers)))
+                                 (setf (harness-openai--stream-retry-after stream) after)))
                  :on-chunk (lambda (chunk)
                              (if (and status (or (< status 200) (>= status 300)))
                                  (setq raw (concat raw chunk))
@@ -843,8 +882,11 @@ Without a status, the error's text is read the same way."
                                 ((harness-openai--stream-finished stream) nil)
                                 ((eq (car-safe err) 'cancelled)
                                  (harness-openai--stream-finish stream 'cancelled))
-                                (err (harness-openai--stream-finish
-                                      stream 'error (harness-error-message (cadr err))))
+                                (err (let ((e (cadr err)))
+                                       (when (and (consp e) (plist-get e :transient))
+                                         (setf (harness-openai--stream-error-kind stream) 'transport))
+                                       (harness-openai--stream-finish
+                                        stream 'error (harness-error-message e))))
                                 ((or (null s) (< s 200) (>= s 300))
                                  (harness-openai--stream-finish
                                   stream 'error

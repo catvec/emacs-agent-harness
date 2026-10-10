@@ -211,6 +211,10 @@ open directory buffers are refreshed.  A session that moved (ARGS is
     (harness-ui-dirs--refresh-session (car args)))))
 
 (defun harness-ui-dirs--init ()
+  "Wire the directory buffers into the UI.
+Granting or revoking a directory, or changing the config, refreshes
+them, and a session that moves refreshes its own; d in
+`harness-ui-map' runs `harness-directories'."
   (add-hook 'harness-ui-event-functions #'harness-ui-dirs--on-event)
   (define-key harness-ui-map (kbd "d") #'harness-directories))
 

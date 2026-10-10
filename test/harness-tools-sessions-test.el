@@ -9,6 +9,7 @@
 (defvar harness-sessions)
 (defvar harness-agent--turns)
 (defvar harness-tools-agent--questions)
+(defvar harness-agent--cancel-grace)
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
 (defvar harness-tasks--loaded)
@@ -18,6 +19,7 @@
 (defvar harness-tasks-non-interactive)
 (defvar harness-tasks-model)
 (defvar harness-tools-sessions--waiters)
+(defvar harness-tools--watchers)
 
 (defconst harness-tools-sessions-test-script
   '((:type text :delta "Reply from ") (:type text :delta "the other session.") (:type done :stop-reason end-turn)))
@@ -27,7 +29,7 @@
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (dolist (m '(store project config provider provider-demo tools session agent tools-agent tasks session-search tools-sessions))
+     (dolist (m '(store project config provider provider-demo tools session agent tools-agent priority tasks session-search tools-sessions))
        (harness-test-load-module m))
      (clrhash harness-sessions)
      (clrhash harness-agent--turns)
@@ -72,13 +74,14 @@
 (ert-deftest harness-tools-sessions-registers-tools ()
   (harness-tools-sessions-test-with
     (let ((names (mapcar (lambda (s) (plist-get s :name)) (harness-call 'tools/list))))
-      (dolist (n '("session_list" "session_search" "session_read" "session_send" "session_control"
-                   "session_move" "set_non_interactive" "session_wait" "task_list" "task_submit" "task_control"
-                   "task_wait"))
+      (dolist (n '("session_list" "session_search" "session_read" "session_history" "session_send" "session_control"
+                   "session_move" "set_non_interactive" "set_priority" "session_wait" "task_list" "task_submit"
+                   "task_control" "task_wait"))
         (should (member n names))))
-    (dolist (n '("session_list" "session_search" "session_read" "session_wait" "task_list" "task_wait"))
+    (dolist (n '("session_list" "session_search" "session_read" "session_history" "session_wait" "task_list" "task_wait"))
       (should (eq 'read (plist-get (harness-call 'tools/get n) :kind))))
-    (dolist (n '("session_send" "session_control" "session_move" "set_non_interactive" "task_submit" "task_control"))
+    (dolist (n '("session_send" "session_control" "session_move" "set_non_interactive" "set_priority" "task_submit"
+                 "task_control"))
       (should (eq 'meta (plist-get (harness-call 'tools/get n) :kind))))))
 
 (ert-deftest harness-tools-sessions-list-and-filters ()
@@ -161,6 +164,25 @@ regexp matcher\" once a line passed some hundred thousand characters."
             (should (string-search small text))
             (should (string-search "Update the README.md please" text))))))))
 
+(ert-deftest harness-tools-sessions-snippet-stays-short ()
+  "A snippet shows the match where it is, on one line, cut to a few hundred characters."
+  (harness-tools-sessions-test-with
+    (let ((text (concat (make-string 1000000 ?x) " see\n\n   README.md   for\tdetails " (make-string 1000000 ?y))))
+      (should (equal (concat "…" (make-string 65 ?x) " see README.md for details " (make-string 77 ?y) "…")
+                     (harness-tools-sessions--snippet text "readme.md" nil)))
+      (should (equal (harness-tools-sessions--snippet text "readme.md" nil)
+                     (harness-tools-sessions--snippet text "R[a-z]+ME\\.md" t)))
+      ;; A long match, which overflows the matcher over the whole text, is
+      ;; cut 300 characters after its start.
+      (let ((snippet (harness-tools-sessions--snippet text "README.*y" t)))
+        (should (string-prefix-p (concat "…" (make-string 65 ?x) " see README.md for details yyy") snippet))
+        (should (= (+ 1 70 300 1) (length snippet))))
+      ;; Without a match, the start of the text.
+      (should (equal (concat (make-string 159 ?x) "…") (harness-tools-sessions--snippet text "zebra" nil)))
+      (should (equal (concat (make-string 159 ?x) "…") (harness-tools-sessions--snippet text "\\(" t)))
+      ;; A short text is shown whole.
+      (should (equal "line 3: ZEBRA stripes" (harness-tools-sessions--snippet "line 3:\nZEBRA  stripes" "zebra" nil))))))
+
 (defvar harness-session-search-index)
 (defvar harness-session-search-embedding-model)
 
@@ -242,6 +264,103 @@ the text as typed."
         (should (plist-get r :is-error))
         (should (string-match-p "No session matches" (plist-get r :content)))))))
 
+(ert-deftest harness-tools-sessions-history-before-a-compaction ()
+  "session_history searches and reads the session's own conversation from
+before its last compaction, the part its context holds only as the
+compaction tells of it; all=true looks through the whole of it."
+  (harness-tools-sessions-test-with
+    (let ((sid (harness-tools-sessions-test-session)))
+      (harness-call 'session/append sid '(:kind user :content "hello"))
+      (should (string-prefix-p "This conversation was never compacted: all 1 nodes are in your context already."
+                               (harness-tools-sessions-test-ok sid "session_history" nil)))
+      (dotimes (i 6)
+        (harness-call 'session/append sid (list :kind 'user :content (format "question %d about the parser" i)))
+        (harness-call 'session/append sid (list :kind 'assistant :content (format "answer %d" i))))
+      (harness-call 'session/append sid '(:kind hint :content "a hint about the parser"))
+      (let* ((compaction (harness-call 'session/append sid '(:kind compaction :content "SUMMARY of the work"
+                                                              :meta (:compaction "brief"))))
+             (cid (plist-get compaction :id)))
+        (harness-call 'session/append sid '(:kind user :content "after the parser compaction"))
+        ;; Neither query nor node: the last nodes before the compaction,
+        ;; oldest first, hints left out.
+        (let ((text (harness-tools-sessions-test-ok sid "session_history" '(:limit 3))))
+          (should (string-match-p
+                   (format (concat "\\`The conversation before the brief compaction \\[compaction %s, [^]]+\\]:"
+                                   " 14 nodes your context holds only as that node tells of them\\.")
+                           cid)
+                   text))
+          (should (string-match-p "3 of 13 nodes, oldest first; earlier ones with before=n-" text))
+          (should (string-match-p "answer 4" text))
+          (should (string-match-p "question 5 about the parser" text))
+          (should (string-match-p "answer 5" text))
+          (should-not (string-match-p "question 4" text))
+          (should-not (string-match-p "a hint" text))
+          (should-not (string-match-p "after the parser compaction" text))
+          (should (string-match-p "Read a node whole with node_id; find one with query\\.\\'" text)))
+        ;; A query: matches newest first, paging back with before.
+        (let ((text (harness-tools-sessions-test-ok sid "session_history" '(:query "PARSER" :limit 2))))
+          (should (string-match-p "6 nodes mention \"PARSER\", newest first:" text))
+          (should (string-match-p "question 5 about the parser" text))
+          (should (string-match-p "question 4 about the parser" text))
+          (should-not (string-match-p "question 3" text))
+          (should-not (string-match-p "after the parser compaction" text))
+          (should (string-match-p "… 4 older; page back with before=\\(n-[a-z0-9]+\\)" text))
+          (string-match "before=\\(n-[a-z0-9]+\\)" text)
+          (let ((older (harness-tools-sessions-test-ok sid "session_history"
+                                                       (list :query "parser" :before (match-string 1 text)))))
+            (should (string-match-p "4 nodes mention \"parser\", newest first, before n-" older))
+            (should (string-match-p "question 0 about the parser" older))
+            (should-not (string-match-p "question 4" older))))
+        (should (string-match-p "Nothing mentions \"purple\"\\."
+                                (harness-tools-sessions-test-ok sid "session_history" '(:query "purple"))))
+        ;; The whole conversation, the part since the compaction included.
+        (let ((text (harness-tools-sessions-test-ok sid "session_history" '(:query "parser" :all t))))
+          (should (string-match-p (format "\\`The whole conversation, 16 nodes, the brief compaction \\[compaction %s, " cid)
+                                  text))
+          (should (string-match-p "7 nodes mention \"parser\"" text))
+          (should (string-match-p "after the parser compaction" text)))
+        ;; Only some kinds.
+        (let ((text (harness-tools-sessions-test-ok sid "session_history" '(:kinds ["assistant"] :limit 50))))
+          (should (string-match-p "6 of 6 nodes, oldest first:" text))
+          (should-not (string-match-p "question" text)))
+        ;; One node whole, with the nodes around it.
+        (let* ((q2 (cl-find "question 2 about the parser" (harness-call 'session/nodes sid)
+                            :key (lambda (n) (plist-get n :content)) :test #'equal))
+               (text (harness-tools-sessions-test-ok sid "session_history" (list :node_id (plist-get q2 :id)))))
+          (should (string-match-p (format "\\[user %s\\]\\( ([^)]+)\\)?, the node asked for:\nquestion 2 about the parser"
+                                          (plist-get q2 :id))
+                                  text))
+          (dolist (near '("question 1" "answer 1" "answer 2" "question 3"))
+            (should (string-match-p near text)))
+          (should-not (string-match-p "answer 0" text))
+          (should-not (string-match-p "answer 3" text)))
+        (let ((r (harness-tools-sessions-test-run sid "session_history" '(:node_id "n-nope"))))
+          (should (plist-get r :is-error))
+          (should (string-match-p "No node n-nope in this session's conversation" (plist-get r :content))))
+        (let ((r (harness-tools-sessions-test-run sid "session_history" '(:before "n-nope"))))
+          (should (plist-get r :is-error)))))))
+
+(ert-deftest harness-tools-sessions-history-before-a-handoff ()
+  "A handoff from another model starts the conversation over too: what
+came before its note is what session_history looks back on."
+  (harness-tools-sessions-test-with
+    (let ((sid (harness-tools-sessions-test-session)))
+      (harness-call 'session/append sid '(:kind user :content "the old model's question"))
+      (harness-call 'session/append sid '(:kind assistant :content "the old model's answer"))
+      (harness-call 'session/append sid '(:kind compaction :content "an older summary"))
+      (harness-call 'session/append sid '(:kind user :content "after the summary"))
+      (harness-call 'session/append sid (list :kind 'user :content "Read the transcript"
+                                              :meta (list :from (harness-sender-system "handoff")
+                                                          :handoff (list :mode "transcript" :file "/tmp/t.md"
+                                                                         :from "demo:scripted" :to "demo:other"))))
+      (harness-call 'session/append sid '(:kind user :content "the new model's question"))
+      (let ((text (harness-tools-sessions-test-ok sid "session_history" nil)))
+        (should (string-match-p "\\`The conversation before the handoff from demo:scripted \\[user n-[a-z0-9]+, [^]]+\\]: 4 nodes"
+                                text))
+        (should (string-match-p "after the summary" text))
+        (should (string-match-p "the old model's answer" text))
+        (should-not (string-match-p "the new model's question" text))))))
+
 (ert-deftest harness-tools-sessions-send-and-wait-reply ()
   (harness-tools-sessions-test-with
     (let ((me (harness-tools-sessions-test-session :name "Boss"))
@@ -279,7 +398,16 @@ tell it from the user's messages."
           (should (string-match-p "\\[user n-[a-z0-9]+\\] from the user" text)))
         (should (string-match-p tag (harness-tools-sessions-test-ok third "session_search" '(:query "status?"))))))))
 
+(defun harness-tools-sessions-test-wakes (sid)
+  "Return the wake-up messages `session_wait' sent to SID, oldest first."
+  (cl-remove-if-not
+   (lambda (node)
+     (and (eq (plist-get node :kind) 'user)
+          (equal '(:kind system :source "session wait") (harness-node-sender node))))
+   (harness-call 'session/nodes sid)))
+
 (ert-deftest harness-tools-sessions-send-then-wait ()
+  "session_wait registers at once and wakes the session when the others stop."
   (harness-tools-sessions-test-with
     (let ((harness-provider-demo--delay 0.1)
           (me (harness-tools-sessions-test-session))
@@ -289,49 +417,340 @@ tell it from the user's messages."
       (harness-tools-sessions-test-ok me "session_send" (list :session_id b :message "go"))
       ;; Running at once: a wait right after the send cannot see a stale idle.
       (should (harness-call 'agent/running a))
-      (let ((p (harness-call 'tools/execute me (list :id "w1" :name "session_wait" :input (list :session_ids (list a b))))))
-        (should-not (harness-promise-settled-p p))
-        (let ((text (plist-get (harness-test-await p 10) :content)))
-          (should (string-match-p "Done waiting" text))
-          (should (= 2 (cl-count-if (lambda (l) (string-match-p "Reply from the other session" l))
-                                    (split-string text "\n"))))))
+      ;; The call does not block: it registers while both still run.
+      (should (string-match-p "Waiting in the background"
+                              (harness-tools-sessions-test-ok me "session_wait" (list :session_ids (list a b)))))
+      (should (= 1 (hash-table-count harness-tools-sessions--waiters)))
+      (should (string-match-p (regexp-quote (harness-tools-sessions--short a))
+                              (harness-call 'agent/outstanding me)))
+      ;; The wake-up message arrives when both have stopped.
+      (harness-test-wait (lambda () (harness-tools-sessions-test-wakes me)) 10 "the wake-up")
+      (let ((text (plist-get (car (harness-tools-sessions-test-wakes me)) :content)))
+        (should (string-match-p "Done waiting" text))
+        (should (= 2 (cl-count-if (lambda (l) (string-match-p "Reply from the other session" l))
+                                  (split-string text "\n")))))
       (should (zerop (hash-table-count harness-tools-sessions--waiters))))))
 
-(ert-deftest harness-tools-sessions-wait-timeout-and-any ()
+(ert-deftest harness-tools-sessions-note-watch-shows-what-it-waits-on ()
+  "The note a call that waits on sessions shows says what each waited
+session is doing and what it has done: the status, the last thing seen
+and the counts.  `session_wait' registers a wake-up and returns at
+once, so the note is what `task_wait' shows of the sessions of the
+tasks it waits on (`harness-tools-sessions--note-watch')."
+  (harness-tools-sessions-test-with
+    (let* ((harness-provider-demo--delay 0.15)
+           (me (harness-tools-sessions-test-session))
+           (other (harness-tools-sessions-test-session))
+           (notes nil)
+           (ctx (list :session-id me
+                      :note (lambda (text) (push text notes)))))
+      ;; A tool call and a turn already behind it, so the counts mean
+      ;; something while the wait runs.
+      (harness-call 'session/append other '(:kind user :content "make the widget"))
+      (harness-call 'session/append other '(:kind tool-call :tool "bash" :call-id "c0" :title "Bash: make widget"))
+      (harness-call 'session/usage-add other '(:context 5000 :last-output 0 :turns 1))
+      (let ((unwatch (harness-tools-sessions--note-watch ctx (list other))))
+        ;; Idle: the note says the last thing it did, and its facts.
+        (let ((note (car (last notes))))
+          ;; Named by its id, since it has no name, then what it last did.
+          (should (string-prefix-p (concat (harness-tools-short-id other) ": ") note))
+          (should (string-match-p "last ran Bash: make widget" note)))
+        (should (cl-some (lambda (n) (string-match-p "5\\.0k/8\\.0k before compact" n)) notes))
+        (should (cl-some (lambda (n) (string-match-p "1 turn" n)) notes))
+        (should (cl-some (lambda (n) (string-match-p "1 tool call" n)) notes))
+        ;; Now it runs: the note says so, and keeps the facts.
+        (harness-tools-sessions-test-ok me "session_send" (list :session_id other :message "go"))
+        (harness-test-wait (lambda () (cl-some (lambda (n) (string-match-p "model\\|thinking\\|writing" n)) notes))
+                           5 "the running note")
+        (should (cl-some (lambda (n) (string-match-p "5\\.0k/8\\.0k before compact · 1 turn · 1 tool call" n))
+                         notes))
+        ;; The watching stops when the call it belongs to is over, and
+        ;; the note does not outlive it.
+        (funcall unwatch)
+        (should-not (cl-some (lambda (ws) (cl-some (lambda (e) (equal other (car e))) ws))
+                             (harness-tools-sessions-test-watchers)))
+        (let ((before (length notes)))
+          (harness-emit 'session/usage other (plist-get (harness-call 'session/get other) :usage))
+          (should (= before (length notes))))))))
+
+(defun harness-tools-sessions-test-watchers ()
+  "Return every watcher the notes keep, as (SESSION-ID . ENTRIES)."
+  (let (out)
+    (maphash (lambda (id ws) (push (cons id ws) out)) harness-tools--watchers)
+    out))
+
+(ert-deftest harness-tools-sessions-wait-already-met-and-timeout ()
+  "A wait that already holds returns the report; a timeout wakes the session."
   (harness-tools-sessions-test-with
     (let ((me (harness-tools-sessions-test-session))
           (idle (harness-tools-sessions-test-session)))
-      ;; Already stopped: returns at once.
+      ;; Already stopped: the report is the call's result, nothing is registered.
       (should (string-match-p "Done waiting" (harness-tools-sessions-test-ok me "session_wait" (list :session_id idle))))
-      ;; Never starts running: times out with a report, not an error.
-      (let ((text (harness-tools-sessions-test-ok me "session_wait" (list :session_id idle :until "running" :timeout_seconds 0.2))))
+      (should (zerop (hash-table-count harness-tools-sessions--waiters)))
+      ;; Never starts running: the call registers, and the timeout wakes it.
+      (should (string-match-p
+               "Waiting in the background"
+               (harness-tools-sessions-test-ok me "session_wait"
+                                               (list :session_id idle :until "running" :timeout_seconds 0.2))))
+      (should (= 1 (hash-table-count harness-tools-sessions--waiters)))
+      (harness-test-wait (lambda () (harness-tools-sessions-test-wakes me)) 5 "the timeout wake-up")
+      (let ((text (plist-get (car (harness-tools-sessions-test-wakes me)) :content)))
         (should (string-match-p "Still waiting" text))
         (should (string-match-p (regexp-quote idle) text)))
       (should (zerop (hash-table-count harness-tools-sessions--waiters))))))
 
-(ert-deftest harness-tools-sessions-wait-ends-with-the-waiting-turn ()
+(ert-deftest harness-tools-sessions-wait-outlives-its-turn-and-drops-on-cancel ()
+  "A registered wait survives the turn that made it, until it fires.
+A turn the user cancelled drops its registrations instead: a turn they
+stopped is not one to start another on."
   (harness-tools-sessions-test-with
-    (let* ((me (harness-tools-sessions-test-session))
-           (other (harness-tools-sessions-test-session))
-           (p (harness-call 'tools/execute me (list :id "w" :name "session_wait"
-                                                    :input (list :session_id other :until "running")))))
-      (harness-test-wait (lambda () (= 1 (hash-table-count harness-tools-sessions--waiters))) 5 "a waiter")
+    (let ((me (harness-tools-sessions-test-session))
+          (other (harness-tools-sessions-test-session))
+          (third (harness-tools-sessions-test-session)))
+      (harness-tools-sessions-test-ok me "session_wait" (list :session_id other :until "running"))
+      (should (= 1 (hash-table-count harness-tools-sessions--waiters)))
+      ;; The turn that registered it ends on its own; the wait stays.
+      (harness-emit 'agent/turn-ended me 'end-turn)
+      (should (= 1 (hash-table-count harness-tools-sessions--waiters)))
+      (should (string-match-p (regexp-quote (harness-tools-sessions--short other))
+                              (harness-call 'agent/outstanding me)))
+      ;; The other session starts running; the wait fires.
+      (harness-tools-sessions-test-ok me "session_send" (list :session_id other :message "go"))
+      (harness-test-wait (lambda () (harness-tools-sessions-test-wakes me)) 5 "the wake-up")
+      (should (zerop (hash-table-count harness-tools-sessions--waiters)))
+      ;; A discarded turn drops what it registered.  Wait for the first
+      ;; wake's own turn to be over so the count below is stable.
+      (harness-tools-sessions-test-idle me)
+      (harness-test-wait (lambda () (not (harness-call 'agent/running other))) 5 "the other turn to end")
+      (harness-tools-sessions-test-ok third "session_send" (list :session_id other :message "again"))
+      (harness-tools-sessions-test-ok me "session_wait" (list :session_id other))
+      (should (= 1 (hash-table-count harness-tools-sessions--waiters)))
       (harness-emit 'agent/turn-ended me 'cancelled)
-      (should (string-match-p "interrupted" (plist-get (harness-test-await p 5) :content)))
-      (should (zerop (hash-table-count harness-tools-sessions--waiters))))))
+      (should (zerop (hash-table-count harness-tools-sessions--waiters)))
+      ;; Nothing woke for the dropped wait, and none of it is outstanding.
+      (should (= 1 (length (harness-tools-sessions-test-wakes me))))
+      (should-not (harness-call 'agent/outstanding me)))))
 
 (ert-deftest harness-tools-sessions-wait-until-blocked-and-answer ()
+  "A wait until another session blocks wakes the session that registered."
   (harness-tools-sessions-test-with
     (let* ((me (harness-tools-sessions-test-session))
            (other (harness-tools-sessions-test-session))
-           (wait (harness-call 'tools/execute me (list :id "w" :name "session_wait"
-                                                       :input (list :session_id other :until "blocked"))))
-           (ask (harness-call 'tools/execute other (list :id "q" :name "ask_user" :input '(:question "Which colour?")))))
-      (let ((text (plist-get (harness-test-await wait 5) :content)))
+           (ask nil))
+      (should (string-match-p
+               "Waiting in the background"
+               (harness-tools-sessions-test-ok me "session_wait" (list :session_id other :until "blocked"))))
+      (setq ask (harness-call 'tools/execute other (list :id "q" :name "ask_user" :input '(:question "Which colour?"))))
+      (harness-test-wait (lambda () (harness-tools-sessions-test-wakes me)) 5 "the wake-up")
+      (let ((text (plist-get (car (harness-tools-sessions-test-wakes me)) :content)))
         (should (string-match-p "waiting on the user: question .*Which colour\\?" text)))
+      (harness-tools-sessions-test-idle me)
       (should (string-match-p "Answered" (harness-tools-sessions-test-ok me "session_control"
                                                                           (list :session_id other :action "answer" :answer "teal"))))
       (should (equal "teal" (plist-get (harness-test-await ask 5) :content))))))
+
+;;;; Waiting on a sub-agent
+;;
+;; A sub-agent is an ordinary child session, and a wait on one settles as
+;; a wait on any session does.  `spawn_agent' returns as soon as its
+;; child starts, so a wait can be registered while it runs; one made
+;; after it has finished -- by a third session, or by a parent that only
+;; looked later -- settles on the spot rather than register for a change
+;; that can never come.
+
+(defconst harness-tools-sessions-test-slow-child
+  '((:type wait :seconds 0.5) (:type text :delta "child says hi") (:type done :stop-reason end-turn))
+  "A child's script whose turn runs long enough to be waited on.")
+
+(declare-function harness-provider-demo--last-user-text "harness-provider-demo")
+
+(defun harness-tools-sessions-test-spawn (parent &rest plist)
+  "Start a sub-agent of PARENT with PLIST's input; return (CHILD . PROMISE).
+The promise is the `spawn_agent' call's; the child id is the session it
+made, found as soon as it exists."
+  (let* ((known (mapcar (lambda (s) (plist-get s :id))
+                        (harness-call 'session/list (list :kind 'subagent))))
+         (promise (harness-call 'tools/execute
+                                parent (list :id (harness-short-id)
+                                             :name "spawn_agent"
+                                             :input (harness-plist-merge (list :prompt "child work") plist))))
+         (child nil))
+    (harness-test-wait (lambda ()
+                         (setq child (cl-find-if (lambda (s) (not (memq (plist-get s :id) known)))
+                                                 (harness-call 'session/list (list :kind 'subagent))))
+                         child)
+                       5 "a sub-agent to exist")
+    (cons (plist-get child :id) promise)))
+
+(defun harness-tools-sessions-test-spawned (parent &rest plist)
+  "Run spawn_agent in PARENT with PLIST and return the child's id once idle."
+  (let ((spawned (apply #'harness-tools-sessions-test-spawn parent plist)))
+    (harness-test-await (cdr spawned) 10)
+    (harness-tools-sessions-test-idle (car spawned))
+    (car spawned)))
+
+(defun harness-tools-sessions-test-wait-report (sid result)
+  "Return the report of a wait call SID made, whose own result is RESULT.
+RESULT is the report when the condition already held at the call, and
+the registration otherwise; then the report arrives as a wake-up
+message of SID's, which this waits for and returns."
+  (if (string-match-p "Done waiting" result)
+      result
+    (let ((before (length (harness-tools-sessions-test-wakes sid))))
+      (harness-test-wait (lambda () (> (length (harness-tools-sessions-test-wakes sid)) before))
+                         10 "the wake-up")
+      (plist-get (nth before (harness-tools-sessions-test-wakes sid)) :content))))
+
+(ert-deftest harness-tools-sessions-wait-on-a-sub-agent-settles ()
+  "A wait on a sub-agent settles when its turn ends, as on any session.
+Both a fresh sub-agent and a fork one, waited on by a third session
+while the child still runs."
+  (harness-tools-sessions-test-with
+    (let ((harness-provider-demo--delay 0.01)
+          (harness-provider-demo-script-override harness-tools-sessions-test-slow-child))
+      (dolist (fork '(nil t))
+        (let* ((watcher (harness-tools-sessions-test-session :name "Watcher"))
+               (parent (harness-tools-sessions-test-session :name "Parent"))
+               (spawned (harness-tools-sessions-test-spawn parent :fork fork))
+               (child (car spawned)))
+          (harness-test-wait (lambda () (harness-call 'agent/running child)) 5 "the child to run")
+          ;; The call registers while the child runs, and returns at once.
+          (let ((result (harness-tools-sessions-test-ok
+                         watcher "session_wait"
+                         (list :session_id child :until "stopped" :timeout_seconds 5))))
+            (should (string-match-p "Waiting in the background" result))
+            (should (= 1 (hash-table-count harness-tools-sessions--waiters)))
+            ;; The wake-up message arrives when the child's turn ends.
+            (let ((text (harness-tools-sessions-test-wait-report watcher result)))
+              (should (string-match-p "Done waiting" text))
+              (should (string-match-p (regexp-quote child) text))
+              (should (string-match-p "child says hi" text))))
+          ;; The spawn call returned at once; the child is done and nothing waits.
+          (should (string-match-p "started (session"
+                                  (plist-get (harness-test-await (cdr spawned) 5) :content)))
+          (should-not (harness-call 'agent/running child))
+          (should (zerop (hash-table-count harness-tools-sessions--waiters)))
+          (should-not harness-tools-sessions--recheck-timer))))))
+
+(ert-deftest harness-tools-sessions-wait-changed-on-a-finished-sub-agent-settles ()
+  "`changed' on a sub-agent that already finished settles, it does not hang.
+`spawn_agent' returns before its child is done, but a wait made once it
+has finished -- as a third session's can be -- has no change left to
+announce, and settles on the spot instead of registering for one that
+can never come."
+  (harness-tools-sessions-test-with
+    (let* ((watcher (harness-tools-sessions-test-session :name "Watcher"))
+           (parent (harness-tools-sessions-test-session :name "Parent"))
+           (child (harness-tools-sessions-test-spawned parent)))
+      ;; The child has finished: its turn ended before the wait below.
+      (should-not (harness-call 'agent/running child))
+      (let ((text (harness-tools-sessions-test-ok watcher "session_wait"
+                                                  (list :session_id child :until "changed"
+                                                        :timeout_seconds 5))))
+        (should (string-match-p "Done waiting" text))
+        (should (string-match-p "idle" text))
+        (should (string-match-p "Reply from the other session" text)))
+      (should (zerop (hash-table-count harness-tools-sessions--waiters))))))
+
+(ert-deftest harness-tools-sessions-wait-on-several-sub-agents-mode-any ()
+  "Several sub-agents, mode any and all: as with any other sessions."
+  (harness-tools-sessions-test-with
+    (let* ((harness-provider-demo--delay 0.01)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (if (string-match-p "slow" (harness-provider-demo--last-user-text request))
+                  '((:type wait :seconds 3) (:type text :delta "slow done") (:type done :stop-reason end-turn))
+                '((:type text :delta "fast done") (:type done :stop-reason end-turn)))))
+           (watcher (harness-tools-sessions-test-session :name "Watcher"))
+           (parent (harness-tools-sessions-test-session :name "Parent"))
+           (slow (car (harness-tools-sessions-test-spawn parent :prompt "slow child")))
+           (fast (car (harness-tools-sessions-test-spawn parent :prompt "fast child"))))
+      (harness-test-wait (lambda () (harness-call 'agent/running slow)) 5 "the slow child to run")
+      ;; any: the first of them to stop wakes the watcher, the slow one still runs.
+      (let ((text (harness-tools-sessions-test-wait-report
+                   watcher (harness-tools-sessions-test-ok
+                            watcher "session_wait"
+                            (list :session_ids (list slow fast) :mode "any" :until "stopped"
+                                  :timeout_seconds 5)))))
+        (should (string-match-p "Done waiting" text))
+        (should (harness-call 'agent/running slow)))
+      ;; all: a second wait is woken for the slow one too.
+      (let ((text (harness-tools-sessions-test-wait-report
+                   watcher (harness-tools-sessions-test-ok
+                            watcher "session_wait"
+                            (list :session_ids (list slow fast) :until "stopped"
+                                  :timeout_seconds 10)))))
+        (should (string-match-p "Done waiting" text))
+        (should-not (harness-call 'agent/running slow))))))
+
+(ert-deftest harness-tools-sessions-wait-settles-without-events ()
+  "A wait settles even when no subscribed event announces the change.
+The events are the ordinary way a wait is looked at; the safety
+re-check (`harness-tools-sessions-wait-recheck') is the floor under
+them, so a change nothing announced cannot leave a registration
+waiting on the events alone."
+  (harness-tools-sessions-test-with
+    (let ((harness-tools-sessions-wait-recheck 0.2)
+          (harness-provider-demo--delay 0.01)
+          (harness-provider-demo-script-override harness-tools-sessions-test-slow-child))
+      (let* ((watcher (harness-tools-sessions-test-session :name "Watcher"))
+             (parent (harness-tools-sessions-test-session :name "Parent"))
+             (child (car (harness-tools-sessions-test-spawn parent)))
+             (result (harness-tools-sessions-test-ok
+                      watcher "session_wait"
+                      (list :session_id child :until "stopped" :timeout_seconds 5))))
+        (should (string-match-p "Waiting in the background" result))
+        (should (= 1 (hash-table-count harness-tools-sessions--waiters)))
+        (should harness-tools-sessions--recheck-timer)
+        ;; Take every poker away: only the safety re-check is left.
+        (dolist (ev '(session/status session/changed session/deleted session/pending-changed
+                      session/node-added session/head-moved agent/turn-started
+                      task/changed task/deleted))
+          (harness-off (cons ev 'harness-tools-sessions--poke)))
+        (harness-off (cons 'agent/turn-ended 'harness-tools-sessions--on-turn-ended))
+        ;; The floor settles it; the wake-up brings the report as usual.
+        (let ((text (harness-tools-sessions-test-wait-report watcher result)))
+          (should (string-match-p "Done waiting" text))
+          (should (string-match-p "child says hi" text)))
+        (should (zerop (hash-table-count harness-tools-sessions--waiters)))
+        (should-not harness-tools-sessions--recheck-timer)))))
+
+(ert-deftest harness-tools-sessions-wait-on-a-sub-agent-until-blocked ()
+  "A sub-agent that asks the user is waited on as any session: blocked,
+then, once answered, idle."
+  (harness-tools-sessions-test-with
+    (let* ((harness-provider-demo--delay 0.01)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (if (string-match-p "child work" (harness-provider-demo--last-user-text request))
+                  '((:type wait :seconds 0.2)
+                    (:type tool-call :id "q" :name "ask_user" :input (:question "Which colour?"))
+                    (:type text :delta "child answered")
+                    (:type done :stop-reason end-turn))
+                harness-tools-sessions-test-script)))
+           (watcher (harness-tools-sessions-test-session :name "Watcher"))
+           (parent (harness-tools-sessions-test-session :name "Parent"))
+           (child (car (harness-tools-sessions-test-spawn parent))))
+      (let ((text (harness-tools-sessions-test-wait-report
+                   watcher (harness-tools-sessions-test-ok
+                            watcher "session_wait"
+                            (list :session_id child :until "blocked" :timeout_seconds 5)))))
+        (should (string-match-p "Done waiting" text))
+        (should (string-match-p "waiting on the user: question .*Which colour\\?" text)))
+      ;; The watcher's own wake-up turn ends before the answer.
+      (harness-tools-sessions-test-idle watcher)
+      ;; Register for idle while the child is blocked, then answer it.
+      (let ((idle (harness-tools-sessions-test-ok
+                   watcher "session_wait" (list :session_id child :until "idle" :timeout_seconds 10))))
+        (should (string-match-p "Waiting in the background" idle))
+        (should (string-match-p "Answered"
+                                (harness-tools-sessions-test-ok
+                                 watcher "session_control"
+                                 (list :session_id child :action "answer" :answer "teal"))))
+        (let ((text (harness-tools-sessions-test-wait-report watcher idle)))
+          (should (string-match-p "Done waiting" text))
+          (should (string-match-p "child answered" text)))))))
+
 
 (ert-deftest harness-tools-sessions-control ()
   (harness-tools-sessions-test-with
@@ -382,19 +801,95 @@ permission chain's: see the perms tests.)"
       (should-not (plist-get (harness-call 'session/get there) :non-interactive))
       (should (plist-get (harness-tools-sessions-test-run me "set_non_interactive" '(:enabled t :all t :session_id "Other"))
                          :is-error))
-      ;; Everything current, in every project: the session over there and
-      ;; the task waiting there.
+      ;; Everything current, in every project: the session over there,
+      ;; the session of the task waiting there -- every task has one from
+      ;; submission -- and that task itself.
       (let ((text (harness-tools-sessions-test-ok me "set_non_interactive" '(:enabled t :all t))))
-        (should (string-match-p "1 session and 1 task changed" text)))
+        (should (string-match-p "2 sessions and 1 task changed" text)))
       (should (plist-get (harness-call 'session/get there) :non-interactive))
       (should (eq t (plist-get (harness-call 'task/get waiting) :non-interactive)))
-      ;; Off, with JSON's false.
+      ;; Off, with JSON's false: the three sessions and the task's own.
       (let ((text (harness-tools-sessions-test-ok me "set_non_interactive" '(:enabled :false :all t))))
-        (should (string-match-p "\\`Non-interactive mode is off for every current session and task of every project: 3 sessions and 1 task changed" text)))
+        (should (string-match-p "\\`Non-interactive mode is off for every current session and task of every project: 4 sessions and 1 task changed" text)))
       (dolist (sid (list me other there))
         (should-not (plist-get (harness-call 'session/get sid) :non-interactive)))
       (should (eq :false (plist-get (harness-call 'task/get waiting) :non-interactive)))
       (harness-call 'task/cancel waiting))))
+
+(ert-deftest harness-tools-sessions-set-priority ()
+  "The set_priority tool gives one session a priority, or every current one.
+With all, every current session and task of every project takes the
+level; a task's priority is its session's, and the listing shows a
+priority that is not the default medium."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (me (harness-tools-sessions-test-session :name "Me"))
+           (other (harness-tools-sessions-test-session :name "Other"))
+           (spec (harness-call 'tools/get "set_priority")))
+      (should (eq 'meta (plist-get spec :kind)))
+      (should (equal '("priority") (plist-get (plist-get spec :schema) :required)))
+      ;; This session by default: a priority is the session's.
+      (should (equal "Priority is now high for this session."
+                     (harness-tools-sessions-test-ok me "set_priority" '(:priority "high"))))
+      (should (eq 'high (harness-priority-of me)))
+      (should (equal "high" (harness-call 'priority/get me)))
+      ;; A session that already carried it of its own is not changed.
+      (should (equal "Priority was already high for this session."
+                     (harness-tools-sessions-test-ok me "set_priority" '(:priority "high"))))
+      ;; Another one, by name, in any case.
+      (should (string-match-p "\\`Priority is now low for session .* \"Other\"\\.\\'"
+                              (harness-tools-sessions-test-ok me "set_priority"
+                                                              '(:priority "LOW" :session_id "Other"))))
+      (should (eq 'low (harness-priority-of other)))
+      ;; The listing says it, and the default medium goes without saying.
+      (let ((text (harness-tools-sessions-test-ok me "session_list" nil)))
+        (should (string-match-p (concat (regexp-quote me) ".*priority high") text))
+        (should (string-match-p (concat (regexp-quote other) ".*priority low") text)))
+      ;; Everything current: a session already at the level is left alone.
+      (let ((text (harness-tools-sessions-test-ok me "set_priority" '(:priority "medium" :all t))))
+        (should (string-match-p "2 sessions changed, the others already had it" text)))
+      (should (eq 'medium (harness-priority-of me)))
+      (should (eq 'medium (harness-priority-of other)))
+      (should (string-match-p "0 sessions changed"
+                              (harness-tools-sessions-test-ok me "set_priority" '(:priority "medium" :all t))))
+      ;; A task's priority is its session's, and every task has its
+      ;; session from submission, so set_priority takes that session.
+      (let* ((id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Urgent fix"))
+                                       :meta)
+                            :task-id))
+             (sid (plist-get (harness-call 'task/get id) :session)))
+        (should (stringp sid))
+        (should (string-match-p "\\`Priority is now high for session "
+                                (harness-tools-sessions-test-ok me "set_priority"
+                                                                (list :session_id sid :priority "high"))))
+        (should (eq 'high (plist-get (harness-call 'task/get id) :priority)))
+        (harness-call 'task/cancel id))
+      ;; It needs a priority, a level that exists, one target, and a session.
+      (should (plist-get (harness-tools-sessions-test-run me "set_priority" nil) :is-error))
+      (should (plist-get (harness-tools-sessions-test-run me "set_priority" '(:priority "urgent")) :is-error))
+      (should (plist-get (harness-tools-sessions-test-run me "set_priority"
+                                                          '(:priority "high" :all t :session_id "Other"))
+                         :is-error))
+      (should (plist-get (harness-tools-sessions-test-run me "set_priority"
+                                                          '(:priority "high" :session_id "Nobody"))
+                         :is-error))
+      ;; Nothing changed by the refusals.
+      (should (eq 'medium (harness-priority-of me)))
+      ;; A harness without the priority module says so, rather than
+      ;; failing on a method nothing implements.
+      (harness-unregister-method 'priority/set)
+      (harness-unregister-method 'priority/set-all)
+      (let ((r (harness-tools-sessions-test-run me "set_priority" '(:priority "high"))))
+        (should (plist-get r :is-error))
+        (should (string-match-p "priority module is not loaded" (plist-get r :content))))
+      (let* ((id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Later"))
+                                       :meta)
+                            :task-id))
+             (r (harness-tools-sessions-test-run me "task_control" (list :task_id id :action "priority"
+                                                                         :priority "high"))))
+        (should (plist-get r :is-error))
+        (should (string-match-p "priority module is not loaded" (plist-get r :content)))
+        (harness-call 'task/cancel id)))))
 
 (declare-function harness-provider-demo--script "harness-provider-demo" (request))
 
@@ -415,6 +910,197 @@ confirmation can be tried live without a model."
             (should (eq t (plist-get input :all)))
             (dolist (key (harness-plist-keys input))
               (should (plist-member (plist-get schema :properties) key)))))))))
+
+;;;; session_settings
+
+(defun harness-tools-sessions-test-hints (sid)
+  "Return the texts of the hint nodes of session SID, oldest first."
+  (delq nil (mapcar (lambda (n) (and (eq (plist-get n :kind) 'hint) (plist-get n :content)))
+                    (harness-call 'session/nodes sid))))
+
+(ert-deftest harness-tools-sessions-settings-read ()
+  "session_settings reads this session's settings or another's: model,
+thinking, the context window with what caps it, the budget, and the
+permission mode and non-interactive state it cannot change."
+  (harness-tools-sessions-test-with
+    (let* ((me (harness-tools-sessions-test-session :name "Planner" :thinking "high"))
+           (other (harness-tools-sessions-test-session
+                   :name "Worker" :kind 'subagent :context-window-limit 4000
+                   :non-interactive t :budget (list :amount 5.0 :hard t))))
+      (let ((text (harness-tools-sessions-test-ok me "session_settings" '(:action "read"))))
+        (should (string-match-p "«Planner» (this session)" text))
+        (should (string-match-p "model: demo:scripted" text))
+        (should (string-match-p "thinking: high" text))
+        (should (string-match-p "context window: 8k tokens (the model's own; no limit is set)" text))
+        (should (string-match-p "budget: none" text))
+        (should (string-match-p "permission mode: ask; non-interactive: off" text))
+        ;; The settings it cannot change say which tool changes them.
+        (should (string-match-p "set_non_interactive" text))
+        (should (string-match-p "session_move" text)))
+      (let ((text (harness-tools-sessions-test-ok
+                   me "session_settings" (list :action "read" :session_id other))))
+        (should (string-match-p "«Worker»" text))
+        (should (string-match-p "kind subagent" text))
+        (should (string-match-p
+                 (regexp-quote "capped at 4k by a sub-agent cap (harness-subagent-context-limit)")
+                 text))
+        (should (string-match-p "budget: \\$5.00 (hard" text))
+        (should (string-match-p "non-interactive: on" text))))))
+
+(ert-deftest harness-tools-sessions-settings-set-on-this-session ()
+  "A set changes the calling session's own model, thinking, context
+limit and budget through session/update, and every change says who made
+it, the old value and the new one."
+  (harness-tools-sessions-test-with
+    (let* ((me (harness-tools-sessions-test-session :name "Planner" :thinking "high"))
+           (events nil))
+      (harness-on 'session/updated (lambda (id changes) (push (cons id changes) events)))
+      (let ((text (harness-tools-sessions-test-ok
+                   me "session_settings"
+                   (list :action "set" :thinking "low" :context_window_limit "4k"
+                         :budget "5" :budget_hard t))))
+        (should (string-match-p "This session:" text))
+        (should (string-match-p "Thinking high → low" text))
+        (should (string-match-p
+                 "Context window limit none (the model's own window) → 4k" text))
+        (should (string-match-p "Budget none → \\$5.00 (hard)" text)))
+      ;; It went through session/update, so views and clients refresh.
+      (should (equal (list (cons me (list :thinking "low" :context-window-limit 4000
+                                          :budget (list :amount 5.0 :hard t))))
+                     events))
+      (let ((s (harness-call 'session/get me)))
+        (should (equal "low" (plist-get s :thinking)))
+        (should (equal 4000 (plist-get s :context-window-limit)))
+        (should (equal (list :amount 5.0 :hard t) (plist-get s :budget))))
+      (should (equal '("Thinking high → low, set by the session itself"
+                       "Context window limit none (the model's own window) → 4k, set by the session itself"
+                       "Budget none → $5.00 (hard), set by the session itself")
+                     (harness-tools-sessions-test-hints me))))))
+
+(ert-deftest harness-tools-sessions-settings-set-on-another-session ()
+  "A set on another session names the caller in the hint and shows the
+changes in the caller's result; the other session is told, this one not."
+  (harness-tools-sessions-test-with
+    (let* ((me (harness-tools-sessions-test-session :name "Planner"))
+           (other (harness-tools-sessions-test-session :name "Worker" :kind 'subagent)))
+      (let ((text (harness-tools-sessions-test-ok
+                   me "session_settings"
+                   (list :action "set" :session_id "Worker" :model "demo:scripted-2"
+                         :context_window_limit "model"))))
+        (should (string-match-p "«Worker»:" text))
+        (should (string-match-p "Model demo:scripted → demo:scripted-2" text)))
+      (should (equal "demo:scripted-2" (plist-get (harness-call 'session/get other) :model)))
+      (should (equal '("Model demo:scripted → demo:scripted-2, set by session «Planner»")
+                     (harness-tools-sessions-test-hints other)))
+      (should-not (harness-tools-sessions-test-hints me)))))
+
+(ert-deftest harness-tools-sessions-settings-a-running-session-hears-next-request ()
+  "A change to a running session leaves a hint saying it takes effect
+from its next request."
+  (harness-tools-sessions-test-with
+    (let* ((harness-provider-demo--delay 0.5)
+           (me (harness-tools-sessions-test-session :name "Me"))
+           (other (harness-tools-sessions-test-session :name "Busy")))
+      (harness-tools-sessions-test-ok me "session_send" (list :session_id other :message "long job"))
+      (should (eq 'running (plist-get (harness-call 'session/get other) :status)))
+      (let ((text (harness-tools-sessions-test-ok
+                   me "session_settings" (list :action "set" :session_id other :thinking "low"))))
+        (should (string-match-p "is running; the changes take effect from its next request:" text)))
+      (let ((hint (cl-find-if (lambda (h) (string-match-p "\\`Thinking" h))
+                              (harness-tools-sessions-test-hints other))))
+        (should (string-match-p "Thinking the model's default → low, set by session «Me»" hint))
+        (should (string-match-p "takes effect from its next request" hint)))
+      (harness-tools-sessions-test-idle other))))
+
+(ert-deftest harness-tools-sessions-settings-refuses-what-is-not-its ()
+  "Permission mode, non-interactive, directories, the working directory
+and the host are refused, naming the tool that changes them; an unknown
+key names what this tool does change; nothing changes."
+  (harness-tools-sessions-test-with
+    (let* ((me (harness-tools-sessions-test-session :name "Me"))
+           (refuse (lambda (input)
+                     (let ((r (harness-tools-sessions-test-run me "session_settings" input)))
+                       (should (plist-get r :is-error))
+                       (plist-get r :content)))))
+      (dolist (case '(("permission_mode" "yolo" "the permission mode is the user's")
+                      ("non_interactive" t "set_non_interactive")
+                      ("allowed_dirs" ("/tmp") "request_directory_access")
+                      ("allowed_directories" ("/tmp") "request_directory_access")
+                      ("directory" "/tmp" "session_move")
+                      ("cwd" "/tmp" "session_move")
+                      ("working_directory" "/tmp" "session_move")
+                      ("host" "box" "session_move")))
+        (should (string-match-p (nth 2 case)
+                                (funcall refuse (list :action "set"
+                                                      (intern (concat ":" (car case))) (nth 1 case))))))
+      ;; A refusal is a refusal on a read too: a read changes nothing.
+      (should (string-match-p "set_non_interactive"
+                              (funcall refuse '(:action "read" :non_interactive t))))
+      (should (string-match-p "does not know temperature"
+                              (funcall refuse '(:action "set" :temperature 0.5))))
+      (should (string-match-p "needs action" (funcall refuse '(:session_id "Me"))))
+      (should (string-match-p "Unknown session_settings action" (funcall refuse '(:action "frob"))))
+      (let ((s (harness-call 'session/get me)))
+        (should (eq 'ask (plist-get s :permission-mode)))
+        (should-not (plist-get s :non-interactive))
+        (should-not (plist-get s :allowed-dirs))))))
+
+(ert-deftest harness-tools-sessions-settings-refuses-a-value-that-is-not ()
+  "A model offering no such thinking level, a limit that is no token
+count and a budget that is no dollar amount are refused with the reason."
+  (harness-tools-sessions-test-with
+    (let* ((me (harness-tools-sessions-test-session :name "Me"))
+           (refuse (lambda (input)
+                     (let ((r (harness-tools-sessions-test-run me "session_settings" input)))
+                       (should (plist-get r :is-error))
+                       (plist-get r :content)))))
+      (should (string-match-p "does not offer the thinking level medium; it offers low, high"
+                              (funcall refuse '(:action "set" :thinking "medium"))))
+      (should (string-match-p "is not a positive number of tokens"
+                              (funcall refuse '(:action "set" :context_window_limit 0))))
+      (should (string-match-p "is not a positive number of tokens"
+                              (funcall refuse '(:action "set" :context_window_limit "soon"))))
+      (should (string-match-p "is not a dollar amount"
+                              (funcall refuse '(:action "set" :budget "cheap"))))
+      (should (string-match-p "is negative"
+                              (funcall refuse '(:action "set" :budget -1))))
+      (should (string-match-p "no budget to make hard or soft"
+                              (funcall refuse '(:action "set" :budget_hard t)))))))
+
+(ert-deftest harness-tools-sessions-settings-policy-pins ()
+  "A setting the policy fixes cannot be set through the tool, the read
+says it is pinned, and the policy's own value is no change."
+  (harness-tools-sessions-test-with
+    (let ((me (harness-tools-sessions-test-session :name "Me")))
+      (harness-test-with-policy '((harness-model . "demo:scripted"))
+        (let ((r (harness-tools-sessions-test-run
+                  me "session_settings" '(:action "set" :model "demo:scripted-2"))))
+          (should (plist-get r :is-error))
+          (should (string-match-p "harness-model is set by policy" (plist-get r :content))))
+        (should (equal "demo:scripted" (plist-get (harness-call 'session/get me) :model)))
+        (should (string-match-p
+                 "Nothing to change"
+                 (harness-tools-sessions-test-ok
+                  me "session_settings" '(:action "set" :model "demo:scripted"))))
+        (should (string-match-p
+                 "model: demo:scripted (set by policy, and cannot be changed)"
+                 (harness-tools-sessions-test-ok me "session_settings" '(:action "read"))))))))
+
+(ert-deftest harness-tools-sessions-settings-nothing-to-change ()
+  "A set that asks for what the session already has changes nothing and
+says so: no hint and no session/updated."
+  (harness-tools-sessions-test-with
+    (let* ((me (harness-tools-sessions-test-session
+                :name "Me" :thinking "high" :context-window-limit 4000))
+           (events nil))
+      (harness-on 'session/updated (lambda (_id _changes) (push t events)))
+      (should (string-match-p
+               "Nothing to change"
+               (harness-tools-sessions-test-ok
+                me "session_settings" '(:action "set" :thinking "high"
+                                        :context_window_limit "4k"))))
+      (should-not events)
+      (should-not (harness-tools-sessions-test-hints me)))))
 
 ;;;; session_move
 
@@ -608,7 +1294,10 @@ the handler moves nothing the user did not confirm."
            (id (plist-get (plist-get submitted :meta) :task-id)))
       (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :name)) 5 "the task's name")
       (should (eq 'pending (plist-get (harness-call 'task/get id) :state)))
-      (should-not (plist-get (harness-call 'task/get id) :session))
+      ;; Every task has its session from submission, waiting for a slot.
+      (let ((sid (plist-get (harness-call 'task/get id) :session)))
+        (should (stringp sid))
+        (should (eq 'idle (plist-get (harness-call 'session/get sid) :status))))
       (should (string-match-p (concat (regexp-quote id) " +pending +\"Lexer fix\": Fix the lexer")
                               (harness-tools-sessions-test-ok me "task_list" nil))))))
 
@@ -683,6 +1372,54 @@ the handler moves nothing the user did not confirm."
       (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "start"))
       (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "done"))
       (should (eq 'done (plist-get (harness-call 'task/get id) :state))))))
+
+(ert-deftest harness-tools-sessions-task-list-separates-the-backlog ()
+  "task_list tells a backlog task from a queued pending one.
+The backlog has its own column and says so on its state line; the
+column filter keeps the two apart, and until=settled still settles on a
+task that waits to be started."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (harness-provider-demo-script-override
+            '((:type text :delta "Fix the lexer\n\nIt drops the last token.") (:type done :stop-reason end-turn)))
+           (me (harness-tools-sessions-test-session))
+           (queued (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Waits for a slot"))
+                                        :meta)
+                              :task-id))
+           (backlog (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit"
+                                                                           '(:prompt "lexer eats a token" :refine t))
+                                          :meta)
+                               :task-id)))
+      ;; The write-up runs in the background; waiting on the task settles
+      ;; once it waits to be started.
+      (should (string-match-p "Done waiting"
+                              (harness-tools-sessions-test-ok me "task_wait" (list :task_id backlog))))
+      (should (equal "Fix the lexer\n\nIt drops the last token."
+                     (plist-get (harness-call 'task/get backlog) :prompt)))
+      (let ((listing (harness-tools-sessions-test-ok me "task_list" nil)))
+        (should (string-match-p (concat (regexp-quote queued) " +pending +Waits for a slot") listing))
+        (should (string-match-p (concat (regexp-quote backlog) " +backlog +Fix the lexer") listing))
+        (should (string-match-p (concat (regexp-quote backlog)
+                                        "[^\n]*\n    state pending, backlog, waits to be started")
+                                listing)))
+      ;; The column filter keeps them apart.
+      (let ((backlog-list (harness-tools-sessions-test-ok me "task_list" '(:column "backlog"))))
+        (should (string-match-p (regexp-quote backlog) backlog-list))
+        (should-not (string-match-p (regexp-quote queued) backlog-list)))
+      (let ((pending-list (harness-tools-sessions-test-ok me "task_list" '(:column "pending"))))
+        (should (string-match-p (regexp-quote queued) pending-list))
+        (should-not (string-match-p (regexp-quote backlog) pending-list)))
+      ;; The queued task is still waiting for a slot: the backlog task's
+      ;; settling is its own.
+      (should (eq 'pending (plist-get (harness-call 'task/get queued) :column)))
+      ;; Queue it: a backlog task becomes a queued pending one.
+      (harness-tools-sessions-test-ok me "task_control" (list :task_id backlog :action "queue"))
+      (let ((task (harness-call 'task/get backlog)))
+        (should (eq 'pending (plist-get task :state)))
+        (should (eq 'pending (plist-get task :column)))
+        (should-not (plist-get task :backlog)))
+      (should-not (string-match-p "backlog"
+                                  (harness-tools-sessions--task-line (harness-call 'task/get backlog)))))))
 
 (ert-deftest harness-tools-sessions-task-submit-main-tree ()
   "task_submit passes main_tree through; the result and task_list say so."
@@ -846,6 +1583,52 @@ task_list filters on it and task_wait can wait for it."
       (should (string-match-p "No tasks match" (harness-tools-sessions-test-ok me "task_list" '(:column "active"))))
       (should (string-match-p "Done waiting"
                               (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "merging")))))))
+
+(ert-deftest harness-tools-sessions-task-queue-suspend-and-resume ()
+  "task_control suspends and resumes a project's queue; task_list says so.
+An explicit start still starts a task while the queue is suspended."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (me (harness-tools-sessions-test-session))
+           (id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Waits for the queue"))
+                                     :meta)
+                          :task-id)))
+      (should (string-match-p "Queue suspended"
+                              (harness-tools-sessions-test-ok me "task_control" '(:action "suspend-queue"))))
+      (let ((listing (harness-tools-sessions-test-ok me "task_list" nil)))
+        (should (string-match-p "Queue suspended for" listing))
+        (should (string-match-p "waiting while the queue is suspended" listing)))
+      (should (eq 'pending (plist-get (harness-call 'task/get id) :state)))
+      ;; The suspension holds back the scheduler, never an explicit start.
+      (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "start"))
+      (should (eq 'active (plist-get (harness-call 'task/get id) :state)))
+      (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "done"))
+      (should (string-match-p "Queue resumed"
+                              (harness-tools-sessions-test-ok me "task_control" '(:action "resume-queue"))))
+      (should-not (string-match-p "Queue suspended" (harness-tools-sessions-test-ok me "task_list" nil))))))
+
+(ert-deftest harness-tools-sessions-task-return-to-pending ()
+  "task_control return-to-pending stops a working task's turn, keeping its session.
+The task waits in pending until the queue starts it again."
+  (harness-tools-sessions-test-with
+    (let* ((harness-agent--cancel-grace 0.05)
+           (harness-tasks-max-running 1)
+           (harness-provider-demo-script-override '((:type wait :seconds 30)))
+           (me (harness-tools-sessions-test-session))
+           (id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Long work"))
+                                     :meta)
+                          :task-id)))
+      (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :session)) 5 "a session")
+      (let* ((sid (plist-get (harness-call 'task/get id) :session))
+             (text (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "return-to-pending"))))
+        (should (string-match-p "Returned to pending" text))
+        (should (string-match-p (regexp-quote sid) text))
+        (let ((task (harness-call 'task/get id)))
+          (should (eq 'pending (plist-get task :state)))
+          (should (plist-get task :returned))
+          (should (equal sid (plist-get task :session)))))
+      ;; Nothing takes the freed slot on its own: the return started nothing.
+      (should (eq 'pending (plist-get (harness-call 'task/get id) :state))))))
 
 (provide 'harness-tools-sessions-test)
 ;;; harness-tools-sessions-test.el ends here

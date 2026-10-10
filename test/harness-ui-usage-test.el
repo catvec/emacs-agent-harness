@@ -58,6 +58,15 @@
   (with-current-buffer harness-ui-usage--buffer-name
     (buffer-substring-no-properties (point-min) (point-max))))
 
+(defun harness-ui-usage-test-click-button (line label)
+  "Click the button LABEL on the dashboard line that contains LINE."
+  (with-current-buffer harness-ui-usage--buffer-name
+    (goto-char (point-min))
+    (search-forward line)
+    (search-forward label)
+    (goto-char (match-beginning 0))
+    (push-button)))
+
 (defun harness-ui-usage-test-has-svg-p ()
   "Non-nil when the buffer holds an SVG display property."
   (with-current-buffer harness-ui-usage--buffer-name
@@ -769,6 +778,60 @@ Two lines would grow the echo area and move the chart under the mouse."
           (should found)
           (should-not offenders))))))
 
+(ert-deftest harness-ui-usage-fallback-tier-text-names-each-tier ()
+  "A provider entry reads as its model per tier, the provider's word left
+off a label that repeats it, and after a model the thinking level its
+tier names.  Tiers that are all one model name it once."
+  (harness-ui-usage-test-with
+    (should (equal "simple→Haiku 4.5 · medium→Sonnet 5 · hard→Opus 5.5 · frontier→Fable 5.1"
+                   (harness-ui-usage--fallback-tier-text
+                    '(:provider "claude" :provider-label "Claude Code"
+                      :tiers ((:tier "simple" :model "claude:claude-haiku-4-5" :label "Claude Haiku 4.5")
+                              (:tier "medium" :model "claude:claude-sonnet-5" :label "Claude Sonnet 5")
+                              (:tier "hard" :model "claude:claude-opus-5-5" :label "Claude Opus 5.5")
+                              (:tier "frontier" :model "claude:claude-fable-5-1" :label "Claude Fable 5.1"))))))
+    ;; DeepSeek's three tiers are one model at three levels.
+    (should (equal "V4.1-Flash: simple low · medium high · hard max"
+                   (harness-ui-usage--fallback-tier-text
+                    '(:provider "deepseek" :provider-label "DeepSeek"
+                      :tiers ((:tier "simple" :model "deepseek:deepseek-flash"
+                               :label "DeepSeek-V4.1-Flash" :thinking "low")
+                              (:tier "medium" :model "deepseek:deepseek-flash"
+                               :label "DeepSeek-V4.1-Flash" :thinking "high")
+                              (:tier "hard" :model "deepseek:deepseek-flash"
+                               :label "DeepSeek-V4.1-Flash" :thinking "max"))))))
+    ;; Tiers on models of their own each name theirs.
+    (should (equal "simple→V4.1-Flash low · hard→V4-Pro"
+                   (harness-ui-usage--fallback-tier-text
+                    '(:provider "deepseek" :provider-label "DeepSeek"
+                      :tiers ((:tier "simple" :model "deepseek:deepseek-flash"
+                               :label "DeepSeek-V4.1-Flash" :thinking "low")
+                              (:tier "hard" :model "deepseek:deepseek-v4-pro"
+                               :label "DeepSeek-V4-Pro"))))))))
+
+(ert-deftest harness-ui-usage-fallback-names-fit-one-column ()
+  "Every fallback entry's name takes one column, as wide as the longest
+up to `harness-ui-usage--fallback-label-width': a provider's four tiers
+are not cut, and the states after the names line up."
+  (harness-ui-usage-test-with
+    (let* ((claude '(:entry "claude" :provider "claude" :provider-label "Claude Code"
+                     :label "Claude Code" :registered t
+                     :tiers ((:tier "simple" :model "claude:claude-haiku-5-5" :label "Claude Haiku 5.5")
+                             (:tier "medium" :model "claude:claude-sonnet-5-5" :label "Claude Sonnet 5.5")
+                             (:tier "hard" :model "claude:claude-opus-5-5" :label "Claude Opus 5.5")
+                             (:tier "frontier" :model "claude:claude-fable-5-1" :label "Claude Fable 5.1"))))
+           (demo '(:entry "demo:scripted" :provider "demo" :provider-label "Demo"
+                   :model "demo:scripted" :label "Scripted" :registered t :known t))
+           (lines (with-temp-buffer
+                    (harness-ui-usage--insert-fallback (list :models (list claude demo)))
+                    (split-string (buffer-string) "\n")))
+           (entries (seq-filter (lambda (line) (string-match-p "available" line)) lines)))
+      (should (> (length "Claude Code  simple→Haiku 5.5 · medium→Sonnet 5.5 · hard→Opus 5.5 · frontier→Fable 5.1")
+                 74))
+      (should (string-match-p (regexp-quote "hard→Opus 5.5 · frontier→Fable 5.1 ") (car entries)))
+      (should (= 2 (length entries)))
+      (should (apply #'= (mapcar (lambda (line) (string-search "available" line)) entries))))))
+
 (ert-deftest harness-ui-usage-fallback-section-shows-and-clears-marks ()
   "The fallback section lists the entries and says what ran out."
   (harness-ui-usage-test-with
@@ -795,6 +858,29 @@ Two lines would grow the echo area and move the chart under the mouse."
     (let ((text (harness-ui-usage-test-text)))
       (should (string-match-p "available" text))
       (should-not (string-match-p "out of quota" text)))))
+
+(ert-deftest harness-ui-usage-fallback-buttons-do-their-work ()
+  "The buttons on a fallback line act where the keys do.
+[up] moves the entry earlier, [try now] clears its mark and [remove]
+takes it out of the list; `harness-ui-button' runs its action with no
+arguments, so a button must not pass it one."
+  (harness-ui-usage-test-with
+    (setq harness-fallback-models '("demo:scripted" "demo"))
+    (harness-ui-usage-test-open)
+    (harness-ui-usage-test-click-button "2. Demo" "[up]")
+    (harness-test-wait (lambda () (equal '("demo" "demo:scripted") harness-fallback-models))
+                       5 "moved up")
+    (harness-call 'fallback/mark "demo" :kind 'quota :reason "hit the limit")
+    (harness-ui-usage-refresh)
+    (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5 "reloaded")
+    (harness-ui-usage-test-click-button "1. Demo" "[try now]")
+    (harness-test-wait (lambda () (null (plist-get (harness-call 'fallback/status) :marks)))
+                       5 "mark cleared")
+    (harness-ui-usage-refresh)
+    (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5 "reloaded")
+    (harness-ui-usage-test-click-button "1. Demo" "[remove]")
+    (harness-test-wait (lambda () (equal '("demo:scripted") harness-fallback-models))
+                       5 "removed")))
 
 (ert-deftest harness-ui-usage-fallback-add-move-and-remove ()
   "Adding, moving and removing entries saves the option through config/set."

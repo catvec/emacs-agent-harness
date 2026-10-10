@@ -14,9 +14,15 @@
 ;;   Merging               in the merge queue, in the order it takes them:
 ;;                         queued, merging, or resolving the conflicts
 ;;   In progress           working, with its current todo and progress
-;;   Pending               waiting for a slot, or in the backlog (refined,
-;;                         waiting for you); editable, startable; in the
-;;                         order they start: by priority, then oldest first
+;;   Pending               waiting for a slot, so it starts on its own
+;;                         while the project has one free; editable,
+;;                         startable; in the order they start: by
+;;                         priority, then oldest first
+;;   Backlog               jotted down or written up for later: the queue
+;;                         never starts one by itself; Q queues it, so it
+;;                         drains like any pending task, and s starts it
+;;                         now; editable, refinable; where a write-up
+;;                         runs too
 ;;   Completed             finished and verified; reply to reopen,
 ;;                         archive to hide
 ;;
@@ -24,8 +30,8 @@
 ;; and it gets a session of its own.  A toggle above the box (C-c C-t)
 ;; switches between Submit, which starts the task, and Refine (backlog
 ;; refinement, once called grooming), which has an agent write the task
-;; up and leaves it in Pending until you start it: jot things down now,
-;; pick them up later, even after a restart.  The same box edits a
+;; up and leaves it in the Backlog until you start it: jot things down
+;; now, pick them up later, even after a restart.  The same box edits a
 ;; pending task (e), replies to a task's session (m) -- for a backlog
 ;; task that is feedback on its write-up (r) -- without leaving the
 ;; board, answers a task's question (m or [Answer]) and takes the
@@ -42,35 +48,54 @@
 ;; the board then shows only the tasks it is about
 ;; (harness-ui-tasks-search.el, through `harness-ui-tasks-filter').
 ;;
-;; Priority: a task is low, medium (the default) or high priority.  While
-;; the project's slots are full (`harness-tasks-max-running'), a higher
-;; priority starts first, oldest first among equals.  + and - on a card
-;; raise and lower its priority, the card's facts say high or low, and
-;; the button beside the Submit / Refine toggle sets the next task's.  In
-;; bulk mode (B) a priority button on the settings line gives every
-;; current task one; the other bulk settings leave priorities alone.
+;; Priority: a task is low, medium (the default) or high priority, and
+;; that priority is its session's -- every task has its session from
+;; submission, holding the level, so the board and the queues the
+;; task's work waits in serve it by the same thing.  While the project's
+;; slots are full (`harness-tasks-max-running'), a higher priority starts
+;; first, oldest first among equals.  A card's arrow -- the priority
+;; UI's, clickable like the chat header's
+;; (`harness-ui-priority-arrow') -- and the card's facts say what it is;
+;; + and - on a card raise and lower it (the change goes to the task's
+;; session), and the button beside the Submit / Refine
+;; toggle sets the next task's.  In bulk mode (B) a priority button on
+;; the settings line gives every current task one; the other bulk
+;; settings leave priorities alone.
 ;;
-;; Review can be turned off (V, or the [Review: on] switch in the header
-;; line): finished tasks then merge and complete by themselves, and Ready
-;; for review shows only while tasks from before still wait there.  The
-;; switch is the harness option `harness-tasks-require-verification', so
-;; it holds for every board and across restarts.
+;; Review can be turned off (V, or `harness-tasks-require-verification'
+;; on the settings page): finished tasks then merge and complete by
+;; themselves, and Ready for review shows only while tasks from before
+;; still wait there.  It is a harness option, so it holds for every
+;; board and across restarts.
 ;;
-;; The header line counts the tasks of each column and, as a chat's
-;; header does for its session, says what they cost and who pays: their
-;; summed cost, or the plan that pays for them with its quota windows,
-;; then the fullest budget that applies to the project.  A click there
-;; opens the usage dashboard.
+;; How many of a project's tasks work at once ends the settings line
+;; under New task: "3 at a time", or "all at once" without a limit.  A
+;; click on it asks for another limit (`harness-ui-tasks-set-max-running'):
+;; the harness option `harness-tasks-max-running', saved like the Review
+;; switch, so every project has that many slots.  A higher limit starts
+;; waiting tasks at once; a lower one stops none at work.
+;;
+;; The header line holds what the board does not show -- each column's
+;; heading counts its own tasks.  As a chat's header does for its
+;; session, it says what the tasks cost and who pays: their summed cost,
+;; or the plan that pays for them with its quota windows, then the
+;; fullest budget that applies to the project.  A click there opens the
+;; usage dashboard.  Its buttons follow: [Bulk edit], [Search], [BTW],
+;; [Add session], [Archived] and [Refresh].
 ;;
 ;; Everything comes over ACP (`_harness/task/…', `_harness/config/set'
-;; for the Review switch, `_harness/usage/project-budgets' for the
+;; for turning review off and the limit, `_harness/usage/project-budgets' for the
 ;; header's budgets, plus the session cache), so the board works
 ;; against a remote harness too.  The list region is
 ;; redrawn as a whole when anything changes -- a board holds tens of
 ;; tasks, not a transcript -- while the compose box is never touched.
-;; Point and every window showing the board stay where they were through
-;; it all: on the same line of the same card, on the same button.  A
-;; click on a button pushes it, however long the click takes.
+;; A board taller than its window holds its least urgent cards back, a
+;; fitting found by measuring the cards once and then kept while only
+;; what the cards read changes, so a busy board of many tasks redraws
+;; the cards its window shows, not all of them.  Point and every window
+;; showing the board stay where they were through it all: on the same
+;; line of the same card, on the same button.  A click on a button
+;; pushes it, however long the click takes.
 
 ;;; Code:
 
@@ -84,6 +109,7 @@
 (require 'harness-ui)
 (require 'harness-ui-compose)
 (require 'harness-ui-pending)
+(require 'harness-ui-priority)
 
 (defgroup harness-ui-tasks nil
   "Task mode." :group 'harness-ui)
@@ -110,8 +136,6 @@ Either way the toggle above the compose box switches it per board."
   "The completed mark." :group 'harness-ui-tasks)
 (defface harness-task-review-face '((t :inherit success :weight bold))
   "Tasks waiting for your review: their mark, heading and count." :group 'harness-ui-tasks)
-(defface harness-task-review-off-face '((t :inherit warning))
-  "The Review switch while finished tasks merge without your review." :group 'harness-ui-tasks)
 (defface harness-task-merging-face '((t :inherit harness-dim-face))
   "The mark of a task waiting in the merge queue." :group 'harness-ui-tasks)
 (defface harness-task-choice-face '((t :inherit bold))
@@ -124,12 +148,18 @@ Either way the toggle above the compose box switches it per board."
 (define-icon harness-icon-task-pending nil
   '((symbol "◌") (text "wait"))
   "Pending task." :version "29.1")
+(define-icon harness-icon-task-backlog nil
+  '((symbol "▤") (text "backlog"))
+  "Backlog task: waiting for you to start it." :version "29.1")
 (define-icon harness-icon-task-done nil
   '((symbol "✓") (text "done"))
   "Completed task." :version "29.1")
 (define-icon harness-icon-task-stopped nil
   '((symbol "■") (text "stop"))
   "Stopped task." :version "29.1")
+(define-icon harness-icon-task-paused nil
+  `((symbol ,(string #x23f8)) (text "pause"))
+  "Task waiting while its project's queue is suspended: a pause bar." :version "29.1")
 (define-icon harness-icon-task-review nil
   `((symbol ,(string #x2691)) (text "review"))
   "Task waiting for your review: a flag." :version "29.1")
@@ -138,16 +168,12 @@ Either way the toggle above the compose box switches it per board."
   "Task in the merge queue: an arrow feeding into a line." :version "29.1")
 (harness-ui-define-icon harness-icon-message "message" "→" "msg"
   "A message to the session of an existing task.")
-(define-icon harness-icon-task-priority-high nil
-  `((symbol ,(string #x2191)) (text "^"))
-  "Task of high priority: an arrow up, before its title." :version "29.1")
-(define-icon harness-icon-task-priority-low nil
-  `((symbol ,(string #x2193)) (text "v"))
-  "Task of low priority: an arrow down, before its title." :version "29.1")
+;; A priority's arrows are the priority UI's (`harness-ui-priority-arrow'),
+;; so a card, a header line and a list row show the same one.
 
 (defconst harness-ui-tasks--columns
   '((needs-input "Requires your input" t) (review "Ready for review") (merging "Merging")
-    (active "In progress") (pending "Pending") (done "Completed"))
+    (active "In progress") (pending "Pending") (backlog "Backlog") (done "Completed"))
   "Columns in display order: (COLUMN HEADING &optional SUBTITLE-SHOWN).
 SUBTITLE-SHOWN is non-nil when the cards of the column show their
 recap subtitle by default; elsewhere a card is one line until you
@@ -161,6 +187,7 @@ show it (see `harness-ui-tasks-toggle-subtitle').")
 (declare-function harness-btw "harness-ui-btw")
 (declare-function harness-ui-popout-at-point "harness-ui-popout")
 (declare-function harness-ui-popout-try-at-point "harness-ui-popout")
+(declare-function harness-toggle-supervisor "harness-ui-supervisor")
 
 (defmacro harness-ui-tasks--with-task (id &rest body)
   "Run BODY with point on task ID's card.
@@ -181,9 +208,11 @@ rather than going up to the card's first line."
 (defvar-local harness-ui-tasks--tasks nil "Task plists (wire shape).")
 (defvar-local harness-ui-tasks--settings nil "What `task/settings' returned.")
 (defvar-local harness-ui-tasks--new nil
-  "Settings the next submitted task starts with: a plist of `:model',
-`:thinking', `:permission-mode' and `:non-interactive', seeded from the
-harness's task defaults and changed with the usual session commands.")
+  "Settings the next submitted task starts with.
+A plist of `:model', `:thinking', `:permission-mode', `:non-interactive'
+and, when the harness has the supervisor module, `:supervisor', seeded
+from the harness's task defaults and changed with the usual session
+commands.")
 (defvar-local harness-ui-tasks--loading t)
 (defvar-local harness-ui-tasks--error nil "Last failure, shown above the compose box.")
 (defvar-local harness-ui-tasks--show-archived nil)
@@ -215,14 +244,41 @@ What `_harness/usage/project-budgets' returned; nil without the usage module.")
 A plist: `:show', a function of a task, non-nil for those shown --
 archived ones too, whatever [Archived] says; `:banner', a function
 returning the text drawn above the columns, whole lines; `:clear', a
-function that drops the filter, which C-g on the board calls (see
+function that drops the filter, which \\<harness-ui-tasks-mode-map>\\[harness-ui-tasks-compose-quit] on the board calls (see
 `harness-ui-tasks-compose-quit').  The columns without a task to show
 are left out.  The board's search sets it (`harness-ui-tasks-search').")
 
 (defvar harness-ui-tasks-header-functions nil
   "Functions returning a segment of a board's header line, or nil.
 Each is called in the board's buffer as the header line is drawn; the
-segments show before [BTW], in order.")
+segments show before [BTW], in order, the board putting the separator
+in front.  A string joins the others into one segment, which makes room
+in a narrow window after the counts and before [BTW]; (TEXT PRIORITY
+MIN), as `harness-ui-fit-header' takes it, is a segment of its own with
+that priority.  The search shows its [Search] the first way, the
+companion pet its face the second.")
+
+(defvar harness-ui-tasks-corner-functions nil
+  "Functions drawing something at the right of the lines above the compose box.
+The lines between the board and the box -- the error, the compose
+label, the bulk banner and the settings -- narrow for it, as Claude
+Code's prompt narrows for its companion, rather than the board giving
+it lines of its own.  Each function is called in the board's buffer
+whenever those lines are drawn -- with the box, and as a window showing
+the board changes size -- with ROOM, the columns the lines have, and
+WIDTHS, the columns each of them takes whole, top first; the first to
+return non-nil draws, and it returns a plist:
+
+- `:beside', the strings ending the first lines, top first, each
+  starting with the space that aligns it to the window's edge;
+- `:reserve', the columns the lines `:beside' ends leave free for it;
+- `:above', whole lines, a string ending in a newline, going above all
+  the lines: what does not fit beside them.
+
+The lines stay together, above the box they are about.  The board fits
+its cards to the room they leave, and
+`harness-ui-tasks-redraw-tail-lines' draws them again when a function
+would draw something else.  The companion pet sits there this way.")
 
 (defun harness-ui-tasks--board-p (buffer)
   "Non-nil when BUFFER is a live task board.
@@ -250,14 +306,20 @@ the task record says so through `:merge-status' as soon as it changes."
   (or (plist-get task :merge-queued) 0))
 
 (defun harness-ui-tasks--column (task)
-  "Return TASK's column as a symbol."
+  "Return TASK's column as a symbol.
+A backlog task has a column of its own (`harness-tasks--column'), so
+the board never shows one among the queued pending tasks."
   (intern (or (plist-get task :column)
               (cond ((harness-ui-tasks--merge-queue-p task) "merging")
+                    ((and (equal (plist-get task :state) "pending")
+                          (harness-ui-tasks--backlog-p task))
+                     "backlog")
                     (t (pcase (plist-get task :state)
                          ("pending" "pending") ("review" "review") ("merging" "merging") ("done" "done")
                          (_ "active")))))))
 
 (defun harness-ui-tasks--archived-p (task)
+  "Non-nil when TASK is archived."
   (harness-json-true-p (plist-get task :archived)))
 
 (defun harness-ui-tasks--backlog-p (task)
@@ -295,20 +357,17 @@ it is by default, until they say it is off."
   "When TASK was completed: verified, else finished, else 0."
   (or (plist-get task :verified-at) (plist-get task :finished) 0))
 
-(defconst harness-ui-tasks--priorities '("low" "medium" "high")
-  "The priorities a task may have, lowest first, as the harness sends them.
-Waiting tasks start by priority, the oldest first among equals
-\(`harness-tasks-priorities').")
-
 (defun harness-ui-tasks--priority (task)
-  "TASK's priority: \"low\", \"medium\" or \"high\"; medium when it has none."
+  "TASK's priority: \"low\", \"medium\" or \"high\"; medium when it has none.
+TASK is a view, whose `:priority' the harness computes from the task's
+session (`harness-priority-of-task')."
   (let* ((value (plist-get task :priority))
          (name (if (and value (symbolp value)) (symbol-name value) value)))
-    (if (member name harness-ui-tasks--priorities) name "medium")))
+    (if (member name harness-ui-priority-levels) name "medium")))
 
 (defun harness-ui-tasks--priority-rank (task)
-  "The place of TASK's priority in `harness-ui-tasks--priorities': 0 is low."
-  (cl-position (harness-ui-tasks--priority task) harness-ui-tasks--priorities :test #'equal))
+  "The place of TASK's priority in `harness-ui-priority-levels': 0 is low."
+  (cl-position (harness-ui-tasks--priority task) harness-ui-priority-levels :test #'equal))
 
 (defun harness-ui-tasks--starts-before-p (a b)
   "Non-nil when waiting task A gets a slot before B, as the harness hands them.
@@ -325,9 +384,10 @@ In progress is newest first by when each task started, review by when
 it finished and completed by when it was completed, so a task arriving
 in any of them shows at the top; merging is the queue's own order, from
 when each branch joined it; pending is in the order its tasks start, by
-priority then oldest first (the backlog sorted the same way among them);
-the other columns are oldest first.  With FILTERED, only the tasks
-`harness-ui-tasks-filter' shows, when there is one, archived or not."
+priority then oldest first, and the backlog (which the queue never
+starts) the same way; the other columns are oldest first.  With
+FILTERED, only the tasks `harness-ui-tasks-filter' shows, when there is
+one, archived or not."
   (let ((groups (mapcar (lambda (c) (list (car c))) harness-ui-tasks--columns))
         (show (and filtered (plist-get harness-ui-tasks-filter :show))))
     (dolist (task harness-ui-tasks--tasks)
@@ -344,11 +404,13 @@ the other columns are oldest first.  With FILTERED, only the tasks
                                                    (harness-ui-tasks--merge-queued b))))
                         ('done (lambda (a b) (> (harness-ui-tasks--completed a) (harness-ui-tasks--completed b))))
                         ('pending #'harness-ui-tasks--starts-before-p)
+                        ('backlog #'harness-ui-tasks--starts-before-p)
                         (_ (lambda (a b) (< (or (plist-get a :created) 0) (or (plist-get b :created) 0))))))))))
 
 ;;;; What a card says
 
 (defun harness-ui-tasks--session (task)
+  "Return the cached plist of TASK's session, or nil."
   (and (plist-get task :session) (harness-ui-session (plist-get task :session))))
 
 (defun harness-ui-tasks--title (task)
@@ -397,11 +459,13 @@ marks on the same centre."
     (and status (format "%s" status))))
 
 (defun harness-ui-tasks--icon (task column session)
+  "Return the icon of TASK's card in COLUMN.
+SESSION is TASK's session plist, or nil; in the needs-input column the
+icon says whether SESSION waits on a request."
   (pcase column
-    ('pending (cond ((harness-ui-tasks--refining-p task) (harness-ui-status-icon "running"))
-                    ((harness-ui-tasks--backlog-p task)
-                     (propertize (harness-ui-icon 'harness-icon-agent) 'face 'harness-dim-face))
-                    (t (propertize (harness-ui-icon 'harness-icon-task-pending) 'face 'harness-dim-face))))
+    ('pending (propertize (harness-ui-icon 'harness-icon-task-pending) 'face 'harness-dim-face))
+    ('backlog (cond ((harness-ui-tasks--refining-p task) (harness-ui-status-icon "running"))
+                    (t (propertize (harness-ui-icon 'harness-icon-task-backlog) 'face 'harness-dim-face))))
     ('done (propertize (harness-ui-icon 'harness-icon-task-done) 'face 'harness-task-done-face))
     ('review (propertize (harness-ui-icon 'harness-icon-task-review) 'face 'harness-task-review-face))
     ('merging (if (equal (harness-ui-tasks--merge-status task) "queued")
@@ -414,9 +478,10 @@ marks on the same centre."
          (harness-ui-status-icon "idle")))))
 
 (defun harness-ui-tasks--detail (task column session position)
-  "The second line of TASK's card.
+  "The second line of TASK's card in COLUMN.
 Once the task has a name, which is then the card's title, the line says
-what its prompt asks."
+what its prompt asks.  SESSION is TASK's session plist, or nil;
+POSITION is its place in line among queued tasks."
   (let ((todos (harness-ui-tasks--todos session))
         (named (and (harness-ui-task-name task session) t)))
     (pcase column
@@ -449,6 +514,8 @@ what its prompt asks."
                                      (t "starting…")))
                            'face 'harness-dim-face))
       ('pending (propertize (harness-ui-tasks--pending-detail task position todos named)
+                            'face 'harness-dim-face))
+      ('backlog (propertize (harness-ui-tasks--pending-detail task position todos named)
                             'face 'harness-dim-face))
       ('review (propertize (harness-ui-tasks--review-detail task named) 'face 'harness-dim-face))
       ('done (propertize (let ((took (and (plist-get task :started) (plist-get task :finished)
@@ -516,16 +583,18 @@ Your own choice for the task wins over its column's default."
       (nth 2 (assq (harness-ui-tasks--column task) harness-ui-tasks--columns)))))
 
 (defun harness-ui-tasks--set-subtitle (id shown)
-  "Show or hide the subtitle of task ID from now on, whatever its column."
+  "Show or hide the subtitle of task ID from now on, whatever its column.
+It shows when SHOWN is non-nil."
   (setq harness-ui-tasks--subtitles
         (cons (cons id shown) (assoc-delete-all id harness-ui-tasks--subtitles))))
 
 (defun harness-ui-tasks--subtitle (task column session position room)
-  "The text under TASK's title, at most ROOM columns wide: its recap,
-else the old detail line.  In the needs-input and merging columns the
-detail stays after the recap, which must not hide what the task waits
-for, or where its branch stands: a needs-input card shows its subtitle
-by default, a merging card when you show it."
+  "The text under TASK's title, at most ROOM columns wide.
+That is its recap, else the old detail line, which COLUMN, SESSION and
+POSITION make as for `harness-ui-tasks--detail'.  In the needs-input
+and merging columns the detail stays after the recap, which must not
+hide what the task waits for, or where its branch stands: a needs-input
+card shows its subtitle by default, a merging card when you show it."
   (let* ((recap (plist-get task :recap))
          (recap (and (stringp recap) (not (harness-string-blank-p recap)) (string-trim recap)))
          (detail (harness-ui-tasks--detail task column session position))
@@ -541,11 +610,13 @@ by default, a merging card when you show it."
      (t (harness-ui-tasks--fit (propertize recap 'face 'harness-dim-face) room)))))
 
 (defun harness-ui-tasks--pending-detail (task position todos &optional named)
-  "The second line of pending TASK's card: what it waits for.
-POSITION is its place in line among queued tasks; TODOS its session's.
-A queued task NAMED (its name is the card's title) has the first line of
-its prompt after its place in line, else the line after it, as a backlog
-task's write-up has, its first line being a title."
+  "The second line of a pending or backlog TASK's card: what it waits for.
+POSITION is its place in line among queued tasks, nil in the backlog,
+which the queue never starts.  TODOS its session's.  A queued task
+NAMED (its name is the card's title) has the first line of its prompt
+after its place in line, else the line after it, as a backlog task's
+write-up has, its first line being a title.  A task returned to
+pending says why it waits (`harness-ui-tasks--returned-why')."
   (let ((body (harness-ui-tasks--body-line task))
         (sep (concat " " harness-ui-tasks--dot " ")))
     (cond
@@ -554,8 +625,45 @@ task's write-up has, its first line being a title."
      ((harness-ui-tasks--backlog-p task)
       (concat (if (plist-get task :refined) "refined, start it when ready" "on hold")
               (if body (concat sep body) "")))
+     ((plist-get task :returned)
+      (format "#%d in line%s" (or position 1)
+              (concat sep (harness-ui-tasks--returned-why task))))
      (t (let ((line (if named (harness-first-line (plist-get task :prompt) 70) body)))
           (format "#%d in line%s" (or position 1) (if line (concat sep line) "")))))))
+
+(defun harness-ui-tasks--returned-why (task)
+  "Why TASK, returned to pending, waits in the queue, for its card.
+A task returned by hand carries on where it stopped, and so does one
+pre-empted (`:return-reason' preempted): a task sent back from review
+took its slot, named by its title when the board has it.  One the user
+sent back from review while no slot could take it waits with their
+feedback."
+  (pcase (format "%s" (or (plist-get task :return-reason) "returned"))
+    ("preempted"
+     (let* ((id (plist-get task :preempted-by))
+            (by (and id (harness-ui-tasks--find id))))
+       (format "pre-empted by %s, carries on where it stopped"
+               (cond (by (format "\"%s\"" (harness-truncate-end (harness-ui-tasks--title by) 40)))
+                     (id (format "%s" id))
+                     (t "a task sent back")))))
+    ("sent-back" "sent back from review, waits for a slot with your feedback")
+    (_ "returned, carries on where it stopped")))
+
+(defun harness-ui-tasks--sent-back-message (task)
+  "Say where TASK went once `task/reject' sent it back, as a message.
+TASK is the task the harness returned: at work on the feedback, or
+waiting in the queue with it when no slot could take it -- every slot
+taken by work that goes first, or the queue suspended."
+  (cond
+   ((not (equal (format "%s" (plist-get task :state)) "pending"))
+    "Sent back: its session works on your feedback")
+   ((harness-json-true-p (plist-get task :queue-suspended))
+    "Sent back: it waits in the suspended queue with your feedback; resume the queue or start it now")
+   (t "Sent back: no slot is free for it, so it waits in the queue with your feedback")))
+
+(defun harness-ui-tasks--say-sent-back (task)
+  "Show where TASK went once `task/reject' sent it back."
+  (message "%s" (harness-ui-tasks--sent-back-message task)))
 
 (defun harness-ui-tasks--took (task)
   "How long TASK worked until it finished, as \"took 12m\"; nil if unknown."
@@ -598,7 +706,8 @@ while there is nothing to count yet."
                 (if output (concat " " harness-ui-tasks--dot " " output) ""))))))
 
 (defun harness-ui-tasks--meta (task column session &optional lean)
-  "The right-aligned facts of TASK's card.
+  "The right-aligned facts of TASK's card in COLUMN.
+SESSION is TASK's session plist, or nil.
 A working task's card says what its session's conversation holds and
 has written, unless LEAN, which a narrow card falls back on."
   (let* ((todos (harness-ui-tasks--todos session))
@@ -618,12 +727,19 @@ has written, unless LEAN, which a narrow card falls back on."
                       (and todos (not (memq column '(done review merging)))
                            (format "%d/%d" (nth 0 todos) (nth 1 todos)))
                       (pcase column
-                        ('pending (cond ((harness-ui-tasks--refining-p task) nil)
+                        ('pending
+                         (let ((queued (format "queued %s" (harness-relative-time (plist-get task :created)))))
+                           ;; The queue being suspended holds it back,
+                           ;; which the card says.
+                           (if (harness-json-true-p (plist-get task :queue-suspended))
+                               (concat queued " · queue suspended")
+                             queued)))
+                        ;; A backlog task waits for the user, never for the
+                        ;; queue, so it says when it was written up or added.
+                        ('backlog (cond ((harness-ui-tasks--refining-p task) nil)
                                         ((plist-get task :refined)
                                          (format "refined %s" (harness-relative-time (plist-get task :refined))))
-                                        ((harness-ui-tasks--backlog-p task)
-                                         (format "added %s" (harness-relative-time (plist-get task :created))))
-                                        (t (format "queued %s" (harness-relative-time (plist-get task :created))))))
+                                        (t (format "added %s" (harness-relative-time (plist-get task :created))))))
                         ('review (and (plist-get task :finished)
                                       (format "ready %s" (harness-relative-time (plist-get task :finished)))))
                         ('merging (let ((queued (harness-ui-tasks--merge-queued task)))
@@ -665,17 +781,12 @@ See `harness-ui-tasks--shown-priority'."
 
 (defun harness-ui-tasks--priority-mark (task column)
   "The mark before the title of TASK's card in COLUMN, with its space, or \"\".
-An arrow up for high priority, down for low: unlike the facts it stays
-on a narrow board.  See `harness-ui-tasks--shown-priority'."
+An arrow up for high priority, down for low, the one
+`harness-ui-priority-arrow' makes for the task's session: unlike the
+facts it stays on a narrow board, and a click on it asks for that
+session's priority.  See `harness-ui-tasks--shown-priority'."
   (if-let* ((priority (harness-ui-tasks--shown-priority task column)))
-      (concat (propertize (harness-ui-icon (if (equal priority "high")
-                                               'harness-icon-task-priority-high
-                                             'harness-icon-task-priority-low))
-                          'face (harness-ui-tasks--priority-face priority)
-                          'help-echo (if (equal priority "high")
-                                         "High priority: it starts before medium and low tasks"
-                                       "Low priority: medium and high tasks start before it"))
-              " ")
+      (concat (harness-ui-priority-arrow priority (plist-get task :session)) " ")
     ""))
 
 (defun harness-ui-tasks--elapsed (seconds)
@@ -696,12 +807,28 @@ on a narrow board.  See `harness-ui-tasks--shown-priority'."
          ((harness-ui-tasks--refining-p task)
           '(("Open" harness-ui-tasks-open) ("Steer" harness-ui-tasks-reply)
             ("Stop" harness-ui-tasks-cancel)))
+         ;; Returned to pending: it has a session with the work in it, so
+         ;; starting it carries on rather than opens it.
+         ((plist-get task :returned)
+          '(("Start now" harness-ui-tasks-start) ("Open" harness-ui-tasks-open)
+            ("Reply" harness-ui-tasks-reply) ("Drop" harness-ui-tasks-cancel)))
          ((plist-get task :session)
           '(("Start now" harness-ui-tasks-start) ("Edit" harness-ui-tasks-edit)
             ("Open" harness-ui-tasks-open) ("Refine" harness-ui-tasks-refine)
             ("Drop" harness-ui-tasks-cancel)))
          (t '(("Start now" harness-ui-tasks-start) ("Edit" harness-ui-tasks-edit)
               ("Refine" harness-ui-tasks-refine) ("Drop" harness-ui-tasks-cancel)))))
+       ;; A backlog task waits for you; one being written up is steered
+       ;; or stopped, like a refining task in the pending column was.
+       ('backlog
+        (if (harness-ui-tasks--refining-p task)
+            '(("Open" harness-ui-tasks-open) ("Steer" harness-ui-tasks-reply)
+              ("Stop" harness-ui-tasks-cancel))
+          ;; Queued first: the backlog's usual way out is the queue, which
+          ;; starts it as a slot frees; Start now ignores the limit.
+          '(("Queue it" harness-ui-tasks-queue) ("Start now" harness-ui-tasks-start)
+            ("Edit" harness-ui-tasks-edit) ("Open" harness-ui-tasks-open)
+            ("Refine" harness-ui-tasks-refine) ("Drop" harness-ui-tasks-cancel))))
        ('needs-input
         (pcase (plist-get (harness-ui-tasks--pending task) :kind)
           ("permission" '(("Allow" harness-ui-tasks-allow) ("Deny" harness-ui-tasks-deny)
@@ -740,6 +867,8 @@ on a narrow board.  See `harness-ui-tasks--shown-priority'."
                   (append
                    '(("Verify" harness-ui-tasks-verify) ("Send back" harness-ui-tasks-reject)
                      ("Open" harness-ui-tasks-open))
+                   ;; The card's menu only: its buttons are Verify and
+                   ;; Send back, and a click on its title is Open.
                    (and (harness-ui-tasks--open-harness-p task)
                         '(("Open harness" harness-ui-tasks-open-harness)))
                    '(("Archive" harness-ui-tasks-archive)))))
@@ -760,12 +889,12 @@ on a narrow board.  See `harness-ui-tasks--shown-priority'."
 (defun harness-ui-tasks--priority-actions (task)
   "The actions that move TASK's priority a step up or down, as they apply."
   (let ((rank (harness-ui-tasks--priority-rank task))
-        (top (1- (length harness-ui-tasks--priorities))))
+        (top (1- (length harness-ui-priority-levels))))
     (append (and (< rank top)
-                 (list (list (format "Raise priority to %s" (nth (1+ rank) harness-ui-tasks--priorities))
+                 (list (list (format "Raise priority to %s" (nth (1+ rank) harness-ui-priority-levels))
                              'harness-ui-tasks-raise-priority)))
             (and (> rank 0)
-                 (list (list (format "Lower priority to %s" (nth (1- rank) harness-ui-tasks--priorities))
+                 (list (list (format "Lower priority to %s" (nth (1- rank) harness-ui-priority-levels))
                              'harness-ui-tasks-lower-priority))))))
 
 (defvar harness-ui-tasks-button-map (make-sparse-keymap)
@@ -830,9 +959,13 @@ A task that handed a report in (`hand_in') gets a [Review] button too:
 its final message and evidence, in a popout.  One whose turn ended
 without it gets [No report] there instead, which pops out what the
 harness recorded for it: that nothing was handed in, and the session's
-last message (`harness-tasks--missing-report')."
-  (let ((id (plist-get task :id))
-        (missing (harness-json-true-p (plist-get (plist-get task :report) :missing))))
+last message (`harness-tasks--missing-report').
+
+A card has no button for opening its session: a click on its title
+does that.  Nor for Open harness, which stays in the card's menu
+\(`mouse-3') for a task in review whose worktree is a checkout of the
+harness (`harness-ui-tasks--open-harness-p')."
+  (let ((missing (harness-json-true-p (plist-get (plist-get task :report) :missing))))
     (concat
      (harness-ui-tasks--action-buttons task)
      (when (and (plist-get task :report) (fboundp 'harness-ui-report-popout))
@@ -845,12 +978,7 @@ last message (`harness-tasks--missing-report')."
                      (if missing
                          "It handed no report in: no summary, no evidence; see what its session said last"
                        "Review what it handed in: the final message and the evidence")
-                     "report")))
-     (when (harness-ui-tasks--open-harness-p task)
-       (concat " " (harness-ui-tasks--button
-                    "[Open harness]"
-                    (lambda () (harness-ui-tasks--with-task id (harness-ui-tasks-open-harness)))
-                    "Open an Emacs running the harness from this task's worktree" "open-harness"))))))
+                     "report"))))))
 
 (defun harness-ui-tasks--subtitle-button (task shown)
   "The chevron that shows or hides TASK's recap subtitle.
@@ -879,6 +1007,14 @@ SHOWN is whether the subtitle shows now."
 ;; is drawn to fit: the least urgent sections cap their lists first,
 ;; each saying how many tasks it holds back, and a section you expanded
 ;; keeps its whole list until folded again.
+;;
+;; What fits is measured, not drawn again and again: one drawing of the
+;; whole board answers how tall each card is, and the cards are then
+;; held back in order until the box fits (`harness-ui-tasks--caps-that-fit').
+;; The fitting is kept (`harness-ui-tasks--fitting') and drawn again as it is
+;; while the board's shape -- tasks, folding, window -- is unchanged, so
+;; the figures that change while many tasks work cost a drawing of the
+;; cards the window shows, not of the whole board.
 
 (defun harness-ui-tasks--window ()
   "Return the window the board should be drawn for.
@@ -962,10 +1098,11 @@ Below that, a board of headings and notes alone helps nobody: the board
 is drawn whole, scrolls under the reader, and the compose box keeps its
 place at the bottom of the window (`harness-compose--follow').")
 
-(defconst harness-ui-tasks--cap-order '(done pending active review needs-input)
+(defconst harness-ui-tasks--cap-order '(done backlog pending active review needs-input)
   "Columns the board caps, least urgent first.
-A cap hides part of a column's list, so the ones that need you are
-capped last, and only ever after everything below them.")
+The backlog waits for you, so it goes before pending, which drains by
+itself; a cap hides part of a column's list, so the ones that need you
+are capped last, and only ever after everything below them.")
 
 (defun harness-ui-tasks--cappable-p (groups)
   "Non-nil when some section of GROUPS may have its list capped."
@@ -1017,50 +1154,203 @@ everything.  Point is left at the end of the board."
   (goto-char (point-min))
   (harness-ui-tasks--insert-board caps))
 
+(defun harness-ui-tasks--runs (property)
+  "Return (VALUE START END) for every run of PROPERTY in the board region.
+In the order they show, top first; the board region ends at
+`harness-ui-tasks--list-end', so the compose box is not part of it."
+  (let ((pos (point-min))
+        (end (marker-position harness-ui-tasks--list-end))
+        out)
+    (while (< pos end)
+      (let ((next (next-single-property-change pos property nil end)))
+        (when-let* ((value (get-text-property pos property)))
+          (push (list value pos next) out))
+        (setq pos next)))
+    (nreverse out)))
+
+(defun harness-ui-tasks--pixel-height (window from to)
+  "Return how many pixels the text FROM and TO take in WINDOW.
+An empty range takes no room."
+  (if (>= from to) 0 (cdr (window-text-pixel-size window from to))))
+
+(defun harness-ui-tasks--sections ()
+  "Return (COLUMN START END) for every section drawn, in display order."
+  (let ((heads (harness-ui-tasks--runs 'harness-task-section))
+        (end (marker-position harness-ui-tasks--list-end))
+        out)
+    (while heads
+      (push (list (nth 0 (car heads)) (nth 1 (car heads))
+                  (or (nth 1 (cadr heads)) end))
+            out)
+      (setq heads (cdr heads)))
+    (nreverse out)))
+
+(defun harness-ui-tasks--caps-that-fit (window groups body)
+  "Return the caps that fit WINDOW's BODY pixels, measured, not drawn.
+The board region is drawn whole now; this measures it -- every card,
+and everything around them -- to find the fewest cards to hold back, in
+the order `harness-ui-tasks--cap-cards' holds them back.  A card takes
+a line or two depending on the wrapping in WINDOW, so a measurement is
+what answers; the bisection this replaces drew the whole board again
+for every trial, 1 + log2(cards) of them.  GROUPS is the tasks shown,
+as `harness-ui-tasks--visible' returns them."
+  (let* ((line (frame-char-height (window-frame window)))
+         (cards (harness-ui-tasks--runs 'harness-task-id))
+         (sections (harness-ui-tasks--sections))
+         (tail (marker-position harness-ui-tasks--list-end))
+         (height 0)
+         (shapes nil))
+    ;; The board's own lines before the first heading, and below the box.
+    (when sections
+      (cl-incf height (harness-ui-tasks--pixel-height window (point-min) (nth 1 (car sections)))))
+    (cl-incf height (harness-ui-tasks--pixel-height window tail (point-max)))
+    ;; Each section: the cards it shows, top first, and the room its
+    ;; heading and notes take around them.
+    (while sections
+      (let ((end (nth 2 (car sections)))
+            (pos (nth 1 (car sections)))
+            (heights nil))
+        (while (and cards (< (nth 1 (car cards)) end))
+          (let ((card (pop cards)))
+            (cl-incf height (harness-ui-tasks--pixel-height window pos (nth 1 card)))
+            (let ((card-height (harness-ui-tasks--pixel-height window (nth 1 card) (nth 2 card))))
+              (push card-height heights)
+              (cl-incf height card-height))
+            (setq pos (nth 2 card))))
+        (cl-incf height (harness-ui-tasks--pixel-height window pos end))
+        (push (cons (nth 0 (car sections)) (nreverse heights)) shapes))
+      (setq sections (cdr sections)))
+    (setq shapes (nreverse shapes))
+    ;; What holding each card back saves, in the order the caps take
+    ;; them: the least urgent section first, its last card first, and the
+    ;; first card of a section costs the line saying how many it holds.
+    (let ((needed (- height body))
+          (savings nil))
+      (dolist (column harness-ui-tasks--cap-order)
+        (unless (or (memq column harness-ui-tasks--folded)
+                    (memq column harness-ui-tasks--expanded))
+          (let ((heights (cdr (assq column shapes))))
+            (when heights
+              (push (- (car (last heights)) line) savings)
+              (dolist (card-height (butlast heights))
+                (push card-height savings))))))
+      (setq savings (nreverse savings))
+      (let ((saved 0)
+            (held 0)
+            (n (length savings)))
+        (while (and (< saved needed) (< held n))
+          (cl-incf saved (nth held savings))
+          (cl-incf held))
+        (let ((caps (harness-ui-tasks--empty-caps)))
+          (when (> held 0) (harness-ui-tasks--cap-cards caps groups held))
+          caps)))))
+
+(defun harness-ui-tasks--held (caps)
+  "Return how many cards CAPS hold back."
+  (cl-loop for cap in caps sum (cdr (cdr cap))))
+
+(defun harness-ui-tasks--cappable (groups)
+  "Return how many cards of GROUPS the caps may hold back, at most.
+That is every card in a section `harness-ui-tasks--cap-cards' takes
+from: the board can hold back no more, whatever the window."
+  (cl-loop for column in harness-ui-tasks--cap-order
+           unless (or (memq column harness-ui-tasks--folded)
+                      (memq column harness-ui-tasks--expanded))
+           sum (length (cdr (assq column groups)))))
+
+(defvar-local harness-ui-tasks--fitting nil
+  "The board's last fitting: (SHAPE . CAPS).
+SHAPE, from `harness-ui-tasks--fit-shape', is what the fitting depends
+on.  While it is unchanged, `harness-ui-tasks--fit-board' draws with
+CAPS again without measuring: the figures that change while a task
+works -- its tokens, rate and cost -- only change what the cards read,
+so a board that many tasks are updating draws its window's cards only.")
+
+(defun harness-ui-tasks--fit-shape (window)
+  "Return what fitting the board to WINDOW depends on.
+The tasks and their order, the folding and the subsections shown, the
+room the window has and the lines the board must leave for the compose
+box: everything that decides which cards show and how tall they are.
+Not the figures that only change what a card reads -- a session's
+tokens, rate or cost, the clock -- so the caps of a board many tasks
+are updating stay good while their cards' figures change."
+  (list window
+        (window-body-width window t)
+        (window-body-height window t)
+        (car (harness-ui-tasks--tail-key window))
+        harness-ui-tasks--tasks
+        harness-ui-tasks--folded
+        harness-ui-tasks--expanded
+        harness-ui-tasks--subtitles
+        harness-ui-tasks--submitting
+        harness-ui-tasks--show-archived
+        harness-ui-tasks--loading
+        harness-ui-tasks-filter))
+
 (defun harness-ui-tasks--fit-board ()
   "Draw the board, holding back the least urgent cards until the box fits.
-The board region is drawn whole first and the whole buffer measured
-through `harness-ui-tasks--fits-p'; when the compose box would not stay
-in the window, the fewest cards that must be held back are found by
-bisection -- a card takes a line or two, and which sections give way
-depends on the wrapping in that window in a way only a drawing answers
--- each capped section getting the line that says how many it holds and
-its [Show all].  Nothing is capped without a window, when the window has
-no room to speak of, or when everything is folded away or expanded: the
-board then scrolls, and the box keeps its place at the bottom of the
-window."
+The board region is drawn whole and measured: when the compose box
+would not stay in the window, the fewest cards that must be held back
+are found by measuring what each holds -- its own lines, and the line a
+capped section costs -- in the order `harness-ui-tasks--cap-cards'
+holds them back (`harness-ui-tasks--caps-that-fit'), where a bisection
+would draw the whole board again for every trial.  Each capped section
+gets the line that says how many it holds and its [Show all].
+
+A fitting is kept for the next redraw of the same shape in the same
+window (`harness-ui-tasks--fitting'), so the figures that change while
+tasks work -- tokens, rates, costs, elapsed times -- cost one drawing
+of the cards the window shows, not a measurement and a drawing of every
+card.
+
+Nothing is capped without a window, when the window has no room to
+speak of, or when everything is folded away or expanded: the board then
+scrolls, and the box keeps its place at the bottom of the window."
   (let* ((window (harness-ui-tasks--window))
          (line (and window (frame-char-height (window-frame window))))
          (body (and window (window-body-height window t)))
          (groups (harness-ui-tasks--visible))
-         (empty (harness-ui-tasks--empty-caps)))
+         (empty (harness-ui-tasks--empty-caps))
+         (shape (and window (harness-ui-tasks--fit-shape window))))
     (cond
      ((or (null window) (null line) (null body)
           (< body (* line harness-ui-tasks--cap-min-lines))
           (not (harness-ui-tasks--cappable-p groups)))
+      (setq harness-ui-tasks--fitting nil)
       (harness-ui-tasks--draw-board nil)
       nil)
+     ;; The same shape, drawn the same way: the caps still fit it (the
+     ;; check is for a card that grew where the shape said it would not),
+     ;; and drawing them covers the figures that changed.
+     ((and (equal shape (car-safe harness-ui-tasks--fitting))
+           (progn (harness-ui-tasks--draw-board (cdr harness-ui-tasks--fitting))
+                  (harness-ui-tasks--fits-p window)))
+      (cdr harness-ui-tasks--fitting))
      (t
       (harness-ui-tasks--draw-board empty)
-      (if (harness-ui-tasks--fits-p window)
-          empty
-        (let* ((total (cl-loop for c in harness-ui-tasks--columns
-                               sum (length (cdr (assq (car c) groups)))))
-               (lo 0) (hi total))
-          (while (< lo hi)
-            (let* ((mid (/ (+ lo hi) 2))
-                   (caps (harness-ui-tasks--empty-caps)))
-              (harness-ui-tasks--cap-cards caps groups mid)
-              (harness-ui-tasks--draw-board caps)
-              (if (harness-ui-tasks--fits-p window)
-                  (setq hi mid)
-                (setq lo (1+ mid)))))
-          (let ((caps (harness-ui-tasks--empty-caps)))
-            (when (> hi 0) (harness-ui-tasks--cap-cards caps groups hi))
-            (harness-ui-tasks--draw-board caps)
-            caps)))))))
+      (let ((caps (if (harness-ui-tasks--fits-p window)
+                      empty
+                    (harness-ui-tasks--caps-that-fit window groups body))))
+        (harness-ui-tasks--draw-board caps)
+        ;; A "N more" line that wraps, or a card taller than the shape
+        ;; said, can leave the drawing taller than it measured: hold back
+        ;; one card at a time until the box fits, as the measurement
+        ;; promised it would.
+        (let ((held (harness-ui-tasks--held caps))
+              (total (harness-ui-tasks--cappable groups)))
+          (while (and (< held total) (not (harness-ui-tasks--fits-p window)))
+            (cl-incf held)
+            (setq caps (harness-ui-tasks--empty-caps))
+            (harness-ui-tasks--cap-cards caps groups held)
+            (harness-ui-tasks--draw-board caps)))
+        (setq harness-ui-tasks--fitting (cons shape caps))
+        caps)))))
 
 (defun harness-ui-tasks--insert-card (task column position)
+  "Insert the card of TASK in COLUMN at point.
+POSITION is TASK's place in line among queued tasks.  The card is one
+line, two when its subtitle shows; its text has TASK's id as its
+`harness-task-id' property."
   (let* ((start (point))
          (session (harness-ui-tasks--session task))
          (width (harness-ui-tasks--width))
@@ -1074,7 +1364,11 @@ window."
                                   meta)
                         meta))))
          (meta (funcall meta-of nil))
-         (lean (funcall meta-of t))
+         ;; The lean facts -- without the token figures -- only when the
+         ;; whole facts would squeeze the title: a wide board never needs
+         ;; them, and computing both costs what the rest of the card does.
+         (lean nil)
+         (lean-of (lambda () (or lean (setq lean (funcall meta-of t)))))
          (buttons (harness-ui-tasks--card-buttons task))
          (shown (or (harness-ui-tasks--subtitle-shown-p task) narrow))
          (chevron (if narrow "" (harness-ui-tasks--subtitle-button task shown)))
@@ -1110,9 +1404,10 @@ window."
          (fits (lambda (right)
                  (>= (- width (string-width right) (string-width left) (string-width mark) 3)
                      harness-ui-tasks--min-title-room)))
-         (right (cond (subtitle (if (funcall fits meta) meta lean))
+         (right (cond (subtitle (if (funcall fits meta) meta (funcall lean-of)))
                       ((funcall fits (concat meta "  " buttons)) (concat meta "  " buttons))
-                      ((funcall fits (concat lean "  " buttons)) (concat lean "  " buttons))
+                      ((funcall fits (concat (funcall lean-of) "  " buttons))
+                       (concat (funcall lean-of) "  " buttons))
                       (t buttons)))
          (room (- width (string-width right) (string-width left) (string-width mark) 3)))
     (insert left mark
@@ -1129,7 +1424,7 @@ window."
     (put-text-property start (point) 'harness-task-id (plist-get task :id))))
 
 (defun harness-ui-tasks--insert-section (column heading tasks &optional cap)
-  "Draw one column: HEADING, its TASKS and, with CAP (SHOW . MORE), the cap.
+  "Draw COLUMN: HEADING, its TASKS and, with CAP (SHOW . MORE), the cap.
 SHOW of the tasks are drawn, in order, and its line says how many MORE
 the window is too small for."
   (let ((folded (memq column harness-ui-tasks--folded))
@@ -1140,7 +1435,16 @@ the window is too small for."
                                             ('needs-input '(harness-task-attention-face harness-task-section-face))
                                             ('review '(harness-task-review-face harness-task-section-face))
                                             (_ 'harness-task-section-face)))
-            (propertize (format "  %d" (length tasks)) 'face 'harness-dim-face))
+            (propertize (format "  %d" (length tasks)) 'face 'harness-dim-face)
+            (if (and (eq column 'pending) (harness-ui-tasks--queue-suspended-p))
+                (propertize "  · queue suspended: nothing starts on its own"
+                            'face 'harness-task-attention-face)
+              "")
+            ;; The backlog drains into In progress by nobody's hand but
+            ;; yours: its heading says so, whoever else is waiting.
+            (if (and (eq column 'backlog) tasks)
+                (propertize "  · start one when ready" 'face 'harness-dim-face)
+              ""))
     (when (and (eq column 'done) tasks (not folded))
       (let ((b (harness-ui-tasks--button "[Archive all]" #'harness-ui-tasks-archive-done
                                          "Archive every completed task" 'harness-ui-tasks-archive-done)))
@@ -1168,15 +1472,16 @@ the window is too small for."
                                 ('merging "    the merge queue is empty\n")
                                 ('active "    nothing working\n")
                                 ('pending "    no tasks waiting\n")
+                                ('backlog "    nothing in the backlog\n")
                                 (_ "    none yet\n"))
                               'face 'harness-dim-face)))
          (t
-          ;; Only queued tasks have a place in line; the backlog waits for you.
+          ;; Only queued tasks have a place in line; a backlog card
+          ;; starts only when you start it.
           (let ((queued 0))
             (dolist (task (if shown (seq-take tasks shown) tasks))
               (harness-ui-tasks--insert-card
-               task column (and (eq column 'pending) (not (harness-ui-tasks--backlog-p task))
-                                (cl-incf queued)))))))
+               task column (and (eq column 'pending) (cl-incf queued)))))))
         ;; The line for a section the window is too small for, or one open
         ;; past the room the window has, which folds it back.
         (when (or (> more 0) (memq column harness-ui-tasks--expanded))
@@ -1493,6 +1798,8 @@ edited."
   (memq (car harness-ui-tasks--target) '(reply answer refine reject)))
 
 (defun harness-ui-tasks--compose-label ()
+  "Return the compose box's label, which says what the box does.
+That depends on `harness-ui-tasks--target': a new task by default."
   (pcase harness-ui-tasks--target
     (`(edit . ,id) (format "Edit pending task “%s”"
                            (harness-first-line (plist-get (harness-ui-tasks--find id) :prompt) 50)))
@@ -1516,12 +1823,13 @@ edited."
 (defun harness-ui-tasks--setting-button (label command help)
   "A button LABEL running the session setting COMMAND on the board's target.
 The target is the new-task settings, the task at point, or every current
-task in bulk mode (see `harness-ui-tasks--setting-target')."
+task in bulk mode (see `harness-ui-tasks--setting-target').  HELP is
+its tooltip."
   (propertize (harness-ui-tasks--button label (lambda () (call-interactively command)) help command)
               'face 'harness-dim-face))
 
-(defconst harness-ui-tasks--bulk-columns '(active pending needs-input)
-  "Columns the bulk editor reaches: running, pending and blocked tasks.
+(defconst harness-ui-tasks--bulk-columns '(active pending backlog needs-input)
+  "Columns the bulk editor reaches: running, pending, backlog and blocked tasks.
 Review, done and archived tasks are history and are left alone.")
 
 (defun harness-ui-tasks--bulk-tasks ()
@@ -1544,6 +1852,7 @@ Review, done and archived tasks are history and are left alone.")
           :thinking (harness-ui-tasks--bulk-common tasks :thinking)
           :permission-mode (harness-ui-tasks--bulk-common tasks :permission-mode)
           :non-interactive (harness-ui-tasks--bulk-common tasks :non-interactive)
+          :supervisor (harness-ui-tasks--bulk-common tasks :supervisor)
           :priority (let ((priorities (delete-dups (mapcar #'harness-ui-tasks--priority tasks))))
                       (and (null (cdr priorities)) (car priorities))))))
 
@@ -1555,7 +1864,9 @@ priority included, stays as it is."
   (setq harness-ui-tasks--new (plist-put (copy-sequence harness-ui-tasks--new) key value))
   (let ((ids (mapcar (lambda (task) (plist-get task :id)) (harness-ui-tasks--bulk-tasks))))
     (harness-ui-call "_harness/task/set-all"
-                     (list :settings (list key (if (and (eq key :non-interactive) (not value)) :false value))
+                     (list :settings (list key (if (and (memq key '(:non-interactive :supervisor))
+                                                       (not value))
+                                                  :false value))
                            :filter (list :ids ids :cwd harness-ui-tasks--dir))
                      (lambda (_) (harness-ui-tasks--render-tail))
                      (lambda (e) (message "Bulk update failed: %s" (harness-error-message e))))))
@@ -1584,26 +1895,21 @@ keeps its own."
 
 (defun harness-ui-tasks--read-bulk-priority (n current)
   "Read the priority to give N tasks, CURRENT now (nil when they differ).
-Return \"low\", \"medium\" or \"high\", or nil for an empty answer."
-  (let* ((choices (reverse harness-ui-tasks--priorities))
-         (choice (completing-read
-                  (format "Priority of %d task%s (%s now): " n (if (= 1 n) "" "s") (or current "mixed"))
-                  (lambda (string pred action)
-                    ;; Keep the highest-first order.
-                    (if (eq action 'metadata)
-                        '(metadata (display-sort-function . identity)
-                                   (cycle-sort-function . identity))
-                      (complete-with-action action choices string pred)))
-                  nil t)))
-    (car (member choice harness-ui-tasks--priorities))))
+Return \"low\", \"medium\" or \"high\", or nil for an empty answer.  The
+levels, their order and the reading are the priority UI's
+\(`harness-ui-priority--choose')."
+  (harness-ui-priority--choose
+   (format "Priority of %d task%s (%s now): " n (if (= 1 n) "" "s") (or current "mixed"))
+   current))
 
 (defun harness-ui-tasks-bulk-priority (&optional priority)
   "Give every current task on this board PRIORITY: \"low\", \"medium\" or \"high\".
 It is the priority button of bulk editing (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-bulk]), and changes the
-running, pending and blocked tasks, as the other bulk settings do.
+running, pending, backlog and blocked tasks, as the other bulk settings do.
 Interactively it asks which; an empty answer changes nothing, and
 neither does quitting.  It is the only way a bulk edit changes
-priorities: the other settings leave each task its own.  The next task
+priorities: the other settings leave each task's alone.  A task's
+priority is its session's, which `task/set-all' changes; the next task
 keeps its own priority too, as a priority only means something against
 the others'."
   (interactive)
@@ -1611,7 +1917,7 @@ the others'."
     (user-error "Bulk editing is off; %s turns it on"
                 (substitute-command-keys "\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-bulk]")))
   (let* ((tasks (or (harness-ui-tasks--bulk-tasks)
-                    (user-error "No running, pending or blocked task to change")))
+                    (user-error "No running, pending, backlog or blocked task to change")))
          (n (length tasks))
          (priority (or priority
                        (harness-ui-tasks--read-bulk-priority
@@ -1619,7 +1925,7 @@ the others'."
          (buffer (current-buffer)))
     (cond
      ((null priority) (message "Priorities unchanged"))
-     ((not (member priority harness-ui-tasks--priorities))
+     ((not (member priority harness-ui-priority-levels))
       (user-error "Unknown priority %s; it is low, medium or high" priority))
      (t
       (harness-ui-call "_harness/task/set-all"
@@ -1634,12 +1940,12 @@ the others'."
 
 (defun harness-ui-tasks-toggle-bulk ()
   "Switch bulk editing of the current tasks on or off.
-While on, the model, effort, permission-mode, non-interactive and
-priority buttons change every running, pending or blocked task, not
-just the new task or the one at point.  Each changes only its own
-setting, when it is used: a task's other settings, its priority among
-them, stay as they are.  Review, done and archived tasks are history
-and are left alone."
+While on, the model, effort, permission-mode, non-interactive,
+supervisor and priority buttons change every running, pending,
+backlog or blocked task, not just the new task or the one at point.  Each changes
+only its own setting, when it is used: a task's other settings, its
+priority among them, stay as they are.  Review, done and archived tasks
+are history and are left alone."
   (interactive)
   (setq harness-ui-tasks--bulk (not harness-ui-tasks--bulk))
   (harness-ui-tasks--render-tail)
@@ -1654,60 +1960,241 @@ and are left alone."
   "The conspicuous line that says bulk editing is on."
   (let ((n (length (harness-ui-tasks--bulk-tasks))))
     (propertize
-     (format "EDITING %d CURRENT TASK%s (running, pending, blocked) — the settings below change all of them"
+     (format "EDITING %d CURRENT TASK%s (running, pending, backlog, blocked) — the settings below change all of them"
              n (if (= 1 n) "" "S"))
      'face 'harness-task-attention-face)))
 
-(defun harness-ui-tasks--new-settings-line ()
-  "The settings line: each setting as a button.
+(defconst harness-ui-tasks--min-settings-room 24
+  "Columns the settings keep before the limit's button is cut off too.
+On a narrow board the settings line shrinks its settings first, so the
+button that says how many tasks work at once stays whole.")
+
+(defun harness-ui-tasks--supervisor-p ()
+  "Non-nil when this board offers the supervisor setting.
+The harness then has the supervisor module, so `task/settings' carries
+`:supervisor' (a harness without it has no such setting to offer), and
+the UI its toggle command (`harness-toggle-supervisor'); otherwise
+there is nothing to show and nothing to run."
+  (and (plist-member harness-ui-tasks--settings :supervisor)
+       (fboundp 'harness-toggle-supervisor)))
+
+(defun harness-ui-tasks--supervisor-label (value)
+  "Return the label of a supervisor setting VALUE.
+t reads \"supervisor\", `:false' \"hands-on\" (the user turned it off)
+and nil \"mixed\": the current tasks differ, or none of them says."
+  (cond ((harness-json-true-p value) "supervisor")
+        (value "hands-on")
+        (t "mixed")))
+
+(defun harness-ui-tasks--new-settings-line (&optional room)
+  "The settings line: each setting as a button, fitted to ROOM columns.
 In bulk mode the values are the current tasks', their priority too, and
 a button changes its one setting of them all; otherwise they are the
-new task's."
+new task's, and the line ends with how many tasks work at once
+\(`harness-ui-tasks--max-running-button').  When ROOM is too narrow
+for it all, the settings shorten first, down to
+`harness-ui-tasks--min-settings-room' columns, so that button stays
+whole; the line shortens as a whole after that.  Without ROOM it is
+not fitted."
   (let* ((bulk harness-ui-tasks--bulk)
          (values (if bulk (harness-ui-tasks--bulk-values) harness-ui-tasks--new))
          (s harness-ui-tasks--settings)
          (scope (if bulk "current tasks" "new tasks"))
-         (main-tree (and (not bulk) (harness-json-true-p (plist-get harness-ui-tasks--new :main-tree)))))
+         (main-tree (and (not bulk) (harness-json-true-p (plist-get harness-ui-tasks--new :main-tree))))
+         ;; How many tasks work at once is the harness's, for every
+         ;; project, not the next task's: apart from its settings.
+         (limit (not (or bulk harness-ui-tasks--refine))))
     (if (null s)
         ""
-      (concat
-       " "
-       (mapconcat
-        #'identity
-        (delq nil
-              (list (harness-ui-tasks--setting-button
-                     (harness-ui-model-label (plist-get values :model))
-                     #'harness-set-model (format "Model of %s" scope))
-                    (harness-ui-tasks--setting-button
-                     (if-let* ((m (plist-get values :permission-mode))) (harness-ui-permission-mode-label m) "default mode")
-                     #'harness-set-permission-mode (format "Permission mode of %s" scope))
-                    (harness-ui-tasks--setting-button
-                     (harness-ui-thinking-label (plist-get values :thinking))
-                     #'harness-set-thinking (format "Thinking level of %s" scope))
-                    (harness-ui-tasks--setting-button
-                     (harness-ui-non-interactive-label (plist-get values :non-interactive))
-                     #'harness-toggle-non-interactive (format "Non-interactive mode of %s" scope))
-                    ;; The next task's priority is beside Submit; the
-                    ;; current tasks' is here, changed only when clicked.
-                    (and (harness-ui-tasks--bulk-priority-p)
-                         (harness-ui-tasks--bulk-priority-button (plist-get values :priority)))
-                    ;; A task that starts cannot change where it works, so
-                    ;; this one is only about the next task, never bulk.
-                    (and (harness-json-true-p (plist-get s :worktrees))
-                         (harness-ui-tasks--setting-button
-                          (if main-tree "main tree" "own worktree")
-                          #'harness-ui-tasks-toggle-main-tree
-                          "Where the next task works: its own worktree and branch, or the project's main tree, where nothing merges"))))
-        (propertize " · " 'face 'harness-dim-face))
-       (if bulk
-           (propertize "   new tasks keep their own settings" 'face 'harness-dim-face)
-         (let ((notes (if harness-ui-tasks--refine
-                          (list "an agent writes it up; you start it")
-                        (delq nil (list (and (plist-get s :max-running)
-                                             (format "%s at a time" (plist-get s :max-running))))))))
-           (if notes
-               (propertize (concat "   " (string-join notes " · ")) 'face 'harness-dim-face)
-             "")))))))
+      (harness-ui-tasks--fit-settings
+       (concat
+        " "
+        (mapconcat
+         #'identity
+         (delq nil
+               (list (harness-ui-tasks--setting-button
+                      (harness-ui-model-label (plist-get values :model))
+                      #'harness-set-model (format "Model of %s" scope))
+                     (harness-ui-tasks--setting-button
+                      (if-let* ((m (plist-get values :permission-mode))) (harness-ui-permission-mode-label m) "default mode")
+                      #'harness-set-permission-mode (format "Permission mode of %s" scope))
+                     (harness-ui-tasks--setting-button
+                      (harness-ui-thinking-label (plist-get values :thinking))
+                      #'harness-set-thinking (format "Thinking level of %s" scope))
+                     (harness-ui-tasks--setting-button
+                      (harness-ui-non-interactive-label (plist-get values :non-interactive))
+                      #'harness-toggle-non-interactive (format "Non-interactive mode of %s" scope))
+                     ;; Supervisor mode is the supervisor module's; a
+                     ;; harness without it has no setting to offer.
+                     (and (harness-ui-tasks--supervisor-p)
+                          (harness-ui-tasks--setting-button
+                           (harness-ui-tasks--supervisor-label (plist-get values :supervisor))
+                           #'harness-toggle-supervisor
+                           (format "Supervisor mode of %s: plan and delegate to workers, or work hands-on" scope)))
+                     ;; The next task's priority is beside Submit; the
+                     ;; current tasks' is here, changed only when clicked.
+                     (and (harness-ui-tasks--bulk-priority-p)
+                          (harness-ui-tasks--bulk-priority-button (plist-get values :priority)))
+                     ;; A task that starts cannot change where it works, so
+                     ;; this one is only about the next task, never bulk.
+                     (and (harness-json-true-p (plist-get s :worktrees))
+                          (harness-ui-tasks--setting-button
+                           (if main-tree "main tree" "own worktree")
+                           #'harness-ui-tasks-toggle-main-tree
+                           "Where the next task works: its own worktree and branch, or the project's main tree, where nothing merges"))))
+         (propertize " · " 'face 'harness-dim-face)))
+       (cond (bulk (propertize "   new tasks keep their own settings" 'face 'harness-dim-face))
+             (harness-ui-tasks--refine
+              (propertize "   an agent writes it up; you start it" 'face 'harness-dim-face))
+             (t (concat "   "
+                        (and (harness-ui-tasks--queue-suspended-p)
+                             (concat (propertize "queue suspended" 'face 'harness-dim-face)
+                                     (propertize " · " 'face 'harness-dim-face)))
+                        (harness-ui-tasks--max-running-button))))
+       limit room))))
+
+(defun harness-ui-tasks--fit-settings (settings note keep room)
+  "SETTINGS then NOTE, fitted to ROOM columns; not fitted without ROOM.
+With KEEP, NOTE stays whole while SETTINGS can shorten to
+`harness-ui-tasks--min-settings-room' columns; otherwise, or narrower
+still, the whole line shortens from its end."
+  (let ((line (concat settings note)))
+    (cond ((or (null room) (<= (string-width line) room)) line)
+          ((and keep (>= (- room (string-width note)) harness-ui-tasks--min-settings-room))
+           (concat (harness-ui-tasks--fit settings (- room (string-width note))) note))
+          (t (harness-ui-tasks--fit line room)))))
+
+;;;; How many tasks work at once
+
+;; The settings line ends with how many of a project's tasks may work at
+;; once: "3 at a time", or "all at once" without a limit.  It is the
+;; harness option `harness-tasks-max-running', the same for every
+;; project, and a click on it sets it as the Review switch sets its
+;; own: saved through `config/set', so it holds for every board and
+;; across restarts.  The harness starts the tasks a higher limit lets
+;; through at once; a lower one stops none at work.
+
+(defface harness-task-held-face '((t :inherit warning))
+  "The limit button while no task starts by itself: 0 at a time."
+  :group 'harness-ui-tasks)
+
+(defun harness-ui-tasks--max-running ()
+  "How many of a project's tasks may work at once: a number, nil for no limit.
+That is the harness's `task/settings' as last fetched."
+  (let ((n (plist-get harness-ui-tasks--settings :max-running)))
+    (and (integerp n) n)))
+
+(defun harness-ui-tasks--held-p (n)
+  "Non-nil when a limit of N tasks lets none start by itself: 0 (or less)."
+  (and n (<= n 0)))
+
+(defun harness-ui-tasks--max-running-label (n)
+  "What the limit button says for a limit of N tasks: \"3 at a time\".
+Without a limit, N nil, it is \"all at once\"."
+  (if n (format "%d at a time" n) "all at once"))
+
+(defun harness-ui-tasks--max-running-help (n)
+  "The tooltip of the limit button for a limit of N tasks, nil for none."
+  (concat
+   (cond ((null n) "No limit: every task starts as soon as it is submitted")
+         ((harness-ui-tasks--held-p n)
+          (format "%d at a time: no task starts by itself; each waits in Pending until you start it" n))
+         (t (format "At most %d of this project's tasks work at once; the others wait in Pending and start, by priority, as slots free up"
+                    n)))
+   ".  Click to change it, for every project."))
+
+(defun harness-ui-tasks--max-running-button ()
+  "The button saying how many of a project's tasks work at once.
+It ends the settings line of a new task, though it is no setting of
+the task: a click asks for another limit, for every project
+\(`harness-ui-tasks-set-max-running').  Like the rest of that line it
+shows once the harness has said what the limit is, so it never shows
+a wrong one.  It stands out at 0, when no task starts by itself."
+  (let ((n (harness-ui-tasks--max-running)))
+    (propertize
+     (harness-ui-tasks--button (harness-ui-tasks--max-running-label n)
+                               (lambda () (call-interactively #'harness-ui-tasks-set-max-running))
+                               (harness-ui-tasks--max-running-help n)
+                               'harness-ui-tasks-set-max-running)
+     'face (if (harness-ui-tasks--held-p n) 'harness-task-held-face 'harness-dim-face))))
+
+(defconst harness-ui-tasks--max-running-choices
+  '("1" "2" "3" "4" "5" "6" "8" "10" "no limit" "0")
+  "The limits the minibuffer offers, in this order; any other number does too.")
+
+(defun harness-ui-tasks--parse-max-running (answer)
+  "The limit ANSWER names: a number of tasks, or nil for no limit.
+A number may come with the button's words (\"4 at a time\"), and no
+limit as \"no limit\", \"none\", \"unlimited\", \"all\" or \"all at
+once\".  Signal a `user-error' for anything else."
+  (let ((answer (downcase (string-trim answer))))
+    (cond ((member answer '("no limit" "none" "nil" "unlimited" "all" "all at once")) nil)
+          ((string-match "\\`\\([0-9]+\\)\\(?: *at a time\\)?\\'" answer)
+           (string-to-number (match-string 1 answer)))
+          (t (user-error "Not a number of tasks: %s (a number, or no limit)" answer)))))
+
+(defun harness-ui-tasks--read-max-running (current)
+  "Read how many of a project's tasks may work at once, CURRENT now.
+Return a number, or nil for no limit; an empty answer keeps CURRENT."
+  (let* ((default (if current (number-to-string current) "no limit"))
+         (annotations '(("0" . "  no task starts by itself: you start each one")
+                        ("no limit" . "  every task starts as soon as it is submitted")))
+         (answer (completing-read
+                  (format-prompt "Tasks of a project working at once" default)
+                  (lambda (string pred action)
+                    (if (eq action 'metadata)
+                        `(metadata (display-sort-function . identity)
+                                   (cycle-sort-function . identity)
+                                   (annotation-function
+                                    . ,(lambda (choice) (cdr (assoc choice annotations)))))
+                      (complete-with-action action harness-ui-tasks--max-running-choices string pred)))
+                  nil nil nil nil default)))
+    (if (string-empty-p (string-trim answer))
+        current
+      (harness-ui-tasks--parse-max-running answer))))
+
+(defun harness-ui-tasks--show-max-running (n)
+  "Show the limit of N tasks, nil for none, as the harness has it now.
+Its `config/changed' brings every board the settings again shortly;
+this one does not wait for them."
+  (when harness-ui-tasks--settings
+    (setq harness-ui-tasks--settings
+          (plist-put (copy-sequence harness-ui-tasks--settings) :max-running n))
+    (harness-ui-tasks--refit-tail)))
+
+(defun harness-ui-tasks-set-max-running (n)
+  "Let N of each project's tasks work at once; N nil means no limit.
+The others wait in Pending and start, by priority then oldest first, as
+slots free up.  Raising the limit starts the tasks it lets through at
+once; lowering it stops no task at work, and only fewer start after.
+With 0 no task starts by itself: each waits until you start it
+\(\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-start]).
+
+The limit is the harness option `harness-tasks-max-running', saved as
+the settings page saves it: for every project, each with that many
+slots of its own, and across restarts.  Interactively it is read in the
+minibuffer, the limit now being the default; the button that says
+\"N at a time\" (or \"all at once\") above the compose box runs it."
+  (interactive (list (harness-ui-tasks--read-max-running (harness-ui-tasks--max-running))))
+  (unless (or (null n) (natnump n))
+    (user-error "Not a number of tasks: %s" n))
+  (let ((buffer (current-buffer))
+        (says (lambda (n)
+                (cond ((null n) "No limit: every task starts as soon as it is submitted, in every project")
+                      ((zerop n) "0 at a time: no task starts by itself now; start each one from Pending (s)")
+                      (t (format "%d at a time: each project works on up to %d task%s at once, the others wait in Pending"
+                                 n n (if (= n 1) "" "s")))))))
+    (if (and harness-ui-tasks--settings (eql n (harness-ui-tasks--max-running)))
+        (message "%s" (funcall says n))
+      (harness-ui-tasks--request-then
+       "_harness/config/set"
+       (list :key "harness-tasks-max-running" :value (prin1-to-string n) :printed t
+             :scope "global" :cwd harness-ui-tasks--dir)
+       "Setting how many tasks work at once"
+       (lambda (_)
+         (when (harness-ui-tasks--board-p buffer)
+           (with-current-buffer buffer (harness-ui-tasks--show-max-running n)))
+         (message "%s" (funcall says n)))))))
 
 (defun harness-ui-tasks--set-new (key value)
   "Set the new-task setting KEY to VALUE and show it."
@@ -1749,6 +2236,77 @@ writes it up, with settings of its own, so it counts as not started."
           (plist-get task :session)
         (list harness-ui-tasks--new #'harness-ui-tasks--set-new)))))
 
+(defun harness-ui-tasks--label-line (room messaging bar)
+  "The compose label, fitted to ROOM columns: what the box does, and the
+Submit / Refine toggle or [cancel].  MESSAGING is non-nil when the box
+sends to a session, BAR what starts the line."
+  (let* ((cancel (if harness-ui-tasks--target
+                     (concat "  " (harness-ui-tasks--button
+                                   "[cancel]" #'harness-ui-tasks-compose-reset
+                                   (if (eq (car harness-ui-tasks--target) 'answer)
+                                       "Back to a new task (C-g); the question stays waiting"
+                                     "Back to a new task (C-g)")
+                                   'harness-ui-tasks-compose-reset))
+                   ""))
+         (toggle (if harness-ui-tasks--target ""
+                   (concat "   " (harness-ui-tasks--mode-toggle)
+                           ;; Bulk editing has the current tasks' priority
+                           ;; on its settings line instead.
+                           (if (harness-ui-tasks--bulk-priority-p) ""
+                             (concat "   " (harness-ui-tasks--priority-toggle))))))
+         (icon (if messaging (concat (harness-ui-icon 'harness-icon-message) " ") ""))
+         (body (concat icon (harness-ui-tasks--compose-label)))
+         (label (harness-ui-tasks--fit (concat bar body)
+                                       (- room (string-width cancel) (string-width toggle)))))
+    ;; The bar, the icon and the label each keep their own look: the
+    ;; band behind them all, the accent on bar and icon, the label face
+    ;; on the text.
+    (let ((head (if messaging (+ (length bar) (length icon)) 0)))
+      (add-face-text-property head (length label) 'harness-label-face t label)
+      (when messaging
+        (add-face-text-property (length bar) (length label) 'harness-compose-message-accent-face t label)))
+    ;; Fitted again as a whole: the label shrinks to a minimum, the toggle not.
+    (harness-ui-tasks--fit (concat label toggle cancel) room)))
+
+(defun harness-ui-tasks--tail-lines (messaging band bar)
+  "The lines between the board and the compose box: (KEY FIT BAND) each.
+Top first: the error, the compose label, the bulk banner and the
+settings, those there are.  KEY names the line for redraws, FIT returns
+it fitted to the columns it is called with, BAND is the face behind it
+or nil.  MESSAGING and BAR are as `harness-ui-tasks--label-line' takes
+them."
+  (let ((lines nil))
+    (when harness-ui-tasks--error
+      (let ((text (propertize (concat "  " harness-ui-tasks--error) 'face 'harness-tool-error-face)))
+        (push (list 'error (lambda (room) (harness-ui-tasks--fit text room)) band) lines)))
+    (push (list 'label (lambda (room) (harness-ui-tasks--label-line room messaging bar)) band) lines)
+    (unless harness-ui-tasks--target
+      (when harness-ui-tasks--bulk
+        (let ((text (harness-ui-tasks--bulk-banner)))
+          (push (list 'bulk (lambda (room) (harness-ui-tasks--fit text room)) nil) lines)))
+      (unless (string-empty-p (harness-ui-tasks--new-settings-line))
+        (push (list 'settings (lambda (room) (harness-ui-tasks--new-settings-line room)) nil) lines)))
+    (nreverse lines)))
+
+(defun harness-ui-tasks--corner (room lines)
+  "What `harness-ui-tasks-corner-functions' draw beside LINES, or nil.
+LINES are as `harness-ui-tasks--tail-lines' returns them, ROOM the
+columns they have.  The functions cannot move point, where the lines
+go: they may measure text in a window, which takes the window's point."
+  (let ((widths (mapcar (lambda (line) (string-width (funcall (nth 1 line) most-positive-fixnum)))
+                        lines)))
+    (run-hook-wrapped 'harness-ui-tasks-corner-functions
+                      (lambda (fn) (ignore-errors (save-excursion (funcall fn room widths)))))))
+
+(defun harness-ui-tasks--insert-corner (text)
+  "Insert TEXT, whole lines of `harness-ui-tasks-corner-functions'.
+They are named for redraws, as the lines below them are."
+  (when (and (stringp text) (not (string-empty-p text)))
+    (let ((start (point)))
+      (insert text)
+      (unless (bolp) (insert "\n"))
+      (put-text-property start (point) 'harness-task-tail 'corner))))
+
 (defun harness-ui-tasks--insert-tail-head ()
   "Insert the error line, the compose label, the settings and the attachments.
 Each line is fitted to the window, like the board's: the buffer wraps
@@ -1756,54 +2314,25 @@ for the compose box, so a longer line would take two.  A new task's
 label carries the Submit / Refine toggle, which the label makes room
 for.  A box that sends to a session wears its message colours here too,
 the label, bar and band around it, so what submitting will do is plain
-before a key is pressed."
+before a key is pressed.  What `harness-ui-tasks-corner-functions'
+draw sits at the right of the lines, which narrow for it, and above
+them."
   (let* ((room (1- (harness-ui-tasks--width)))
          (messaging (harness-ui-tasks--messaging-p))
          (band (and messaging 'harness-compose-message-face))
          (bar (if messaging
                   (harness-compose-bar 'harness-compose-message-accent-face 'harness-compose-message-face)
-                " ")))
-    (when harness-ui-tasks--error
-      (harness-ui-tasks--insert-tail-line
-       'error (harness-ui-tasks--fit (propertize (concat "  " harness-ui-tasks--error)
-                                                 'face 'harness-tool-error-face)
-                                     room)
-       band))
-    (let* ((cancel (if harness-ui-tasks--target
-                       (concat "  " (harness-ui-tasks--button
-                                     "[cancel]" #'harness-ui-tasks-compose-reset
-                                     (if (eq (car harness-ui-tasks--target) 'answer)
-                                         "Back to a new task (C-g); the question stays waiting"
-                                       "Back to a new task (C-g)")
-                                     'harness-ui-tasks-compose-reset))
-                     ""))
-           (toggle (if harness-ui-tasks--target ""
-                     (concat "   " (harness-ui-tasks--mode-toggle)
-                             ;; Bulk editing has the current tasks' priority
-                             ;; on its settings line instead.
-                             (if (harness-ui-tasks--bulk-priority-p) ""
-                               (concat "   " (harness-ui-tasks--priority-toggle))))))
-           (icon (if messaging (concat (harness-ui-icon 'harness-icon-message) " ") ""))
-           (body (concat icon (harness-ui-tasks--compose-label)))
-           (label (harness-ui-tasks--fit (concat bar body)
-                                         (- room (string-width cancel) (string-width toggle)))))
-      ;; The bar, the icon and the label each keep their own look: the
-      ;; band behind them all, the accent on bar and icon, the label face
-      ;; on the text.
-      (let ((head (if messaging (+ (length bar) (length icon)) 0)))
-        (add-face-text-property head (length label) 'harness-label-face t label)
-        (when messaging
-          (add-face-text-property (length bar) (length label) 'harness-compose-message-accent-face t label)))
-      ;; Fitted again as a whole: the label shrinks to a minimum, the toggle not.
-      (harness-ui-tasks--insert-tail-line 'label (harness-ui-tasks--fit (concat label toggle cancel) room)
-                                          band))
-    (unless harness-ui-tasks--target
-      (when harness-ui-tasks--bulk
-        (harness-ui-tasks--insert-tail-line
-         'bulk (harness-ui-tasks--fit (harness-ui-tasks--bulk-banner) room)))
-      (let ((line (harness-ui-tasks--new-settings-line)))
-        (unless (string-empty-p line)
-          (harness-ui-tasks--insert-tail-line 'settings (harness-ui-tasks--fit line room)))))
+                " "))
+         (lines (harness-ui-tasks--tail-lines messaging band bar))
+         (corner (harness-ui-tasks--corner room lines))
+         (beside (plist-get corner :beside))
+         (reserve (or (plist-get corner :reserve) 0)))
+    (harness-ui-tasks--insert-corner (plist-get corner :above))
+    (cl-loop for (key fit band) in lines
+             for i from 0
+             for right = (nth i beside)
+             do (harness-ui-tasks--insert-tail-line
+                 key (if right (concat (funcall fit (- room reserve)) right) (funcall fit room)) band))
     (let ((start (point)))
       ;; The bar down every attachment's line.
       (harness-compose-insert-attachments (and messaging bar))
@@ -1840,6 +2369,17 @@ and point on those lines stays there."
       (harness-ui-tasks--restore places)
       (set-buffer-modified-p nil))))
 
+(defun harness-ui-tasks-redraw-tail-lines (&optional buffers)
+  "Draw the lines above the compose box of BUFFERS again, the box left alone.
+BUFFERS are boards, every board by default.  For a module whose
+`harness-ui-tasks-corner-functions' would draw something else now: each
+board then fits its cards to the room the lines leave."
+  (dolist (buffer (or buffers (harness-ui-tasks--buffers)))
+    (when (harness-ui-tasks--board-p buffer)
+      (with-current-buffer buffer
+        (harness-ui-tasks--refit-tail)
+        (harness-ui-tasks--schedule-render buffer)))))
+
 (defun harness-ui-tasks--mode-toggle ()
   "The Submit / Refine toggle above the compose box: the current mode.
 One button, showing only the mode new tasks get, with the icon their
@@ -1849,7 +2389,7 @@ to the other mode, as `harness-ui-tasks-toggle-refine' does."
     (pcase-let ((`(,icon ,label ,help ,other)
                  (if harness-ui-tasks--refine
                      '(harness-icon-agent "Refine"
-                       "Refine: an agent writes the task up, then it waits in Pending until you start it"
+                       "Refine: an agent writes the task up, then it waits in the Backlog until you start it"
                        "Submit")
                    '(harness-icon-running "Submit" "Submit: the task starts at once" "Refine"))))
       (propertize
@@ -1885,14 +2425,14 @@ current tasks' priority takes its place, on the settings line
   (setq harness-ui-tasks--refine (and refine t))
   (harness-ui-tasks--render-tail)
   (message (if refine
-               "Refine: an agent writes each new task up; it waits in Pending until you start it"
+               "Refine: an agent writes each new task up; it waits in the Backlog until you start it"
              "Submit: each new task starts at once")))
 
 (defun harness-ui-tasks-toggle-refine (&optional arg)
   "Switch the compose box between submitting new tasks and refining them.
 Submit starts a task at once.  Refine (backlog refinement, once called
 grooming) has an agent write it up first -- briefly, reading the code
-but changing nothing -- and the task then waits in Pending, across
+but changing nothing -- and the task then waits in the Backlog, across
 restarts, until you start it (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-start]).  With a prefix ARG, refine
 when it is positive and submit otherwise."
   (interactive "P")
@@ -1930,7 +2470,7 @@ board is changed on its card (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-
   (let ((priority (or priority
                       (pcase (harness-ui-tasks--priority harness-ui-tasks--new)
                         ("medium" "high") ("high" "low") (_ "medium")))))
-    (unless (member priority harness-ui-tasks--priorities)
+    (unless (member priority harness-ui-priority-levels)
       (error "Unknown priority %s" priority))
     (harness-ui-tasks--set-new :priority priority)
     (message "The next task is %s priority" priority)))
@@ -1986,31 +2526,40 @@ the box, or on the same line above it (`harness-ui-tasks--anchor')."
 ;;;; Header line
 
 (defun harness-ui-tasks--segment (text command help)
+  "Return the header-line segment TEXT; a click on it runs COMMAND.
+HELP is its tooltip."
   (propertize text 'mouse-face 'mode-line-highlight 'help-echo help
               'keymap (harness-ui-mouse-keymap command)))
 
-(defun harness-ui-tasks--review-help (window _object _pos)
-  "The tooltip of the Review switch in WINDOW's header line.
+(defun harness-ui-tasks--queue-suspended-p ()
+  "Non-nil when the board's project has its pending queue suspended.
+That is the harness's `task/settings' as last fetched: the queue is
+running until they say otherwise."
+  (harness-json-true-p (plist-get harness-ui-tasks--settings :queue-suspended)))
+
+(defun harness-ui-tasks--queue-help (window _object _pos)
+  "The tooltip of the queue switch in WINDOW's header line.
 It says what the switch does now and how to turn it.  A `help-echo'
 function, so the keymaps are searched on hover, not on every redisplay
 of the header line."
   (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
     (let ((keys (substitute-command-keys
-                 "\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-review]" t)))
-      (if (harness-ui-tasks--review-p)
-          (format "Review is on: finished tasks wait in Ready for review until you verify them, which merges them, or send them back.  Click or %s to turn it off, for every project: finished tasks then merge and complete by themselves."
-                  keys)
-        (format "Review is off: finished tasks merge and complete by themselves, without waiting for you to verify them.  Click or %s to turn it on again, for every project."
-                keys)))))
+                 "\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-queue]" t)))
+      (if (harness-ui-tasks--queue-suspended-p)
+          (format "The queue is suspended: no waiting task of this project starts on its own, so the board is clear for one urgent task -- [Start now], and task_control start, still start one.  Tasks already at work go on, and returning one to pending does not start another.  Click or %s to let the waiting tasks start again, by priority." keys)
+        (format "The queue is running: waiting tasks start by themselves as slots free, by priority.  Click or %s to suspend it, so none starts on its own until you resume it or start one by hand." keys)))))
 
-(defun harness-ui-tasks--review-segment ()
-  "The header's Review switch: whether finished tasks wait for your review.
-A click turns it the other way (`harness-ui-tasks-toggle-review').  Off,
-it stands out: work then merges without anyone looking at it."
-  (harness-ui-tasks--segment (if (harness-ui-tasks--review-p)
-                                 "[Review: on]"
-                               (propertize "[Review: off]" 'face 'harness-task-review-off-face))
-                             #'harness-ui-tasks-toggle-review #'harness-ui-tasks--review-help))
+(defun harness-ui-tasks--queue-segment ()
+  "The header's queue switch: whether waiting tasks start on their own.
+A click suspends or resumes the board's project queue
+\(`harness-ui-tasks-toggle-queue').  Suspended, it stands out: the
+board then waits for you."
+  (harness-ui-tasks--segment
+   (if (harness-ui-tasks--queue-suspended-p)
+       (concat (propertize (harness-ui-icon 'harness-icon-task-paused) 'face 'harness-task-attention-face)
+               (propertize " Queue suspended" 'face 'harness-task-attention-face))
+     "[Queue: running]")
+   #'harness-ui-tasks-toggle-queue #'harness-ui-tasks--queue-help))
 
 (defun harness-ui-tasks--spend (groups)
   "Return what the tasks of GROUPS cost and who pays, for the header.
@@ -2028,8 +2577,8 @@ provider whose account stands for them all."
   "Return the header's (TEXT PRIORITY MIN) of what the tasks of GROUPS cost.
 TEXT, after SEP, is `harness-ui-tasks--spend' and the fullest budget
 that applies to the project; MIN leaves the budget out.  A click on
-either opens the usage dashboard.  It stays longer than the counts and
-most buttons: the board says nowhere else how much of the plan is left."
+either opens the usage dashboard.  It stays longer than most buttons:
+the board says nowhere else how much of the plan is left."
   (let ((spend (harness-ui-tasks--spend groups))
         (budgets (harness-ui-format-budgets harness-ui-tasks--budgets)))
     (list (concat sep (harness-ui-spend-segment
@@ -2039,79 +2588,80 @@ most buttons: the board says nowhere else how much of the plan is left."
 
 (defun harness-ui-tasks--header (&optional width)
   "Return the header line, fitted to WIDTH, its window's by default.
+It holds what the board below does not show: the project, what its
+tasks cost and the board's buttons.  How many tasks each column holds
+is on the column's heading, and whether finished work waits for review
+is a setting (`harness-tasks-require-verification', on the settings
+page; \\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-review] here).
+
 In a window too narrow for all of it, [Add session] goes first, then
-the counts of completed, merging, pending and working tasks and the
-bulk-edit segment; the project's name shortens after those, then the
-other modules' segments (`harness-ui-tasks-header-functions', the
-search's [Search]) and [BTW] and [Archived], then the Review switch.
-What the tasks cost and the plan's quota stay longer, the budget going
-first (`harness-ui-tasks--spend-segment'); what needs you, what waits
-for your review, [Refresh] and a board still loading stay longest.
-WIDTH is as `harness-ui-fit-header' takes it."
+[Bulk edit]; the project's name shortens after those, then [Archived],
+[BTW] and the other modules' segments (`harness-ui-tasks-header-functions',
+the search's [Search]) go.  Another module's segment with a priority of
+its own goes when that says: the companion pet's face before anything
+else.  What the tasks cost and the plan's quota stay longer, the budget
+going first (`harness-ui-tasks--spend-segment'); bulk editing while it
+is on, [Refresh] and a board still loading stay longest.  WIDTH is as
+`harness-ui-fit-header' takes it."
   (let* ((groups (harness-ui-tasks--visible))
-         (counts (mapcar (lambda (g) (cons (car g) (length (cdr g)))) groups))
-         (needs (alist-get 'needs-input counts))
-         (review (alist-get 'review counts))
+         ;; Other modules' segments: strings join into one, lists stand
+         ;; on their own.
+         (extra (delq nil (mapcar (lambda (fn) (ignore-errors (funcall fn)))
+                                  harness-ui-tasks-header-functions)))
+         (joined (cl-remove-if-not #'stringp extra))
+         (own (cl-remove-if-not #'consp extra))
          (name (if harness-ui-tasks--project
                    (file-name-nondirectory (directory-file-name harness-ui-tasks--project))
                  (abbreviate-file-name (or harness-ui-tasks--dir ""))))
-         (n (length (harness-ui-tasks--bulk-tasks)))
+         ;; How many tasks it edits is the banner's, above the box.
          (bulk (harness-ui-tasks--segment
-                (if harness-ui-tasks--bulk
-                    (format "[Bulk: editing %d task%s]" n (if (= 1 n) "" "s"))
-                  (format "[Bulk edit: %d task%s]" n (if (= 1 n) "" "s")))
+                (if harness-ui-tasks--bulk "[Bulk edit: on]" "[Bulk edit]")
                 #'harness-ui-tasks-toggle-bulk
-                "Bulk edit: apply the model, effort, permission mode, interactivity or priority you change to every running, pending and blocked task"))
+                "Bulk edit: apply the model, effort, permission mode, interactivity or priority you change to every running, pending, backlog or blocked task"))
          (sep "   ")
          (gap (lambda () (prog1 sep (setq sep "  ")))))
     (harness-ui-fit-header
-     (list
-      (concat " " (propertize "Tasks" 'face 'bold))
-      (list (concat " " (propertize name 'face 'harness-dim-face))
-            50 (concat " " (propertize (harness-truncate-end name 6) 'face 'harness-dim-face)))
-      (and (> needs 0)
-           (list (concat (funcall gap)
-                         (propertize (format "%s %d need you" (harness-ui-icon 'harness-icon-blocked) needs)
-                                     'face 'harness-status-blocked-face))
-                 90))
-      (and (> review 0)
-           (list (concat (funcall gap)
-                         (propertize (format "%s %d to review" (harness-ui-icon 'harness-icon-task-review) review)
-                                     'face 'harness-task-review-face))
-                 88))
-      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-running) (alist-get 'active counts)) 45)
-      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-merging) (alist-get 'merging counts))
-            42)
-      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-pending) (alist-get 'pending counts))
-            40)
-      (list (format "%s%s %d" (funcall gap) (harness-ui-icon 'harness-icon-task-done) (alist-get 'done counts)) 25)
-      (harness-ui-tasks--spend-segment groups (funcall gap))
-      (list (concat (funcall gap)
-                    (if harness-ui-tasks--bulk (propertize bulk 'face 'harness-task-attention-face) bulk))
-            (if harness-ui-tasks--bulk 82 30))
-      ;; Shown once the harness said how it is, so it never shows the wrong way.
-      (and harness-ui-tasks--settings (list (concat (funcall gap) (harness-ui-tasks--review-segment)) 70))
-      ;; Other modules' segments, the search's say.
-      (let ((segments (delq nil (mapcar (lambda (fn) (ignore-errors (funcall fn)))
-                                        harness-ui-tasks-header-functions))))
-        (and segments (list (concat (funcall gap) (mapconcat #'identity segments " ")) 65)))
-      (list (concat (funcall gap) (harness-ui-tasks--segment "[BTW]" #'harness-ui-tasks-btw
-                                                              "Ask about the tasks in a side conversation"))
-            60)
-      (list (concat " " (harness-ui-tasks--segment "[Add session]" #'harness-ui-tasks-adopt
-                                                   "Make an ongoing session of this project a task"))
-            20)
-      ;; Showing archived tasks is not the usual board: that stays longer.
-      (list (concat " " (harness-ui-tasks--segment (if harness-ui-tasks--show-archived "[Hide archived]" "[Archived]")
-                                                   #'harness-ui-tasks-toggle-archived "Show or hide archived tasks"))
-            (if harness-ui-tasks--show-archived 75 55))
-      (list (concat " " (harness-ui-tasks--segment "[Refresh]" #'harness-ui-tasks-refresh "Reload the board")) 80)
-      (and harness-ui-tasks--loading (list (propertize "  loading…" 'face 'harness-dim-face) 85)))
+     (append
+      (list
+       (concat " " (propertize "Tasks" 'face 'bold))
+       (list (concat " " (propertize name 'face 'harness-dim-face))
+             50 (concat " " (propertize (harness-truncate-end name 6) 'face 'harness-dim-face)))
+       ;; The queue switch: conspicuous while the queue is suspended, and
+       ;; among the first to go when it is running.
+       (list (concat (funcall gap) (harness-ui-tasks--queue-segment))
+             (if (harness-ui-tasks--queue-suspended-p) 92 30))
+       (harness-ui-tasks--spend-segment groups (funcall gap))
+       (list (concat (funcall gap)
+                     (if harness-ui-tasks--bulk (propertize bulk 'face 'harness-task-attention-face) bulk))
+             (if harness-ui-tasks--bulk 82 30))
+       ;; Other modules' segments, the search's say.
+       (and joined (list (concat (funcall gap) (mapconcat #'identity joined " ")) 65)))
+      ;; Those with a priority of their own, the companion pet's say.
+      (mapcar (lambda (segment)
+                (let ((sep (funcall gap)))
+                  (list (concat sep (car segment)) (nth 1 segment)
+                        (and (nth 2 segment) (concat sep (nth 2 segment))))))
+              own)
+      (list
+       (list (concat (funcall gap) (harness-ui-tasks--segment "[BTW]" #'harness-ui-tasks-btw
+                                                               "Ask about the tasks in a side conversation"))
+             60)
+       (list (concat " " (harness-ui-tasks--segment "[Add session]" #'harness-ui-tasks-adopt
+                                                    "Make an ongoing session of this project a task"))
+             20)
+       ;; Showing archived tasks is not the usual board: that stays longer.
+       (list (concat " " (harness-ui-tasks--segment (if harness-ui-tasks--show-archived "[Hide archived]" "[Archived]")
+                                                    #'harness-ui-tasks-toggle-archived "Show or hide archived tasks"))
+             (if harness-ui-tasks--show-archived 75 55))
+       (list (concat " " (harness-ui-tasks--segment "[Refresh]" #'harness-ui-tasks-refresh "Reload the board")) 80)
+       (and harness-ui-tasks--loading (list (propertize "  loading…" 'face 'harness-dim-face) 85))))
      width)))
 
 ;;;; Data
 
 (defun harness-ui-tasks--fail (buffer what err)
+  "Show on the board BUFFER that WHAT failed with the error ERR.
+The board stops loading, and the failure shows above its compose box."
   (when (harness-ui-tasks--board-p buffer)
     (with-current-buffer buffer
       (setq harness-ui-tasks--loading nil
@@ -2142,12 +2692,10 @@ QUIET refreshes in the background, without the loading indicator."
                                        (with-current-buffer buffer
                                          (let ((review (harness-ui-tasks--review-p)))
                                            (setq harness-ui-tasks--settings s)
-                                           ;; The Review switch decides whether the board
-                                           ;; shows Ready for review when it is empty.
+                                           ;; Review decides whether the board shows
+                                           ;; Ready for review when it is empty.
                                            (unless (eq review (harness-ui-tasks--review-p))
                                              (harness-ui-tasks--render)))
-                                         ;; The header shows the switch.
-                                         (force-mode-line-update)
                                          (unless harness-ui-tasks--new
                                            (setq harness-ui-tasks--new
                                                  (list :model (plist-get s :model)
@@ -2155,6 +2703,17 @@ QUIET refreshes in the background, without the loading indicator."
                                                        :permission-mode (plist-get s :permission-mode)
                                                        :non-interactive (harness-json-true-p
                                                                          (plist-get s :non-interactive)))))
+                                         ;; The supervisor setting appears with
+                                         ;; its module, without overriding a
+                                         ;; choice already made on the board.
+                                         (when (and (plist-member s :supervisor)
+                                                    (not (plist-member harness-ui-tasks--new :supervisor)))
+                                           (setq harness-ui-tasks--new
+                                                 (plist-put (copy-sequence harness-ui-tasks--new) :supervisor
+                                                            (if (harness-json-true-p (plist-get s :supervisor))
+                                                                t :false))))
+                                         ;; The header's spend goes by the new tasks' model.
+                                         (force-mode-line-update)
                                          (when (and (harness-compose-live-p) (null harness-ui-tasks--target))
                                            (harness-ui-tasks--render-tail)))))
                          #'ignore)
@@ -2176,6 +2735,8 @@ QUIET refreshes in the background, without the loading indicator."
          (lambda (e) (harness-ui-tasks--fail buffer "Finding the project" e)))))))
 
 (defun harness-ui-tasks--schedule-render (buffer)
+  "Redraw the board BUFFER soon, once a burst of calls for it settles.
+It is drawn 0.1 seconds after the last call, if it is still a board."
   (harness-debounce (list 'harness-ui-tasks buffer) 0.1
                     (lambda () (when (harness-ui-tasks--board-p buffer)
                                  (with-current-buffer buffer (harness-ui-tasks--render))))))
@@ -2184,11 +2745,12 @@ QUIET refreshes in the background, without the loading indicator."
   '("merge/queued" "merge/started" "merge/conflict" "merge/finished"
     "agent/turn-started" "agent/turn-ended" "session/status" "session/pending-changed"
     "session/created" "session/deleted" "worktree/created" "worktree/removed"
-    "harness/reloaded" "config/changed" "usage/budgets-changed" "usage/budget-warning")
+    "harness/reloaded" "config/changed" "task/queue" "usage/budgets-changed" "usage/budget-warning")
   "Events after which every board quietly reloads its tasks and budgets.
 `task/changed' and `task/deleted' update a board directly; these catch
 anything that moves a task without one, so a board never drifts.  A
-turn's end and the budget events also change what its budgets show.")
+turn's end and the budget events also change what its budgets show, and
+`task/queue' changes the queue switch's state in the settings.")
 
 (defun harness-ui-tasks--refresh-soon (buffer)
   "Reload BUFFER's tasks in the background, once a burst of events settles."
@@ -2210,10 +2772,21 @@ turn's end and the budget events also change what its budgets show.")
                                      (with-current-buffer buffer (harness-ui-tasks--refit-tail))))))))
 
 (defun harness-ui-tasks--on-event (event args)
-  "Follow task events on every board; reload them after related events."
+  "Follow EVENT with ARGS on every board; reload them after related events.
+A task event updates the boards it concerns, and a task ready for
+review is announced when `harness-ui-tasks--notify-review' is non-nil.
+A task's priority is its session's, so a board with a card of the
+session whose `:ext' changed reloads: the task's view, which carries
+the level the card shows, is asked for again."
   (when (member event harness-ui-tasks--refresh-events)
     (mapc #'harness-ui-tasks--refresh-soon (harness-ui-tasks--buffers)))
   (pcase event
+    ("session/ext-changed"
+     (when (member (format "%s" (cadr args)) '(":priority" "priority"))
+       (dolist (b (harness-ui-tasks--buffers))
+         (when (cl-some (lambda (task) (equal (plist-get task :session) (car args)))
+                        (buffer-local-value 'harness-ui-tasks--tasks b))
+           (harness-ui-tasks--refresh-soon b)))))
     ("task/changed"
      (let ((task (car args)))
        (dolist (b (harness-ui-tasks--buffers))
@@ -2293,6 +2866,7 @@ board."
 (defvar harness-ui-tasks--timer nil "Refreshes elapsed times on visible boards.")
 
 (defun harness-ui-tasks--tick ()
+  "Redraw every board a window shows, so its elapsed times run."
   (dolist (b (harness-ui-tasks--buffers))
     (when (get-buffer-window b t)
       (with-current-buffer b (harness-ui-tasks--render)))))
@@ -2313,7 +2887,8 @@ so they type, into the compose box (`harness-compose-acts-p')."
       (get-text-property (point) 'harness-task-id)))
 
 ;; Typing off a card, the board's keys for the task at point (see above).
-(dolist (command '(harness-ui-tasks-open-other harness-ui-tasks-start harness-ui-tasks-edit
+(dolist (command '(harness-ui-tasks-open-other harness-ui-tasks-start harness-ui-tasks-queue
+                   harness-ui-tasks-edit
                    harness-ui-tasks-reply harness-ui-tasks-requests harness-ui-tasks-refine
                    harness-ui-tasks-allow harness-ui-tasks-deny harness-ui-tasks-cancel
                    harness-ui-tasks-complete harness-ui-tasks-verify harness-ui-tasks-reject
@@ -2331,6 +2906,7 @@ so they type, into the compose box (`harness-compose-acts-p')."
   (define-key map (kbd "<backtab>") #'harness-ui-tasks-previous)
   (define-key map (kbd "a") #'harness-ui-tasks-compose)
   (define-key map (kbd "s") #'harness-ui-tasks-start)
+  (define-key map (kbd "Q") #'harness-ui-tasks-queue)
   (define-key map (kbd "e") #'harness-ui-tasks-edit)
   (define-key map (kbd "m") #'harness-ui-tasks-reply)
   (define-key map (kbd "SPC") #'harness-ui-tasks-requests)
@@ -2339,6 +2915,8 @@ so they type, into the compose box (`harness-compose-acts-p')."
   (define-key map (kbd "n") #'harness-ui-tasks-deny)
   (define-key map (kbd "+") #'harness-ui-tasks-raise-priority)
   (define-key map (kbd "-") #'harness-ui-tasks-lower-priority)
+  (define-key map (kbd "u") #'harness-ui-tasks-return-to-pending)
+  (define-key map (kbd "P") #'harness-ui-tasks-toggle-queue)
   (define-key map (kbd "k") #'harness-ui-tasks-cancel)
   (define-key map (kbd "d") #'harness-ui-tasks-complete)
   (define-key map (kbd "v") #'harness-ui-tasks-verify)
@@ -2416,6 +2994,7 @@ task's key typed off a card.
         (". o" "Open in position" harness-ui-tasks-open-other)
         (". TAB" "Fold the section or the recap" harness-ui-tasks-tab)
         (". s" "Start now" harness-ui-tasks-start)
+        (". Q" "Queue it (start it when a slot frees)" harness-ui-tasks-queue)
         (". e" "Edit prompt" harness-ui-tasks-edit)
         (". m" "Message session" harness-ui-tasks-reply)
         (". SPC" "View what point needs" harness-ui-tasks-requests)
@@ -2426,6 +3005,7 @@ task's key typed off a card.
         (". n" "Deny request" harness-ui-tasks-deny)]
        ["Finish"
         (". k" "Stop or drop" harness-ui-tasks-cancel)
+        (". u" "Return to pending" harness-ui-tasks-return-to-pending)
         (". v" "Verify (accept)" harness-ui-tasks-verify)
         (". R" "Send back with feedback" harness-ui-tasks-reject)
         (". d" "Mark completed" harness-ui-tasks-complete)
@@ -2438,6 +3018,7 @@ task's key typed off a card.
         (". I" "Adopt a session" harness-ui-tasks-adopt)
         (". X" "Archive completed" harness-ui-tasks-archive-done)
         (". A" "Show archived" harness-ui-tasks-toggle-archived)
+        (". P" "Suspend or resume the queue" harness-ui-tasks-toggle-queue)
         (". V" "Review on or off" harness-ui-tasks-toggle-review)
         (". B" "Bulk edit current tasks" harness-ui-tasks-toggle-bulk)
         (". F" "Fullscreen layout" harness-fullscreen)
@@ -2451,6 +3032,7 @@ task's key typed off a card.
         ("C-y" "Paste; an image attaches" harness-compose-yank)]))
 
 (defun harness-ui-tasks--buffer-name (dir)
+  "Return the name of the board buffer for the project directory DIR."
   (format "*harness tasks: %s*" (file-name-nondirectory (directory-file-name dir))))
 
 (defun harness-ui-tasks--local-root (dir)
@@ -2525,7 +3107,8 @@ the left of the frame and the sessions open beside it (see
 ;;;; Commands
 
 (defun harness-ui-tasks--task (&optional noerror)
-  "Return the task at point."
+  "Return the task at point.
+Without one, return nil if NOERROR is non-nil, else signal a user error."
   (or (let ((id (get-text-property (point) 'harness-task-id)))
         (and id (harness-ui-tasks--find id)))
       (unless noerror (user-error "No task here"))))
@@ -2536,7 +3119,8 @@ the left of the frame and the sessions open beside it (see
     (lambda (e) (harness-ui-tasks--fail buffer what e))))
 
 (defun harness-ui-tasks--request-then (method params what &optional callback)
-  "Call METHOD with PARAMS; failures show in the buffer as WHAT failing."
+  "Call METHOD with PARAMS; failures show in the buffer as WHAT failing.
+CALLBACK, when non-nil, is called with the result."
   (setq harness-ui-tasks--error nil)
   (harness-ui-call method params (or callback #'ignore) (harness-ui-tasks--on-error what)))
 
@@ -2607,6 +3191,9 @@ A heading folds its column; a card shows or hides its recap subtitle."
    (t (harness-ui-tasks-next))))
 
 (defun harness-ui-tasks--move (forward)
+  "Move point to the next card when FORWARD is non-nil, else the previous.
+Point goes to the card's first non-blank character; with no card that
+way, it stays and a message says so."
   (let ((here (get-text-property (point) 'harness-task-id))
         (pos (point)))
     (while (and (if forward (< pos (point-max)) (> pos (point-min)))
@@ -2706,11 +3293,15 @@ and attachments go along, as in a chat."
              (harness-ui-tasks--send target text expanded atts refine))))))))
 
 (defun harness-ui-tasks--new-opts ()
-  "The new-task settings as `task/submit' options (unset ones are left out)."
+  "The new-task settings as `task/submit' options (unset ones are left out).
+Supervisor mode is sent only when the harness has its module, which
+`task/settings' says by carrying the setting."
   (let ((new harness-ui-tasks--new))
     (append (cl-loop for k in '(:model :thinking :permission-mode)
                      when (plist-get new k) append (list k (plist-get new k)))
             (and new (list :non-interactive (if (harness-json-true-p (plist-get new :non-interactive)) t :false)))
+            (and (plist-member harness-ui-tasks--settings :supervisor)
+                 (list :supervisor (if (harness-json-true-p (plist-get new :supervisor)) t :false)))
             (and (harness-json-true-p (plist-get new :main-tree)) (list :main-tree t))
             (and (plist-get new :priority) (list :priority (harness-ui-tasks--priority new))))))
 
@@ -2724,17 +3315,23 @@ A new task is refined for the backlog when REFINE is non-nil."
                                        "Editing the task")
        (message "Task updated"))
       (`(reply . ,id)
-       (harness-ui-tasks--request-then "_harness/task/prompt" (list :id id :text expanded :attachments atts)
-                                       "Sending the message")
-       (message "Sent to the task's session"))
+       (let* ((task (harness-ui-tasks--find id))
+              (returned (plist-get task :returned)))
+         (harness-ui-tasks--request-then "_harness/task/prompt" (list :id id :text expanded :attachments atts)
+                                         "Sending the message")
+         (message "%s" (cond
+                        ((and returned (harness-ui-tasks--queue-suspended-p))
+                         "Kept: the queue starts the task with your message when you resume it")
+                        ((and returned (equal (format "%s" (plist-get task :return-reason)) "sent-back"))
+                         "Kept: the task waits for a slot with your feedback, and gets your message when it starts")
+                        (t "Sent to the task's session")))))
       (`(refine . ,id)
        (harness-ui-tasks--request-then "_harness/task/prompt" (list :id id :text expanded :attachments atts)
                                        "Sending the feedback")
        (message "Sent: the task is being written up again"))
       (`(reject . ,id)
        (harness-ui-tasks--request-then "_harness/task/reject" (list :id id :feedback expanded :attachments atts)
-                                       "Sending the task back")
-       (message "Sent back: its session works on your feedback"))
+                                       "Sending the task back" #'harness-ui-tasks--say-sent-back))
       (_
        (harness-ui-call
         "_harness/task/submit" (list :cwd harness-ui-tasks--dir :prompt expanded
@@ -2760,27 +3357,99 @@ A new task is refined for the backlog when REFINE is non-nil."
               (harness-ui-tasks--fail buffer "Submitting the task" e)))))))))
 
 (defun harness-ui-tasks-start ()
-  "Start the pending task at point now, even when every slot is busy."
+  "Start the pending or backlog task at point now, even when every slot is busy.
+A task returned to pending carries on in the session that already
+worked on it, where it stopped; a backlog task starts with its
+write-up.  \<harness-ui-tasks-board-map>\[harness-ui-tasks-queue] leaves it to the queue instead."
   (interactive)
   (harness-ui-tasks--request-then "_harness/task/start" (list :id (plist-get (harness-ui-tasks--task) :id))
                                   "Starting the task"))
 
+(defun harness-ui-tasks-queue ()
+  "Put the backlog task at point back in the pending queue.
+It then starts on its own as soon as its project has a free slot, by
+priority, as any queued task does; while the queue is suspended
+\(\<harness-ui-tasks-board-map>\[harness-ui-tasks-toggle-queue]) it waits in Pending until the queue is
+resumed.  \<harness-ui-tasks-board-map>\[harness-ui-tasks-start] starts it at once instead, whatever the limit."
+  (interactive)
+  (let ((task (harness-ui-tasks--task)))
+    (unless (and (harness-ui-tasks--backlog-p task) (not (harness-ui-tasks--refining-p task)))
+      (user-error "Only a task waiting in the backlog can be queued"))
+    (harness-ui-tasks--request-then "_harness/task/queue" (list :id (plist-get task :id))
+                                    "Queueing the task")
+    (message "%s" (if (harness-ui-tasks--queue-suspended-p)
+                      "Queued: it starts when you resume the queue (or now with s)"
+                    "Queued: it starts as soon as the project has a free slot"))))
+
+(defun harness-ui-tasks-return-to-pending ()
+  "Stop the turn of the task at point and put it back in the pending queue.
+The task keeps its session, branch and worktree, so when it starts
+again it carries on where it stopped (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-start], or the
+queue starting it).  It goes to the front of its priority's queue,
+ahead of the tasks that never started, behind only tasks of a higher
+priority.  Returning it frees its slot for the other waiting tasks and
+starts nothing itself: with the queue suspended
+\(\\[harness-ui-tasks-toggle-queue]) nothing starts at all until you resume it."
+  (interactive)
+  (let ((task (harness-ui-tasks--task)))
+    (unless (equal (plist-get task :state) "active")
+      (user-error "Only a task at work can be returned to pending; this one is %s"
+                  (plist-get task :state)))
+    (harness-ui-tasks--request-then "_harness/task/return-to-pending" (list :id (plist-get task :id))
+                                    "Returning the task to pending")
+    (message "Returned to pending: it carries on where it stopped when it starts again")))
+
+(defun harness-ui-tasks--priority-shown (id priority)
+  "Show task ID at PRIORITY at once, the reload behind it confirming.
+A priority is the task's session's, and the harness announces the
+change as the session's (`session/ext-changed'), which reloads the
+board; until that lands, the card would still read the old level and a
+second `+' would send it again.  The task's view in the board is
+changed here, so the card moves as it used to."
+  (when (harness-ui-tasks--find id)
+    (setq harness-ui-tasks--tasks
+          (mapcar (lambda (other)
+                    (if (equal id (plist-get other :id))
+                        (plist-put (copy-sequence other) :priority priority)
+                      other))
+                  harness-ui-tasks--tasks))
+    (harness-ui-tasks--render)))
+
+(defun harness-ui-tasks--set-priority (task priority)
+  "Give TASK's session PRIORITY, showing it on TASK's card at once.
+A task's priority is its session's (`harness-priority-of-task'): the
+change goes to that session, where the board's queue and the queues the
+task's work waits in read it.  A task with no session -- a record from
+before every task had one -- is refused: there is nothing to hold a
+priority."
+  (let ((id (plist-get task :id))
+        (sid (plist-get task :session))
+        (buffer (current-buffer)))
+    (unless sid
+      (user-error "Task %s has no session, and a task's priority is its session's" id))
+    (harness-ui-tasks--request-then "_harness/priority/set"
+                                    (list :sessionId sid :priority priority)
+                                    "Changing the priority"
+                                    (lambda (_result)
+                                      (when (buffer-live-p buffer)
+                                        (with-current-buffer buffer
+                                          (harness-ui-tasks--priority-shown id priority)))))
+    (message "%s is %s priority now" (harness-ui-tasks--quote (harness-ui-tasks--title task)) priority)))
+
 (defun harness-ui-tasks--shift-priority (step)
   "Move the priority of the task at point STEP places: 1 up, -1 down.
-Priorities are low, medium and high (`harness-ui-tasks--priorities');
-the harness starts waiting tasks by priority, then oldest first, and
-Pending shows them in that order, so the card moves with it."
+Priorities are low, medium and high (`harness-ui-priority-levels'),
+and a task's priority is its session's (`harness-priority-of-task').
+The harness starts waiting tasks by priority, then oldest first, and
+Pending shows them in that order, and the backlog too, so the card moves with it."
   (let* ((task (harness-ui-tasks--task))
          (rank (harness-ui-tasks--priority-rank task))
-         (priority (nth (+ rank step) harness-ui-tasks--priorities)))
+         (priority (nth (+ rank step) harness-ui-priority-levels)))
     (when (eq (harness-ui-tasks--column task) 'done)
       (user-error "This task is completed; priority orders the tasks still to start"))
     (unless (and priority (>= (+ rank step) 0))
       (user-error "It is %s priority already" (harness-ui-tasks--priority task)))
-    (harness-ui-tasks--request-then "_harness/task/set-priority"
-                                    (list :id (plist-get task :id) :priority priority)
-                                    "Changing the priority")
-    (message "%s is %s priority now" (harness-ui-tasks--quote (harness-ui-tasks--title task)) priority)))
+    (harness-ui-tasks--set-priority task priority)))
 
 (defun harness-ui-tasks-raise-priority ()
   "Raise the priority of the task at point: low to medium, medium to high.
@@ -2813,13 +3482,16 @@ For a backlog task, or one whose write-up stopped or refused it as a
 duplicate, that is feedback on its write-up, which is written again (see
 `harness-ui-tasks-refine').  For a task waiting for your review it is
 the feedback that sends it back, as any message you send its session is
-\(see `harness-ui-tasks-reject')."
+\(see `harness-ui-tasks-reject').  For a task returned to pending the
+message starts it again, as an explicit start would -- or is kept for
+its next start while the queue is suspended."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
     (unless (plist-get task :session) (user-error "This task has not started yet"))
     (harness-ui-tasks--set-compose
      "" (cons (cond ((equal (plist-get (harness-ui-tasks--pending task) :kind) "question") 'answer)
                     ((equal (plist-get task :state) "review") 'reject)
+                    ((plist-get task :returned) 'reply)
                     ((or (equal (plist-get task :state) "pending")
                          (and (harness-ui-tasks--refining-p task) (not (harness-ui-tasks--writing-p task))))
                      'refine)
@@ -2930,7 +3602,8 @@ and with a backlog task the session that wrote it up."
   "Non-nil when TASK's worktree can be run as a harness of its own.
 That is a card waiting for review whose worktree holds harness.el and
 the live development loop scripts/dev.sh side by side: the work it
-handed in can then be tried live before verifying it."
+handed in can then be tried live before verifying it, with Open
+harness in the card's menu (`harness-ui-tasks-open-harness')."
   (and (equal (plist-get task :state) "review")
        (not (harness-ui-tasks--archived-p task))
        (let ((dir (plist-get task :worktree)))
@@ -2954,9 +3627,12 @@ task is completed once merged; otherwise it is completed at once."
   "Send the task at point back from review with feedback.
 The compose box takes the feedback, which \\<harness-ui-tasks-mode-map>\\[harness-ui-tasks-submit] sends to the task's
 session: it works on the task again, in its own worktree, and the task
-comes back for your review once that is done.  With a prefix argument
-the feedback is read in the minibuffer instead; from Lisp, FEEDBACK is
-sent at once."
+comes back for your review once that is done.  Sending it back keeps
+to the limit of tasks at once: with no slot free it takes the slot of
+a task at work it outranks, which goes back to the queue, or waits in
+the queue with your feedback when every task at work goes first.  With
+a prefix argument the feedback is read in the minibuffer instead; from
+Lisp, FEEDBACK is sent at once."
   (interactive (list (and current-prefix-arg
                           (progn (harness-ui-tasks--review-task) (read-string "Feedback: ")))))
   (let ((task (harness-ui-tasks--review-task)))
@@ -2964,11 +3640,14 @@ sent at once."
      ((null feedback) (harness-ui-tasks--set-compose "" (cons 'reject (plist-get task :id))))
      ((harness-string-blank-p feedback) (user-error "Sending a task back needs feedback"))
      (t (harness-ui-tasks--request-then "_harness/task/reject" (list :id (plist-get task :id) :feedback feedback)
-                                        "Sending the task back")
-        (message "Sent back: its session works on your feedback")))))
+                                        "Sending the task back" #'harness-ui-tasks--say-sent-back)))))
 
 (defun harness-ui-tasks-open-harness ()
-  "Open an Emacs running the harness from the task's worktree."
+  "Open an Emacs running the harness from the task's worktree.
+The task at point waits for your review, and its worktree is a
+checkout of the harness; the card's menu (`mouse-3') offers it then.
+This is not the task's session, which a click on the card's title
+opens."
   (interactive)
   (let* ((task (harness-ui-tasks--review-task))
          (dir (plist-get task :worktree)))
@@ -2995,6 +3674,46 @@ this one does not wait for them."
     (harness-ui-tasks--render)
     (harness-ui-tasks--refit-tail)))
 
+(defun harness-ui-tasks--show-queue (suspended)
+  "Show SUSPENDED (non-nil) or running on this board, as the harness has it now.
+Its `task/queue' event brings every board the settings again shortly;
+this one does not wait for them."
+  (when harness-ui-tasks--settings
+    (setq harness-ui-tasks--settings
+          (plist-put (copy-sequence harness-ui-tasks--settings) :queue-suspended (if suspended t :false)))
+    (harness-ui-tasks--render)
+    (harness-ui-tasks--refit-tail)
+    (force-mode-line-update)))
+
+(defun harness-ui-tasks-toggle-queue (&optional arg)
+  "Suspend the pending queue of the board's project, or resume it.
+While the queue is suspended, no waiting task of the project starts on
+its own: the board is clear for one urgent task, which [Start now]
+\(\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-start]) still starts, as task_control start
+does.  A task at work goes on; returning one to pending
+\(\\[harness-ui-tasks-return-to-pending]) frees its slot, and no waiting task takes it
+while the queue is suspended.  Resuming lets the waiting tasks start
+again at once, by priority, the tasks returned to pending first.
+
+The suspension is per project, like the concurrency limit, and kept
+across restarts.  With a prefix ARG, suspend when ARG is positive and
+resume otherwise."
+  (interactive "P")
+  (let* ((buffer (current-buffer))
+         (suspend (if arg (> (prefix-numeric-value arg) 0)
+                    (not (harness-ui-tasks--queue-suspended-p))))
+         (what (if suspend "Suspending the queue" "Resuming the queue")))
+    (harness-ui-tasks--show-queue suspend)
+    (harness-ui-tasks--request-then
+     "_harness/task/toggle-queue" (list :cwd harness-ui-tasks--dir) what
+     (lambda (state)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (harness-ui-tasks--show-queue (harness-json-true-p (plist-get state :suspended)))))))
+    (message "%s" (if suspend
+                       "Queue suspended: nothing starts on its own; s starts one by hand"
+                     "Queue resumed: waiting tasks start again, by priority"))))
+
 (defun harness-ui-tasks-toggle-review (&optional arg)
   "Turn the review of finished tasks off, or back on.
 With review on, a task whose work is finished waits in Ready for review
@@ -3004,10 +3723,10 @@ as it is finished, and the task is done.  The board then shows no Ready
 for review column, unless tasks still wait there.  Turning review off
 while tasks of this board wait for it offers to verify them too.
 
-The switch is the harness option `harness-tasks-require-verification',
-saved as the settings page saves it: for every project, and across
-restarts.  With a prefix ARG, turn review on when ARG is positive and
-off otherwise."
+It sets the harness option `harness-tasks-require-verification', which
+the settings page has under Task board, and saves it as that page does:
+for every project, and across restarts.  With a prefix ARG, turn review
+on when ARG is positive and off otherwise."
   (interactive "P")
   (let* ((buffer (current-buffer))
          (on (if arg (> (prefix-numeric-value arg) 0) (not (harness-ui-tasks--review-p))))
@@ -3086,10 +3805,12 @@ off otherwise."
   "Ask about the tasks in a BTW side conversation over the board.
 It opens blank, for a question written in its compose box.  Its agent
 answers with the task and session tools: what a task is doing, how far
-along it is, what it changed, why it is stuck."
+along it is, what it changed, why it is stuck.  Like any BTW it runs on
+a cheap model (`harness-btw-model'); with a prefix argument it asks
+which model to run this one on."
   (interactive)
   (unless (fboundp 'harness-btw) (user-error "The BTW module is not loaded"))
-  (harness-btw))
+  (harness-btw nil nil (and current-prefix-arg 'choose)))
 
 (declare-function harness-tasks-search "harness-ui-tasks-search")
 
@@ -3104,14 +3825,18 @@ tasks it is about and says what was done.  See `harness-tasks-search'."
     (user-error "The task search module (ui-tasks-search) is not loaded"))
   (call-interactively #'harness-tasks-search))
 
-(defun harness-ui-tasks--start-btw (name)
+(defun harness-ui-tasks--start-btw (name &optional model)
   "Start a conversation NAME about the board's tasks; return a promise of it.
 Every call starts a new session (`task/btw'), never an earlier one.
-The BTW module calls this (`harness-ui-btw-start-function') to open a
-BTW over the board; a failure shows on the board too."
+MODEL, a PROVIDER:NAME, is the model to run it on; without one it runs
+on `harness-btw-model', and no model goes over the wire.  The BTW
+module calls this (`harness-ui-btw-start-function') to open a BTW over
+the board; a failure shows on the board too."
   (setq harness-ui-tasks--error nil)
   (let ((buffer (current-buffer))
-        (promise (harness-ui-request "_harness/task/btw" (list :cwd harness-ui-tasks--dir :name name))))
+        (promise (harness-ui-request "_harness/task/btw"
+                                     (append (list :cwd harness-ui-tasks--dir :name name)
+                                             (and model (list :model model))))))
     (harness-then promise #'ignore (lambda (e) (harness-ui-tasks--fail buffer "Starting a BTW" e)))
     promise))
 
@@ -3132,6 +3857,10 @@ BTW over the board; a failure shows on the board too."
 ;;;; Module
 
 (defun harness-ui-tasks--init ()
+  "Keep the boards up to date and bind `harness-tasks' in `harness-ui-map'.
+They follow the harness's events, sessions, output rates, live token
+figures and quotas, and a timer redraws the visible ones so their
+elapsed times run."
   (add-hook 'harness-ui-event-functions #'harness-ui-tasks--on-event)
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-tasks--on-sessions-changed)
   (add-hook 'harness-ui-rate-functions #'harness-ui-tasks--on-rate)
@@ -3143,6 +3872,7 @@ BTW over the board; a failure shows on the board too."
   (define-key harness-ui-map (kbd "a") #'harness-tasks))
 
 (defun harness-ui-tasks--shutdown ()
+  "Stop the timer that redraws the boards' elapsed times."
   (when (timerp harness-ui-tasks--timer) (cancel-timer harness-ui-tasks--timer))
   (setq harness-ui-tasks--timer nil))
 

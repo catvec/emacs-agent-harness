@@ -39,6 +39,7 @@
 (defvar harness-directory)
 (defvar harness-state-directory)
 (defvar harness-module-directories)
+(defvar harness-extra-module-directories)
 (defvar harness-acp-token)
 (defvar harness-acp-port)
 (defvar harness-acp-host)
@@ -48,6 +49,8 @@
 (defvar harness-policy-exempt)
 (defvar harness-server--own-variables)  ; Below, with the parent's code.
 (declare-function harness--reload "harness")
+(declare-function harness--extra-module-directories "harness")
+(declare-function harness--ui-module-file-p "harness" (file))
 (declare-function harness-start "harness")
 (declare-function harness-stop "harness")
 (declare-function harness-acp-server-address "harness-acp")
@@ -146,6 +149,9 @@ HARNESS_SERVER_TOKEN and HARNESS_SERVER_PARENT from the environment."
       (load harness-server-init-file nil t))
     (setq harness-process nil
           harness-compile-subdirectory "elc-server/"
+          ;; So it loads the modules of lisp/modules, and of
+          ;; `harness-extra-module-directories' all but the UI ones
+          ;; (see `harness--module-files').
           harness-module-directories '("lisp/modules")
           harness-acp-token (getenv "HARNESS_SERVER_TOKEN")
           harness-acp-host "127.0.0.1"
@@ -208,16 +214,22 @@ remote command finds there (`tramp-remote-path'), so the harness uses
 the user's, as their own Emacs does.")
 
 (defconst harness-server--own-variables
-  '(harness-process harness-module-directories harness-compile-subdirectory
-    harness-acp-token harness-acp-host harness-acp-port
+  '(harness-process harness-module-directories harness-extra-module-directories
+    harness-compile-subdirectory harness-acp-token harness-acp-host harness-acp-port
     harness-server-forward-variables
     ;; The harness process reads the policy from where the administrator
     ;; put it, not from where this Emacs was told to look.
     harness-policy-file)
-  "Variables the harness process sets for itself; never forwarded.")
+  "Variables never forwarded as they are.
+The harness process sets them for itself, but for
+`harness-extra-module-directories', which `harness-server--forwarded'
+expands first.")
 
 (defun harness-server--forwardable-p (sym)
-  "Non-nil when SYM configures the harness process, not this Emacs's UI."
+  "Non-nil when SYM configures the harness process, not this Emacs's UI.
+A variable a UI module defines, the harness's or the user's, is the
+UI's.  It is defined in the compiled copy of the module's file, so the
+file's name tells, not its directory."
   (let ((name (symbol-name sym)))
     (and (string-prefix-p "harness-" name)
          (not (string-match-p "--" name))
@@ -226,21 +238,27 @@ the user's, as their own Emacs does.")
          ;; Last: `symbol-file' walks `load-history', far too slow to ask
          ;; of every symbol `harness-server--forwarded' goes through.
          (not (let ((file (symbol-file sym 'defvar)))
-                (and file (string-match-p "/lisp/ui/" file))))
+                (and file (harness--ui-module-file-p file))))
          (harness-server--user-set-p sym))))
 
 (defun harness-server--forwarded ()
-  "Return ((SYMBOL . VALUE) ...) to set in the harness process."
+  "Return ((SYMBOL . VALUE) ...) to set in the harness process.
+`harness-extra-module-directories' goes as absolute directories: the
+process starts from `emacs -Q', whose `user-emacs-directory', which
+relative ones are relative to, may not be this Emacs's."
   (let (out)
     (mapatoms (lambda (sym) (when (harness-server--forwardable-p sym) (push sym out))))
     (dolist (sym harness-server-forward-variables)
       (when (boundp sym) (cl-pushnew sym out)))
     (dolist (sym harness-server--tramp-variables)
       (when (harness-server--user-set-p sym) (cl-pushnew sym out)))
-    (cl-loop for sym in (cons 'harness-state-directory (delq 'harness-state-directory out))
-             if (harness-server--readable-p (symbol-value sym))
-             collect (cons sym (symbol-value sym))
-             else do (harness-log 'warn "server: %s has no readable value; not forwarded" sym))))
+    (append
+     (cl-loop for sym in (cons 'harness-state-directory (delq 'harness-state-directory out))
+              if (harness-server--readable-p (symbol-value sym))
+              collect (cons sym (symbol-value sym))
+              else do (harness-log 'warn "server: %s has no readable value; not forwarded" sym))
+     (and (bound-and-true-p harness-extra-module-directories)
+          (list (cons 'harness-extra-module-directories (harness--extra-module-directories)))))))
 
 (defun harness-server--write-config (file)
   "Write the forwarded configuration to FILE."

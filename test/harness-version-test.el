@@ -41,6 +41,18 @@ Signal an error when git fails."
   (harness-version-test--git dir "commit" "-q" "-m" subject)
   (harness-version-test--git dir "rev-parse" "HEAD"))
 
+(defun harness-version-test--commit-with-body (dir subject body)
+  "Commit a change in DIR with SUBJECT and BODY; return the commit's hash."
+  (let ((msg (expand-file-name "COMMIT-MSG" dir)))
+    (with-temp-file (expand-file-name "CHANGES" dir) (insert subject "\n"))
+    (with-temp-file msg (insert subject "\n\n" body "\n"))
+    (unwind-protect
+        (progn
+          (harness-version-test--git dir "add" "CHANGES")
+          (harness-version-test--git dir "commit" "-q" "-F" msg))
+      (delete-file msg)))
+  (harness-version-test--git dir "rev-parse" "HEAD"))
+
 (defun harness-version-test--harness-repo (dir)
   "Make DIR a repository of the harness with one commit, first; return its hash."
   (make-directory (expand-file-name "lisp" dir) t)
@@ -168,6 +180,43 @@ A project may be a plist of a session instead of its directory."
             (should (string-match-p "gone/ does not exist" (harness-revision-error-message err))))
           ;; None of it is an error of the harness's own.
           (should-not errors))
+      (delete-directory base t))))
+
+(ert-deftest harness-revision-resolves-the-remote-a-checkout-follows ()
+  "A branch tracking a remote follows it; otherwise origin or the only remote."
+  (skip-unless (executable-find "git"))
+  (let* ((base (harness-test-temp-dir))
+         (upstream (file-name-as-directory (expand-file-name "upstream" base)))
+         (url (concat "file://" (directory-file-name upstream)))
+         (clone (file-name-as-directory (expand-file-name "clone" base))))
+    (unwind-protect
+        (progn
+          (make-directory upstream t)
+          (harness-version-test--harness-repo upstream)
+          (harness-version-test--git base "clone" "-q" url clone)
+          (harness-version-test--configure clone)
+          ;; Cloned from the recipe's URL: main tracks origin/main.
+          (should (equal (list :remote "origin" :url url :branch "main" :tracked t)
+                         (harness-test-await (harness-revision-remote clone "main"))))
+          ;; A branch that tracks nothing is read from origin's same-named branch.
+          (harness-version-test--git clone "config" "--unset" "branch.main.remote")
+          (harness-version-test--git clone "config" "--unset" "branch.main.merge")
+          (should (equal (list :remote "origin" :url url :branch "main" :tracked nil)
+                         (harness-test-await (harness-revision-remote clone "main"))))
+          ;; With only one remote, its name does not have to be origin.
+          (harness-version-test--git clone "remote" "rename" "origin" "upstream")
+          (should (equal (list :remote "upstream" :url url :branch "main" :tracked nil)
+                         (harness-test-await (harness-revision-remote clone "main"))))
+          ;; No remote at all: nil.
+          (harness-version-test--git clone "remote" "remove" "upstream")
+          (should-not (harness-test-await (harness-revision-remote clone "main")))
+          ;; A detached HEAD follows none: nil branch, and it still reads origin.
+          (harness-version-test--git clone "remote" "add" "origin" url)
+          (harness-version-test--git clone "config" "branch.main.remote" "origin")
+          (harness-version-test--git clone "config" "branch.main.merge" "refs/heads/main")
+          (harness-version-test--git clone "checkout" "-q" "--detach" "HEAD")
+          (should (equal (list :remote "origin" :url url :branch nil :tracked nil)
+                         (harness-test-await (harness-revision-remote clone nil)))))
       (delete-directory base t))))
 
 (ert-deftest harness-revision-notes-what-was-loaded-until-the-next-load ()
@@ -441,6 +490,7 @@ and the repository exists.
         (should (equal (list "newer" 2 0 (plist-get w :third) "third")
                        (mapcar (lambda (k) (plist-get dev k)) '(:status :missing :extra :commit :subject))))
         (should (equal '("third" "second") (harness-version-test--subjects (plist-get dev :missing-commits))))
+        (should (equal "" (plist-get (car (plist-get dev :missing-commits)) :body)))
         (should-not (plist-get dev :extra-commits))
         ;; The repository the installed checkout pulls from, on its branch;
         ;; the development checkout holds its commit, so it is counted.
@@ -448,6 +498,24 @@ and the repository exists.
                        (mapcar (lambda (k) (plist-get upstream k))
                                '(:status :missing :extra :commit :location :branch :upstream))))
         (should (equal '("second") (harness-version-test--subjects (plist-get upstream :missing-commits))))))))
+
+(ert-deftest harness-version-lists-a-commit-body ()
+  "The commits an origin has that the harness lacks carry their message body."
+  (skip-unless (executable-find "git"))
+  (harness-version-test-with
+    (let* ((w (harness-version-test--world base))
+           (installed (plist-get w :installed)))
+      (setq harness-directory installed)
+      (harness-version-test--sessions-in (plist-get w :dev))
+      (harness-version-test--commit-with-body (plist-get w :dev) "fourth"
+                                              "A body with two lines.\nMore.")
+      (let* ((report (harness-version-test--check))
+             (dev (harness-version-test--origin report "local")))
+        (should (equal "newer" (plist-get dev :status)))
+        (should (equal '("fourth" "third" "second")
+                       (harness-version-test--subjects (plist-get dev :missing-commits))))
+        (should (equal "A body with two lines.\nMore."
+                       (plist-get (car (plist-get dev :missing-commits)) :body)))))))
 
 (ert-deftest harness-version-follows-the-loaded-checkout-until-a-reload ()
   (skip-unless (executable-find "git"))
@@ -636,6 +704,23 @@ and the repository exists.
           (harness-test-await promise 60)
           (should-not harness-version--checking))))))
 
+(ert-deftest harness-version-gives-the-last-report-without-checking ()
+  ;; What a UI asks for as it connects, for its nag icon: a harness just
+  ;; started still checks only when it means to.
+  (skip-unless (executable-find "git"))
+  (harness-version-test-with
+    (let ((w (harness-version-test--world base)))
+      (setq harness-directory (plist-get w :installed))
+      (should-not (harness-call 'version/report))
+      (should-not harness-version--checking)
+      (let ((report (harness-version-test--check)))
+        (should (equal "behind" (plist-get report :verdict)))
+        (should (eq report (harness-call 'version/report))))
+      ;; After a reload the report is about the revision that ran before.
+      (harness-revision-note-loaded)
+      (should-not (harness-call 'version/report))
+      (should-not harness-version--checking))))
+
 (ert-deftest harness-version-checks-by-itself ()
   (harness-version-test-with
     (let ((timer harness-version--timer))
@@ -658,11 +743,13 @@ and the repository exists.
         (should-not harness-version--timer)))))
 
 (ert-deftest harness-version-goes-over-acp ()
-  ;; The UI asks with _harness/version/check and hears version/checked.
+  ;; The UI asks with _harness/version/check and _harness/version/report,
+  ;; and hears version/checked.
   (let ((harness-acp--server-enabled nil))
     (harness-test-reset-bus)
     (harness-test-load-module 'acp))
   (should (harness-acp--extension-allowed-p "version/check"))
+  (should (harness-acp--extension-allowed-p "version/report"))
   (should (memq 'version/checked harness-acp--forwarded-events)))
 
 (ert-deftest harness-version-origins-option-is-documented ()

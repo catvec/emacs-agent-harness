@@ -86,7 +86,8 @@ The modules of `harness-tasks-search-test--modules' are loaded too."
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
      (let ((harness-acp--server-enabled nil))
-       (dolist (m (append '(store project config provider provider-demo tools session agent tasks tasks-search acp)
+       (dolist (m (append '(store project config provider provider-demo tools session agent priority
+                                  tasks tasks-search acp)
                           harness-tasks-search-test--modules))
          (harness-test-load-module m)))
      (clrhash harness-sessions)

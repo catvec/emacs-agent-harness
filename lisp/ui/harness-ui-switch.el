@@ -92,7 +92,9 @@ the HOST the command ran in does."
 
 (defun harness-ui-switch--ask (checks label total session host callback)
   "Ask how to hand over: show a banner, or ask in the minibuffer.
-See `harness-ui-switch-function'."
+See `harness-ui-switch-function' for CHECKS, LABEL, TOTAL, SESSION, HOST
+and CALLBACK.  The banner shows in SESSION's chat buffer, else in HOST;
+without either, the minibuffer asks."
   (let ((target (harness-ui-switch--host session host)))
     (if (null target)
         (funcall callback (harness-ui--read-handoff checks label total))
@@ -135,7 +137,8 @@ See `harness-ui-switch-function'."
 ;;;; The banner
 
 (defun harness-ui-switch--heading (prompt)
-  "Return the heading of the switch banner: what switches to what."
+  "Return the heading of the switch banner: what switches to what.
+PROMPT is the switch it asks about, as `harness-ui-switch--prompt' holds it."
   (let* ((first (car (plist-get prompt :checks)))
          (total (plist-get prompt :total))
          (from (or (plist-get first :from-label)

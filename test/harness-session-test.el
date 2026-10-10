@@ -3,6 +3,10 @@
 
 (require 'harness-test-helpers)
 
+(defvar harness-tasks-context-limit)
+;; The tasks module is not loaded here; declaring the option special lets
+;; a test bind it, as the tool that reads it binds it in reality.
+
 (defmacro harness-session-test-with (&rest body)
   "Load the state modules into a fresh bus and temp state dir, then run BODY."
   (declare (indent 0))
@@ -200,7 +204,10 @@ asked for a false."
            (skip (plist-get (harness-call 'session/create :cwd cwd) :id)))
       (harness-call 'session/deactivate task)
       (harness-call 'session/deactivate left)
-      (harness-register-method 'task/session-ids (lambda (&optional _filter) (list task skip "gone")))
+      (harness-register-method 'task/session-ids
+                               (lambda (&optional filter)
+                                 (unless (equal '("done") (plist-get filter :columns))
+                                   (list task skip "gone"))))
       (should (equal (sort (list open skip task) #'string<)
                      (sort (mapcar (lambda (s) (plist-get s :id))
                                    (harness-call 'session/select (list :active t :tasks t)))
@@ -212,6 +219,32 @@ asked for a false."
         (should (harness-json-true-p (plist-get (harness-call 'session/get task) :non-interactive)))
         (should-not (plist-get (harness-call 'session/get left) :non-interactive))
         (should-not (plist-get (harness-call 'session/get skip) :non-interactive))))))
+
+(ert-deftest harness-session-select-leaves-out-the-sessions-of-done-tasks ()
+  "With `:tasks', a completed task's session is left out of the selection,
+and so of every bulk change, even while that session is active and of
+every project; the current tasks' sessions stay in."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (open (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (done (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (task (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (everything (list :active t :tasks t)))
+      (harness-call 'session/deactivate task)
+      (harness-register-method 'task/session-ids
+                               (lambda (&optional filter)
+                                 (if (equal '("done") (plist-get filter :columns))
+                                     (list done)
+                                   (list task))))
+      (should (equal (sort (list open task) #'string<)
+                     (sort (mapcar (lambda (s) (plist-get s :id))
+                                   (harness-call 'session/select everything))
+                           #'string<)))
+      (should (equal (sort (list open task) #'string<)
+                     (sort (harness-call 'session/set-all (list :non-interactive t) everything)
+                           #'string<)))
+      (should-not (plist-get (harness-call 'session/get done) :non-interactive))
+      (should (harness-json-true-p (plist-get (harness-call 'session/get open) :non-interactive))))))
 
 (ert-deftest harness-session-non-interactive-is-its-own-switch ()
   "A session's non-interactive switch starts from the setting, unless an
@@ -591,18 +624,23 @@ its transcript; one made at its parent's head goes on."
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :name "old") :id))
            (s (gethash id harness-sessions))
-           ;; Made before the last two slots, provider-node and move.
-           (old (apply #'record (cl-loop for i below (- (length s) 2) collect (aref s i)))))
+           ;; Made before the last three slots: provider-node, move and ext.
+           (old (apply #'record (cl-loop for i below (- (length s) 3) collect (aref s i)))))
       (puthash id old harness-sessions)
       (should-error (harness-session-provider-node old))
       (should-error (harness-session-move old))
+      (should-error (harness-session-ext old))
       (harness-session--upgrade-records)
       (let ((new (gethash id harness-sessions)))
         (should (= (length s) (length new)))
         (should (equal "old" (harness-session-name new)))
         (should-not (harness-session-provider-node new))
         (should-not (harness-session-move new))
-        (should (equal "old" (plist-get (harness-call 'session/get id) :name)))))))
+        (should-not (harness-session-ext new))
+        (should (equal "old" (plist-get (harness-call 'session/get id) :name)))
+        ;; The slot is there to use.
+        (harness-call 'session/set-ext id :supervisor t)
+        (should (equal '(:supervisor t) (harness-session-ext (gethash id harness-sessions))))))))
 
 (defun harness-session-test-kinds (id)
   (mapcar (lambda (n) (plist-get n :kind)) (harness-call 'session/nodes id)))
@@ -1096,6 +1134,56 @@ one; one that holds it carries it on, uncached for its model."
       (harness-call 'session/update id :model "test-loop:l" :silent t)
       (should (equal '(:at 2000.0 :ttl 300 :expires 2300.0 :model "test-api:a") (funcall cache))))))
 
+(ert-deftest harness-session-cache-restamps-on-the-first-request-after-a-reset ()
+  "A compaction of a conversation that had a cache remembers it.
+The first request that follows stamps the new cache even when the
+provider reports no cache tokens for it, as an OpenAI-compatible
+provider's first request after the conversation starts over does; the
+pending marker survives a restart.  A conversation that never had a
+cache is not made to look warm."
+  (harness-session-test-with
+    (let* ((harness-cache-ttl 300)
+           (harness-cache-ttl-overrides nil)
+           (id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (model (plist-get (harness-call 'session/get id) :model))
+           (cache (lambda () (plist-get (harness-call 'session/get id) :cache))))
+      (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 900 :context 920
+                                             :cache-at 1000.0))
+      (should (funcall cache))
+      ;; The compaction clears the stamp and remembers that one existed.
+      (harness-call 'session/usage-add id '(:input 900 :output 200 :cache-read 900 :context 200
+                                             :cache-reset t))
+      (should-not (funcall cache))
+      (should (plist-get (plist-get (harness-call 'session/get id) :usage) :cache-pending))
+      ;; The first request after it is a miss, with no cache tokens: it
+      ;; stamps the new cache with the model's default lifetime.
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 5000.0)))
+        (harness-call 'session/usage-add id '(:input 200 :output 10 :context 210)))
+      (let ((c (funcall cache)))
+        (should (= 5000.0 (plist-get c :at)))
+        (should (= 300 (plist-get c :ttl)))
+        (should (= 5300.0 (plist-get c :expires)))
+        (should (equal model (plist-get c :model))))
+      (should-not (plist-get (plist-get (harness-call 'session/get id) :usage) :cache-pending))
+      ;; The marker survives a restart, and the next request after it stamps.
+      (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 900 :context 920
+                                             :cache-at 6000.0))
+      (harness-call 'session/usage-add id '(:input 100 :output 10 :context 110 :cache-reset t))
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (plist-get (plist-get (harness-call 'session/get id) :usage) :cache-pending))
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 7000.0)))
+        (harness-call 'session/usage-add id '(:input 200 :output 10 :context 210)))
+      (should (= 7000.0 (plist-get (funcall cache) :at)))
+      (should-not (plist-get (plist-get (harness-call 'session/get id) :usage) :cache-pending))
+      ;; A conversation that never had a cache is not made to look warm.
+      (let ((fresh (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+        (harness-call 'session/usage-add fresh '(:input 10 :output 10 :context 20 :cache-reset t))
+        (should-not (plist-get (plist-get (harness-call 'session/get fresh) :usage) :cache-pending))
+        (harness-call 'session/usage-add fresh '(:input 100 :output 10 :context 110))
+        (should-not (plist-get (harness-call 'session/get fresh) :cache))))))
+
 (ert-deftest harness-session-messages-merge-rules ()
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
@@ -1254,6 +1342,164 @@ itself is left alone."
                             tool-result tool-result)
                      (harness-session-test-kinds id))))))
 
+;;;; Settings that modules keep for a session (ext)
+
+(defconst harness-session-test--ext
+  '(:supervisor t :off :false :tier "cheap" :budget 12 :ratio 0.5
+    :tiers (:fast "demo:fast" :deep "demo:deep") :models ("a" "b"))
+  "An ext plist with every kind of value the JSON store of a record keeps.")
+
+(defun harness-session-test--ext-of (id)
+  "Return the ext plist of session ID."
+  (plist-get (harness-call 'session/get id) :ext))
+
+(ert-deftest harness-session-ext-sets-and-gets ()
+  "A setting is set to a value, an explicit off is a value, and nil removes it."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (should-not (harness-session-test--ext-of id))
+      ;; The session plist comes back, with the setting in it.
+      (should (equal '(:supervisor t) (plist-get (harness-call 'session/set-ext id :supervisor t) :ext)))
+      (should (equal id (plist-get (harness-call 'session/set-ext id :tier "cheap") :id)))
+      (should (equal '(:supervisor t :tier "cheap") (harness-session-test--ext-of id)))
+      (let ((before (harness-session-test--ext-of id)))
+        ;; An explicit off is stored as it is, in its place.
+        (harness-call 'session/set-ext id :supervisor :false)
+        (should (equal '(:supervisor :false :tier "cheap") (harness-session-test--ext-of id)))
+        ;; Whoever held the plist before keeps what it saw.
+        (should (equal '(:supervisor t :tier "cheap") before)))
+      ;; nil removes the setting; one removed twice, or never set, is no error.
+      (harness-call 'session/set-ext id :supervisor nil)
+      (should (equal '(:tier "cheap") (harness-session-test--ext-of id)))
+      (harness-call 'session/set-ext id :supervisor nil)
+      (harness-call 'session/set-ext id :nothing nil)
+      (should (equal '(:tier "cheap") (harness-session-test--ext-of id)))
+      (harness-call 'session/set-ext id :tier nil)
+      (should-not (harness-session-test--ext-of id))
+      ;; Every kind of value.
+      (cl-loop for (k v) on harness-session-test--ext by #'cddr
+               do (harness-call 'session/set-ext id k v))
+      (should (equal harness-session-test--ext (harness-session-test--ext-of id)))
+      (should-error (harness-call 'session/set-ext "no-such-session" :supervisor t)))))
+
+(ert-deftest harness-session-ext-key-may-be-a-name ()
+  "A client on the wire names a setting with a string, with or without the colon."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (dolist (key (list :a 'b "c" ":d"))
+        (harness-call 'session/set-ext id key t))
+      (should (equal '(:a t :b t :c t :d t) (harness-session-test--ext-of id)))
+      (harness-call 'session/set-ext id "a" nil)
+      (harness-call 'session/set-ext id ":b" :false)
+      (should (equal '(:b :false :c t :d t) (harness-session-test--ext-of id)))
+      (dolist (key (list nil t "" 7))
+        (should-error (harness-call 'session/set-ext id key t) :type 'harness-error))
+      (should (equal '(:b :false :c t :d t) (harness-session-test--ext-of id))))))
+
+(ert-deftest harness-session-ext-survives-the-store ()
+  "The settings are stored with the record and read back as they were."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (cl-loop for (k v) on harness-session-test--ext by #'cddr
+               do (harness-call 'session/set-ext id k v))
+      ;; The record, as JSON writes it and `harness-session--from-plist' reads it.
+      (let* ((record (harness-session-plist (gethash id harness-sessions)))
+             (stored (harness-json-parse (harness-json-encode record))))
+        (should (equal harness-session-test--ext (harness-session-ext (harness-session--from-plist stored)))))
+      ;; And from the store itself, after the harness exited and started again.
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (equal harness-session-test--ext (harness-session-test--ext-of id)))
+      ;; A setting that was removed is gone for good.
+      (harness-call 'session/set-ext id :supervisor nil)
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should-not (plist-member (harness-session-test--ext-of id) :supervisor))
+      (should (eq :false (plist-get (harness-session-test--ext-of id) :off))))))
+
+(ert-deftest harness-session-ext-reads-only-a-plist ()
+  "A stored value that is no plist reads as no settings, and a key set to null as none."
+  (harness-session-test-with
+    (dolist (junk (list "junk" 7 t :false '("a" "b") '(:a) '(1 2)))
+      (should-not (harness-session-ext (harness-session--from-plist (list :id "x" :cwd "/tmp/" :ext junk)))))
+    (should-not (harness-session-ext (harness-session--from-plist (list :id "x" :cwd "/tmp/"))))
+    (should (equal '(:a 1) (harness-session-ext
+                            (harness-session--from-plist (list :id "x" :cwd "/tmp/" :ext '(:a 1 :b nil))))))))
+
+(ert-deftest harness-session-create-takes-initial-ext ()
+  "`session/create' accepts the settings a session starts with."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (s (harness-call 'session/create :cwd cwd :ext '(:supervisor t :off :false :unset nil))))
+      (should (equal '(:supervisor t :off :false) (plist-get s :ext)))
+      (should (equal '(:supervisor t :off :false) (harness-session-test--ext-of (plist-get s :id))))
+      (should-not (plist-get (harness-call 'session/create :cwd cwd) :ext))
+      (should-not (plist-get (harness-call 'session/create :cwd cwd :ext "junk") :ext)))))
+
+(ert-deftest harness-session-fork-does-not-copy-ext ()
+  "A fork, a sub-agent and a BTW start without their parent's settings.
+A module that wants its fork to have some gives them when it forks."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                       :ext '(:supervisor t :tier "cheap"))
+                         :id)))
+      (dolist (kind '(fork subagent))
+        (let ((child (harness-await (harness-call 'session/fork id :kind kind))))
+          (should-not (plist-get child :ext))
+          (should-not (harness-session-test--ext-of (plist-get child :id)))))
+      (should-not (plist-get (harness-call 'session/btw id) :ext))
+      (let ((child (harness-await (harness-call 'session/fork id :kind 'fork :ext '(:supervisor :false)))))
+        (should (equal '(:supervisor :false) (plist-get child :ext))))
+      (should (equal '(:supervisor t :tier "cheap") (harness-session-test--ext-of id))))))
+
+(ert-deftest harness-session-ext-change-is-announced ()
+  "A change emits `session/ext-changed' once the session holds it, and `session/changed' too."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+          (events nil)
+          (changed nil))
+      (harness-on 'session/ext-changed
+                  (lambda (sid key value)
+                    (push (list sid key value (plist-get (harness-session-test--ext-of sid) key)) events)))
+      (harness-on 'session/changed (lambda (_sid session) (push (plist-get session :ext) changed)))
+      (harness-call 'session/set-ext id :supervisor t)
+      (harness-call 'session/set-ext id "tier" "cheap")
+      (harness-call 'session/set-ext id :supervisor nil)
+      ;; The key is the keyword, the value what was asked, and the session
+      ;; already held it when the event came.
+      (should (equal (list (list id :supervisor t t) (list id :tier "cheap" "cheap") (list id :supervisor nil nil))
+                     (reverse events)))
+      (should (equal '((:supervisor t) (:supervisor t :tier "cheap") (:tier "cheap"))
+                     (reverse changed))))))
+
+(ert-deftest harness-session-ext-hint-is-added ()
+  "A hint that is a string lands in the transcript as a hint, any other does not."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-call 'session/set-ext id :supervisor t "Supervisor mode on")
+      (let ((node (car (last (harness-call 'session/nodes id)))))
+        (should (eq 'hint (plist-get node :kind)))
+        (should (equal "Supervisor mode on" (plist-get node :content))))
+      (harness-call 'session/set-ext id :supervisor :false)
+      (harness-call 'session/set-ext id :tier "x" nil)
+      (harness-call 'session/set-ext id :tier "y" 5)
+      (should (equal '(hint) (harness-session-test-kinds id)))
+      (should (equal '(:supervisor :false :tier "y") (harness-session-test--ext-of id))))))
+
+(ert-deftest harness-session-ext-warns-of-a-value-the-store-would-change ()
+  "A value JSON does not keep as it is (a symbol, say) is kept, and logged."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-call 'session/set-ext id :mode 'auto)
+      (should (eq 'auto (plist-get (harness-session-test--ext-of id) :mode)))
+      (with-current-buffer (get-buffer-create harness-log-buffer-name)
+        (should (string-match-p "ext :mode would not survive the JSON store" (buffer-string))))
+      (should (harness-session--ext-json-p harness-session-test--ext))
+      (dolist (bad (list 'auto [1 2] (lambda () 1) '(:a auto) '("a" auto) '(:a 1 :b)))
+        (should-not (harness-session--ext-json-p bad))))))
+
 ;;;; Context windows
 
 (defvar harness-providers)
@@ -1391,6 +1637,35 @@ outright window wins over it, and nil gives the model's window back."
             (should (= 1000000 (harness-session-test-window id)))))
       (harness-session-test-drop-provider))))
 
+(ert-deftest harness-session-context-limit-source-names-the-cap ()
+  "The limit's source names the setting that made it, best effort: a
+sub-agent's kind says the sub-agent cap, the tasks module's own cap
+value says a task's, and another limit is one set for the session.  No
+limit, no source."
+  (harness-session-test-with
+    (unwind-protect
+        (progn
+          (harness-session-test-provider '(("big" . 1000000)))
+          (let ((plain (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                                :model "test-win:big") :id))
+                (sub (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                              :model "test-win:big" :kind 'subagent
+                                              :context-window-limit 96000) :id))
+                (other (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                                :model "test-win:big"
+                                                :context-window-limit 200000) :id)))
+            (should-not (harness-session-context-limit-source (harness-call 'session/get plain)))
+            (should (equal "a sub-agent cap (harness-subagent-context-limit)"
+                           (harness-session-context-limit-source (harness-call 'session/get sub))))
+            (should (equal "set for this session"
+                           (harness-session-context-limit-source (harness-call 'session/get other))))
+            ;; A limit equal to the tasks module's own cap is a task's.
+            (let ((harness-tasks-context-limit 200000))
+              (should (equal "a task cap (harness-tasks-context-limit)"
+                             (harness-session-context-limit-source
+                              (harness-call 'session/get other)))))))
+      (harness-session-test-drop-provider))))
+
 (ert-deftest harness-session-record-window-copy-ignored-on-load ()
   "Records used to keep `:context-window', a copy of the model's window.
 That copy may be the 128000 stand-in; a session loads with its model's
@@ -1479,7 +1754,10 @@ a budget given to a session after that stays."
 (defmacro harness-session-test-with-thinker (&rest body)
   "Run BODY in `harness-session-test-with' with provider `test-think' defined.
 Its model thinker has the thinking levels low, medium and high; its
-model plain has none."
+model plain has none.  Its model deep has low, high and max, as
+DeepSeek's do (no medium), and its model steep only high and max.  The
+provider names no cheap tier and prices no model, so a BTW over any of
+them stays on it."
   (declare (indent 0))
   `(harness-session-test-with
      (unwind-protect
@@ -1488,6 +1766,8 @@ model plain has none."
              :complete #'ignore
              :models (lambda ()
                        (harness-resolved (list (list :name "thinker" :thinking-levels '("low" "medium" "high"))
+                                               (list :name "deep" :thinking-levels '("low" "high" "max"))
+                                               (list :name "steep" :thinking-levels '("high" "max"))
                                                (list :name "plain")))))
            ,@body)
        (remhash 'test-think harness-providers)
@@ -1500,10 +1780,11 @@ model plain has none."
 (ert-deftest harness-session-btw-thinks-at-the-btw-level ()
   "A BTW starts at `harness-btw-thinking', low unless configured otherwise.
 It does whatever the level of the session it is opened over, which
-keeps its own.  A model the catalogue lists no such level for keeps the
-parent's level, as nil does.  The setting layers: a .dir-locals.el sets
-it for its directory.  The BTW can be changed afterwards like any
-session."
+keeps its own.  A model the catalogue lists the level for gets it; one
+that lacks it gets the nearest level it lists below it, never the
+parent's.  A model the catalogue lists no levels for keeps the parent's
+level, as nil does.  The setting layers: a .dir-locals.el sets it for
+its directory.  The BTW can be changed afterwards like any session."
   (harness-session-test-with-thinker
     (should (equal "low" (eval (car (get 'harness-btw-thinking 'standard-value)) t)))
     (let* ((harness-btw-thinking "low")
@@ -1520,16 +1801,22 @@ session."
       (should (equal "high" (plist-get (harness-call 'session/get high) :thinking)))
       ;; A model without levels gets no level it did not have.
       (should (equal "high" (harness-session-test-btw-level plain)))
-      ;; Another level, when the model offers it; else the parent's.
+      ;; Another level, when the model offers it; else the strongest it
+      ;; offers below it: here the top level, whatever the parent's.
       (let ((harness-btw-thinking "medium"))
         (should (equal "medium" (harness-session-test-btw-level high))))
       (let ((harness-btw-thinking "max"))
         (should (equal "high" (harness-session-test-btw-level high)))
-        (should-not (harness-session-test-btw-level default)))
+        (should (equal "high" (harness-session-test-btw-level default))))
       ;; nil: the parent's level, as before BTWs had one of their own.
       (let ((harness-btw-thinking nil))
         (should (equal "high" (harness-session-test-btw-level high)))
         (should-not (harness-session-test-btw-level default)))
+      ;; A model without levels: nothing to fit to, so the parent's level
+      ;; stays, the setting asking for another or not.
+      (dolist (setting '("low" "max" nil))
+        (let ((harness-btw-thinking setting))
+          (should (equal "high" (harness-session-test-btw-level plain)))))
       ;; Changed in the BTW, like in any session.
       (let ((btw (plist-get (harness-call 'session/btw high) :id)))
         (harness-call 'session/update btw :thinking "high" :silent t)
@@ -1544,7 +1831,8 @@ session."
 
 (ert-deftest harness-session-btw-created-without-a-level ()
   "A `btw' session created without a level, as a task board's is, starts at
-the BTW level when its model offers it, else at `harness-thinking'.  A
+the BTW level fitted to the levels its model offers, else at
+`harness-thinking' (no level configured, or a model that lists none).  A
 level given to it wins, and other kinds of session are left alone."
   (harness-session-test-with-thinker
     (let ((harness-btw-thinking "low")
@@ -1557,8 +1845,319 @@ level given to it wins, and other kinds of session are left alone."
         (should (equal "medium" (level :kind 'btw :model "test-think:thinker" :thinking "medium")))
         (should (equal "high" (level :model "test-think:thinker")))
         (should (equal "high" (level :kind 'fork :model "test-think:thinker")))
+        ;; A level its model lacks is the nearest below it, else the model's
+        ;; weakest -- not `harness-thinking', which a BTW falls back on
+        ;; only where nothing can be fitted (the plain model has no levels).
+        (let ((harness-btw-thinking "medium")
+              (harness-thinking "max"))
+          (should (equal "medium" (level :kind 'btw :model "test-think:thinker")))
+          (should (equal "low" (level :kind 'btw :model "test-think:deep")))
+          (should (equal "high" (level :kind 'btw :model "test-think:steep")))
+          (should (equal "max" (level :kind 'btw :model "test-think:plain")))
+          (should (equal "max" (level :model "test-think:deep"))))
         (let ((harness-btw-thinking nil))
           (should (equal "high" (level :kind 'btw :model "test-think:thinker"))))))))
+
+(ert-deftest harness-session-btw-thinks-lower-on-its-sessions-own-model ()
+  "A BTW that stays on its session's model still thinks lower, whatever the session's level.
+The provider has no cheaper tier here.  A model that lacks the level (a
+DeepSeek-like one has low, high and max, no medium) gives the nearest it
+has below it, never the session's own; one whose levels are all
+stronger than the one asked for gives its weakest."
+  (harness-session-test-with-thinker
+    (let* ((harness-btw-thinking "low")
+           (harness-thinking nil)
+           (cwd (harness-test-temp-dir))
+           (deep (plist-get (harness-call 'session/create :cwd cwd :model "test-think:deep" :thinking "max")
+                            :id))
+           (steep (plist-get (harness-call 'session/create :cwd cwd :model "test-think:steep" :thinking "max")
+                             :id)))
+      (cl-flet ((on (id) (let ((btw (harness-call 'session/btw id)))
+                           (cons (plist-get btw :model) (plist-get btw :thinking)))))
+        ;; The default: the model has it.
+        (should (equal '("test-think:deep" . "low") (on deep)))
+        ;; Medium: it has none, and gets low, not the session's max.
+        (let ((harness-btw-thinking "medium"))
+          (should (equal '("test-think:deep" . "low") (on deep))))
+        ;; The nearest it has below, whichever level is asked for.
+        (let ((harness-btw-thinking "high"))
+          (should (equal '("test-think:deep" . "high") (on deep))))
+        (let ((harness-btw-thinking "xhigh"))
+          (should (equal '("test-think:deep" . "high") (on deep))))
+        ;; Every level it has is stronger than the one asked for: its weakest.
+        (should (equal '("test-think:steep" . "high") (on steep)))
+        (let ((harness-btw-thinking "medium"))
+          (should (equal '("test-think:steep" . "high") (on steep))))
+        ;; Nothing configured: the session's own level, which its model has.
+        (let ((harness-btw-thinking nil))
+          (should (equal '("test-think:deep" . "max") (on deep))))
+        ;; The sessions keep theirs.
+        (should (equal "max" (plist-get (harness-call 'session/get deep) :thinking)))
+        (should (equal "max" (plist-get (harness-call 'session/get steep) :thinking)))))))
+
+;;;; The model of a BTW
+
+(defvar harness-model)
+(defvar harness-btw-model)
+(defvar harness-allowed-models)
+
+(defmacro harness-session-test-with-tiers (&rest body)
+  "Run BODY in `harness-session-test-with-thinker' with provider `test-tier' defined too.
+Its cheap tier is the model small, which offers the thinking levels
+low, medium and high; its model big offers up to max.  Provider
+`test-think' names no tier and prices no model."
+  (declare (indent 0))
+  `(harness-session-test-with-thinker
+     (unwind-protect
+         (progn
+           (harness-define-provider 'test-tier
+             :complete #'ignore
+             :tiers '(:cheap "small")
+             :models (lambda ()
+                       (harness-resolved
+                        (list (list :name "big" :thinking-levels '("low" "medium" "high" "xhigh" "max"))
+                              (list :name "small" :thinking-levels '("low" "medium" "high"))))))
+           ,@body)
+       (remhash 'test-tier harness-providers)
+       (harness-provider--forget 'test-tier))))
+
+(defun harness-session-test-parent (model &rest plist)
+  "Create a session on MODEL with PLIST in a directory of its own; return its id."
+  (plist-get (apply #'harness-call 'session/create :cwd (harness-test-temp-dir) :model model plist) :id))
+
+(defun harness-session-test-btw (parent &rest args)
+  "Start a BTW over session PARENT with ARGS after its name; return the session."
+  (apply #'harness-call 'session/btw parent "side" args))
+
+(ert-deftest harness-session-btw-runs-on-the-cheap-tier ()
+  "A BTW runs on the cheap tier of its model's provider, not on its session's.
+Over a session on the provider's top model it is made on the cheap one,
+as `session/get' says too, thinking at the BTW level; the session keeps
+its model and level, and a BTW already on the cheap tier stays there."
+  (harness-session-test-with-tiers
+    (let* ((harness-btw-thinking "low")
+           (harness-thinking nil)
+           (parent (harness-session-test-parent "test-tier:big" :thinking "max"
+                                                :permission-mode 'accept-edits))
+           (btw (harness-session-test-btw parent)))
+      (should (eq 'auto (eval (car (get 'harness-btw-model 'standard-value)) t)))
+      (should (eq 'btw (plist-get btw :kind)))
+      (should (equal parent (plist-get btw :parent-id)))
+      (should (equal "test-tier:small" (plist-get btw :model)))
+      (should (equal "test-tier:small" (plist-get (harness-call 'session/get (plist-get btw :id)) :model)))
+      (should (equal "low" (plist-get btw :thinking)))
+      (should (eq 'accept-edits (plist-get btw :permission-mode)))
+      (let ((session (harness-call 'session/get parent)))
+        (should (equal "test-tier:big" (plist-get session :model)))
+        (should (equal "max" (plist-get session :thinking))))
+      (let ((small (harness-session-test-parent "test-tier:small" :thinking "medium")))
+        (should (equal "test-tier:small" (plist-get (harness-session-test-btw small) :model)))))))
+
+(ert-deftest harness-session-btw-model-setting ()
+  "`harness-btw-model' picks the model of a BTW: `auto' the cheap tier, a model that model, nil its session's.
+It layers like the other settings: a .dir-locals.el sets it for its directory."
+  (harness-session-test-with-tiers
+    (let* ((harness-btw-thinking "low")
+           (cwd (harness-test-temp-dir))
+           (big (plist-get (harness-call 'session/create :cwd cwd :model "test-tier:big") :id))
+           (think (plist-get (harness-call 'session/create :cwd cwd :model "test-think:thinker") :id)))
+      (cl-flet ((model-of (id) (plist-get (harness-session-test-btw id) :model)))
+        ;; The default, spelled as the symbol or as a string.
+        (dolist (auto '(auto "auto"))
+          (let ((harness-btw-model auto))
+            (should (equal "test-tier:small" (model-of big)))))
+        ;; A model: that one, whoever the session's provider is.
+        (let ((harness-btw-model "test-tier:big"))
+          (should (equal "test-tier:big" (model-of big)))
+          (should (equal "test-tier:big" (model-of think))))
+        (let ((harness-btw-model "test-tier:small"))
+          (should (equal "test-tier:small" (model-of think))))
+        ;; nil, or nothing: the session's own.
+        (dolist (own '(nil ""))
+          (let ((harness-btw-model own))
+            (should (equal "test-tier:big" (model-of big)))
+            (should (equal "test-think:thinker" (model-of think)))))
+        ;; Configured for the directory the session works in.
+        (with-temp-file (expand-file-name ".dir-locals.el" cwd)
+          (insert "((nil . ((harness-btw-model . nil))))\n"))
+        (should (equal "test-tier:big" (model-of big)))
+        (with-temp-file (expand-file-name ".dir-locals.el" cwd)
+          (insert "((nil . ((harness-btw-model . \"test-think:thinker\"))))\n"))
+        (should (equal "test-think:thinker" (model-of big)))
+        (with-temp-file (expand-file-name ".dir-locals.el" cwd)
+          (insert "((nil . ((harness-btw-model . auto))))\n"))
+        (let ((harness-btw-model nil))
+          (should (equal "test-tier:small" (model-of big))))))))
+
+(ert-deftest harness-session-btw-model-setting-must-be-allowed ()
+  "A `harness-btw-model' that `harness-allowed-models' leaves out is not used.
+The BTW stays on its session's model, and the log says why."
+  (harness-session-test-with-tiers
+    (let ((think (harness-session-test-parent "test-think:thinker"))
+          (harness-btw-model "test-tier:big"))
+      (should (equal "test-tier:big" (plist-get (harness-session-test-btw think) :model)))
+      (harness-test-with-policy '((harness-allowed-models "test-think"))
+        (should (equal "test-think:thinker" (plist-get (harness-session-test-btw think) :model)))))))
+
+(ert-deftest harness-session-btw-model-can-be-chosen-for-one-btw ()
+  "A model given to `session/btw' runs that BTW on it, over the setting and the cheap tier.
+A blank one is none.  It is chosen at the start: the BTW is a session
+like any from then on, whose model can be switched, and its session
+keeps its own."
+  (harness-session-test-with-tiers
+    (let ((parent (harness-session-test-parent "test-tier:big" :thinking "max")))
+      ;; Over the cheap tier.
+      (should (equal "test-tier:big" (plist-get (harness-session-test-btw parent "test-tier:big") :model)))
+      (should (equal "test-think:thinker"
+                     (plist-get (harness-session-test-btw parent "test-think:thinker") :model)))
+      ;; Over the setting.
+      (let ((harness-btw-model "test-tier:small"))
+        (should (equal "test-think:thinker"
+                       (plist-get (harness-session-test-btw parent "test-think:thinker") :model)))
+        (should (equal "test-tier:small" (plist-get (harness-session-test-btw parent) :model))))
+      (let ((harness-btw-model nil))
+        (should (equal "test-tier:small" (plist-get (harness-session-test-btw parent "test-tier:small") :model)))
+        (should (equal "test-tier:big" (plist-get (harness-session-test-btw parent) :model))))
+      ;; Blank is none.
+      (dolist (blank '(nil "" "  "))
+        (should (equal "test-tier:small" (plist-get (harness-session-test-btw parent blank) :model))))
+      ;; Chosen once: after that the BTW switches models like any session.
+      (let ((id (plist-get (harness-session-test-btw parent "test-tier:big") :id)))
+        (harness-call 'session/update id :model "test-think:thinker" :silent t)
+        (should (equal "test-think:thinker" (plist-get (harness-call 'session/get id) :model))))
+      (should (equal "test-tier:big" (plist-get (harness-call 'session/get parent) :model))))))
+
+(ert-deftest harness-session-btw-model-and-thinking-are-independent ()
+  "The BTW level is checked against the model the BTW runs on, not its session's.
+`harness-btw-thinking' lowers the effort on the cheap model as on any
+other; a level that model lacks is not carried over from a session that
+had it, nor is the usual one used: the BTW gets the nearest level the
+model has below it."
+  (harness-session-test-with-tiers
+    (let* ((harness-thinking nil)
+           (max (harness-session-test-parent "test-tier:big" :thinking "max"))
+           (high (harness-session-test-parent "test-tier:big" :thinking "high")))
+      (cl-flet ((on (id) (let ((btw (harness-session-test-btw id)))
+                           (cons (plist-get btw :model) (plist-get btw :thinking)))))
+        ;; The effort is low on the cheap model, whatever the session's.
+        (let ((harness-btw-thinking "low"))
+          (should (equal '("test-tier:small" . "low") (on max)))
+          (should (equal '("test-tier:small" . "low") (on high))))
+        (let ((harness-btw-thinking "medium"))
+          (should (equal '("test-tier:small" . "medium") (on max))))
+        ;; A level the cheap model lacks is the nearest it has below it.
+        (let ((harness-btw-thinking "max"))
+          (should (equal '("test-tier:small" . "high") (on max)))
+          (should (equal '("test-tier:small" . "high") (on high))))
+        (let ((harness-btw-thinking "xhigh")
+              (harness-thinking "low"))
+          (should (equal '("test-tier:small" . "high") (on max))))
+        ;; The session's level, when the cheap model has it; else the usual one.
+        (let ((harness-btw-thinking nil))
+          (should (equal '("test-tier:small" . nil) (on max)))
+          (should (equal '("test-tier:small" . "high") (on high)))
+          (let ((harness-thinking "medium"))
+            (should (equal '("test-tier:small" . "medium") (on max)))))
+        ;; On the session's own model nothing is lost.
+        (let ((harness-btw-model nil))
+          (let ((harness-btw-thinking "low"))
+            (should (equal '("test-tier:big" . "low") (on max))))
+          (let ((harness-btw-thinking nil))
+            (should (equal '("test-tier:big" . "max") (on max)))))
+        ;; A model chosen for the BTW, too.
+        (let ((harness-btw-thinking nil))
+          (should (equal '("test-tier:big" . "max")
+                         (let ((btw (harness-session-test-btw max "test-tier:big")))
+                           (cons (plist-get btw :model) (plist-get btw :thinking)))))
+          (should (equal '("test-tier:small" . "high")
+                         (let ((btw (harness-session-test-btw high "test-tier:small")))
+                           (cons (plist-get btw :model) (plist-get btw :thinking))))))))))
+
+(ert-deftest harness-session-btw-keeps-the-model-without-a-cheap-tier ()
+  "A provider that names no cheap model and prices none leaves a BTW on its session's.
+So does a model whose provider nobody registered.  The level is fitted
+to the levels of the model it stays on; a model the catalogue lists no
+levels for has none to fit to, so its level is the session's, whatever
+`harness-btw-thinking' says."
+  (harness-session-test-with-tiers
+    (let ((harness-btw-thinking "low")
+          (think (harness-session-test-parent "test-think:thinker" :thinking "high"))
+          (plain (harness-session-test-parent "test-think:plain" :thinking "high"))
+          (nobody (harness-session-test-parent "nobody:model" :thinking "high")))
+      (should (equal "test-think:thinker" (plist-get (harness-session-test-btw think) :model)))
+      (should (equal "low" (plist-get (harness-session-test-btw think) :thinking)))
+      (should (equal "test-think:plain" (plist-get (harness-session-test-btw plain) :model)))
+      (should (equal "high" (plist-get (harness-session-test-btw plain) :thinking)))
+      (should (equal "nobody:model" (plist-get (harness-session-test-btw nobody) :model)))
+      (should (equal "high" (plist-get (harness-session-test-btw nobody) :thinking)))
+      ;; Nothing configured either: the session's level, as before.
+      (let ((harness-btw-thinking nil))
+        (should (equal "high" (plist-get (harness-session-test-btw plain) :thinking)))
+        (should (equal "high" (plist-get (harness-session-test-btw nobody) :thinking)))))))
+
+(ert-deftest harness-session-btw-created-without-a-model ()
+  "A `btw' session created without a model, as a task board's is, runs on `harness-btw-model'.
+That is applied to `harness-model' as configured at its directory.  A
+model it is given wins, and other kinds of session are left alone."
+  (harness-session-test-with-tiers
+    (let ((harness-model "test-tier:big")
+          (harness-thinking "high")
+          (harness-btw-thinking "low")
+          (cwd (harness-test-temp-dir)))
+      (cl-flet ((create (&rest plist) (apply #'harness-call 'session/create :cwd cwd plist)))
+        (should (equal "test-tier:small" (plist-get (create :kind 'btw) :model)))
+        (should (equal "low" (plist-get (create :kind 'btw) :thinking)))
+        (should (equal "test-tier:big" (plist-get (create :kind 'btw :model "test-tier:big") :model)))
+        (should (equal "test-tier:big" (plist-get (create) :model)))
+        (should (equal "test-tier:big" (plist-get (create :kind 'fork) :model)))
+        (let ((harness-btw-model nil))
+          (should (equal "test-tier:big" (plist-get (create :kind 'btw) :model))))
+        (let ((harness-btw-model "test-think:thinker"))
+          (should (equal "test-think:thinker" (plist-get (create :kind 'btw) :model))))
+        ;; The model the directory configures is the one the tier comes from.
+        (with-temp-file (expand-file-name ".dir-locals.el" cwd)
+          (insert "((nil . ((harness-model . \"test-think:thinker\"))))\n"))
+        (should (equal "test-think:thinker" (plist-get (create :kind 'btw) :model)))
+        (with-temp-file (expand-file-name ".dir-locals.el" cwd)
+          (insert "((nil . ((harness-model . \"test-tier:big\"))))\n"))
+        (should (equal "test-tier:small" (plist-get (create :kind 'btw) :model)))))))
+
+(ert-deftest harness-session-policy-fixes-the-model-of-a-btw ()
+  "A policy on `harness-model' fixes a BTW's model as every session's.
+Not the cheap tier then: neither `harness-btw-model' nor a model asked
+for changes it, and a model that is another is refused, creating
+nothing.  The level is not fixed, so it stays the BTW level."
+  (harness-session-test-with-tiers
+    (harness-test-with-policy '((harness-model . "test-tier:big"))
+      (let* ((harness-btw-thinking "low")
+             (cwd (harness-test-temp-dir))
+             (parent (plist-get (harness-call 'session/create :cwd cwd :thinking "max") :id)))
+        (should (equal "test-tier:big" (plist-get (harness-call 'session/get parent) :model)))
+        (should (equal "test-tier:big" (plist-get (harness-session-test-btw parent) :model)))
+        (should (equal "low" (plist-get (harness-session-test-btw parent) :thinking)))
+        (should (equal "test-tier:big" (plist-get (harness-call 'session/create :cwd cwd :kind 'btw) :model)))
+        (should (equal "test-tier:big"
+                       (plist-get (harness-call 'session/create :cwd cwd :kind 'btw :model "test-tier:small")
+                                  :model)))
+        (let ((harness-btw-model "test-think:thinker"))
+          (should (equal "test-tier:big" (plist-get (harness-session-test-btw parent) :model))))
+        ;; The policy's own model is no change.
+        (should (equal "test-tier:big" (plist-get (harness-session-test-btw parent "test-tier:big") :model)))
+        (let* ((sessions (length (harness-call 'session/list)))
+               (err (should-error (harness-session-test-btw parent "test-tier:small"))))
+          (should (string-match-p "harness-model is set by policy" (cadr err)))
+          (should (= sessions (length (harness-call 'session/list)))))))))
+
+(ert-deftest harness-session-btw-model-asked-for-must-be-allowed ()
+  "A model asked for that `harness-allowed-models' leaves out is refused, creating nothing."
+  (harness-session-test-with-tiers
+    (let ((parent (harness-session-test-parent "test-tier:big"))
+          (sessions (length (harness-call 'session/list))))
+      (harness-test-with-policy '((harness-allowed-models "test-tier"))
+        (should (equal "test-tier:small" (plist-get (harness-session-test-btw parent "test-tier:small") :model)))
+        (let ((err (should-error (harness-session-test-btw parent "test-think:thinker"))))
+          (should (string-match-p "test-think:thinker is not allowed" (cadr err))))
+        (should (= (1+ sessions) (length (harness-call 'session/list))))))))
 
 ;;;; Moving to another directory
 
@@ -1825,5 +2424,48 @@ policy came, one running when it came.  Another value is refused."
           (should (string-match-p "set by policy" (cadr err))))
         (should (equal "claude:sonnet" (plist-get (harness-call 'session/get id) :model)))))))
 
+
+(ert-deftest harness-session-discards-nodes-and-keeps-the-chain-whole ()
+  "Nodes dropped from the transcript leave it a chain, in memory and after a reload.
+The step a turn is about to try again wrote an assistant node; a hint
+was written after it, and a checkpoint may sit on it.  Dropping the
+step's node must not cut the transcript at the hint, and must not come
+back when the session is loaded again."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (u (plist-get (harness-call 'session/append id '(:kind user :content "q")) :id))
+           (half (plist-get (harness-call 'session/append id '(:kind assistant :content "half")) :id))
+           (hint (plist-get (harness-call 'session/append id '(:kind hint :content "Error: reset")) :id))
+           (again (plist-get (harness-call 'session/append id '(:kind assistant :content "again")) :id))
+           (removed nil) (moves nil))
+      (harness-on 'session/nodes-removed (lambda (_sid ids) (push ids removed)))
+      (harness-on 'session/head-moved (lambda (_sid node) (push node moves)))
+      ;; The partial node goes, the hint after it stays and is re-parented.
+      (should (equal (list half) (harness-call 'session/discard-nodes id (list half))))
+      (should-not (harness-call 'session/node id half))
+      (should (equal u (plist-get (harness-call 'session/node id hint) :parent)))
+      (should (equal (list u hint again)
+                     (mapcar (lambda (n) (plist-get n :id)) (harness-call 'session/nodes id))))
+      (should (equal (list (list half)) removed))
+      (should-not moves)                    ; the head was not one of them
+      ;; The newest node goes too: the head moves to the one kept.
+      (should (equal (list again) (harness-call 'session/discard-nodes id (list again))))
+      (should (equal hint (plist-get (harness-call 'session/get id) :head)))
+      (should (equal (list hint) moves))
+      ;; Ids that name nothing change nothing.
+      (should-not (harness-call 'session/discard-nodes id '("n-nope")))
+      (should (equal (list u hint)
+                     (mapcar (lambda (n) (plist-get n :id)) (harness-call 'session/nodes id))))
+      ;; Loaded again, the dropped nodes are still gone and the chain whole.
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should-not (harness-call 'session/node id half))
+      (should-not (harness-call 'session/node id again))
+      (should (equal u (plist-get (harness-call 'session/node id hint) :parent)))
+      (should (equal (list u hint)
+                     (mapcar (lambda (n) (plist-get n :id)) (harness-call 'session/nodes id)))))))
+
+(provide 'harness-session-test)
 (provide 'harness-session-test)
 ;;; harness-session-test.el ends here

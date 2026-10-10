@@ -5,6 +5,7 @@
 (require 'harness-acp)
 
 (defvar harness-ui-default-position)
+(defvar harness-ui-tree--node-text-limit)
 
 (defmacro harness-ui-tree-test-with (&rest body)
   "Load the state layer, ACP, the UI foundation and the tree, then run BODY."
@@ -247,6 +248,31 @@
               (should (eq icon-face (car (ensure-list (get-text-property start 'face)))))
               (should (eq text-face (car (ensure-list (get-text-property (+ start 2) 'face))))))))))))
 
+(ert-deftest harness-ui-tree-bounds-node-text-and-keeps-no-undo ()
+  "A tree row holds a bounded node, and the generated buffer has no undo.
+A row keeps its node as a text property and a redraw records it for
+undo: a hint holding a dumped error grew the undo list to megabytes and
+warned that it exceeded `undo-outer-limit'."
+  (harness-ui-tree-test-with
+    (let* ((sid (plist-get (harness-ui-tree-test-request
+                            "session/new" (list :cwd (harness-test-temp-dir)
+                                                :_harness (list :model "demo:scripted" :name "Huge")))
+                           :sessionId))
+           (id (harness-ui-tree-test-append sid "hint" (make-string 100000 ?x))))
+      (harness-tree sid)
+      (harness-test-wait (lambda () harness-ui-tree--data) 5 "the tree")
+      ;; Nothing in a generated tree buffer is worth undoing.
+      (should (eq t (buffer-local-value 'buffer-undo-list (current-buffer))))
+      ;; The buffer's nodes and the row's property are both bounded.
+      (let ((node (cl-find id (plist-get harness-ui-tree--data :nodes)
+                           :key (lambda (n) (plist-get n :id)) :test #'equal)))
+        (should node)
+        (should (<= (length (plist-get node :content)) (1+ harness-ui-tree--node-text-limit))))
+      (harness-ui-tree-test-goto id)
+      (let ((node (get-text-property (point) 'harness-ui-tree-node)))
+        (should (equal id (plist-get node :id)))
+        (should (<= (length (plist-get node :content)) (1+ harness-ui-tree--node-text-limit)))))))
+
 (provide 'harness-ui-tree-test)
 ;;; harness-ui-tree-test.el ends here
 
@@ -259,3 +285,41 @@ and shove the rest of the row, time and all, out of the tree."
       (let ((excerpt (harness-ui-tree--excerpt (list :kind "message" :content text))))
         (should-not (string-match-p "[\t\n\r]" excerpt))))
     (should (equal "a b" (harness-ui-tree--excerpt (list :kind "message" :content "a\tb"))))))
+
+(ert-deftest harness-ui-tree-hover-is-per-row ()
+  "A row carries `mouse-face' on its own text only, so one row hovers.
+Emacs highlights every contiguous character that shares a `mouse-face'
+value.  A row whose terminating newline carried the same value as the
+next row joined it, and mousing anywhere in the tree lit up every node
+at once."
+  (harness-ui-tree-test-with
+    (let* ((sid (plist-get (harness-ui-tree-test-request
+                            "session/new" (list :cwd (harness-test-temp-dir)
+                                                :_harness (list :model "demo:scripted" :name "Hover")))
+                           :sessionId))
+           (n1 (harness-ui-tree-test-append sid "user" "first question"))
+           (n2 (harness-ui-tree-test-append sid "assistant" "first answer"))
+           (n3 (harness-ui-tree-test-append sid "user" "second question")))
+      ;; Full width, as the other buffer test opens it.
+      (let ((harness-ui-default-position 'full))
+        (harness-tree sid))
+      (harness-test-wait (lambda () harness-ui-tree--data) 5 "tree data")
+      (let ((values nil))
+        (dolist (id (list n1 n2 n3))
+          (let ((pos (harness-ui-tree--node-position id)))
+            (should pos)
+            ;; The row is the node's, and still tells what a click does.
+            (should (equal id (plist-get (get-text-property pos 'harness-ui-tree-node) :id)))
+            (should (string-match-p "open the session here" (get-text-property pos 'help-echo)))
+            ;; The newline that ends the row carries no mouse-face, so the
+            ;; stretch Emacs highlights stops at the row's own end.
+            (let ((end (save-excursion (goto-char pos) (line-end-position))))
+              (should (eq ?\n (char-after end)))
+              (should-not (get-text-property end 'mouse-face)))
+            (push (get-text-property pos 'mouse-face) values)))
+        ;; Each row has a value of its own, so two can never share a
+        ;; stretch even if a newline ever carried one again.
+        (should (cl-every #'identity values))
+        (should-not (eq (nth 0 values) (nth 1 values)))
+        (should-not (eq (nth 1 values) (nth 2 values)))
+        (should-not (eq (nth 0 values) (nth 2 values)))))))

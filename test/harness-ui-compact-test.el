@@ -13,6 +13,7 @@
 (require 'harness-test-helpers)
 (require 'harness-acp)
 (require 'harness-ui-compact)
+(require 'transient)
 
 (defvar harness-provider-demo-script-override)
 (defvar harness-provider-demo--delay)
@@ -50,7 +51,12 @@
             (:kind "brief" :model "test:small" :model-label "Small" :input 725 :output 2000
                    :cached nil :cost 0.01090625 :after 2000)
             (:kind "transcript" :model nil :model-label nil :input 0 :output 0
-                   :cached nil :cost 0.0 :after 84 :file-tokens 84500)))
+                   :cached nil :cost 0.0 :after 84 :file-tokens 84500)
+            (:kind "fresh" :model nil :model-label nil :input 0 :output 0
+                   :cached nil :cost 0.0 :after 90)
+            (:kind "truncate" :model nil :model-label nil :input 0 :output 0
+                   :cached nil :cost 0.0 :after 3000 :kept 3 :dropped 17
+                   :kept-tokens 2000 :dropped-tokens 84500)))
   "A `compaction/estimate' answer as it comes over ACP: kinds are strings.")
 
 (ert-deftest harness-ui-compact-says-what-each-kind-costs ()
@@ -63,13 +69,32 @@ what, the costs going beside them."
     (should (equal "~$0.463" (harness-ui-compact-cost-text e 'summary)))
     (should (equal "free" (harness-ui-compact-cost-text e 'transcript)))
     (should (equal "free" (harness-ui-compact-cost-text nil 'transcript)))
+    ;; A fresh start asks no model either.
+    (should (equal "free" (harness-ui-compact-cost-text e 'fresh)))
+    (should (equal "free" (harness-ui-compact-cost-text nil 'fresh)))
+    ;; A cut old context asks no model either.
+    (should (equal "free" (harness-ui-compact-cost-text e 'truncate)))
+    (should (equal "free" (harness-ui-compact-cost-text nil 'truncate)))
+    (should (equal "Cut old context" (harness-ui-compact-label 'truncate)))
+    (should (equal (concat "The oldest 17 nodes (~84.5k tokens) are dropped and the most recent 3"
+                           " (~2.0k tokens) are kept as they were; a note says what went."
+                           "  No model is asked anything.")
+                   (harness-ui-compact-describe e 'truncate)))
+    ;; Nothing to cut: the whole conversation already fits.
+    (let ((nothing (list :kinds (list (list :kind "truncate" :cost 0.0 :after 900 :kept 2 :dropped 0)))))
+      (should (string-match-p "\\`Nothing can be cut: the whole conversation already fits"
+                              (harness-ui-compact-describe nothing 'truncate))))
+    (should (equal "Fresh start" (harness-ui-compact-label 'fresh)))
+    (should (string-match-p (concat "\\`Nothing of the conversation is carried over: .* note of ~90 tokens"
+                                    ".* with session_history .*No model is asked anything\\.\\'")
+                            (harness-ui-compact-describe e 'fresh)))
     (should-not (harness-ui-compact-cost-text nil 'brief))
     (let ((unpriced (list :kinds (list (list :kind "brief" :model "x:y" :cost nil)))))
       (should-not (harness-ui-compact-cost-text unpriced 'brief)))
     (should (equal "Brief summary" (harness-ui-compact-label 'brief)))
     (should (equal "Transcript file" (harness-ui-compact-label 'transcript)))
-    (should (equal (concat "Small reads only the first and last messages, ~725 tokens in all."
-                           "  Most of the middle is left out, which the summary says.")
+    (should (equal (concat "Small reads the conversation's narrative, ~725 tokens in all."
+                           "  Tool payloads are left out, which the summary says.")
                    (harness-ui-compact-describe e 'brief)))
     (should (equal "Big reads the whole conversation again, ~84.5k tokens uncached."
                    (harness-ui-compact-describe e 'summary)))
@@ -98,15 +123,18 @@ much, and what carrying on costs."
     (pcase-let ((`(,prompt ,choices ,help ,show-help) asked))
       (should (equal "Compact the conversation" prompt))
       (should (equal '((?b "brief summary (~$0.011)") (?s "summary (~$0.463)")
-                       (?t "transcript file (free)") (?q "cancel"))
+                       (?t "transcript file (free)") (?f "fresh start (free)")
+                       (?c "cut old context (free)") (?q "cancel"))
                      (mapcar (lambda (c) (list (car c) (cadr c))) choices)))
       (should (equal "*Harness compaction*" show-help))
       (should (string-match-p "Session +“Parser work”" help))
       (should (string-match-p "Model +Big" help))
       (should (string-match-p "Carry on +the next message sends ~84\\.5k tokens uncached, about \\$0\\.422" help))
-      (should (string-match-p "^  b +brief summary +Small +~\\$0\\.011 +Small reads only" help))
+      (should (string-match-p "^  b +brief summary +Small +~\\$0\\.011 +Small reads the conversation's narrative" help))
       (should (string-match-p "^  s +summary +Big +~\\$0\\.463 +Big reads the whole" help))
-      (should (string-match-p "^  t +transcript file +- +free +The whole conversation" help)))
+      (should (string-match-p "^  t +transcript file +- +free +The whole conversation" help))
+      (should (string-match-p "^  f +fresh start +- +free +Nothing of the conversation" help))
+      (should (string-match-p "^  c +cut old context +- +free +The oldest 17 nodes" help)))
     (cl-letf (((symbol-function 'read-multiple-choice) (lambda (_p choices &rest _) (assq ?q choices))))
       (should-not (harness-ui-compact-read '(:id "s1") harness-ui-compact-test--estimate)))))
 
@@ -118,6 +146,10 @@ much, and what carrying on costs."
   (should (eq 'brief (harness-ui-compact-parse-kind "b")))
   (should (eq 'summary (harness-ui-compact-parse-kind " summary ")))
   (should (eq 'transcript (harness-ui-compact-parse-kind "t")))
+  (should (eq 'fresh (harness-ui-compact-parse-kind "fresh")))
+  (should (eq 'fresh (harness-ui-compact-parse-kind "f")))
+  (should (eq 'truncate (harness-ui-compact-parse-kind "truncate")))
+  (should (eq 'truncate (harness-ui-compact-parse-kind "c")))
   (should-error (harness-ui-compact-parse-kind "sideways") :type 'user-error))
 
 (ert-deftest harness-ui-compact-says-what-it-did ()
@@ -133,14 +165,60 @@ the model."
   (should (equal "Compacted ~2.0k tokens into a summary"
                  (harness-ui-compact-outcome '(:kind "compaction" :meta (:compaction "summary" :input-tokens 2000)))))
   (should (equal "Compacted the conversation into a summary"
-                 (harness-ui-compact-outcome '(:kind "compaction" :meta nil)))))
+                 (harness-ui-compact-outcome '(:kind "compaction" :meta nil))))
+  (should (equal "Started afresh, leaving ~84.5k tokens behind; session_history reaches it"
+                 (harness-ui-compact-outcome '(:kind "compaction" :meta (:compaction "fresh" :input-tokens 84500)))))
+  (should (equal "Cut ~84.5k tokens of older conversation away, keeping the most recent"
+                 (harness-ui-compact-outcome
+                  '(:kind "compaction" :meta (:compaction "truncate" :input-tokens 84500)))))
+  (should (equal "Starting afresh…" (harness-ui-compact-doing 'fresh)))
+  (should (equal "Cutting the oldest context away…" (harness-ui-compact-doing 'truncate)))
+  (should (equal "Compacting the conversation into a brief summary…" (harness-ui-compact-doing 'brief))))
 
-(ert-deftest harness-ui-compact-waits-for-the-turn ()
-  "A session running a turn, or blocked inside one, is not compacted."
-  (let ((harness-ui--sessions (make-hash-table :test 'equal)))
-    (dolist (status '("running" "blocked" running))
-      (puthash "s1" (list :id "s1" :status status) harness-ui--sessions)
-      (should-error (harness-compact "s1" 'transcript) :type 'user-error))))
+(ert-deftest harness-ui-compact-asks-how-when-the-turn-is-running ()
+  "A session running a turn is asked to interrupt the step and compact
+now, or to queue the compaction for the turn's next boundary;
+cancelling does nothing.  An idle session still compacts now."
+  (let ((harness-ui--sessions (make-hash-table :test 'equal))
+        calls asked)
+    ;; Running, blocked inside a turn, or the symbol: all a running turn.
+    (should (harness-ui-compact-running-p '(:status "running")))
+    (should (harness-ui-compact-running-p '(:status "blocked")))
+    (should (harness-ui-compact-running-p '(:status running)))
+    (should-not (harness-ui-compact-running-p '(:status "idle")))
+    (puthash "s1" (list :id "s1" :name "Parser work" :status "running") harness-ui--sessions)
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (method params &optional _callback _on-error) (push (list method params) calls)))
+              ((symbol-function 'read-multiple-choice)
+               (lambda (prompt choices &rest _) (setq asked (list prompt choices)) (list ?q nil))))
+      (harness-compact "s1" 'transcript)
+      (should (equal "Compacting “Parser work”, which is running a turn" (car asked)))
+      (should (equal '(?i ?q ?c) (mapcar #'car (cadr asked))))
+      (should (equal '(:kind "transcript" :queue t)
+                     (plist-get (cadr (car calls)) :opts))))
+    ;; Interrupting: the turn is cancelled and the compaction runs once it is over.
+    (setq calls nil asked nil)
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (method params &optional _callback _on-error) (push (list method params) calls)))
+              ((symbol-function 'read-multiple-choice) (lambda (&rest _) (list ?i nil))))
+      (harness-compact "s1" 'transcript)
+      (should (equal '(:kind "transcript" :interrupt t)
+                     (plist-get (cadr (car calls)) :opts))))
+    ;; Cancelled: nothing is sent.
+    (setq calls nil)
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (method params &optional _callback _on-error) (push (list method params) calls)))
+              ((symbol-function 'read-multiple-choice) (lambda (&rest _) (list ?c nil))))
+      (harness-compact "s1" 'transcript))
+    (should-not calls)
+    ;; Idle: no question, and `:idle' as before.
+    (puthash "s1" (list :id "s1" :status "idle") harness-ui--sessions)
+    (setq calls nil)
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (method params &optional _callback _on-error) (push (list method params) calls))))
+      (harness-compact "s1" 'transcript))
+    (should (equal '(:kind "transcript" :idle t)
+                   (plist-get (cadr (car calls)) :opts)))))
 
 ;;;; In a chat
 
@@ -176,6 +254,18 @@ the model."
          (clrhash harness-chat--buffers)
          (dolist (c (copy-sequence harness-acp--clients))
            (harness-acp--drop-client c))))))
+
+(defun harness-ui-compact-test--menu-command ()
+  "Return the command the harness menu binds C to, or nil."
+  (plist-get (cdr (transient-get-suffix 'harness-menu "C")) :command))
+
+(ert-deftest harness-ui-compact-menu-entry ()
+  "The compact command is in the harness menu, under C, and stays there
+when the module is initialised again."
+  (harness-ui-compact-test-with
+    (should (eq 'harness-compact (harness-ui-compact-test--menu-command)))
+    (harness-ui-compact--init)
+    (should (eq 'harness-compact (harness-ui-compact-test--menu-command)))))
 
 (defun harness-ui-compact-test--session ()
   "Create a demo session with a conversation of twenty messages; return its id."
@@ -249,7 +339,7 @@ what kind of compaction it was.  /compact alone asks, with the costs."
           (harness-ui-compact-test--send buffer "/compact")
           (harness-test-wait (lambda () (= 2 (length (harness-ui-compact-test--compactions sid)))) 10
                              "the brief summary"))
-        (should (equal '(?b ?s ?t ?q) (mapcar #'car choices)))
+        (should (equal '(?b ?s ?t ?f ?c ?q) (mapcar #'car choices)))
         ;; The demo model is priced: both summaries say what they cost.
         (should (string-match-p "\\`brief summary (~\\$[0-9.]+)\\'" (cadr (assq ?b choices))))
         (should (string-match-p "\\`summary (~\\$[0-9.]+)\\'" (cadr (assq ?s choices))))
@@ -262,6 +352,15 @@ what kind of compaction it was.  /compact alone asks, with the costs."
                                                     (harness-ui-model-label "demo:scripted"))))
                          5 "the brief summary in the chat")
       (with-current-buffer buffer (should (equal "" (harness-compose-text))))
+      ;; A fresh start: no request, a note saying nothing was carried over.
+      (harness-ui-compact-test--send buffer "/compact fresh")
+      (harness-test-wait (lambda () (= 3 (length (harness-ui-compact-test--compactions sid)))) 5
+                         "the fresh start")
+      (let ((node (nth 2 (harness-ui-compact-test--compactions sid))))
+        (should (equal "fresh" (harness-node-compaction-kind node)))
+        (should (string-match-p "not carried over" (plist-get node :content))))
+      (harness-test-wait (lambda () (harness-ui-compact-test--shows buffer "context compacted to start afresh"))
+                         5 "the fresh start in the chat")
       ;; A kind that is none keeps the box as typed.
       (with-current-buffer buffer
         (goto-char harness-compose-end)

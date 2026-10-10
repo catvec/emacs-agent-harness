@@ -249,9 +249,9 @@
           (should (equal "go on" (car (last texts)))))))))
 
 (ert-deftest harness-handoff-compact-new-summarises-on-the-new-model ()
-  "The new model writes the summary when the old one cannot, from a bounded context.
-Only the first and last messages of the session go to it, and the
-summary it writes opens the new conversation with a lossy-handoff note."
+  "The new model writes the summary when the old one cannot, from the narrative.
+Every message goes to it, tools named in brief, and the summary it
+writes opens the new conversation with a lossy-handoff note."
   (harness-handoff-test-with
     (let ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
                                         :model "demo:scripted")
@@ -264,8 +264,8 @@ summary it writes opens the new conversation with a lossy-handoff note."
         (should (equal "hosted:m" (plist-get result :summarizer)))
         (should (eq 'sample (plist-get result :context)))
         (should (equal "hosted:m" (plist-get (harness-call 'session/get sid) :model)))
-        ;; The new model got one message of text: the start and end of the
-        ;; conversation, with what was left out said so.
+        ;; The new model got one message of text: the conversation's
+        ;; narrative, tools named in brief.
         (should (= 1 (length harness-handoff-test--requests)))
         (let* ((request (car harness-handoff-test--requests))
                (texts (harness-handoff-test--last-user-texts request)))
@@ -273,9 +273,8 @@ summary it writes opens the new conversation with a lossy-handoff note."
           (should-not (plist-get request :provider-state))
           (should (= 2 (length texts)))
           (let ((text (car texts)))
-            (dolist (i '(0 3 8 19)) (should (string-match-p (format "message %d" i) text)))
-            (dolist (i '(4 5 6 7)) (should-not (string-match-p (format "message %d" i) text)))
-            (should (string-match-p "left out the 4 messages" text)))
+            (dolist (i (number-sequence 0 19)) (should (string-match-p (format "message %d" i) text)))
+            (should-not (string-match-p "left out" text)))
           (should (string-match-p "Summarize the conversation above" (cadr texts))))
         ;; Its summary opens the session, marked as a lossy handoff.
         (let ((compaction (cl-find 'compaction (harness-call 'session/nodes sid)
@@ -445,7 +444,10 @@ goes on in it, so it is asked about and handed over like the others."
            (ids (lambda (checks) (sort (mapcar (lambda (c) (plist-get c :id)) checks) #'string<))))
       (harness-call 'session/deactivate closed)
       (harness-call 'session/deactivate history)
-      (harness-register-method 'task/session-ids (lambda (&optional _filter) (list closed)))
+      (harness-register-method 'task/session-ids
+                               (lambda (&optional filter)
+                                 (unless (equal '("done") (plist-get filter :columns))
+                                   (list closed))))
       ;; Without `:tasks' only the open one; with it the task's too, but
       ;; not a closed session no current task goes on in.
       (should (equal (list open) (funcall ids (harness-call 'handoff/check-all "hosted:m" '(:active t)))))
@@ -463,6 +465,27 @@ goes on in it, so it is asked about and handed over like the others."
       (should (equal "demo:scripted" (plist-get (harness-call 'session/get history) :model)))
       ;; Switched once: the second time nothing is left to switch.
       (should-not (harness-call 'handoff/switch-all "hosted:m" '(:active t :tasks t))))))
+
+(ert-deftest harness-handoff-all-leaves-the-sessions-of-completed-tasks-alone ()
+  "A completed task's session is not checked nor switched with `:tasks',
+though it is still active; the current tasks' sessions are."
+  (harness-handoff-test-with
+    (let* ((open (harness-handoff-test--session t))
+           (done (harness-handoff-test--session t))
+           (task (harness-handoff-test--session t))
+           (ids (lambda (checks) (sort (mapcar (lambda (c) (plist-get c :id)) checks) #'string<))))
+      (harness-call 'session/deactivate task)
+      (harness-register-method 'task/session-ids
+                               (lambda (&optional filter)
+                                 (if (equal '("done") (plist-get filter :columns))
+                                     (list done)
+                                   (list task))))
+      (should (equal (sort (list open task) #'string<)
+                     (funcall ids (harness-call 'handoff/check-all "hosted:m" '(:active t :tasks t)))))
+      (should (equal (sort (list open task) #'string<)
+                     (sort (copy-sequence (harness-call 'handoff/switch-all "hosted:m" '(:active t :tasks t) 'none))
+                           #'string<)))
+      (should (equal "demo:scripted" (plist-get (harness-call 'session/get done) :model))))))
 
 (ert-deftest harness-handoff-over-acp ()
   "A client checks and switches with string arguments, as the UI does."

@@ -416,7 +416,7 @@ it makes until their branch is merged."
     (if (not (harness-json-true-p (plist-get wt :locked)))
         (harness-ui-call "_harness/worktree/lock" (list :root root :path path)
                          (lambda (_) (funcall reload "Locked %s")))
-      (when (yes-or-no-p (format "Unlock worktree %s%s?  A prune that cannot see its directory would drop it. "
+      (when (yes-or-no-p (format "Unlock worktree %s%s, letting a prune that cannot see its directory drop it? "
                                  (abbreviate-file-name path)
                                  (if (stringp (plist-get wt :lock-reason))
                                      (format " (locked: %s)" (plist-get wt :lock-reason))
@@ -477,9 +477,9 @@ before the harness locked them, or registered again after a prune."
                                  (message "Forked into %s" (abbreviate-file-name path))))))))))))
 
 (defun harness-ui-worktree--show-queue (parent-id)
-  "Fetch the merge queue of PARENT-ID and show it in the mode line."
+  "Fetch the merge queue of PARENT-ID, a session, and show it in the mode line."
   (let ((buf (current-buffer)))
-    (harness-ui-call "_harness/merge/queue" (list :parent-id parent-id)
+    (harness-ui-call "_harness/merge/queue" (list :target parent-id)
                      (lambda (items)
                        (when (buffer-live-p buf)
                          (with-current-buffer buf
@@ -499,7 +499,7 @@ before the harness locked them, or registered again after a prune."
                                                 (lambda (s) (memq s sessions))))))
          (child (plist-get session :id))
          (parent (plist-get session :parent-id)))
-    (harness-ui-call "_harness/merge/enqueue" (list :child-id child :parent-id parent)
+    (harness-ui-call "_harness/merge/enqueue" (list :child-id child :target parent)
                      (lambda (position)
                        (message "Queued %s for merging into %s (position %s)"
                                 (or (plist-get session :name) (substring child 0 8))
