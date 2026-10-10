@@ -27,8 +27,10 @@
 ;; - `session_move' moves a session, this one by default, to another
 ;;   working directory and that directory's project.  The user confirms
 ;;   every move, in every permission mode (see session_move below).
-;; - `session_wait' waits until sessions stop running (or become idle,
-;;   blocked, start running, or change at all).
+;; - `session_wait' does not wait: it registers a wake-up and returns at
+;;   once, and the session is sent a message of its own when the other
+;;   sessions stop running (or become idle, blocked, start running, or
+;;   change at all).
 ;; - `set_non_interactive' turns non-interactive mode on or off for
 ;;   this session, another one, or every current session and task of
 ;;   every project, with `session/set-all' and `task/set-all' as the
@@ -52,9 +54,24 @@
 ;; to ask, so its request is denied.  Turning it off needs no one's
 ;; leave.
 ;;
-;; Waits never block: each is an entry in `harness-tools-sessions--waiters'
-;; re-checked by one subscriber whenever a session or task changes, and
-;; settled by its condition, its timeout, or the end of the waiting turn.
+;; Waits run without blocking the harness: each is an entry in
+;; `harness-tools-sessions--waiters' re-checked by one subscriber
+;; whenever a session or task changes, and settled by its condition, its
+;; timeout, or the end of the waiting turn.  A wait made by a call
+;; (`task_wait') settles with a result for its promise; a registered one
+;; (`session_wait') outlives the turn that made it and sends the session
+;; a message of its own when an event settles it.
+;;
+;; The subscriber is not the only way a wait is looked at: a slow safety
+;; re-check (`harness-tools-sessions-wait-recheck') runs while any wait
+;; does, so a change that no subscribed event announced -- a subscriber
+;; lost to a reload, a session settled by a module of its own, a finish
+;; that happened before the wait was made -- cannot leave a wait or a
+;; registration while its condition already holds.  This matters most
+;; for a sub-agent: `spawn_agent' returns as soon as its child starts,
+;; but a wait made once that child has finished has nothing left to
+;; announce, and `--reached-p' settles a changed wait on an idle or
+;; closed session: nothing new of its own is coming from it.
 
 ;;; Code:
 
@@ -68,10 +85,25 @@
 (defvar harness-state-directory)
 
 (defconst harness-tools-sessions--wait-default 600
-  "Seconds `session_wait' and `task_wait' wait when the call gives no timeout.")
+  "Seconds `task_wait' waits when the call gives no timeout.")
 
 (defconst harness-tools-sessions--wait-max 3600
   "Longest wait, in seconds, a `session_wait' or `task_wait' call may ask for.")
+
+(defcustom harness-tools-sessions-wait-recheck 2
+  "Seconds between the safety re-checks of running waits, or nil for none.
+A wait is settled the moment its condition first holds, as the events
+that announce a session's or task's changes tell the module to look
+again; this is a floor under those events, so a change none of them
+announced -- a subscriber lost to a reload, a status a module set on its
+own, a finish that happened before the wait was made -- cannot leave a
+wait or a registration while its condition already holds.  The
+re-check is a walk over the running waits; with none running, nothing
+runs."
+  :type '(choice (const :tag "No safety re-check" nil)
+                 (number :tag "Seconds"))
+  :safe (lambda (v) (or (null v) (and (numberp v) (> v 0))))
+  :group 'harness)
 
 (defconst harness-tools-sessions--grep-program "grep"
   "Program `session_search' runs over the transcript logs.")
@@ -223,7 +255,8 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
       status)))
 
 (defun harness-tools-sessions--list (input ctx)
-  "Handler of session_list."
+  "Handler of session_list.
+INPUT is the tool call's input plist and CTX its context."
   (let* ((scope (harness-tools-sessions--scope input ctx))
          (status (let ((s (plist-get input :status))) (and s (intern s))))
          (kind (let ((k (plist-get input :kind))) (and k (intern k))))
@@ -346,7 +379,8 @@ A line of STDOUT holds a whole node, which can be megabytes long:
     (nreverse hits)))
 
 (defun harness-tools-sessions--search (input ctx)
-  "Handler of session_search."
+  "Handler of session_search.
+INPUT is the tool call's input plist and CTX its context."
   (let* ((query (or (plist-get input :query) ""))
          (regexp (harness-json-true-p (plist-get input :regexp)))
          (scope (harness-tools-sessions--scope input ctx))
@@ -441,7 +475,8 @@ A line of STDOUT holds a whole node, which can be megabytes long:
 ;;;; session_read
 
 (defun harness-tools-sessions--read (input _ctx)
-  "Handler of session_read."
+  "Handler of session_read.
+INPUT is the tool call's input plist."
   (let* ((sid (harness-tools-sessions--resolve (plist-get input :session_id)))
          (s (harness-call 'session/get sid))
          (limit (or (plist-get input :limit) 20))
@@ -669,7 +704,8 @@ Its text is cut to CHARS; the nodes around it are shown short."
     (harness-sender-session (or (ignore-errors (harness-call 'session/get sid)) (list :id sid)))))
 
 (defun harness-tools-sessions--send (input ctx)
-  "Handler of session_send."
+  "Handler of session_send.
+INPUT is the tool call's input plist and CTX its context."
   (let* ((sid (harness-tools-sessions--other (plist-get input :session_id) ctx "message"))
          (text (or (plist-get input :message) ""))
          (queue (equal (plist-get input :mode) "queue"))
@@ -715,7 +751,8 @@ Its text is cut to CHARS; the nodes around it are shown short."
 ;;;; session_control
 
 (defun harness-tools-sessions--control (input ctx)
-  "Handler of session_control."
+  "Handler of session_control.
+INPUT is the tool call's input plist and CTX its context."
   (let* ((action (or (plist-get input :action) ""))
          (sid (harness-tools-sessions--other (plist-get input :session_id) ctx action)))
     (pcase action
@@ -1030,7 +1067,40 @@ CTX is the tool context, which names the calling session."
 (defvar harness-tools-sessions--waiters (make-hash-table :test 'equal)
   "Wait id -> (:check FN :finish FN :session-id ID) for running waits.
 CHECK returns non-nil once the wait's condition holds; FINISH settles
-the wait with a reason symbol (met, timeout or cancelled).")
+the wait, taking `met', `timeout' or `cancelled'.  A wait made by a
+call (`task_wait') settles with a result for its promise.  One
+registered by `session_wait' carries `:wake' t (and the `:label' its
+outstanding line shows): it outlives the turn that made it and wakes
+its session with a message when an event settles it.")
+
+(defun harness-tools-sessions--wait-title (sid)
+  "Return how a wait's note names session SID."
+  (let* ((short (harness-tools-short-id sid))
+         (session (ignore-errors (harness-call 'session/get sid)))
+         (name (plist-get session :name)))
+    (if (and (stringp name) (not (harness-string-blank-p name)))
+        (format "%s (%s): " name short)
+      (format "%s: " short))))
+
+(defun harness-tools-sessions--note-watch (ctx ids)
+  "Show what the sessions IDS are doing, under the call CTX runs.
+Each session's note is made when an event about it arrives, and the
+call's note carries all of them (see `harness-tools-session-note').
+Return a function that stops the watching; nothing happens, and it is
+a no-op, when the call can show no note."
+  (if (not (plist-get ctx :note))
+      #'ignore
+    (let* ((notes (make-hash-table :test 'equal))
+           (push (lambda ()
+                   (harness-tools-note
+                    ctx (string-join (delq nil (mapcar (lambda (sid) (gethash sid notes)) ids)) "\n"))))
+           (stops (mapcar (lambda (sid)
+                            (harness-tools-watch-session
+                             sid
+                             (lambda (text) (puthash sid text notes) (funcall push))
+                             (list :title (harness-tools-sessions--wait-title sid) :recap t)))
+                          ids)))
+      (lambda () (mapc #'funcall stops)))))
 
 (defun harness-tools-sessions--poke (&rest _)
   "Re-check every running wait (subscribed to session and task events)."
@@ -1039,13 +1109,65 @@ the wait with a reason symbol (met, timeout or cancelled).")
                (funcall (plist-get w :finish) 'met)))
            (copy-hash-table harness-tools-sessions--waiters)))
 
-(defun harness-tools-sessions--on-turn-ended (session-id &rest _)
-  "Settle the waits made by SESSION-ID's turn, which has ended, then re-check."
+(defvar harness-tools-sessions--recheck-timer nil
+  "Timer of the safety re-check of the running waits, or nil for none.")
+
+(defun harness-tools-sessions--arm-recheck ()
+  "Keep the waits' safety re-check armed while any wait runs.
+See `harness-tools-sessions-wait-recheck': this is the floor under the
+events that settle waits, so none can be left by a change nothing
+announced."
+  (when (and harness-tools-sessions-wait-recheck
+             (not harness-tools-sessions--recheck-timer)
+             (> (hash-table-count harness-tools-sessions--waiters) 0))
+    (setq harness-tools-sessions--recheck-timer
+          (run-at-time harness-tools-sessions-wait-recheck nil
+                       #'harness-tools-sessions--recheck))))
+
+(defun harness-tools-sessions--recheck ()
+  "Look at every running wait once, and keep the next re-check armed."
+  (setq harness-tools-sessions--recheck-timer nil)
+  (harness-tools-sessions--poke)
+  (harness-tools-sessions--arm-recheck))
+
+(defun harness-tools-sessions--disarm-recheck ()
+  "Stop the safety re-check of the waits when none of them waits any more."
+  (when (and harness-tools-sessions--recheck-timer
+             (zerop (hash-table-count harness-tools-sessions--waiters)))
+    (cancel-timer harness-tools-sessions--recheck-timer)
+    (setq harness-tools-sessions--recheck-timer nil)))
+
+(defun harness-tools-sessions--on-turn-ended (session-id reason &rest _)
+  "Settle the waits of SESSION-ID, whose turn ended with REASON, then re-check.
+A wait made by a call of the turn settles as cancelled: its call went
+with the turn.  A registered wait (`harness-tools-sessions--watch')
+outlives it -- the message it sends is what settles it -- except after a
+turn the user cancelled, when it goes too: a turn the user stopped is
+not one to start another on (as `harness-supervisor--flush' has it)."
   (maphash (lambda (_ w)
-             (when (equal (plist-get w :session-id) session-id)
+             (when (and (equal (plist-get w :session-id) session-id)
+                        (or (not (plist-get w :wake))
+                            (eq reason 'cancelled)))
                (funcall (plist-get w :finish) 'cancelled)))
            (copy-hash-table harness-tools-sessions--waiters))
   (harness-tools-sessions--poke))
+
+(defun harness-tools-sessions--outstanding (value session-id)
+  "Add what SESSION-ID waits for to VALUE (see `agent/outstanding').
+A registered wait (`session_wait') outlives the turn that made it, so a
+task whose session's turn ended stays active, waiting, while this says
+something."
+  (let (labels)
+    (maphash (lambda (_ w)
+               (when (and (plist-get w :wake) (equal (plist-get w :session-id) session-id))
+                 (push (plist-get w :label) labels)))
+             harness-tools-sessions--waiters)
+    (if (null labels)
+        value
+      (let ((text (format "Waiting on %s" (string-join (nreverse labels) ", "))))
+        (if (and (stringp value) (not (harness-string-blank-p value)))
+            (concat value "; " text)
+          text)))))
 
 (defun harness-tools-sessions--wait (ctx timeout check report)
   "Return a promise of REPORT's result once CHECK holds or TIMEOUT seconds pass.
@@ -1058,12 +1180,14 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
                      (when (gethash id harness-tools-sessions--waiters)
                        (remhash id harness-tools-sessions--waiters)
                        (when timer (cancel-timer timer))
+                       (harness-tools-sessions--disarm-recheck)
                        (funcall resolve (condition-case err (funcall report why)
                                           (error (harness-tool-error (harness-error-message err)))))))))
       (if (funcall check)
           (funcall resolve (funcall report 'met))
         (puthash id (list :check check :finish finish :session-id (plist-get ctx :session-id))
                  harness-tools-sessions--waiters)
+        (harness-tools-sessions--arm-recheck)
         (setq timer (run-at-time timeout nil finish 'timeout))))))
 
 (defun harness-tools-sessions--timeout (input)
@@ -1072,8 +1196,110 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
     (max 1 (min harness-tools-sessions--wait-max
                 (if (numberp v) v harness-tools-sessions--wait-default)))))
 
+(defun harness-tools-sessions--wake-timeout (input)
+  "Return the seconds INPUT asks to be woken after without its condition, or nil.
+A registered wait has no timeout of its own: it is woken by its
+condition, however long that takes, unless the call gives one."
+  (let ((v (plist-get input :timeout_seconds)))
+    (and (numberp v) (> v 0) (min harness-tools-sessions--wait-max v))))
+
+(defun harness-tools-sessions--until-phrase (until)
+  "Return UNTIL, a wait's condition, as a few words."
+  (pcase until
+    ("stopped" "stop running")
+    ("idle" "become idle")
+    ("blocked" "wait on the user")
+    ("running" "start running")
+    ("changed" "change in any way")
+    (_ (format "reach %s" until))))
+
+(defun harness-tools-sessions--wait-condition (ids until any)
+  "Return how a wait on IDS until UNTIL reads, as a clause.
+ANY says only one of them has to reach it."
+  (format "%s %s %s"
+          (if any "any of" "all of")
+          (string-join (mapcar #'harness-tools-sessions--short ids) ", ")
+          (harness-tools-sessions--until-phrase until)))
+
+(defun harness-tools-sessions--wait-report (ids until why started &optional timeout)
+  "Return the report of a wait on IDS that settled WHY, started at STARTED.
+TIMEOUT is the seconds it was given, for the text of a timeout.  The
+text is the same whether the call returns it (the condition already
+held) or a later message brings it (the wait was registered), so the
+model reads it the same either way."
+  (concat (pcase why
+            ('met (format "Done waiting after %s (until %s)."
+                          (harness-format-duration (- (float-time) started)) until))
+            ('timeout (format "Still waiting after %ss; the condition (until %s) did not hold. Register session_wait again to keep waiting."
+                              timeout until))
+            (_ "The wait was dropped."))
+          "\n\n"
+          (mapconcat (lambda (sid) (harness-tools-sessions--describe sid)) ids "\n\n")))
+
+(defun harness-tools-sessions--wake (session-id text)
+  "Wake SESSION-ID with TEXT, a message of the harness's own, sent soon.
+An idle session starts a turn on it and a running one is steered, as a
+supervisor's report arrives; a session that is gone is left alone.  The
+message is from the harness (\"session wait\"), so transcripts do not
+show it as the user's."
+  (when (harness-call 'session/exists-p session-id)
+    (harness-run-soon
+     (lambda ()
+       (when (harness-call 'session/exists-p session-id)
+         (harness-catch
+          (harness-call-async 'agent/prompt session-id text (list :from (harness-sender-system "session wait")))
+          (lambda (err)
+            (harness-log 'warn "tools-sessions: waking %s failed: %s"
+                         session-id (harness-error-message err)))))))))
+
+(defun harness-tools-sessions--watch (ctx input ids until any check report)
+  "Register a wake-up for the session in CTX and return its tool result.
+CHECK returns non-nil once the wait's condition holds (IDS until UNTIL,
+ANY of them enough); the session is then woken with (REPORT `met') as a
+message of its own, and reported to `agent/outstanding' as \"Waiting on
+IDS\" until then.  The registration outlives the turn that made it: only
+the event that settles it, its timeout (INPUT's `timeout_seconds'), or a
+turn the user cancelled ends it (see
+`harness-tools-sessions--on-turn-ended').  The call itself returns at
+once and blocks nothing."
+  (let* ((caller (plist-get ctx :session-id))
+         (id (harness-short-id 12))
+         (timeout (harness-tools-sessions--wake-timeout input))
+         (timer nil)
+         (finish (lambda (why)
+                   (when (gethash id harness-tools-sessions--waiters)
+                     (remhash id harness-tools-sessions--waiters)
+                     (when timer (cancel-timer timer))
+                     (harness-tools-sessions--disarm-recheck)
+                     (when (memq why '(met timeout))
+                       (harness-tools-sessions--wake caller (funcall report why)))))))
+    (if (funcall check)
+        (harness-tool-ok (funcall report 'met))
+      (puthash id (list :check check :finish finish :session-id caller :wake t
+                        :label (string-join (mapcar #'harness-tools-sessions--short ids) ", "))
+               harness-tools-sessions--waiters)
+      (harness-tools-sessions--arm-recheck)
+      (when timeout (setq timer (run-at-time timeout nil finish 'timeout)))
+      (harness-tool-ok
+       (format (concat "Waiting in the background: you will be woken with a message when %s. "
+                       "Carry on with other work, and do not poll.%s")
+               (harness-tools-sessions--wait-condition ids until any)
+               (if timeout
+                   (format " If that has not happened in %ss, you are woken then instead." timeout)
+                 ""))))))
+
 (defun harness-tools-sessions--reached-p (sid until baseline)
-  "Non-nil when session SID satisfies UNTIL; BASELINE is its state at the start."
+  "Non-nil when session SID satisfies UNTIL; BASELINE is its state at the start.
+A `changed' wait is met by any new state of the session and also by an
+idle or closed one: a session that is not running and not waiting on
+the user has nothing new of its own coming, so asking for a change that
+can never come would only leave the wait or its registration unsettled
+(a registered wait may have no timeout at all).  It is what a wait made
+on a sub-agent meets: `spawn_agent' returns as soon as its child
+starts, but a wait can still be made once that child has finished -- by
+a session that only looks later, or a third one -- and then nothing is
+left to announce.  A blocked session is left to the wait: its turn is
+not over, and it changes when its question is answered."
   (if (not (harness-call 'session/exists-p sid))
       t
     (let ((status (harness-tools-sessions--status sid)))
@@ -1081,7 +1307,8 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
         ("idle" (eq status 'idle))
         ("blocked" (eq status 'blocked))
         ("running" (eq status 'running))
-        ("changed" (not (equal baseline (harness-tools-sessions--state sid))))
+        ("changed" (or (memq status '(idle inactive))
+                       (not (equal baseline (harness-tools-sessions--state sid)))))
         (_ (not (eq status 'running)))))))
 
 (defun harness-tools-sessions--state (sid)
@@ -1092,41 +1319,37 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
                (mapcar (lambda (p) (plist-get p :id)) (plist-get s :pending))))))
 
 (defun harness-tools-sessions--session-wait (input ctx)
-  "Handler of session_wait."
+  "Handler of session_wait: register a wake-up for the sessions INPUT names.
+The call returns at once, with the report itself when the condition
+already holds and a registration otherwise; when an event makes the
+condition hold, the session in CTX is woken with the same report as a
+message of the harness's own."
   (let* ((ids (mapcar (lambda (r) (harness-tools-sessions--other r ctx "wait on"))
                       (harness-tools-sessions--refs input :session_id :session_ids)))
          (until (or (plist-get input :until) "stopped"))
          (any (equal (plist-get input :mode) "any"))
          (baselines (mapcar #'harness-tools-sessions--state ids))
-         (timeout (harness-tools-sessions--timeout input))
+         (timeout (harness-tools-sessions--wake-timeout input))
          (started (float-time)))
     (unless ids (signal 'harness-error (list "session_wait needs session_id or session_ids")))
-    (harness-tools-sessions--wait
-     ctx timeout
+    (harness-tools-sessions--watch
+     ctx input ids until any
      (lambda ()
        (funcall (if any #'cl-some #'cl-every)
                 (lambda (pair) (harness-tools-sessions--reached-p (car pair) until (cdr pair)))
                 (cl-mapcar #'cons ids baselines)))
-     (lambda (why)
-       (harness-tool-ok
-        (concat (pcase why
-                  ('met (format "Done waiting after %s (until %s)." (harness-format-duration (- (float-time) started)) until))
-                  ('timeout (format "Still waiting after %ss; the condition (until %s) did not hold. Call session_wait again to keep waiting." timeout until))
-                  (_ "The wait was interrupted."))
-                "\n\n"
-                (mapconcat (lambda (sid) (harness-tools-sessions--describe sid)) ids "\n\n")))))))
+     (lambda (why) (harness-tools-sessions--wait-report ids until why started timeout)))))
 
 (harness-define-tool "session_wait"
   :label "Wait for sessions"
-  :description "Wait for other sessions without polling. until=stopped (default) returns when each session is no longer running (its turn ended, it is blocked on the user, or it closed); idle, blocked and running wait for that status; changed waits for any new status, message or pending request. mode=all (default) waits for every session, any for the first. Returns each session's status, what it waits on and its last reply; on timeout it returns the same report, not an error."
+  :description "Wait for other sessions without blocking: the call registers a wake-up and returns at once, and when the condition holds the session is sent a message of the harness's own reporting the sessions. until=stopped (default) waits for a session to stop running (its turn ended: it is idle, blocked on the user, or closed); idle, blocked and running wait for that status; changed waits for any new status, message or pending request, and is met at once by an idle or closed session, whose own work is over and from which nothing new of its own is coming -- so a wait on a sub-agent that has already finished settles rather than ask for a change that can never come. mode=all (default) waits for every session, any for the first. The registration outlives the turn that made it, so nothing is left hanging; with timeout_seconds you are woken with the report anyway if the condition still does not hold by then, and the registration ends. If the condition already holds the report is the call's result. Never poll or wait in a loop: register, and carry on."
   :schema '(:type "object"
             :properties (:session_id (:type "string" :description "A session id, unique id prefix or unique name.")
                          :session_ids (:type "array" :items (:type "string") :description "Several sessions.")
                          :until (:type "string" :enum ("stopped" "idle" "blocked" "running" "changed"))
                          :mode (:type "string" :enum ("all" "any"))
-                         :timeout_seconds (:type "number" :description "Give up after this long (default 600, at most 3600).")))
+                         :timeout_seconds (:type "number" :description "Wake me anyway after this long, without blocking (default: wait for the condition, however long it takes).")))
   :kind 'read
-  :timeout 3700
   :subject (lambda (input) (mapconcat #'harness-tools-sessions--short
                                       (harness-tools-sessions--refs input :session_id :session_ids) " "))
   :handler #'harness-tools-sessions--session-wait)
@@ -1194,10 +1417,31 @@ the line says \"(this task)\"."
              (let ((rounds (length (plist-get task :feedback))))
                (if (> rounds 0) (format ", sent back %d time%s" rounds (if (= rounds 1) "" "s")) "")))
      (if (plist-get task :archived) ", archived" "")
+     (if (and (eq (plist-get task :state) 'pending)
+              (harness-json-true-p (plist-get task :queue-suspended)))
+         ", waiting while the queue is suspended" "")
      (if pending (format "\n    waiting on the user: %s" pending) ""))))
 
+(defun harness-tools-sessions--task-queue-line (tasks)
+  "Say which of TASKS' projects have a suspended pending queue, else nothing.
+A suspended queue starts no waiting task on its own: one waits until
+its queue is resumed or it is started by hand."
+  (let ((projects (cl-remove-duplicates
+                   (cl-loop for task in tasks
+                            when (harness-json-true-p (plist-get task :queue-suspended))
+                            collect (or (plist-get task :project) (plist-get task :cwd)))
+                   :test #'equal)))
+    (cond
+     ((null projects) "")
+     ((null (cdr projects))
+      (format "Queue suspended for %s: its waiting tasks start only when one is started by hand or the queue is resumed.\n"
+              (abbreviate-file-name (directory-file-name (car projects)))))
+     (t (format "Queues suspended: %s; their waiting tasks start only by hand until resumed.\n"
+                (mapconcat (lambda (p) (abbreviate-file-name (directory-file-name p))) projects ", "))))))
+
 (defun harness-tools-sessions--task-list (input ctx)
-  "Handler of task_list."
+  "Handler of task_list.
+INPUT is the tool call's input plist and CTX its context."
   (harness-tools-sessions--tasks-p)
   (let* ((cwd (unless (harness-json-true-p (plist-get input :all_projects)) (plist-get ctx :cwd)))
          (column (let ((c (plist-get input :column))) (and c (intern c))))
@@ -1212,16 +1456,17 @@ the line says \"(this task)\"."
          (hidden (- (length tasks) (length shown)))
          (self (plist-get ctx :session-id)))
     (harness-tool-ok
-     (if tasks
-         (concat (if (> hidden 0)
-                     (format "… %d older task%s not shown; raise limit to see them\n" hidden (if (= hidden 1) "" "s"))
-                   "")
-                 (mapconcat (lambda (task) (harness-tools-sessions--task-line task self)) shown "\n"))
-       "No tasks match."))))
+     (concat (harness-tools-sessions--task-queue-line tasks)
+             (if tasks
+                 (concat (if (> hidden 0)
+                             (format "… %d older task%s not shown; raise limit to see them\n" hidden (if (= hidden 1) "" "s"))
+                           "")
+                         (mapconcat (lambda (task) (harness-tools-sessions--task-line task self)) shown "\n"))
+               "No tasks match.")))))
 
 (harness-define-tool "task_list"
   :label "List tasks"
-  :description "List the task board: tasks (one session each, usually in its own worktree, or in the project's main tree when submitted with main_tree, done once the user verified the work and it merged) with their title (their session's name, else the one a task is given as soon as it is submitted), prompt, column (pending, needs-input, active, review, merging, done), state, priority (shown when it is low or high rather than medium; waiting tasks start highest priority first), when they were created and finished, session, branch, merge status and review status. A task in review has finished and waits for the user to verify it or send it back; one in merging holds a place in the merge queue (queued, merging, or its session resolving conflicts). Defaults to this project's unarchived tasks, oldest first; limit keeps the most recent ones. The task this session works on says (this task). Inspect a task's work with session_read on its session."
+  :description "List the task board: tasks (one session each, usually in its own worktree, or in the project's main tree when submitted with main_tree, done once the user verified the work and it merged) with their title (their session's name, else the one a task is given as soon as it is submitted), prompt, column (pending, needs-input, active, review, merging, done), state, priority (shown when it is low or high rather than medium; waiting tasks start highest priority first), when they were created and finished, session, branch, merge status and review status. A task in review has finished and waits for the user to verify it or send it back; one in merging holds a place in the merge queue (queued, merging, or its session resolving conflicts). A suspended queue (task_control suspend-queue) is named before the tasks, and its waiting tasks say so: they start only by hand (task_control start) or when the queue is resumed. Defaults to this project's unarchived tasks, oldest first; limit keeps the most recent ones. The task this session works on says (this task). Inspect a task's work with session_read on its session."
   :schema '(:type "object"
             :properties (:column (:type "string" :enum ("pending" "needs-input" "active" "review" "merging" "done"))
                          :include_archived (:type "boolean" :description "Include archived tasks (default false).")
@@ -1233,7 +1478,8 @@ the line says \"(this task)\"."
   :handler #'harness-tools-sessions--task-list)
 
 (defun harness-tools-sessions--task-submit (input ctx)
-  "Handler of task_submit."
+  "Handler of task_submit.
+INPUT is the tool call's input plist and CTX its context."
   (harness-tools-sessions--tasks-p)
   (let* ((prompt (or (plist-get input :prompt) ""))
          (cwd (or (plist-get input :cwd) (plist-get ctx :cwd)))
@@ -1253,7 +1499,7 @@ the line says \"(this task)\"."
 
 (harness-define-tool "task_submit"
   :label "Submit task"
-  :description "Add a task to the task board. The task runs in its own session (in a git project, in a fresh worktree whose branch is merged back through the merge queue) with the task defaults for permissions; it starts when its project has a free slot (the limit on running tasks applies to each project separately, and counts only the tasks' own top-level sessions at work: sub-agents, forks and the merge queue never take a slot), and waiting tasks take free slots by priority: high before medium (the default) before low, oldest first among equals. By default finished work waits in review until the user verifies it (task_control verify) or sends it back (task_control reject). With refine=true it goes to the backlog instead: an agent briefly writes it up, read-only, and it waits in pending until someone starts it (task_control start), which is how to record work for later. With main_tree=true it works in the project's main checkout instead of a worktree: no branch, nothing merges, and its changes take effect in the checkout itself -- for work that has to touch it, such as cleaning up uncommitted changes. Returns the task id; follow it with task_wait or task_list."
+  :description "Add a task to the task board. The task runs in its own session (in a git project, in a fresh worktree whose branch is merged back through the merge queue) with the task defaults for permissions; it starts when its project has a free slot (the limit on running tasks applies to each project separately, and counts only the tasks' own top-level sessions at work: sub-agents, forks and the merge queue never take a slot), and waiting tasks take free slots by priority: high before medium (the default) before low, oldest first among equals. While the project's queue is suspended (task_control suspend-queue) nothing starts it on its own; the task waits until the queue is resumed or someone starts it with task_control start. By default finished work waits in review until the user verifies it (task_control verify) or sends it back (task_control reject). With refine=true it goes to the backlog instead: an agent briefly writes it up, read-only, and it waits in pending until someone starts it (task_control start), which is how to record work for later. With main_tree=true it works in the project's main checkout instead of a worktree: no branch, nothing merges, and its changes take effect in the checkout itself -- for work that has to touch it, such as cleaning up uncommitted changes. Returns the task id; follow it with task_wait or task_list."
   :schema '(:type "object"
             :properties (:prompt (:type "string" :description "What the task should do; self-contained, the task does not see this conversation.")
                          :cwd (:type "string" :description "Project directory (default: this session's).")
@@ -1268,62 +1514,87 @@ the line says \"(this task)\"."
   :subject (lambda (input) (harness-first-line (plist-get input :prompt) 60))
   :handler #'harness-tools-sessions--task-submit)
 
+(defun harness-tools-sessions--task-queue (input ctx action)
+  "Suspend or resume the pending queue ACTION names, for task_control.
+INPUT carries the tool's input, CTX its context: the project is the
+calling session's own, or the one INPUT's `:cwd' names."
+  (let* ((cwd (or (plist-get input :cwd) (plist-get ctx :cwd)))
+         (method (if (equal action "suspend-queue") 'task/suspend-queue 'task/resume-queue)))
+    (unless cwd
+      (signal 'harness-error (list (format "%s needs the project: call it from a session with a directory, or give cwd" action))))
+    (let* ((state (harness-call method cwd))
+           (project (plist-get state :project))
+           (suspended (harness-json-true-p (plist-get state :suspended))))
+      (harness-tool-ok
+       (format "%s of %s.\n%s"
+               (if suspended "Queue suspended" "Queue resumed")
+               (abbreviate-file-name (directory-file-name project))
+               (if suspended
+                   "No pending task of the project starts on its own now; one already at work goes on, and task_control start still starts a task by hand."
+                 "Waiting tasks start again now, by priority, up to the project's limit."))))))
+
 (defun harness-tools-sessions--task-control (input ctx)
   "Handler of task_control.
+INPUT is the tool call's input plist and CTX its context.
 A message to a task's session is the calling session's, as
 session_send's is: it opens with the header naming that session and
 goes with it as the sender, so a task waiting for review takes it for
 no review of the user's (`harness-tasks--on-message').  Only reject
 sends work back."
   (harness-tools-sessions--tasks-p)
-  (let* ((task (harness-tools-sessions--task (plist-get input :task_id)))
-         (id (plist-get task :id))
-         (action (or (plist-get input :action) "")))
-    (pcase action
-      ("start" (harness-call 'task/start id))
-      ("message"
-       (let ((text (or (plist-get input :message) "")))
-         (when (harness-string-blank-p text) (signal 'harness-error (list "message needs a message")))
-         (if (eq (plist-get task :state) 'pending)
-             (harness-call 'task/update id (concat (plist-get task :prompt) "\n\n" text) (plist-get task :attachments))
-           (harness-call 'task/prompt id (concat (harness-tools-sessions--from ctx) text) nil
-                         (list :from (harness-tools-sessions--sender ctx))))))
-      ("cancel" (harness-call 'task/cancel id))
-      ("merge" (harness-call 'task/merge id))
-      ("verify" (harness-call 'task/verify id))
-      ("reject"
-       (let ((text (or (plist-get input :message) "")))
-         (when (harness-string-blank-p text)
-           (signal 'harness-error (list "reject needs the feedback in message")))
-         (harness-call 'task/reject id text)))
-      ("complete" (harness-call 'task/complete id))
-      ("archive" (harness-call 'task/archive id))
-      ("restore" (harness-call 'task/archive id t))
-      ("delete" (harness-call 'task/delete id))
-      ("priority"
-       (let ((priority (plist-get input :priority)))
-         (when (harness-string-blank-p priority)
-           (signal 'harness-error (list "priority needs priority: low, medium or high")))
-         (harness-call 'task/set-priority id priority)))
-      (_ (signal 'harness-error (list (format "Unknown action %S" action)))))
-    (harness-tool-ok
-     (if-let* ((task (ignore-errors (harness-call 'task/get id))))
-         (format "%s.\n%s"
-                 (if (equal action "priority")
-                     (format "Priority %s" (plist-get task :priority))
-                   (concat action " done"))
-                 (harness-tools-sessions--task-line task))
-       (format "%s done; task %s is gone." action id)))))
+  (let ((action (or (plist-get input :action) "")))
+    (if (member action '("suspend-queue" "resume-queue"))
+        (harness-tools-sessions--task-queue input ctx action)
+      (let* ((task (harness-tools-sessions--task (plist-get input :task_id)))
+             (id (plist-get task :id)))
+        (pcase action
+          ("start" (harness-call 'task/start id))
+          ("message"
+           (let ((text (or (plist-get input :message) "")))
+             (when (harness-string-blank-p text) (signal 'harness-error (list "message needs a message")))
+             (if (and (eq (plist-get task :state) 'pending) (not (plist-get task :returned)))
+                 (harness-call 'task/update id (concat (plist-get task :prompt) "\n\n" text) (plist-get task :attachments))
+               (harness-call 'task/prompt id (concat (harness-tools-sessions--from ctx) text) nil
+                             (list :from (harness-tools-sessions--sender ctx))))))
+          ("cancel" (harness-call 'task/cancel id))
+          ("return-to-pending" (harness-call 'task/return-to-pending id))
+          ("merge" (harness-call 'task/merge id))
+          ("verify" (harness-call 'task/verify id))
+          ("reject"
+           (let ((text (or (plist-get input :message) "")))
+             (when (harness-string-blank-p text)
+               (signal 'harness-error (list "reject needs the feedback in message")))
+             (harness-call 'task/reject id text)))
+          ("complete" (harness-call 'task/complete id))
+          ("archive" (harness-call 'task/archive id))
+          ("restore" (harness-call 'task/archive id t))
+          ("delete" (harness-call 'task/delete id))
+          ("priority"
+           (let ((priority (plist-get input :priority)))
+             (when (harness-string-blank-p priority)
+               (signal 'harness-error (list "priority needs priority: low, medium or high")))
+             (harness-call 'task/set-priority id priority)))
+          (_ (signal 'harness-error (list (format "Unknown action %S" action)))))
+        (harness-tool-ok
+         (if-let* ((task (ignore-errors (harness-call 'task/get id))))
+             (format "%s.\n%s"
+                     (pcase action
+                       ("priority" (format "Priority %s" (plist-get task :priority)))
+                       ("return-to-pending" "Returned to pending; it starts again where it stopped")
+                       (_ (concat action " done")))
+                     (harness-tools-sessions--task-line task))
+           (format "%s done; task %s is gone." action id)))))))
 
 (harness-define-tool "task_control"
   :label "Control task"
-  :description "Act on a task. start runs a pending task now; message sends a follow-up to its session, marked as coming from this session (while pending, it appends to the prompt instead; a task in review gets it as a message, not as a review -- only reject sends work back -- and waits for review again once that turn ends); cancel drops a pending task or stops a working one's turn; merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); reject sends a task in review back to its session with the feedback in message, to work on it again; complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept); priority sets its priority to the given one (low, medium or high), which reorders the tasks waiting for a slot: high starts before medium, medium before low."
+  :description "Act on a task, or on its project's pending queue. start runs a pending task now, whatever the limit or a suspended queue; message sends a follow-up to its session, marked as coming from this session (while pending, it appends to the prompt instead -- a task returned to pending that waits with its queue suspended keeps the message and gets it when it starts, otherwise it starts now); cancel drops a pending task or stops a working one's turn; return-to-pending stops a working task's turn and puts it back at the front of its project's pending queue, keeping its session, branch and worktree so it carries on where it stopped when it starts again; reject sends a task in review back to its session with the feedback in message, to work on it again (with the queue suspended the task waits in pending with the feedback kept instead); merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept); priority sets its priority to the given one (low, medium or high), which reorders the tasks waiting for a slot: high starts before medium, medium before low. suspend-queue stops a project's pending tasks from starting on their own -- the queue waits until resume-queue, while start still starts a task -- and resume-queue starts them again at once, by priority; both act on the project of cwd (default: this session's) and need no task_id."
   :schema '(:type "object"
-            :properties (:task_id (:type "string" :description "Task id or unique prefix.")
-                         :action (:type "string" :enum ("start" "message" "cancel" "merge" "verify" "reject" "complete" "archive" "restore" "delete" "priority"))
+            :properties (:task_id (:type "string" :description "Task id or unique prefix; not needed by suspend-queue and resume-queue.")
+                         :action (:type "string" :enum ("start" "message" "cancel" "return-to-pending" "merge" "verify" "reject" "complete" "archive" "restore" "delete" "priority" "suspend-queue" "resume-queue"))
                          :message (:type "string" :description "Text, for message; the feedback, for reject.")
-                         :priority (:type "string" :enum ("low" "medium" "high") :description "The new priority, for priority."))
-            :required ("task_id" "action"))
+                         :priority (:type "string" :enum ("low" "medium" "high") :description "The new priority, for priority.")
+                         :cwd (:type "string" :description "Project directory, for suspend-queue and resume-queue (default: this session's)."))
+            :required ("action"))
   :kind 'meta
   :subject (lambda (input) (string-trim (format "%s %s" (or (plist-get input :action) "") (or (plist-get input :task_id) ""))))
   :handler #'harness-tools-sessions--task-control)
@@ -1346,10 +1617,13 @@ sends work back."
                    (and (eq (plist-get task :state) 'pending) (plist-get task :backlog) t))))))))
 
 (defun harness-tools-sessions--task-wait (input ctx)
-  "Handler of task_wait."
+  "Handler of task_wait.
+INPUT is the tool call's input plist and CTX its context."
   (harness-tools-sessions--tasks-p)
-  (let* ((ids (mapcar (lambda (r) (plist-get (harness-tools-sessions--task r) :id))
-                      (harness-tools-sessions--refs input :task_id :task_ids)))
+  (let* ((refs (harness-tools-sessions--refs input :task_id :task_ids))
+         (tasks (mapcar #'harness-tools-sessions--task refs))
+         (ids (mapcar (lambda (task) (plist-get task :id)) tasks))
+         (sessions (delq nil (mapcar (lambda (task) (plist-get task :session)) tasks)))
          (until (or (plist-get input :until) "settled"))
          (any (equal (plist-get input :mode) "any"))
          (baselines (mapcar (lambda (id) (let ((task (harness-call 'task/get id)))
@@ -1358,30 +1632,32 @@ sends work back."
          (timeout (harness-tools-sessions--timeout input))
          (started (float-time)))
     (unless ids (signal 'harness-error (list "task_wait needs task_id or task_ids")))
-    (harness-tools-sessions--wait
-     ctx timeout
-     (lambda ()
-       (funcall (if any #'cl-some #'cl-every)
-                (lambda (pair) (harness-tools-sessions--task-reached-p (car pair) until (cdr pair)))
-                (cl-mapcar #'cons ids baselines)))
-     (lambda (why)
-       (harness-tool-ok
-        (concat (pcase why
-                  ('met (format "Done waiting after %s (until %s)." (harness-format-duration (- (float-time) started)) until))
-                  ('timeout (format "Still waiting after %ss; the condition (until %s) did not hold. Call task_wait again to keep waiting." timeout until))
-                  (_ "The wait was interrupted."))
-                "\n\n"
-                (mapconcat
-                 (lambda (id)
-                   (let ((task (ignore-errors (harness-call 'task/get id))))
-                     (if (not task)
-                         (format "%s: deleted" id)
-                       (let* ((sid (plist-get task :session))
-                              (reply (and sid (harness-call 'session/exists-p sid)
-                                          (harness-tools-sessions--last-reply sid))))
-                         (concat (harness-tools-sessions--task-line task)
-                                 (if reply (format "\n    last reply:\n%s" (harness-truncate-end reply 2000)) ""))))))
-                 ids "\n\n")))))))
+    (let ((unwatch (harness-tools-sessions--note-watch ctx sessions)))
+      (harness-tools-sessions--wait
+       ctx timeout
+       (lambda ()
+         (funcall (if any #'cl-some #'cl-every)
+                  (lambda (pair) (harness-tools-sessions--task-reached-p (car pair) until (cdr pair)))
+                  (cl-mapcar #'cons ids baselines)))
+       (lambda (why)
+         (funcall unwatch)
+         (harness-tool-ok
+          (concat (pcase why
+                    ('met (format "Done waiting after %s (until %s)." (harness-format-duration (- (float-time) started)) until))
+                    ('timeout (format "Still waiting after %ss; the condition (until %s) did not hold. Call task_wait again to keep waiting." timeout until))
+                    (_ "The wait was interrupted."))
+                  "\n\n"
+                  (mapconcat
+                   (lambda (id)
+                     (let ((task (ignore-errors (harness-call 'task/get id))))
+                       (if (not task)
+                           (format "%s: deleted" id)
+                         (let* ((sid (plist-get task :session))
+                                (reply (and sid (harness-call 'session/exists-p sid)
+                                            (harness-tools-sessions--last-reply sid))))
+                           (concat (harness-tools-sessions--task-line task)
+                                   (if reply (format "\n    last reply:\n%s" (harness-truncate-end reply 2000)) ""))))))
+                   ids "\n\n"))))))))
 
 (harness-define-tool "task_wait"
   :label "Wait for tasks"
@@ -1404,9 +1680,11 @@ sends work back."
 Install the stage that has the user confirm session_move, too: the tool
 is registered at load time, and must never be offered without it."
   (dolist (ev '(session/status session/changed session/deleted session/pending-changed
+                session/node-added session/head-moved
                 agent/turn-started task/changed task/deleted))
     (harness-on ev #'harness-tools-sessions--poke 90))
   (harness-on 'agent/turn-ended #'harness-tools-sessions--on-turn-ended 90)
+  (harness-add-filter 'agent/outstanding #'harness-tools-sessions--outstanding)
   (harness-add-filter 'permission/decide #'harness-tools-sessions--move-gate 6))
 
 (harness-tools-sessions--init)

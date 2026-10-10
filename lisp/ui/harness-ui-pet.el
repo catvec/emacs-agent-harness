@@ -1643,8 +1643,18 @@ A pet that hatched sleeps, eyes shut: turned on, it wakes as it was."
                     (propertize ago 'face 'italic) "\n")
             (add-face-text-property (line-beginning-position 0) (point) 'harness-dim-face t)))))))
 
+(defun harness-ui-pet--by-hand (view)
+  "What VIEW says `harness-pet-overrides' sets, as a sentence, or nil.
+VIEW's `:overrides' names the attributes, as a list or a vector."
+  (when-let* ((keys (append (plist-get view :overrides) nil)))
+    (format "Set by hand in harness-pet-overrides: %s."
+            (if (cdr keys)
+                (concat (string-join (butlast keys) ", ") " and " (car (last keys)))
+              (car keys)))))
+
 (defun harness-ui-pet--footer ()
-  "Insert what the pet speaks with, and whether it may."
+  "Insert what the pet speaks with, and whether it may.
+Then which of its attributes are set by hand, when any are."
   (let* ((view harness-ui-pet--view)
          (model (plist-get view :model))
          (text (cond ((not (harness-ui-pet--hatched-p)) nil)
@@ -1662,7 +1672,10 @@ A pet that hatched sleeps, eyes shut: turned on, it wakes as it was."
                                   (_ "here")))))))
     (when text
       (insert "\n")
-      (harness-ui-pet--insert-filled text 'harness-dim-face))))
+      (harness-ui-pet--insert-filled text 'harness-dim-face))
+    (when-let* ((by-hand (and (harness-ui-pet--hatched-p) (harness-ui-pet--by-hand view))))
+      (insert "\n")
+      (harness-ui-pet--insert-filled by-hand 'harness-dim-face))))
 
 (defun harness-ui-pet--render ()
   "Draw the pet's buffer, the current buffer, from what it knows."

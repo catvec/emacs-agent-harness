@@ -67,6 +67,7 @@
 ;;;; Inline rendering
 
 (defun harness-ui-markdown--add-face (string face)
+  "Return a copy of STRING with FACE added to the faces of all of it."
   (let ((s (copy-sequence string)))
     (add-face-text-property 0 (length s) face t s)
     s))
@@ -242,6 +243,9 @@ The string may be shared with other renderings: change a copy of it."
     (error code)))
 
 (defun harness-ui-markdown--code-block (code lang)
+  "Render fenced block CODE, in language LANG (a string or nil), as text.
+The code is fontified for LANG where possible and indented, under a
+line naming LANG when it is given."
   (let* ((body (harness-ui-markdown--fontify-code (string-trim-right code) lang))
          (label (if (and lang (not (string-empty-p lang)))
                     (propertize (concat lang "\n") 'face 'harness-md-code-lang)
@@ -284,6 +288,33 @@ the backquotes of `code', take no room."
             (push line out))))
       (propertize (apply #'concat (nreverse out)) 'harness-md-block 'table))))
 
+(defun harness-ui-markdown--rule-p (line)
+  "Non-nil when LINE is a Markdown horizontal rule.
+Three or more of the same \"-\", \"*\" or \"_\", spaces allowed between
+them, up to three leading spaces.  Checked by hand rather than with the
+equivalent regexp, which backtracks its way through a line of a hundred
+thousand characters until the regexp engine gives up with a \"Stack
+overflow in regexp matcher\": a single enormous line, such as a message
+the harness sends itself, would take the whole rendering down."
+  (let ((end (length line))
+        (i 0)
+        (char nil)
+        (count 0)
+        (rule t))
+    ;; Up to three leading spaces; a fourth makes it an indented code line.
+    (while (and (< i end) (eq (aref line i) ?\s) (< i 3))
+      (cl-incf i))
+    (if (and (< i end) (eq (aref line i) ?\s))
+        nil
+      (while (and rule (< i end))
+        (let ((c (aref line i)))
+          (cond ((memq c '(?- ?* ?_))
+                 (setq char (or char c))
+                 (if (eq c char) (cl-incf count) (setq rule nil)))
+                ((not (eq c ?\s)) (setq rule nil))))
+        (cl-incf i))
+      (and rule (>= count 3)))))
+
 (defun harness-ui-markdown-render (text)
   "Render Markdown TEXT into a propertized string."
   (let ((lines (split-string (or text "") "\n"))
@@ -318,7 +349,7 @@ the backquotes of `code', take no room."
                                 (3 'harness-md-heading-3) (_ 'harness-md-heading-4))))
               (emit (concat (harness-ui-markdown--add-face (harness-ui-markdown-inline (match-string 2 line)) face) "\n"))))
            ;; Horizontal rule
-           ((string-match-p "\\`[ ]\\{0,3\\}\\([-*_]\\)\\([ ]*\\1\\)\\{2,\\}[ ]*\\'" line)
+           ((harness-ui-markdown--rule-p line)
             (flush-para)
             (emit (propertize (concat (make-string 40 ?\s) "\n") 'face 'harness-md-rule)))
            ;; Table (a line with pipes followed by a separator line)
