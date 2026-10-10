@@ -75,6 +75,8 @@ layout: half the frame keeps the board's cards whole.")
 (defvar harness-ui--position-buffers)
 (defvar harness-ui--fullscreen-layouts)
 (defvar harness-ui-tasks--target)
+(defvar harness-ui-tasks-search--state)
+(defvar harness-quick-search--state)
 (defvar harness-chat--blocks)
 (defvar harness-chat--loading)
 (defvar harness-chat--order)
@@ -111,6 +113,12 @@ layout: half the frame keeps the board's cards whole.")
 (declare-function harness-ui-tasks-reply "harness-ui-tasks")
 (declare-function harness-ui-tasks-compose-reset "harness-ui-tasks")
 (declare-function harness-ui-tasks--find "harness-ui-tasks")
+(declare-function harness-ui-tasks--searching-p "harness-ui-tasks")
+(declare-function harness-ui-tasks-search "harness-ui-tasks")
+(declare-function harness-ui-tasks-compose-quit "harness-ui-tasks")
+(declare-function harness-quick-search "harness-ui-quick-search")
+(declare-function harness-quick-search-box-submit "harness-ui-quick-search")
+(declare-function harness-ui-popout-close "harness-ui-popout")
 (declare-function harness-ui-report-popout "harness-ui-report")
 (declare-function harness-ui-popout-buffer "harness-ui-popout")
 (declare-function harness-sessions "harness-ui-sessions")
@@ -132,6 +140,8 @@ layout: half the frame keeps the board's cards whole.")
 (declare-function harness-tasks--set "harness-tasks")
 (declare-function harness-ui-cowboy-waiting-p "harness-ui-cowboy")
 (declare-function harness-sender-session "harness-util")
+(declare-function harness-json-array "harness-util")
+(declare-function harness-json-encode-text "harness-util")
 (declare-function transient-quit-all "transient")
 
 ;;;; Small helpers
@@ -1185,18 +1195,50 @@ report] on the task's card (`harness-tasks--missing-report')."
   (let ((last (car (last (plist-get request :messages)))))
     (and last (cl-some (lambda (b) (equal (plist-get b :type) "tool_result")) (plist-get last :content)))))
 
+(defun harness-media--search-query (text)
+  "The line a search asked: the line of TEXT that starts with \"Query:\".
+TEXT is the message that carries the line to the search's model."
+  (if (string-match "^Query: \\(.*\\)$" text) (match-string 1 text) ""))
+
+(defun harness-media--search-session (key)
+  "How a search names the session KEY of the world to its model.
+That is the first eight characters of its id, as the sessions are listed."
+  (let ((id (plist-get harness-media--world key)))
+    (and id (substring id 0 (min 8 (length id))))))
+
+(defun harness-media--search-json (&rest fields)
+  "The one line of JSON a search's model answers with.
+FIELDS are `:show' (task ids), `:sessions' (session ids), `:commands'
+\(command names) and `:do' (actions on tasks), each a list, and `:note',
+a sentence; a field left out is empty."
+  (harness-json-encode-text
+   (append (list :show (harness-json-array (plist-get fields :show))
+                 :sessions (harness-json-array (plist-get fields :sessions))
+                 :commands (harness-json-array (plist-get fields :commands))
+                 :do (harness-json-array (plist-get fields :do)))
+           (and (plist-get fields :note) (list :note (plist-get fields :note))))))
+
 (defun harness-media--search-answer (text)
   "The scripted search model's answer to TEXT, the message carrying the query.
-TEXT is the board dump the search sends; a query about the slow-request
-warning gets that task shown and archived, so the picture has a filter,
-a toast and an [Undo]."
-  (let* ((tasks (plist-get harness-media--world :tasks))
-         (slow (plist-get tasks :slow)))
+TEXT is what a search sends its model: where the query was typed, the
+board, the sessions and the commands, then the query, which alone picks
+the answer:
+- the slow-request warning, asked on the board, shows that task and
+  archives it, so the picture has a filter, a toast and an [Undo];
+- attaching the API guide, asked in a chat, names the command that
+  attaches a file and the session that wrote the guide;
+- anything else finds nothing."
+  (let ((query (harness-media--search-query text))
+        (slow (plist-get (plist-get harness-media--world :tasks) :slow))
+        (guide (harness-media--search-session :guide)))
     (cond
-     ((and slow (string-match-p "slow\\|warning\\|500 ms" text))
-      (format "{\"show\":[\"%s\"],\"do\":[{\"task\":\"%s\",\"action\":\"archive\"}]}"
-              slow slow))
-     (t "{\"show\":[],\"do\":[]}"))))
+     ((and slow (string-match-p "slow request warning" query))
+      (harness-media--search-json :show (list slow)
+                                  :do (list (list :task slow :action "archive"))))
+     ((and guide (string-match-p "\\`how do i attach the api guide" (downcase query)))
+      (harness-media--search-json :sessions (list guide)
+                                  :commands (list "harness-compose-add-attachment" "harness-compose-yank")))
+     (t (harness-media--search-json)))))
 
 (defun harness-media--script (request)
   "Return the events that answer REQUEST."
@@ -2100,24 +2142,72 @@ or send it back."
     (harness-media--capture "report-image")))
 
 (defun harness-media-shot-tasks-search ()
-  "The task board after a search in words: filtered, an action done, [Undo].
-The scripted model answers a query about the slow-request warning: the
-board shows that task under the banner, archives it (the toast says so)
-and offers [Undo].  The task is put back after the picture, so the shots
-that follow see the board every other picture shows."
+  "The task board searched in words, typed in the board's own compose box.
+/ turns the box into a search box, in colours of its own; the query is
+typed there and RET sends it.  The scripted model answers a query about
+the slow-request warning: the board shows that task under the banner,
+archives it (the banner says so) and offers [Undo].  / once more opens
+the box for the next search, so the picture shows the board's box as a
+search box, under what the last search found.  After the picture the
+search closes and the task is put back, so the shots that follow see the
+board every other picture shows."
   (harness-media--view
    (lambda () (harness-tasks harness-media-project 'full))
    (lambda ()
-     (cl-letf (((symbol-function 'read-string)
-                (lambda (&rest _) "get rid of the slow request warning")))
-       (call-interactively #'harness-ui-tasks-search))
+     (call-interactively #'harness-ui-tasks-search)
+     (unless (harness-ui-tasks--searching-p)
+       (error "The board's box did not turn into a search box"))
+     (harness-compose-set "get rid of the slow request warning")
+     (harness-quick-search-box-submit)
      (harness-media--wait (lambda () (plist-get harness-ui-tasks-search--state :results))
                           20 "the search to act")
+     (call-interactively #'harness-ui-tasks-search)
+     (unless (harness-ui-tasks--searching-p)
+       (error "The board's box did not open for the next search"))
      (harness-media--settle 0.6)))
   (harness-media--capture "tasks-search")
-  ;; Leave the world as the other shots expect it.
+  ;; Leave the world as the other shots expect it: C-g closes the search
+  ;; box, a second one shows every task again.
+  (with-current-buffer (window-buffer (selected-window))
+    (harness-ui-tasks-compose-quit)
+    (harness-ui-tasks-compose-quit))
   (let ((id (plist-get (plist-get harness-media--world :tasks) :slow)))
     (ignore-errors (harness-call 'task/archive id t))))
+
+(defconst harness-media--quick-search-line "how do I attach the API guide?"
+  "What the quick search picture asks.")
+
+(defconst harness-media--quick-search-lines 40
+  "How many lines high the quick search picture is.
+The popout takes what its answer needs, about 15, and the chat and the
+code beside it the rest.")
+
+(defun harness-media-shot-quick-search ()
+  "The quick search, opened from a chat: a command and a session found in words.
+C-c h / in the rate-limit session's chat, `acme/ratelimit.py' beside
+it, opens the search's popout at the bottom of the frame; the line is
+typed in its box and RET sends it.  The scripted model names the command
+that attaches a file and the session that wrote the API guide (see
+`harness-media--search-answer'), so the popout lists a command with
+[Run] and [Describe] and a session with [Open].  The popout closes
+after the picture."
+  (let ((buffer (harness-media--code-layout (plist-get harness-media--world :ratelimit))))
+    (set-frame-size nil harness-media-columns harness-media--quick-search-lines)
+    (harness-media--settle 0.5)
+    (harness-media--to-bottom buffer)
+    (select-window (get-buffer-window buffer))
+    (call-interactively #'harness-quick-search)
+    (let ((popout (harness-ui-popout-buffer '(quick-search))))
+      (unless popout (error "The quick search did not open"))
+      (with-current-buffer popout
+        (harness-compose-set harness-media--quick-search-line)
+        (harness-quick-search-box-submit)
+        (harness-media--wait (lambda () (eq 'done (plist-get harness-quick-search--state :status)))
+                             20 "the search to answer"))
+      (harness-media--settle 0.5)
+      (harness-media--to-bottom buffer)
+      (harness-media--capture "quick-search")
+      (harness-ui-popout-close '(quick-search) t))))
 
 (defun harness-media-shot-sessions ()
   "The session list."
@@ -2565,6 +2655,7 @@ afterwards."
     ("attachments" . harness-media-shot-attachments)
     ("tasks" . harness-media-shot-tasks)
     ("tasks-search" . harness-media-shot-tasks-search)
+    ("quick-search" . harness-media-shot-quick-search)
     ("tasks-long" . harness-media-shot-tasks-long)
     ("tasks-message" . harness-media-shot-tasks-message)
     ("report" . harness-media-shot-report)

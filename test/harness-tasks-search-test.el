@@ -508,5 +508,330 @@ the board's search works offline: topics, states and orders."
 
 (declare-function harness-provider-demo--search "harness-provider-demo")
 
+;;;; Searching the whole harness
+
+(declare-function harness-tasks-search--words "harness-tasks-search")
+(declare-function harness-tasks-search--score "harness-tasks-search")
+(declare-function harness-tasks-search--resolve-session "harness-tasks-search")
+(declare-function harness-tasks-search--resolve-command "harness-tasks-search")
+(declare-function harness-tasks-search--rank-commands "harness-tasks-search")
+(declare-function harness-tasks-search--catalogue "harness-tasks-search")
+(declare-function harness-tasks-search--looked "harness-tasks-search")
+(declare-function harness-acp--call-extension "harness-acp")
+
+(defconst harness-tasks-search-test--catalogue
+  '((:command "harness-compose-add-attachment" :keys "C-c C-a" :where "Chat" :label "Attach file"
+     :doc "Attach PATH to the next message." :here t)
+    (:command "harness-ui-sessions" :keys "C-c h l" :where "menu" :label "List sessions"
+     :doc "List every session, newest first." :here :false)
+    (:command "harness-tasks-search" :keys "/" :where "Board" :label "Search tasks"
+     :doc "Find or act on tasks in words." :here :false)
+    (:command "harness-new-session" :keys "C-c h n" :where "menu" :label "New session"
+     :doc "Start a session in a directory." :here :false))
+  "Commands as a UI sends them to a search.")
+
+(defun harness-tasks-search-test--ask (query opts &rest replies)
+  "Run `search/ask' of QUERY with OPTS; return its plan.
+The model answers REPLIES in turn."
+  (setq harness-tasks-search-test--replies replies
+        harness-tasks-search-test--requests nil)
+  (harness-test-await (harness-call 'search/ask default-directory query opts) 10))
+
+(defun harness-tasks-search-test--first ()
+  "The first message the model got in the last search."
+  (harness-tasks-search-test--asked (car (last harness-tasks-search-test--requests))))
+
+(defun harness-tasks-search-test--session (name &rest plist)
+  "Make a session called NAME, with PLIST, that works on no task; return its id."
+  (plist-get (apply #'harness-call 'session/create :cwd default-directory :name name plist) :id))
+
+(defun harness-tasks-search-test--ids (things)
+  "The ids of THINGS, plists."
+  (mapcar (lambda (thing) (plist-get thing :id)) things))
+
+(defmacro harness-tasks-search-test-with-session-search (fn &rest body)
+  "Run BODY with FN standing in for `session/search'.
+The test is skipped where the session search itself is loaded."
+  (declare (indent 1))
+  `(progn
+     (when (harness-method-exists-p 'session/search)
+       (ert-skip "The session search is loaded, not stubbed"))
+     (harness-register-method 'session/search ,fn)
+     (unwind-protect (progn ,@body)
+       (harness-unregister-method 'session/search))))
+
+(ert-deftest harness-tasks-search-ask-favours-tasks-on-the-board ()
+  "On the board the search favours tasks: the model is told so, reads the
+board as `task/search' has it read, and the plan shows the task, with
+what a view without the board shows of it."
+  (harness-tasks-search-test-with
+    (let ((button (harness-tasks-search-test--submit "Add a question button to the chat"))
+          (land (harness-tasks-search-test--submit "Remove the mq land skill")))
+      (harness-tasks-search-test--done button land)
+      (let ((plan (harness-tasks-search-test--ask
+                   "did I have a task about the question button?"
+                   (list :context (list :view "board") :commands harness-tasks-search-test--catalogue)
+                   (format "{\"show\":[\"%s\"]}" button)))
+            (text (harness-tasks-search-test--first)))
+        (should (equal "tasks" (plist-get plan :bias)))
+        (should (equal (list button) (plist-get plan :ids)))
+        (should (equal (list (list :id button :title "Add a question button to the chat" :status "done: completed"
+                                   :session (plist-get (harness-tasks-search-test--task button) :session)))
+                       (plist-get plan :tasks)))
+        (should (eq :false (plist-get plan :widened)))
+        (should-not (plist-get plan :note))
+        (should-not (plist-get plan :sessions))
+        (should (string-match-p "^Project: .*Now: .*\nContext: the task board of project [^ ]+\\. Favour tasks; sessions and commands count too\\.$"
+                                text))
+        (should (string-match-p "^2 tasks, newest first" text))
+        (should (string-match-p (format "^%s | done: completed | Add a question button to the chat$"
+                                        (regexp-quote button))
+                                text))
+        (should (string-match-p "^Query: did I have a task about the question button\\?$" text))
+        ;; Commands are not what it favours: only those the words match.
+        (should-not (string-match-p "^Commands" text))))))
+
+(ert-deftest harness-tasks-search-ask-opens-a-session-off-the-board ()
+  "Away from the board the search reaches every session: the model asks
+to search them, and the plan names the session it picks by the start of
+its id, with what the search found in it.  The session the engineer is
+in stays out of it."
+  (harness-tasks-search-test-with
+    (let* ((here (harness-tasks-search-test--session "Write the release notes"))
+           (merge (harness-tasks-search-test--session "Land the queue fix" :kind 'btw))
+           (calls nil))
+      (harness-tasks-search-test-with-session-search
+          (lambda (query opts)
+            (push (list query opts) calls)
+            (harness-resolved
+             (list :query query :mode 'text :engine "fts" :loose nil
+                   :sessions (and (string-match-p "merge queue" query)
+                                  (list (append (harness-call 'session/get merge)
+                                                (list :hits (list (list :snippet "…why the merge queue dropped a commit…")))))))))
+        (let ((plan (harness-tasks-search-test--ask
+                     "open the session where I debugged the merge queue"
+                     (list :context (list :view "chat" :title "Write the release notes" :session here))
+                     "{\"sessions\":\"merge queue\"}"
+                     (format "{\"sessions\":[\"%s\"]}" (substring merge 0 8))))
+              (here8 (substring here 0 8))
+              (merge8 (substring merge 0 8)))
+          (should (equal "commands" (plist-get plan :bias)))
+          (should (equal "searched the sessions for \"merge queue\"" (plist-get plan :looked)))
+          (pcase-let ((`(,session) (plist-get plan :sessions)))
+            (should (equal merge (plist-get session :id)))
+            (should (equal "Land the queue fix" (plist-get session :name)))
+            (should (equal "btw" (plist-get session :kind)))
+            (should (equal "idle" (plist-get session :status)))
+            (should (equal "…why the merge queue dropped a commit…" (plist-get session :snippet)))
+            (should-not (plist-get session :task)))
+          (should (eq :false (plist-get plan :widened)))
+          ;; Every session was searched but the engineer's.
+          (should (equal '("merge queue") (mapcar #'car calls)))
+          (should (equal (list here) (plist-get (cadr (car calls)) :exclude)))
+          (let ((first (harness-tasks-search-test--first))
+                (again (harness-tasks-search-test--asked (car harness-tasks-search-test--requests))))
+            (should (string-match-p
+                     (format "^Context: the chat of session “Write the release notes” (%s)\\. Favour commands, then sessions; tasks count too\\. Leave session %s out of \"sessions\": the engineer is in it\\.$"
+                             here8 here8)
+                     first))
+            (should (string-match-p "^Sessions besides the board's tasks (chats, side conversations, sub-agents, forks), best match first:$"
+                                    first))
+            (should (string-match-p (format "^%s | btw | idle | [^|]+ | updated [^|]+ | Land the queue fix$" merge8) first))
+            (should-not (string-match-p (format "^%s | " here8) first))
+            (should (string-match-p "^Sessions that mention \"merge queue\", best first:$" again))
+            (should (string-match-p (format "^%s | btw | idle | [^|]+ | Land the queue fix: …why the merge queue dropped a commit…$"
+                                            merge8)
+                                    again))
+            (should (string-match-p "Now answer the query" again))))))))
+
+(ert-deftest harness-tasks-search-ask-finds-commands ()
+  "Asked how to do something, the search shows the model the commands
+whose words match, and the menu's, and the plan holds the commands it
+names that there are.  A UI asks over ACP."
+  (harness-tasks-search-test-with
+    (setq harness-tasks-search-test--replies
+          '("{\"commands\":[\"harness-compose-add-attachment\",\"no-such-command\"]}")
+          harness-tasks-search-test--requests nil)
+    (let ((plan (harness-test-await
+                 (harness-acp--call-extension
+                  "search/ask"
+                  ;; As the JSON of a request reads.
+                  (list :cwd default-directory :query "how do I attach a file?"
+                        :opts (list :context (list :view "buffer" :title "notes.org" :mode "org-mode")
+                                    :commands harness-tasks-search-test--catalogue)))
+                 10))
+          (text (harness-tasks-search-test--first)))
+      (should (equal "commands" (plist-get plan :bias)))
+      (should (equal (list (car harness-tasks-search-test--catalogue)) (plist-get plan :commands)))
+      (should (eq :false (plist-get plan :widened)))
+      (should (string-match-p "^Context: Emacs buffer “notes\\.org” (org-mode)\\. Favour commands, then sessions; tasks count too\\.$"
+                              text))
+      (should (string-match-p "^The board has no tasks\\.$" text))
+      (should (string-match-p "^Commands (name | keys | where | what it does):
+harness-compose-add-attachment | C-c C-a | Chat | Attach file — Attach PATH to the next message\\.$"
+                              text))
+      ;; Few match: the menu's come too, so the model knows what there is.
+      (should (string-match-p "^harness-ui-sessions | C-c h l | menu | List sessions — List every session, newest first\\.$" text))
+      (should (string-match-p "^harness-new-session | C-c h n | menu | " text))
+      (should-not (string-match-p "^harness-tasks-search | " text)))))
+
+(ert-deftest harness-tasks-search-ask-widens-when-nothing-matches ()
+  "A search the model answers with nothing adds the sessions and commands
+that come nearest the query itself, and says so; a model that widens the
+search itself says so in its note, which the plan passes on."
+  (harness-tasks-search-test-with
+    (let ((suite (harness-tasks-search-test--submit "Speed up the test suite")))
+      (harness-tasks-search-test--done suite)
+      (let* ((flaky (harness-tasks-search-test--session "Debug the flaky login test"))
+             (flaky8 (substring flaky 0 8))
+             (plan (harness-tasks-search-test--ask
+                    "the flaky login"
+                    (list :context (list :view "board") :commands harness-tasks-search-test--catalogue)
+                    "{\"show\":[]}")))
+        (should (equal "tasks" (plist-get plan :bias)))
+        (should (eq t (plist-get plan :widened)))
+        (should (equal "Nothing matched exactly; these come nearest." (plist-get plan :note)))
+        (should (equal (list flaky) (harness-tasks-search-test--ids (plist-get plan :sessions))))
+        (should-not (plist-get plan :ids))
+        (should-not (plist-get plan :commands))
+        ;; Favouring tasks, the model sees the sessions whose names match.
+        (should (string-match-p (format "^Sessions besides the board's tasks .*:\n%s | chat | idle | " flaky8)
+                                (harness-tasks-search-test--first)))
+        ;; One model call only.
+        (should (= 1 (length harness-tasks-search-test--requests)))
+        ;; The model widens the search itself: its note goes through.
+        (let ((plan (harness-tasks-search-test--ask
+                     "the flaky login"
+                     (list :context (list :view "board"))
+                     "{\"sessions\":\"flaky login\"}"
+                     (format "{\"show\":[],\"sessions\":[\"%s\"],\"note\":\" No task matched; this session mentions it. \"}"
+                             flaky8))))
+          (should (eq :false (plist-get plan :widened)))
+          (should (equal "No task matched; this session mentions it." (plist-get plan :note)))
+          (should (equal (list flaky) (harness-tasks-search-test--ids (plist-get plan :sessions))))
+          (should (equal "searched the sessions for \"flaky login\"" (plist-get plan :looked))))))))
+
+(ert-deftest harness-tasks-search-ask-finds-nothing-without-failing ()
+  "A query nothing matches, not even once widened, ends in an empty plan
+that says so, not in an error."
+  (harness-tasks-search-test-with
+    (let ((suite (harness-tasks-search-test--submit "Speed up the test suite"))
+          (calls nil))
+      (harness-tasks-search-test--done suite)
+      (harness-tasks-search-test--session "Write the release notes")
+      (harness-tasks-search-test-with-session-search
+          (lambda (query opts)
+            (push (list query opts) calls)
+            (harness-resolved (list :query query :mode 'text :engine "fts" :sessions nil)))
+        (let ((plan (harness-tasks-search-test--ask
+                     "zxqv blorp"
+                     (list :context (list :view "board") :commands harness-tasks-search-test--catalogue)
+                     "{\"show\":[],\"sessions\":[],\"commands\":[],\"do\":[]}")))
+          (should (eq t (plist-get plan :widened)))
+          (should (equal "Nothing matched: no task, session or command." (plist-get plan :note)))
+          (should-not (plist-get plan :ids))
+          (should-not (plist-get plan :actions))
+          (should-not (plist-get plan :sessions))
+          (should-not (plist-get plan :commands))
+          ;; The search looked for the nearest sessions itself; the model
+          ;; was asked once.
+          (should (equal '("zxqv blorp") (mapcar #'car calls)))
+          (should (= 1 (length harness-tasks-search-test--requests))))))))
+
+(ert-deftest harness-tasks-search-ask-reads-session-names-without-the-session-search ()
+  "Without the session search, a look at the sessions reads their names,
+and says the transcripts were not searched; a session is named by six
+characters of its id or more."
+  (harness-tasks-search-test-with
+    (let ((merge (harness-tasks-search-test--session "Debug the merge queue"))
+          (other (harness-tasks-search-test--session "Write the release notes")))
+      (should-not (harness-method-exists-p 'session/search))
+      (let ((plan (harness-tasks-search-test--ask
+                   "where did I debug the merge queue?"
+                   (list :context (list :view "sessions"))
+                   "{\"sessions\":\"merge queue\"}"
+                   (format "{\"sessions\":[\"%s\"]}" (substring merge 0 7)))))
+        (should (equal "sessions" (plist-get plan :bias)))
+        (should (equal (list merge) (harness-tasks-search-test--ids (plist-get plan :sessions))))
+        (should-not (plist-get (car (plist-get plan :sessions)) :snippet))
+        (let ((again (harness-tasks-search-test--asked (car harness-tasks-search-test--requests))))
+          (should (string-match-p (format "^Sessions whose names mention \"merge queue\" (their transcripts were not searched):\n%s | chat | idle | [^|]+ | updated [^|]+ | Debug the merge queue$"
+                                          (substring merge 0 8))
+                                  again))
+          (should-not (string-match-p (regexp-quote (substring other 0 8)) again)))
+        (should (string-match-p "^Context: the session list\\. Favour sessions, then commands; tasks count too\\.$"
+                                (harness-tasks-search-test--first)))))))
+
+(ert-deftest harness-tasks-search-task-search-never-widens ()
+  "The board's own search answers with what the model found and no more,
+however little that is."
+  (harness-tasks-search-test-with
+    (let ((suite (harness-tasks-search-test--submit "Speed up the test suite")))
+      (harness-tasks-search-test--done suite)
+      (harness-tasks-search-test--session "Debug the flaky login test")
+      (setq harness-tasks-search-test--requests nil)
+      (let ((plan (harness-tasks-search-test--search "the flaky login" "{\"show\":[]}")))
+        (should (equal "tasks" (plist-get plan :bias)))
+        (should (eq :false (plist-get plan :widened)))
+        (should-not (plist-get plan :note))
+        (should-not (plist-get plan :sessions))
+        (should (string-match-p "^Context: the task board of project .*Favour tasks"
+                                (harness-tasks-search-test--asked (car harness-tasks-search-test--requests))))))))
+
+(ert-deftest harness-tasks-search-matches-words-by-their-stems ()
+  "Names and commands match a query's words by their stems, leaving out
+the words that say nothing; a session is named by its whole id or a
+start of it six characters long or more, a command by its name or its
+name without \"harness-\"."
+  (harness-tasks-search-test-with
+    (should (equal '("debugged" "merge" "queue")
+                   (harness-tasks-search--words "Open the session where I debugged the merge queue?")))
+    (should (= 3 (harness-tasks-search--score '("debugged" "merge" "queue") "Debug the Merge-Queue")))
+    (should (= 1 (harness-tasks-search--score '("attach" "zebra") "Attachments go here")))
+    (let ((ids '("abcdef12-0000" "abcdef13-0000" "x")))
+      (should (equal "abcdef12-0000" (harness-tasks-search--resolve-session "abcdef12" ids)))
+      (should (equal "abcdef12-0000" (harness-tasks-search--resolve-session " ABCDEF12 " ids)))
+      (should-not (harness-tasks-search--resolve-session "abcdef1" ids))
+      (should-not (harness-tasks-search--resolve-session "abcde" '("abcdef12-0000")))
+      (should (equal "x" (harness-tasks-search--resolve-session "x" ids))))
+    (let ((catalogue (harness-tasks-search--catalogue harness-tasks-search-test--catalogue)))
+      (should (equal catalogue harness-tasks-search-test--catalogue))
+      (should (equal "harness-compose-add-attachment"
+                     (plist-get (harness-tasks-search--resolve-command "compose-add-attachment" catalogue) :command)))
+      (should-not (harness-tasks-search--resolve-command "compose-add" catalogue))
+      (should-not (harness-tasks-search--resolve-command "find-file" catalogue))
+      (should (equal '("harness-compose-add-attachment")
+                     (mapcar (lambda (c) (plist-get c :command))
+                             (harness-tasks-search--rank-commands catalogue "how do I attach a file?"))))
+      ;; In the label, the name and the doc beats in the doc alone
+      ;; ("newest"); "session" says nothing.
+      (should (equal '("harness-new-session" "harness-ui-sessions")
+                     (mapcar (lambda (c) (plist-get c :command))
+                             (harness-tasks-search--rank-commands catalogue "start a new session")))))
+    (should (equal "searched the transcripts for \"x\", searched the sessions for \"y\" and looked up commands for \"z\""
+                   (harness-tasks-search--looked '(:grep "x" :sessions "y" :commands "z"))))))
+
+(ert-deftest harness-tasks-search-demo-answers-sessions-and-commands ()
+  "Offline, the demo provider picks the commands and the sessions whose
+lines hold the query's words, as it picks tasks."
+  (harness-tasks-search-test-with
+    (let ((harness-provider-demo-script-override
+           (lambda (request)
+             (if (harness-tasks-search-test--search-p request)
+                 (harness-provider-demo--search request)
+               (harness-tasks-search-test--script request))))
+          (merge (harness-tasks-search-test--session "Debug the merge queue")))
+      (harness-tasks-search-test--session "Write the release notes")
+      (cl-flet ((ask (query opts) (harness-test-await (harness-call 'search/ask default-directory query opts) 10)))
+        (let ((plan (ask "how do I attach a file?"
+                         (list :context (list :view "chat") :commands harness-tasks-search-test--catalogue))))
+          (should (equal '("harness-compose-add-attachment")
+                         (mapcar (lambda (c) (plist-get c :command)) (plist-get plan :commands))))
+          (should-not (plist-get plan :sessions))
+          (should (eq :false (plist-get plan :widened))))
+        (let ((plan (ask "open the session where I debugged the merge queue" (list :context (list :view "sessions")))))
+          (should (equal (list merge) (harness-tasks-search-test--ids (plist-get plan :sessions))))
+          (should (eq :false (plist-get plan :widened))))))))
+
 (provide 'harness-tasks-search-test)
 ;;; harness-tasks-search-test.el ends here

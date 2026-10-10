@@ -3,11 +3,13 @@
 ;;; Commentary:
 
 ;; Drives the board's smart search against the real state layer, the
-;; in-process ACP connection and the demo provider: the line read by /
-;; goes to the model, the board filters to what it answers, the banner
-;; says what is shown and what was done, an order runs at once with
-;; [Undo], a proposal waits for an OK, a failure offers [Retry] and C-g
-;; shows every task again.
+;; in-process ACP connection and the demo provider: / turns the compose
+;; box into a search box, whose line goes to the model favouring tasks,
+;; with the harness's commands; the box gets back what it held after; the
+;; board filters to what it answers, the banner says what is shown, the
+;; sessions and commands found and what was done, an order runs at once
+;; with [Undo], a proposal waits for an OK, a failure offers [Retry] and
+;; C-g shows every task again.
 
 ;;; Code:
 
@@ -41,19 +43,34 @@
 (defvar harness-ui-tasks-filter)
 (defvar harness-ui-tasks-search--state)
 (defvar harness-ui-tasks-search--model)
-(defvar harness-ui-tasks-search-history)
+(defvar harness-ui-tasks--target)
+(defvar harness-ui-map)
+(defvar harness-compose-attachments)
+(defvar harness-compose--placeholder)
+(defvar harness-quick-search-history)
+(defvar harness-quick-search-box-mode)
+(defvar harness-quick-search-box-function)
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-ui-tasks--render "harness-ui-tasks")
 (declare-function harness-ui-tasks--header "harness-ui-tasks")
 (declare-function harness-ui-tasks--title "harness-ui-tasks")
+(declare-function harness-ui-tasks--find "harness-ui-tasks")
+(declare-function harness-ui-tasks--searching-p "harness-ui-tasks")
 (declare-function harness-ui-tasks-compose-quit "harness-ui-tasks")
 (declare-function harness-ui-tasks-submit "harness-ui-tasks")
 (declare-function harness-ui-tasks-search "harness-ui-tasks")
+(declare-function harness-compose-text "harness-ui-compose")
+(declare-function harness-compose-in-p "harness-ui-compose")
+(declare-function harness-compose-add-attachment "harness-ui-compose")
+(declare-function harness-ui-level-icon "harness-ui")
+(declare-function harness-quick-search "harness-ui-quick-search")
+(declare-function harness-quick-search-box-submit "harness-ui-quick-search")
 (declare-function harness-ui-tasks-search--banner "harness-ui-tasks-search")
 (declare-function harness-ui-tasks-search--done-text "harness-ui-tasks-search")
 (declare-function harness-ui-tasks-search--install "harness-ui-tasks-search")
-(declare-function harness-ui-tasks-search--read "harness-ui-tasks-search")
 (declare-function harness-ui-tasks-search--shutdown "harness-ui-tasks-search")
+(declare-function harness-ui-tasks-search-submit "harness-ui-tasks-search")
+(declare-function harness-ui-tasks-search-show-plan "harness-ui-tasks-search")
 (declare-function harness-ui-tasks-search-clear "harness-ui-tasks-search")
 (declare-function harness-ui-tasks-search-confirm "harness-ui-tasks-search")
 (declare-function harness-ui-tasks-search-retry "harness-ui-tasks-search")
@@ -91,8 +108,10 @@ The last one answers every request after it.")
 (defmacro harness-ui-tasks-search-test-with (&rest body)
   "Load the state layer, the board and its search with the demo provider.
 The priority plugin is in there too: a task's priority is its session's,
-so the search's priority action goes through `priority/set'.  Run BODY
-with `board' open, with review off unless BODY turns it on."
+so the search's priority action goes through `priority/set'; and the
+quick search, whose box keys and lines the board's search takes.  Run
+BODY with `board' open, with review off unless BODY turns it on, and
+an empty history of searches."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
@@ -120,14 +139,14 @@ with `board' open, with review off unless BODY turns it on."
            ;; Full width: the banner checks below are not about narrow boards.
            (harness-ui-default-position 'full)
            (harness-acp-token nil)
+           (harness-quick-search-history nil)
            (default-directory dir))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
        ;; The UI modules load once the client list is clear, so their
        ;; connection is the one the harness events reach.
-       (harness-test-load-module 'ui)
-       (harness-test-load-module 'ui-tasks)
-       (harness-test-load-module 'ui-tasks-search)
+       (dolist (m '(ui ui-compose ui-popout ui-tasks ui-quick-search ui-tasks-search))
+         (harness-test-load-module m))
        (clrhash harness-ui--sessions)
        (let ((board (harness-tasks dir)))
          (unwind-protect
@@ -206,6 +225,24 @@ With review on, a task that finished waits there instead of completing."
 (defun harness-ui-tasks-search-test--search (board query)
   "Search BOARD for QUERY, as / does, and wait for the answer."
   (with-current-buffer board (harness-tasks-search query)))
+
+(defun harness-ui-tasks-search-test--label (board)
+  "What BOARD shows above its compose box, the box's label among it."
+  (with-current-buffer board
+    (buffer-substring-no-properties harness-ui-tasks--list-end harness-compose-start)))
+
+(defun harness-ui-tasks-search-test--placeholder (board)
+  "The placeholder BOARD's empty compose box shows, or nil."
+  (with-current-buffer board
+    (let ((text (overlay-get harness-compose--placeholder 'before-string)))
+      (and text (substring-no-properties text)))))
+
+(defun harness-ui-tasks-search-test--push (board label)
+  "Push the button LABEL in BOARD's board region, the first there is."
+  (with-current-buffer board
+    (goto-char (point-min))
+    (should (search-forward label harness-ui-tasks--list-end t))
+    (push-button (match-beginning 0))))
 
 (defun harness-ui-tasks-search-test--last-user-text (request)
   "The text of the last user message of REQUEST."
@@ -333,27 +370,40 @@ names it, and [Undo] gives each task the priority it had."
       (should (plist-get (harness-call 'task/get id) :verified))
       (should-not (plist-get (harness-ui-tasks-search-test--state board) :proposed)))))
 
-(ert-deftest harness-ui-tasks-search-empty-line-does-what-is-proposed ()
-  "The prompt names the proposal, and RET on an empty line runs it."
+(ert-deftest harness-ui-tasks-search-empty-box-does-what-is-proposed ()
+  "The search box's placeholder names the proposal, and RET on the empty
+box runs it; with nothing proposed, the search box stays and says what
+it takes."
   (harness-ui-tasks-search-test-with
     (let ((id (harness-ui-tasks-search-test--submit board "Old work to remove")))
       (with-current-buffer board
+        ;; Nothing proposed: an empty RET searches nothing.
+        (call-interactively #'harness-ui-tasks-search)
+        (should-not (string-match-p "RET:" (harness-ui-tasks-search-test--placeholder board)))
+        (call-interactively (key-binding (kbd "RET")))
+        (should (harness-ui-tasks--searching-p))
+        (should-not harness-ui-tasks-search--state)
+        (should-not harness-ui-tasks-search-test--requests)
+        ;; A proposal arrives while the search box is open: the
+        ;; placeholder names it at once.
         (setq harness-ui-tasks-search--state
               (list :query "remove the old work" :seq 1 :status 'done :ids (list id)
                     :proposed (list (list :task id :action "archive" :title "Old work to remove"
                                           :confirm t))))
         (harness-ui-tasks-search--install)
-        (let ((prompt nil))
-          (cl-letf (((symbol-function 'read-string)
-                     (lambda (p &rest _) (setq prompt p) "")))
-            (should (equal "" (harness-ui-tasks-search--read))))
-          (should (string-match-p "RET: stop and archive" prompt)))
-        ;; An empty line does the proposal.
-        (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "  ")))
-          (call-interactively #'harness-tasks-search))
-        (harness-test-wait (lambda () (harness-json-true-p (plist-get (harness-call 'task/get id) :archived)))
-                           5 "the proposal to run")
-        (harness-ui-tasks-search-test--wait-text board "Archived")))))
+        (should (string-match-p "RET: stop and archive “Old work to remove”"
+                                (harness-ui-tasks-search-test--placeholder board)))
+        ;; Blanks are an empty box: RET does the proposal, and the box
+        ;; is a task's again.
+        (insert "  ")
+        (call-interactively (key-binding (kbd "RET")))
+        (should-not (harness-ui-tasks--searching-p))
+        (should-not harness-ui-tasks--target))
+      (harness-test-wait (lambda () (harness-json-true-p (plist-get (harness-call 'task/get id) :archived)))
+                         5 "the proposal to run")
+      (harness-ui-tasks-search-test--wait-text board "Archived")
+      ;; It ran without asking the model.
+      (should-not harness-ui-tasks-search-test--requests))))
 
 (ert-deftest harness-ui-tasks-search-c-g-shows-every-task-again ()
   "C-g on the board drops the search and its filter."
@@ -407,24 +457,107 @@ names it, and [Undo] gives each task the priority it had."
       (should-not harness-ui-tasks-filter)
       (should (string-match-p "\\[Search\\]" (harness-ui-tasks--header))))))
 
-(ert-deftest harness-ui-tasks-search-slash-reads-the-line-and-searches ()
-  "/ on the board reads a line in the minibuffer and searches for it."
+(ert-deftest harness-ui-tasks-search-slash-opens-the-search-box ()
+  "/ on the board turns the compose box into a search box, whose RET
+searches; the box gets back what it held, and point goes to the best
+match.  / under the harness prefix stays the quick search's."
   (harness-ui-tasks-search-test-with
-    (let ((id (harness-ui-tasks-search-test--submit board "Fix the flaky test"))
-          (prompt nil))
+    (let ((id (harness-ui-tasks-search-test--submit board "Fix the flaky test")))
       (setq harness-ui-tasks-search-test--replies
             (list (format "{\"show\":[\"%s\"],\"do\":[]}" id)))
+      (should (eq (lookup-key harness-ui-map (kbd "/")) #'harness-quick-search))
       (with-current-buffer board
+        ;; A task half described, point back on a card.
+        (goto-char harness-compose-end)
+        (insert "Half a task")
         (goto-char (point-min))
         (search-forward "Fix the flaky test")
         (should (eq (key-binding (kbd "/")) #'harness-ui-tasks-search))
-        (cl-letf (((symbol-function 'read-string)
-                   (lambda (p &rest _) (setq prompt p) "flaky test")))
-          (call-interactively (key-binding (kbd "/")))))
-      (should (equal "Find or act on tasks: " prompt))
+        (call-interactively (key-binding (kbd "/")))
+        ;; A search box: empty, point in it, its own label and placeholder.
+        (should (equal '(search) harness-ui-tasks--target))
+        (should harness-quick-search-box-mode)
+        (should (eq harness-quick-search-box-function #'harness-ui-tasks-search-submit))
+        (should (harness-compose-in-p))
+        (should (equal "" (harness-compose-text)))
+        (should (string-match-p "Search tasks, sessions and commands" (harness-ui-tasks-search-test--label board)))
+        (should (string-match-p "Find or act on tasks; sessions and commands too"
+                                (harness-ui-tasks-search-test--placeholder board)))
+        ;; RET in the box searches the line.
+        (insert "flaky test")
+        (should (eq (key-binding (kbd "RET")) #'harness-quick-search-box-submit))
+        (call-interactively (key-binding (kbd "RET")))
+        ;; The box is a task's again, and holds what it held.
+        (should-not harness-ui-tasks--target)
+        (should-not harness-quick-search-box-mode)
+        (should (equal "Half a task" (harness-compose-text)))
+        (should-not (string-match-p "Search tasks" (harness-ui-tasks-search-test--label board))))
       (harness-ui-tasks-search-test--wait-status board 'done)
       (should (equal "flaky test" (plist-get (harness-ui-tasks-search-test--state board) :query)))
-      (should (string-match-p "1 task" (harness-ui-tasks-search-test--board-text board))))))
+      (should (string-match-p "1 task" (harness-ui-tasks-search-test--board-text board)))
+      ;; The line is in the searches' history, the quick search's too.
+      (should (equal '("flaky test") harness-quick-search-history))
+      (with-current-buffer board
+        ;; Point was on the board: it is on the best match.
+        (should (equal id (get-text-property (point) 'harness-task-id)))
+        ;; M-p in the search box brings the line back.
+        (call-interactively #'harness-ui-tasks-search)
+        (should (eq (key-binding (kbd "M-p")) #'harness-quick-search-box-previous))
+        (call-interactively (key-binding (kbd "M-p")))
+        (should (equal "flaky test" (harness-compose-text)))
+        (harness-ui-tasks-compose-quit)
+        (should (equal "Half a task" (harness-compose-text)))))))
+
+(ert-deftest harness-ui-tasks-search-c-g-closes-the-search-box ()
+  "C-g in the search box closes it, searching nothing: the box gets back
+its text and attachments, and point the card it was on.  A message
+being written stays a message."
+  (harness-ui-tasks-search-test-with
+    (let ((id (harness-ui-tasks-search-test--submit board "Fix the flaky test"))
+          (file (expand-file-name "notes.txt" dir)))
+      (with-temp-file file (insert "notes\n"))
+      (with-current-buffer board
+        (goto-char harness-compose-end)
+        (insert "Half a task")
+        (harness-compose-add-attachment file)
+        (should (= 1 (length harness-compose-attachments)))
+        ;; From the box: point stays there.
+        (call-interactively #'harness-ui-tasks-search)
+        (should (harness-ui-tasks--searching-p))
+        (should-not harness-compose-attachments)
+        (insert "something to find")
+        (let ((said nil))
+          (cl-letf (((symbol-function 'message)
+                     (lambda (fmt &rest args) (setq said (apply #'format-message fmt args)))))
+            (harness-ui-tasks-compose-quit))
+          (should (equal "Search closed" said)))
+        (should-not (harness-ui-tasks--searching-p))
+        (should-not harness-quick-search-box-mode)
+        (should-not harness-ui-tasks--target)
+        (should (equal "Half a task" (harness-compose-text)))
+        (should (= 1 (length harness-compose-attachments)))
+        (should (harness-compose-in-p))
+        ;; From a card: point goes back to it.
+        (goto-char (point-min))
+        (search-forward "Fix the flaky test")
+        (call-interactively (key-binding (kbd "/")))
+        (should (harness-compose-in-p))
+        (harness-ui-tasks-compose-quit)
+        (should (equal id (get-text-property (point) 'harness-task-id)))
+        (should (equal "Half a task" (harness-compose-text)))
+        ;; A message to the task's session, half written, stays one.
+        (harness-ui-tasks-compose-reset)
+        (goto-char (point-min))
+        (search-forward "Fix the flaky test")
+        (call-interactively (key-binding (kbd "m")))
+        (should (equal (cons 'reply id) harness-ui-tasks--target))
+        (insert "also check the login test")
+        (call-interactively #'harness-ui-tasks-search)
+        (should (harness-ui-tasks--searching-p))
+        (harness-ui-tasks-compose-quit)
+        (should (equal (cons 'reply id) harness-ui-tasks--target))
+        (should (equal "also check the login test" (harness-compose-text)))))
+    (should-not harness-ui-tasks-search-test--requests)))
 
 (ert-deftest harness-ui-tasks-search-asks-with-the-board-dump ()
   "The model reads every task: its id, where it stands, its words."
@@ -439,3 +572,97 @@ names it, and [Undo] gives each task the priority it had."
         (should (string-match-p (regexp-quote id) text))
         (should (string-match-p "Fix the flaky test" text))
         (should (string-match-p "Query: flaky" text))))))
+
+(ert-deftest harness-ui-tasks-search-asks-favouring-tasks-with-the-commands ()
+  "The board's search is the harness's own search favouring tasks: the
+model reads that it was typed on the board, and the commands its words
+match, from the board's catalogue."
+  (harness-ui-tasks-search-test-with
+    (harness-ui-tasks-search-test--submit board "Fix the flaky test")
+    (harness-ui-tasks-search-test--search board "archive the completed tasks")
+    (harness-ui-tasks-search-test--wait-status board 'done)
+    (let ((text (harness-ui-tasks-search-test--last-user-text (car harness-ui-tasks-search-test--requests))))
+      (should (string-match-p "^Context: the task board of project .*\\. Favour tasks; sessions and commands count too\\.$"
+                              text))
+      (should (string-match-p "^Commands (name | keys | where | what it does):$" text))
+      (should (string-match-p "^harness-ui-tasks-archive-done | .*Archive completed" text))
+      (should (string-match-p "Query: archive the completed tasks" text)))))
+
+(ert-deftest harness-ui-tasks-search-banner-shows-sessions-and-commands ()
+  "What the search found besides tasks shows in the banner, counted on
+its first line, under the model's note: each session with [Open], each
+command with [Run] where it runs; their buttons open and run them from
+the board."
+  (harness-ui-tasks-search-test-with
+    (let* ((id (harness-ui-tasks-search-test--submit board "Fix the flaky test"))
+           (session (plist-get (harness-call 'task/get id) :session))
+           (opened nil)
+           (ran nil))
+      (should session)
+      (setq harness-ui-tasks-search-test--replies
+            (list (harness-json-encode-text
+                   (list :show (list id) :sessions (list session)
+                         :commands (list "harness-ui-tasks-archive-done")
+                         :note "Its session talks of it too."))))
+      (harness-ui-tasks-search-test--search board "the flaky test, and how to clear the done ones")
+      (harness-ui-tasks-search-test--wait-status board 'done)
+      (let ((state (harness-ui-tasks-search-test--state board))
+            (text (harness-ui-tasks-search-test--board-text board)))
+        (should (equal (list id) (plist-get state :ids)))
+        (should (equal (list session) (mapcar (lambda (s) (plist-get s :id)) (plist-get state :sessions))))
+        (should (equal '("harness-ui-tasks-archive-done")
+                       (mapcar (lambda (c) (plist-get c :command)) (plist-get state :commands))))
+        (should-not (plist-get state :widened))
+        (should (string-match-p "1 task · 1 session · 1 command" text))
+        (should (string-match-p "Its session talks of it too\\." text))
+        (should (string-match-p "\\[Open\\]" text))
+        (should (string-match-p "Archive completed.*\\[Run\\] \\[Describe\\]" text)))
+      ;; [Open] opens the session, [Run] runs the command on the board.
+      (cl-letf (((symbol-function 'harness-ui-visit-session) (lambda (sid &rest _) (setq opened sid)))
+                ((symbol-function 'harness-ui-tasks-archive-done)
+                 (lambda () (interactive) (setq ran (current-buffer)))))
+        (harness-ui-tasks-search-test--push board "[Open]")
+        (harness-ui-tasks-search-test--push board "[Run]"))
+      (should (equal session opened))
+      (should (eq board ran)))))
+
+(ert-deftest harness-ui-tasks-search-widened-answer-says-so ()
+  "A search that matches nothing, even looking wider, says so in the
+banner, with the caution icon, and that no task matches; the board then
+shows no task."
+  (harness-ui-tasks-search-test-with
+    (harness-ui-tasks-search-test--submit board "Fix the flaky test")
+    (setq harness-ui-tasks-search-test--replies '("{\"show\":[],\"sessions\":[],\"commands\":[],\"do\":[]}"))
+    (harness-ui-tasks-search-test--search board "zxqv blorp")
+    (harness-ui-tasks-search-test--wait-status board 'done)
+    (let ((state (harness-ui-tasks-search-test--state board))
+          (text (harness-ui-tasks-search-test--board-text board)))
+      (should (eq t (plist-get state :widened)))
+      (should (equal "Nothing matched: no task, session or command." (plist-get state :note)))
+      (should (string-match-p "“zxqv blorp”  ·  no task matches" text))
+      (should (string-match-p "Nothing matched: no task, session or command\\." text))
+      (should-not (string-match-p "Fix the flaky test" text))
+      ;; The note says it looked wider: the caution icon leads it.
+      (should (string-match-p (regexp-quote (concat (substring-no-properties (harness-ui-level-icon 'caution))
+                                                    " Nothing matched"))
+                              text)))))
+
+(ert-deftest harness-ui-tasks-search-show-plan-shows-what-was-found ()
+  "A plan from elsewhere -- the quick search's [Board] -- shows on the
+board as its search would: its tasks under a banner, nothing proposed."
+  (harness-ui-tasks-search-test-with
+    (harness-ui-tasks-search-test--submit board "Fix the flaky test")
+    (harness-ui-tasks-search-test--submit board "Write the docs")
+    (let ((id (harness-ui-tasks-search-test--id board "Write the docs")))
+      (with-current-buffer board
+        (harness-ui-tasks-search-show-plan (list :ids (list id) :query "the docs"))
+        (let ((state harness-ui-tasks-search--state)
+              (text (harness-ui-tasks-search-test--board-text board)))
+          (should (eq 'done (plist-get state :status)))
+          (should (equal (list id) (plist-get state :ids)))
+          (should-not (plist-get state :proposed))
+          (should (string-match-p "“the docs”  ·  1 task" text))
+          (should (string-match-p "Write the docs" text))
+          (should-not (string-match-p "Fix the flaky test" text))
+          (should (equal id (get-text-property (point) 'harness-task-id))))))
+    (should-not harness-ui-tasks-search-test--requests)))

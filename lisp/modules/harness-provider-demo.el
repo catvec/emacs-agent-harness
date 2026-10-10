@@ -30,8 +30,9 @@
 ;; refinement section) instead looks at the board with task_list, takes
 ;; a quick look at the project and writes it up -- or, when another task
 ;; on the board asks for it in the same words, refuses it as a duplicate.
-;; A task board's search gets the JSON a search model answers with,
-;; matched from the words of the query (`harness-provider-demo--search'),
+;; A search, the task board's or the harness-wide one, gets the JSON a
+;; search model answers with: the tasks, sessions and commands matched
+;; from the words of the query (`harness-provider-demo--search'),
 ;; and a request to name a session the first words of its opening
 ;; message (`harness-provider-demo--title').  The companion pet gets
 ;; its name and its lines (`harness-provider-demo--pet'), and the
@@ -189,7 +190,7 @@ the last user message picks one (see the Commentary)."
       (harness-provider-demo--title request))
      ((string-match-p "^## Task refinement" (or (plist-get request :system) ""))
       (harness-provider-demo--write-up request cwd))
-     ((string-prefix-p "You are the search box of a task board" (or (plist-get request :system) ""))
+     ((string-prefix-p "You are the search box" (or (plist-get request :system) ""))
       (harness-provider-demo--search request))
      ((string-match-p "\\`You \\(?:name newly hatched\\|are a\\) coding companion" (or (plist-get request :system) ""))
       (harness-provider-demo--pet request))
@@ -557,17 +558,46 @@ happened, or remarks on the longest word of the user's last message."
 (defconst harness-provider-demo--search-stopwords
   '("a" "an" "the" "task" "tasks" "about" "did" "i" "have" "had" "any" "all" "my" "me" "of" "for"
     "to" "on" "in" "is" "are" "was" "were" "that" "this" "these" "those" "them" "it" "which" "what"
-    "show" "find" "where" "with" "and" "or" "one" "ones" "do" "does" "there" "please" "adding" "add")
-  "Words a demo search ignores when it matches tasks.")
+    "show" "find" "where" "with" "and" "or" "one" "ones" "do" "does" "there" "please" "adding" "add"
+    "how" "can" "open" "session" "sessions" "command" "commands" "you" "your" "when" "who" "why")
+  "Words a demo search ignores when it matches tasks, sessions and commands.")
+
+(defun harness-provider-demo--search-lines (text header)
+  "The lines of the block of TEXT that a line starting with HEADER opens.
+Each is (NAME . LINE): NAME its first field, LINE the line downcased.
+The block ends at a blank line."
+  (let ((in nil) (out nil))
+    (dolist (line (split-string text "\n"))
+      (cond ((string-prefix-p header line) (setq in t))
+            ((string-empty-p line) (setq in nil))
+            ((and in (string-match "\\`\\([^ |]+\\) | " line))
+             (push (cons (match-string 1 line) (downcase line)) out))))
+    (nreverse out)))
+
+(defun harness-provider-demo--search-best (words lines max)
+  "The names of LINES holding the most of WORDS, at most MAX; nil for none.
+A word counts when a line holds its first five characters, so
+\"debugged\" finds \"debug\"."
+  (let* ((stems (mapcar (lambda (w) (substring w 0 (min 5 (length w)))) words))
+         (scored (mapcar (lambda (line) (cons (cl-count-if (lambda (s) (string-search s (cdr line))) stems) (car line)))
+                         lines))
+         (best (apply #'max 0 (mapcar #'car scored))))
+    (and (> best 0)
+         (seq-take (mapcar #'cdr (cl-remove-if-not (lambda (s) (= (car s) best)) scored)) max))))
 
 (defun harness-provider-demo--search (request)
-  "Answer a task board search from REQUEST's board, as a scripted model would.
+  "Answer a search from what REQUEST gives, as a scripted model would.
 No model: words of the query that order an action pick it (or, failing
 that, words that give a priority), words that name a state keep the
 tasks in that state, and the other words keep the tasks whose lines
-hold them all (or, when none does, the most of them)."
+hold them all (or, when none does, the most of them).  The same words
+pick the sessions and the commands whose lines hold the most of them.
+A query with no such words shows every task in its state, or every task
+when the search favours tasks."
   (let* ((text (harness-provider-demo--last-user-text request))
          (query (downcase (if (string-match "^Query: \\(.*\\)$" text) (match-string 1 text) "")))
+         (favours-tasks (or (not (string-match-p "^Context: " text))
+                            (string-match-p "^Context: .*Favour tasks" text)))
          (entries nil))
     ;; Each task is a line "ID | STATUS | TITLE" and the indented lines after it.
     (dolist (line (split-string text "\n"))
@@ -599,10 +629,18 @@ hold them all (or, when none does, the most of them)."
                            in-state))
            (best (if words (apply #'max 0 (mapcar #'car scored)) 0))
            (shown (mapcar (lambda (s) (nth 1 s))
-                          (cond ((null words) (mapcar (lambda (e) (cons 0 e)) in-state))
+                          (cond ((and (null words) (or state favours-tasks)) (mapcar (lambda (e) (cons 0 e)) in-state))
                                 ((> best 0) (cl-remove-if-not (lambda (s) (= (car s) best)) scored)))))
-           (answer (format "{\"show\":[%s],\"do\":[%s]}"
+           (sessions (and words (harness-provider-demo--search-best
+                                 words (harness-provider-demo--search-lines text "Sessions besides the board's tasks")
+                                 5)))
+           (commands (and words (harness-provider-demo--search-best
+                                 words (harness-provider-demo--search-lines text "Commands (name | keys")
+                                 3)))
+           (answer (format "{\"show\":[%s],\"sessions\":[%s],\"commands\":[%s],\"do\":[%s]}"
                            (mapconcat (lambda (id) (format "%S" id)) shown ",")
+                           (mapconcat (lambda (id) (format "%S" id)) sessions ",")
+                           (mapconcat (lambda (name) (format "%S" name)) commands ",")
                            (cond (action
                                   (mapconcat (lambda (id) (format "{\"task\":%S,\"action\":%S}" id action)) shown ","))
                                  (priority
