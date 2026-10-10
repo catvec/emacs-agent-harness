@@ -20,8 +20,8 @@
 ;; -- whoever sent the message, and asks what goes first
 ;; (`harness-cowboy-choices'):
 ;;
-;; - `brief'      a brief summary by a cheap model, from only the first
-;;                and the last messages: cents;
+;; - `brief'      a brief summary by a cheap model, from the whole
+;;                narrative, tool calls in brief: cents;
 ;; - `summary'    a summary by the session's model, which reads all of
 ;;                the conversation again uncached;
 ;; - `transcript' the conversation written to a file the model reads as
@@ -90,7 +90,7 @@
 ;;;; Settings
 
 (defconst harness-cowboy-choices
-  '((brief "Brief summary" "a cheap model summarises the first and last messages")
+  '((brief "Brief summary" "a cheap model summarises the narrative, tool calls in brief")
     (summary "Summary" "the session's model summarises it all, reading it uncached")
     (transcript "Transcript file" "the conversation goes to a file the model reads as it needs")
     (fresh "Start afresh" "nothing is carried over; the model looks back when it needs to")
@@ -111,14 +111,15 @@ or in any once `harness-cowboy-ask' is off.  Answering the question
 with \"always\" and a choice sets it.
 
 `brief' (the default) has a cheap model write a short summary from the
-first and last messages only, so it never pays for the whole
-conversation; `summary' has the session's model summarise all of it,
+conversation's narrative -- every user and assistant message, each tool
+call and result in a line, never a payload -- so it never pays for the
+whole conversation; `summary' has the session's model summarise all of it,
 reading it uncached; `transcript' writes the conversation to a file
 the model reads as it needs, and `fresh' carries nothing over, neither
 asking any model; `carry-on' sends it all again as before.  Whatever
 it is, the model can search and read the conversation it replaced with
 the session_history tool."
-  :type '(choice (const :tag "Brief summary: a cheap model reads the first and last messages" brief)
+  :type '(choice (const :tag "Brief summary: a cheap model reads the narrative, tool calls in brief" brief)
                  (const :tag "Summary: the session's model reads all of it, uncached" summary)
                  (const :tag "Transcript file: the model reads what it needs" transcript)
                  (const :tag "Start afresh: nothing carried over" fresh)

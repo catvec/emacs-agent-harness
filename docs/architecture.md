@@ -2933,17 +2933,18 @@ retries its own API calls.
   - `summary` (the default): the session's model (OPTS `:model`
     another) summarises the conversation, and the message reads
     "Summary of the conversation so far: ...".  OPTS `:context` is
-    `full` (the default) or `sample`, which keeps only the first and
-    last few messages (`harness-compaction--sample-head`/`-tail`) with a
-    user message saying how many were left out: a bound on what a
-    summariser sent the conversation as text costs.  A summary of a
-    sample is a brief one.
+    `full` (the default) or `sample`, which sends the conversation's
+    narrative — every user and assistant message, each tool call and
+    result in one line, never a payload — so a summariser that has to
+    be sent the conversation as text never takes its payloads at once.
+    A summary of a sample is a brief one.
   - `brief`: a summary of a sample, written by OPTS `:model`, else
     `harness-compaction-brief-model` (`auto`, the default: the simple
     tier of the session's provider, `provider/tier-model`, else the
     session's model; nil: the session's model; or a model named), and
-    ending in a note that it was written from only the first and last
-    messages and may lack what came between
+    ending in a note that it was written from the conversation's
+    narrative, tool calls and results named in a line, and so lacks
+    what they carried
     (`harness-compaction--brief-caveat`; OPTS `:caveat` replaces it, nil
     for none).  It costs cents however long the conversation.  A
     handoff's `compact-new` is one, written by the new model.
@@ -2976,6 +2977,11 @@ retries its own API calls.
   the conversation it replaced is still on record.  The line is left
   out when the session's model does not have the tool
   (`harness-compaction-history-p`, from `tools/list`).
+  A model-written compaction (`summary` or `brief`) also keeps the
+  conversation's first message and its most recent one verbatim in the
+  node (`harness-compaction--verbatim-ends`), so a short task and the
+  latest message survive the summary; the cost estimate's `:after`
+  counts them.
   The node's `:meta` points at the compacted head and records the kind
   (`:compaction`, read back by `harness-node-compaction-kind`), the
   writer (`:model`, the session's for a transcript), what it was given
@@ -3171,7 +3177,8 @@ so switching to either loses nothing.
   lasts and pays for it all uncached once it lapsed (`:cache`), and
   `compact-new` has the *new* model summarise instead,
   from a bounded context (`compaction/compact` `:kind brief` with
-  `:model`: the first and last few messages): use it when the old
+  `:model`: the conversation's narrative, tool calls and results each
+  in one line): use it when the old
   provider cannot answer -- its plan ran out, it is down -- or to keep
   the job small.  The compaction node,
   marked `:handoff` with the mode, summariser and context, opens the new

@@ -281,6 +281,32 @@ conversation."
         (should (string-match-p "first" text))
         (should (string-match-p "second" text))))))
 
+(ert-deftest harness-cowboy-the-next-request-restamps-the-cache ()
+  "After a cowboy compaction the first request that follows stamps the new cache.
+The provider reports the turn as a plain miss (`:cache-read 0',
+`:cache-write 0'), as an OpenAI-compatible provider does; the session
+still records the new cache from the pending marker the compaction left,
+so it is warm and nothing asks again."
+  (harness-cowboy-test-with
+    (let* ((sid (harness-cowboy-test-session))
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (if (string-match-p "handoff summary" (or (plist-get request :system) ""))
+                  '((:type text :delta "SUMMARY TEXT")
+                    (:type done :stop-reason end-turn))
+                (push request harness-cowboy-test--requests)
+                '((:type text :delta "Done.")
+                  (:type usage :input 30 :output 5 :cache-read 0 :cache-write 0 :context 430)
+                  (:type done :stop-reason end-turn))))))
+      (let ((p (harness-call 'agent/prompt sid "feedback: fix it")))
+        (harness-cowboy-test--answer sid "b")
+        (harness-test-await p 10))
+      (should (= 1 (length (harness-cowboy-test--compactions sid))))
+      (let ((s (harness-call 'session/get sid)))
+        (should (plist-get s :cache))
+        (should-not (harness-cowboy-cold-p s (float-time))))
+      (should-not (harness-call 'question/pending sid)))))
+
 (ert-deftest harness-cowboy-fresh-start ()
   "Starting afresh carries nothing over but a note pointing at the history."
   (harness-cowboy-test-with
@@ -467,9 +493,8 @@ right after it, and a tool message must answer the call before it."
 
 (ert-deftest harness-cowboy-brief-summarises-a-sample-with-tool-calls ()
   "A brief summary of a long conversation with tool calls is made and used.
-The sample names the middle it leaves out and keeps every tool call with
-the message that answers it -- a provider rejects a request that parts
-them -- and the tool-call JSON in it serializes."
+The narrative the summary reads names the tool call and its result each
+in a line, keeps every message, and serializes without a payload."
   (harness-cowboy-test-with
     (let* ((sid (harness-cowboy-test-session))
            (summaries nil)
@@ -494,12 +519,15 @@ them -- and the tool-call JSON in it serializes."
       (let* ((request (car summaries))
              (messages (plist-get request :messages))
              (text (harness-cowboy-test--request-text request)))
-        (should (string-match-p "left out the 4 messages" text))
-        (should (harness-cowboy-test-paired-p messages))
-        (should (cl-some (lambda (m) (cl-some (lambda (b) (and (equal (plist-get b :type) "tool_use")
-                                                              (equal (plist-get b :id) "c1")))
-                                             (plist-get m :content)))
-                         messages))
+        (should (string-match-p "next: read it" text))
+        (should (string-match-p (regexp-quote "[called read_file: path: café/naïve.txt]") text))
+        (should (string-match-p (regexp-quote "[result: the file says café]") text))
+        (dolist (i (number-sequence 0 15))
+          (should (string-match-p (format "message %d" i) text)))
+        (should-not (string-match-p "left out" text))
+        (should-not (cl-some (lambda (m) (cl-some (lambda (b) (equal (plist-get b :type) "tool_use"))
+                                                  (plist-get m :content)))
+                             messages))
         ;; What the provider would put in its body serializes.
         (should (stringp (harness-json-encode messages))))
       (should (equal "brief" (harness-node-compaction-kind (car (harness-cowboy-test--compactions sid))))))))

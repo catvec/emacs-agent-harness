@@ -3249,7 +3249,7 @@ not called."
   '((?c "current model summarises" compact
         "warm cache; summary from the whole conversation")
     (?n "new model summarises" compact-new
-        "only the first and last messages; small, but lossy")
+        "the conversation's narrative, tool calls in brief; small, but lossy")
     (?t "full transcript" transcript
         "whole conversation as a file the new model reads")
     (?s "no handoff" none
@@ -3458,7 +3458,7 @@ their number).  The risks show before the question.  Return a mode of
       (format "Model → %s from the running turn's next step, which takes the handoff" label))
      ((equal mode "compact") (format "Model → %s, starting from a summary of the conversation" label))
      ((equal mode "compact-new")
-      (format "Model → %s, starting from a summary that model wrote from the first and last messages" label))
+      (format "Model → %s, starting from a summary that model wrote from the conversation's narrative" label))
      ((and (equal mode "transcript") (stringp file))
       (format "Model → %s, which reads the transcript in %s first%s" label (abbreviate-file-name file)
               (if (plist-get result :fallback) " (no summary could be made)" "")))
