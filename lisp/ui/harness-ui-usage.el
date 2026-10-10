@@ -410,7 +410,7 @@ a load in progress or an error stay longest.  WIDTH is as
                 (harness-ui-usage--error
                  (list (concat "  " (propertize (format "error: %s" harness-ui-usage--error) 'face 'error)) 95)))
           (list (concat "  " (harness-ui-usage--segment "g" #'harness-ui-usage-refresh nil "Refresh")) 60)
-          (list (harness-ui-usage--segment "q" #'quit-window nil "Quit") 65)))
+          (list (harness-ui-usage--segment "q" #'harness-ui-quit-view nil "Quit") 65)))
    width))
 
 (defun harness-ui-usage--period-command (period)
@@ -940,7 +940,7 @@ so neither a refresh nor a fold scrolls it."
 
 (defvar harness-ui-usage-mode-map
   (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
+    (set-keymap-parent map harness-ui-view-map)
     (define-key map (kbd "g") #'harness-ui-usage-refresh)
     (define-key map (kbd "t") #'harness-ui-usage-cycle-period)
     (define-key map (kbd "b") #'harness-ui-usage-cycle-group)

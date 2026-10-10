@@ -224,6 +224,8 @@ their sum; TAB, RET, w and the heading's button show and hide them."
 (ert-deftest harness-ui-usage-empty-state ()
   (harness-ui-usage-test-with
     (let ((text (harness-ui-usage-test-open)))
+      ;; q buries the dashboard rather than quitting its window.
+      (should (eq #'harness-ui-quit-view (key-binding (kbd "q"))))
       (should (string-match-p "No usage recorded" text))
       (should (string-match-p "no budgets yet" text))
       (should (string-match-p "\\$0 cost" text)))))

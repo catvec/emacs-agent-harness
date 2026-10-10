@@ -298,6 +298,8 @@ once in the fifteen half seconds of its idle loop."
     (let ((buf (harness-ui-pet-test--open)))
       (should (eq buf (window-buffer (selected-window))))
       (should (with-current-buffer buf (derived-mode-p 'harness-ui-pet-mode)))
+      ;; q buries the pet rather than quitting its window.
+      (should (eq #'harness-ui-quit-view (with-current-buffer buf (key-binding (kbd "q")))))
       (let ((text (harness-ui-pet-test--text)))
         (should (string-match-p "An egg" text))
         (should (string-match-p "Hatch it" text))

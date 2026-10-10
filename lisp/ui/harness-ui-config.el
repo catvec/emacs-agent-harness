@@ -1834,7 +1834,7 @@ with save and revert, and a load in progress or an error stay longest."
                               (harness-ui-config--segment "revert" #'harness-ui-config-revert-all "Drop every edit"))
                       92))
            (list (concat "  " (harness-ui-config--segment "g" #'harness-ui-config-refresh "Reload the settings (g)")) 60)
-           (list (harness-ui-config--segment "q" #'quit-window "Quit (q)") 65))
+           (list (harness-ui-config--segment "q" #'harness-ui-quit-view "Quit (q)") 65))
      width)))
 
 ;;;; Loading
@@ -2146,7 +2146,7 @@ They have a global value only, so showing them shows the Global scope."
     (define-key map (kbd "a") #'harness-ui-config-toggle-advanced)
     (define-key map (kbd "C") #'harness-ui-config-customize-interface)
     (define-key map (kbd "g") #'harness-ui-config-refresh)
-    (define-key map (kbd "q") #'quit-window)
+    (define-key map (kbd "q") #'harness-ui-quit-view)
     (define-key map (kbd "n") #'harness-ui-config-next-setting)
     (define-key map (kbd "p") #'harness-ui-config-previous-setting)
     (define-key map (kbd "d") #'harness-ui-config-unset-setting)

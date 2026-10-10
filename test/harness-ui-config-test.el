@@ -221,6 +221,8 @@ state directory, as they would the user's."
       (insert "((nil . ((harness-permission-mode . yolo) (harness-sandbox-policy . 5))))"))
     (harness-ui-config-test-open root)
     (should (derived-mode-p 'harness-ui-config-mode))
+    ;; q buries the page rather than quitting its window.
+    (should (eq #'harness-ui-quit-view (key-binding (kbd "q"))))
     (should-not (string-match-p "does not fit" (harness-ui-config-test-block "harness-sandbox-policy")))
     (should (equal (format "*harness settings: %s*" (file-name-nondirectory (directory-file-name root)))
                    (buffer-name)))

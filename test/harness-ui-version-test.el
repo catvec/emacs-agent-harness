@@ -378,8 +378,14 @@ The harness runs in this Emacs unless BODY binds the address."
   (should (eq #'harness-ui-version-refresh (lookup-key harness-ui-version-mode-map (kbd "g"))))
   (should (eq #'harness-menu (lookup-key harness-ui-version-mode-map (kbd "?"))))
   (should (eq #'forward-button (lookup-key harness-ui-version-mode-map (kbd "TAB"))))
-  (should (eq #'quit-window (lookup-key harness-ui-version-mode-map (kbd "q"))))
+  ;; q comes from the shared view map, which buries the page.
+  (should (eq harness-ui-view-map (keymap-parent harness-ui-version-mode-map)))
   (should (equal "Version" (car (get 'harness-ui-version-mode 'harness-menu-group)))))
+
+(ert-deftest harness-ui-version-page-q-buries ()
+  "q on the version page buries it, as it does on every harness view."
+  (harness-ui-version-test-with-page (harness-ui-version-test--loaded)
+    (should (eq #'harness-ui-quit-view (key-binding (kbd "q"))))))
 
 ;;;; The nag icon
 

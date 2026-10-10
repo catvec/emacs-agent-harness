@@ -1047,5 +1047,33 @@ aside."
       (should-not (tabulated-list-get-id))
       (should (equal "new" (harness-ui-sessions--overview-session))))))
 
+(ert-deftest harness-ui-sessions-waiting-shows-beside-the-anchor ()
+  "With the fullscreen layout on, the waiting list shows in the slot.
+It does not take the anchor's place: `harness-sessions-waiting' passes
+the `slot' position, which `harness-ui-display-buffer' shows beside the
+anchor."
+  (harness-ui-sessions-test-with-repo
+    (let* ((anchor (get-buffer-create "*harness waiting anchor*"))
+           (file (get-buffer-create "*harness waiting file*"))
+           (shown nil))
+      (unwind-protect
+          (progn
+            (with-current-buffer anchor
+              (setq-local harness-ui-overview-function #'ignore))
+            (delete-other-windows)
+            (switch-to-buffer file)
+            (harness-ui--fullscreen-enter anchor)
+            (should (harness-ui--fullscreen-layout))
+            ;; Capture what position the list is displayed in.
+            (cl-letf (((symbol-function 'harness-ui-display-view)
+                       (lambda (buffer &optional position)
+                         (setq shown (cons buffer position)))))
+              (harness-sessions-waiting))
+            (should (eq (get-buffer harness-ui-sessions--buffer-name) (car shown)))
+            (should (eq 'slot (cdr shown))))
+        (ignore-errors (harness-ui--fullscreen-leave))
+        (kill-buffer anchor)
+        (kill-buffer file)))))
+
 (provide 'harness-ui-sessions-test)
 ;;; harness-ui-sessions-test.el ends here

@@ -487,7 +487,7 @@ keys least used ([n/p lane], [TAB expand], [b btw], [c checkout],
            (funcall btn "[TAB expand]" #'harness-ui-tree-toggle "Show the full node" 30)
            (funcall btn "[n/p lane]" #'harness-ui-tree-next-in-lane "Move within this session's rows" 20)
            (funcall btn "[g]" #'harness-ui-tree-refresh "Refresh" 75)
-           (funcall btn "[q]" #'quit-window "Quit" 80))
+           (funcall btn "[q]" #'harness-ui-quit-view "Quit" 80))
      width)))
 
 (defun harness-ui-tree--node-position (id)
@@ -597,7 +597,7 @@ making each buffer current in turn."
 
 (defvar harness-ui-tree-mode-map
   (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
+    (set-keymap-parent map harness-ui-view-map)
     (define-key map (kbd "RET") #'harness-ui-tree-open)
     (define-key map [mouse-1] #'harness-ui-tree-mouse-open)
     (define-key map (kbd "c") #'harness-ui-tree-checkout)
