@@ -321,7 +321,8 @@ triangle).  Words that go with the icon take `harness-ui-level-face'."
 
 (defvar harness-ui-connection nil "The ACP connection the UI talks through.")
 (defvar harness-ui-connection-address nil
-  "Where the harness is: nil in this Emacs, `process' for the harness
+  "Address of the harness the UI talks to.
+It is nil for the harness in this Emacs, `process' for the harness
 process `harness-start' manages (see `harness-process'), or \"host:port\".")
 
 (defvar harness-ui-update-functions nil
@@ -374,10 +375,11 @@ Each is (METHOD PARAMS PROMISE); PROMISE is nil for notifications.")
   (and harness-ui-connection (harness-acp-connected-p harness-ui-connection)))
 
 (defun harness-ui-connect (&optional address)
-  "Connect the UI to ADDRESS: nil for the in-process harness, `process'
-for the managed harness process, or \"host:port\".  Return the
-connection, or nil while the harness process is still starting; requests
-made meanwhile are queued and sent once it listens.
+  "Connect the UI to ADDRESS.
+ADDRESS is nil for the in-process harness, `process' for the managed
+harness process, or \"host:port\".  Return the connection, or nil while
+the harness process is still starting; requests made meanwhile are
+queued and sent once it listens.
 In corporate mode (`harness-corporate-mode') a \"host:port\" ADDRESS
 gives way to this Emacs's own harness: the UI connects to no other."
   (when (and (stringp address) (harness-corporate-p))
@@ -443,15 +445,19 @@ initialize: one it let go of for another closes on purpose."
     conn))
 
 (defun harness-ui-connection ()
-  "Return the live connection, connecting if needed; nil while the harness
-process is starting.  A TCP connection still connecting is live: what is
-sent meanwhile goes out once it connects, whereas connecting again would
-drop it along with every request it carries."
+  "Return the live connection, connecting if needed.
+Return nil while the harness process is starting.  A TCP connection
+still connecting is live: what is sent meanwhile goes out once it
+connects, whereas connecting again would drop it along with every
+request it carries."
   (if (harness-acp-open-p harness-ui-connection)
       harness-ui-connection
     (harness-ui-connect harness-ui-connection-address)))
 
 (defun harness-ui--on-close ()
+  "Say in the echo area that the UI's connection closed.
+A connection to the managed harness process is left to its supervisor
+to report."
   (unless (eq harness-ui-connection-address 'process) ; the supervisor reports that
     (message "Harness: connection closed%s"
              (if harness-ui-connection-address (format " (%s)" harness-ui-connection-address) ""))))
@@ -581,6 +587,18 @@ tasks among them carry on once the process is back (see
                      (lambda (_) (message "Harness process reloaded"))
                      (lambda (e) (message "Harness process: %s" (harness-error-message e))))))
 
+(defun harness-ui--harness-modules ()
+  "Return (TITLE . PROMISE) of the modules of the harness the UI talks to.
+For `harness-describe-modules-functions'.  Nil when that harness runs
+in this Emacs, whose modules `harness-describe-modules' lists anyway."
+  (when harness-ui-connection-address
+    (cons (if (eq harness-ui-connection-address 'process)
+              "Modules of the harness process"
+            (format "Modules of the harness at %s" harness-ui-connection-address))
+          (harness-ui-request "_harness/harness/modules"))))
+
+(add-hook 'harness-describe-modules-functions #'harness-ui--harness-modules)
+
 (defun harness-ui--advertise ()
   "Tell the harness again what this Emacs lends it, as `initialize' did.
 After a reload, so that a connection opened by older code, which lent
@@ -655,11 +673,15 @@ as needing input and its chat panel or task card answers it later."
   t)
 
 (defun harness-ui--default-permission (params respond)
-  "Fallback when no UI module claimed permission request PARAMS: leave it pending."
+  "Leave permission request PARAMS pending, as no UI module claimed it.
+Declining it through RESPOND keeps it pending on its session (see
+`harness-ui--leave-pending')."
   (harness-ui--leave-pending params respond "permission request"))
 
 (defun harness-ui--default-question (params respond)
-  "Fallback when no UI module claimed question PARAMS: leave it pending."
+  "Leave question PARAMS pending, as no UI module claimed it.
+Declining it through RESPOND keeps it pending on its session (see
+`harness-ui--leave-pending')."
   (harness-ui--leave-pending params respond "question"))
 
 ;;;; Desktop notifications
@@ -813,6 +835,8 @@ yet: it starts after the init file, with the value set there."
 (defalias 'harness-ui--cache-session #'harness-ui-cache-session)
 
 (defun harness-ui--forget-session (id)
+  "Remove session ID from the cache and notify listeners.
+Its output rate and live token figures go with it."
   (remhash id harness-ui--sessions)
   (harness-ui--store-rate id nil)
   (harness-ui--store-live id nil)
@@ -846,6 +870,14 @@ yet: it starts after the init file, with the value set there."
     (format "%s %s" (harness-ui-status-icon (plist-get session :status))
             (or (and name (not (string-empty-p name)) name)
                 (format "unnamed (%s)" (substring (or (plist-get session :id) "????") 0 4))))))
+
+(defun harness-ui-session-name (id &optional name)
+  "Return the name of session ID to show: its name now, else NAME, else a short id."
+  (let ((name (or (plist-get (and id (harness-ui-session id)) :name) name))
+        (id (or id "?")))
+    (if (and (stringp name) (not (string-blank-p name)))
+        name
+      (substring id 0 (min 8 (length id))))))
 
 (defun harness-ui-task-name (task &optional session)
   "Return TASK's name, or nil while it has none and its title is its prompt.
@@ -1243,8 +1275,9 @@ NOW defaults to the current time."
               (if (numberp limit) (format " of %s" (harness-format-cost limit)) "")))))
 
 (defun harness-ui-quota-headline-windows (quota)
-  "Return the windows of QUOTA worth a glance: the 5-hour and weekly ones,
-and any other that is at least 70% used."
+  "Return the windows of QUOTA worth a glance.
+They are the 5-hour and weekly ones, and any other that is at least
+70% used."
   (cl-remove-if-not (lambda (w) (or (member (plist-get w :name) '("5h" "7d"))
                                     (>= (or (plist-get w :used) 0) 0.7)))
                     (plist-get quota :windows)))
@@ -1498,18 +1531,297 @@ session's context window, when the context is shown against it."
                          (harness-format-tokens estimated))
                "")))))
 
+;;;; The context limit behind the token figure
+;;
+;; The token figure ("12.3k/200k") is a button wherever it shows: a
+;; click offers to change the session's context window limit, up to the
+;; model's own window, and to remove the limit so the whole window is
+;; used.  A sub-agent's and a task's window are capped by
+;; `harness-subagent-context-limit' and `harness-tasks-context-limit';
+;; the offer names the cap that holds the session, and never offers
+;; more than the model has -- read from its catalogue entry, never
+;; assumed.
+
+(defun harness-ui-model-context-window (model)
+  "Return the context window of MODEL from the UI's model cache, or nil.
+The cache is what `harness-ui-refresh-models' last fetched; nil when it
+does not hold MODEL, and then the caller reads the window from the
+harness (`provider/model') instead."
+  (let ((entry (and (stringp model) (gethash model harness-ui--models))))
+    (plist-get entry :context-window)))
+
+(defun harness-ui-context-cap-name (session limit &optional full)
+  "Return the name of what caps SESSION's window at LIMIT.
+A sub-agent's cap is `harness-subagent-context-limit', a task's
+`harness-tasks-context-limit'; anything else is a limit set for the
+session itself.  Best effort: the session's kind says it is a
+sub-agent, the tasks module's own cap value says a task's.  FULL adds
+the option's name, as the tooltip shows it; the prompt stays short."
+  (let ((kind (format "%s" (plist-get session :kind))))
+    (cond ((member kind '("subagent" "fork"))
+           (if full "a sub-agent's limit (harness-subagent-context-limit)"
+             "a sub-agent's limit"))
+          ((and (boundp 'harness-tasks-context-limit)
+                (numberp (symbol-value 'harness-tasks-context-limit))
+                (equal limit (symbol-value 'harness-tasks-context-limit)))
+           (if full "a task's limit (harness-tasks-context-limit)"
+             "a task's limit"))
+          (t "a limit set for this session"))))
+
+(defun harness-ui-context-limit-state (session &optional model-window)
+  "Return how SESSION's context window is limited, as a plist.
+MODEL-WINDOW is the model's own window, read from its catalogue entry
+by the caller, or nil when unknown.  The value has:
+  :window        the window in effect now
+  :model-window  the model's own window, when known
+  :limit         the limit set for the session, nil for none
+  :override      the window set for the session outright, nil for none
+  :limited       non-nil when the limit is what holds the window
+  :capped        non-nil when it holds it below the model's own window
+  :cap           what set the limit, when `:limited' (see
+                 `harness-ui-context-cap-name')"
+  (let* ((window (plist-get session :context-window))
+         (limit (plist-get session :context-window-limit))
+         (override (plist-get session :context-window-override))
+         ;; A window set for the session outright wins over any limit.
+         (limited (and (numberp limit) (null override) (equal limit window)))
+         (capped (and limited (numberp model-window) (< limit model-window))))
+    (list :window window
+          :model-window model-window
+          :limit limit
+          :override override
+          :limited limited
+          :capped capped
+          :cap (and limited (harness-ui-context-cap-name session limit)))))
+
+(defun harness-ui-context-limit-help (session &optional model-window)
+  "Return the tooltip of SESSION's token figure, with its context limit.
+MODEL-WINDOW is the model's own window when the caller knows it; the
+tooltip then says when a limit holds the window below the model's, and
+by what.  It ends by naming the key that changes the limit."
+  (let* ((state (harness-ui-context-limit-state session model-window))
+         (limit (plist-get state :limit))
+         (window (plist-get state :window))
+         (model (plist-get state :model-window))
+         (cap (and (plist-get state :limited)
+                   (harness-ui-context-cap-name session limit t)))
+         (sentence
+          (cond
+           ((plist-get state :override)
+            (format "Its window of %s is set for the session itself and wins over any limit."
+                    (harness-format-tokens window)))
+           ((plist-get state :capped)
+            (format "The model's window is %s, but this session is capped at %s by %s."
+                    (harness-format-tokens model) (harness-format-tokens limit) cap))
+           ((plist-get state :limited)
+            (format "This session is capped at %s by %s."
+                    (harness-format-tokens limit) cap))
+           ((and limit model)
+            (format "A limit of %s is set, but the model's own window of %s is what applies."
+                    (harness-format-tokens limit) (harness-format-tokens model)))
+           (limit
+            (format "A limit of %s is set, above the model's own window, which is what applies."
+                    (harness-format-tokens limit)))
+           (t ""))))
+    (harness-ui-one-line
+     (string-join (delq nil (list (harness-ui-tokens-help (harness-ui-session-tokens session) window)
+                                  (unless (string-empty-p sentence) sentence)
+                                  (substitute-command-keys
+                                   "Mouse-1 or \\[harness-set-context-limit] changes the limit.")))
+                  " "))))
+
+(defun harness-ui--token-count (string)
+  "Return the number of tokens STRING names, or nil.
+Reads what `harness-format-tokens' shows -- \"950\", \"12.3k\",
+\"1.2M\" -- case-insensitively, with thousands separators allowed.
+Zero and anything else name none."
+  (when (and (stringp string)
+             (string-match "\\`[ \t]*\\([0-9][0-9_,']*\\(?:\\.[0-9]+\\)?\\)[ \t]*\\([kKmM]\\)?[ \t]*\\'"
+                           string))
+    (let ((value (string-to-number (replace-regexp-in-string "[_,']" "" (match-string 1 string))))
+          (suffix (and (match-string 2 string) (downcase (match-string 2 string)))))
+      (when (> value 0)
+        (round (* value (cond ((equal suffix "k") 1000.0)
+                              ((equal suffix "m") 1000000.0)
+                              (t 1.0))))))))
+
+(defun harness-ui-context-limit-prompt (session state)
+  "Return the `completing-read' prompt for SESSION's context limit.
+STATE is what `harness-ui-context-limit-state' returned."
+  (let* ((name (or (plist-get session :name) "session"))
+         (model (plist-get state :model-window))
+         (window (plist-get state :window))
+         (limit (plist-get state :limit))
+         (now (cond
+               ((plist-get state :override)
+                (format "now %s, set for the session itself; a change clears it"
+                        (harness-format-tokens window)))
+               ((plist-get state :limited)
+                (format "now %s, capped by %s"
+                        (harness-format-tokens limit)
+                        (plist-get state :cap)))
+               (limit
+                (format "now %s, its model's window; a limit of %s is set above it"
+                        (harness-format-tokens window) (harness-format-tokens limit)))
+               (t (format "now %s" (harness-format-tokens window))))))
+    (format "Context limit for %s (model window %s; %s): "
+            name (if model (harness-format-tokens model) "unknown") now)))
+
+(defun harness-ui--context-limit-options (model-window limit)
+  "Return the choices offered for a context limit, as (LABEL . VALUE).
+MODEL-WINDOW is the model's own window, or nil when unknown; LIMIT the
+limit in effect.  VALUE is a number of tokens, or nil for no limit.
+The current limit comes first, then a few round sizes that stay under
+the model's window, then no limit, which uses the whole of it."
+  (let ((options nil))
+    (dolist (n (delq nil (delete-dups (list limit 128000 256000 512000 1000000))))
+      (when (or (null model-window) (< n model-window))
+        (push (cons (if (equal n limit)
+                        (format "%s (current)" (harness-format-tokens n))
+                      (harness-format-tokens n))
+                    n)
+              options)))
+    (push (cons (if model-window
+                    (format "no limit: the whole %s the model has"
+                            (harness-format-tokens model-window))
+                  "no limit: the model's whole window")
+                nil)
+          options)
+    (nreverse options)))
+
+(defun harness-ui--apply-context-limit (session limit model-window)
+  "Set SESSION's context limit to LIMIT tokens, nil for none.
+MODEL-WINDOW is the model's own window, or nil; a LIMIT above it is
+brought down to it, the window being able to be no larger.  A window
+set for the session outright is cleared, whatever is chosen: it wins
+over any limit, so the choice must clear it to take effect -- with
+LIMIT nil the whole of MODEL-WINDOW is then used.  The session is
+updated, its views redrawn and the change said; its conversation is
+untouched, and nothing restarts or compacts it."
+  (let* ((id (plist-get session :id))
+         (name (or (plist-get session :name) id))
+         (clamped (and (numberp limit) (numberp model-window) (> limit model-window)))
+         (limit (if clamped model-window limit))
+         (override (plist-get session :context-window-override))
+         (cleared (and override ", its own window cleared"))
+         (label (cond ((null limit)
+                       (format "Context limit removed for %s: the whole %s window%s"
+                               name
+                               (if model-window (harness-format-tokens model-window) "model's")
+                               (or cleared "")))
+                      (clamped (format "Context limit for %s → %s (the model's window)%s"
+                                       name (harness-format-tokens limit) (or cleared "")))
+                      (t (format "Context limit for %s → %s%s"
+                                 name (harness-format-tokens limit) (or cleared ""))))))
+    (harness-ui-call
+     "_harness/session/update"
+     (append (list :id id :context-window-limit limit)
+             (and override (list :context-window nil)))
+     (lambda (updated)
+       (when (and (listp updated) (plist-get updated :id))
+         (harness-ui-cache-session updated))
+       ;; At once, rather than at the next session push.
+       (force-mode-line-update t)
+       (message "%s" label)))))
+
+(defun harness-ui--offer-context-limit (session model-window)
+  "Offer to set SESSION's context limit, up to MODEL-WINDOW, and set it.
+MODEL-WINDOW is the model's own window, or nil when it is unknown.  The
+choices are `harness-ui--context-limit-options'; a number typed instead
+is read as a number of tokens (\"300k\", \"1.5M\") and anything else
+chooses nothing."
+  (let* ((state (harness-ui-context-limit-state session model-window))
+         (options (harness-ui--context-limit-options model-window (plist-get state :limit)))
+         (choice (completing-read (harness-ui-context-limit-prompt session state)
+                                  options nil nil)))
+    (cond ((assoc choice options)
+           (harness-ui--apply-context-limit session (cdr (assoc choice options)) model-window))
+          ((string-empty-p (string-trim choice))
+           (message "Context limit unchanged"))
+          (t
+           (let ((count (harness-ui--token-count choice)))
+             (cond (count (harness-ui--apply-context-limit session count model-window))
+                   ((member (downcase (string-trim choice))
+                            '("no limit" "none" "unlimited"))
+                    (harness-ui--apply-context-limit session nil model-window))
+                   (t (user-error "Not a number of tokens: %s" choice))))))))
+
+(defun harness-ui--context-limit-session (session-id)
+  "Return the session id the context limit commands apply to.
+SESSION-ID when given, else the session of the buffer or of the item at
+point, else one read with completion."
+  (or session-id
+      (harness-ui-session-at-point t)
+      (harness-ui-current-session-id)))
+
+;;;###autoload
+(defun harness-set-context-limit (&optional session-id)
+  "Change the context window limit of SESSION-ID.
+The limit caps what the model's window allows, so the session compacts
+sooner; the offer names the model's own window as the most it can be,
+and \"no limit\", which uses the whole of it.  A number typed at the
+prompt instead sets that many tokens (\"300k\", \"1.5M\").  The change
+neither restarts nor compacts the session: it takes effect at its next
+request, and the header line shows the new window at once.  In the chat
+header, a click on the token figure runs this; the figure is clickable
+in the session list and the task board too."
+  (interactive)
+  (let* ((id (harness-ui--context-limit-session session-id))
+         (session (harness-ui-session id)))
+    (unless session (user-error "No session %s" id))
+    (let* ((model (plist-get session :model))
+           (cached (harness-ui-model-context-window model))
+           (continue (lambda (model-window)
+                       (harness-ui--offer-context-limit session model-window))))
+      (if (or cached (null model))
+          (funcall continue cached)
+        ;; The model's own window comes from its catalogue entry, never
+        ;; from a number of our own.
+        (harness-ui-call "_harness/provider/model" (list :model-id model)
+                         (lambda (m) (funcall continue (plist-get m :context-window)))
+                         (lambda (_err) (funcall continue nil) nil))))))
+
+(defun harness-ui-context-limit-click (&optional event)
+  "Change the context limit of the session whose token figure EVENT clicked.
+The figure carries its session id in the `harness-context-session' text
+property, so a click acts on the figure clicked, not on point.  A click
+that carries none -- the chat header's segment, say -- falls back to
+the session of the buffer or of the item at point."
+  (interactive (list last-nonmenu-event))
+  (let* ((posn (and (mouse-event-p event) (event-start event)))
+         (point (and posn (posn-point posn)))
+         (id (and (integer-or-marker-p point)
+                  (get-text-property point 'harness-context-session))))
+    (when (and posn (window-live-p (posn-window posn)))
+      (select-window (posn-window posn)))
+    (harness-set-context-limit id)))
+
+(defvar harness-ui-context-limit-map
+  (let ((map (make-sparse-keymap)))
+    (dolist (key '([mouse-1] [mouse-2] [header-line mouse-1] [header-line mouse-2]
+                   [mode-line mouse-1] [mode-line mouse-2]))
+      (define-key map key #'harness-ui-context-limit-click))
+    map)
+  "Keymap of the token figure: a click changes its session's context limit.")
+
 (defun harness-ui-format-context (session)
   "Return \"12.3k/200k\" for SESSION with the warning face applied.
 The tokens in use are the size of SESSION's conversation.  While it runs
 they grow as its model streams; \"~\" marks a figure partly estimated
-from what streamed since its provider last reported usage."
+from what streamed since its provider last reported usage.  The figure
+is a button: a click changes SESSION's context window limit (see
+`harness-set-context-limit')."
   (let* ((tokens (harness-ui-session-tokens session))
          (context (plist-get tokens :context))
          (window (plist-get session :context-window)))
     (propertize (format "%s%s/%s" (if (> (plist-get tokens :estimated) 0) "~" "")
                         (harness-format-tokens context) (harness-format-tokens window))
                 'face (harness-ui-context-face context window)
-                'help-echo (harness-ui-tokens-help tokens window))))
+                'help-echo (harness-ui-context-limit-help
+                            session (harness-ui-model-context-window (plist-get session :model)))
+                'mouse-face 'highlight
+                'keymap harness-ui-context-limit-map
+                'harness-context-session (plist-get session :id))))
 
 (defun harness-ui-format-output (session &optional bare)
   "Return SESSION's output tokens as \"3.4k out\", or nil when it wrote none.
@@ -1658,7 +1970,7 @@ PROPS are extra text properties; `:help' sets the tooltip."
                         'mouse-face 'highlight)))
 
 (defun harness-ui-mouse-keymap (command)
-  "Return a keymap running COMMAND on mouse-1, mouse-2 and RET.
+  "Return a keymap running COMMAND on a left or middle click and on RET.
 The bindings also work from header-line and mode-line segments."
   (let ((map (make-sparse-keymap))
         ;; Not (interactive "e"), which signals for RET, an event without
@@ -1742,6 +2054,16 @@ under a dark theme."
                  (cons :tag "Other colours" (color :tag "Foreground") (color :tag "Background")))
   :group 'harness-ui)
 
+(defcustom harness-ui-image-load-delay 0.05
+  "Seconds between drawing the images a view is loading.
+Drawing an image decodes it, which a full-size screenshot takes long
+enough for that a view drawing several of them in one go -- a report
+with a handful of screenshots -- would open frozen.  Each is drawn on a
+timer of its own, this far after the one before: the buffer appears at
+once, with a line where each image goes, and stays responsive while
+they come in."
+  :type 'number :group 'harness-ui)
+
 (defun harness-ui-image-color-props ()
   "Return the `create-image' properties colouring an image, or nil.
 They follow `harness-ui-image-colors'."
@@ -1822,7 +2144,7 @@ it: the switch banner's, the cache panel's."
   (propertize key 'face 'harness-ui-key-face))
 
 (defun harness-ui-action-map (command)
-  "Return a keymap running COMMAND on mouse-1, mouse-2 and RET."
+  "Return a keymap running COMMAND on a left or middle click and on RET."
   (let ((map (make-sparse-keymap)))
     (define-key map [mouse-1] command)
     (define-key map [mouse-2] command)
@@ -1852,6 +2174,34 @@ anywhere runs the action (`harness-ui-action-push')."
                     (and (> (point) (point-min)) (get-text-property (1- (point)) 'harness-ui-action)))))
     (if action (funcall action) (if (get-text-property (point) 'button) (push-button (point))
                                   (user-error "No button here")))))
+
+(defun harness-ui-add-session-keys (object id &optional name start end)
+  "Make OBJECT's text from START to END open session ID on a click or RET.
+OBJECT is a string or a buffer.  START and END default to the whole
+object.  Where the text already carries a keymap -- a button's -- the
+new keys are composed under it, so the button keeps its own keys and
+tooltip; where none does, the text gets a hover face and says what a
+click does.  NAME is the session's, for the tooltip; nil uses
+`harness-ui-session-name'.  Return OBJECT."
+  (let* ((string (stringp object))
+         (start (or start (if string 0 (point-min))))
+         (end (or end (if string (length object) (point-max))))
+         (map (harness-ui-action-map (lambda () (interactive) (harness-ui-display-session id))))
+         (help (format "mouse-1, RET: open the session %s"
+                       (or name (harness-ui-session-name id))))
+         (pos start))
+    (while (< pos end)
+      (let ((next (or (next-single-property-change pos 'keymap object end) end))
+            (existing (get-text-property pos 'keymap object)))
+        (put-text-property pos next 'keymap
+                           (if existing (make-composed-keymap (list existing map)) map)
+                           object)
+        (unless existing
+          (put-text-property pos next 'mouse-face 'highlight object)
+          (put-text-property pos next 'help-echo help object)
+          (put-text-property pos next 'pointer 'hand object))
+        (setq pos next)))
+    object))
 
 (defun harness-ui-add-keymap (start end map)
   "Give START..END the keymap MAP, composed under any button keymaps."
@@ -1948,6 +2298,111 @@ line saying so, a button opening it outside Emacs."
      (too-large (concat (propertize (harness-ui-image-too-large-label label too-large) 'face 'harness-dim-face) "\n"))
      (open (concat (harness-ui-action-button label open :help (format "Open %s" path)) "\n"))
      (t (concat (propertize label 'face 'harness-dim-face) "\n")))))
+
+;;;; Images drawn after the buffer is up
+;;
+;; A buffer that shows a screenshot is showing something Emacs only
+;; decodes when it draws it, and a full-size one takes long enough for
+;; that the buffer would appear to hang before it is even shown: a
+;; report popout decodes its images while it fits its window.  So a view
+;; that has several puts a line where each image goes, says it is
+;; loading, and draws it a moment later, one image at a time.
+
+(defvar-local harness-ui-image-loads nil
+  "The images this buffer is showing a loading line for, oldest first.
+Each entry is (START END DRAW): the markers where the line sits, and the
+function that draws the image in its place.")
+
+(defvar-local harness-ui-image-load--timer nil
+  "The timer drawing this buffer's next image, while one waits.")
+
+(defvar-local harness-ui-image-load-reflow nil
+  "Function fitting this buffer's windows to it once an image is drawn.
+Called with no arguments, the buffer current: an image takes more room
+than the line that said it was loading, and the window grows to show it.
+Nil leaves the windows as they are.")
+
+(defun harness-ui-image-load (placeholder draw)
+  "Insert PLACEHOLDER at point, and draw the image DRAW draws in its place.
+DRAW, a function of no arguments, is called with this buffer current and
+point where the placeholder was, the placeholder deleted: it inserts the
+image.  The call comes a moment later, and one image at a time
+\(`harness-ui-image-load-delay'), so a view that shows several of them
+-- a report with a handful of screenshots -- appears at once instead of
+opening frozen while they are decoded.  PLACEHOLDER should read as the
+line the image will take, ending in a newline.
+
+A redraw of the buffer drops what still waits
+\(`harness-ui-image-load-cancel'), and a placeholder edited away is
+never drawn over: drawing checks the placeholder is still there."
+  (let ((start (point))
+        (entry (list nil nil draw)))
+    (insert placeholder)
+    (put-text-property start (point) 'harness-ui-image-loading entry)
+    (setcar entry (copy-marker start))
+    (setcar (cdr entry) (copy-marker (point)))
+    (setq harness-ui-image-loads (nconc harness-ui-image-loads (list entry))))
+  (unless harness-ui-image-load--timer
+    (harness-ui-image-load--schedule)))
+
+(defun harness-ui-image-load--schedule ()
+  "Draw this buffer's next image once the UI has had a moment to settle."
+  (setq harness-ui-image-load--timer
+        (run-at-time harness-ui-image-load-delay nil
+                     #'harness-ui-image-load--step (current-buffer))))
+
+(defun harness-ui-image-load--draw-next ()
+  "Draw this buffer's next waiting image, and return non-nil when one was drawn.
+An entry whose loading line is gone -- the buffer was drawn again, or
+the text around it was edited away -- is dropped without drawing."
+  (let (drawn)
+    (while (and harness-ui-image-loads (not drawn))
+      (let* ((entry (pop harness-ui-image-loads))
+             (start (car entry))
+             (end (nth 1 entry))
+             (place (marker-position start)))
+        (when (and place (marker-position end)
+                   (eq (get-text-property place 'harness-ui-image-loading) entry))
+          (let ((inhibit-read-only t) (buffer-undo-list t))
+            (goto-char start)
+            (delete-region start end)
+            (goto-char start)
+            (funcall (nth 2 entry)))
+          (setq drawn t))))
+    drawn))
+
+(defun harness-ui-image-load--step (buffer)
+  "Draw the next image of BUFFER, and time the one after it."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq harness-ui-image-load--timer nil)
+      (when (harness-ui-image-load--draw-next)
+        (when harness-ui-image-load-reflow (funcall harness-ui-image-load-reflow)))
+      (when harness-ui-image-loads (harness-ui-image-load--schedule)))))
+
+(defun harness-ui-image-load-cancel ()
+  "Drop the images this buffer still waits to draw, and their timer.
+What is drawn already stays.  A redraw calls this before it erases the
+buffer: the loading lines go with the text, and the draw that follows
+puts a fresh line where each image goes."
+  (when (and harness-ui-image-load--timer (timerp harness-ui-image-load--timer))
+    (cancel-timer harness-ui-image-load--timer))
+  (setq harness-ui-image-load--timer nil
+        harness-ui-image-loads nil))
+
+(defun harness-ui-image-load-flush ()
+  "Draw the images this buffer waits on now, in the order they came.
+What waited no longer, and the windows are fitted once at the end.  For
+a caller that needs the buffer complete before it goes on -- a string
+drawn from it, say -- and for tests, which do not wait on timers."
+  (when (and harness-ui-image-load--timer (timerp harness-ui-image-load--timer))
+    (cancel-timer harness-ui-image-load--timer))
+  (setq harness-ui-image-load--timer nil)
+  (let (drawn)
+    (while harness-ui-image-loads
+      (when (harness-ui-image-load--draw-next) (setq drawn t)))
+    (when (and drawn harness-ui-image-load-reflow)
+      (funcall harness-ui-image-load-reflow))))
 
 (defun harness-ui-format-value (value)
   "Return VALUE for display in a tool input listing."
@@ -2690,6 +3145,9 @@ fullscreen layout this ends the layout, as `harness-ui-quit-view' does."
 ;;;; Commands
 
 (defun harness-ui--default-directory ()
+  "Return the directory that prompts for a directory offer by default.
+That is the root of the project `default-directory' is in, else
+`default-directory' itself."
   (harness-files-project-root default-directory))
 
 ;;;###autoload
@@ -2719,7 +3177,7 @@ fullscreen layout this ends the layout, as `harness-ui-quit-view' does."
   "Function telling the session setting commands what to change in this buffer.
 It returns a session id, or (SETTINGS . SET) for settings that are not a
 session's yet: SETTINGS is a plist with a session's setting keys
-(`:model' `:thinking' `:permission-mode' `:non-interactive') and SET a
+\(`:model' `:thinking' `:permission-mode' `:non-interactive') and SET a
 function of KEY and VALUE storing one.  The task board uses it so the
 same commands set up the next task.  When it is nil or returns nil, the
 commands use `harness-ui-current-session-id'.")
@@ -3008,7 +3466,8 @@ their number).  The risks show before the question.  Return a mode of
 
 (defun harness-ui--ask-handoff (checks label total _session _host callback)
   "Ask how to hand over a lossy switch in the minibuffer.
-See `harness-ui-switch-function'; CALLBACK gets the mode chosen."
+See `harness-ui-switch-function' for CHECKS, LABEL and TOTAL; CALLBACK
+gets the mode chosen."
   (funcall callback (harness-ui--read-handoff checks label total)))
 
 (defvar harness-ui-switch-function #'harness-ui--ask-handoff
@@ -3109,7 +3568,9 @@ fails is logged and the others still run."
 Every active session (idle, running or blocked) of every project, and
 the session of every current task whatever its status: a task's session
 may be closed, after a restart say, and still be where the task goes
-on.  Inactive sessions of no current task are history."
+on.  Inactive sessions of no current task are history.  A completed
+task's session, in the board's done column, is left out by the
+selection itself (`session/select'), even an active one."
   (list :active t :tasks t))
 
 (defun harness-ui--count (n word)
@@ -3567,6 +4028,8 @@ worktrees, task sessions and sessions merges are queued into."
     (define-key map (kbd "T") #'harness-set-thinking)
     (define-key map (kbd "H") #'harness-set-thinking-all)
     (define-key map (kbd "p") #'harness-set-permission-mode)
+    ;; e: expand the context limit, to the model's whole window.
+    (define-key map (kbd "e") #'harness-set-context-limit)
     (define-key map (kbd "f") #'harness-fork-session)
     (define-key map (kbd "k") #'harness-cancel-turn)
     (define-key map (kbd "D") #'harness-delete-session)
@@ -3621,6 +4084,8 @@ the harness UI loads, that is before `harness-start'."
   :global t :group 'harness-ui :keymap harness-global-mode-map)
 
 (defun harness-ui--command-available-p (symbol)
+  "Non-nil when the command SYMBOL is defined, so the menu may offer it.
+Some commands belong to modules that may be off."
   (fboundp symbol))
 
 (defun harness-ui--free-side-slot (side)
@@ -3636,15 +4101,24 @@ the harness UI loads, that is before `harness-start'."
   (cl-remove-if-not (lambda (window) (eq (window-parameter window 'window-side) 'bottom))
                     (window-list nil 'nomini)))
 
-(defun harness-ui--menu-lines (buffer)
-  "Return about how many lines the menu BUFFER needs, its mode line included.
-Transient fills the buffer before it shows it and fits the window to
-it once shown, so this need only be close."
-  (with-current-buffer buffer
-    (max window-min-height
-         (+ (count-lines (point-min) (point-max))
-            (if mode-line-format 1 0)
-            (if header-line-format 1 0)))))
+(defun harness-ui--menu-height (buffer window)
+  "Return how many pixels the menu BUFFER needs in a window below WINDOW.
+That is its text, as it shows in a window as wide as WINDOW, and a
+line for each of its mode and header lines.  On a text terminal a
+pixel is a line, and so is each line of the text.  On a graphic frame
+the text is measured: transient draws the line under a menu a pixel
+high there, and counted as a whole line it would make the window too
+tall.  Transient fills the buffer before it shows it and fits the
+window to it once shown, shrinking it to its text; the pixels it gives
+up would go to WINDOW, which is to keep its height."
+  (let* ((frame (window-frame window))
+         (line (frame-char-height frame)))
+    (with-current-buffer buffer
+      (max (* window-min-height line)
+           (+ (if (display-graphic-p frame)
+                  (cdr (buffer-text-pixel-size buffer window))
+                (count-lines (point-min) (point-max)))
+              (* line (+ (if mode-line-format 1 0) (if header-line-format 1 0))))))))
 
 (defun harness-ui--display-menu-below (buffer window alist)
   "Display the menu BUFFER in a new window below WINDOW and return it.
@@ -3655,21 +4129,25 @@ come from the windows above, so WINDOW keeps its height while the menu
 shows, and `harness-ui--delete-menu-below' gives them back once the
 menu closes.  Return nil, the windows as they were, when the windows
 above cannot spare the lines.  ALIST is the action alist."
-  (let ((height (window-pixel-height window))
-        (preserved (window-parameter window 'window-preserved-size))
-        (lines (min (harness-ui--menu-lines buffer)
-                    (window-max-delta window nil window)))
-        menu)
-    (when (>= lines window-min-height)
+  (let* ((height (window-pixel-height window))
+         (preserved (window-parameter window 'window-preserved-size))
+         ;; Pixels, so that WINDOW gives the menu exactly what it took.
+         (pixels (min (harness-ui--menu-height buffer window)
+                      (window-max-delta window nil window nil nil nil t)))
+         menu)
+    (when (>= pixels (* window-min-height (frame-char-height (window-frame window))))
       (condition-case err
           (progn
-            (window-resize window lines nil window)
-            (setq menu (let ((window-combination-resize 'side)
-                             (window-combination-limit t)
-                             ;; WINDOW itself, even a Doom popup, whose
-                             ;; `split-window' splits another window.
-                             (ignore-window-parameters t))
-                         (split-window window (- lines) 'below)))
+            ;; To the pixel: rounded to whole lines, the menu would come
+            ;; out a line short of its text on a graphic frame.
+            (let ((window-resize-pixelwise t))
+              (window-resize window pixels nil window t)
+              (setq menu (let ((window-combination-resize 'side)
+                               (window-combination-limit t)
+                               ;; WINDOW itself, even a Doom popup, whose
+                               ;; `split-window' splits another window.
+                               (ignore-window-parameters t))
+                           (split-window window (- pixels) 'below t))))
             (set-window-parameter menu 'harness-ui--menu-below (list window height preserved))
             (set-window-parameter menu 'delete-window #'harness-ui--delete-menu-below)
             ;; Fixed at its height while the menu shows, so that transient
@@ -3680,8 +4158,15 @@ above cannot spare the lines.  ALIST is the action alist."
          (harness-log 'error "harness-menu: no window below %s: %s" window (error-message-string err))
          (if (window-live-p menu)
              (delete-window menu)
-           (window-resize-no-error window (- height (window-pixel-height window)) nil window t))
+           (harness-ui--resize-back window height))
          nil)))))
+
+(defun harness-ui--resize-back (window height)
+  "Make WINDOW HEIGHT pixels high again, with the lines of the windows above.
+To the pixel, as `harness-ui--display-menu-below' resized it: rounded
+to whole lines, WINDOW would come out a pixel or more off."
+  (let ((window-resize-pixelwise t))
+    (window-resize-no-error window (- height (window-pixel-height window)) nil window t)))
 
 (defun harness-ui--delete-menu-below (menu)
   "Delete MENU, a window of `harness-ui--display-menu-below', putting sizes back.
@@ -3697,7 +4182,7 @@ and the windows above get back the lines the menu took."
         (delete-window menu)
       (when (window-live-p window)
         (unless (window-live-p menu)
-          (window-resize-no-error window (- height (window-pixel-height window)) nil window t))
+          (harness-ui--resize-back window height))
         (set-window-parameter window 'window-preserved-size preserved)))))
 
 (defun harness-ui--display-menu (buffer alist)
@@ -3871,9 +4356,12 @@ leaves the buffer's commands out, never the whole menu."
     ("T" "Thinking" harness-set-thinking)
     ("H" "Thinking for all sessions" harness-set-thinking-all)
     ("p" "Permission mode" harness-set-permission-mode)
+    ("e" "Context limit" harness-set-context-limit)
     ("d" "Directory access" harness-directories :if (lambda () (harness-ui--command-available-p 'harness-directories)))
     ("i" (lambda () (harness-ui--non-interactive-menu-label)) harness-toggle-non-interactive)
     ("I" "Non-interactive for all sessions" harness-set-non-interactive-all)
+    ("V" "Supervisor mode for all sessions" harness-set-supervisor-all
+     :if (lambda () (harness-ui--command-available-p 'harness-set-supervisor-all)))
     ("r" "Rename" harness-rename-session)
     ("W" "Move to another directory" harness-move-session)]
    ["Tools"
@@ -3902,9 +4390,15 @@ leaves the buffer's commands out, never the whole menu."
 ;;;; Module
 
 (defun harness-ui--on-reloaded ()
+  "Have every UI buffer redraw, as after a reload."
   (run-hooks 'harness-ui-redraw-hook))
 
 (defun harness-ui--init ()
+  "Start the UI: connect it to the harness and turn on `harness-global-mode'.
+Also stop the harness process when Emacs exits, and make changes of
+`harness-corporate-mode' reach the harness.  A click on a notification
+this Emacs no longer knows lists the sessions waiting for you, unless
+another function already handles such clicks."
   (add-hook 'kill-emacs-hook #'harness-ui--stop-server)
   (add-hook 'harness-corporate-mode-change-hook #'harness-ui--corporate-mode-changed)
   ;; A click on a macOS notification this Emacs no longer knows (one it

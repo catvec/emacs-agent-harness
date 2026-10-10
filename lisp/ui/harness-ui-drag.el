@@ -137,10 +137,10 @@ FILE is what a drag hands over: a local file name, or a function
 returning one when the drag starts.  Without FILE it is the image
 STRING displays, its file or, for an image held in memory, a file its
 bytes are written to (`harness-ui-drag-image-file').  STRING gets
-`harness-ui-drag-map' over the keymaps it has, so pressing mouse-1 on it
-and moving the mouse drags it while a click does what it did, and its
-hover text says so.  STRING comes back unchanged when this Emacs cannot
-drag, or FILE is on another host."
+`harness-ui-drag-map' over the keymaps it has, so pressing the left
+mouse button on it and moving the mouse drags it while a click does
+what it did, and its hover text says so.  STRING comes back unchanged
+when this Emacs cannot drag, or FILE is on another host."
   (if (not (and (harness-ui-drag--can-p file) (stringp string) (> (length string) 0)))
       string
     (let ((s (copy-sequence string)))
@@ -230,12 +230,12 @@ displayed at POSN."
 
 (defun harness-ui-drag-start (event)
   "Drag the image under the mouse out of Emacs, or click it.
-EVENT is the press of mouse-1 on something `harness-ui-drag-source' or
-`harness-ui-drag-region' made draggable.  Moving the mouse
-`harness-ui-drag-threshold' pixels with the button down drags its file
-into the application it is released over; a drop back on this frame
-does nothing.  Released sooner, it is a click, and does what mouse-1
-does there."
+EVENT is the press of the left mouse button on something
+`harness-ui-drag-source' or `harness-ui-drag-region' made draggable.
+Moving the mouse `harness-ui-drag-threshold' pixels with the button
+down drags its file into the application it is released over; a drop
+back on this frame does nothing.  Released sooner, it is a click, and
+does what a click does there."
   (interactive "e")
   (let* ((start (event-start event))
          (window (posn-window start))

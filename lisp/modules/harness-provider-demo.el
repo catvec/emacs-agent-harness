@@ -167,6 +167,12 @@ user wrote."
     (or text "")))
 
 (defun harness-provider-demo--script (request)
+  "Return the events the demo plays for REQUEST.
+`harness-provider-demo-script-override' wins when set.  Otherwise the
+system prompt picks a script for a request to name a session, write a
+task up, search a task board, name the companion pet or give it its
+lines, or write the Insights report; else the last user message picks
+one (see the Commentary)."
   (let ((text (downcase (harness-provider-demo--last-user-text request)))
         (cwd (or (plist-get (plist-get request :session) :cwd) default-directory)))
     (cond
@@ -615,6 +621,11 @@ the JSON the report asks for."
   "Session id -> remaining script after a tool call, resumed on the next request.")
 
 (defun harness-provider-demo--complete (request)
+  "Play REQUEST's script (`harness-provider-demo--script') to its `:on-event'.
+Events go out one at a time, `harness-provider-demo--delay' apart.  At a
+tool call the turn stops for the agent to run it, and the rest of the
+script waits for the session's next request that carries tool results.
+Return the handle plist, whose `:cancel' stops the script."
   (let* ((on-event (plist-get request :on-event))
          (sid (or (plist-get (plist-get request :session) :id) "none"))
          (script (harness-provider-demo--script request))
@@ -664,6 +675,7 @@ the JSON the report asks for."
                     (funcall on-event '(:type done :stop-reason cancelled))))))
 
 (defun harness-provider-demo--has-tool-results-p (request)
+  "Non-nil when the last message of REQUEST carries tool results."
   (let ((last (car (last (plist-get request :messages)))))
     (and last (cl-some (lambda (b) (equal (plist-get b :type) "tool_result"))
                        (plist-get last :content)))))

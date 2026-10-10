@@ -26,6 +26,7 @@
 (declare-function harness-ui-popout-try-at-point "harness-ui-popout")
 (declare-function harness-ui-popout--header "harness-ui-popout")
 (declare-function harness-ui-popout-image "harness-ui-popout")
+(declare-function harness-ui-image-load-flush "harness-ui")
 (declare-function harness-ui-popout-pixel-height "harness-ui-popout")
 (declare-function harness-ui-popout-pixel-width "harness-ui-popout")
 (declare-function harness-compose-live-p "harness-ui-compose")
@@ -324,10 +325,13 @@ shows the other one there again, where it was."
               (should (harness-ui-popout-buffer '(test report)))
               (should (get-buffer-window (harness-ui-popout-buffer '(test report)))))
             ;; With images, one that cannot be decoded says so, and is
-            ;; never read when it is remote.
+            ;; never read when it is remote.  An image is drawn after the
+            ;; popout shows, so the buffer is drawn out to see it.
             (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))
-              (let ((text (with-current-buffer (harness-ui-popout-image file) (buffer-string))))
-                (should (string-search "cannot be shown here" text)))
+              (with-current-buffer (harness-ui-popout-image file)
+                (should (string-search "loading…" (buffer-string)))
+                (harness-ui-image-load-flush)
+                (should (string-search "cannot be shown here" (buffer-string))))
               (let ((text (with-current-buffer (harness-ui-popout-image "/ssh:nowhere.invalid:/tmp/x.png")
                             (buffer-string))))
                 (should (string-search "remote image is not read here" text))))

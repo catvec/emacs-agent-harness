@@ -14,7 +14,7 @@
 ;; for a ticket title (see Titles).
 ;;
 ;; A task's session also runs on a shorter context than an interactive
-;; one by default: `harness-tasks-context-limit' (256k tokens) caps the
+;; one by default: `harness-tasks-context-limit' (384k tokens) caps the
 ;; session's context window, so the harness compacts a task sooner and
 ;; hands it a smaller transcript to carry on from.  Set it to nil to
 ;; give task sessions the whole window, like any other session, or to
@@ -24,12 +24,16 @@
 ;; in a fresh worktree on a branch of its own (the `worktree' module),
 ;; its session is told to commit there, and when the agent finishes the
 ;; branch goes through the merge queue (the `merge' module) into the
-;; branch checked out at the project root.  A task is complete only once
-;; its changes are merged.  The merge queue needs a parent session to
-;; merge into, so every project gets one quiet session at its root,
-;; named by `harness-tasks--merge-session-name', that only ever receives
-;; merges.  Conflicts are handed back to the task's own session by the
-;; merge queue; any other failure puts the task in front of the user.
+;; branch checked out at the project root -- a main checkout, which the
+;; queue takes as a target in its own right, with no session behind it.
+;; It is the same queue, the same conflict resolution and the same
+;; events as a sub-agent merging into the session that started it, which
+;; a task's own session may have started: its branch waits in the queue
+;; while those merges into its worktree are still to come, and it may
+;; not hand in until they are through.  A task is complete only once its
+;; changes are merged.  Conflicts are handed back to the task's own
+;; session by the merge queue; any other failure puts the task in front
+;; of the user.
 ;; Archiving a merged task removes its worktree and its merged branch.
 ;; The worktree is locked until its branch is merged, so a `git worktree
 ;; prune' run where it cannot be seen (in another session's sandbox)
@@ -239,7 +243,7 @@ own setting, from the board or `task/submit', wins over both."
   :type `(choice (const :tag "Configured default" nil) ,@harness-tasks--thinking-levels)
   :group 'harness)
 
-(defcustom harness-tasks-context-limit 256000
+(defcustom harness-tasks-context-limit 384000
   "Most tokens of context a task session uses, or nil for its whole window.
 A task session compacts when its context comes within the usual reserve
 of this limit, so unattended tasks compact earlier than interactive
@@ -404,9 +408,6 @@ complete only when the merge queue has merged that branch."
 (defconst harness-tasks--merge-attempts 3
   "Merges a task may try before it waits for the user.")
 
-(defconst harness-tasks--merge-session-name "Task merges"
-  "Name of the session at a project's root that task branches merge into.")
-
 (defcustom harness-tasks-resume-interrupted t
   "When non-nil, tasks a stopped harness interrupted carry on by themselves.
 A task that was working when the harness stopped (Emacs quit,
@@ -535,8 +536,15 @@ that session brings the task back to work, so the session stays."
     view))
 
 (defun harness-tasks--set (id &rest plist)
-  "Merge PLIST into task ID and store it.  Return its view."
-  (harness-tasks--put (apply #'harness-plist-merge (harness-tasks--get id) (list plist))))
+  "Merge PLIST into task ID and store it.  Return its view.
+A change that names `:state' ends what the task waits for (`:waiting',
+see `harness-tasks--on-turn-ended'), unless it sets a wait itself."
+  (let ((task (apply #'harness-plist-merge (harness-tasks--get id) (list plist))))
+    (harness-tasks--put (if (and (plist-member plist :state)
+                                 (not (plist-member plist :waiting))
+                                 (plist-member task :waiting))
+                            (harness-plist-remove task :waiting)
+                          task))))
 
 (defun harness-tasks--intern (task)
   "Turn the string enum values of a stored TASK back into symbols.
@@ -949,19 +957,11 @@ the default, medium."
         (harness-call-async 'worktree/create root :branch (harness-tasks--branch-name task))
         (lambda (wt) (append (list :base base) wt)))))))
 
-(defun harness-tasks--merge-target (root)
-  "Return the id of the session at project ROOT that task branches merge into."
-  (let ((existing (cl-find-if (lambda (s) (and (equal (plist-get s :name) harness-tasks--merge-session-name)
-                                               (equal (plist-get s :cwd) root)
-                                               (null (plist-get s :worktree))))
-                              (harness-call 'session/list (list :project root)))))
-    (plist-get (or existing
-                   (harness-call 'session/create :cwd root :name harness-tasks--merge-session-name))
-               :id)))
-
 (defun harness-tasks--enqueue-merge (id)
   "Queue task ID's branch for the merge queue, or put the task before the user.
-`:merge-queued' records when the branch joined the queue."
+The target is the project root: the main checkout, which the merge
+queue takes as a target of its own.  `:merge-queued' records when the
+branch joined the queue."
   (let* ((task (harness-tasks--get id))
          (attempts (1+ (or (plist-get task :merge-attempts) 0))))
     (cond
@@ -972,7 +972,7 @@ the default, medium."
      ((harness-call 'merge/status (plist-get task :session)) nil)
      (t
       (condition-case err
-          (let ((target (harness-tasks--merge-target (plist-get task :project))))
+          (let ((target (plist-get task :project)))
             (harness-tasks--set id :state 'merging :merge-status 'queued :merge-attempts attempts
                                 :merge-target target :merge-queued (float-time) :outcome nil :error nil)
             (harness-call 'merge/enqueue (plist-get task :session) target
@@ -1068,7 +1068,7 @@ is not merged yet.  Return a promise, or nil when there is nothing to do."
 Before the task starts they write it up (`harness-tasks--refine-prompt');
 afterwards they learn how to hand the finished work in, and, in a
 worktree, how it reaches the main branch -- or, in the main tree
-(`harness-tasks--main-tree-p'), that the work takes effect there."
+\(`harness-tasks--main-tree-p'), that the work takes effect there."
   (let ((task (harness-tasks--by-session (plist-get session :id))))
     (cond
      ((and task (harness-tasks--refinement-p task)
@@ -1321,7 +1321,9 @@ and the session list shows them under it."
   "Non-nil when TASK takes one of its project's slots.
 It does while it starts, and while it is active with its own session
 running or blocked mid-turn: one waiting on the user keeps its slot, as
-its turn goes on once answered.  Only that session counts, and only
+its turn goes on once answered.  So does one that waits on work its
+session left running (`:waiting', see `agent/outstanding'), such as the
+workers of a supervisor's plan.  Only that session counts, and only
 when it is top-level (`harness-tasks--top-level-p'): the sub-agents,
 forks and conflict resolvers working for a task take no slot of their
 own, and neither does a sub-agent made a task (`task/adopt'), which
@@ -1332,7 +1334,8 @@ the conflicts, and nor does writing a backlog task up (refining)."
       (and (eq (plist-get task :state) 'active)
            (let ((session (harness-tasks--session task)))
              (and (harness-tasks--top-level-p session)
-                  (memq (plist-get session :status) '(running blocked)))))))
+                  (or (plist-get task :waiting)
+                      (memq (plist-get session :status) '(running blocked))))))))
 
 (defun harness-tasks--slot-project (task)
   "Return the project whose slots TASK takes: its `:project', else its `:cwd'.
@@ -2058,6 +2061,19 @@ task's worktree is locked again for the new work."
                 (unless (eq (plist-get task :state) 'merging) (list :verified nil :verified-at nil))
                 (when (memq (plist-get task :state) '(review done)) (list :reopened (float-time)))))))))
 
+(defun harness-tasks--outstanding (task)
+  "Return what runs for TASK's session outside its own turn, or nil.
+That is the text of `agent/outstanding': work a module started for the
+session that goes on without its turn, a supervisor plan's workers say.
+Nil when no module reports any, and without the agent module."
+  (let ((sid (plist-get task :session)))
+    (when (and sid (harness-method-exists-p 'agent/outstanding))
+      (condition-case err
+          (harness-call 'agent/outstanding sid)
+        (error (harness-log 'warn "task %s: asking what its session has outstanding failed: %s"
+                            (plist-get task :id) (harness-error-message err))
+               nil)))))
+
 (defun harness-tasks--on-turn-ended (session-id reason)
   "Advance SESSION-ID's task when its turn ended with REASON.
 `end-turn' puts the work in review (`harness-tasks-require-verification')
@@ -2065,10 +2081,17 @@ until the user verified it; after that, or without review, it completes
 the task outside git -- in the main tree too, which has nothing to
 merge -- and queues its merge inside.  A round that ends without a
 report handed in gets one saying so (`harness-tasks--missing-report').
-A refinement turn puts its write-up in the backlog."
+A refinement turn puts its write-up in the backlog.  A clean end of a
+turn is not the end of the work while something the session started
+still runs outside it (`harness-tasks--outstanding'): the task then
+neither goes to review nor merges, but stays active, with the text of
+what runs as its `:waiting' until its state next changes.  The turn the
+session takes when that work is done, or once nothing runs any more,
+ends the task as usual."
   (remhash session-id harness-tasks--refine-calls)
   (when-let* ((task (harness-tasks--by-session session-id)))
-    (let ((id (plist-get task :id)))
+    (let ((id (plist-get task :id))
+          (waiting nil))
       (remhash id harness-tasks--starting)
       (cond
        ((harness-tasks--refinement-p task) (harness-tasks--finish-refinement id reason))
@@ -2078,6 +2101,8 @@ A refinement turn puts its write-up in the backlog."
        ((plist-get task :merge-status) nil) ; a conflict turn; merge/finished decides
        ;; Merged mid-turn: done, or in review when that merge needs one.
        ((and (memq (plist-get task :state) '(done review)) (harness-tasks--merged-p task)) nil)
+       ((setq waiting (harness-tasks--outstanding task))
+        (harness-tasks--set id :state 'active :waiting waiting))
        ((harness-tasks--needs-review-p task)
         (apply #'harness-tasks--to-review id :outcome reason :error nil :finished (float-time)
                (harness-tasks--missing-report task)))
@@ -2289,11 +2314,9 @@ waits in pending until `task/start'."
 
 (defun harness-tasks--adoptable-p (session)
   "Non-nil when SESSION may become a task.
-It must be open, not a task already, not a merge target and not a
-conversation about the board."
+It must be open, not a task already and not a conversation about the board."
   (and (not (eq (plist-get session :status) 'inactive))
        (not (harness-tasks--by-session (plist-get session :id)))
-       (not (equal (plist-get session :name) harness-tasks--merge-session-name))
        (not (harness-tasks--btw-p session))))
 
 (harness-defmethod task/adoptable (&optional cwd)

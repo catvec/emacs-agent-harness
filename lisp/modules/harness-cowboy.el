@@ -59,6 +59,20 @@
 ;; and the session's settling at the next start puts it back in its
 ;; queue (`harness-session--settle').  A turn cancelled while the
 ;; question waits dismisses it.
+;;
+;; The gate only sees a session whose own `:cache' lapsed.  A session
+;; made from another -- the supervisor's worker, a fork of the
+;; supervisor's whole conversation onto a model that has never read it
+;; (harness-supervisor.el) -- has no `:cache' at all, so it is never
+;; cold, and its first turn would send the whole conversation uncached
+;; with nobody asked.  `cowboy/compact' is the gate's unasked path for
+;; such a caller, before the session's first turn: it takes
+;; `harness-cowboy-default' (never `hold', and nothing when the context
+;; is under `harness-cowboy-min-context'), says so in a hint, compacts as
+;; the gate does -- with the same fallbacks -- and resolves with the
+;; choice taken.  It never rejects, so the caller can always go on.  It
+;; records its decision as `cold-start' by default and, with `:why',
+;; opens its hint with the caller's reason in place of the clock.
 
 ;;; Code:
 
@@ -190,7 +204,7 @@ A switch the policy sets wins, then the session's own, then
   (and (harness-method-exists-p 'compaction/estimate)
        (condition-case err
            (harness-call 'compaction/estimate session-id)
-         (error (harness-log 'warn "cowboy: no estimate for %s: %s" session-id (harness-error-message err))
+         (error (harness-log 'warn "cowboy: no estimate for %s: %s" session-id (harness-error-short-message err))
                 nil))))
 
 (defun harness-cowboy--kind-estimate (estimate choice)
@@ -382,7 +396,7 @@ say, which then stays as it is."
           (harness-save-user-option 'harness-cowboy-default choice)
           (harness-save-user-option 'harness-cowboy-ask nil))
         nil)
-    (error (let ((msg (harness-error-message err)))
+    (error (let ((msg (harness-error-short-message err)))
              (harness-log 'warn "cowboy: could not make %s the default: %s" choice msg)
              msg))))
 
@@ -428,7 +442,7 @@ the message."
                                           (format "“%s” is not one of the choices."
                                                   (harness-truncate-end (harness-first-line text) 60)))
                    (error (harness-log 'warn "cowboy: could not ask %s again: %s"
-                                       session-id (harness-error-message err))
+                                       session-id (harness-error-short-message err))
                           (funcall settle 'hold 'user))))
                 ((and (cdr parsed) (not (eq (car parsed) 'hold)))
                  (let ((failed (harness-cowboy--remember (car parsed))))
@@ -449,27 +463,42 @@ the message."
   "not now: the prompt cache is cold, and the message waits; the next one sends it too"
   "Why a held turn did not start, as the hint after it says.")
 
-(defun harness-cowboy--hint-text (choice by session estimate)
+(defun harness-cowboy--choice-text (choice context)
+  "Return in words what CHOICE does first.
+CONTEXT, a number of tokens or nil, is what carrying on sends again."
+  (pcase choice
+    ('brief "compacting into a brief summary first")
+    ('summary "compacting into a summary first")
+    ('transcript "writing the conversation to a transcript file first")
+    ('fresh "starting afresh")
+    (_ (format "carrying on with the whole conversation%s"
+               (if (and (numberp context) (> context 0))
+                   (format ", ~%s tokens uncached" (harness-format-tokens context))
+                 "")))))
+
+(defun harness-cowboy--by-text (by)
+  "Return in words why BY, who decided what goes first, decided as it did."
+  (pcase by
+    ('user "as you chose")
+    ('always "as you chose, from now on without asking (harness-cowboy-ask turns asking back on)")
+    ('non-interactive "the default for a session that does not wait for you (harness-cowboy-default)")
+    ('unasked "the default, as the question could not be asked (harness-cowboy-default)")
+    ('cold-start "the default for a session no warm cache holds (harness-cowboy-default)")
+    (_ "the default, as asking is off (harness-cowboy-ask)")))
+
+(defun harness-cowboy--hint-text (choice by session estimate &optional why)
   "Return the hint saying CHOICE goes first in SESSION, as BY decided.
-ESTIMATE is `compaction/estimate''s answer, or nil."
-  (let ((context (or (plist-get estimate :context) (plist-get (plist-get session :usage) :context))))
-    (format "Prompt cache cold since %s: %s, %s"
-            (harness-cowboy--clock (plist-get (plist-get session :cache) :expires))
-            (pcase choice
-              ('brief "compacting into a brief summary first")
-              ('summary "compacting into a summary first")
-              ('transcript "writing the conversation to a transcript file first")
-              ('fresh "starting afresh")
-              (_ (format "carrying on with the whole conversation%s"
-                         (if (and (numberp context) (> context 0))
-                             (format ", ~%s tokens uncached" (harness-format-tokens context))
-                           ""))))
-            (pcase by
-              ('user "as you chose")
-              ('always "as you chose, from now on without asking (harness-cowboy-ask turns asking back on)")
-              ('non-interactive "the default for a session that does not wait for you (harness-cowboy-default)")
-              ('unasked "the default, as the question could not be asked (harness-cowboy-default)")
-              (_ "the default, as asking is off (harness-cowboy-ask)")))))
+ESTIMATE is `compaction/estimate''s answer, or nil.  WHY, a string,
+opens the hint in place of the time the prompt cache went cold: a
+session with no cache of its own has none to date."
+  (let ((context (or (plist-get estimate :context) (plist-get (plist-get session :usage) :context)))
+        (expires (plist-get (plist-get session :cache) :expires)))
+    (format "%s: %s, %s"
+            (cond ((and (stringp why) (not (string-blank-p why))) (string-trim why))
+                  ((numberp expires) (format "Prompt cache cold since %s" (harness-cowboy--clock expires)))
+                  (t "No warm prompt cache holds this conversation"))
+            (harness-cowboy--choice-text choice context)
+            (harness-cowboy--by-text by))))
 
 (defun harness-cowboy--compact (session-id choice by)
   "Compact SESSION-ID as CHOICE says, BY deciding; return a promise.
@@ -487,7 +516,9 @@ cannot be written to carrying on, each said in a hint."
     (harness-catch
      (harness-call-async 'compaction/compact session-id (list :kind choice :meta (funcall meta)))
      (lambda (err)
-       (let ((msg (harness-error-message err)))
+       ;; Short: the error can carry a whole transcript or request body
+       ;; (`harness-error-short-message'), and the hint is read.
+       (let ((msg (harness-error-short-message err)))
          (if (and (memq choice '(brief summary)) (harness-call 'session/exists-p session-id))
              (progn
                (harness-call 'session/hint session-id
@@ -496,7 +527,7 @@ cannot be written to carrying on, each said in a hint."
                (harness-catch
                 (harness-call-async 'compaction/compact session-id
                                     (list :kind 'transcript :meta (funcall meta msg)))
-                (lambda (err) (funcall carry-on (harness-error-message err)))))
+                (lambda (err) (funcall carry-on (harness-error-short-message err)))))
            (funcall carry-on msg)))))))
 
 (defun harness-cowboy--busy (session-id)
@@ -510,7 +541,7 @@ starts, and its end, cancelled or not, when it ends."
         (harness-call 'session/set-status session-id 'running)
         (when (harness-method-exists-p 'agent/note-activity)
           (harness-call 'agent/note-activity session-id (list :phase 'compacting))))
-    (error (harness-log 'warn "cowboy: could not mark %s busy: %s" session-id (harness-error-message err)))))
+    (error (harness-log 'warn "cowboy: could not mark %s busy: %s" session-id (harness-error-short-message err)))))
 
 (defun harness-cowboy--apply (session-id choice by value estimate)
   "Do CHOICE before SESSION-ID's turn, as BY decided; promise the gate value.
@@ -552,9 +583,74 @@ the turn goes on with: asked (`harness-cowboy--ask') or taken unasked
         (condition-case err
             (harness-cowboy--ask session-id session value estimate settle)
           (error
-           (harness-log 'warn "cowboy: could not ask %s: %s" session-id (harness-error-message err))
+           (harness-log 'warn "cowboy: could not ask %s: %s" session-id (harness-error-short-message err))
            (funcall settle (harness-cowboy--default) 'unasked)))
         promise))))
+
+;;;; Compacting unasked
+
+(defun harness-cowboy--by (value)
+  "Return who decided, as VALUE, a symbol or its name, says, else `cold-start'."
+  (cond ((and value (symbolp value)) value)
+        ((and (stringp value) (not (string-blank-p value))) (intern (string-trim value)))
+        (t 'cold-start)))
+
+(harness-defmethod cowboy/compact (session-id &rest opts)
+  "Compact SESSION-ID, unasked, before its first turn; promise the choice.
+For a caller that makes a session whose conversation no warm prompt
+cache holds: a fork of a long session onto a model that never read it,
+say.  Such a session has no `:cache' of its own, so the cold-cache gate
+never finds it cold, and its first turn would send the whole
+conversation uncached.  This does what the gate does for a session
+nobody is asked about: it takes `harness-cowboy-default' (never `hold'),
+emits `cowboy/decided', adds a hint saying so to SESSION-ID and, unless
+the choice is `carry-on', compacts as the gate does, with the same
+fallbacks: a brief or full summary that cannot be made gives way to the
+transcript file, and that to carrying on, each said in a hint.  As in
+the gate, the compaction node's `:meta' `:cowboy' holds the choice and
+who decided.
+
+The promise resolves with the choice taken, a symbol, or with nil when
+nothing was done: the context is under `harness-cowboy-min-context',
+SESSION-ID does not exist, or something failed (it is logged).  It never
+rejects, so a caller can always go on.  No turn is running, so the
+session is not shown busy while it compacts.
+
+OPTS keys:
+ `:by'   who decided, a symbol: the `:by' of the node's meta and the
+         third argument of `cowboy/decided'.  The default, `cold-start',
+         is the default for a session no warm cache holds, which is
+         what the hint says whatever the caller names.
+ `:why'  a string that opens the hint in place of \"Prompt cache cold
+         since HH:MM\": a session with no cache of its own has no time
+         to give.  Say what no cache holds, for example \"No prompt cache
+         on MODEL holds this conversation\"."
+  (condition-case err
+      (let* ((session (harness-call 'session/get session-id))
+             (estimate (harness-cowboy--estimate session-id))
+             (context (or (plist-get estimate :context)
+                          (plist-get (plist-get session :usage) :context)))
+             (smallest (max 0 (or harness-cowboy-min-context 0)))
+             (choice (harness-cowboy--default))
+             (by (harness-cowboy--by (plist-get opts :by))))
+        (if (< (if (numberp context) context 0) smallest)
+            (harness-resolved nil)
+          (harness-emit 'cowboy/decided session-id choice by)
+          ;; Whoever the caller says decided, what was done is the default
+          ;; for a session no warm cache holds: the hint says so.
+          (harness-call 'session/hint session-id
+                        (harness-cowboy--hint-text choice 'cold-start session estimate (plist-get opts :why)))
+          (if (eq choice 'carry-on)
+              (harness-resolved choice)
+            (harness-then (harness-cowboy--compact session-id choice by)
+                          (lambda (_) choice)
+                          (lambda (err)
+                            (harness-log 'warn "cowboy: compacting %s unasked failed: %s"
+                                         session-id (harness-error-short-message err))
+                            nil)))))
+    (error (harness-log 'warn "cowboy: compacting %s unasked failed: %s"
+                        session-id (harness-error-short-message err))
+           (harness-resolved nil))))
 
 ;;;; The gate
 
@@ -571,7 +667,7 @@ changed it."
       (harness-then (harness-cowboy--decide id session value)
                     (lambda (gate) (funcall next gate) nil)
                     (lambda (err)
-                      (harness-log 'warn "cowboy: deciding for %s failed: %s" id (harness-error-message err))
+                      (harness-log 'warn "cowboy: deciding for %s failed: %s" id (harness-error-short-message err))
                       (funcall next value)
                       nil))))
   nil)
@@ -611,7 +707,7 @@ then `agent/turn-ended'); the message is kept."
 (harness-cowboy--init)
 
 (harness-declare-event 'cowboy/asked "(SESSION-ID PENDING-ID) after asking what goes first in a session whose prompt cache went cold.")
-(harness-declare-event 'cowboy/decided "(SESSION-ID CHOICE BY) once what goes first is decided: CHOICE one of `harness-cowboy-choices', BY `user', `always' (the answer made it the default), `non-interactive', `default' (asking is off) or `unasked' (the question could not be asked).")
+(harness-declare-event 'cowboy/decided "(SESSION-ID CHOICE BY) once what goes first is decided: CHOICE one of `harness-cowboy-choices', BY `user', `always' (the answer made it the default), `non-interactive', `default' (asking is off), `unasked' (the question could not be asked) or `cold-start' (`cowboy/compact', for a session no warm cache holds; its caller may name another BY).")
 
 (harness-define-module 'cowboy
   :doc "Ask what goes first when a message meets a session whose prompt cache went cold."

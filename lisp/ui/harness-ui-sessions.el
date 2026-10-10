@@ -151,6 +151,8 @@ model, status, kind and permission mode."
     (nreverse out)))
 
 (defun harness-ui-sessions--entry (depth s)
+  "Return the entry of session S in `tabulated-list-entries'.
+Its name is indented DEPTH levels under its parents."
   (let* ((name (or (harness-ui-sessions--name s) (propertize "unnamed" 'face 'harness-dim-face)))
          (status (plist-get s :status))
          (kind (harness-ui-sessions--kind s)))
@@ -173,6 +175,9 @@ model, status, kind and permission mode."
            (propertize (file-name-nondirectory (directory-file-name (or (plist-get s :project) ""))) 'face 'harness-dim-face)))))
 
 (defun harness-ui-sessions--refresh ()
+  "Compute the rows of the list from the session cache, then its mode line.
+The mode line says the scope and the filter, and whether the list hides
+inactive sessions or shows only those waiting for you."
   (let ((ordered (harness-ui-sessions--ordered)))
     (setq harness-ui-sessions--depths (make-hash-table :test 'equal))
     (dolist (cell ordered)
@@ -292,6 +297,9 @@ which is the session's too: RET opens it, SPC pops its request out."
       (or found first (point-min)))))
 
 (defun harness-ui-sessions--number< (col)
+  "Return a predicate ordering entries by the number at COL in their sessions.
+COL is a list of keywords, as `harness-plist-get-in' takes; a session
+without that number sorts as 0."
   (lambda (a b)
     (let ((x (harness-ui-session (car a))) (y (harness-ui-session (car b))))
       (< (or (harness-plist-get-in x col) 0) (or (harness-plist-get-in y col) 0)))))
@@ -426,6 +434,7 @@ whose session is gone goes to the first row."
             (set-window-point window (harness-ui-sessions--position at))))))))
 
 (defun harness-ui-sessions--on-changed ()
+  "Redraw the list shortly, once for a burst of changes."
   (harness-debounce 'harness-ui-sessions 0.15 #'harness-ui-sessions--redraw))
 
 (defun harness-ui-sessions--on-rate (_id _rate)
@@ -501,7 +510,9 @@ fails, as on a harness without tasks, the list names no task."
 
 (defun harness-ui-sessions--on-event (event args)
   "Follow the tasks in the list: `task/changed' (TASK) and `task/deleted' (ID).
-A task changes session when it starts, so it is looked up by its id."
+EVENT names a harness event and ARGS are its arguments, as
+`harness-ui-event-functions' gets them.  A task changes session when it
+starts, so it is looked up by its id."
   (when-let* ((buf (and (member event '("task/changed" "task/deleted"))
                         (get-buffer harness-ui-sessions--buffer-name))))
     (with-current-buffer buf
@@ -561,6 +572,7 @@ POSITION, as `harness-sessions' has it."
   (harness-sessions t position t))
 
 (defun harness-ui-sessions--id ()
+  "Return the id of the session on this line, or signal a user error."
   (or (tabulated-list-get-id) (user-error "No session on this line")))
 
 (defun harness-ui-sessions-open (&optional position)
@@ -708,6 +720,10 @@ the list at once, before its session says it is no longer blocked."
     (harness-ui-sessions--on-changed)))
 
 (defun harness-ui-sessions--init ()
+  "Wire the session list into the UI.
+The list redraws as sessions, what they wait on, their output rates and
+their live token figures change, and follows the tasks; l in
+`harness-ui-map' opens it."
   (add-hook 'harness-ui-sessions-changed-hook #'harness-ui-sessions--on-changed)
   (add-hook 'harness-ui-pending-changed-hook #'harness-ui-sessions--on-pending)
   (add-hook 'harness-ui-rate-functions #'harness-ui-sessions--on-rate)

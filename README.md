@@ -36,6 +36,12 @@ OpenAI-compatible APIs and AWS Bedrock.
   worktree, review the results, and merge them back through a merge
   queue. A per-project limit on running tasks starts the waiting ones
   by priority (low, medium, high).
+- **Supervisor mode.** A session on an expensive model plans and
+  coordinates while workers on cheaper models make the changes. The
+  harness enforces it with tools rather than a prompt: the supervising
+  session has no write tools, its shell is read-only and offline, and
+  every turn ends on a decision. On by default, and a click on the
+  header line (or `C-c h V`) switches a session to working hands-on.
 - **Notifications.** A desktop notification, and a push to your phone
   through Gotify once you set it up, when a task waits for your review
   or is done. Agents can notify you too.
@@ -52,11 +58,13 @@ OpenAI-compatible APIs and AWS Bedrock.
 - **Remote control.** The harness speaks the Agent Client Protocol
   (ACP), so another Emacs or any ACP client can drive it, including one
   on your phone, paired by scanning a QR code.
-- **Modular and reloadable.** Every feature is a module, and the whole
-  harness reloads in place without losing running sessions.
+- **Modular and reloadable.** Every feature is a module, modules of
+  your own load beside them, and the whole harness reloads in place
+  without losing running sessions.
 - **A companion pet.** Hatch a small creature of a random species and
-  rarity that keeps you company in a buffer of its own and now and
-  then has a word to say about your work.
+  rarity. It sits by the compose box of your chats and of the task
+  board, and now and then has a word to say about your work. One switch
+  turns it off everywhere.
 
 ## Screenshots
 
@@ -288,6 +296,8 @@ the menu's Version entry says so.
 | `C-c h p` | `harness-set-permission-mode` | Choose the permission mode |
 | `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
 | `C-c h I` | `harness-set-non-interactive-all` | Turn non-interactive mode on or off for every current session and task of every project |
+| `C-c h V` | `harness-toggle-supervisor` | Toggle supervisor mode: a session that supervises plans and leaves the changes to workers on cheaper models, a hands-on one may change files itself (see [Supervisor mode](#supervisor-mode)) |
+| menu `V` | `harness-set-supervisor-all` | In the `C-c h ?` menu, turn supervisor mode on or off for every current session and task of every project (see [Supervisor mode](#supervisor-mode)) |
 | `C-c h d` | `harness-directories` | Manage the directories a session may access |
 | `C-c h W` | `harness-move-session` | Move a session to another working directory, and with it to that directory's project (see [Moving a session](#moving-a-session-to-another-directory)) |
 | `m` | `harness-ui-sessions-move` | In the session list, move the session at point to another directory |
@@ -441,6 +451,14 @@ panel above the compose box lists every item with its state. `C-c C-t`,
 a click on the header segment, or `TAB` on the panel folds the items
 away and brings them back; the list disappears when the agent clears it.
 
+A session that other sessions merge their work into -- the sub-agents it
+started, in worktrees of their own -- shows that queue in the same place,
+a panel of its own above the compose box: one line per child, marked
+queued, merging, in conflict, merged or failed, with the reason the
+queue gave, the live merges first and the last few finished under them.
+It follows the merges as they happen, and disappears when the queue is
+empty and nothing was merged recently.
+
 A session may use its working directory, its worktree, the directories
 in `harness-allowed-directories` and the ones you grant it. It also has
 a temporary directory of its own, `/tmp/harness-UID/ID/` (under
@@ -593,13 +611,19 @@ The header line shows the session's status, name, todo progress while
 it has one, model, permission mode, whether it is `non-interactive` or
 `interactive`, thinking level, context and cost. Click the model, the
 permission mode, the non-interactive switch or the thinking level to
-change it. Switching a session that waits on a permission prompt to
-YOLO answers the prompt, since yolo would have allowed the call
-anyway; a directory prompt still waits for your answer. A
-non-interactive session never waits for you, which suits a session you
+change it. A session that [supervises](#supervisor-mode) starts the
+line with a `supervisor` badge, or a `hands-on` one once you switched
+that off; a click there toggles it, and a window too narrow for the
+whole line drops the badge before the session's model or counts. Switching a session that waits on a
+permission prompt to YOLO answers the prompt, since yolo would have
+allowed the call anyway; a directory prompt still waits for your
+answer. A non-interactive session never waits for you, which suits a session you
 leave to work while you are away. Whatever would ask you for
 permission, the auto-mode judge decides instead, whatever the
-permission mode. The judge runs on the session's own provider: its
+permission mode. The one exception is a supervising session's plan:
+the judge never rules on `submit_plan` or `retry_step`, which are
+allowed (see **Approving plans** under
+[Supervisor mode](#supervisor-mode)). The judge runs on the session's own provider: its
 cheap tier (Claude Haiku, DeepSeek Flash, or the cheapest model that
 provider lists), so a session on one provider is never judged through
 another. Set `harness-perms-auto-model` to force one model. The judge
@@ -639,7 +663,11 @@ unless a prefix argument (`C-u C-c h I`) leaves the default alone. It
 says how many sessions and tasks changed, and when it turns the mode
 off, what still turns it on for new work: a project's `.dir-locals.el`
 that sets `harness-non-interactive`, or `harness-tasks-non-interactive`.
-It changes neither.
+It changes neither. A completed task — one in the board's `done`
+column — is over: its session is left alone by this and by every other
+"for all sessions" command (`C-c h M`, `C-c h H`, the menu's `V`),
+even a session still running, idle or blocked (see
+[Task board](#task-board)).
 
 An agent can do the same when you ask it to, with its
 `set_non_interactive` tool, for itself, another session, or everything.
@@ -849,6 +877,249 @@ thinking level, whatever the session's level is. Set
 from the session's level. A BTW whose model does not offer that level
 starts at the session's.
 
+### Sub-agents
+
+An agent hands a job to a sub-agent of its own with `spawn_agent`: one
+prompt runs in a child session, and the call never blocks the
+conversation. It returns as soon as the child starts, naming its
+session; the child's answer comes later, in a message of the harness's
+own (**System · sub-agent**), so a session can start as many sub-agents
+as it needs and carry on while they work instead of waiting for one
+after another. Several `spawn_agent` calls made in one step run at
+once, and calls made one after another overlap just the same. While
+sub-agents run the session has work outstanding, so a task does not go
+to review until they are back; a child that itself has work going on (a
+wait it registered, a sub-agent it started) is reported when that is
+over, not when its turn merely ends.
+
+`fork=true` forks the session, so the child shares the conversation and
+its cached prefix; a fresh child starts with the prompt alone.
+`worktree=true` gives the child a git worktree and branch of its own, so
+several children can change files at once; each branch merges back into
+the parent's working directory through the merge queue, one at a time.
+To wait for some other session without blocking, `session_wait`
+registers a wake-up and returns at once: a message of the harness's own
+arrives when the session is done, and the registration outlives the
+turn that made it.
+
+### Supervisor mode
+
+A session in supervisor mode plans and coordinates; workers on cheaper
+models make the changes. The session investigates just enough to plan,
+then submits a plan (`submit_plan`): steps, each a self-contained job
+with a tier that says how hard it is. The harness starts a worker
+session for every step on the model of its tier, reports back when a
+step fails and when the plan has finished, and the supervisor checks the
+work and decides what comes next. The plan shows in the chat as soon as
+it is submitted, and every worker is a sub-agent session of its own,
+named `Step ID: title`, that you can open and read like any other.
+
+The harness enforces the rule itself, with tools and not with a prompt,
+because a model that is only told to delegate drifts back to "I'll just
+do it myself": one small edit, then another, until the expensive model
+does the cheap work at the expensive price. A supervising session is not
+offered the tools that change things, and the permission layer denies a
+call to one anyway, in every permission mode.
+
+- **On by default.** New top-level sessions supervise
+  (`harness-supervisor`), and so do the sessions of the tasks the board
+  starts (`harness-supervisor-tasks`). Both are on the settings page,
+  under **Supervisor mode**, and `harness-supervisor` can be set per
+  project like the other settings of new sessions (see
+  [Configuration](#configuration)). They decide how a session starts;
+  from then on each session has its own switch, and changing a setting
+  leaves the sessions that exist as they are. Sub-agents and BTW side
+  conversations never supervise, and a fork starts as its parent is.
+- **The header button and `C-c h V`.** The header line of a session
+  starts with a `supervisor` badge, or a `hands-on` one once the mode is
+  off; a window too narrow for the whole line drops it before the
+  session's model or counts. A
+  click on it, or `C-c h V` (`harness-toggle-supervisor`), flips it, and
+  the transcript says so. A hands-on session works as sessions always
+  did: it may write. Switch the mode back on and writes are denied
+  again from the next call, in a turn that is running too; the shorter
+  tool list follows at its next step. Only you flip the mode: the agent
+  has no tool for it.
+- **Every session at once.** `harness-set-supervisor-all` (the menu's
+  `V`, beside the other "for all sessions" entries) turns the mode on or
+  off for every current session the plugin governs, of every project:
+  the sessions of the current tasks (running, pending or blocked)
+  included, even a closed one. Sub-agents and side conversations are
+  left alone (they never supervise), and so is a session whose task is
+  [completed](#task-board) or already at the value asked for. Unless a
+  prefix argument says otherwise it also sets `harness-supervisor` and
+  `harness-supervisor-tasks`, so new top-level and task sessions
+  follow, and it says what still wins over those: a project whose
+  `.dir-locals.el` sets `harness-supervisor`. It never rewrites a
+  `.dir-locals.el`.
+- **What a supervising session can and cannot do.** It reads: files,
+  search, other sessions and tasks, your Emacs's buffers and
+  documentation, skills and the web. It coordinates: it asks you
+  (`ask_user`), keeps its todo list, notifies you, hands work to other
+  sessions and tasks (`session_send`, `task_submit`, `task_control` and
+  the like), asks for a directory and hands a task's work in. It plans
+  (`submit_plan`, `retry_step`, `no_plan_needed`). And it runs shell
+  commands that are read-only and offline: every directory is mounted
+  read-only and the network is cut, so `git log` and `grep` work and
+  anything that writes fails. That takes a sandbox that can confine the
+  command; where none can (`harness-sandbox-policy` is `off`, the
+  directory is on another host, neither bubblewrap nor `systemd-run` is
+  installed), the session has no bash at all, rather than an unconfined
+  one. `write_file`, `edit_file`, `ssh`, `elisp`, `spawn_agent` and the
+  other tools that change files or run code are not offered, and a call
+  to one is denied for good, with a hint to put the change in a step of
+  the plan.
+- **Every turn ends on a decision.** A supervising turn is not over
+  until the model made one: `submit_plan` when the work changes files,
+  however small; `no_plan_needed`, with a one-line reason, when it
+  answered a question, there is nothing to do or a plan is still
+  running; `retry_step`; `hand_in` in a task; or handing the work to
+  another session or task (`task_submit`, `task_control`,
+  `session_send`, `session_control`). A model that stops without one is
+  sent back with a reminder, twice at most in a turn; after that the
+  turn ends, and the transcript says it ended without a decision.
+  `no_plan_needed` does not end the turn: the answer follows it.
+- **A soft step budget.** A turn that investigates for too long is
+  steered, never stopped. After `harness-supervisor-step-budget` tool
+  calls (80) the session is told to stop investigating and submit the
+  plan with what it knows, and it is told again every half budget after
+  that (at 120, 160 and so on). The default comes from 164 real
+  sessions: the median reached its plan after 61 tool calls, the 75th
+  percentile after 80 and the 90th after 103, so the nudge comes when a
+  turn is already among the slowest quarter.
+- **Plans, tiers and models.** Each step has a tier and a one-line
+  reason for it: `mundane` for mechanical, well-specified edits,
+  `standard` for ordinary work and `hard` for subtle design or
+  debugging. They map to the cheap, balanced and frontier models of the
+  supervisor's provider. `harness-supervisor-tiers` names a model for a
+  tier instead (a tier it leaves out keeps the default). A provider
+  with no model for a tier runs that step on the supervisor's own model,
+  and a hint says so.
+- **Thinking levels.** Thinking is a role thing: planning well is worth
+  the top effort, and the many small steps are not. A session that
+  starts supervising takes the level its provider names in
+  `harness-supervisor-thinking`, and each worker the level its own
+  model's provider names in `harness-supervisor-worker-thinking`. Both
+  are alists from a provider id to a level; by default DeepSeek
+  supervisors plan at `max`, and DeepSeek workers think at `medium`,
+  which DeepSeek's own mapping makes of its middle effort, one step
+  below max. A provider neither setting names, and a nil level, leaves
+  those sessions as they were: a worker thinks at its supervisor's
+  level. The supervisor's level is raised when the mode is turned on
+  and put back as it was when it is turned off; a level you choose while
+  the session supervises is left as it is when the mode goes off, and
+  after a restart of the harness the raised one stands. Workers keep the
+  level they started with. Both settings are on the settings page, under
+  **Supervisor mode**.
+- **Fork or fresh, and `after`.** A step's context is `fork` (the
+  default) or `fresh`. A fork worker is a fork of the supervisor at the
+  call that submitted the plan, so it sees everything the supervisor
+  learned and nothing has to be found out again (a step that starts
+  again may get a summary of it instead, see **Retry and escalation**).
+  A fresh worker starts empty in the same directory, for a
+  self-contained job that needs none of it, and its prompt holds
+  everything. `after` lists the steps that must be done first, and a
+  worker is given the reports of the steps it follows. Steps with no
+  order between them run at once in the same working tree (a task's
+  worktree, in a task), so the supervisor gives them different files.
+- **Cache seeds.** A provider's prompt cache serves only the model that
+  wrote it, so every fork onto a cheaper model would pay to write the
+  whole conversation into that model's cache, and no two forks share a
+  prefix, since a system prompt names its own directories. When a plan
+  has two or more fork steps on one model, the harness forks them
+  through a *seed*: a fork of the supervisor on that model, sent one
+  tiny message that writes the context into the cache once. Each worker
+  is then a fork of the seed, sends the seed's system prompt word for
+  word, and reads the context from the cache. The seed is a sub-agent
+  session like any other, named "Shared context for ..." in the session
+  list, and stays there until you delete it. One fork step on a model
+  has nothing to share and is forked directly.
+- **Short context for workers.** A worker is a sub-agent, and
+  sub-agents work on a deliberately short context window,
+  `harness-subagent-context-limit` (256000 tokens by default, nil for
+  no cap): a fresh worker's window is that limit, and a fork gets what
+  it inherits plus the limit, never more than the supervisor's own
+  limit or its model's window. Calls stay cheap, a worker that
+  outgrows its window compacts early, and its report stays short. The
+  worker's transcript says so, in a hint at its start ("Context window
+  capped at 256k tokens, as a sub-agent's is
+  (harness-subagent-context-limit)"), as the transcript of any
+  sub-agent does. A worker compacted before it starts (see **Retry and
+  escalation**) is capped from the summary it starts with, not from
+  all the supervisor holds.
+- **Reports back.** Submitting the plan ends the turn: the supervisor
+  does not wait or poll, and the harness reports to it in messages of
+  its own (**System · supervisor**). A finished step is a hint in the
+  transcript and starts the steps that waited for it. A step that did
+  not get done (its worker could not be made, its turn failed, was
+  cancelled or blocked, or its session was deleted) is a message of its
+  own: the step, its tier and model, why, the steps held on it and the
+  ways on. When the last step is done, a message lists every step with
+  its result and asks the supervisor to check the work and decide. An
+  idle session starts a turn on a message, and a running turn is
+  steered.
+- **Retry and escalation.** After a failure the supervisor calls
+  `retry_step`, which runs the step again on a new worker, with notes on
+  what went wrong and, when the model was not up to it, a higher tier. It
+  does not end the turn, so several steps can be retried in one
+  message. Or the supervisor submits a new plan, which supersedes the
+  steps of the earlier ones that have not started (their running steps
+  finish as usual), or it asks you. A step that starts again, retried or
+  interrupted by a restart, does not make its worker read the whole
+  conversation uncached on a model that never saw it, which a higher tier
+  usually is. With a warm seed on the step's model its fork worker forks
+  through the seed; otherwise it forks the supervisor and is compacted
+  before its first turn, as the cold-cache question would for a session
+  nobody is asked about (a brief summary by default, see
+  `harness-cowboy-default`), and a hint tells the supervisor which. The
+  worker's message also says which session, model and error the attempt
+  before had, so it can read what was tried (`session_read`) and not
+  repeat it.
+- **In tasks.** The session of a task supervises by default, and the
+  last step of its plan commits (`git add -A && git commit`). Once the
+  plan has finished and the supervisor has checked the result, it calls
+  `hand_in`; feedback from your review leads to a new plan that fixes
+  the work. While workers run, the task stays active, with a line of what
+  it waits for, instead of going to review when the turn that submitted
+  the plan ends. The session that writes a backlog task up only reads,
+  and takes the setting when the task starts.
+- **Merging back.** The merge queue takes a target rather than a
+  parent: the session a branch merges into, or the main checkout
+  itself. A sub-agent started in a worktree (`spawn_agent` with
+  `worktree`) merges into the session that started it, beside whatever
+  else merges there. A session that is itself a worktree -- a task's --
+  merges into the main checkout, and may be the target of the sessions
+  it starts in between, at any depth: one queue, one conflict
+  resolution, one set of events.
+  Order follows the work: a branch may be queued upward while the
+  merges into its own worktree are still to come, but it waits for
+  them, and the session may not hand in (`hand_in`) until they are
+  through, so what reaches main is built on what it was built on. A
+  merge that failed is the child's to fix and does not hold the
+  session back; the queue says so and the panel shows it.
+- **After a restart.** Workers die with the harness. Once it is up
+  again, the steps that were running are marked interrupted and
+  reported as a failure is: to the session of a task as a message, so
+  the task carries on, and to any other session queued, to go with your
+  next message instead of starting an expensive turn you did not ask
+  for. `retry_step` runs an interrupted step again.
+- **Approving plans.** In Ask mode you approve each plan
+  (`submit_plan`), in the permission prompt, before any worker starts,
+  and each retry (`retry_step`, which starts a worker too) the same way.
+  In Accept edits, Auto and YOLO mode, and in any non-interactive
+  session whatever its mode, plans and retries are allowed without
+  asking, and without the auto-mode judge: it never rules on a plan. A
+  plan changes nothing by itself. Every call a worker makes is decided
+  in the worker's own session, by its mode and the judge as usual, and
+  the workers run with the supervisor's permission mode, directory
+  grants and non-interactive switch, so in Ask mode their edits ask too.
+  A standing deny rule for `submit_plan` still denies it.
+- **Removing the plugin.** Supervisor mode is a plugin. Add
+  `supervisor` and `ui-supervisor` to `harness-disabled-modules`, and
+  `seed` too if nothing should share a cache this way, and everything
+  else works as before: no turn has to end on a decision, sessions keep
+  every tool, and the header line shows no segment.
+
 ### Task board
 
 `C-c h a` opens the task board of the current project. Each task runs in
@@ -915,7 +1186,7 @@ your checkout itself can be submitted to the **main tree** instead (the
   agent sets it with `task_submit`'s `priority` and `task_control`'s
   `priority` action, and the board's search understands "do the docs
   task first".
-- Task sessions run on at most 256k tokens of context
+- Task sessions run on at most 384k tokens of context
   (`harness-tasks-context-limit`): they compact sooner than interactive
   sessions, so a long task works from a smaller transcript between
   turns. Set it to another number of tokens to tune that, or to nil to
@@ -1248,27 +1519,64 @@ first ran a harness with Insights. Set
 
 ### Companion pet
 
-`C-c h z` (`M-x harness-pet`) opens the pet's buffer, the only place it
-shows. The first time there is an egg: press `h` to hatch it. It hatches
-into one of 18 species, from common to legendary (one in a hundred),
-sometimes with a hat and, rarely, shiny, with five stats. The cheapest
-model of your provider names it and gives it a personality.
+`C-c h z` (`M-x harness-pet`) opens the pet's buffer. The first time
+there is an egg: press `h` to hatch it. It hatches into one of 18
+species, from common to legendary (one in a hundred), sometimes with a
+hat and, rarely, shiny, with five stats. The cheapest model of your
+provider names it and gives it a personality.
 
-While its buffer is on screen, it now and then says a line about the
-message you just sent, a test run that failed or a big change, and it
-always answers when you call it by name in a message or pet it (`p`).
-It grows a level as you work. `r` renames it, `m` mutes it and `R` lets
-it go, after which the next egg hatches another.
+Once it hatched, it keeps you company in other places too:
 
-It costs little: it never asks a model anything while its buffer is
-hidden or while it is muted, comments unasked at most once a minute
-(`harness-pet-cooldown`), on your messages only by chance
-(`harness-pet-chance`), and then asks for one short line from a cheap
-model (`harness-pet-model`) with no thinking and none of your project's
-context but the last few messages. Nothing runs while nothing happens.
-To keep it quiet, set
-`harness-pet-reactions` to nil; to remove it, add `pet` and `ui-pet` to
-`harness-disabled-modules`.
+- **Chats.** The whole creature sits in the bottom right corner, right
+  above the compose box, as Claude Code's companion sits beside its
+  prompt. It is drawn in its rarity's colour, with its name beside its
+  eyes, and takes only as many lines as it is tall. What it last said
+  about the session shows in a speech bubble on its left, joined to it,
+  until the session's next turn starts. The bubble widens rather than
+  grow taller than the creature. Hovering names the pet, and a click
+  opens its buffer. Side conversations (BTW) go without it.
+- **The task board.** It sits in the board's bottom right corner in the
+  same way, with the last thing it said about anything. The compose
+  label and settings lines narrow to make room for its bottom rows, so
+  it adds only a few lines of its own. Each task that gets done gives it
+  experience.
+- **Small windows.** A window narrower than 40 columns or shorter than
+  20 lines shows its face on one line instead, as in `(·>`. The face
+  comes with its name or the first few of its words. Set
+  `harness-ui-pet-figure` to `face` to get that everywhere.
+- **Header lines, if you want them.** Its face on one line, as in `(·>`,
+  can end each chat's header line (`chat-header`), where it blinks now
+  and then while the session works. Its face and name can also show in
+  the board's header line (`board-header`). Either is the first thing to
+  go when the window is narrow.
+
+`harness-ui-pet-places` chooses among these places: `chat` and `board`
+by default, `chat-header` and `board-header` too if you add them. nil
+keeps the pet to its own buffer. `harness-ui-pet-figure` chooses how it
+shows by the compose boxes: `whole` (the default) or `face`.
+
+While it is on screen (its buffer, the task board, or a chat whose
+session it would talk about), it now and then says a line. It may
+comment on the message you just sent, on a test run that failed or on a
+big change. It always answers when you call it by name in a message or
+pet it (`p`). It grows a level as you work. `r` renames it, `m` mutes it
+and `R` lets it go, after which the next egg hatches another.
+
+It costs little. It never asks a model anything about what is not on
+screen, nor while it is muted. It comments unasked at most once a minute
+(`harness-pet-cooldown`), and on your messages only by chance
+(`harness-pet-chance`). It then asks a cheap model (`harness-pet-model`)
+for one short line, with no thinking and no context from your project
+beyond the last few messages. Nothing runs while nothing happens: the
+creature by a compose box is drawn again only when it changes, says
+something else, or has more or less room.
+
+To keep it quiet, set `harness-pet-reactions` to nil. To turn it off
+altogether, press `O` in its buffer, click [Turn off] there, or set
+`harness-pet-enabled` to nil (also on the settings page). It then shows
+nowhere else, grows no more and asks no model anything. Its buffer only
+says it is asleep and offers to turn it on again, as it was. To remove
+the code itself, add `pet` and `ui-pet` to `harness-disabled-modules`.
 
 ## Configuration
 
@@ -1280,8 +1588,11 @@ shows where its effective value comes from.
 
 The page leads with the settings most people change, grouped by what
 they are for: **New sessions** (model, thinking, permission mode,
-non-interactive), **Spending** (the budget, one for all sessions
-together), **Compaction** (what stands in for a conversation that grew
+non-interactive, supervisor mode), **Supervisor mode** (whether
+sessions and tasks supervise, the models of the tiers, the thinking
+levels of supervisors and their workers, the step budget),
+**Spending** (the budget, one for all sessions together),
+**Compaction** (what stands in for a conversation that grew
 too long, and which model writes a brief summary), **Files and safety**
 (directory access,
 sandbox policy, standing permission rules), **Task board** (what task
@@ -1307,6 +1618,7 @@ project's, and a project's over the global value.
 - `harness-allowed-directories`
 - `harness-sandbox-policy`
 - `harness-non-interactive`
+- `harness-supervisor`
 
 The rest of the settings have a global value only.
 
@@ -1500,7 +1812,11 @@ board, unless a prefix argument (`C-u C-c h M`) says otherwise. Only
 idle, running and blocked sessions change — deactivated ones are history
 and are left alone, unless a current task goes on in one — no running
 turn is cancelled (it takes the new model at its next step), and each
-session records the change once, as a hint. When the default changes,
+session records the change once, as a hint. A session whose task is
+completed (in the board's `done` column) is over and is left alone too,
+even while it is still running, idle or blocked; so are the records of
+completed tasks, which `task/set-all` never touches. When the default
+changes,
 they then say what still wins over it: a project whose `.dir-locals.el`
 sets `harness-model` (or `harness-thinking`), at the project or the
 directory layer, and `harness-tasks-model` (or `harness-tasks-thinking`)
@@ -1787,10 +2103,93 @@ ACP, so it works the same with a local or a remote harness.
 
 | Area | Modules |
 |---|---|
-| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `cowboy` `handoff` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `acp` `acp-remote` |
+| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `cowboy` `handoff` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `supervisor` `seed` `acp` `acp-remote` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-ssh` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-merge` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` `ui-supervisor` |
+
+### Modules of your own
+
+Your own modules load beside the harness's, from the directories you
+list in `harness-extra-module-directories`. Each directory is absolute
+or relative to `user-emacs-directory`:
+
+```elisp
+(setq harness-extra-module-directories '("harness-modules"))
+```
+
+As in the harness's own tree, each file named `harness-NAME.el` there
+is a module called `NAME`, which `harness-enabled-modules` and
+`harness-disabled-modules` name like any other. Other files are not
+modules, but a module can `require` them: the directories are on
+`load-path`.
+
+The name also decides where a module runs:
+
+- `ui` and `ui-NAME` (in `harness-ui-NAME.el`) are UI modules and
+  load in your Emacs.
+- Any other module loads in the harness process, or in your Emacs too
+  when `harness-process` is off.
+
+A module whose name the harness already has is left out, with a
+warning in the log (`C-c h L`).
+
+Your modules are handled like the harness's own:
+
+- The harness compiles them, and `harness-reload` (`C-c h R`) and
+  `harness-update` reload them.
+- `harness-auto-reload-mode` watches their directories.
+- `M-x harness-describe-modules` lists the modules of your Emacs and of
+  the harness process, with the file of each of yours.
+- The options of a module in the harness process show on the settings
+  page, under Advanced, by module.
+
+The harness process reads the list of directories when it starts, so
+run `M-x harness-restart` after changing it.
+
+A minimal pair: a method in the harness process, and a command in
+your Emacs that calls it.
+
+```elisp
+;;; harness-modules/harness-hello.el  -*- lexical-binding: t; -*-
+(require 'harness-core)
+
+(defcustom harness-hello-greeting "Hello"
+  "How `hello/greet' greets."
+  :type 'string :group 'harness)
+
+(harness-defmethod hello/greet (name)
+  "Greet NAME."
+  (format "%s, %s!" harness-hello-greeting name))
+
+;; Clients, your Emacs among them, may call it as `_harness/hello/greet'.
+(defvar harness-acp-extra-method-prefixes)
+(with-eval-after-load 'harness-acp
+  (add-to-list 'harness-acp-extra-method-prefixes "hello/"))
+
+(harness-define-module 'hello :doc "Says hello.")
+(provide 'harness-hello)
+```
+
+```elisp
+;;; harness-modules/harness-ui-hello.el  -*- lexical-binding: t; -*-
+(require 'harness-ui)
+
+(defun harness-hello (name)
+  "Have the harness greet NAME."
+  (interactive "sName: ")
+  (harness-ui-call "_harness/hello/greet" (list :name name)
+                   (lambda (greeting) (message "%s" greeting))))
+
+(harness-define-module 'ui-hello :doc "Asks hello to greet." :requires '(ui))
+(provide 'harness-ui-hello)
+```
+
+The harness process receives every `harness-` variable you set, so
+`(setq harness-hello-greeting "Hi")` in your init file reaches the
+module.
+[docs/architecture.md](docs/architecture.md#modules-of-your-own) has
+the rest of the contract, such as how a module's events reach the UI.
 
 Further documentation:
 

@@ -26,6 +26,7 @@
 (defvar harness-pet--last-pet)
 (defvar harness-pet--save-timer)
 (defvar harness-pet-reactions)
+(defvar harness-pet-enabled)
 (defvar harness-pet-model)
 (defvar harness-pet-chance)
 (defvar harness-pet-cooldown)
@@ -576,6 +577,110 @@ cooldown), and no UI shows it until BODY says one does."
       (should (equal "demo:scripted" (plist-get (harness-call 'pet/get) :model))))
     (let ((harness-pet-model "other:model"))
       (should (equal "other:model" (plist-get (harness-call 'pet/get) :model))))))
+
+(ert-deftest harness-pet-grows-with-done-tasks ()
+  "Every task that gets done gives the pet experience; with no pet, nothing happens."
+  (harness-pet-test-with
+    (harness-emit 'task/done (list :id "t0" :session "s0") 'merged)
+    (should-not harness-pet--pet)
+    (harness-pet-test-hatch)
+    (let ((xp (plist-get (harness-call 'pet/get) :xp)))
+      (harness-emit 'task/done (list :id "t1" :session "s1") 'merged)
+      (harness-emit 'task/done (list :id "t2") 'completed)
+      (should (= (+ xp 6) (plist-get (harness-call 'pet/get) :xp))))))
+
+;;;; Where it is seen
+
+(ert-deftest harness-pet-speaks-only-where-seen ()
+  "A UI showing what the pet says beside some sessions lets it speak about those only;
+showing the pet itself lets it speak about anything."
+  (harness-pet-test-with
+    (harness-pet-test-hatch)
+    (let ((s1 (harness-pet-test-session))
+          (s2 (harness-pet-test-session))
+          (said (harness-pet-test-said)))
+      (should-error (harness-call 'pet/watch "test-ui" t "s1") :type 'harness-error)
+      (should-error (harness-call 'pet/watch "test-ui" t 7) :type 'harness-error)
+      (should-error (harness-call 'pet/watch "test-ui" t (list 1 2)) :type 'harness-error)
+      ;; As a JSON array may come.
+      (harness-call 'pet/watch "test-ui" t (vector s1))
+      (should (equal (list s1) (gethash "test-ui" harness-pet--watchers)))
+      (should (eq t (plist-get (harness-call 'pet/watch "test-ui" t (list s1)) :watching)))
+      (harness-pet-test-counting-requests requests
+        ;; Another session, whose chat is not on screen: nothing.
+        (harness-call 'session/append s2 (list :kind 'user :content "rewrite the tokenizer"))
+        ;; Nor petting, about no session: only the pet itself on screen hears of that.
+        (harness-call 'pet/pet)
+        (sleep-for 0.1)
+        (should (null requests))
+        ;; The session on screen: it speaks about that.
+        (harness-call 'session/append s1 (list :kind 'user :content "rewrite the tokenizer"))
+        (harness-test-wait (lambda () (funcall said)) 5 "a comment on the session on screen")
+        (should (equal s1 (plist-get (car (funcall said)) :session)))
+        (should (= 1 (length requests)))
+        (harness-test-wait (lambda () (eq :false (plist-get (harness-call 'pet/get) :thinking))) 5 "quiet")
+        ;; The pet itself on screen: anything.
+        (harness-call 'pet/watch "test-ui" t)
+        (setq harness-pet--last-unasked 0 harness-pet--last-spoke 0)
+        (harness-call 'session/append s2 (list :kind 'user :content "and the parser"))
+        (harness-test-wait (lambda () (= 2 (length (funcall said)))) 5 "a comment on another session")
+        (should (equal s2 (plist-get (cadr (funcall said)) :session)))
+        ;; Gone from the screen.
+        (harness-call 'pet/watch "test-ui" :false)
+        (should (eq :false (plist-get (harness-call 'pet/get) :watching)))))))
+
+;;;; Turned off
+
+(ert-deftest harness-pet-turned-off-does-nothing ()
+  "Turned off, the pet reacts to nothing, grows no more, asks no model and
+refuses all but `pet/get'; turned on again, it is as it was."
+  (harness-pet-test-with
+    (should (eq t (plist-get (harness-call 'pet/get) :enabled)))
+    (let ((harness-pet-enabled nil))
+      (should (eq :false (plist-get (harness-call 'pet/get) :enabled)))
+      (should-error (harness-call 'pet/hatch) :type 'harness-error)
+      (should-not harness-pet--pet))
+    (harness-pet-test-hatch)
+    (harness-pet-test-watch)
+    (let* ((sid (harness-pet-test-session))
+           (name (plist-get harness-pet--pet :name))
+           (said (harness-pet-test-said))
+           (before (harness-call 'pet/get)))
+      (harness-pet-test-counting-requests requests
+        (let ((harness-pet-enabled nil))
+          (let ((view (harness-call 'pet/get)))
+            (should (eq :false (plist-get view :enabled)))
+            ;; Its record stays, for when it is turned on again.
+            (should (equal name (plist-get view :name))))
+          (dolist (call '((pet/pet) (pet/rename "Other") (pet/set-muted t) (pet/release) (pet/hatch)))
+            (should-error (apply #'harness-call call) :type 'harness-error))
+          (harness-call 'session/append sid (list :kind 'user :content (format "hey %s, look" name)))
+          (harness-call 'session/append sid (list :kind 'tool-call :tool "bash" :call-id "c1" :title "make test"))
+          (harness-call 'session/append sid (list :kind 'tool-result :call-id "c1" :output "40 passed, 2 failed"))
+          (harness-emit 'agent/turn-ended sid 'end-turn)
+          (harness-emit 'task/done (list :id "t1" :session sid) 'merged)
+          (sleep-for 0.1))
+        (should (null requests))
+        (should (null (funcall said)))
+        (let ((after (harness-call 'pet/get)))
+          (should (eq t (plist-get after :enabled)))
+          (should (equal name (plist-get after :name)))
+          (should (equal (plist-get before :xp) (plist-get after :xp)))
+          (should (equal (plist-get before :pets) (plist-get after :pets))))))))
+
+(ert-deftest harness-pet-turned-off-mid-saying-drops-it ()
+  "What the pet was asked to say before it was turned off is dropped when it comes."
+  (harness-pet-test-with
+    (harness-pet-test-hatch)
+    (harness-pet-test-watch)
+    (let ((said (harness-pet-test-said))
+          (harness-provider-demo--delay 0.2))
+      (harness-call 'pet/pet)
+      (harness-test-wait (lambda () (eq t (plist-get (harness-call 'pet/get) :thinking))) 5 "the question")
+      (let ((harness-pet-enabled nil))
+        (harness-test-wait (lambda () (eq :false (plist-get (harness-call 'pet/get) :thinking))) 10 "the answer"))
+      (should (null (funcall said)))
+      (should (null (plist-get harness-pet--pet :said))))))
 
 ;;;; Over ACP
 
