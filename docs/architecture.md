@@ -5603,8 +5603,20 @@ scrolling the chat froze Emacs for seconds.  A checkout (`session/head-moved`) m
 another path, so the buffer loads it again rather than leave the
 branch behind on screen.  Markdown is rendered by the built-in renderer in
 `harness-ui-markdown` (headings, emphasis, code spans, fenced code with
-the language's major mode, lists, quotes, links).  A click or `RET` on
-a link opens it (`harness-ui-markdown-open-link`): a URL with
+the language's major mode, lists, quotes, links, tables).  Tables are
+fitted to the window: a table wider than the chat wraps each cell
+inside its column, so the columns stay aligned, and is drawn again when
+the window's width changes.  The text rendered as Markdown is the
+agent's messages and plans; the user's messages, their line breaks kept
+as typed (`harness-ui-markdown-hard-breaks`); an ask_user question, in
+its panel and in its block; and its answer, which the block shows as a
+message of the user's because it stands in for the next prompt (a
+dismissed question, or a failed or refused call, shows none).  The
+answer is the block's last lines, after its details and outside their
+fold, so a folded block still shows it; there each of its rows ends on
+a newline of its own, and so is drawn to the window's edge in the
+user's colour.  A click
+or `RET` on a link opens it (`harness-ui-markdown-open-link`): a URL with
 `browse-url`, anything else as a file in `default-directory` -- the
 session's directory, in a chat -- in another window, at the line a
 `#L12` or `:12` suffix names.  The link's keymap binds `mouse-2` as well
@@ -5615,6 +5627,10 @@ rear-nonsticky, so an insertion inside it gets through).  Its double and
 triple clicks are bound to `ignore`: unbound, they ran as single clicks
 and opened the link again after the first click had.  Tool and thinking
 nodes collapse; runs of coalescable tools fold into a summary block.
+A run folds from its first call: a lone call is a run of one under its
+summary, which names the call as its header does ("1 tool call: Read
+file x.el"), and each later call of the run, with the thinking between,
+joins that block.
 Thinking between two calls of a run does not break it but folds in
 with them, since a model that thinks before every call would never
 have a run otherwise; thinking before a run's first call or after its
@@ -5767,7 +5783,8 @@ label in `harness-tool-title-face` and what the call is about after it
 in `harness-tool-subject-face` (the faces stand in for the colon of the
 title), a summary block counts the calls by label ("5 tool calls: Read
 file ×3, Search files, Find files", then " · thinking ×2" for the
-thinking folded in with them), and so do the permission panel,
+thinking folded in with them; a run of one names its call, label and
+subject, in plain text), and so do the permission panel,
 the activity line and the spinner's tooltip.  A title recorded before tools had
 labels starts with the tool's name ("read_file x.el"), which the label
 replaces, so old transcripts read the same.  Under a folded call's
@@ -5784,7 +5801,17 @@ the fold, whose button opens that session.  A call the harness recorded
 line, as that sender's message does, rather than joining the agent's
 turn or a run of calls, and shows as running until its result comes,
 whatever its session is doing.
-Auto-scroll follows unless the user scrolled up.  While the session
+Auto-scroll follows unless the user scrolled up.  While a window on the
+chat is away from the end, scrolled up by any command or moved there
+with the jump keys, the header line shows "↓ newer messages", which
+jumps back down.  The header reads a flag, `harness-chat--notice`, that
+the post-command hook and `window-scroll-functions` keep current; it
+never measures the window itself.  `pos-visible-in-window-p` measures
+a window's header line by formatting it, so a header that called it
+would be evaluated again inside itself, without end, until
+`max-lisp-eval-depth`: the header drawn empty, the mode line losing its
+status, and every redisplay taking seconds.
+While the session
 runs, an activity line under the last block says what the turn does
 and for how long: waiting for the model, thinking, writing, preparing a
 tool call (with the size of its input so far), running one (with the
@@ -5811,8 +5838,9 @@ cost and [menu]; clicking a setting changes it, and "non-interactive"
 makes the session interactive again.  A narrow window drops the cost
 first, then the thinking level, the context and the model.  The mode
 line has the status: its icon and word, the spinner while a turn runs
-(its tooltip says what the turn does), and the turn's duration while it
-runs or blocks.  The todo list is left to its panel above the compose
+(its tooltip says what the turn does), and the turn's duration while
+the turn runs, not while the session is blocked waiting on the user.
+The todo list is left to its panel above the compose
 box, what the turn does to the activity line, and the output tokens and
 rate to the session list and a running task's card.  The output
 rate ("48 tok/s", `harness-ui-format-rate`) is the session's rate as the
@@ -6718,7 +6746,9 @@ a task's session is of kind task and goes by its task's title, as on the
 board, until the model names it after its first turn — the list loads
 the tasks with `_harness/task/list` and follows `task/changed' and
 `task/deleted'),
-conversation tree (`harness-ui-tree`), usage dashboard (`harness-ui-usage`,
+conversation tree (`harness-ui-tree`: each row's properties, its
+`mouse-face` among them, stop before its newline, so hovering highlights
+that row alone), usage dashboard (`harness-ui-usage`,
 svg charts via svg.el; by project, the rows of a project's git
 worktrees, its tasks' and sub-agents', fold by their `:main` into one
 line with their sum and count, folded until TAB, RET or a click unfolds

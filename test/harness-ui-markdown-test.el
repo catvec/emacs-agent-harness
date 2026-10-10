@@ -270,5 +270,63 @@ A file name is taken in `default-directory'; a file: URL is a file too."
           (should-error (harness-ui-markdown-follow-link) :type 'user-error))
         (should (= 8 (length visited)))))))
 
+(ert-deftest harness-md-table-fits-a-bound-width ()
+  "A table wider than its bound wraps inside its columns, still aligned."
+  (let* ((md "| name | description |\n|---|---|\n| alpha | a very long description that would not fit in a chat window at all, over and over and over again |\n")
+         (harness-ui-markdown-table-width 40)
+         (s (harness-ui-markdown-render md))
+         (plain (substring-no-properties s))
+         (lines (split-string plain "\n" t)))
+    (should (eq 'table (get-text-property 0 'harness-md-block s)))
+    (dolist (line lines)
+      (should (<= (string-width line) 40))
+      (should (string-match-p "│" line)))
+    (should (memq 'harness-md-table-header (harness-md-test-face-at s 0)))
+    ;; No word of the header or the long cell is lost to the wrapping.
+    (dolist (word '("name" "description" "alpha" "a" "very" "long" "description"
+                    "that" "would" "not" "fit" "in" "a" "chat" "window" "at" "all"
+                    "over" "and" "over" "and" "over" "again"))
+      (should (string-match-p word plain)))))
+
+(ert-deftest harness-md-table-breaks-a-long-word ()
+  "One long word breaks across the column instead of overflowing it."
+  (let* ((word (make-string 200 ?w))
+         (md (format "| a |\n|---|\n| %s |\n" word))
+         (harness-ui-markdown-table-width 30)
+         (s (harness-ui-markdown-render md))
+         (plain (substring-no-properties s)))
+    (dolist (line (split-string plain "\n" t))
+      (should (<= (string-width line) 30)))
+    (should (eq 'table (get-text-property 0 'harness-md-block s)))
+    ;; The whole word is still there, just broken across the lines.
+    (should (= 200 (cl-count ?w plain)))))
+
+(ert-deftest harness-md-table-unchanged-when-it-fits ()
+  "A table that already fits its bound renders exactly as without one."
+  (let ((md "| a | b |\n|---|---|\n| 1 | 2 |\n")
+        (natural (harness-ui-markdown-render "| a | b |\n|---|---|\n| 1 | 2 |\n")))
+    (let ((harness-ui-markdown-table-width 40))
+      (should (equal natural (harness-ui-markdown-render md))))))
+
+(ert-deftest harness-md-hard-breaks-keep-a-paragraph-s-lines ()
+  "`harness-ui-markdown-hard-breaks' keeps the line breaks inside a paragraph.
+Markdown joins a paragraph's lines with spaces; bound, as for what a
+person typed, each line break stays one.  Paragraphs apart, lists and
+code blocks render the same either way."
+  (should (equal "one two" (substring-no-properties (harness-ui-markdown-render "one\ntwo"))))
+  (let ((harness-ui-markdown-hard-breaks t))
+    (should (equal "one\ntwo" (substring-no-properties (harness-ui-markdown-render "one\ntwo"))))
+    ;; Inline markup still renders on each line.
+    (let ((s (harness-ui-markdown-render "a **bold** line\nand `code`")))
+      (should (equal "a bold line\nand code" (substring-no-properties s)))
+      (should (memq 'bold (harness-md-test-face-at s 2)))
+      (should (memq 'harness-md-code (harness-md-test-face-at s 16)))))
+  (dolist (md '("one\n\ntwo"
+                "- item one\n  wrapped\n- item two"
+                "```\nline one\nline two\n```"))
+    (let ((soft (harness-ui-markdown-render md))
+          (hard (let ((harness-ui-markdown-hard-breaks t)) (harness-ui-markdown-render md))))
+      (should (equal-including-properties soft hard)))))
+
 (provide 'harness-ui-markdown-test)
 ;;; harness-ui-markdown-test.el ends here
