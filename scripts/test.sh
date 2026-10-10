@@ -91,8 +91,12 @@ if [ "$changed" = 1 ]; then
       lisp/*/harness-*.el|lisp/harness-*.el)
         base=$(basename "$p" .el)
         short=${base#harness-}
-        [ -f "test/$base-test.el" ] && add_suite "test/$base-test.el"
-        while IFS= read -r t; do add_suite "$t"; done < <(grep -lE "harness-$short|'$short" test/*-test.el 2>/dev/null)
+        found=0
+        if [ -f "test/$base-test.el" ]; then add_suite "test/$base-test.el"; found=1; fi
+        while IFS= read -r t; do add_suite "$t"; found=1; done < <(grep -lE "harness-$short|'$short" test/*-test.el 2>/dev/null)
+        # A module no suite is named after and no suite names has nothing
+        # to run for it: say so, rather than skipping it silently.
+        [ "$found" = 1 ] || uncovered+=("$p")
         ;;
       *) uncovered+=("$p") ;;
     esac
@@ -104,7 +108,8 @@ if [ "$changed" = 1 ]; then
     files=(${suites[@]+"${suites[@]}"})
   fi
   if [ ${#uncovered[@]} -gt 0 ]; then
-    echo "test.sh --changed: no suite covers ${uncovered[*]};"
+    echo "test.sh --changed: no suite covers:"
+    printf '  %s\n' "${uncovered[@]}"
     echo "  only the full scripts/test.sh is sure to check it."
   fi
   if [ ${#files[@]} -eq 0 ]; then
