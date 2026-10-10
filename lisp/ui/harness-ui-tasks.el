@@ -56,6 +56,13 @@
 ;; switch is the harness option `harness-tasks-require-verification', so
 ;; it holds for every board and across restarts.
 ;;
+;; How many of a project's tasks work at once ends the settings line
+;; under New task: "3 at a time", or "all at once" without a limit.  A
+;; click on it asks for another limit (`harness-ui-tasks-set-max-running'):
+;; the harness option `harness-tasks-max-running', saved like the Review
+;; switch, so every project has that many slots.  A higher limit starts
+;; waiting tasks at once; a lower one stops none at work.
+;;
 ;; The header line counts the tasks of each column and, as a chat's
 ;; header does for its session, says what they cost and who pays: their
 ;; summed cost, or the plan that pays for them with its quota windows,
@@ -63,7 +70,7 @@
 ;; opens the usage dashboard.
 ;;
 ;; Everything comes over ACP (`_harness/task/…', `_harness/config/set'
-;; for the Review switch, `_harness/usage/project-budgets' for the
+;; for the Review switch and the limit, `_harness/usage/project-budgets' for the
 ;; header's budgets, plus the session cache), so the board works
 ;; against a remote harness too.  The list region is
 ;; redrawn as a whole when anything changes -- a board holds tens of
@@ -1659,56 +1666,209 @@ and are left alone."
              n (if (= 1 n) "" "S"))
      'face 'harness-task-attention-face)))
 
-(defun harness-ui-tasks--new-settings-line ()
-  "The settings line: each setting as a button.
+(defconst harness-ui-tasks--min-settings-room 24
+  "Columns the settings keep before the limit's button is cut off too.
+On a narrow board the settings line shrinks its settings first, so the
+button that says how many tasks work at once stays whole.")
+
+(defun harness-ui-tasks--new-settings-line (&optional room)
+  "The settings line: each setting as a button, fitted to ROOM columns.
 In bulk mode the values are the current tasks', their priority too, and
 a button changes its one setting of them all; otherwise they are the
-new task's."
+new task's, and the line ends with how many tasks work at once
+\(`harness-ui-tasks--max-running-button').  When ROOM is too narrow
+for it all, the settings shorten first, down to
+`harness-ui-tasks--min-settings-room' columns, so that button stays
+whole; the line shortens as a whole after that.  Without ROOM it is
+not fitted."
   (let* ((bulk harness-ui-tasks--bulk)
          (values (if bulk (harness-ui-tasks--bulk-values) harness-ui-tasks--new))
          (s harness-ui-tasks--settings)
          (scope (if bulk "current tasks" "new tasks"))
-         (main-tree (and (not bulk) (harness-json-true-p (plist-get harness-ui-tasks--new :main-tree)))))
+         (main-tree (and (not bulk) (harness-json-true-p (plist-get harness-ui-tasks--new :main-tree))))
+         ;; How many tasks work at once is the harness's, for every
+         ;; project, not the next task's: apart from its settings.
+         (limit (not (or bulk harness-ui-tasks--refine))))
     (if (null s)
         ""
-      (concat
-       " "
-       (mapconcat
-        #'identity
-        (delq nil
-              (list (harness-ui-tasks--setting-button
-                     (harness-ui-model-label (plist-get values :model))
-                     #'harness-set-model (format "Model of %s" scope))
-                    (harness-ui-tasks--setting-button
-                     (if-let* ((m (plist-get values :permission-mode))) (harness-ui-permission-mode-label m) "default mode")
-                     #'harness-set-permission-mode (format "Permission mode of %s" scope))
-                    (harness-ui-tasks--setting-button
-                     (harness-ui-thinking-label (plist-get values :thinking))
-                     #'harness-set-thinking (format "Thinking level of %s" scope))
-                    (harness-ui-tasks--setting-button
-                     (harness-ui-non-interactive-label (plist-get values :non-interactive))
-                     #'harness-toggle-non-interactive (format "Non-interactive mode of %s" scope))
-                    ;; The next task's priority is beside Submit; the
-                    ;; current tasks' is here, changed only when clicked.
-                    (and (harness-ui-tasks--bulk-priority-p)
-                         (harness-ui-tasks--bulk-priority-button (plist-get values :priority)))
-                    ;; A task that starts cannot change where it works, so
-                    ;; this one is only about the next task, never bulk.
-                    (and (harness-json-true-p (plist-get s :worktrees))
-                         (harness-ui-tasks--setting-button
-                          (if main-tree "main tree" "own worktree")
-                          #'harness-ui-tasks-toggle-main-tree
-                          "Where the next task works: its own worktree and branch, or the project's main tree, where nothing merges"))))
-        (propertize " · " 'face 'harness-dim-face))
-       (if bulk
-           (propertize "   new tasks keep their own settings" 'face 'harness-dim-face)
-         (let ((notes (if harness-ui-tasks--refine
-                          (list "an agent writes it up; you start it")
-                        (delq nil (list (and (plist-get s :max-running)
-                                             (format "%s at a time" (plist-get s :max-running))))))))
-           (if notes
-               (propertize (concat "   " (string-join notes " · ")) 'face 'harness-dim-face)
-             "")))))))
+      (harness-ui-tasks--fit-settings
+       (concat
+        " "
+        (mapconcat
+         #'identity
+         (delq nil
+               (list (harness-ui-tasks--setting-button
+                      (harness-ui-model-label (plist-get values :model))
+                      #'harness-set-model (format "Model of %s" scope))
+                     (harness-ui-tasks--setting-button
+                      (if-let* ((m (plist-get values :permission-mode))) (harness-ui-permission-mode-label m) "default mode")
+                      #'harness-set-permission-mode (format "Permission mode of %s" scope))
+                     (harness-ui-tasks--setting-button
+                      (harness-ui-thinking-label (plist-get values :thinking))
+                      #'harness-set-thinking (format "Thinking level of %s" scope))
+                     (harness-ui-tasks--setting-button
+                      (harness-ui-non-interactive-label (plist-get values :non-interactive))
+                      #'harness-toggle-non-interactive (format "Non-interactive mode of %s" scope))
+                     ;; The next task's priority is beside Submit; the
+                     ;; current tasks' is here, changed only when clicked.
+                     (and (harness-ui-tasks--bulk-priority-p)
+                          (harness-ui-tasks--bulk-priority-button (plist-get values :priority)))
+                     ;; A task that starts cannot change where it works, so
+                     ;; this one is only about the next task, never bulk.
+                     (and (harness-json-true-p (plist-get s :worktrees))
+                          (harness-ui-tasks--setting-button
+                           (if main-tree "main tree" "own worktree")
+                           #'harness-ui-tasks-toggle-main-tree
+                           "Where the next task works: its own worktree and branch, or the project's main tree, where nothing merges"))))
+         (propertize " · " 'face 'harness-dim-face)))
+       (cond (bulk (propertize "   new tasks keep their own settings" 'face 'harness-dim-face))
+             (harness-ui-tasks--refine
+              (propertize "   an agent writes it up; you start it" 'face 'harness-dim-face))
+             (t (concat "   " (harness-ui-tasks--max-running-button))))
+       limit room))))
+
+(defun harness-ui-tasks--fit-settings (settings note keep room)
+  "SETTINGS then NOTE, fitted to ROOM columns; not fitted without ROOM.
+With KEEP, NOTE stays whole while SETTINGS can shorten to
+`harness-ui-tasks--min-settings-room' columns; otherwise, or narrower
+still, the whole line shortens from its end."
+  (let ((line (concat settings note)))
+    (cond ((or (null room) (<= (string-width line) room)) line)
+          ((and keep (>= (- room (string-width note)) harness-ui-tasks--min-settings-room))
+           (concat (harness-ui-tasks--fit settings (- room (string-width note))) note))
+          (t (harness-ui-tasks--fit line room)))))
+
+;;;; How many tasks work at once
+
+;; The settings line ends with how many of a project's tasks may work at
+;; once: "3 at a time", or "all at once" without a limit.  It is the
+;; harness option `harness-tasks-max-running', the same for every
+;; project, and a click on it sets it as the Review switch sets its
+;; own: saved through `config/set', so it holds for every board and
+;; across restarts.  The harness starts the tasks a higher limit lets
+;; through at once; a lower one stops none at work.
+
+(defface harness-task-held-face '((t :inherit warning))
+  "The limit button while no task starts by itself: 0 at a time."
+  :group 'harness-ui-tasks)
+
+(defun harness-ui-tasks--max-running ()
+  "How many of a project's tasks may work at once: a number, nil for no limit.
+That is the harness's `task/settings' as last fetched."
+  (let ((n (plist-get harness-ui-tasks--settings :max-running)))
+    (and (integerp n) n)))
+
+(defun harness-ui-tasks--held-p (n)
+  "Non-nil when a limit of N tasks lets none start by itself: 0 (or less)."
+  (and n (<= n 0)))
+
+(defun harness-ui-tasks--max-running-label (n)
+  "What the limit button says for a limit of N tasks: \"3 at a time\".
+Without a limit, N nil, it is \"all at once\"."
+  (if n (format "%d at a time" n) "all at once"))
+
+(defun harness-ui-tasks--max-running-help (n)
+  "The tooltip of the limit button for a limit of N tasks, nil for none."
+  (concat
+   (cond ((null n) "No limit: every task starts as soon as it is submitted")
+         ((harness-ui-tasks--held-p n)
+          (format "%d at a time: no task starts by itself; each waits in Pending until you start it" n))
+         (t (format "At most %d of this project's tasks work at once; the others wait in Pending and start, by priority, as slots free up"
+                    n)))
+   ".  Click to change it, for every project."))
+
+(defun harness-ui-tasks--max-running-button ()
+  "The button saying how many of a project's tasks work at once.
+It ends the settings line of a new task, though it is no setting of
+the task: a click asks for another limit, for every project
+\(`harness-ui-tasks-set-max-running').  Like the rest of that line it
+shows once the harness has said what the limit is, so it never shows
+a wrong one.  It stands out at 0, when no task starts by itself."
+  (let ((n (harness-ui-tasks--max-running)))
+    (propertize
+     (harness-ui-tasks--button (harness-ui-tasks--max-running-label n)
+                               (lambda () (call-interactively #'harness-ui-tasks-set-max-running))
+                               (harness-ui-tasks--max-running-help n)
+                               'harness-ui-tasks-set-max-running)
+     'face (if (harness-ui-tasks--held-p n) 'harness-task-held-face 'harness-dim-face))))
+
+(defconst harness-ui-tasks--max-running-choices
+  '("1" "2" "3" "4" "5" "6" "8" "10" "no limit" "0")
+  "The limits the minibuffer offers, in this order; any other number does too.")
+
+(defun harness-ui-tasks--parse-max-running (answer)
+  "The limit ANSWER names: a number of tasks, or nil for no limit.
+A number may come with the button's words (\"4 at a time\"), and no
+limit as \"no limit\", \"none\", \"unlimited\", \"all\" or \"all at
+once\".  Signal a `user-error' for anything else."
+  (let ((answer (downcase (string-trim answer))))
+    (cond ((member answer '("no limit" "none" "nil" "unlimited" "all" "all at once")) nil)
+          ((string-match "\\`\\([0-9]+\\)\\(?: *at a time\\)?\\'" answer)
+           (string-to-number (match-string 1 answer)))
+          (t (user-error "Not a number of tasks: %s (a number, or no limit)" answer)))))
+
+(defun harness-ui-tasks--read-max-running (current)
+  "Read how many of a project's tasks may work at once, CURRENT now.
+Return a number, or nil for no limit; an empty answer keeps CURRENT."
+  (let* ((default (if current (number-to-string current) "no limit"))
+         (annotations '(("0" . "  no task starts by itself: you start each one")
+                        ("no limit" . "  every task starts as soon as it is submitted")))
+         (answer (completing-read
+                  (format-prompt "Tasks of a project working at once" default)
+                  (lambda (string pred action)
+                    (if (eq action 'metadata)
+                        `(metadata (display-sort-function . identity)
+                                   (cycle-sort-function . identity)
+                                   (annotation-function
+                                    . ,(lambda (choice) (cdr (assoc choice annotations)))))
+                      (complete-with-action action harness-ui-tasks--max-running-choices string pred)))
+                  nil nil nil nil default)))
+    (if (string-empty-p (string-trim answer))
+        current
+      (harness-ui-tasks--parse-max-running answer))))
+
+(defun harness-ui-tasks--show-max-running (n)
+  "Show the limit of N tasks, nil for none, as the harness has it now.
+Its `config/changed' brings every board the settings again shortly;
+this one does not wait for them."
+  (when harness-ui-tasks--settings
+    (setq harness-ui-tasks--settings
+          (plist-put (copy-sequence harness-ui-tasks--settings) :max-running n))
+    (harness-ui-tasks--refit-tail)))
+
+(defun harness-ui-tasks-set-max-running (n)
+  "Let N of each project's tasks work at once; N nil means no limit.
+The others wait in Pending and start, by priority then oldest first, as
+slots free up.  Raising the limit starts the tasks it lets through at
+once; lowering it stops no task at work, and only fewer start after.
+With 0 no task starts by itself: each waits until you start it
+\(\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-start]).
+
+The limit is the harness option `harness-tasks-max-running', saved as
+the settings page saves it: for every project, each with that many
+slots of its own, and across restarts.  Interactively it is read in the
+minibuffer, the limit now being the default; the button that says
+\"N at a time\" (or \"all at once\") above the compose box runs it."
+  (interactive (list (harness-ui-tasks--read-max-running (harness-ui-tasks--max-running))))
+  (unless (or (null n) (natnump n))
+    (user-error "Not a number of tasks: %s" n))
+  (let ((buffer (current-buffer))
+        (says (lambda (n)
+                (cond ((null n) "No limit: every task starts as soon as it is submitted, in every project")
+                      ((zerop n) "0 at a time: no task starts by itself now; start each one from Pending (s)")
+                      (t (format "%d at a time: each project works on up to %d task%s at once, the others wait in Pending"
+                                 n n (if (= n 1) "" "s")))))))
+    (if (and harness-ui-tasks--settings (eql n (harness-ui-tasks--max-running)))
+        (message "%s" (funcall says n))
+      (harness-ui-tasks--request-then
+       "_harness/config/set"
+       (list :key "harness-tasks-max-running" :value (prin1-to-string n) :printed t
+             :scope "global" :cwd harness-ui-tasks--dir)
+       "Setting how many tasks work at once"
+       (lambda (_)
+         (when (harness-ui-tasks--board-p buffer)
+           (with-current-buffer buffer (harness-ui-tasks--show-max-running n)))
+         (message "%s" (funcall says n)))))))
 
 (defun harness-ui-tasks--set-new (key value)
   "Set the new-task setting KEY to VALUE and show it."
@@ -1802,9 +1962,9 @@ before a key is pressed."
       (when harness-ui-tasks--bulk
         (harness-ui-tasks--insert-tail-line
          'bulk (harness-ui-tasks--fit (harness-ui-tasks--bulk-banner) room)))
-      (let ((line (harness-ui-tasks--new-settings-line)))
+      (let ((line (harness-ui-tasks--new-settings-line room)))
         (unless (string-empty-p line)
-          (harness-ui-tasks--insert-tail-line 'settings (harness-ui-tasks--fit line room)))))
+          (harness-ui-tasks--insert-tail-line 'settings line))))
     (let ((start (point)))
       ;; The bar down every attachment's line.
       (harness-compose-insert-attachments (and messaging bar))

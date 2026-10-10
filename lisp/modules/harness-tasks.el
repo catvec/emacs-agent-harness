@@ -185,9 +185,15 @@ and the merge queue's conflict resolvers -- and neither does the merge
 queue's work: a task whose branch is queued, merging or having its
 conflicts resolved holds no slot, even while its own session commits
 or resolves them.  `task/start' starts a task whatever the limit.
-nil (the default) means no limit.  Waiting tasks start by priority,
-then oldest first (see `harness-tasks-priorities')."
-  :type '(choice (const :tag "No limit" nil) integer) :group 'harness)
+nil (the default) means no limit, and 0 that no task starts by itself.
+Waiting tasks start by priority, then oldest first (see
+`harness-tasks-priorities').
+
+The task board's \"N at a time\" button sets it (through `config/set',
+saved for every project).  A limit raised that way, or on the settings
+page, starts the tasks it lets through at once; one lowered stops no
+task at work, and fewer start after (`harness-tasks--on-config-changed')."
+  :type '(choice (const :tag "No limit" nil) (natnum :tag "Tasks at once")) :group 'harness)
 
 (defconst harness-tasks-priorities '(low medium high)
   "The priorities a task may have, lowest first; `medium' is the default.
@@ -1301,6 +1307,11 @@ listed under it (`session/btw'), so only the board's have no parent."
 ;; queue, which the limit does not hold up (`task/verify' queues a
 ;; branch at once): a task in it (merging) holds no slot, even while
 ;; its own session commits or resolves the conflicts.
+;;
+;; The limit changes while tasks wait: the board's "N at a time" button
+;; sets it through `config/set', and its `config/changed' runs the
+;; scheduler, so a higher limit starts waiting tasks at once.  A lower
+;; one stops no task at work; fewer start after.
 
 (defun harness-tasks--working-p (task)
   "Non-nil when TASK is at work: starting, running or blocked mid-turn.
@@ -1374,6 +1385,16 @@ tasks wait for `task/start' instead."
           (cl-decf left)
           (harness-tasks--start task))
         (puthash project left free)))))
+
+(defun harness-tasks--on-config-changed (key &rest _)
+  "Start the tasks a new limit lets through, when KEY is the limit.
+On `config/changed': the board's \"N at a time\" button and the
+settings page change `harness-tasks-max-running' through `config/set'
+\(or `config/unset').  A higher limit frees slots, which waiting tasks
+take at once rather than at the next task's end; a lower one stops no
+task at work, and the scheduler then finds no slot free."
+  (when (eq (if (stringp key) (intern-soft key) key) 'harness-tasks-max-running)
+    (harness-run-soon #'harness-tasks--schedule)))
 
 (defun harness-tasks--blocks (task)
   "Return the content blocks that open TASK's session."
@@ -2375,7 +2396,9 @@ first question."
 
 (harness-defmethod task/settings (&optional cwd)
   "Return the settings task sessions start with (for CWD's project).
-Model, thinking and non-interactive are the values a new task would
+`:max-running' is how many of a project's tasks work at once, nil for
+no limit (`harness-tasks-max-running'; a board shows it as \"N at a
+time\").  Model, thinking and non-interactive are the values a new task would
 really get: the task defaults, else what the project configures.  So
 non-interactive is on only when `harness-tasks-non-interactive' is, or
 `harness-non-interactive' for the project.  `:require-verification'
@@ -2754,6 +2777,7 @@ up again, merges in flight are queued again and waiting tasks start."
   (harness-on 'merge/started #'harness-tasks--on-merge-started)
   (harness-on 'merge/conflict #'harness-tasks--on-merge-conflict)
   (harness-on 'merge/finished #'harness-tasks--on-merge-finished)
+  (harness-on 'config/changed #'harness-tasks--on-config-changed)
   (harness-add-filter 'worktree/lock-existing-p #'harness-tasks--lock-existing-p)
   (harness-add-filter 'agent/system-prompt #'harness-tasks--system-prompt 60)
   (harness-add-filter 'agent/system-prompt #'harness-tasks--btw-system-prompt 60)
@@ -2785,8 +2809,10 @@ up again, merges in flight are queued again and waiting tasks start."
 ;; feedback, which sends it back, from another session's word: install
 ;; them now, with the filter that keeps a task's session in its task's
 ;; directory.  The session of a task whose title is on its way waits for
-;; it, and the tasks of the boards without a title get one.
+;; it, and the tasks of the boards without a title get one.  A limit
+;; raised from a board starts the tasks it lets through, here too.
 (when (harness-module-ready-p 'tasks)
+  (harness-on 'config/changed #'harness-tasks--on-config-changed)
   (harness-add-filter 'permission/decide #'harness-tasks--write-up-gate 25)
   (harness-add-filter 'agent/message #'harness-tasks--on-message)
   (harness-add-filter 'session/before-move #'harness-tasks--before-move)
