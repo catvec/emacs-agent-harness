@@ -483,43 +483,6 @@ INPUT is the tool call's input plist."
 (defconst harness-tools-sessions--history-around 2
   "Nodes before and after the node session_history shows whole.")
 
-(defun harness-tools-sessions--boundary (path)
-  "Return the position in PATH of the node this conversation opens with, or nil.
-That is its last compaction node, or its last handoff note when that
-comes later: what the model is sent starts there, and the nodes before
-it reach the model only as that node tells of them -- a summary, a
-transcript file, or nothing."
-  (cl-position-if (lambda (n) (or (eq (plist-get n :kind) 'compaction) (harness-node-handoff n)))
-                  path :from-end t))
-
-(defun harness-tools-sessions--when (node)
-  "Return when NODE was written, as a short date and time, or nil."
-  (let ((ts (plist-get node :ts)))
-    (and (numberp ts) (format-time-string "%b %-d %H:%M" ts))))
-
-(defun harness-tools-sessions--history-scope (path boundary all)
-  "Describe what session_history looks through, for its first line.
-PATH is the conversation, BOUNDARY the position of the node it opens
-with or nil, ALL non-nil when the whole of it is looked through."
-  (let* ((node (and boundary (nth boundary path)))
-         (what (cond ((null node) nil)
-                     ((harness-node-handoff node)
-                      (format "the handoff from %s"
-                              (or (plist-get (harness-node-handoff node) :from) "another model")))
-                     (t (format "the %scompaction"
-                                (let ((kind (harness-node-compaction-kind node)))
-                                  (if (member kind '("summary" "brief" "transcript" "fresh" "truncate"))
-                                      (concat kind " ")
-                                    ""))))))
-         (stamp (and node (format "[%s %s, %s]" (plist-get node :kind) (plist-get node :id)
-                                  (or (harness-tools-sessions--when node) "undated")))))
-    (cond ((null node)
-           (format "This conversation was never compacted: all %d nodes are in your context already."
-                   (length path)))
-          (all (format "The whole conversation, %d nodes, %s %s included." (length path) what stamp))
-          (t (format "The conversation before %s %s: %d nodes your context holds only as that node tells of them."
-                     what stamp boundary)))))
-
 (defun harness-tools-sessions--locate (text query regexp)
   "Return (START . END) of the first match of QUERY in TEXT, or nil.
 QUERY is literal text, or a regexp when REGEXP is non-nil; case is
@@ -572,6 +535,43 @@ match is read, so a node of megabytes costs no more than a short one."
         (concat (if (or (> from 0) (> b 0)) "…" "")
                 (substring window b a)
                 (if (or (< to len) (< a (length window))) "…" ""))))))
+
+(defun harness-tools-sessions--boundary (path)
+  "Return the position in PATH of the node this conversation opens with, or nil.
+That is its last compaction node, or its last handoff note when that
+comes later: what the model is sent starts there, and the nodes before
+it reach the model only as that node tells of them -- a summary, a
+transcript file, or nothing."
+  (cl-position-if (lambda (n) (or (eq (plist-get n :kind) 'compaction) (harness-node-handoff n)))
+                  path :from-end t))
+
+(defun harness-tools-sessions--when (node)
+  "Return when NODE was written, as a short date and time, or nil."
+  (let ((ts (plist-get node :ts)))
+    (and (numberp ts) (format-time-string "%b %-d %H:%M" ts))))
+
+(defun harness-tools-sessions--history-scope (path boundary all)
+  "Describe what session_history looks through, for its first line.
+PATH is the conversation, BOUNDARY the position of the node it opens
+with or nil, ALL non-nil when the whole of it is looked through."
+  (let* ((node (and boundary (nth boundary path)))
+         (what (cond ((null node) nil)
+                     ((harness-node-handoff node)
+                      (format "the handoff from %s"
+                              (or (plist-get (harness-node-handoff node) :from) "another model")))
+                     (t (format "the %scompaction"
+                                (let ((kind (harness-node-compaction-kind node)))
+                                  (if (member kind '("summary" "brief" "transcript" "fresh" "truncate"))
+                                      (concat kind " ")
+                                    ""))))))
+         (stamp (and node (format "[%s %s, %s]" (plist-get node :kind) (plist-get node :id)
+                                  (or (harness-tools-sessions--when node) "undated")))))
+    (cond ((null node)
+           (format "This conversation was never compacted: all %d nodes are in your context already."
+                   (length path)))
+          (all (format "The whole conversation, %d nodes, %s %s included." (length path) what stamp))
+          (t (format "The conversation before %s %s: %d nodes your context holds only as that node tells of them."
+                     what stamp boundary)))))
 
 (defun harness-tools-sessions--history-line (node chars &optional query regexp)
   "Return the line of NODE in session_history's answer.
@@ -2112,7 +2112,7 @@ sends work back."
 
 (harness-define-tool "task_control"
   :label "Control task"
-  :description "Act on a task, or on its project's pending queue. start runs a pending task now, whatever the limit or a suspended queue; queue puts a backlog task back in the pending queue, where it starts on its own as soon as a slot frees (or waits there while the queue is suspended); message sends a follow-up to its session, marked as coming from this session (while pending, it appends to the prompt instead -- a task returned to pending that waits with its queue suspended, or that was sent back from review and waits for a slot, keeps the message and gets it when it starts, otherwise it starts now); cancel drops a pending task or stops a working one's turn; return-to-pending stops a working task's turn and puts it back at the front of its project's pending queue, keeping its session, branch and worktree so it carries on where it stopped when it starts again; reject sends a task in review back to its session with the feedback in message, to work on it again within the limit on running tasks: with no slot free it takes the slot of a working task it outranks (a lower priority, or its own unless that task was sent back from review too), which returns to pending and carries on where it stopped when it starts again; when it outranks none it waits at the front of its priority in pending with the feedback kept, and takes a slot as soon as one frees or it outranks a working task (with the queue suspended it waits so until the queue resumes); merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept); priority sets its priority to the given one (low, medium or high), given to the task's session, which is where a task's priority lives (`harness-priority-of-task'), and which reorders the tasks waiting for a slot: high starts before medium, medium before low (a task sent back from review that waits takes the slot of a working task it comes to outrank). suspend-queue stops a project's pending tasks from starting on their own -- the queue waits until resume-queue, while start still starts a task -- and resume-queue starts them again at once, by priority; both act on the project of cwd (default: this session's) and need no task_id."
+  :description "Act on a task, or on its project's pending queue. start runs a pending task now, whatever the limit or a suspended queue; queue puts a backlog task back in the pending queue, where it starts on its own as soon as a slot frees (or waits there while the queue is suspended); message sends a follow-up to its session, marked as coming from this session (while pending, it appends to the prompt instead -- a task returned to pending that waits with its queue suspended, or that was sent back from review and waits for a slot, keeps the message and gets it when it starts, otherwise it starts now); cancel drops a pending task or stops a working one's turn; return-to-pending stops a working task's turn, and the work its session left running outside it (its supervisor plan's workers and its sub-agents, whose steps it is told were interrupted), and puts it back at the front of its project's pending queue, keeping its session, branch and worktree so it carries on where it stopped when it starts again; reject sends a task in review back to its session with the feedback in message, to work on it again within the limit on running tasks: with no slot free it takes the slot of a working task it outranks (a lower priority, or its own unless that task was sent back from review too; one waiting on its supervisor plan's workers or its sub-agents is working), which returns to pending, its workers and sub-agents stopped, and carries on where it stopped when it starts again; when it outranks none it waits at the front of its priority in pending with the feedback kept, and takes a slot as soon as one frees or it outranks a working task (with the queue suspended it waits so until the queue resumes); merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept); priority sets its priority to the given one (low, medium or high), given to the task's session, which is where a task's priority lives (`harness-priority-of-task'), and which reorders the tasks waiting for a slot: high starts before medium, medium before low (a task sent back from review that waits takes the slot of a working task it comes to outrank). suspend-queue stops a project's pending tasks from starting on their own -- the queue waits until resume-queue, while start still starts a task -- and resume-queue starts them again at once, by priority; both act on the project of cwd (default: this session's) and need no task_id."
   :schema '(:type "object"
             :properties (:task_id (:type "string" :description "Task id or unique prefix; not needed by suspend-queue and resume-queue.")
                          :action (:type "string" :enum ("start" "queue" "message" "cancel" "return-to-pending" "merge" "verify" "reject" "complete" "archive" "restore" "delete" "priority" "suspend-queue" "resume-queue"))

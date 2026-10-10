@@ -3079,6 +3079,79 @@ opening it where images cannot show or the file is remote."
         (should (= 2 (hash-table-count harness-chat--groups)))
         (should (harness-ui-chat-test-find buf "5 tool calls: Read file ×3, Search files, Find files"))))))
 
+(ert-deftest harness-ui-chat-denied-call-offers-approval ()
+  "A call the permission system refused offers [Approve] where it reads
+its denial.  Clicking it has the harness mark the call approved -- the
+transcript says so, and tells the agent to rerun it unchanged with
+rerun_approved -- and the rerun then shows as a user-approved call
+linked to the one it was denied as."
+  (harness-ui-chat-test-with
+    (harness-test-load-module 'perms)
+    (let* ((sid (harness-ui-chat-test-session "Denied"))
+           (buf (harness-ui-chat-test-open sid))
+           (prompts nil)
+           denied-node)
+      (harness-register-method 'agent/prompt
+                               (lambda (session blocks &optional opts)
+                                 (push (list session (plist-get (car blocks) :text) opts) prompts)
+                                 (harness-resolved nil)))
+      (harness-call 'session/append sid
+                    (list :kind 'tool-call :tool "bash" :call-id "call-1"
+                          :input '(:command "make") :title "Bash"))
+      (setq denied-node
+            (plist-get (harness-call 'session/append sid
+                                     (list :kind 'tool-result :call-id "call-1"
+                                           :output "Denied: denied by a standing rule for bash. The user can approve this call in the chat (handle call-1); once they have, rerun it unchanged with rerun_approved and that handle."
+                                           :is-error t :meta (list :denied t)))
+                       :id))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf "[Approve]")) 5 "the [Approve] button")
+      (with-current-buffer buf
+        (let ((pos (harness-ui-chat-test-find buf "[Approve]")))
+          (should (harness-ui-chat-test-face-at (1- pos) 'button))
+          (should (string-match-p "exactly as it was denied"
+                                  (get-text-property (1- pos) 'help-echo))))
+        ;; The denial itself is still shown, as the call's reason.
+        (should (harness-ui-chat-test-find buf "denied by a standing rule for bash"))
+        (goto-char (1- (harness-ui-chat-test-find buf "[Approve]")))
+        (harness-chat-push))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf "user-approved")) 5 "the call approved")
+      (with-current-buffer buf
+        (should (harness-ui-chat-test-find buf "user-approved · the agent can rerun it"))
+        (should-not (harness-ui-chat-test-find buf "[Approve]"))
+        ;; Approving it again is nothing the user has left to do.
+        (goto-char (1- (harness-ui-chat-test-find buf "user-approved")))
+        (should-error (harness-chat-approve-denied-call)))
+      ;; The harness told the agent, in its own name, which handle to rerun.
+      (let ((prompt (car prompts)))
+        (should prompt)
+        (should (equal sid (car prompt)))
+        (should (string-match-p "handle call-1" (cadr prompt)))
+        (should (string-match-p "rerun_approved" (cadr prompt)))
+        (should (equal (harness-sender-system "permissions") (plist-get (nth 2 prompt) :from))))
+      ;; The approval is kept on the denied result, where a reload finds it.
+      (should (harness-json-true-p
+               (plist-get (plist-get (harness-call 'session/node sid denied-node) :meta) :approved)))
+      ;; The rerun by handle then shows as a user-approved call, and its
+      ;; tool links back to the call it was denied as.
+      (harness-call 'session/append sid
+                    (list :kind 'tool-call :tool "rerun_approved" :call-id "r1"
+                          :input '(:handle "call-1") :title "Rerun approved call"))
+      (harness-call 'session/append sid
+                    (list :kind 'tool-result :call-id "r1"
+                          :output "The user approved denied call call-1 (bash); it ran as it was denied.\n\nmake: nothing to be done"
+                          :meta (list :user-approved t :rerun-of "call-1" :rerun-tool "bash")))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf "user-approved rerun of")) 5 "the rerun line")
+      (with-current-buffer buf
+        (should (harness-ui-chat-test-find buf "user-approved rerun of bash · handle call-1"))
+        (should (harness-ui-chat-test-find buf "make: nothing to be done"))
+        (goto-char (1- (harness-ui-chat-test-find buf "user-approved rerun of bash")))
+        (harness-chat-push)
+        (should (equal "call-1"
+                       (plist-get (harness-chat-block-node
+                                   (gethash (get-text-property (point) 'harness-chat-node)
+                                            harness-chat--blocks))
+                                  :call-id)))))))
+
 (defun harness-ui-chat-test-check-groups (buf)
   "Check that every group of BUF is sound and return the groups, oldest first.
 Its members are distinct blocks folded into it, oldest first, starting

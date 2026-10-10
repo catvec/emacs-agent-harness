@@ -123,10 +123,16 @@
 ;; task_control's return-to-pending) stops the turn of a task at work
 ;; and puts it back in the pending queue, keeping its session, branch
 ;; and worktree: when it starts again its own session carries on where
-;; it stopped, told so by the harness.  It goes to the front of its
-;; priority's queue, ahead of the tasks that never started, the ones
-;; returned first starting first; a higher priority still goes first.
-;; Returning it frees its slot for the other waiting tasks, and starts
+;; it stopped, told so by the harness.  The work its session left
+;; running outside its turn -- a supervisor's workers, sub-agents --
+;; stops too, once no turn of the session runs
+;; (`harness-tasks--stop-outstanding'): what that work was on is
+;; reported to the session, where it waits for the task to carry on and
+;; retry it or plan it again.  It goes to the front of its priority's
+;; queue, ahead of the tasks that never started, the ones returned
+;; first starting first; a higher priority still goes first.  Returning
+;; it frees its slot for the other waiting tasks (one waiting on work
+;; its session left running, `:waiting', holds one too), and starts
 ;; nothing itself, so the task waits -- also while the queue is
 ;; suspended -- for the next task the queue starts, for
 ;; `task/resume-queue', or for an explicit `task/start'.  A message to
@@ -239,12 +245,14 @@ between them.  A task's project is the main checkout it was submitted
 for, also when it works in a worktree.
 
 Only top-level sessions are limited: a task takes a slot while its own
-session works on it, running or waiting on the user mid-turn.  The
-sessions working for it never take one -- its sub-agents and forks,
-and the merge queue's conflict resolvers -- and neither does the merge
-queue's work: a task whose branch is queued, merging or having its
-conflicts resolved holds no slot, even while its own session commits
-or resolves them.  `task/start' starts a task whatever the limit.
+session works on it, running or waiting on the user mid-turn, and
+while it waits on work its session left running outside its turn,
+such as a supervisor's workers.  The sessions working for it never
+take one -- its sub-agents and forks, and the merge queue's conflict
+resolvers -- and neither does the merge queue's work: a task whose
+branch is queued, merging or having its conflicts resolved holds no
+slot, even while its own session commits or resolves them.
+`task/start' starts a task whatever the limit.
 nil (the default) means no limit, and 0 that no task starts by itself.
 Waiting tasks start by priority, then oldest first (see
 `harness-priority-levels').
@@ -252,8 +260,9 @@ Waiting tasks start by priority, then oldest first (see
 Work the user sends back from review is held to the limit too: with no
 slot free it pre-empts a task at work it outranks -- of a lower
 priority, or of its own that was not sent back from review itself --
-which goes back to the queue to carry on later, and when it outranks
-none it waits in the queue (`harness-tasks--make-room').
+which goes back to the queue to carry on later, its turn stopped and
+the work its session left running outside it stopped too; when it
+outranks none it waits in the queue (`harness-tasks--make-room').
 
 The task board's \"N at a time\" button sets it (through `config/set',
 saved for every project).  A limit raised that way, or on the settings
@@ -496,19 +505,24 @@ task's write-up: it is written again, or with nil waits for a retry."
 `task/retry' sends it; %s says how the turn stopped.")
 
 (defconst harness-tasks--paused-message
-  "This task was returned to the queue and its turn stopped; it has started again now. Check where you left off -- the files you changed are still there -- then carry on with the task."
+  "This task was returned to the queue: its turn stopped, and workers or sub-agents still running were stopped (what they were on is reported above: retry it or plan it again). It has started again now. Check where you left off -- the files you changed are still there -- then carry on with the task."
   "Message that starts a task returned to pending again.
-`task/return-to-pending' puts a working task back in the queue; when
-the queue starts it again its own session carries on (see
-`harness-tasks--start-paused'), told so by this message.")
+`task/return-to-pending' puts a working task back in the queue, its
+turn stopped and the work its session left running outside its turn
+stopped too (`harness-tasks--stop-outstanding'), which reports to the
+session what it was on; when the queue starts the task again its own
+session carries on (see `harness-tasks--start-paused'), told so by
+this message.")
 
 (defconst harness-tasks--preempted-message
-  "Your last turn on this task was cut short to free its slot for a task the user sent back from review, which goes first: tool calls that were still running did not finish. The task waited in the queue and has started again now. Check where you left off -- the files you changed are still there -- then carry on with the task."
+  "Your work on this task was stopped to free its slot for a task the user sent back from review, which goes first: tool calls that were still running did not finish, and workers or sub-agents still running were stopped (what they were on is reported above: retry it or plan it again). The task waited in the queue and has started again now. Check where you left off -- the files you changed are still there -- then carry on with the task."
   "Message that starts a task again after it was pre-empted.
 A task the user sends back from review while every slot of its project
 is taken takes the slot of a task at work it outranks
 \(`harness-tasks--victim'); that task goes back to the queue, its turn
-stopped, as a restart stops one, and when the queue starts it again
+stopped, as a restart stops one, and the work its session left running
+outside its turn stopped too (`harness-tasks--stop-outstanding'), which
+reports to the session what it was on.  When the queue starts it again
 its own session carries on, told so by this message, as
 `harness-tasks--resume-prompt' tells it after a restart.")
 
@@ -610,9 +624,10 @@ state directory the first time it looks at a queue.")
   "Task ids whose turn is being stopped by a return to pending.
 The turn ends soon after (`agent/cancel' waits out its grace), and
 `harness-tasks--on-turn-ended' must not take the cut-short turn for the
-task's own end: the task is waiting in the queue, not at work.  A task
-pre-empted (`harness-tasks--preempt') is returned to pending this way
-too.")
+task's own end: the task is waiting in the queue, not at work.  Once
+that turn has ended, the work its session left running outside it
+stops (`harness-tasks--stop-outstanding').  A task pre-empted
+\(`harness-tasks--preempt') is returned to pending this way too.")
 
 (defvar harness-tasks--worktrees-made (make-hash-table :test 'equal)
   "Task id -> promise of the worktree being made for it.
@@ -1664,15 +1679,18 @@ SUSPENDED), which the boards follow."
 ;; `harness-tasks--preempted-message' as a restart's resume tells it.
 ;; A task still starting can give its slot up too: its start launches
 ;; nothing once its worktree is ready (`harness-tasks--start-current-p').
-;; One waiting on work its session left running (`:waiting') cannot: its
-;; turn is over, and that work goes on all the same.  When every task
-;; at work outranks it -- or the project's queue is suspended, or the
-;; limit is 0 -- the sent-back task waits in the queue instead
-;; (`harness-tasks--hold-back'), ahead of the rest of its priority, with
-;; its feedback, and its session takes no turn until it starts
-;; (`harness-tasks--before-turn'); the scheduler lets it pre-empt as
-;; soon as it outranks a task at work (a priority changed, say:
-;; `harness-tasks--on-priority-changed').  Nothing else pre-empts: a new
+;; So can one waiting on work its session left running (`:waiting'),
+;; such as a supervisor's workers: that work stops with it, as the work
+;; left running by any task pre-empted or returned to pending does,
+;; once no turn of its session runs (`harness-tasks--stop-outstanding'),
+;; and what it was on is reported to the session for when the task
+;; carries on.  When every task at work outranks it -- or the project's
+;; queue is suspended, or the limit is 0 -- the sent-back task waits in
+;; the queue instead (`harness-tasks--hold-back'), ahead of the rest of
+;; its priority, with its feedback, and its session takes no turn until
+;; it starts (`harness-tasks--before-turn'); the scheduler lets it
+;; pre-empt as soon as it outranks a task at work (a priority changed,
+;; say: `harness-tasks--on-priority-changed').  Nothing else pre-empts: a new
 ;; task, a returned or pre-empted one and a follow-up only take free
 ;; slots, and a priority changed otherwise only reorders the queue.
 
@@ -1750,13 +1768,13 @@ before other feedback of its priority."
 
 (defun harness-tasks--preemptible-p (task)
   "Non-nil when TASK holds a slot that work sent back from review may take.
-That is a task holding one (`harness-tasks--holds-slot-p'): its session
-running or waiting on the user mid-turn, or the task still starting.
-Not one that waits on work its session left running (`:waiting'): its
-turn is over, and that work would go on all the same, so stopping it
-frees nothing."
-  (and (harness-tasks--holds-slot-p task)
-       (not (plist-get task :waiting))))
+That is every task holding one (`harness-tasks--holds-slot-p'): its
+session running or waiting on the user mid-turn, the task still
+starting, or waiting on work its session left running outside its
+turn (`:waiting'), such as a supervisor's workers.  Pre-empting it
+stops that work too (`harness-tasks--stop-outstanding'), so the slot
+it held is free."
+  (harness-tasks--holds-slot-p task))
 
 (defun harness-tasks--working-since (task)
   "Return when TASK's current work began, a float time.
@@ -1779,7 +1797,8 @@ last before the others: it has the least to lose."
 (defun harness-tasks--victim (task)
   "Return the task at work whose slot TASK, sent back from review, takes, or nil.
 Only a task of TASK's project that holds a slot
-\(`harness-tasks--preemptible-p') and that TASK outranks
+\(`harness-tasks--preemptible-p'), one waiting on work its session left
+running included, and that TASK outranks
 \(`harness-tasks--outranks-p') gives one up: of those, the first by
 `harness-tasks--preempt-first-p' -- the lowest priority, then work that
 only started, then the work that began last.  Nil when TASK outranks
@@ -1818,33 +1837,84 @@ else when the stopped turn ends (`harness-tasks--on-turn-ended')."
                     (format "Task pre-empted: task %s, sent back from review, took its slot; this one waits in the queue and carries on when it gets one again"
                             (harness-tasks--label (plist-get task :preempted-by)))))))
 
+(defun harness-tasks--stop-reason (task)
+  "Return why the work TASK's session left running is stopped, a short text.
+TASK waits in the queue: pre-empted (`harness-tasks--preempt') or
+returned to pending."
+  (if (eq (harness-tasks--return-reason task) 'preempted)
+      (format "its task was pre-empted: task %s, sent back from review, took its slot"
+              (harness-tasks--label (plist-get task :preempted-by)))
+    "its task was returned to the queue"))
+
+(defun harness-tasks--stop-outstanding (id)
+  "Stop the work task ID's session left running outside its turn.
+That is while ID waits in the queue after its work began
+\(`harness-tasks--returned-p'): pre-empted (`harness-tasks--preempt') or
+returned to pending (`task/return-to-pending').  A task waiting in the
+queue has nothing at work, so what its session started that goes on
+without its turn -- a supervisor's workers, sub-agents -- stops too,
+through `agent/stop-outstanding', told why (`harness-tasks--stop-reason').
+It is called once no turn of the session runs: at once when none ran,
+else when the stopped turn ends (`harness-tasks--on-turn-ended').  The
+reports the stopped work sends then reach a session with no turn to
+steer, whose turn the waiting task refuses and whose message waits in
+the transcript for the task's start (`harness-tasks--before-turn'),
+rather than steering a turn being cancelled and getting lost.  What was
+stopped is said in the session, as a hint.  Return that text, or nil
+when nothing was stopped, the task no longer waits, or there is no
+agent module."
+  (let* ((task (gethash id harness-tasks--table))
+         (sid (plist-get task :session)))
+    (when (and task sid
+               (harness-tasks--queued-p task)
+               (harness-tasks--returned-p task)
+               (harness-method-exists-p 'agent/stop-outstanding)
+               (harness-call 'session/exists-p sid))
+      (let ((text (condition-case err
+                      (harness-call 'agent/stop-outstanding sid (harness-tasks--stop-reason task))
+                    (error (harness-log 'warn "task %s: stopping what its session left running failed: %s"
+                                        id (harness-error-message err))
+                           nil))))
+        (when text
+          (harness-log 'info "task %s: stopped while it waits in the queue: %s" id text)
+          (harness-call 'session/hint sid (format "Stopped while the task waits in the queue: %s" text)))
+        text))))
+
 (defun harness-tasks--preempt (id by)
   "Stop task ID's work and put it back in the queue: task BY takes its slot.
 BY was sent back from review and outranks it (`harness-tasks--victim').
 ID is returned to pending as `task/return-to-pending' returns a task --
 it keeps its session, branch and worktree and leads its priority's
 queue -- with `:return-reason' `preempted' and `:preempted-by' BY, and
-its turn is stopped.  When it starts again its session carries on,
-told so by `harness-tasks--preempted-message'.  A task still starting
-gives its slot up too: one whose worktree is still being made launches
-nothing once it is ready (`harness-tasks--start-current-p'), and a
-first turn held before it began is cancelled.  Return ID's view."
+its turn is stopped.  Once no turn of its session runs -- at once when
+none did, else when the stopped turn ends (`harness-tasks--on-turn-ended')
+-- its session says it was pre-empted (`harness-tasks--preempted-hint'),
+and the work its session left running outside its turn, a supervisor's
+workers say, stops (`harness-tasks--stop-outstanding'): a task that only
+waits on such work (`:waiting') gives its slot up this way.  When it
+starts again its session carries on, told so by
+`harness-tasks--preempted-message'.  A task still starting gives its
+slot up too: one whose worktree is still being made launches nothing
+once it is ready (`harness-tasks--start-current-p'), and a first turn
+held before it began is cancelled.  Return ID's view."
   (harness-log 'info "task %s: pre-empted; task %s, sent back from review, takes its slot" id by)
   (remhash id harness-tasks--starting)
   ;; The queue first, then the turn (see `task/return-to-pending').
   (prog1 (harness-tasks--to-pending id :return-reason 'preempted :preempted-by by)
     (unless (harness-tasks--stop-turn id)
-      (harness-tasks--preempted-hint id))))
+      (harness-tasks--preempted-hint id)
+      (harness-tasks--stop-outstanding id))))
 
 (defun harness-tasks--make-room (task)
   "Find TASK, which the user sends back from review, a slot to work in now.
 Return non-nil when it may work at once: without a limit, with a slot
 of its project free, or by taking the slot of a task at work it
 outranks, which is pre-empted (`harness-tasks--victim',
-`harness-tasks--preempt').  Nil means it waits in the queue: every
-task at work outranks it, the limit is 0, or its project's queue is
-suspended, which holds work sent back from review back as it holds
-back any start the harness makes by itself."
+`harness-tasks--preempt'); a task that only waits on work its session
+left running is one too, and that work stops with it.  Nil means it
+waits in the queue: every task at work outranks it, the limit is 0,
+or its project's queue is suspended, which holds work sent back from
+review back as it holds back any start the harness makes by itself."
   (cond ((harness-tasks--task-suspended-p task) nil)
         ((> (harness-tasks--free-slots (harness-tasks--slot-project task)) 0) t)
         (t (when-let* ((victim (harness-tasks--victim task)))
@@ -1862,7 +1932,8 @@ whose queue is suspended (`task/suspend-queue'): the suspension holds
 back the starts the scheduler makes on its own, never an explicit
 `task/start'.  SKIP, a task id, is left out of this pass: returning a
 task to pending starts it again with the next pass, not with the one
-that stops it.
+that stops it, nor with one that follows a turn its session was
+refused while it waits (`harness-tasks--on-turn-ended').
 
 A task waiting because it was sent back from review while no slot could
 take it (`:return-reason' `sent-back') does not wait for a free slot
@@ -2564,7 +2635,12 @@ task's view."
   "Stop the turn of task ID's session, if one runs, for a return to pending.
 `harness-tasks--returning' says so until the turn ends, and the turn
 stops as `task/cancel' stops a working task: without waiting for it.
-Return non-nil when a turn was running, so it is being stopped."
+Return non-nil when a turn was running, so it is being stopped.  The
+work the session left running outside its turn is not stopped here:
+that waits until no turn of the session runs
+\(`harness-tasks--stop-outstanding') -- now when this returns nil, which
+is for the caller to do, else when the stopped turn ends
+\(`harness-tasks--on-turn-ended')."
   (let ((sid (plist-get (harness-tasks--get id) :session)))
     (when (and sid (harness-tasks--turn-p (harness-tasks--get id)))
       (puthash id t harness-tasks--returning)
@@ -2968,27 +3044,37 @@ again (see `harness-tasks--schedule'); a start the task got while that
 turn was still stopping did steer the turn being cancelled and so went
 nowhere, and is made here, once the turn is gone.  A task pre-empted
 says so in its session now that the stopped turn is over
-\(`harness-tasks--preempted-hint').  Nor does a turn of a task waiting in
-the queue say anything about it: one its session was refused while the
-task waits (`harness-tasks--before-turn')."
+\(`harness-tasks--preempted-hint'), and the work its session left
+running outside its turn -- of a task pre-empted or returned to
+pending alike -- stops now (`harness-tasks--stop-outstanding'), so that
+what it reports reaches a session with no turn to steer; not for a task
+started again meanwhile, whose work goes on.  Nor does a turn of a task
+waiting in the queue say anything about it: one its session was
+refused while the task waits (`harness-tasks--before-turn').  A
+returned task is left out of the scheduling pass after such a turn
+too, so that the reports of the work stopped with its return, refused
+while it waits, do not start it again: the return starts nothing."
   (remhash session-id harness-tasks--refine-calls)
   (when-let* ((task (harness-tasks--by-session session-id)))
     (let ((id (plist-get task :id))
           (waiting nil)
-          (stopped nil))
+          (skip nil))
       (remhash id harness-tasks--starting)
       (cond
        ((gethash id harness-tasks--returning)
         (remhash id harness-tasks--returning)
-        (setq stopped t)
+        (setq skip t)
         (cond
          ((eq (plist-get task :state) 'active)
           (harness-log 'info "task %s: the turn it was returned from ended after it started again; starting it once more" id)
           (harness-tasks--start-paused id (plist-get task :worktree) (plist-get task :worktree)))
-         ((eq (harness-tasks--return-reason task) 'preempted)
-          (harness-tasks--preempted-hint id))))
+         (t
+          (when (eq (harness-tasks--return-reason task) 'preempted)
+            (harness-tasks--preempted-hint id))
+          (harness-tasks--stop-outstanding id))))
        ((harness-tasks--refinement-p task) (harness-tasks--finish-refinement id reason))
-       ((harness-tasks--queued-p task) nil)
+       ((harness-tasks--queued-p task)
+        (setq skip (harness-tasks--returned-p task)))
        ((not (eq reason 'end-turn))
         (unless (plist-get task :merge-status)
           (harness-tasks--set id :state 'active :outcome reason)))
@@ -3006,7 +3092,7 @@ task waits (`harness-tasks--before-turn')."
         (harness-tasks--enqueue-merge id))
        (t (apply #'harness-tasks--to-done id 'finished :outcome reason :finished (float-time)
                  (harness-tasks--missing-report task))))
-      (if stopped
+      (if skip
           (harness-run-soon #'harness-tasks--schedule id)
         (harness-run-soon #'harness-tasks--schedule)))))
 
@@ -3488,10 +3574,14 @@ The task keeps its session, branch and worktree, so it carries on where
 it stopped when it starts again (`harness-tasks--start-paused'), and it
 goes to the front of its priority's queue: ahead of the tasks that
 never started, behind only tasks of a higher priority, and among the
-returned ones the first returned starts first.  Returning it frees its
-slot for the other waiting tasks; the return itself starts nothing,
-suspended or not, so the task waits for the next task the queue starts,
-for `task/resume-queue', or for an explicit `task/start'.  Return the
+returned ones the first returned starts first.  The work its session
+left running outside its turn -- a supervisor's workers, sub-agents --
+stops too, once no turn of the session runs: at once for a task that
+only waited on it (`:waiting'), else when the stopped turn ends
+\(`harness-tasks--stop-outstanding').  Returning it frees its slot for
+the other waiting tasks; the return itself starts nothing, suspended
+or not, so the task waits for the next task the queue starts, for
+`task/resume-queue', or for an explicit `task/start'.  Return the
 task's view."
   (let ((task (harness-tasks--get id)))
     (unless (eq (plist-get task :state) 'active)
@@ -3501,8 +3591,11 @@ task's view."
       (error "Task %s is still starting; wait for it or stop it" id))
     ;; The queue first, then the turn: a cancel that ends the turn at once
     ;; then finds the task waiting, not at work (`harness-tasks--returning').
+    ;; The work left running outside the turn stops once no turn runs:
+    ;; now, or when the stopped turn ends (`harness-tasks--on-turn-ended').
     (prog1 (harness-tasks--to-pending id)
-      (harness-tasks--stop-turn id)
+      (unless (harness-tasks--stop-turn id)
+        (harness-tasks--stop-outstanding id))
       (harness-tasks--schedule id))))
 
 (harness-defmethod task/update (id prompt &optional attachments)

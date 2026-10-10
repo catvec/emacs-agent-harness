@@ -1332,6 +1332,9 @@ selected by `:active' alone; the active sessions change as ever."
     "skill_search" "skill_load" "notification_providers" "emacs_buffers" "emacs_windows"
     "emacs_buffer" "emacs_describe" "emacs_find_definition" "emacs_messages" "emacs_open"
     "request_directory_access"
+    ;; Runs only a call the user approved by hand, so a supervising
+    ;; session may use it; see harness-supervisor--allowed-tools.
+    "rerun_approved"
     "web_fetch" "web_search"
     "ask_user" "todo_write" "hand_in" "notify" "session_control" "session_send" "session_move"
     "set_non_interactive" "set_priority" "task_control" "task_submit" "session_settings"

@@ -22,7 +22,11 @@
 ;;   conversation and several sub-agents can run at once; the child's
 ;;   answer arrives later in a message of its own, and one that still
 ;;   has work going on (a wait it registered, a sub-agent of its own)
-;;   is reported when that work is over.  Several spawn_agent calls made
+;;   is reported when that work is over.  A session whose outstanding
+;;   work is stopped (`agent/stop-outstanding': its task was pre-empted,
+;;   or returned to the queue) stops its sub-agents with it
+;;   (`harness-tools-agent--stop-outstanding'), and hears of each as of
+;;   a sub-agent that was cancelled.  Several spawn_agent calls made
 ;;   in one step run at once.  A sub-agent works on a
 ;;   deliberately shorter context window
 ;;   (`harness-subagent-context-limit'); the limit a child gets is
@@ -420,14 +424,18 @@ Replace the todos of the session in CTX with those in INPUT."
 (defvar harness-tools-agent--children (make-hash-table :test 'equal)
   "Child session id -> what a spawn_agent call knows of a running child.
 A plist (:parent PARENT-ID :name NAME :worktree PATH :branch BRANCH
-:result RESULT :unwatch STOP).  A child's call has always returned, since
-it started; RESULT is what the child's first turn ended with, nil while
-it runs.  The entry stays until the child is done with everything it has
-going on, so a parent counts it as work it still runs
+:result RESULT :unwatch STOP :stopped WHY).  A child's call has always
+returned, since it started; RESULT is what the child's first turn ended
+with, nil while it runs.  The entry stays until the child is done with
+everything it has going on, so a parent counts it as work it still runs
 \(`harness-tools-agent--outstanding') and a child that registered a wait
 is not reported as finished when its turn merely ended; STOP, when
 there is one, stops the note under the child's spawn_agent call
-\(`harness-tools-agent--watch-child').")
+\(`harness-tools-agent--watch-child').  WHY is there once the parent's
+outstanding work was stopped and took the child's with it
+\(`harness-tools-agent--stop-outstanding'): the reason, or t without
+one.  A child so stopped is reported as cancelled, whatever its last
+turn said.")
 
 (defun harness-tools-agent--short-id (id)
   "Return the first eight characters of session ID."
@@ -440,14 +448,31 @@ there is one, stops the note under the child's spawn_agent call
         name
       (harness-tools-agent--short-id cid))))
 
-(defun harness-tools-agent--running-children (session-id)
-  "Return the names of the sub-agents of SESSION-ID still running."
-  (let (names)
+(defun harness-tools-agent--child-entries (session-id)
+  "Return (ID . ENTRY) for the sub-agents of SESSION-ID still running.
+They come in the order they were spawned.  ENTRY is the child's entry
+in `harness-tools-agent--children'."
+  (let (entries)
     (maphash (lambda (cid entry)
                (when (equal (plist-get entry :parent) session-id)
-                 (push (harness-tools-agent--child-name cid entry) names)))
+                 (push (cons cid entry) entries)))
              harness-tools-agent--children)
-    (nreverse names)))
+    (nreverse entries)))
+
+(defun harness-tools-agent--running-children (session-id)
+  "Return the names of the sub-agents of SESSION-ID still running."
+  (mapcar (lambda (child) (harness-tools-agent--child-name (car child) (cdr child)))
+          (harness-tools-agent--child-entries session-id)))
+
+(defun harness-tools-agent--add-names (value names verb)
+  "Return VALUE with a text appended saying the sub-agents NAMES VERB.
+That is \"Sub-agent A running\" or \"Sub-agents A, B stopped\", joined to
+what VALUE says already by \"; \", as the handlers of `agent/outstanding'
+and `agent/stop-outstanding' add to the text before them."
+  (let ((text (format "Sub-agent%s %s %s" (if (cdr names) "s" "") (string-join names ", ") verb)))
+    (if (and (stringp value) (not (harness-string-blank-p value)))
+        (concat value "; " text)
+      text)))
 
 (defun harness-tools-agent--outstanding (value session-id)
   "Add the sub-agents of SESSION-ID that still run to VALUE.
@@ -457,12 +482,7 @@ supervisor's steps run."
   (let ((names (harness-tools-agent--running-children session-id)))
     (if (null names)
         value
-      (let ((text (format "Sub-agent%s %s running"
-                          (if (cdr names) "s" "")
-                          (string-join names ", "))))
-        (if (and (stringp value) (not (harness-string-blank-p value)))
-            (concat value "; " text)
-          text)))))
+      (harness-tools-agent--add-names value names "running"))))
 
 (defun harness-tools-agent--child-busy-p (cid)
   "Non-nil when child CID has work going on but its turn.
@@ -478,13 +498,17 @@ until nothing is outstanding for it any more (see `agent/outstanding')."
 REASON is how the turn that just ended ended, for a child whose own
 result is not known (a later turn's, which carries no error text).  A
 child that is still busy is left for the turn that ends its wait, or its
-sub-agent's report."
+sub-agent's report.  A child its parent's outstanding work stopped
+\(`harness-tools-agent--stop-outstanding') is reported as cancelled
+whatever its last turn said: it did not finish."
   (let ((entry (gethash cid harness-tools-agent--children)))
     (when (and entry (not (harness-tools-agent--child-busy-p cid)))
       (harness-tools-agent--forget-child cid)
       (harness-tools-agent--report-child (plist-get entry :parent) cid entry
-                                         (or (plist-get entry :result)
-                                             (list :stop-reason reason))))))
+                                         (cond ((plist-get entry :stopped)
+                                                (list :stop-reason 'cancelled))
+                                               ((plist-get entry :result))
+                                               (t (list :stop-reason reason)))))))
 
 (defun harness-tools-agent--child-result (cid result)
   "Note RESULT, how the first turn of child CID ended, then settle it.
@@ -536,10 +560,14 @@ ENTRY is the child's entry in `harness-tools-agent--children'.  RESULT
 is what `agent/prompt' answered for the child's first turn, or just
 \(:stop-reason REASON) for a later one: the text names the child, says
 how its turn ended, holds its summary, and says where it worked when it
-had a worktree."
+had a worktree.  A child the outstanding work of its parent stopped,
+for a reason (`:stopped' in its entry), says it in brackets after how
+its turn ended."
   (let* ((name (harness-tools-agent--child-name cid entry))
          (reason (plist-get result :stop-reason))
          (error (plist-get result :error))
+         (why (let ((stopped (plist-get entry :stopped)))
+                (and (stringp stopped) (not (harness-string-blank-p stopped)) stopped)))
          (summary (condition-case err
                       (harness-tools-agent--child-summary cid)
                     (error (format "(its session is gone: %s)" (harness-error-message err)))))
@@ -547,16 +575,18 @@ had a worktree."
                       (concat (harness-truncate-middle summary harness-tools-max-output-chars)
                               (format "\n\n(Its answer was long; session_read on %s shows the rest.)" cid))
                     summary))
-         (state (pcase reason
-                  ('end-turn "finished")
-                  ('cancelled "stopped: its turn was cancelled")
-                  ('max-tokens "stopped: it hit its output limit")
-                  ('blocked "stopped: its turn was blocked")
-                  ('error (format "stopped: it failed%s"
-                                  (if (and (stringp error) (not (harness-string-blank-p error)))
-                                      (format ": %s" error)
-                                    "")))
-                  (_ (format "stopped: its turn ended (%s)" (or reason "no reason")))))
+         (state (concat
+                 (pcase reason
+                   ('end-turn "finished")
+                   ('cancelled "stopped: its turn was cancelled")
+                   ('max-tokens "stopped: it hit its output limit")
+                   ('blocked "stopped: its turn was blocked")
+                   ('error (format "stopped: it failed%s"
+                                   (if (and (stringp error) (not (harness-string-blank-p error)))
+                                       (format ": %s" error)
+                                     "")))
+                   (_ (format "stopped: its turn ended (%s)" (or reason "no reason"))))
+                 (and why (format " (%s)" why))))
          (worktree (plist-get entry :worktree))
          (branch (plist-get entry :branch)))
     (concat
@@ -581,6 +611,77 @@ arrives."
      (lambda (err)
        (harness-log 'warn "tools-agent: reporting sub-agent %s to session %s failed: %s"
                     (harness-tools-agent--short-id cid) parent-id (harness-error-message err))))))
+
+(defun harness-tools-agent--mark-stopped (cid reason)
+  "Note in the entry of sub-agent CID that it was stopped, for REASON.
+REASON is the text the report of CID says (`:stopped' in its entry),
+or t when there is none.  A child that has been reported meanwhile has no
+entry, and none is made."
+  (when-let* ((entry (gethash cid harness-tools-agent--children)))
+    (puthash cid (plist-put entry :stopped reason) harness-tools-agent--children)))
+
+(defun harness-tools-agent--stop-child (cid reason)
+  "Stop sub-agent CID, as its parent's outstanding work is stopped for REASON.
+Work of its own it has outside its turn -- its sub-agents -- is stopped
+first (`agent/stop-outstanding' for CID), which may wake it with the
+reports of what stopped.  Then the turn it runs, or the one those
+reports started, is cancelled; once that has ended and nothing of it is
+outstanding, the child is reported to its parent as a cancelled
+sub-agent is (`harness-tools-agent--settle-child').  An idle child is
+reported at once unless work of its own is still stopping.  It is
+marked as stopped before its turn can end, so that its report says why.
+A child with nothing running and nothing to stop is left as it is:
+one that is done with everything, or waits for something a stop leaves
+alone, as `session_wait' does.  Nothing is merged: a child in a worktree
+is reported as any cancelled sub-agent is, which says where it worked,
+and its branch and worktree stay.  Return non-nil when the child, or
+work of its own, was stopped; nil for a child already being stopped,
+whose cancelled turn has not ended yet."
+  (let* ((entry (gethash cid harness-tools-agent--children))
+         (running (harness-call 'agent/running cid))
+         (note (and (stringp reason) (not (harness-string-blank-p reason)) (string-trim reason))))
+    (when (and entry (not (and running (plist-get entry :stopped))))
+      (when running
+        (harness-tools-agent--mark-stopped cid (or note t)))
+      (let* ((below (and (harness-method-exists-p 'agent/stop-outstanding)
+                         (harness-call 'agent/stop-outstanding cid reason)))
+             (running (or running (harness-call 'agent/running cid))))
+        (when (or running below)
+          (harness-log 'info "tools-agent: stopping sub-agent %s%s"
+                       (harness-tools-agent--short-id cid) (if note (format ": %s" note) ""))
+          (harness-tools-agent--mark-stopped cid (or note t))
+          (if running
+              (harness-call 'agent/cancel cid)
+            (harness-tools-agent--settle-child cid 'cancelled))
+          t)))))
+
+(defun harness-tools-agent--stop-outstanding (value session-id reason)
+  "Stop the sub-agents SESSION-ID still runs, and name them in VALUE.
+The `agent/stop-outstanding' filter: REASON, or nil, says why the work
+SESSION-ID has outside its turn is stopped -- its task was pre-empted,
+say -- and the reports of the sub-agents say it too.  Each sub-agent it
+spawned that has not been reported yet (`harness-tools-agent--children')
+is stopped (`harness-tools-agent--stop-child'): the turn it runs is
+cancelled, and so is work of its own, so that nothing it started is left
+running.  Their reports reach SESSION-ID as those of cancelled
+sub-agents do, messages of the harness's.  The workers of a supervisor's
+plan are no sub-agents here, the supervisor stops those, and a
+sub-agent that only waits is left alone.  VALUE is what the handlers
+before this one stopped: \"Sub-agent A stopped\" or \"Sub-agents A, B
+stopped\" follows it, and it stays as it is when no sub-agent was
+stopped."
+  (let (names)
+    (dolist (child (harness-tools-agent--child-entries session-id))
+      (when (condition-case err
+                (harness-tools-agent--stop-child (car child) reason)
+              (error (harness-log 'warn "tools-agent: stopping sub-agent %s of %s failed: %s"
+                                  (harness-tools-agent--short-id (car child)) session-id
+                                  (harness-error-message err))
+                     nil))
+        (push (harness-tools-agent--child-name (car child) (cdr child)) names)))
+    (if names
+        (harness-tools-agent--add-names value (nreverse names) "stopped")
+      value)))
 
 (defcustom harness-subagent-context-limit 256000
   "Most tokens of context a sub-agent adds of its own, or nil for no cap.
@@ -820,7 +921,7 @@ own once its turn ends and nothing of it is outstanding any more."
           (lambda (child)
             (let* ((cid (plist-get child :id))
                    (entry (list :parent sid :name (plist-get child :name)
-                                :worktree worktree :branch branch :result nil
+                                :worktree worktree :branch branch :result nil :stopped nil
                                 :unwatch (harness-tools-agent--watch-child cid (plist-get ctx :note)))))
               ;; From here the call itself names its sub-agent, not only its
               ;; result: the chat links it while the call still runs.  A call
@@ -934,6 +1035,7 @@ own once its turn ends and nothing of it is outstanding any more."
   "Register the module's filters and subscribers (idempotent)."
   (harness-add-filter 'agent/system-prompt #'harness-tools-agent--system-prompt 40)
   (harness-add-filter 'agent/outstanding #'harness-tools-agent--outstanding)
+  (harness-add-filter 'agent/stop-outstanding #'harness-tools-agent--stop-outstanding)
   (harness-on 'agent/turn-ended #'harness-tools-agent--on-turn-ended))
 
 (harness-tools-agent--init)

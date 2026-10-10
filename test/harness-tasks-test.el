@@ -4522,9 +4522,10 @@ before `task/submit' returns, so before the test knows its session."
   "Work sent back from review outranks a lower priority, or its own unless sent back.
 Of the tasks at work it outranks, the one that gives its slot up has
 the lowest priority, then is work that only started rather than
-feedback, then began last.  A task waiting on work its session left
-running, another project's task, and any task while the limit is 0
-give none up."
+feedback, then began last.  A task whose turn is over but which waits
+on work its session left running holds its slot through that work,
+and gives it up like the others: the work stops with it.  Another
+project's task, and any task while the limit is 0, give none up."
   (harness-tasks-test-with
     (let ((harness-tasks-max-running 1)
           (other (file-name-as-directory (harness-test-temp-dir))))
@@ -4547,14 +4548,33 @@ give none up."
                (older (at-work "medium" :started 100.0))
                (newer (at-work "medium" :started 200.0))
                (low (at-work "low" :started 300.0))
-               ;; Were they candidates, these would go first: they began last.
-               (_waiting (at-work "low" :started 400.0 :waiting "2 workers"))
+               ;; Its turn over, it waits on its workers: it holds its
+               ;; slot through them, its session idle, not by starting.
+               (waiting (let* ((sid (plist-get (harness-call 'session/create :cwd default-directory
+                                                             :model "demo:scripted")
+                                               :id))
+                               (task (list :id (concat "t-" (harness-short-id 8)) :session sid
+                                           :project default-directory :cwd default-directory
+                                           :prompt "plan it" :state 'active :started 400.0
+                                           :waiting "2 workers running" :created (float-time))))
+                          (harness-call 'priority/set sid "low")
+                          (puthash (plist-get task :id) task harness-tasks--table)
+                          task))
+               ;; Were it a candidate, this would go first: it began last.
                (_elsewhere (at-work "low" :started 500.0 :project other)))
+          (should (harness-tasks--holds-slot-p waiting))
+          (should-not (gethash (plist-get waiting :id) harness-tasks--starting))
+          (should-not (harness-call 'agent/running (plist-get waiting :session)))
+          (should (harness-tasks--outranks-p reviewed waiting))
           (should (harness-tasks--outranks-p reviewed low))
           (should (harness-tasks--outranks-p reviewed older))
           (should-not (harness-tasks--outranks-p reviewed fed-back))
           (should-not (harness-tasks--outranks-p reviewed high))
-          ;; The lowest priority first ...
+          ;; The lowest priority first, the work that began last first:
+          ;; the task waiting on its workers ...
+          (should (equal (plist-get waiting :id) (victim reviewed)))
+          ;; ... then the other of its priority ...
+          (remhash (plist-get waiting :id) harness-tasks--table)
           (should (equal (plist-get low :id) (victim reviewed)))
           ;; ... then, of its own priority, the work that began last.
           (remhash (plist-get low :id) harness-tasks--table)
@@ -4847,6 +4867,330 @@ nothing is said."
       (let* ((id (harness-tasks-test-submit "and another one"))
              (sid (harness-tasks-test-session-id id)))
         (should-not (harness-tasks-test--hint-p sid "Context window capped"))))))
+
+;;;; Pre-emption and return stop the work left running outside the turn
+;;
+;; A task whose session left work running outside its turn -- a
+;; supervisor's workers, sub-agents -- has that work stopped through
+;; `agent/stop-outstanding' when it is pre-empted or returned to the
+;; queue, once no turn of its session runs.  The tests fake that work
+;; with handlers of their own for "write the docs".
+
+(declare-function harness-define-tool "harness-tools")
+
+(defvar harness-tasks-test--workers nil
+  "Non-nil while the test's workers run for the task of \"write the docs\".
+Its session's `agent/outstanding' then says \"2 workers running\"
+\(`harness-tasks-test--report-workers'), and `agent/stop-outstanding'
+stops them (`harness-tasks-test--stop-workers').")
+
+(defvar harness-tasks-test--stops nil
+  "The calls of the test's `agent/stop-outstanding' handler, newest first.
+Each is (SESSION-ID REASON RUNNING), RUNNING non-nil when a turn of
+the session ran at the time.")
+
+(defvar harness-tasks-test--stop-report nil
+  "What the test's workers report to their session when stopped, or nil.
+It goes as a supervisor's report does: a message of the harness's.")
+
+(defun harness-tasks-test--workers-p (session-id)
+  "Non-nil while the test's workers run for SESSION-ID."
+  (and harness-tasks-test--workers
+       (let ((task (harness-tasks--by-session session-id)))
+         (and task (equal "write the docs" (plist-get task :prompt))))))
+
+(defun harness-tasks-test--report-workers (value session-id)
+  "`agent/outstanding' handler: add the test's workers to VALUE while they run."
+  (if (harness-tasks-test--workers-p session-id)
+      (concat (and value (concat value "; ")) "2 workers running")
+    value))
+
+(defun harness-tasks-test--stop-workers (value session-id reason)
+  "`agent/stop-outstanding' handler: stop the test's workers, told REASON.
+Every call is recorded in `harness-tasks-test--stops'.  Workers running
+for SESSION-ID stop, report `harness-tasks-test--stop-report' when set,
+and say so after VALUE; else VALUE stands."
+  (push (list session-id reason (and (harness-call 'agent/running session-id) t))
+        harness-tasks-test--stops)
+  (if (not (harness-tasks-test--workers-p session-id))
+      value
+    (setq harness-tasks-test--workers nil)
+    (when harness-tasks-test--stop-report
+      (harness-catch (harness-call-async 'agent/prompt session-id harness-tasks-test--stop-report
+                                         (list :from (harness-sender-system "supervisor")))
+                     #'ignore))
+    (concat (and value (concat value "; ")) "2 workers stopped")))
+
+(defmacro harness-tasks-test-with-workers (&rest body)
+  "Run BODY with the test's workers running and their handlers on the bus."
+  (declare (indent 0))
+  `(let ((harness-tasks-test--workers t)
+         (harness-tasks-test--stops nil)
+         (harness-tasks-test--stop-report nil))
+     (harness-add-filter 'agent/outstanding #'harness-tasks-test--report-workers)
+     (harness-add-filter 'agent/stop-outstanding #'harness-tasks-test--stop-workers)
+     (unwind-protect (progn ,@body)
+       (harness-remove-filter 'agent/outstanding #'harness-tasks-test--report-workers)
+       (harness-remove-filter 'agent/stop-outstanding #'harness-tasks-test--stop-workers))))
+
+(defun harness-tasks-test--hint-position (sid prefix)
+  "Return where the first hint of session SID starting with PREFIX is, or nil."
+  (cl-position-if (lambda (hint) (and (stringp hint) (string-prefix-p prefix hint)))
+                  (harness-tasks-test-hints sid)))
+
+(defun harness-tasks-test--said-position (sid text)
+  "Return where the first user message of session SID saying TEXT is, or nil."
+  (cl-position text (harness-tasks-test-user-nodes sid)
+               :key (lambda (n) (plist-get n :content)) :test #'equal))
+
+(ert-deftest harness-tasks-sent-back-task-preempts-a-task-waiting-on-its-workers ()
+  "Work sent back from review takes the slot of a task waiting on its workers.
+That task's turn is over, but its workers run on, so it holds its slot.
+Pre-empting it stops them at once, as no turn of its session runs, told
+why: its session says it was pre-empted, then what was stopped.  When
+the slot frees again it carries on in its session, told why by the
+harness."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (harness-tasks-test-with-workers
+      (let* ((harness-tasks-max-running 1)
+             (harness-tasks-require-verification t)
+             (harness-provider-demo-script-override harness-tasks-test--quick)
+             (reviewed (harness-tasks-test-submit "fix the parser"))
+             (rsid (harness-tasks-test-session-id reviewed)))
+        (harness-tasks-test-wait-state reviewed 'review)
+        (let* ((busy (harness-tasks-test-submit "write the docs"))
+               (bsid (harness-tasks-test-session-id busy)))
+          ;; Its turn ends at once, its workers running on: it waits on
+          ;; them, at work, and holds the slot.
+          (harness-test-wait (lambda () (harness-tasks-test--waiting busy)) 5 "the task to wait on its workers")
+          (harness-test-wait (lambda () (harness-tasks-test--idle busy)) 5 "its turn to end")
+          (harness-tasks-test--settle)
+          (let ((waiting (harness-tasks-test-task busy)))
+            (should (eq 'active (plist-get waiting :state)))
+            (should (= 0 (harness-tasks--free-slots (harness-tasks--slot-project waiting)))))
+          (should-not harness-tasks-test--stops)
+          (harness-call 'task/reject reviewed "handle tabs too")
+          ;; The task sent back has the slot; the other is back in line.
+          (let ((preempted (harness-tasks-test-task busy)))
+            (should (eq 'pending (plist-get preempted :state)))
+            (should (eq 'preempted (plist-get preempted :return-reason)))
+            (should (equal reviewed (plist-get preempted :preempted-by)))
+            (should-not (plist-get preempted :waiting)))
+          (should (memq (harness-tasks-test-state reviewed) '(active review)))
+          ;; Its workers were stopped there and then, once, told why.
+          (should (= 1 (length harness-tasks-test--stops)))
+          (pcase-let ((`(,sid ,reason ,running) (car harness-tasks-test--stops)))
+            (should (equal bsid sid))
+            (should (string-prefix-p (format "its task was pre-empted: task %s" reviewed) reason))
+            (should (string-suffix-p ", sent back from review, took its slot" reason))
+            (should-not running))
+          (should-not harness-tasks-test--workers)
+          ;; Its session says it was pre-empted, then what was stopped.
+          (let ((said (harness-tasks-test--hint-position bsid "Task pre-empted: task "))
+                (stopped (harness-tasks-test--hint-position
+                          bsid "Stopped while the task waits in the queue: 2 workers stopped")))
+            (should said)
+            (should stopped)
+            (should (< said stopped)))
+          ;; The task sent back works on the feedback, and is back in review;
+          ;; the slot it frees goes to the task it pre-empted, which carries
+          ;; on in its own session, told why by the harness.
+          (harness-tasks-test-wait-state reviewed 'review)
+          (should (harness-tasks-test--said rsid (harness-tasks--reject-text "handle tabs too")))
+          (harness-tasks-test-wait-state busy 'review)
+          (let ((opening (car (harness-tasks-test--said bsid harness-tasks--preempted-message))))
+            (should opening)
+            (should (eq 'system (harness-sender-kind (harness-node-sender opening)))))
+          (should (equal bsid (plist-get (harness-tasks-test-task busy) :session)))
+          ;; Nothing else was stopped.
+          (should (= 1 (length harness-tasks-test--stops))))))))
+
+(ert-deftest harness-tasks-return-to-pending-stops-the-work-left-running ()
+  "Returning a task that waits on its workers stops them and frees its slot.
+Its turn is over, so they stop at once, told why, and the task next in
+line takes the slot.  When it starts again its session carries on,
+told so by the harness."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (harness-tasks-test-with-workers
+      (let* ((harness-tasks-max-running 1)
+             (harness-provider-demo-script-override harness-tasks-test--quick)
+             (busy (harness-tasks-test-submit "write the docs"))
+             (bsid (harness-tasks-test-session-id busy)))
+        (harness-test-wait (lambda () (harness-tasks-test--waiting busy)) 5 "the task to wait on its workers")
+        (harness-test-wait (lambda () (harness-tasks-test--idle busy)) 5 "its turn to end")
+        (let ((next (harness-tasks-test-submit "fix the parser")))
+          ;; No slot for the next task while the first waits on its workers.
+          (harness-tasks-test--settle)
+          (should (eq 'pending (harness-tasks-test-state next)))
+          (should (eq 'active (harness-tasks-test-state busy)))
+          (should (eq 'pending (plist-get (harness-call 'task/return-to-pending busy) :state)))
+          ;; Its workers were stopped there and then, once, told why.
+          (should (equal (list (list bsid "its task was returned to the queue" nil)) harness-tasks-test--stops))
+          (should-not harness-tasks-test--workers)
+          (should (harness-tasks-test--hint-p bsid "Stopped while the task waits in the queue: 2 workers stopped"))
+          ;; Its slot goes to the next task; when that is done, it carries on.
+          (harness-tasks-test-wait-state next 'done)
+          (harness-tasks-test-wait-state busy 'done)
+          (let ((opening (car (harness-tasks-test--said bsid harness-tasks--paused-message))))
+            (should opening)
+            (should (eq 'system (harness-sender-kind (harness-node-sender opening)))))
+          (should (= 1 (length harness-tasks-test--stops))))))))
+
+(ert-deftest harness-tasks-return-to-pending-is-not-undone-by-the-stopped-work ()
+  "What the work stopped with a return reports does not start the task again.
+The report reaches the session while the task waits: its turn is
+refused and the message kept for the task's start.  The return starts
+nothing, though a slot is free, until the task is started; then the
+session carries on with the report before the harness's message."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (harness-tasks-test-with-workers
+      (let* ((harness-tasks-max-running 1)
+             (harness-provider-demo-script-override harness-tasks-test--quick)
+             (harness-tasks-test--stop-report "Step 2 (write the docs) was interrupted: its task was returned to the queue.")
+             (busy (harness-tasks-test-submit "write the docs"))
+             (bsid (harness-tasks-test-session-id busy)))
+        (harness-test-wait (lambda () (harness-tasks-test--waiting busy)) 5 "the task to wait on its workers")
+        (harness-test-wait (lambda () (harness-tasks-test--idle busy)) 5 "its turn to end")
+        ;; The scheduling pass its turn's end asked for is over.
+        (harness-tasks-test--settle)
+        (harness-call 'task/return-to-pending busy)
+        (should (= 1 (length harness-tasks-test--stops)))
+        (harness-test-wait (lambda () (harness-tasks-test--hint-p bsid "Turn not started: its task ")) 5
+                           "the report's turn refused")
+        (should (harness-tasks-test--said bsid harness-tasks-test--stop-report))
+        (harness-test-wait (lambda () (harness-tasks-test--idle busy)) 5 "the refused turn over")
+        (accept-process-output nil 0.2)
+        ;; The slot is free, but the task waits on.
+        (should (= 1 (harness-tasks--free-slots (harness-tasks--slot-project (harness-tasks-test-task busy)))))
+        (should (eq 'pending (harness-tasks-test-state busy)))
+        (should-not (harness-tasks-test--said bsid harness-tasks--paused-message))
+        ;; Started, it carries on, the report before the harness's message.
+        (harness-call 'task/start busy)
+        (harness-tasks-test-wait-state busy 'done)
+        (let ((report (harness-tasks-test--said-position bsid harness-tasks-test--stop-report))
+              (opening (harness-tasks-test--said-position bsid harness-tasks--paused-message)))
+          (should report)
+          (should opening)
+          (should (< report opening)))
+        (should (= 1 (length (harness-tasks-test--said bsid harness-tasks-test--stop-report))))
+        (should (= 1 (length harness-tasks-test--stops)))))))
+
+(ert-deftest harness-tasks-preempted-turn-ends-before-its-workers-stop ()
+  "A task pre-empted mid-turn has its workers stopped once that turn has ended.
+The turn takes a while to stop (a call that does not return holds it
+up until the cancel's grace is out); the workers run on until then.
+Stopped with no turn of the session running, what they report reaches
+it while the task waits, refused and kept, rather than steering the
+turn being cancelled, and the task carries on with it once it starts
+again."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (harness-tasks-test-with-workers
+      (let* ((stall t)
+             (stalled nil)
+             (feedback-turn
+              '((:type wait :seconds 0.6) (:type text :delta "Done.\n") (:type done :stop-reason end-turn)))
+             (sent-back nil)
+             (harness-agent--cancel-grace 0.2)
+             (harness-tasks-max-running 1)
+             (harness-tasks-require-verification t)
+             (harness-tasks-test--stop-report "Step 2 (write the docs) was interrupted: its task was pre-empted.")
+             (harness-provider-demo-script-override
+              (lambda (request)
+                (let* ((task (harness-tasks--by-session (plist-get (plist-get request :session) :id)))
+                       (prompt (plist-get task :prompt)))
+                  (cond ((and stall (equal "write the docs" prompt))
+                         '((:type tool-call :id "s-1" :name "stall" :input nil)))
+                        ((and sent-back (equal "fix the parser" prompt)) feedback-turn)
+                        (t harness-tasks-test--quick)))))
+             (reviewed (harness-tasks-test-submit "fix the parser")))
+        (harness-define-tool "stall" :label "Stall" :description "never returns" :kind 'read
+                             :handler (lambda (_input _ctx)
+                                        (setq stalled t)
+                                        (harness-with-promise (resolve reject) (ignore resolve reject))))
+        (harness-tasks-test-wait-state reviewed 'review)
+        (let* ((busy (harness-tasks-test-submit "write the docs"))
+               (bsid (harness-tasks-test-session-id busy)))
+          ;; At work mid-turn, on a call that does not return.
+          (harness-test-wait (lambda () stalled) 5 "the task at work on its call")
+          (should (harness-tasks-test--running-p bsid))
+          (setq stall nil sent-back t)
+          (harness-call 'task/reject reviewed "handle tabs too")
+          (should (eq 'pending (harness-tasks-test-state busy)))
+          (should (eq 'preempted (plist-get (harness-tasks-test-task busy) :return-reason)))
+          ;; Its turn is still stopping: its workers run on, untouched.
+          (should (harness-call 'agent/running bsid))
+          (should-not harness-tasks-test--stops)
+          (should harness-tasks-test--workers)
+          (should-not (harness-tasks-test--hint-position bsid "Task pre-empted: task "))
+          ;; Once the turn has ended they stop, while no turn of it runs.
+          (harness-test-wait (lambda () harness-tasks-test--stops) 5 "the workers stopped")
+          (should (= 1 (length harness-tasks-test--stops)))
+          (pcase-let ((`(,sid ,reason ,running) (car harness-tasks-test--stops)))
+            (should (equal bsid sid))
+            (should (string-prefix-p (format "its task was pre-empted: task %s" reviewed) reason))
+            (should-not running))
+          (should (eq 'pending (harness-tasks-test-state busy)))
+          (should (memq (harness-tasks-test-state reviewed) '(active review)))
+          (let ((said (harness-tasks-test--hint-position bsid "Task pre-empted: task "))
+                (stopped (harness-tasks-test--hint-position
+                          bsid "Stopped while the task waits in the queue: 2 workers stopped")))
+            (should said)
+            (should stopped)
+            (should (< said stopped)))
+          ;; Their report waits in the session for the task's start, which
+          ;; comes once the task sent back is in review again.
+          (harness-test-wait (lambda () (harness-tasks-test--said bsid harness-tasks-test--stop-report)) 5
+                             "the report kept")
+          (harness-tasks-test-wait-state reviewed 'review)
+          (harness-tasks-test-wait-state busy 'review)
+          (let ((report (harness-tasks-test--said-position bsid harness-tasks-test--stop-report))
+                (opening (harness-tasks-test--said-position bsid harness-tasks--preempted-message)))
+            (should report)
+            (should opening)
+            (should (< report opening)))
+          (should (= 1 (length harness-tasks-test--stops))))))))
+
+(ert-deftest harness-tasks-started-again-before-its-turn-stopped-keeps-its-work ()
+  "A task started again while the turn its return stopped is ending keeps its work.
+It is back at work when that turn ends, so its workers run on: nothing
+of its is stopped, and its next turn ends waiting on them again."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (harness-tasks-test-with-workers
+      (let* ((stall t)
+             (stalled nil)
+             (harness-agent--cancel-grace 0.3)
+             (harness-tasks-max-running 1)
+             (harness-provider-demo-script-override
+              (lambda (request)
+                (let ((task (harness-tasks--by-session (plist-get (plist-get request :session) :id))))
+                  (if (and stall (equal "write the docs" (plist-get task :prompt)))
+                      '((:type tool-call :id "s-1" :name "stall" :input nil))
+                    harness-tasks-test--quick)))))
+        (harness-define-tool "stall" :label "Stall" :description "never returns" :kind 'read
+                             :handler (lambda (_input _ctx)
+                                        (setq stalled t)
+                                        (harness-with-promise (resolve reject) (ignore resolve reject))))
+        (let* ((busy (harness-tasks-test-submit "write the docs"))
+               (bsid (harness-tasks-test-session-id busy)))
+          (harness-test-wait (lambda () stalled) 5 "the task at work on its call")
+          (setq stall nil)
+          (harness-call 'task/return-to-pending busy)
+          (should (eq 'pending (harness-tasks-test-state busy)))
+          (should (harness-call 'agent/running bsid))
+          ;; The user's message starts it again while that turn is ending.
+          (harness-call 'task/prompt busy "Go on with the docs.")
+          (should (eq 'active (harness-tasks-test-state busy)))
+          ;; The turn ends, the task carries on, and its workers run on.
+          (harness-test-wait (lambda () (harness-tasks-test--waiting busy)) 5 "the task to wait on its workers")
+          (should (eq 'active (harness-tasks-test-state busy)))
+          (should harness-tasks-test--workers)
+          (should-not harness-tasks-test--stops)
+          (should-not (harness-tasks-test--hint-p bsid "Stopped while the task waits in the queue: ")))))))
 
 (provide 'harness-tasks-test)
 ;;; harness-tasks-test.el ends here

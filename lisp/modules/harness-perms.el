@@ -40,7 +40,17 @@
 ;; the new decision; `:final' stops the chain.  Denials always carry a
 ;; `:reason' and, when there is something the model can do about it, a
 ;; `:hint', because a denial the model can act on is the difference
-;; between an autonomous session and one that stalls.  Other modules
+;; between an autonomous session and one that stalls.
+;;
+;; The user, never the harness, has the last word.  A denial blocks the
+;; call as it happens, so a session is never stuck on a prompt nobody
+;; answers; but every denial is kept, per session, under the handle of
+;; the call's id, and the user can approve that one call in the chat.
+;; The agent is then told, and runs it unchanged with `rerun_approved',
+;; which asks the chain nothing: the approval is what it would have
+;; asked.  "Denied calls the user can approve" below has the rest.
+;;
+;; Other modules
 ;; add stages of their own: the session tools have the user confirm
 ;; session_move at 6 (`harness-perms-confirm', see Confirmations), the
 ;; supervisor module denies a supervising session what it may not use at
@@ -197,8 +207,13 @@
 
 (defconst harness-perms--auto-allow-tools
   '("ask_user" "plan" "todo_write" "skill_search" "skill_load"
-    "web_search" "notify" "hand_in" "open_harness")
+    "web_search" "notify" "hand_in" "open_harness" "rerun_approved")
   "Tools that never need approval, in every permission mode.
+`rerun_approved' is included because it can run only a call the user
+approved by hand (`permission/approve-denied'): asking again about the
+one call whose whole point is that the user already said yes would let
+a gate that denied the call originally (the write-up gate, say) deny
+the rerun too.
 `web_search' is included because it only sends its query to the
 configured `harness-websearch-provider', so even unattended task
 sessions can look things up; `web_fetch' is not, because it reaches
@@ -2972,6 +2987,296 @@ recorded nothing new, and TEXT says what happened."
                                                (list :undo outcome :result message))))
         (list :outcome outcome :message message))))))
 
+;;;; Denied calls the user can approve
+;;
+;; The harness can deny a call -- a standing rule, the jail, a gate such
+;; as the write-up one, the auto-mode judge -- and the denial stands for
+;; the call.  But the user, never the harness, has the last word: every
+;; denial is kept per session under the handle of its call id, with the
+;; tool and the very input the call was denied with
+;; (`harness-perms--remember-denied'), and the user can approve that one
+;; call from the chat ([Approve], `permission/approve-denied').  The
+;; agent is then told, and runs the stored call unchanged with
+;; `rerun_approved', which asks the permission chain nothing: the user's
+;; approval is what it would have asked.  The tool takes the handle
+;; alone, so the arguments cannot change, and a handle is used once.
+;;
+;; The record lives in memory for this run and in the session's own
+;; transcript, where it outlives a reload: the call's node holds the
+;; tool and the input the model asked with, and its denied result the
+;; `:meta' the approval is written into.  `harness-perms--denied-record'
+;; reads both, so a session reloaded after an approval still knows it.
+
+(defvar harness-perms--denied (make-hash-table :test 'equal)
+  "Session id -> the calls denied in this run, newest first.
+Each record is a plist as `harness-perms--denied-record' describes.")
+
+(defconst harness-perms--denied-kept 100
+  "How many denied calls a session keeps in memory.
+Older ones fall out; the session's transcript still has them.")
+
+(defconst harness-perms-denied-note
+  "The user can approve this call in the chat (handle %s); once they have, rerun it unchanged with rerun_approved and that handle."
+  "What a denial tells the agent about the user's approval.
+See `rerun_approved': the handle names the denied call, the user alone
+approves it, and the call then runs as it was denied.")
+
+(harness-defmethod permission/denied-note (session-id request)
+  "Return what a denial of REQUEST tells SESSION-ID's agent about the user.
+The note names the handle the call is kept under
+\(`harness-perms--remember-denied'), which the user can approve in the
+chat; the agent then reruns the call unchanged with `rerun_approved'.
+Empty for a request with no call id, and so no handle."
+  (ignore session-id)
+  (let ((handle (plist-get request :call-id)))
+    (if (and (stringp handle) (not (harness-string-blank-p handle)))
+        (format harness-perms-denied-note handle)
+      "")))
+
+(defun harness-perms--denied-node (session-id handle)
+  "Return the nodes of the denied call HANDLE of SESSION-ID, or nil.
+That is (CALL . RESULT): the call's node, with the tool and the input
+the model asked with, and the result node the harness marked denied.
+The result node's `:meta' carries the approval, so it is where one
+outlives a session reload.  nil without the session module, or when the
+transcript has no denied call of that id."
+  (when (harness-method-exists-p 'session/nodes)
+    (let (call result)
+      (dolist (n (harness-call 'session/nodes session-id))
+        (when (equal (plist-get n :call-id) handle)
+          (pcase (harness-perms--sym (plist-get n :kind))
+            ('tool-call (setq call n))
+            ('tool-result
+             (when (harness-json-true-p (plist-get (plist-get n :meta) :denied))
+               (setq result n))))))
+      (and result (cons (or call result) result)))))
+
+(defun harness-perms--denied-record (session-id handle)
+  "Return the record of the denied call HANDLE of SESSION-ID, or nil.
+A record is (:handle H :tool NAME :input INPUT :kind KIND :reason TEXT
+:hint TEXT :at FLOAT :approved BOOL :approved-at FLOAT :used BOOL
+:rerun-call-id ID :node-id NODE-ID); REASON and HINT are the decision's,
+and INPUT the call's own, exactly as it was denied.  The record kept in
+memory for this run is the base, with what the session's transcript
+says of the same call over it, so an approval made before a reload is
+seen.  Without a kept record and without a denied call in the
+transcript, nil: the handle is no call this session can rerun."
+  (let* ((kept (cl-find-if (lambda (r) (equal (plist-get r :handle) handle))
+                           (gethash session-id harness-perms--denied)))
+         (nodes (harness-perms--denied-node session-id handle))
+         (call (car nodes))
+         (result (cdr nodes))
+         (meta (and result (plist-get result :meta)))
+         (truth (lambda (key) (harness-json-true-p (and meta (plist-get meta key))))))
+    (when (or kept call)
+      (harness-plist-merge
+       (or kept (list :handle handle
+                      :tool (and call (plist-get call :tool))
+                      :input (and call (plist-get call :input))
+                      :kind (and call (plist-get call :kind))
+                      :at (and call (plist-get call :ts))
+                      :approved nil
+                      :used nil))
+       (list :node-id (and result (plist-get result :id))
+             :approved (or (funcall truth :approved) (and kept (plist-get kept :approved)))
+             :approved-at (or (and meta (plist-get meta :approved-at))
+                              (and kept (plist-get kept :approved-at)))
+             :used (or (funcall truth :used) (and kept (plist-get kept :used)))
+             :rerun-call-id (or (and meta (plist-get meta :rerun-call-id))
+                                (and kept (plist-get kept :rerun-call-id))))))))
+
+(defun harness-perms--remember-denied (session-id request decision)
+  "Keep REQUEST, which DECISION denies, as a call the user can approve.
+The handle is the call's own id (`:call-id'); the record holds the tool
+and the input exactly as they were denied, with what the agent was
+told.  A call already kept is replaced by this one, and the oldest fall
+out past `harness-perms--denied-kept'.  A subscriber of
+`permission/decided', so every denial is kept, whichever stage made it;
+a decision that allows the call, or one still asking, is no denial and
+is left alone.  A request without a call id is no call the user can
+approve either.  Return the record, or nil."
+  (let ((handle (plist-get request :call-id)))
+    (when (and (stringp handle) (not (harness-string-blank-p handle))
+               (not (eq (harness-perms--sym (plist-get decision :behavior)) 'allow)))
+      (let ((record (list :handle handle
+                          :tool (plist-get request :tool)
+                          :input (copy-tree (or (plist-get decision :input)
+                                                (plist-get request :input)))
+                          :kind (plist-get request :kind)
+                          :reason (plist-get decision :reason)
+                          :hint (plist-get decision :hint)
+                          :at (float-time)
+                          :approved nil
+                          :used nil)))
+        (puthash session-id
+                 (cons record (cl-remove handle (gethash session-id harness-perms--denied)
+                                         :key (lambda (r) (plist-get r :handle)) :test #'equal))
+                 harness-perms--denied)
+        (let ((kept (gethash session-id harness-perms--denied)))
+          (when (> (length kept) harness-perms--denied-kept)
+            (puthash session-id (seq-take kept harness-perms--denied-kept) harness-perms--denied)))
+        record))))
+
+(defun harness-perms--forget-denied (session-id &rest _)
+  "Forget the denied calls of SESSION-ID, whose session is gone.
+Nothing is lost for a session kept on disk: its transcript still has
+the calls, and an approval it recorded (`harness-perms--denied-node')."
+  (remhash session-id harness-perms--denied))
+
+(defun harness-perms--update-denied-node (session-id node-id plist)
+  "Merge PLIST into the `:meta' of node NODE-ID of SESSION-ID.
+The node is the denied result an approval is written into: the chat
+shows it from there, and a session reloaded later knows it.  A node or
+a session module that is not there leaves the memory record the truth
+of this run; a failure is logged and changes nothing."
+  (when (and node-id (harness-method-exists-p 'session/update-node))
+    (condition-case err
+        (when-let* ((node (harness-call 'session/node session-id node-id)))
+          (harness-call 'session/update-node session-id node-id
+                        :meta (harness-plist-merge (plist-get node :meta) plist)))
+      (error (harness-log 'warn "perms: could not mark denied call %s of %s: %s"
+                          node-id session-id (harness-error-message err))))))
+
+(defun harness-perms--mark-denied (session-id handle plist)
+  "Merge PLIST into the record of the denied call HANDLE of SESSION-ID.
+That is the record in memory and, when the session's transcript has the
+call's denied result, that node's `:meta', where the change outlives a
+reload.  Return the record, or nil when the handle is no denied call of
+the session."
+  (when-let* ((record (harness-perms--denied-record session-id handle)))
+    (let ((new (harness-plist-merge record plist)))
+      (puthash session-id
+               (cons new (cl-remove handle (gethash session-id harness-perms--denied)
+                                    :key (lambda (r) (plist-get r :handle)) :test #'equal))
+               harness-perms--denied)
+      (harness-perms--update-denied-node session-id (plist-get record :node-id) plist)
+      new)))
+
+(defconst harness-perms-approved-text
+  "The user approved the denied call to %s (handle %s). Run it now, unchanged, with rerun_approved and that handle: it runs the very call they approved, with the input it was denied with."
+  "What the agent is told after the user approves a denied call.
+See `permission/approve-denied'.")
+
+(defun harness-perms--tell-approved (session-id handle tool)
+  "Tell SESSION-ID's agent that the user approved the denied call HANDLE.
+An idle session starts a turn for it; a running one is steered.  A
+failure is logged: the approval stands and the chat shows it, so the
+user can ask the agent to look again."
+  (when (harness-method-exists-p 'agent/prompt)
+    (condition-case err
+        (harness-call 'agent/prompt session-id
+                      (list (list :type "text"
+                                  :text (format harness-perms-approved-text
+                                                (or tool "the tool") handle)))
+                      ;; The user approved it, but the harness says so.
+                      (list :from (harness-sender-system "permissions")))
+      (error (harness-log 'warn "perms: telling %s of the approval failed: %S" session-id err)))))
+
+(harness-defmethod permission/approve-denied (session-id handle)
+  "Approve the denied call HANDLE of SESSION-ID, for the user.
+The user alone approves a denied call, and only this way: the chat's
+[Approve] button, for the call whose id is HANDLE.  The call is marked
+approved, which the chat shows and a session reload keeps, and the
+agent is told to run it unchanged with `rerun_approved'.  A request to
+approve twice is no error: the agent is told again, unless the call was
+already rerun.  A blank handle, or one this session has no denied call
+for, signals a `harness-error'.  Return (:handle :tool :approved
+:used :message)."
+  (unless (and (stringp handle) (not (harness-string-blank-p handle)))
+    (signal 'harness-error (list "Approve which denied call? The handle names it")))
+  (let ((record (harness-perms--denied-record session-id handle)))
+    (unless record
+      (signal 'harness-error (list (format "No denied call %s in this session" handle))))
+    (let ((tool (plist-get record :tool)))
+      (if (plist-get record :used)
+          (list :handle handle :tool tool :approved t :used t
+                :message (format "Call %s was already approved and rerun; a handle is used once" handle))
+        (let ((approved (plist-get record :approved)))
+          (harness-perms--mark-denied session-id handle (list :approved t :approved-at (float-time)))
+          (harness-perms--tell-approved session-id handle tool)
+          (list :handle handle :tool tool :approved t
+                :message (if approved
+                             "That call was already approved; the session is told again to rerun it"
+                           "Approved; the session is told to rerun the call with rerun_approved")))))))
+
+(defun harness-perms--rerun-result (handle tool result)
+  "Return RESULT of the approved denied call TOOL (HANDLE), ready to show.
+The call ran as it was denied, so the text says who approved it and
+what ran, the call's own content under it.  The call's own props travel
+along, with `:rerun-of' and `:rerun-tool' in the `:meta' so the
+transcript links the rerun to the call it was denied as."
+  (let* ((text (or (plist-get result :content) ""))
+         (note (format "The user approved denied call %s (%s); it ran as it was denied."
+                       handle (or tool "the tool"))))
+    (append (list :content (if (string-empty-p text) note (concat note "\n\n" text))
+                  :is-error (and (plist-get result :is-error) t))
+            (harness-plist-remove result :content :is-error :meta)
+            (list :meta (append (list :user-approved t :rerun-of handle :rerun-tool tool)
+                                (plist-get result :meta))))))
+
+(defun harness-perms--run-denied (session-id record rerun-call-id)
+  "Run the call RECORD holds, as it was denied, and mark it rerun.
+The permission chain is not asked: the user approved this call by hand
+\(`permission/approve-denied'), and that is what the chain would have
+asked for.  RERUN-CALL-ID is the call of `rerun_approved' that runs it,
+whose block the rerun's progress and notes go under.  Return a promise
+of the result, the denied call's own, with `harness-perms--rerun-result'
+saying what it is."
+  (let ((handle (plist-get record :handle))
+        (tool (plist-get record :tool)))
+    (harness-then
+     (harness-call-async 'tools/execute-approved
+                         session-id
+                         (list :id rerun-call-id :name tool :input (plist-get record :input)))
+     (lambda (result)
+       (harness-perms--mark-denied session-id handle
+                                   (list :used t :rerun-call-id rerun-call-id :rerun-at (float-time)))
+       (harness-perms--rerun-result handle tool result)))))
+
+(defun harness-perms--rerun-approved (input ctx)
+  "Handler of `rerun_approved', run with the call's INPUT and CTX.
+INPUT holds one thing, `:handle': the denied call the user approved.
+Refused are a handle this session has no denied call for, one the user
+has not approved, and one already rerun; nothing else of INPUT is
+looked at, so the tool and its arguments cannot change."
+  (let ((handle (plist-get input :handle)))
+    (if (not (and (stringp handle) (not (harness-string-blank-p handle))))
+        (harness-tool-error "rerun_approved needs handle: the handle the denial named, such as \"call_ab12\"")
+      (let* ((session-id (plist-get ctx :session-id))
+             (record (harness-perms--denied-record session-id handle)))
+        (cond
+         ((null record)
+          (harness-tool-error
+           (format "No denied call %s in this session: a handle names a call this session was denied, and only one the user approved can be rerun"
+                   handle)))
+         ((not (stringp (plist-get record :tool)))
+          (harness-tool-error
+           (format "Denied call %s is not in this session's transcript any more, so there is no call to run" handle)))
+         ((plist-get record :used)
+          (harness-tool-error
+           (format "Denied call %s was already rerun%s; a handle is used once"
+                   handle (let ((at (plist-get record :rerun-call-id)))
+                            (if (and (stringp at) (not (string-empty-p at)))
+                                (format " (by call %s)" at)
+                              "")))))
+         ((not (plist-get record :approved))
+          (harness-tool-error
+           (format "Denied call %s has not been approved by the user. They can approve it in the chat, and the harness tells you when they have; do not ask again before that, and carry on another way"
+                   handle)))
+         (t (harness-perms--run-denied session-id record (plist-get ctx :call-id))))))))
+
+(harness-define-tool "rerun_approved"
+  :label "Rerun approved call"
+  :description "Run a call the user has approved after it was denied, exactly as it was denied. Pass the handle the denial named: the tool and the input are the call's own as it was denied, and cannot be changed. The user approves a denied call in the chat; a handle they have not approved, one this session does not know, and one already rerun are refused. The call runs with no permission check, since the user's approval is what the permission system would have asked for."
+  :schema '(:type "object"
+            :properties (:handle (:type "string" :description "The handle of the denied call the user approved, as the denial named it."))
+            :required ("handle"))
+  :kind 'meta
+  :subject (lambda (input)
+             (let ((handle (plist-get input :handle)))
+               (and (stringp handle) (harness-tools-short-id handle))))
+  :handler #'harness-perms--rerun-approved)
+
 ;;;; Confirmations
 ;;
 ;; Some calls change what only the user may change, whatever the
@@ -3322,9 +3627,11 @@ to call again."
   (harness-add-filter 'permission/decide #'harness-perms--auto 30)
   (harness-add-filter 'permission/decide #'harness-perms--non-interactive 40)
   (harness-add-filter 'permission/decide #'harness-perms--ask 90)
+  (harness-on 'permission/decided #'harness-perms--remember-denied)
   (harness-on 'permission/decided #'harness-perms--on-decided)
   (harness-on 'session/updated #'harness-perms--on-session-updated)
   (harness-on 'session/deleted #'harness-perms--forget-revealed)
+  (harness-on 'session/deleted #'harness-perms--forget-denied)
   ;; What was granted until a turn ends goes when it ends.
   (harness-on 'agent/turn-started #'harness-perms--end-turn-grants)
   (harness-on 'agent/turn-ended #'harness-perms--end-turn-grants))
@@ -3335,9 +3642,11 @@ to call again."
                 harness-perms--jail harness-perms--mode
                 harness-perms--auto harness-perms--non-interactive harness-perms--ask))
     (harness-remove-filter 'permission/decide fn))
+  (harness-off (cons 'permission/decided #'harness-perms--remember-denied))
   (harness-off (cons 'permission/decided #'harness-perms--on-decided))
   (harness-off (cons 'session/updated #'harness-perms--on-session-updated))
   (harness-off (cons 'session/deleted #'harness-perms--forget-revealed))
+  (harness-off (cons 'session/deleted #'harness-perms--forget-denied))
   (harness-off (cons 'agent/turn-started #'harness-perms--end-turn-grants))
   (harness-off (cons 'agent/turn-ended #'harness-perms--end-turn-grants)))
 
@@ -3348,7 +3657,7 @@ to call again."
 (harness-perms--init)
 
 (harness-define-module 'perms
-  :doc "Directory jail, directory requests, sandbox guard, permission modes, auto judge and user prompts."
+  :doc "Directory jail, directory requests, sandbox guard, permission modes, auto judge, user prompts and the user's approval of denied calls."
   :requires '(config tools)
   :init #'harness-perms--init
   :shutdown #'harness-perms--shutdown)

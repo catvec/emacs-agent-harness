@@ -1165,6 +1165,21 @@ task's card (`harness-tasks--missing-report')."
           (harness-media--say (format "%s\n\n**What and why.** %s\n\n**Change.** %s\n\n**Done when.** The behaviour above works and a test in `tests/` covers it.\n\n**Open questions.** %s"
                                       (nth 1 entry) (nth 2 entry) (nth 3 entry) (nth 4 entry))))))
 
+(defun harness-media--baseline-denied-script (_request)
+  "A turn that stops on a call the session's own rule refuses."
+  (list
+   (harness-media--think "The suite is the fastest way to see what the pooled client changes, and it has to be run before I touch anything. `python3 -m unittest` is exactly what this session's rules refuse, so the call will be denied; the user can approve that one call in the chat.")
+   (harness-media--say "Before I change `acme/webhooks.py`, let me run the suite as a baseline:")
+   (harness-media--tool "bash" :command "python3 -m unittest")))
+
+(defun harness-media--rerun-approved-script (request)
+  "The turn the user's approval starts: rerun the refused call by handle.
+The handle is the one the approval message names."
+  (let* ((text (or (car (last (harness-media--user-texts request))) ""))
+         (handle (and (string-match "handle \\([^ )]+\\)" text) (match-string 1 text))))
+    (list (harness-media--tool "rerun_approved" :handle handle)
+          (harness-media--say "The suite is green, so the baseline holds. Now the pooled client in `acme/webhooks.py`."))))
+
 (defconst harness-media--titles
   '(("hmac" . "Constant-time API key checks")
     ("requires-python" . "Require Python 3.12")
@@ -1197,6 +1212,9 @@ task's card (`harness-tasks--missing-report')."
     ("Hold this turn" . harness-media--hold-script)
     ("Let a sub-agent run" . harness-media--notes-script)
     ("Run the project's check suite" . harness-media--notes-child-script)
+    ;; The denied call and the user's approval of it.
+    ("baseline" . harness-media--baseline-denied-script)
+    ("The user approved the denied call" . harness-media--rerun-approved-script)
     ("/health" . harness-media--task-health))
   "Scripts as (REGEXP . FUNCTION), matched against the newest user message.")
 
@@ -1923,6 +1941,62 @@ picture is taken last, so its usage counts in none of theirs."
     (harness-call 'agent/cancel id)
     (harness-media--wait (lambda () (not (harness-call 'agent/running id))) 15 "the turn to end")
     (harness-call 'session/delete id)))
+
+(defun harness-media--denied-call (id)
+  "Return the newest refused call of session ID, or nil.
+That is its tool result whose `:meta' says `:denied', the node the
+user's approval is written into and its handle, the call's id."
+  (car (last (cl-remove-if-not
+              (lambda (n) (and (equal (format "%s" (plist-get n :kind)) "tool-result")
+                               (harness-json-true-p (plist-get (plist-get n :meta) :denied))))
+              (harness-call 'session/nodes id)))))
+
+(defun harness-media--chat-denied (approve)
+  "Run the refused-command turn of a session and show its chat.
+The session's own rule refuses commands, so its `python3 -m unittest'
+call is denied and offers [Approve].  With APPROVE, the user approves
+that call: the agent is told, reruns it unchanged with `rerun_approved',
+and the chat shows the rerun under the call it was refused as.  Return
+the chat buffer."
+  (harness-media--reset-layout)
+  (let* ((id (harness-media--new-session :name "Baseline the webhooks suite"
+                                         :model "claude:claude-sonnet-5"
+                                         :permission-mode 'ask))
+         (buffer nil))
+    ;; The picture's rule: this session does not run commands.
+    (harness-perms-add-rule id '(:tool "bash" :behavior deny) 'session)
+    (harness-media--prompt id "Before I change acme/webhooks.py, run the suite for a baseline; then install httpx and pool the connections.")
+    (let ((denied (harness-media--denied-call id)))
+      (unless denied (error "The session's command was not refused"))
+      (setq buffer (harness-media--open-chat id 'full))
+      (when approve
+        (harness-call 'permission/approve-denied id (plist-get denied :call-id))
+        (harness-media--wait (lambda () (not (eq (harness-media--status id) 'idle))) 15
+                             "the rerun to start")
+        (harness-media--wait-status id '(idle))))
+    (harness-media--expand buffer "bash")
+    (when approve (harness-media--expand buffer "rerun_approved"))
+    (harness-media--to-bottom buffer)
+    (harness-media--fit (harness-media--text-lines (selected-window)) 26)
+    (harness-media--settle 1)
+    buffer))
+
+(defun harness-media-shot-chat-denied ()
+  "A call the harness refuses, with the [Approve] that lets it run anyway.
+The session's rule refuses commands; the denial names the handle and the
+chat offers the user's approval, which no permission mode, rule or
+judge can deny.  Taken last: its session would count in the usage
+pictures."
+  (harness-media--chat-denied nil)
+  (harness-media--capture "chat-denied"))
+
+(defun harness-media-shot-chat-denied-approved ()
+  "That call after the user approved it: rerun exactly as it was refused.
+The chat shows the call marked user-approved, the agent's
+`rerun_approved' call under it with what the command printed, and the
+handle linking the two."
+  (harness-media--chat-denied t)
+  (harness-media--capture "chat-denied-approved"))
 
 (defun harness-media--notes-child (parent)
   "Return the sub-agent session PARENT sent to run the checks, once it exists."
@@ -2721,7 +2795,11 @@ afterwards."
     ;; pictures, whose numbers its session would join.
     ("notes" . harness-media-shot-notes)
     ;; After every picture of usage: its session's usage would count there.
-    ("chat-cowboy" . harness-media-shot-chat-cowboy))
+    ("chat-cowboy" . harness-media-shot-chat-cowboy)
+    ;; And after that one: these make sessions of their own, whose usage
+    ;; would count in the usage pictures' totals.
+    ("chat-denied" . harness-media-shot-chat-denied)
+    ("chat-denied-approved" . harness-media-shot-chat-denied-approved))
   "Every picture, as (NAME . FUNCTION), in the order they are taken.")
 
 ;;;; Entry point
