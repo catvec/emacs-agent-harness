@@ -18,6 +18,7 @@
 (defvar harness-provider-demo-script-override)
 (defvar harness-usage-live-interval)
 (defvar harness-ui--live)
+(defvar harness-ui--sessions)
 (defvar mwheel-scroll-up-function)
 (defvar mwheel-scroll-down-function)
 (defvar harness-perms-rules)
@@ -821,6 +822,86 @@ the header follows, and the transcript notes each change."
         (harness-test-wait (lambda () (harness-ui-chat-test-find buf "non-interactive off")) 5 "the hint")
         (should (< (harness-ui-chat-test-find buf "non-interactive on")
                    (harness-ui-chat-test-find buf "non-interactive off")))))))
+
+(ert-deftest harness-ui-chat-header-leads-up-to-the-parent ()
+  "A session started from another says so and leads back up to it.
+A fork, a sub-agent and a BTW name the session they were started from
+right after their own name; clicking that name, or `harness-up-to-parent',
+shows it: the window that shows the parent already is selected when
+there is one, else the parent opens where the child is shown.  A
+session started from nothing, or whose parent is gone, says so instead."
+  (harness-ui-chat-test-with
+    (let* ((parent (harness-ui-chat-test-session "Planner"))
+           (child (plist-get (harness-call 'session/create
+                                           :cwd (harness-test-temp-dir) :model "demo:scripted"
+                                           :name "Read the parser" :kind 'subagent :parent-id parent)
+                             :id))
+           (plain (harness-ui-chat-test-session "On its own")))
+      (harness-test-wait (lambda () (and (harness-ui-session parent) (harness-ui-session child)))
+                         5 "the parent and its child in the session cache")
+      (let* ((parent-buf (harness-ui-chat-test-open parent))
+             (child-buf (harness-ui-chat-test-open child))
+             (plain-buf (harness-ui-chat-test-open plain)))
+        ;; The relation the child's kind names, a symbol or (over ACP) a string.
+        (should (equal "sub-agent of" (harness-chat--parent-label 'subagent)))
+        (should (equal "sub-agent of" (harness-chat--parent-label "subagent")))
+        (should (equal "fork of" (harness-chat--parent-label 'fork)))
+        (should (equal "opened over" (harness-chat--parent-label "btw")))
+        (should (equal "child of" (harness-chat--parent-label 'main)))
+        ;; Shown as opening it from its parent's transcript does.
+        (harness-ui-display-session child 'right)
+        (let ((w (get-buffer-window child-buf)))
+          (should (window-live-p w))
+          (should (eq child-buf (window-buffer w)))
+          (should-not (get-buffer-window parent-buf))
+          (with-current-buffer child-buf
+            (let* ((header (harness-chat--header most-positive-fixnum))
+                   (segment (harness-ui-chat-test-segment header #'harness-up-to-parent)))
+              (should segment)
+              (should (equal "Planner" (car segment)))
+              ;; Right after the session's own name, before its model.
+              (should (string-match-p "Read the parser  ↑ sub-agent of Planner"
+                                      (substring-no-properties header)))
+              (should (< (string-search "Read the parser" header) (cadr segment)))
+              (should (< (cadr segment) (string-search "scripted (Demo)" header)))
+              ;; The name is a button, and its tooltip names the key.
+              (should (get-text-property (cadr segment) 'mouse-face header))
+              (should (string-match-p
+                       "started from.*C-c C-u"
+                       (funcall (get-text-property (cadr segment) 'help-echo header) w nil nil)))))
+          (with-current-buffer plain-buf
+            (should-not (harness-chat--parent-segment))
+            (let ((header (harness-chat--header most-positive-fixnum)))
+              (should-not (harness-ui-chat-test-segment header #'harness-up-to-parent))
+              (should-not (string-search "↑" (substring-no-properties header))))
+            (should-error (harness-up-to-parent) :type 'user-error))
+          ;; A click on the name goes up in the window the child was shown in.
+          (cl-flet ((click ()
+                        (with-current-buffer child-buf
+                          (let* ((header (harness-chat--header most-positive-fixnum))
+                                 (segment (harness-ui-chat-test-segment header #'harness-up-to-parent)))
+                            (funcall (lookup-key (get-text-property (cadr segment) 'local-map header)
+                                                 [header-line mouse-1])
+                                     (list 'mouse-1 (list w 'header-line '(0 . 0) 0)))))))
+            (click)
+            (should (eq parent-buf (window-buffer w))))
+          ;; The child shows there again; with the parent in sight, the
+          ;; command selects the parent's window rather than showing it again.
+          (harness-ui-display-session child 'right)
+          (should (eq child-buf (window-buffer w)))
+          (harness-ui-display-session parent 'bottom)
+          (let ((parent-window (get-buffer-window parent-buf)))
+            (should (window-live-p parent-window))
+            (should-not (eq parent-window w))
+            (select-window w)
+            (with-current-buffer child-buf (call-interactively #'harness-up-to-parent))
+            (should (eq parent-window (selected-window)))
+            (should (eq child-buf (window-buffer w)))))
+        ;; A parent the harness no longer has leaves nothing to go up to.
+        (remhash parent harness-ui--sessions)
+        (with-current-buffer child-buf
+          (should-not (harness-chat--parent-segment))
+          (should-error (harness-up-to-parent) :type 'user-error))))))
 
 (ert-deftest harness-ui-chat-streaming-appends-cheaply ()
   (harness-ui-chat-test-with

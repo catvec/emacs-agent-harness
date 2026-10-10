@@ -3230,6 +3230,63 @@ They grow while its turn streams, a few times a second at most.  ID
 nil, after every session's figures were fetched again, redraws them all."
   (harness-chat--on-rate id nil))
 
+;;;; The session this one was started from
+
+;; A fork, a sub-agent, a BTW and a session the merge queue started to
+;; resolve a conflict all record the session they were started from as
+;; their `:parent-id' (see `session/fork', `session/btw' and
+;; `harness-session-parent-id').  The header line says which session that
+;; is and what the relation is, and clicking it goes up to it: a child
+;; session tells you where it came from and leads back there
+;; (`harness-up-to-parent').
+
+(defconst harness-chat--parent-labels
+  '((fork . "fork of")
+    (subagent . "sub-agent of")
+    (btw . "opened over"))
+  "How the header reads the session a child session was started from.
+The kind of the child names the relation; any other kind with a parent
+is a \"child of\" it.")
+
+(defun harness-chat--parent-label (kind)
+  "Return how the header names the parent of a child session of KIND.
+KIND is the child's `:kind' as the session cache holds it, a symbol or,
+over ACP, a string."
+  (or (alist-get (if (stringp kind) (intern kind) kind) harness-chat--parent-labels)
+      "child of"))
+
+(defun harness-chat--parent-id ()
+  "Return the id of the session this buffer's session was started from, or nil.
+See `harness-chat--parent-label'."
+  (let ((id (plist-get (harness-chat--session) :parent-id)))
+    (and (stringp id) (not (string-empty-p id)) id)))
+
+(defun harness-chat--parent-help (window _object _pos)
+  "Return the tooltip of the parent segment in WINDOW's header line.
+A `help-echo' function, so the keys are searched on hover, not on every
+redisplay of the header line."
+  (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
+    (substitute-command-keys
+     "The session this one was started from (mouse-1: go up to it, \\[harness-up-to-parent])" t)))
+
+(defun harness-chat--parent-segment ()
+  "Return the header segment leading to this session's parent, or nil.
+A fork, a sub-agent and a BTW name the session they were started from,
+and the name opens it (`harness-up-to-parent').  A session with no
+parent, or whose parent the harness no longer has, has no segment."
+  (when-let* ((id (harness-chat--parent-id))
+              (parent (harness-ui-session id)))
+    (let* ((label (harness-chat--parent-label (plist-get (harness-chat--session) :kind)))
+           (name (harness-chat--session-name id))
+           (segment (lambda (name)
+                      (concat "  " (harness-ui-icon 'harness-icon-up) " "
+                              (propertize (concat label " ") 'face 'harness-dim-face)
+                              (harness-chat--segment name #'harness-up-to-parent
+                                                     #'harness-chat--parent-help)))))
+      ;; Shown after the session's own name, which matters more: a narrow
+      ;; window drops this before the name, and shortens it before that.
+      (list (funcall segment name) 65 (funcall segment (harness-truncate-end name 12))))))
+
 (defvar harness-chat-header-functions nil
   "Functions putting segments in front of the chat header line.
 Each is called without arguments in the chat buffer whenever the header
@@ -3290,12 +3347,13 @@ shows its face this way.")
   "Return the header line, fitted to WIDTH, its window's by default.
 In a window too narrow for all of it, the output rate goes first, then
 the output tokens, the spend, the thinking level, the context, the
-non-interactive mode, the model and the todos; the name shortens after
-those.  What `harness-chat-header-functions' put in front leads the
-line and makes room as its own priorities say, before any of the
-session's do; the status, the permission mode, [menu] and the notice of
-new messages stay.  What `harness-chat-header-end-functions' add shows
-before [menu], making room as its priorities say.  WIDTH is as
+non-interactive mode, the model and the todos; the session's name and
+the session it was started from shorten after those.  What
+`harness-chat-header-functions' put in front leads the line and makes
+room as its own priorities say, before any of the session's do; the
+status, the permission mode, [menu] and the notice of new messages
+stay.  What `harness-chat-header-end-functions' add shows before
+[menu], making room as its priorities say.  WIDTH is as
 `harness-ui-fit-header' takes it."
   (let* ((s (harness-chat--session))
          (status (or (plist-get s :status) "idle"))
@@ -3321,6 +3379,8 @@ before [menu], making room as its priorities say.  WIDTH is as
                                                 "Session name (mouse-1: rename)" 'bold))
              70 (concat " " (harness-chat--segment (harness-truncate-end name 8) #'harness-rename-session
                                                   "Session name (mouse-1: rename)" 'bold)))
+       ;; Where the session came from, right after its own name.
+       (harness-chat--parent-segment)
        ;; The segment ends in two spaces of its own; the list takes them
        ;; as the separator, as the plain header line did.
        (and todos (list (concat "  " (string-trim-right todos " +")) 55))
@@ -3466,6 +3526,30 @@ nearest above point, so the agent's last one from the box.  The chat's
   (harness-chat--load (harness-chat--at-bottom-p)))
 
 ;;;###autoload
+(defun harness-up-to-parent ()
+  "Show the session this one was started from, and return its buffer.
+A fork, a sub-agent and a BTW record the session they were started from
+as their parent (`:parent-id'); the header line names it, and this
+command, like a click on that name, goes up to it.  The window that
+shows the parent already is selected when there is one; a parent in no
+window opens where this session is shown.  A session that was not
+started from another, or whose parent the harness no longer has, says
+so instead."
+  (interactive)
+  (let ((id (harness-chat--parent-id)))
+    (unless id
+      (user-error "This session was not started from another"))
+    (unless (harness-ui-session id)
+      (user-error "The session this one was started from is gone (%s)"
+                  (harness-chat--session-name id)))
+    (unless harness-ui-open-session-function
+      (user-error "No chat module loaded"))
+    (let ((buffer (funcall harness-ui-open-session-function id)))
+      (if-let* ((window (get-buffer-window buffer)))
+          (progn (select-window window) buffer)
+        (harness-ui-display-buffer buffer harness-ui-position)))))
+
+;;;###autoload
 (defun harness-open-session (id &optional position)
   "Open session ID in POSITION.
 An inactive session opens as it is, compose box included; the first
@@ -3515,6 +3599,7 @@ message sent from it resumes it."
   (define-key map (kbd "C-c C-b") #'harness-chat-previous-diagram)
   (define-key map (kbd "C-c C-w") #'harness-chat-copy-last-response)
   (define-key map (kbd "C-c C-t") #'harness-chat-toggle-todos)
+  (define-key map (kbd "C-c C-u") #'harness-up-to-parent)
   (define-key map (kbd "C-c C-r") #'harness-chat-redraw)
   (define-key map (kbd "C-c C-e") #'harness-chat-scroll-to-bottom)
   ;; Plain q is typing here.
@@ -3572,6 +3657,8 @@ the box, to reply to it; from the box, the agent's last message.
         ("C-c C-b" "Previous diagram" harness-chat-previous-diagram)
         ("C-c C-t" "Show or hide the todo list" harness-chat-toggle-todos)
         ("C-c C-k" "Cancel turn" harness-chat-cancel)]
+       ["Session"
+        ("C-c C-u" "Go to the session this one came from" harness-up-to-parent)]
        ["Transcript"
         (". TAB" "Fold block" harness-chat-tab)
         ("C-c C-s" "Search" harness-chat-search)
