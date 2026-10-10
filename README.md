@@ -854,6 +854,31 @@ thinking level, whatever the session's level is. Set
 from the session's level. A BTW whose model does not offer that level
 starts at the session's.
 
+### Sub-agents
+
+An agent hands a job to a sub-agent of its own with `spawn_agent`: one
+prompt runs in a child session, and the call never blocks the
+conversation. It returns as soon as the child starts, naming its
+session; the child's answer comes later, in a message of the harness's
+own (**System · sub-agent**), so a session can start as many sub-agents
+as it needs and carry on while they work instead of waiting for one
+after another. Several `spawn_agent` calls made in one step run at
+once, and calls made one after another overlap just the same. While
+sub-agents run the session has work outstanding, so a task does not go
+to review until they are back; a child that itself has work going on (a
+wait it registered, a sub-agent it started) is reported when that is
+over, not when its turn merely ends.
+
+`fork=true` forks the session, so the child shares the conversation and
+its cached prefix; a fresh child starts with the prompt alone.
+`worktree=true` gives the child a git worktree and branch of its own, so
+several children can change files at once; each branch merges back into
+the parent's working directory through the merge queue, one at a time.
+To wait for some other session without blocking, `session_wait`
+registers a wake-up and returns at once: a message of the harness's own
+arrives when the session is done, and the registration outlives the
+turn that made it.
+
 ### Supervisor mode
 
 A session in supervisor mode plans and coordinates; workers on cheaper
@@ -958,13 +983,13 @@ call to one anyway, in every permission mode.
   has nothing to share and is forked directly.
 - **Short context for workers.** A worker is a sub-agent, and
   sub-agents work on a deliberately short context window,
-  `harness-subagent-context-limit` (128000 tokens by default, nil for
+  `harness-subagent-context-limit` (256000 tokens by default, nil for
   no cap): a fresh worker's window is that limit, and a fork gets what
   it inherits plus the limit, never more than the supervisor's own
   limit or its model's window. Calls stay cheap, a worker that
   outgrows its window compacts early, and its report stays short. The
   worker's transcript says so, in a hint at its start ("Context window
-  capped at 128k tokens, as a sub-agent's is
+  capped at 256k tokens, as a sub-agent's is
   (harness-subagent-context-limit)"), as the transcript of any
   sub-agent does. A worker compacted before it starts (see **Retry and
   escalation**) is capped from the summary it starts with, not from

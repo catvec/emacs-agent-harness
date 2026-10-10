@@ -72,7 +72,11 @@
 ;; is capped as `harness-tools-agent-context-limit' says, and never
 ;; silently: a hint in the worker's transcript says so
 ;; (`harness-supervisor--limit-hint').  The worker's reply is the step's
-;; result, which the steps that wait for it are given.
+;; result, which the steps that wait for it are given.  A worker shows
+;; in the supervisor's transcript as the `spawn_agent' call that would
+;; have started it -- the call when it starts, its result when the step
+;; ends -- recorded by the harness (`harness-outside-node-p'), so the
+;; supervisor's model never sees it and nothing waits for it.
 ;;
 ;; A step that starts again -- `retry_step', perhaps on a higher tier, or an
 ;; interrupted step after a restart -- decides its context by the cache.  A
@@ -794,6 +798,12 @@ would be lost with it, so reports wait (see `harness-supervisor--send').")
 (defvar harness-supervisor--held (make-hash-table :test 'equal)
   "Session id -> the reports held back until its ending turn is over, oldest first.")
 
+(defvar harness-supervisor--spawns (make-hash-table :test 'equal)
+  "Worker session id -> the spawn_agent call shown for it, while it has no result.
+The call is (:session SUPERVISOR :call-id ID :started TIME), SUPERVISOR
+the session whose transcript shows it (see
+`harness-supervisor--open-call').")
+
 (defun harness-supervisor--plans (session-id)
   "Return the plans of session SESSION-ID, oldest first."
   (let ((plans (plist-get (plist-get (harness-call 'session/get session-id) :ext)
@@ -1096,7 +1106,7 @@ hint that cannot be added fails nothing."
                              (harness-tools-agent-context-limit-hint limit fork inherited))))
         (harness-supervisor--hint (plist-get worker :id) text))
     (error (harness-log 'warn "supervisor: no context cap hint for %s: %s"
-                        (plist-get worker :id) (harness-error-message err)))))
+                        (plist-get worker :id) (harness-error-short-message err)))))
 
 (defun harness-supervisor--refit-limit (session-id worker)
   "Fit the context window limit of WORKER to its compacted conversation.
@@ -1117,7 +1127,7 @@ is set, nil when nothing caps a worker or the context cannot be told."
           (harness-call 'session/update wid :context-window-limit limit :silent t)
           (list :context-limit limit :context-inherited (round context))))
     (error (harness-log 'warn "supervisor: could not fit the context limit of %s: %s"
-                        (plist-get worker :id) (harness-error-message err))
+                        (plist-get worker :id) (harness-error-short-message err))
            nil)))
 
 (defun harness-supervisor--seeded-p (plan step)
@@ -1201,9 +1211,9 @@ what it now holds (`harness-supervisor--refit-limit'), whose
        (harness-resolved nil)))
      done
      (lambda (err)
-       (harness-log 'warn "supervisor: compacting the fork %s failed: %s" wid (harness-error-message err))
+       (harness-log 'warn "supervisor: compacting the fork %s failed: %s" wid (harness-error-short-message err))
        (harness-supervisor--hint
-        wid (format "No compaction (%s): carrying on with the whole conversation" (harness-error-message err)))
+        wid (format "No compaction (%s): carrying on with the whole conversation" (harness-error-short-message err)))
        (funcall done)))))
 
 (defun harness-supervisor--make-worker (session-id plan step)
@@ -1411,7 +1421,7 @@ new worker is told of (`harness-supervisor--worker-text')."
          (lambda (err)
            (harness-supervisor--step-ended
             session-id plan-id step-id "failed"
-            (format "the worker could not be made: %s" (harness-error-message err)))))))))
+            (format "the worker could not be made: %s" (harness-error-short-message err)))))))))
 
 (defun harness-supervisor--start-ready (session-id plan-id)
   "Start the steps of plan PLAN-ID of session SESSION-ID that are ready."
@@ -1422,7 +1432,7 @@ new worker is told of (`harness-supervisor--worker-text')."
             (harness-supervisor--start-step session-id plan-id (plist-get step :id))
           (error (harness-supervisor--step-ended
                   session-id plan-id (plist-get step :id) "failed"
-                  (format "the worker could not be started: %s" (harness-error-message err)))))))))
+                  (format "the worker could not be started: %s" (harness-error-short-message err)))))))))
 
 (defun harness-supervisor--compaction-words (kind)
   "Return in words what a compaction of KIND, a string, leaves of a conversation."
@@ -1476,7 +1486,10 @@ whose supervisor was deleted, does not run."
               (condition-case hint-err
                   (harness-supervisor--restart-hint session-id step worker)
                 (error (harness-log 'warn "supervisor: no hint for step %s: %s"
-                                    step-id (harness-error-message hint-err))))
+                                    step-id (harness-error-short-message hint-err))))
+              ;; The worker shows in the supervisor's chat as the
+              ;; spawn_agent call that would have started it.
+              (harness-supervisor--open-call session-id wid step)
               (harness-then
                (harness-call-async 'agent/prompt wid
                                    (harness-supervisor--worker-text
@@ -1488,11 +1501,11 @@ whose supervisor was deleted, does not run."
                (lambda (err)
                  (harness-supervisor--turn-ended session-id plan-id step-id wid
                                                  (list :stop-reason 'error
-                                                       :error (harness-error-message err)))))))
+                                                       :error (harness-error-short-message err)))))))
         ;; A step must not stay running for a worker that never got its job.
         (error (harness-supervisor--step-ended
                 session-id plan-id step-id "failed"
-                (format "the worker could not be given its step: %s" (harness-error-message err))))))))
+                (format "the worker could not be given its step: %s" (harness-error-short-message err))))))))
 
 (defun harness-supervisor--turn-ended (session-id plan-id step-id worker-id result)
   "Settle step STEP-ID of plan PLAN-ID of SESSION-ID: the turn of WORKER-ID ended.
@@ -1515,6 +1528,127 @@ running on that worker any more."
              (format "the worker's turn ended with %s%s" (or reason "no reason")
                      (if (harness-string-blank-p error-text) "" (format ": %s" error-text)))))))))))
 
+;;;; The workers' spawn_agent calls
+;;
+;; A worker shows in its supervisor's transcript as the spawn_agent call
+;; that would have started it, as the merge queue shows its conflict
+;; resolver in the session whose branch it merges.  The call is an
+;; outside node (`harness-outside-node-p'): the supervisor's model never
+;; gets it and nothing waits for its result.  Its `:meta' names the
+;; worker as `:child-id', which the chat renders as a clickable session
+;; line (`harness-chat--child-line'), and its input carries the step,
+;; its tier, its model and the attempt.  The result joins the call when
+;; the step ends -- done, failed, cancelled or interrupted by a restart.
+;; A retried step gets a call of its own for its new worker.
+
+(defun harness-supervisor--spawn-input (step)
+  "Return the input of the spawn_agent call that shows the worker of STEP.
+It names the worker as `spawn_agent' names a sub-agent, and says where
+it runs: the step's model and tier, and the attempt of the step."
+  (append (list :name (harness-supervisor--worker-name step)
+                :prompt (plist-get step :prompt))
+          (and (plist-get step :model) (list :model (plist-get step :model)))
+          (and (plist-get step :tier) (list :tier (plist-get step :tier)))
+          (and (plist-get step :attempts) (list :attempt (plist-get step :attempts)))
+          (and (equal (plist-get step :context) "fork") (list :fork t))))
+
+(defun harness-supervisor--open-call (session-id worker-id step)
+  "Show WORKER-ID, the worker of STEP, in SESSION-ID's transcript.
+That is the spawn_agent call that would have started the worker, an
+outside node (`harness-outside-node-p'): the supervisor's model never
+gets it and nothing waits for its result.  The `:meta' names the worker
+as `:child-id', which the chat links to its session.  A call that
+cannot be shown fails nothing.  Return the open call, or nil."
+  (let* ((call-id (concat "sup-" (harness-short-id 10)))
+         (input (harness-supervisor--spawn-input step)))
+    (condition-case err
+        (progn
+          (harness-call 'session/append session-id
+                        (list :kind 'tool-call :tool "spawn_agent" :call-id call-id :input input
+                              :title (harness-tool-title "spawn_agent" input)
+                              :meta (list :from (harness-supervisor--sender) :child-id worker-id)))
+          (puthash worker-id (list :session session-id :call-id call-id :started (float-time))
+                   harness-supervisor--spawns))
+      (error (harness-log 'warn "supervisor: could not show the worker %s in %s: %s"
+                          worker-id session-id (harness-error-short-message err))
+             nil))))
+
+(defun harness-supervisor--spawn-call-node (session-id worker-id)
+  "Return the open spawn_agent call of WORKER-ID in SESSION-ID, or nil.
+An open call is a tool-call node naming WORKER-ID as its `:meta'
+`:child-id' that no tool-result node answers.  After a restart the hash
+`harness-supervisor--spawns' is gone, but the call is in the transcript."
+  (let ((nodes (ignore-errors (harness-call 'session/nodes session-id)))
+        (answered (make-hash-table :test 'equal)))
+    (dolist (node nodes)
+      (when (eq (plist-get node :kind) 'tool-result)
+        (puthash (plist-get node :call-id) t answered)))
+    (cl-find-if (lambda (node)
+                  (and (eq (plist-get node :kind) 'tool-call)
+                       (equal (plist-get (plist-get node :meta) :child-id) worker-id)
+                       (not (gethash (plist-get node :call-id) answered))))
+                nodes :from-end t)))
+
+(defun harness-supervisor--spawn-result (step state why)
+  "Return what the spawn_agent call of STEP reports, now that it ended.
+STATE is \"done\", \"failed\", \"cancelled\" or \"interrupted\"; WHY
+says what stopped a step that did not get done.  The text is what the
+worker reported -- its final reply for a step that is done, WHY and its
+last reply otherwise -- then a footer naming the step, the state, the
+model, the worker's session and, for a step that is done, what the
+worker did and cost."
+  (let* ((worker (plist-get step :session))
+         (session (and (stringp worker) (harness-call 'session/exists-p worker)
+                       (ignore-errors (harness-call 'session/get worker))))
+         (reply (if (equal state "done")
+                    (plist-get step :result)
+                  (harness-supervisor--cut (harness-supervisor--last-reply worker)
+                                           harness-supervisor--report-limit)))
+         (why (harness-supervisor--cut why harness-supervisor--report-limit))
+         (body (cond ((and why reply) (concat why "\n\n" reply))
+                     (why why)
+                     (reply reply)
+                     (t "(the worker reported nothing)")))
+         (calls (and session
+                     (cl-count-if (lambda (node) (and (eq (plist-get node :kind) 'tool-call)
+                                                      (equal (plist-get node :session) worker)))
+                                  (ignore-errors (harness-call 'session/nodes worker))))))
+    (format "%s\n\n[step %s %s on %s, session %s%s]"
+            body
+            (harness-supervisor--step-name step)
+            state
+            (or (plist-get step :worker-model) (plist-get step :model) "?")
+            (or worker "?")
+            (if (and (equal state "done") (numberp calls))
+                (format ", %d tool calls, cost %s" calls (harness-format-spend (plist-get session :usage)))
+              ""))))
+
+(defun harness-supervisor--close-call (session-id step state why)
+  "Record the result of the spawn_agent call shown for STEP of SESSION-ID.
+STATE is \"done\", \"failed\", \"cancelled\" or \"interrupted\"; WHY
+says what stopped a step that did not get done.  The call is found in
+`harness-supervisor--spawns', or in the transcript after a restart
+\(`harness-supervisor--spawn-call-node'): a call the restart already
+answered, or one that was never shown, gets nothing.  Return the new
+result node, or nil."
+  (let* ((worker (plist-get step :session))
+         (call (gethash worker harness-supervisor--spawns))
+         (open (and worker (harness-call 'session/exists-p session-id)
+                    (or call (harness-supervisor--spawn-call-node session-id worker)))))
+    (when open
+      (when call (remhash worker harness-supervisor--spawns))
+      (condition-case err
+          (harness-call 'session/append session-id
+                        (list :kind 'tool-result :call-id (plist-get open :call-id)
+                              :output (harness-supervisor--spawn-result step state why)
+                              :is-error (not (equal state "done"))
+                              :meta (append (list :from (harness-supervisor--sender) :child-id worker)
+                                            (and call (list :duration
+                                                            (- (float-time) (plist-get call :started)))))))
+        (error (harness-log 'warn "supervisor: could not record the result of the worker %s: %s"
+                            worker (harness-error-short-message err))
+               nil)))))
+
 ;;;; The plan engine: what the supervisor is told
 
 (defun harness-supervisor--task-p (session-id)
@@ -1530,7 +1664,7 @@ QUEUE the message waits for the session's next message instead."
    (harness-call-async 'agent/prompt session-id text
                        (append (list :from (harness-supervisor--sender)) (and queue (list :queue t))))
    (lambda (err)
-     (harness-log 'warn "supervisor: reporting to %s failed: %s" session-id (harness-error-message err)))))
+     (harness-log 'warn "supervisor: reporting to %s failed: %s" session-id (harness-error-short-message err)))))
 
 (defun harness-supervisor--send (session-id text)
   "Report TEXT to the supervising session SESSION-ID.
@@ -1650,6 +1784,8 @@ that step ends."
                  :result (harness-supervisor--cut (harness-supervisor--last-reply worker-id)
                                                   harness-supervisor--result-limit))))
       (when step
+        ;; The call's result joins the call before the hints and reports.
+        (harness-supervisor--close-call session-id step "done" nil)
         (harness-supervisor--hint session-id (format "Step %s done on %s" step-id (plist-get step :model)))
         (harness-supervisor--start-ready session-id plan-id)
         (let ((plan (harness-supervisor--plan (harness-supervisor--plans session-id) plan-id)))
@@ -1664,6 +1800,8 @@ is told in a message of its own, which names the steps now held on it."
   (when (harness-call 'session/exists-p session-id)
     (let ((step (harness-supervisor--update-step session-id plan-id step-id :state state :error error)))
       (when step
+        ;; The call's result joins the call before the report.
+        (harness-supervisor--close-call session-id step state error)
         (harness-supervisor--send
          session-id
          (harness-supervisor--failure-text
@@ -1929,9 +2067,12 @@ Its running workers are cancelled; nothing is written to the session,
 which is going."
   (remhash session-id harness-supervisor--ending)
   (remhash session-id harness-supervisor--held)
-  (let (mine)
+  (let (mine spawns)
     (maphash (lambda (key worker) (when (equal (car key) session-id) (push (cons key worker) mine)))
              harness-supervisor--live)
+    (maphash (lambda (worker call) (when (equal (plist-get call :session) session-id) (push worker spawns)))
+             harness-supervisor--spawns)
+    (dolist (worker spawns) (remhash worker harness-supervisor--spawns))
     (dolist (entry mine)
       (remhash (car entry) harness-supervisor--live)
       (when (and (stringp (cdr entry)) (harness-method-exists-p 'agent/cancel)
@@ -1972,6 +2113,8 @@ expensive turn they did not ask for."
       (dolist (ids interrupted)
         (let* ((plan (harness-supervisor--plan (harness-supervisor--plans session-id) (car ids)))
                (step (harness-supervisor--step plan (cdr ids))))
+          ;; The call's result joins the call before the report.
+          (harness-supervisor--close-call session-id step "interrupted" (plist-get step :error))
           (harness-supervisor--deliver session-id (harness-supervisor--failure-text session-id plan step)
                                        (not task))))
       ;; A task carries on by itself, so a step whose turn came just as

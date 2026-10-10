@@ -61,6 +61,11 @@ backtrace too."
 (defconst harness--log-max-lines 5000
   "Maximum number of lines kept in the log buffer.")
 
+(defconst harness--log-value-limit 200
+  "Longest text a log line may quote of one value, in characters.
+A value logged with `%s' can be a whole transcript or request body; it
+is cut rather than repeated in *Messages* and the log buffer.")
+
 (defvar harness-log-hook nil
   "Functions called with (LEVEL MESSAGE) for every log entry.")
 
@@ -184,6 +189,19 @@ settled is left as it is."
         (harness--promise-enqueue promise cb))))
   promise)
 
+(defun harness--short-error-text (err)
+  "Return ERR as short text for a log line.
+An error can carry a whole transcript, prompt or request body as its
+data (`harness-error-short-message'); quoting it whole would put all of
+it in the log.  The helper lives in harness-util, which is not loaded
+with the core alone: without it the printed form is cut here."
+  (if (fboundp 'harness-error-short-message)
+      (harness-error-short-message err)
+    (let ((text (let ((print-length 20) (print-level 6)) (format "%S" err))))
+      (if (> (length text) harness--log-value-limit)
+          (concat (substring text 0 (1- harness--log-value-limit)) "…")
+        text))))
+
 (defun harness--promise-dispatch (promise cb)
   "Call the half of CB that fits settled PROMISE with the promise's value.
 CB is (ON-RESOLVED . ON-REJECTED); a nil half does nothing.  An error
@@ -197,7 +215,7 @@ goes no further."
                 (funcall fn (harness-promise-value promise)))
             (funcall fn (harness-promise-value promise)))
         (error
-         (harness-log 'error "promise callback failed: %S%s" err
+         (harness-log 'error "promise callback failed: %s%s" (harness--short-error-text err)
                       (if (and (harness--debug-p) harness--last-backtrace)
                           (format "\n  frames: %s" (string-join (seq-take (cdr harness--last-backtrace) 40) " < "))
                         "")))))))
@@ -244,11 +262,13 @@ When `harness-log-level' is `debug', capture a backtrace on error."
 (defun harness--note-handler-error (err fn)
   "Log ERR signalled inside promise handler FN.
 A handler that signals is almost always a bug, and the rejection it
-produces may never be observed, so it is logged here."
-  (harness-log 'error "promise handler %s signalled: %S%s"
+produces may never be observed, so it is logged here.  The log line is
+short: the error may carry a whole transcript, and FN's printed form can
+be long (an error here is not worth megabytes in the log)."
+  (harness-log 'error "promise handler %s signalled: %s%s"
                (let ((print-length 12) (print-level 3))
-                 (truncate-string-to-width (prin1-to-string fn) 400 nil nil "…"))
-               err
+                 (truncate-string-to-width (prin1-to-string fn) 120 nil nil "…"))
+               (harness--short-error-text err)
                (if (and (harness--debug-p) harness--last-backtrace)
                    (format "\n  frames: %s" (string-join (seq-take (cdr harness--last-backtrace) 40) " < "))
                  "")))
@@ -736,6 +756,7 @@ another process.")
 
 (defvar harness-directory)
 (declare-function harness-error-message "harness-util" (err))
+(declare-function harness-error-short-message "harness-util" (err &optional limit))
 
 (defun harness--insert-modules (modules)
   "Insert a line for each of MODULES.

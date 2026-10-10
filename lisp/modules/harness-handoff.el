@@ -321,7 +321,7 @@ resolves with `:error'."
       (let ((result (harness-handoff--write-transcript session-id plan)))
         (harness-resolved (if why (append result (list :fallback why)) result)))
     (error
-     (let ((msg (harness-error-message err)))
+     (let ((msg (harness-error-short-message err)))
        (harness-log 'warn "handoff: %s: the transcript could not be handed over: %s" session-id msg)
        (ignore-errors
          (harness-call 'session/hint session-id
@@ -353,7 +353,7 @@ result."
      (list :mode (plist-get plan :mode) :summarizer summarizer :context context
            :node (plist-get node :id)))
    (lambda (err)
-     (let ((msg (harness-error-message err)))
+     (let ((msg (harness-error-short-message err)))
        (ignore-errors
          (harness-call 'session/hint session-id
                        (format "No summary from %s (%s): handing the whole transcript over instead"
@@ -369,7 +369,7 @@ The promise never rejects: a failure is reported to the session."
         ('compact-new (harness-handoff--compact session-id plan (plist-get plan :to) 'sample))
         ('transcript (harness-handoff--transcript session-id plan))
         (_ (harness-resolved (list :mode 'none))))
-    (error (harness-resolved (list :mode 'none :error (harness-error-message err))))))
+    (error (harness-resolved (list :mode 'none :error (harness-error-short-message err))))))
 
 (defun harness-handoff--run (session-id)
   "Carry out the handoff waiting for SESSION-ID; return a promise of its result.
@@ -454,7 +454,7 @@ running on their own.  Return the ids switched, newest first."
       (unless (equal (plist-get s :model) model)
         (let* ((id (plist-get s :id))
                (fail (lambda (err)
-                       (harness-log 'warn "handoff: switching %s failed: %s" id (harness-error-message err))
+                       (harness-log 'warn "handoff: switching %s failed: %s" id (harness-error-short-message err))
                        nil)))
           (condition-case err
               (harness-catch (harness-handoff--switch s model mode) fail)

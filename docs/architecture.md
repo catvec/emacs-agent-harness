@@ -4088,7 +4088,7 @@ TRAMP prefixes come from the session host):
 | `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`) |
 | `plan` | Plan | plan | meta |
 | `todo_write` | Todo list | todos | meta |
-| `spawn_agent` | Sub-agent | prompt, fork, model, name, cwd, worktree | meta (the jail checks `cwd`, as it checks bash's) |
+| `spawn_agent` | Sub-agent | prompt, fork, model, name, cwd, worktree | meta (runs the child in the background and returns at once; the jail checks `cwd`, as it checks bash's) |
 | `skill_search` / `skill_load` | Search skills / Load skill | query / name, file (one of the skill's supporting files) | read (needs no approval: `harness-perms--auto-allow-tools`) |
 | `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -4098,7 +4098,7 @@ TRAMP prefixes come from the session host):
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta (answer refuses the harness's cold-cache question, left to the user) |
 | `session_move` | Move session | directory, session_id (default: this session), keep_old_directory, reason | meta (the user confirms every call, in every mode; see perms, Confirmations, and `session/move`) |
 | `set_non_interactive` | Non-interactive mode | enabled, session_id (default: this session) or all (every current session and task of every project), reason | meta (perms module's away-request stage: turning it on is decided only by the user's answer, in every mode, and denied at once in a non-interactive session; turning it off is allowed at once) |
-| `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
+| `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds (optional: wake anyway after this long) | read (registers a wake-up prompt and returns at once; needs no approval: `harness-perms--inspection-tools`) |
 | `task_list` | List tasks | column (pending/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: the order waiting tasks start in) | meta |
 | `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete/priority), message (the feedback, for reject), priority (low/medium/high, for priority) | meta |
@@ -4166,8 +4166,37 @@ unconfined.  With no handler the command runs as it always did.  The
 supervisor module makes the commands of a supervising session read-only
 and offline this way.
 
+Every `spawn_agent` call runs its child in the background: the tool
+call returns as soon as the child's turn starts, with a result naming
+the child session (its `:meta` carries `:child-id`, which the chat
+links), never waiting for its answer.  A child's first turn settles its
+entry with the `agent/prompt` result (`harness-tools-agent--child-result'),
+which holds a failure's error; a later turn -- the wake-up turn of a
+wait the child registered, say -- settles it on `agent/turn-ended`
+(`harness-tools-agent--on-turn-ended`).  When the child's turn ends and
+nothing of it is outstanding any more (`harness-tools-agent--child-busy-p`,
+which asks `agent/outstanding`), tools-agent sends the parent a message
+of the harness's (`harness-sender-system "sub-agent"`) built from
+`harness-tools-agent--child-summary`: the child's last reply and its
+footer of tool calls and cost, the reason when its turn ended any other
+way than `end-turn`, its worktree and branch when it worked in one, and,
+past `harness-tools-max-output-chars`, cut in the middle with a note to
+read the child's session.  An idle parent starts a turn on it, a running
+one is steered, as a supervisor step's report is.  With several
+`spawn_agent` calls made in one step each tool call runs without
+blocking the others, so the children work at once.  A running child
+counts as work outstanding for its parent:
+`harness-tools-agent--outstanding`, a handler of the sync filter
+`agent/outstanding`, reports every entry of
+`harness-tools-agent--children` whose `:parent` is the session, as
+"Sub-agent NAME running" or "Sub-agents A, B running" (an entry says
+`:parent`, `:name`, `:worktree`, `:branch` and `:result`, kept until the
+child is done), so a task whose session's turn ended stays active
+(`harness-tasks--on-turn-ended`) instead of going to review while its
+sub-agents run.
+
 `spawn_agent` (tools-agent) runs its child on a deliberately shorter
-context window: `harness-subagent-context-limit` (128000 tokens; nil for
+context window: `harness-subagent-context-limit` (256000 tokens; nil for
 no cap) is the most a sub-agent adds of its own.
 `harness-tools-agent-context-limit PARENT-ID FORK &optional INHERITED`
 → the `:context-window-limit` for a sub-agent of session PARENT-ID, or
@@ -4182,9 +4211,9 @@ supervisor's workers pass the result to `session/create` or
 `session/fork`; without a cap a fork keeps its parent's limit.  The cap
 is never silent: `harness-tools-agent-context-limit-hint LIMIT FORK
 &optional INHERITED` → the text of a hint that says it, or nil when
-LIMIT is nil, such as "Context window capped at 128k tokens, as a
+LIMIT is nil, such as "Context window capped at 256k tokens, as a
 sub-agent's is (harness-subagent-context-limit)", and for a fork "Context
-window capped at 218k tokens: the 90k it starts with plus 128k of its
+window capped at 346k tokens: the 90k it starts with plus 256k of its
 own, as a sub-agent's is (harness-subagent-context-limit)" (INHERITED is
 `harness-tools-agent-inherited-context PARENT-ID`; a limit the parent's
 own holds lower adds ", and no higher than the limit of the session that
@@ -4319,23 +4348,39 @@ message as coming from here rather than from the user; `session_read`
 and `session_search` tag such nodes the same way.  `task_control`'s
 message does the same through `task/prompt` (its OPTS `:from`), so a
 task waiting for review takes neither for the user's review: only
-`task_control` reject sends work back (see tasks).  Waits are
-entries re-checked on session and task events, settled by their
-condition, their timeout (`harness-tools-sessions--wait-default`, at most
-`-wait-max`) or the end of the waiting turn; a timeout is a report, not
-an error.  Events are not their only look: while any wait runs, the
-safety re-check (`harness-tools-sessions-wait-recheck`) walks them every
-few seconds too, so a change none of those events announced -- a
-subscriber lost to a reload, a session settled by a module of its own, a
-finish that happened before the wait was made -- cannot hold a wait for
-its whole timeout while its condition already holds.  That is what a
-wait on a sub-agent needs: `spawn_agent` is blocking, so the parent's
-call returns at the child's turn end, and by the time the parent can
-wait on it the child has finished -- an `until=changed` wait settles at
-once for a session that is not running, rather than wait for a change
-that can never come.  Nothing here grants permissions: permission
-requests and permission modes stay with the user, and `task_submit`
-uses the task
+`task_control` reject sends work back (see tasks).  Waits never block
+the tool that asks for one, and are entries in
+`harness-tools-sessions--waiters` re-checked by one subscriber when a
+session or task event fires.  `task_wait` settles its promise with the
+report when its condition, its timeout
+(`harness-tools-sessions--wait-default`, at most `-wait-max`) or the end
+of the waiting turn says so; a timeout is a report, not an error.
+`session_wait` does not settle a call: it returns at once, with the
+report when the condition already holds and otherwise with a
+registration (`harness-tools-sessions--watch`, its entry carrying
+`:wake` and the `:label` its outstanding line shows), and the session is
+woken with the same report as a message of the harness's own
+(`harness-sender-system "session wait"`, through `agent/prompt`: an idle
+session starts a turn on it, a running one is steered) when
+`harness-tools-sessions--poke` sees the condition hold.  A registration
+outlives the turn that made it, and counts for `agent/outstanding` as
+"Waiting on IDS" (`harness-tools-sessions--outstanding`) until it
+settles -- except after a turn the user cancelled, which drops it
+(`harness-tools-sessions--on-turn-ended`); its optional
+`timeout_seconds` wakes the session with a "still waiting" report
+instead.  The subscriber is not the only look at a wait: while any
+runs, the safety re-check (`harness-tools-sessions-wait-recheck`) walks
+them every few seconds too, so a change none of those events announced
+-- a subscriber lost to a reload, a session settled by a module of its
+own, a finish that happened before the wait was made -- cannot leave a
+registration while its condition already holds; and a `changed` wait is
+met at once by an idle or closed session, whose own work is over and
+from which nothing new of its own is coming -- a wait on a sub-agent
+that has already finished is such a session, and since a registration
+may have no timeout at all, asking it for a change that can never come
+would leave it waiting forever.  Nothing here grants permissions:
+permission requests and permission modes stay with the user, and
+`task_submit` uses the task
 defaults.  Nor does `session_control` answer the harness's question
 about a cold prompt cache (its payload's `:cowboy`): what to spend on
 another session's conversation is the user's call.  The task tools need the `tasks` module.
