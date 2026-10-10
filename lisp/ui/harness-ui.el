@@ -3040,35 +3040,37 @@ It is called in the overview's buffer.")
   (slot nil :documentation "The window beside it, where sessions show.")
   (home nil :documentation "The slot as the layout started.")
   (saved nil :documentation "The window configuration of the frame from before.")
-  (positions nil :documentation "Alist of the anchors shown and their positions from before."))
+  (positions nil :documentation "Alist of the buffers shown and their positions from before."))
 
 (defvar harness-ui--fullscreen-layouts (make-hash-table :test 'eq :weakness 'key)
   "Frame -> its fullscreen layout, a `harness-ui--fullscreen'.")
 
 (defun harness-ui--fullscreen-restore-position (layout buffer)
-  "Give BUFFER, an anchor of LAYOUT, back the position it had before it.
-Do nothing when BUFFER is not one of the anchors LAYOUT noted."
+  "Give BUFFER, which LAYOUT showed, back the position it had before it.
+Do nothing when BUFFER is not one of the buffers LAYOUT noted."
   (when (buffer-live-p buffer)
     (when-let* ((entry (assq buffer (harness-ui--fullscreen-positions layout))))
       (with-current-buffer buffer (setq-local harness-ui-position (cdr entry))))))
 
 (defun harness-ui--fullscreen-restore-positions (layout)
-  "Give the anchors LAYOUT showed back the positions they had before it.
-An anchor that left the layout meanwhile -- another took its place -- keeps
-the position it has now."
+  "Give the buffers LAYOUT showed back the positions they had before it.
+That is its anchors and the buffers of its slot.  A buffer that left the
+layout meanwhile -- another took its place, or it was buried -- keeps the
+position it has now."
   (pcase-dolist (`(,buffer . ,_position) (harness-ui--fullscreen-positions layout))
     (when (and (buffer-live-p buffer)
                (eq (buffer-local-value 'harness-ui-position buffer) 'fullscreen))
       (harness-ui--fullscreen-restore-position layout buffer))))
 
 (defun harness-ui--fullscreen-drop (&optional frame)
-  "Forget FRAME's fullscreen layout, giving the anchors it showed their positions.
+  "Forget FRAME's fullscreen layout, giving the buffers it showed their positions.
 FRAME is the selected frame by default.  The windows are left as they are:
 this is for a layout whose windows are gone already, replaced by a project
 or workspace switch, say, or closed by the user.  Every buffer the layout
-marked `fullscreen' and noted as an anchor gets back the position it had
-before the layout, so a later `harness-ui-display-view' does not look for a
-layout that is not there any more."
+marked `fullscreen' and noted -- its anchor and the buffers of its slot --
+gets back the position it had before the layout, so a later
+`harness-ui-display-view' does not look for a layout that is not there any
+more."
   (let ((frame (or frame (selected-frame))))
     (when-let* ((layout (gethash frame harness-ui--fullscreen-layouts)))
       (remhash frame harness-ui--fullscreen-layouts)
@@ -3256,8 +3258,10 @@ other buffer.  START and POINT may be missing."
 (defun harness-ui--show-in-layout-slot (layout buffer)
   "Show BUFFER in LAYOUT's slot and select that window.
 The buffer takes the slot as `harness-ui--show-in-slot' has it, so the
-anchor stays where it is."
+anchor stays where it is.  Its position before the layout is noted in
+LAYOUT, so ending the layout gives it back (`harness-ui--note-position')."
   (let ((slot (harness-ui--fullscreen-window layout)))
+    (harness-ui--note-position layout buffer)
     (harness-ui--show-in-slot slot buffer)
     (select-window slot)))
 
@@ -3278,8 +3282,13 @@ the frame's width minus 20."
     ;; C-x 1 in the slot keeps the anchor.
     (window-parameters . ((no-delete-other-windows . t)))))
 
-(defun harness-ui--note-overview (layout buffer)
-  "Remember in LAYOUT the position the anchor BUFFER had before it."
+(defun harness-ui--note-position (layout buffer)
+  "Remember in LAYOUT the position BUFFER had before it showed it.
+That is the anchor, and every buffer shown in the slot, so that ending or
+dropping the layout can give each back the position it had before, instead
+of leaving it marked `fullscreen' with nowhere to show it.  A buffer with
+no position of its own is noted with nil.  A buffer already noted keeps the
+position first remembered for it."
   (unless (assq buffer (harness-ui--fullscreen-positions layout))
     (push (cons buffer (let ((position (buffer-local-value 'harness-ui-position buffer)))
                          (and (not (eq position 'fullscreen)) position)))
@@ -3307,10 +3316,11 @@ showed.  Return the anchor's window."
       (set-window-configuration saved)
       (user-error "This frame has no room for the anchor"))
     (let ((layout (harness-ui--fullscreen-create :overview window :slot slot :home slot :saved saved)))
-      (harness-ui--note-overview layout anchor)
-      (puthash frame layout harness-ui--fullscreen-layouts))
-    (cond (session (harness-ui--show-in-slot slot session))
-          ((eq (window-buffer slot) anchor) (harness-ui--show-previous slot anchor)))
+      (harness-ui--note-position layout anchor)
+      (puthash frame layout harness-ui--fullscreen-layouts)
+      (cond (session (harness-ui--note-position layout session)
+                     (harness-ui--show-in-slot slot session))
+            ((eq (window-buffer slot) anchor) (harness-ui--show-previous slot anchor))))
     window))
 
 (defun harness-ui--display-fullscreen (buffer)
@@ -3328,7 +3338,7 @@ without the layout the selected window, as in the `full' position."
           ;; it back the position it had before the layout, so it is not
           ;; left marked `fullscreen' with no window to show it.
           (harness-ui--fullscreen-restore-position layout (window-buffer window))
-          (harness-ui--note-overview layout buffer)
+          (harness-ui--note-position layout buffer)
           (set-window-buffer window buffer)
           ;; A new buffer drops the side window's dedication.
           (set-window-dedicated-p window 'side))
@@ -3339,6 +3349,7 @@ without the layout the selected window, as in the `full' position."
       (select-window (harness-ui--fullscreen-enter buffer)))
      (layout
       (let ((slot (harness-ui--fullscreen-window layout)))
+        (harness-ui--note-position layout buffer)
         (harness-ui--show-in-slot slot buffer)
         (select-window slot)))
      (t (switch-to-buffer buffer)))))
@@ -3347,8 +3358,9 @@ without the layout the selected window, as in the `full' position."
   "End the fullscreen layout of FRAME, by default the selected one.
 The windows come back as they were before it, but for a buffer of the
 user's in the slot, such as a file visited there, which stays in sight
-in the window the layout kept.  The anchors it showed get back their
-positions.  With BURY the anchor goes out of sight too."
+in the window the layout kept.  The buffers it showed -- its anchor and
+the buffers of its slot -- get back the positions they had before it.
+With BURY the anchor goes out of sight too."
   (when-let* ((frame (or frame (selected-frame)))
               (layout (harness-ui--fullscreen-layout frame)))
     (let* ((anchor (window-buffer (harness-ui--fullscreen-overview layout)))
@@ -3429,7 +3441,9 @@ In a window of the frame's own -- the one beside the anchor of the
 fullscreen layout, say -- that is the last buffer the window showed
 that is not the harness's: the file a session took the place of.  The
 layout stays, and the next session opened from the anchor takes the
-window back.  A side window, such as a session's in the `right'
+window back.  A buffer put away out of the slot gets back the position
+it had before the layout, rather than staying marked `fullscreen' with
+no layout showing it.  A side window, such as a session's in the `right'
 position, quits as `quit-window' would.  On the anchor of the
 fullscreen layout this ends the layout, as `harness-ui-quit-view' does."
   (interactive)
@@ -3439,7 +3453,10 @@ fullscreen layout this ends the layout, as `harness-ui-quit-view' does."
      ((harness-ui--overview-window-p window) (harness-ui--fullscreen-leave nil t))
      ((or (window-parameter window 'window-side) (eq (window-dedicated-p window) t))
       (quit-window nil window))
-     (t (harness-ui--show-previous window buffer)
+     (t (let ((layout (harness-ui--fullscreen-layout (window-frame window))))
+          (when (and layout (eq window (harness-ui--fullscreen-window layout)))
+            (harness-ui--fullscreen-restore-position layout buffer)))
+        (harness-ui--show-previous window buffer)
         (unrecord-window-buffer window buffer)
         (bury-buffer-internal buffer)))))
 
@@ -4315,9 +4332,15 @@ worktrees, task sessions and sessions merges are queued into."
 
 ;;;###autoload
 (defun harness-show-log ()
-  "Show the harness log buffer."
+  "Show the harness log buffer.
+The log is a harness view like any other: its own mode
+\(`harness-ui-log-mode') is on, so q buries it."
   (interactive)
-  (harness-ui-display-view (get-buffer-create harness-log-buffer-name)))
+  (let ((buffer (get-buffer-create harness-log-buffer-name)))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'harness-ui-log-mode)
+        (harness-ui-log-mode)))
+    (harness-ui-display-view buffer)))
 
 ;;;; Keymap, menu, global mode
 
@@ -4364,6 +4387,26 @@ window showed before -- and C-c C-z does the same.  Buffers that host a
 compose box (a chat, the task board, a popout) do not use it: there a
 plain key, q included, types into the box, and C-c C-z buries the
 buffer.")
+
+;; The log buffer is a harness view too (`harness-show-log'): its keys
+;; are `harness-ui-view-map''s, so the mode is defined here, below the
+;; map it parents.
+(defvar harness-ui-log-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map harness-ui-view-map)
+    (define-key map (kbd "?") #'harness-menu)
+    map)
+  "Keymap of `harness-ui-log-mode'.")
+
+(define-derived-mode harness-ui-log-mode special-mode "Harness log"
+  "Major mode of the harness log buffer (`harness-show-log').
+The log is read-only; `harness-log' appends to it with
+`inhibit-read-only' bound, so logging carries on.  Its keys are a
+harness view's (`harness-ui-view-map'): q buries the buffer, bringing
+back what its window showed before, C-c C-z does the same, and ? opens
+the harness menu.
+
+\\{harness-ui-log-mode-map}")
 
 (defvar harness-global-mode-map (make-sparse-keymap)
   "Keymap of `harness-global-mode': `harness-ui-map' under `harness-ui-prefix-key'.")

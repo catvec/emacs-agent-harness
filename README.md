@@ -1530,10 +1530,10 @@ anchor, and so does anything else the harness shows without a position.
   into its compose box.
 - `q` on a harness view — the board, the session list, the settings
   page, usage, insights, the worktrees, the version page, the tree, the
-  directories, the pet — buries it the same way, bringing back what its
-  window showed and keeping the layout. In a chat, board or popout
-  compose box `q` still types into the box. On the anchor itself `q`
-  (or `F` again) ends the layout, and the windows come back as they
+  directories, the log, the pet — buries it the same way, bringing back
+  what its window showed and keeping the layout. In a chat, board or
+  popout compose box `q` still types into the box. On the anchor itself
+  `q` (or `F` again) ends the layout, and the windows come back as they
   were. A file you visited in the slot stays in sight.
 - Opening the other overview while the layout is on (`C-c h l` beside
   the board, say) puts it on the anchor side instead. The session list

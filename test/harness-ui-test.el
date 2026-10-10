@@ -796,6 +796,59 @@ and \"two\", `one' and `two'."
       ;; Opened again, it goes where it was before the layout.
       (should (eq 'right (buffer-local-value 'harness-ui-position view))))))
 
+(ert-deftest harness-ui-fullscreen-slot-session-gets-its-position-back ()
+  "Ending the layout gives a session shown in the slot its position back.
+The session is marked `fullscreen' while the layout lasts, but once the
+layout is gone it has the position it had before, not one that sends it
+looking for a layout that is not there any more."
+  (harness-ui-test-with-fullscreen
+    (let ((main (selected-window)))
+      (harness-ui-display-view view 'fullscreen)
+      (should (eq one (window-buffer main)))
+      (should (eq 'fullscreen (buffer-local-value 'harness-ui-position one)))
+      ;; q on the anchor, the selected window after the layout started.
+      (harness-ui-quit-view)
+      (should-not (harness-ui--fullscreen-layout))
+      (should-not (buffer-local-value 'harness-ui-position one)))))
+
+(ert-deftest harness-ui-fullscreen-slot-bury-gets-the-position-back ()
+  "Burying a session out of the slot keeps the layout, and its position comes back."
+  (harness-ui-test-with-fullscreen
+    (let ((main (selected-window)))
+      (harness-ui-display-view view 'fullscreen)
+      (should (eq one (window-buffer main)))
+      ;; C-c C-z in the slot: the user's file comes back and the layout
+      ;; stays, but the session is not left marked `fullscreen'.
+      (select-window main)
+      (harness-ui-bury)
+      (should (eq file (window-buffer main)))
+      (should (harness-ui--fullscreen-layout))
+      (should (harness-ui--overview-window-p (get-buffer-window view)))
+      (should-not (buffer-local-value 'harness-ui-position one)))))
+
+(ert-deftest harness-ui-fullscreen-slot-view-gets-its-position-back ()
+  "A view shown in the slot gets back the position it had before the layout."
+  (harness-ui-test-with-fullscreen
+    (let ((anchor (get-buffer-create "*harness fullscreen test anchor*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer anchor (setq-local harness-ui-overview-function #'ignore))
+            (with-current-buffer view (setq-local harness-ui-position 'right))
+            (harness-ui-display-view anchor 'fullscreen)
+            (should (harness-ui--fullscreen-layout))
+            ;; A left or right position inside a layout is the slot.
+            (harness-ui-display-buffer view 'right)
+            (should (eq view (window-buffer (selected-window))))
+            (should-not (window-parameter (selected-window) 'window-side))
+            (should (eq 'fullscreen (buffer-local-value 'harness-ui-position view)))
+            ;; q on the anchor ends the layout, and the view goes back to
+            ;; the position it had before it.
+            (select-window (harness-ui--fullscreen-overview (harness-ui--fullscreen-layout)))
+            (harness-ui-quit-view)
+            (should-not (harness-ui--fullscreen-layout))
+            (should (eq 'right (buffer-local-value 'harness-ui-position view))))
+        (kill-buffer anchor)))))
+
 (ert-deftest harness-ui-fullscreen-ends-keeping-a-file-visited-beside ()
   "Ended, the layout puts the windows back but the user's buffer stays in sight."
   (harness-ui-test-with-fullscreen
@@ -1058,6 +1111,43 @@ showed gets back the position it had before the layout."
               (harness-ui-quit-view)
               (should-not (harness-ui--fullscreen-layout))))
         (kill-buffer in-slot)))))
+
+(ert-deftest harness-ui-log-is-a-buryable-view ()
+  "The harness log is a harness view: q buries it, and logging carries on."
+  (harness-ui-test-with-fullscreen
+    (when (get-buffer harness-log-buffer-name)
+      (kill-buffer harness-log-buffer-name))
+    (let ((main (selected-window))
+          (buffer (get-buffer-create harness-log-buffer-name)))
+      (unwind-protect
+          (progn
+            ;; Over the user's file, in the frame's own window.
+            (let ((harness-ui-default-position 'full))
+              (harness-show-log))
+            (should (eq buffer (window-buffer main)))
+            (with-current-buffer buffer
+              (should (derived-mode-p 'harness-ui-log-mode))
+              (should (harness-ui-view-p))
+              (should (eq 'harness-ui-quit-view (key-binding (kbd "q"))))
+              (should (eq 'harness-ui-bury (key-binding (kbd "C-c C-z"))))
+              (should (eq 'harness-menu (key-binding (kbd "?"))))
+              ;; The mode makes the buffer read-only; the harness logs to it
+              ;; with `inhibit-read-only' bound, so a line still lands.
+              (should buffer-read-only)
+              (let ((before (buffer-size)))
+                (harness-log 'info "log test %s" "line")
+                (should (> (buffer-size) before))
+                (should (save-excursion
+                          (goto-char (point-min))
+                          (search-forward "log test line" nil t)))))
+            ;; q buries it: back to the user's file, the window kept.
+            (select-window main)
+            (harness-ui-quit-view)
+            (should (window-live-p main))
+            (should (eq file (window-buffer main)))
+            (should (eq main (selected-window)))
+            (should-not (get-buffer-window buffer)))
+        (kill-buffer buffer)))))
 
 (ert-deftest harness-ui-unowned-requests-stay-pending-without-prompting ()
   "A question or permission no buffer owns is declined, never prompted for."
