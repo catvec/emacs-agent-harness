@@ -14,9 +14,15 @@
 ;;   Merging               in the merge queue, in the order it takes them:
 ;;                         queued, merging, or resolving the conflicts
 ;;   In progress           working, with its current todo and progress
-;;   Pending               waiting for a slot, or in the backlog (refined,
-;;                         waiting for you); editable, startable; in the
-;;                         order they start: by priority, then oldest first
+;;   Pending               waiting for a slot, so it starts on its own
+;;                         while the project has one free; editable,
+;;                         startable; in the order they start: by
+;;                         priority, then oldest first
+;;   Backlog               jotted down or written up for later: the queue
+;;                         never starts one by itself; Q queues it, so it
+;;                         drains like any pending task, and s starts it
+;;                         now; editable, refinable; where a write-up
+;;                         runs too
 ;;   Completed             finished and verified; reply to reopen,
 ;;                         archive to hide
 ;;
@@ -24,8 +30,8 @@
 ;; and it gets a session of its own.  A toggle above the box (C-c C-t)
 ;; switches between Submit, which starts the task, and Refine (backlog
 ;; refinement, once called grooming), which has an agent write the task
-;; up and leaves it in Pending until you start it: jot things down now,
-;; pick them up later, even after a restart.  The same box edits a
+;; up and leaves it in the Backlog until you start it: jot things down
+;; now, pick them up later, even after a restart.  The same box edits a
 ;; pending task (e), replies to a task's session (m) -- for a backlog
 ;; task that is feedback on its write-up (r) -- without leaving the
 ;; board, answers a task's question (m or [Answer]) and takes the
@@ -142,6 +148,9 @@ Either way the toggle above the compose box switches it per board."
 (define-icon harness-icon-task-pending nil
   '((symbol "◌") (text "wait"))
   "Pending task." :version "29.1")
+(define-icon harness-icon-task-backlog nil
+  '((symbol "▤") (text "backlog"))
+  "Backlog task: waiting for you to start it." :version "29.1")
 (define-icon harness-icon-task-done nil
   '((symbol "✓") (text "done"))
   "Completed task." :version "29.1")
@@ -164,7 +173,7 @@ Either way the toggle above the compose box switches it per board."
 
 (defconst harness-ui-tasks--columns
   '((needs-input "Requires your input" t) (review "Ready for review") (merging "Merging")
-    (active "In progress") (pending "Pending") (done "Completed"))
+    (active "In progress") (pending "Pending") (backlog "Backlog") (done "Completed"))
   "Columns in display order: (COLUMN HEADING &optional SUBTITLE-SHOWN).
 SUBTITLE-SHOWN is non-nil when the cards of the column show their
 recap subtitle by default; elsewhere a card is one line until you
@@ -297,9 +306,14 @@ the task record says so through `:merge-status' as soon as it changes."
   (or (plist-get task :merge-queued) 0))
 
 (defun harness-ui-tasks--column (task)
-  "Return TASK's column as a symbol."
+  "Return TASK's column as a symbol.
+A backlog task has a column of its own (`harness-tasks--column'), so
+the board never shows one among the queued pending tasks."
   (intern (or (plist-get task :column)
               (cond ((harness-ui-tasks--merge-queue-p task) "merging")
+                    ((and (equal (plist-get task :state) "pending")
+                          (harness-ui-tasks--backlog-p task))
+                     "backlog")
                     (t (pcase (plist-get task :state)
                          ("pending" "pending") ("review" "review") ("merging" "merging") ("done" "done")
                          (_ "active")))))))
@@ -370,9 +384,10 @@ In progress is newest first by when each task started, review by when
 it finished and completed by when it was completed, so a task arriving
 in any of them shows at the top; merging is the queue's own order, from
 when each branch joined it; pending is in the order its tasks start, by
-priority then oldest first (the backlog sorted the same way among them);
-the other columns are oldest first.  With FILTERED, only the tasks
-`harness-ui-tasks-filter' shows, when there is one, archived or not."
+priority then oldest first, and the backlog (which the queue never
+starts) the same way; the other columns are oldest first.  With
+FILTERED, only the tasks `harness-ui-tasks-filter' shows, when there is
+one, archived or not."
   (let ((groups (mapcar (lambda (c) (list (car c))) harness-ui-tasks--columns))
         (show (and filtered (plist-get harness-ui-tasks-filter :show))))
     (dolist (task harness-ui-tasks--tasks)
@@ -389,6 +404,7 @@ the other columns are oldest first.  With FILTERED, only the tasks
                                                    (harness-ui-tasks--merge-queued b))))
                         ('done (lambda (a b) (> (harness-ui-tasks--completed a) (harness-ui-tasks--completed b))))
                         ('pending #'harness-ui-tasks--starts-before-p)
+                        ('backlog #'harness-ui-tasks--starts-before-p)
                         (_ (lambda (a b) (< (or (plist-get a :created) 0) (or (plist-get b :created) 0))))))))))
 
 ;;;; What a card says
@@ -447,10 +463,9 @@ marks on the same centre."
 SESSION is TASK's session plist, or nil; in the needs-input column the
 icon says whether SESSION waits on a request."
   (pcase column
-    ('pending (cond ((harness-ui-tasks--refining-p task) (harness-ui-status-icon "running"))
-                    ((harness-ui-tasks--backlog-p task)
-                     (propertize (harness-ui-icon 'harness-icon-agent) 'face 'harness-dim-face))
-                    (t (propertize (harness-ui-icon 'harness-icon-task-pending) 'face 'harness-dim-face))))
+    ('pending (propertize (harness-ui-icon 'harness-icon-task-pending) 'face 'harness-dim-face))
+    ('backlog (cond ((harness-ui-tasks--refining-p task) (harness-ui-status-icon "running"))
+                    (t (propertize (harness-ui-icon 'harness-icon-task-backlog) 'face 'harness-dim-face))))
     ('done (propertize (harness-ui-icon 'harness-icon-task-done) 'face 'harness-task-done-face))
     ('review (propertize (harness-ui-icon 'harness-icon-task-review) 'face 'harness-task-review-face))
     ('merging (if (equal (harness-ui-tasks--merge-status task) "queued")
@@ -499,6 +514,8 @@ POSITION is its place in line among queued tasks."
                                      (t "starting…")))
                            'face 'harness-dim-face))
       ('pending (propertize (harness-ui-tasks--pending-detail task position todos named)
+                            'face 'harness-dim-face))
+      ('backlog (propertize (harness-ui-tasks--pending-detail task position todos named)
                             'face 'harness-dim-face))
       ('review (propertize (harness-ui-tasks--review-detail task named) 'face 'harness-dim-face))
       ('done (propertize (let ((took (and (plist-get task :started) (plist-get task :finished)
@@ -593,11 +610,12 @@ card shows its subtitle by default, a merging card when you show it."
      (t (harness-ui-tasks--fit (propertize recap 'face 'harness-dim-face) room)))))
 
 (defun harness-ui-tasks--pending-detail (task position todos &optional named)
-  "The second line of pending TASK's card: what it waits for.
-POSITION is its place in line among queued tasks; TODOS its session's.
-A queued task NAMED (its name is the card's title) has the first line of
-its prompt after its place in line, else the line after it, as a backlog
-task's write-up has, its first line being a title.  A task returned to
+  "The second line of a pending or backlog TASK's card: what it waits for.
+POSITION is its place in line among queued tasks, nil in the backlog,
+which the queue never starts.  TODOS its session's.  A queued task
+NAMED (its name is the card's title) has the first line of its prompt
+after its place in line, else the line after it, as a backlog task's
+write-up has, its first line being a title.  A task returned to
 pending says it carries on where it stopped."
   (let ((body (harness-ui-tasks--body-line task))
         (sep (concat " " harness-ui-tasks--dot " ")))
@@ -675,17 +693,19 @@ has written, unless LEAN, which a narrow card falls back on."
                       (and todos (not (memq column '(done review merging)))
                            (format "%d/%d" (nth 0 todos) (nth 1 todos)))
                       (pcase column
-                        ('pending (cond ((harness-ui-tasks--refining-p task) nil)
+                        ('pending
+                         (let ((queued (format "queued %s" (harness-relative-time (plist-get task :created)))))
+                           ;; The queue being suspended holds it back,
+                           ;; which the card says.
+                           (if (harness-json-true-p (plist-get task :queue-suspended))
+                               (concat queued " · queue suspended")
+                             queued)))
+                        ;; A backlog task waits for the user, never for the
+                        ;; queue, so it says when it was written up or added.
+                        ('backlog (cond ((harness-ui-tasks--refining-p task) nil)
                                         ((plist-get task :refined)
                                          (format "refined %s" (harness-relative-time (plist-get task :refined))))
-                                        ((harness-ui-tasks--backlog-p task)
-                                         (format "added %s" (harness-relative-time (plist-get task :created))))
-                                        (t (let ((queued (format "queued %s" (harness-relative-time (plist-get task :created)))))
-                                             ;; The queue being suspended holds it
-                                             ;; back, which the card says.
-                                             (if (harness-json-true-p (plist-get task :queue-suspended))
-                                                 (concat queued " · queue suspended")
-                                               queued)))))
+                                        (t (format "added %s" (harness-relative-time (plist-get task :created))))))
                         ('review (and (plist-get task :finished)
                                       (format "ready %s" (harness-relative-time (plist-get task :finished)))))
                         ('merging (let ((queued (harness-ui-tasks--merge-queued task)))
@@ -764,6 +784,17 @@ session's priority.  See `harness-ui-tasks--shown-priority'."
             ("Drop" harness-ui-tasks-cancel)))
          (t '(("Start now" harness-ui-tasks-start) ("Edit" harness-ui-tasks-edit)
               ("Refine" harness-ui-tasks-refine) ("Drop" harness-ui-tasks-cancel)))))
+       ;; A backlog task waits for you; one being written up is steered
+       ;; or stopped, like a refining task in the pending column was.
+       ('backlog
+        (if (harness-ui-tasks--refining-p task)
+            '(("Open" harness-ui-tasks-open) ("Steer" harness-ui-tasks-reply)
+              ("Stop" harness-ui-tasks-cancel))
+          ;; Queued first: the backlog's usual way out is the queue, which
+          ;; starts it as a slot frees; Start now ignores the limit.
+          '(("Queue it" harness-ui-tasks-queue) ("Start now" harness-ui-tasks-start)
+            ("Edit" harness-ui-tasks-edit) ("Open" harness-ui-tasks-open)
+            ("Refine" harness-ui-tasks-refine) ("Drop" harness-ui-tasks-cancel))))
        ('needs-input
         (pcase (plist-get (harness-ui-tasks--pending task) :kind)
           ("permission" '(("Allow" harness-ui-tasks-allow) ("Deny" harness-ui-tasks-deny)
@@ -1033,10 +1064,11 @@ Below that, a board of headings and notes alone helps nobody: the board
 is drawn whole, scrolls under the reader, and the compose box keeps its
 place at the bottom of the window (`harness-compose--follow').")
 
-(defconst harness-ui-tasks--cap-order '(done pending active review needs-input)
+(defconst harness-ui-tasks--cap-order '(done backlog pending active review needs-input)
   "Columns the board caps, least urgent first.
-A cap hides part of a column's list, so the ones that need you are
-capped last, and only ever after everything below them.")
+The backlog waits for you, so it goes before pending, which drains by
+itself; a cap hides part of a column's list, so the ones that need you
+are capped last, and only ever after everything below them.")
 
 (defun harness-ui-tasks--cappable-p (groups)
   "Non-nil when some section of GROUPS may have its list capped."
@@ -1373,6 +1405,11 @@ the window is too small for."
             (if (and (eq column 'pending) (harness-ui-tasks--queue-suspended-p))
                 (propertize "  · queue suspended: nothing starts on its own"
                             'face 'harness-task-attention-face)
+              "")
+            ;; The backlog drains into In progress by nobody's hand but
+            ;; yours: its heading says so, whoever else is waiting.
+            (if (and (eq column 'backlog) tasks)
+                (propertize "  · start one when ready" 'face 'harness-dim-face)
               ""))
     (when (and (eq column 'done) tasks (not folded))
       (let ((b (harness-ui-tasks--button "[Archive all]" #'harness-ui-tasks-archive-done
@@ -1401,15 +1438,16 @@ the window is too small for."
                                 ('merging "    the merge queue is empty\n")
                                 ('active "    nothing working\n")
                                 ('pending "    no tasks waiting\n")
+                                ('backlog "    nothing in the backlog\n")
                                 (_ "    none yet\n"))
                               'face 'harness-dim-face)))
          (t
-          ;; Only queued tasks have a place in line; the backlog waits for you.
+          ;; Only queued tasks have a place in line; a backlog card
+          ;; starts only when you start it.
           (let ((queued 0))
             (dolist (task (if shown (seq-take tasks shown) tasks))
               (harness-ui-tasks--insert-card
-               task column (and (eq column 'pending) (not (harness-ui-tasks--backlog-p task))
-                                (cl-incf queued)))))))
+               task column (and (eq column 'pending) (cl-incf queued)))))))
         ;; The line for a section the window is too small for, or one open
         ;; past the room the window has, which folds it back.
         (when (or (> more 0) (memq column harness-ui-tasks--expanded))
@@ -1756,8 +1794,8 @@ its tooltip."
   (propertize (harness-ui-tasks--button label (lambda () (call-interactively command)) help command)
               'face 'harness-dim-face))
 
-(defconst harness-ui-tasks--bulk-columns '(active pending needs-input)
-  "Columns the bulk editor reaches: running, pending and blocked tasks.
+(defconst harness-ui-tasks--bulk-columns '(active pending backlog needs-input)
+  "Columns the bulk editor reaches: running, pending, backlog and blocked tasks.
 Review, done and archived tasks are history and are left alone.")
 
 (defun harness-ui-tasks--bulk-tasks ()
@@ -1833,7 +1871,7 @@ levels, their order and the reading are the priority UI's
 (defun harness-ui-tasks-bulk-priority (&optional priority)
   "Give every current task on this board PRIORITY: \"low\", \"medium\" or \"high\".
 It is the priority button of bulk editing (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-bulk]), and changes the
-running, pending and blocked tasks, as the other bulk settings do.
+running, pending, backlog and blocked tasks, as the other bulk settings do.
 Interactively it asks which; an empty answer changes nothing, and
 neither does quitting.  It is the only way a bulk edit changes
 priorities: the other settings leave each task's alone.  A task's
@@ -1845,7 +1883,7 @@ the others'."
     (user-error "Bulk editing is off; %s turns it on"
                 (substitute-command-keys "\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-bulk]")))
   (let* ((tasks (or (harness-ui-tasks--bulk-tasks)
-                    (user-error "No running, pending or blocked task to change")))
+                    (user-error "No running, pending, backlog or blocked task to change")))
          (n (length tasks))
          (priority (or priority
                        (harness-ui-tasks--read-bulk-priority
@@ -1869,8 +1907,8 @@ the others'."
 (defun harness-ui-tasks-toggle-bulk ()
   "Switch bulk editing of the current tasks on or off.
 While on, the model, effort, permission-mode, non-interactive,
-supervisor and priority buttons change every running, pending or
-blocked task, not just the new task or the one at point.  Each changes
+supervisor and priority buttons change every running, pending,
+backlog or blocked task, not just the new task or the one at point.  Each changes
 only its own setting, when it is used: a task's other settings, its
 priority among them, stay as they are.  Review, done and archived tasks
 are history and are left alone."
@@ -1888,7 +1926,7 @@ are history and are left alone."
   "The conspicuous line that says bulk editing is on."
   (let ((n (length (harness-ui-tasks--bulk-tasks))))
     (propertize
-     (format "EDITING %d CURRENT TASK%s (running, pending, blocked) — the settings below change all of them"
+     (format "EDITING %d CURRENT TASK%s (running, pending, backlog, blocked) — the settings below change all of them"
              n (if (= 1 n) "" "S"))
      'face 'harness-task-attention-face)))
 
@@ -2317,7 +2355,7 @@ to the other mode, as `harness-ui-tasks-toggle-refine' does."
     (pcase-let ((`(,icon ,label ,help ,other)
                  (if harness-ui-tasks--refine
                      '(harness-icon-agent "Refine"
-                       "Refine: an agent writes the task up, then it waits in Pending until you start it"
+                       "Refine: an agent writes the task up, then it waits in the Backlog until you start it"
                        "Submit")
                    '(harness-icon-running "Submit" "Submit: the task starts at once" "Refine"))))
       (propertize
@@ -2353,14 +2391,14 @@ current tasks' priority takes its place, on the settings line
   (setq harness-ui-tasks--refine (and refine t))
   (harness-ui-tasks--render-tail)
   (message (if refine
-               "Refine: an agent writes each new task up; it waits in Pending until you start it"
+               "Refine: an agent writes each new task up; it waits in the Backlog until you start it"
              "Submit: each new task starts at once")))
 
 (defun harness-ui-tasks-toggle-refine (&optional arg)
   "Switch the compose box between submitting new tasks and refining them.
 Submit starts a task at once.  Refine (backlog refinement, once called
 grooming) has an agent write it up first -- briefly, reading the code
-but changing nothing -- and the task then waits in Pending, across
+but changing nothing -- and the task then waits in the Backlog, across
 restarts, until you start it (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-start]).  With a prefix ARG, refine
 when it is positive and submit otherwise."
   (interactive "P")
@@ -2545,7 +2583,7 @@ is on, [Refresh] and a board still loading stay longest.  WIDTH is as
          (bulk (harness-ui-tasks--segment
                 (if harness-ui-tasks--bulk "[Bulk edit: on]" "[Bulk edit]")
                 #'harness-ui-tasks-toggle-bulk
-                "Bulk edit: apply the model, effort, permission mode, interactivity or priority you change to every running, pending and blocked task"))
+                "Bulk edit: apply the model, effort, permission mode, interactivity or priority you change to every running, pending, backlog or blocked task"))
          (sep "   ")
          (gap (lambda () (prog1 sep (setq sep "  ")))))
     (harness-ui-fit-header
@@ -2815,7 +2853,8 @@ so they type, into the compose box (`harness-compose-acts-p')."
       (get-text-property (point) 'harness-task-id)))
 
 ;; Typing off a card, the board's keys for the task at point (see above).
-(dolist (command '(harness-ui-tasks-open-other harness-ui-tasks-start harness-ui-tasks-edit
+(dolist (command '(harness-ui-tasks-open-other harness-ui-tasks-start harness-ui-tasks-queue
+                   harness-ui-tasks-edit
                    harness-ui-tasks-reply harness-ui-tasks-requests harness-ui-tasks-refine
                    harness-ui-tasks-allow harness-ui-tasks-deny harness-ui-tasks-cancel
                    harness-ui-tasks-complete harness-ui-tasks-verify harness-ui-tasks-reject
@@ -2833,6 +2872,7 @@ so they type, into the compose box (`harness-compose-acts-p')."
   (define-key map (kbd "<backtab>") #'harness-ui-tasks-previous)
   (define-key map (kbd "a") #'harness-ui-tasks-compose)
   (define-key map (kbd "s") #'harness-ui-tasks-start)
+  (define-key map (kbd "Q") #'harness-ui-tasks-queue)
   (define-key map (kbd "e") #'harness-ui-tasks-edit)
   (define-key map (kbd "m") #'harness-ui-tasks-reply)
   (define-key map (kbd "SPC") #'harness-ui-tasks-requests)
@@ -2920,6 +2960,7 @@ task's key typed off a card.
         (". o" "Open in position" harness-ui-tasks-open-other)
         (". TAB" "Fold the section or the recap" harness-ui-tasks-tab)
         (". s" "Start now" harness-ui-tasks-start)
+        (". Q" "Queue it (start it when a slot frees)" harness-ui-tasks-queue)
         (". e" "Edit prompt" harness-ui-tasks-edit)
         (". m" "Message session" harness-ui-tasks-reply)
         (". SPC" "View what point needs" harness-ui-tasks-requests)
@@ -3280,12 +3321,29 @@ A new task is refined for the backlog when REFINE is non-nil."
               (harness-ui-tasks--fail buffer "Submitting the task" e)))))))))
 
 (defun harness-ui-tasks-start ()
-  "Start the pending task at point now, even when every slot is busy.
+  "Start the pending or backlog task at point now, even when every slot is busy.
 A task returned to pending carries on in the session that already
-worked on it, where it stopped."
+worked on it, where it stopped; a backlog task starts with its
+write-up.  \<harness-ui-tasks-board-map>\[harness-ui-tasks-queue] leaves it to the queue instead."
   (interactive)
   (harness-ui-tasks--request-then "_harness/task/start" (list :id (plist-get (harness-ui-tasks--task) :id))
                                   "Starting the task"))
+
+(defun harness-ui-tasks-queue ()
+  "Put the backlog task at point back in the pending queue.
+It then starts on its own as soon as its project has a free slot, by
+priority, as any queued task does; while the queue is suspended
+\(\<harness-ui-tasks-board-map>\[harness-ui-tasks-toggle-queue]) it waits in Pending until the queue is
+resumed.  \<harness-ui-tasks-board-map>\[harness-ui-tasks-start] starts it at once instead, whatever the limit."
+  (interactive)
+  (let ((task (harness-ui-tasks--task)))
+    (unless (and (harness-ui-tasks--backlog-p task) (not (harness-ui-tasks--refining-p task)))
+      (user-error "Only a task waiting in the backlog can be queued"))
+    (harness-ui-tasks--request-then "_harness/task/queue" (list :id (plist-get task :id))
+                                    "Queueing the task")
+    (message "%s" (if (harness-ui-tasks--queue-suspended-p)
+                      "Queued: it starts when you resume the queue (or now with s)"
+                    "Queued: it starts as soon as the project has a free slot"))))
 
 (defun harness-ui-tasks-return-to-pending ()
   "Stop the turn of the task at point and put it back in the pending queue.
@@ -3347,7 +3405,7 @@ priority."
 Priorities are low, medium and high (`harness-ui-priority-levels'),
 and a task's priority is its session's (`harness-priority-of-task').
 The harness starts waiting tasks by priority, then oldest first, and
-Pending shows them in that order, so the card moves with it."
+Pending shows them in that order, and the backlog too, so the card moves with it."
   (let* ((task (harness-ui-tasks--task))
          (rank (harness-ui-tasks--priority-rank task))
          (priority (nth (+ rank step) harness-ui-priority-levels)))

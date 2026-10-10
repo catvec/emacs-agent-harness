@@ -1270,8 +1270,13 @@ your checkout itself can be submitted to the **main tree** instead (the
 - Write a task in the compose box at the bottom of the board and press
   `C-c C-c` to submit it. `C-c C-t` switches the box between **Submit**,
   which starts the task at once, and **Refine**, which has an agent
-  write the task up first. A refined task waits in *Pending*, across
-  restarts, until you start it with `s`. Refining looks at the board
+  write the task up first. A refined task waits in *Backlog*, across
+  restarts, until you start it with `s`. *Pending* holds only the tasks
+  waiting for a slot, which the queue starts by itself as slots free;
+  *Backlog* is its own section, and the queue never starts one of
+  those: `Q` on a backlog card (or its [Queue it] button) puts it back
+  in *Pending*, where it starts by itself as soon as a slot frees, and
+  `s` starts it at once. Refining looks at the board
   first: a task it already has is refused rather than written up (drop
   it, or write it up anyway), and the write-up names the tasks working
   on the same code, to coordinate with instead of redoing their work.
