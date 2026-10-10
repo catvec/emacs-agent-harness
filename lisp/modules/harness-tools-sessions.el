@@ -7,7 +7,7 @@
 ;;
 ;; Sessions:
 ;; - `session_list' lists sessions (this project by default) with
-;;   status, model, usage and whether they wait on the user.
+;;   status, model, usage, priority and whether they wait on the user.
 ;; - `session_search' finds sessions whose transcript contains a string.
 ;;   It greps the node logs on disk in a subprocess, so transcripts are
 ;;   never loaded into memory just to be searched.
@@ -35,11 +35,18 @@
 ;;   this session, another one, or every current session and task of
 ;;   every project, with `session/set-all' and `task/set-all' as the
 ;;   UI's `harness-set-non-interactive-all' does.
+;; - `set_priority' gives one session -- this one by default, a task's
+;;   through the session `task_list' names -- or every current session
+;;   and task of every project a priority: low, medium or high, the
+;;   priority plugin's one vocabulary (`priority/set',
+;;   `priority/set-all').  A task's priority is its session's.
 ;;
 ;; Tasks (when the `tasks' module is loaded):
 ;; - `task_list', `task_submit' (with a priority: low, medium or high),
 ;;   `task_control' (start, message, cancel, merge, verify, reject,
 ;;   complete, archive, restore, delete, priority) and `task_wait'.
+;;   `task_control''s priority action sets the task's session's, since
+;;   that is where a task's priority lives.
 ;;
 ;; Nothing here grants permissions: a session's permission requests and
 ;; permission mode are left to the user, and tasks are submitted with
@@ -80,6 +87,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-files)
+(require 'harness-priority)
 (require 'harness-tools)
 
 (defvar harness-state-directory)
@@ -135,9 +143,13 @@ but not over a piece this long; see `harness-tools-sessions--locate'.")
                  pending "; "))))
 
 (defun harness-tools-sessions--line (s)
-  "Return the one-line listing of session plist S."
+  "Return the one-line listing of session plist S.
+A priority of its own that is not the default shows after the figures,
+as \", priority high\": it is what the queues the session's work waits
+in go by (see the priority plugin)."
   (let ((u (plist-get s :usage))
-        (pending (harness-tools-sessions--pending-text s)))
+        (pending (harness-tools-sessions--pending-text s))
+        (level (harness-priority-of-ext (plist-get s :ext))))
     (concat
      (format "%s  %-8s %-8s %s  model %s, %s, cost %s, updated %s"
              (plist-get s :id) (plist-get s :status) (plist-get s :kind)
@@ -146,6 +158,8 @@ but not over a piece this long; see `harness-tools-sessions--locate'.")
              (abbreviate-file-name (or (plist-get s :cwd) ""))
              (harness-format-spend u)
              (harness-relative-time (plist-get s :updated)))
+     (if (and level (not (eq level harness-priority-default)))
+         (format ", priority %s" level) "")
      (if (plist-get s :parent-id) (format ", parent %s" (harness-tools-sessions--short (plist-get s :parent-id))) "")
      (if (plist-get s :queue) (format ", %d queued" (length (plist-get s :queue))) "")
      (if pending (format "\n    waiting on the user: %s" pending) ""))))
@@ -290,7 +304,7 @@ INPUT is the tool call's input plist and CTX its context."
 
 (harness-define-tool "session_list"
   :label "List sessions"
-  :description "List harness sessions with id, status (idle, running, blocked, inactive), kind, name, model, working directory, cost and what each one waits on. Defaults to the open sessions of this project; set include_inactive for closed ones and all_projects for every project. Session ids (or a unique prefix, or a unique name) are accepted by the other session_* tools."
+  :description "List harness sessions with id, status (idle, running, blocked, inactive), kind, name, model, working directory, cost, priority (when it is not the default medium) and what each one waits on. A task's priority is its session's. Defaults to the open sessions of this project; set include_inactive for closed ones and all_projects for every project. Session ids (or a unique prefix, or a unique name) are accepted by the other session_* tools."
   :schema '(:type "object"
             :properties (:status (:type "string" :enum ("idle" "running" "blocked" "inactive")
                                   :description "Only sessions in this status.")
@@ -892,6 +906,73 @@ new sessions is the user's to change, so it is left alone."
                                     (harness-tools-sessions--short (plist-get input :session_id))))))
   :handler #'harness-tools-sessions--set-non-interactive)
 
+;;;; set_priority
+
+(defun harness-tools-sessions--priority-p ()
+  "Signal unless the priority module is loaded."
+  (unless (harness-method-exists-p 'priority/set)
+    (signal 'harness-error (list "The priority module is not loaded, so a session has no priority"))))
+
+(defun harness-tools-sessions--set-all-priority (level)
+  "Give every current session and task session LEVEL; return the ids changed.
+That is every active session and the session of every current task, of
+every project: `priority/set-all' with `:active' and `:tasks', the
+filter `session/select' reads, and the one call the UI's
+`harness-set-priority-all' makes.  A session already carrying LEVEL of
+its own is left alone."
+  (harness-call 'priority/set-all (symbol-name level) (list :active t :tasks t)))
+
+(defun harness-tools-sessions--set-priority (input ctx)
+  "Handler of set_priority, with the call's INPUT and CTX.
+One session, CTX's own by default, or with `all' every current session
+and task of every project.  A priority is the session's -- a task's is
+its session's, the one `task_list' names -- and it orders the queues
+the session's work waits in: the higher it is, the sooner its calls and
+its commands go when the machine is busy (see the tool slots)."
+  (harness-tools-sessions--priority-p)
+  (let* ((value (plist-get input :priority))
+         (ref (let ((r (plist-get input :session_id)))
+                (and (stringp r) (not (harness-string-blank-p r)) r)))
+         (level (if (harness-string-blank-p value)
+                    (signal 'harness-error (list "priority needs priority: low, medium or high"))
+                  (harness-priority-read value))))
+    (cond
+     ((and ref (harness-json-true-p (plist-get input :all)))
+      (harness-tool-error "Give session_id or all, not both"))
+     ((harness-json-true-p (plist-get input :all))
+      (let ((changed (harness-tools-sessions--set-all-priority level)))
+        (harness-tool-ok
+         (format "Priority is now %s for every current session and task of every project: %s changed, the others already had it. When the machine is busy the work of the higher ones is served first."
+                 (symbol-name level)
+                 (harness-tools-sessions--plural (length changed) "session")))))
+     (t
+      (let* ((sid (if ref (harness-tools-sessions--resolve ref) (plist-get ctx :session-id)))
+             (session (harness-call 'session/get sid))
+             (was (harness-priority-of-ext (plist-get session :ext))))
+        (harness-call 'priority/set sid (symbol-name level))
+        (harness-tool-ok
+         (format "Priority %s %s for %s."
+                 (if (eq level was) "was already" "is now")
+                 (symbol-name level)
+                 (if (equal sid (plist-get ctx :session-id)) "this session"
+                   (format "session %s %S" sid (or (plist-get session :name) "(unnamed)"))))))))))
+
+(harness-define-tool "set_priority"
+  :label "Set priority"
+  :description "Give a session a priority: low, medium (the default) or high. The higher it is, the sooner the session's calls and commands go while the machine is busy (the tool slots), so a high session is served before a medium one and a low one last. A task's priority is its session's (task_list names that session), and a task waiting for a slot starts by it, so this is how a task's priority is changed; every task has its session from submission. One session, this session by default, or with all=true every current session and task of every project."
+  :schema '(:type "object"
+            :properties (:session_id (:type "string" :description "The session to change: id, unique id prefix or unique name. Default: this session.")
+                         :priority (:type "string" :enum ("low" "medium" "high")
+                                    :description "The new priority, for the session (or for every session, with all).")
+                         :all (:type "boolean" :description "Give every current session and task of every project this priority instead (default false)."))
+            :required ("priority"))
+  :kind 'meta
+  :subject (lambda (input)
+             (string-trim (format "%s %s" (or (plist-get input :priority) "")
+                                  (if (harness-json-true-p (plist-get input :all)) "all"
+                                    (harness-tools-sessions--short (plist-get input :session_id))))))
+  :handler #'harness-tools-sessions--set-priority)
+
 ;;;; session_move
 ;;
 ;; A session started in one directory that works on another moves
@@ -1354,9 +1435,9 @@ message of the harness's own."
 (defun harness-tools-sessions--task-line (task &optional self)
   "Return the listing of TASK.
 Its title on the board, once it has one, comes before its prompt: the
-name of its session, else its own, which a task waiting for a slot has
-before it has a session.  When SELF, a session id, is TASK's session,
-the line says \"(this task)\"."
+name of its session, else its own, which a task has from submission --
+it gets its session then, named with the title once it comes.  When
+SELF, a session id, is TASK's session, the line says \"(this task)\"."
   (let* ((sid (plist-get task :session))
          (session (and sid (harness-call 'session/exists-p sid) (harness-call 'session/get sid)))
          (title (if (harness-string-blank-p (plist-get session :name))
@@ -1501,20 +1582,27 @@ sends work back."
        (let ((priority (plist-get input :priority)))
          (when (harness-string-blank-p priority)
            (signal 'harness-error (list "priority needs priority: low, medium or high")))
-         (harness-call 'task/set-priority id priority)))
+         (harness-tools-sessions--priority-p)
+         (let ((sid (plist-get task :session)))
+           ;; A task's priority is its session's, and only that record
+           ;; holds one; a task waiting for a slot has its session already.
+           (unless sid
+             (signal 'harness-error
+                     (list (format "Task %s has no session, so setting its priority is not possible" id))))
+           (harness-call 'priority/set sid priority))))
       (_ (signal 'harness-error (list (format "Unknown action %S" action)))))
     (harness-tool-ok
      (if-let* ((task (ignore-errors (harness-call 'task/get id))))
          (format "%s.\n%s"
                  (if (equal action "priority")
-                     (format "Priority %s" (plist-get task :priority))
+                     (format "Priority %s" (harness-priority-of-task task))
                    (concat action " done"))
                  (harness-tools-sessions--task-line task))
        (format "%s done; task %s is gone." action id)))))
 
 (harness-define-tool "task_control"
   :label "Control task"
-  :description "Act on a task. start runs a pending task now; message sends a follow-up to its session, marked as coming from this session (while pending, it appends to the prompt instead; a task in review gets it as a message, not as a review -- only reject sends work back -- and waits for review again once that turn ends); cancel drops a pending task or stops a working one's turn; merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); reject sends a task in review back to its session with the feedback in message, to work on it again; complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept); priority sets its priority to the given one (low, medium or high), which reorders the tasks waiting for a slot: high starts before medium, medium before low."
+  :description "Act on a task. start runs a pending task now; message sends a follow-up to its session, marked as coming from this session (while pending, it appends to the prompt instead; a task in review gets it as a message, not as a review -- only reject sends work back -- and waits for review again once that turn ends); cancel drops a pending task or stops a working one's turn; merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); reject sends a task in review back to its session with the feedback in message, to work on it again; complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept); priority sets its priority to the given one (low, medium or high), given to the task's session, which is where a task's priority lives (`harness-priority-of-task'), and which reorders the tasks waiting for a slot: high starts before medium, medium before low."
   :schema '(:type "object"
             :properties (:task_id (:type "string" :description "Task id or unique prefix.")
                          :action (:type "string" :enum ("start" "message" "cancel" "merge" "verify" "reject" "complete" "archive" "restore" "delete" "priority"))

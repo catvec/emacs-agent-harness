@@ -16,7 +16,8 @@
 ;;   and the merge queue, so plans can use them).
 ;; - `todo_write' replaces the session's todo list.
 ;; - `spawn_agent' creates a child session (fresh or forked, optionally
-;;   in its own git worktree) and runs one prompt in it.  The call
+;;   in its own git worktree, optionally at a priority of its own) and
+;;   runs one prompt in it.  The call
 ;;   returns as soon as the child starts, so a spawn never blocks the
 ;;   conversation and several sub-agents can run at once; the child's
 ;;   answer arrives later in a message of its own, and one that still
@@ -28,7 +29,8 @@
 ;;   `harness-tools-agent-context-limit', which other modules that start
 ;;   sub-agents use too.  The cap is never silent: a hint at the start of
 ;;   the child's transcript says it
-;;   (`harness-tools-agent-context-limit-hint').
+;;   (`harness-tools-agent-context-limit-hint').  Without a priority of
+;;   its own the child works at its parent's (`harness-priority-session').
 ;; - `session_info' describes the current session to the model.
 ;;
 ;; Nothing here waits: every long operation returns a promise, and the
@@ -41,6 +43,7 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-priority)
 (require 'harness-tools)
 
 ;;;; Questions
@@ -649,15 +652,31 @@ sub-agent's transcript, so that the cap is never silent:
                 capped as-a-sub-agent))
        (t (format "%s, %s" capped as-a-sub-agent))))))
 
-(defun harness-tools-agent--create-child (parent input child-id cwd worktree call-id)
+(defun harness-tools-agent--child-priority (input)
+  "Return the priority INPUT gives a new child session, or nil.
+That is the `priority' option, read the way the priority plugin reads a
+level (a name no level has is refused here, before any child is made:
+`spawn_agent' calls this before the worktree).  nil, the default, is no
+priority of its own, so the child works at what it inherits -- its
+parent's priority, and the default when the chain up has none (see
+`harness-priority-session')."
+  (let ((value (plist-get input :priority)))
+    (and (not (harness-string-blank-p value))
+         (harness-priority-read value))))
+
+(defun harness-tools-agent--create-child (parent input child-id cwd worktree call-id priority)
   "Return a promise of the child session plist for PARENT from INPUT.
 CHILD-ID is the id to use, CWD its working directory and WORKTREE
 its worktree path (or nil).  CALL-ID is the spawn_agent call's: a fork
 copies it among the parent's calls still running, and answers it with
-a result saying the fork is the sub-agent it started.  The child's
-context is capped as `harness-tools-agent-context-limit' says, and a
-hint in its transcript says so (`harness-tools-agent-context-limit-hint'),
-added once it exists."
+a result saying the fork is the sub-agent it started.  PRIORITY, a
+level or nil, is the child session's own priority (see
+`harness-tools-agent--child-priority'): it orders the queues the
+child's work waits in, as the parent's does its own (see the priority
+plugin).  The child's context is capped as
+`harness-tools-agent-context-limit' says, and a hint in its transcript
+says so (`harness-tools-agent-context-limit-hint'), added once it
+exists."
   (let* ((fork (harness-json-true-p (plist-get input :fork)))
          (name (plist-get input :name))
          (model (or (plist-get input :model) (plist-get parent :model)))
@@ -683,15 +702,22 @@ added once it exists."
                     ;; Off too, not left to the setting.
                     :non-interactive (if (harness-json-true-p (plist-get parent :non-interactive)) t :false)
                     limit-option)))))
-    (if (null hint)
+    (if (and (null hint) (null priority))
         created
       (harness-then created
                     (lambda (child)
-                      ;; A hint that cannot be added must not fail the sub-agent.
-                      (condition-case err
-                          (harness-call 'session/hint (plist-get child :id) hint)
-                        (error (harness-log 'warn "tools-agent: adding the context cap hint to %s failed: %S"
-                                            (plist-get child :id) err)))
+                      ;; A hint or a priority that cannot be set must not
+                      ;; fail the sub-agent.
+                      (when hint
+                        (condition-case err
+                            (harness-call 'session/hint (plist-get child :id) hint)
+                          (error (harness-log 'warn "tools-agent: adding the context cap hint to %s failed: %S"
+                                              (plist-get child :id) err))))
+                      (when priority
+                        (condition-case err
+                            (harness-call 'priority/set (plist-get child :id) (symbol-name priority))
+                          (error (harness-log 'warn "tools-agent: giving %s priority %s failed: %S"
+                                              (plist-get child :id) priority err))))
                       child)))))
 
 (defun harness-tools-agent--spawn (input ctx)
@@ -704,6 +730,9 @@ own once its turn ends and nothing of it is outstanding any more."
          (parent (harness-call 'session/get sid))
          (prompt (or (plist-get input :prompt) ""))
          (child-id (harness-uuid))
+         ;; A priority no level has is refused here, before the worktree
+         ;; or the child is made.
+         (priority (harness-tools-agent--child-priority input))
          (want-worktree (and (harness-json-true-p (plist-get input :worktree))
                              (harness-method-exists-p 'worktree/create)))
          (cwd (or (plist-get input :cwd) (plist-get parent :cwd))))
@@ -721,7 +750,7 @@ own once its turn ends and nothing of it is outstanding any more."
              (branch (plist-get wt :branch)))
          (harness-then
           (harness-tools-agent--create-child parent input child-id (or worktree cwd) worktree
-                                             (plist-get ctx :call-id))
+                                             (plist-get ctx :call-id) priority)
           (lambda (child)
             (let* ((cid (plist-get child :id))
                    (entry (list :parent sid :name (plist-get child :name)
@@ -749,14 +778,16 @@ own once its turn ends and nothing of it is outstanding any more."
 
 (harness-define-tool "spawn_agent"
   :label "Sub-agent"
-  :description "Run a sub-agent on a prompt and return at once, naming the child session: it runs in the background and its answer arrives later in a message of its own when it is done, so the call never blocks this conversation -- never wait or poll for a sub-agent. Start several at once, in several calls in the same step or one after another, and carry on; each reports back on its own. fork=true forks this session (the child shares your context and its cached prefix; cheaper when the task needs what you already know); fork=false starts a fresh session with only the prompt. worktree=true gives the child its own git worktree and branch so it can change files in parallel; merge its branch back afterwards through the merge queue."
+  :description "Run a sub-agent on a prompt and return at once, naming the child session: it runs in the background and its answer arrives later in a message of its own when it is done, so the call never blocks this conversation -- never wait or poll for a sub-agent. Start several at once, in several calls in the same step or one after another, and carry on; each reports back on its own. fork=true forks this session (the child shares your context and its cached prefix; cheaper when the task needs what you already know); fork=false starts a fresh session with only the prompt. worktree=true gives the child its own git worktree and branch so it can change files in parallel; merge its branch back afterwards through the merge queue. priority is the child session's own priority (low, medium or high), which orders the queues its work waits in: without it the child works at what it inherits from this session."
   :schema '(:type "object"
             :properties (:prompt (:type "string" :description "The task for the sub-agent.")
                          :fork (:type "boolean" :description "Fork this session instead of starting fresh (default false).")
                          :model (:type "string" :description "Model id for the child (default: this session's model).")
                          :name (:type "string" :description "Display name for the child session.")
                          :cwd (:type "string" :description "Working directory for the child (default: this session's), inside this session's allowed directories.")
-                         :worktree (:type "boolean" :description "Create a git worktree and branch for the child (default false)."))
+                         :worktree (:type "boolean" :description "Create a git worktree and branch for the child (default false).")
+                         :priority (:type "string" :enum ("low" "medium" "high")
+                                    :description "The child session's priority (default: what it inherits from this session's)."))
             :required ("prompt"))
   :kind 'meta
   ;; The child works where it starts: the jail checks that like bash's cwd.
