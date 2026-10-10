@@ -131,8 +131,10 @@ Every entry is a plist with these keys:
                    an official DeepSeek host gets its handling anyway;
                    see `harness-openai--deepseek-p')
   :capabilities    static capability plist overriding the flavor default
-  :tiers           model names per tier (:cheap :balanced :frontier), as
-                   `harness-define-provider' takes them; without one the
+  :tiers           a model name per tier (:simple :medium :hard
+                   :frontier), perhaps with a thinking level, as
+                   `harness-define-provider' takes them (see
+                   `harness-provider-tiers-type'); without one the
                    tier comes from the catalogue's prices
 
 When neither :api-key nor :api-key-env yields a key, auth-source is

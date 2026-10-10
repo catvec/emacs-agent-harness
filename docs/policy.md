@@ -222,8 +222,8 @@ It is an option anyone can set, and a policy makes it binding:
   a task's, the auto-mode judge's, naming's, compaction's.  The session
   shows the reason.
 - `provider/models` lists only the models allowed, so the model picker
-  offers nothing else, and a provider's cheap or strong tier is chosen
-  among them.
+  offers nothing else, and a provider's model of a tier (simple,
+  medium, hard or frontier) is chosen among them.
 - `session/update` refuses another model.
 
 A session already on a model the policy no longer allows keeps it, and

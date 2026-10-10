@@ -288,12 +288,12 @@ take such a rule back (`permission/undo')."
   "Model that judges tool calls, as PROVIDER:NAME, or `auto'.
 It judges in `auto' mode, and in every mode for a non-interactive
 session, deciding what would ask the user while they are away.
-`auto' (the default) asks the session's provider for its `cheap' tier
+`auto' (the default) asks the session's provider for its `simple' tier
 \(see `harness-provider-tier-model'), so the judge runs on a model the
 session's provider can actually serve, falling back to the session's
 own model when the provider names none and its prices are unknown.  A
 PROVIDER:NAME forces that model, and nil uses the session's own model."
-  :type '(choice (const :tag "The session provider's cheap model" auto)
+  :type '(choice (const :tag "The session provider's simple model" auto)
                  (const :tag "The session's own model" nil)
                  (string :tag "Model" :names model))
   :group 'harness)
@@ -2036,7 +2036,7 @@ one, and quotes the start of TEXT, what the judge replied."
 (defun harness-perms--judge-model (session)
   "Return the model the auto-mode judge uses for SESSION.
 `harness-perms-auto-model' names one, `auto' asks the session's own
-provider for its cheap tier (falling back to the session's model), and
+provider for its simple tier (falling back to the session's model), and
 nil uses the session's model."
   (let* ((session-model (or (plist-get session :model)
                             (harness-perms--config 'harness-model session)))
@@ -2046,7 +2046,7 @@ nil uses the session's model."
     (cond
      (automatic
       (or (and session-model (harness-method-exists-p 'provider/tier-model)
-               (harness-call 'provider/tier-model session-model 'cheap))
+               (harness-call 'provider/tier-model session-model 'simple))
           session-model))
      ((stringp choice) choice)
      (t session-model))))

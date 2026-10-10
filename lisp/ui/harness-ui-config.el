@@ -118,7 +118,14 @@
     ("core" . "Core"))
   "Section titles of the harness modules.")
 
-(defconst harness-ui-config--labels nil
+(defconst harness-ui-config--labels
+  ;; Side by side under Model tiers, each would be "Tiers".
+  '(("harness-provider-claude-tiers" . "Claude tiers")
+    ("harness-deepseek-tiers" . "DeepSeek tiers")
+    ("harness-bedrock-tiers" . "Bedrock tiers")
+    ("harness-provider-copilot-tiers" . "Copilot tiers")
+    ;; Under Supervisor mode, beside the providers' own tiers.
+    ("harness-supervisor-tiers" . "Step models"))
   "Names of settings that the general rule gets wrong, as (KEY . NAME).")
 
 (defconst harness-ui-config--acronyms

@@ -427,6 +427,10 @@ state directory, as they would the user's."
                   ("harness-openai-endpoints" "provider-openai" "Endpoints")
                   ("harness-anthropic-admin-api-key" "usage" "Anthropic admin API key")
                   ("harness-provider-claude-program" "provider-claude" "Program")
+                  ;; Side by side under Model tiers, each says whose they are.
+                  ("harness-provider-claude-tiers" "provider-claude" "Claude tiers")
+                  ("harness-deepseek-tiers" "provider-deepseek" "DeepSeek tiers")
+                  ("harness-supervisor-tiers" "supervisor" "Step models")
                   ("harness-log-level" "core" "Log level")))
     (should (equal (nth 2 case)
                    (harness-ui-config--label (list :key (nth 0 case) :module (nth 1 case))))))

@@ -9,7 +9,7 @@
 ;; task's raw first message as its title all along.
 ;;
 ;; That request runs beside the turn.  It is a request of its own, to the
-;; naming model (`harness-naming-model': by default the cheap tier of the
+;; naming model (`harness-naming-model': by default the simple tier of the
 ;; session's provider), holding only the conversation's opening message
 ;; (and its latest one, when it has moved on since, as a fork's has) and
 ;; the question.  It carries no provider state and is `:ephemeral', so a
@@ -61,12 +61,12 @@
 
 (defcustom harness-naming-model 'auto
   "Model that names a session from its first message, as PROVIDER:NAME, or `auto'.
-`auto' (the default) asks the session's provider for its `cheap' tier
+`auto' (the default) asks the session's provider for its `simple' tier
 \(see `harness-provider-tier-model'): a title is a few words, which the
 fastest, cheapest model writes as well as any, falling back to the
 session's own model when the provider names none.  A PROVIDER:NAME
 forces that model, and nil uses the session's own model."
-  :type '(choice (const :tag "The session provider's cheap model" auto)
+  :type '(choice (const :tag "The session provider's simple model" auto)
                  (const :tag "The session's own model" nil)
                  (string :tag "Model" :names model))
   :group 'harness)
@@ -146,7 +146,7 @@ session, or the one `naming/title' is told the title is for."
         (choice harness-naming-model))
     (cond ((or (eq choice 'auto) (equal choice "auto"))
            (or (and model (harness-method-exists-p 'provider/tier-model)
-                    (ignore-errors (harness-call 'provider/tier-model model 'cheap)))
+                    (ignore-errors (harness-call 'provider/tier-model model 'simple)))
                model))
           ((and (stringp choice) (not (string-empty-p choice))) choice)
           (t model))))
@@ -379,7 +379,7 @@ This is the request that names a session from its first message
 \(`naming/name' with `:opening') for a message with no session to name
 yet: task mode names a task from its prompt this way while it waits for
 a slot.  It goes to `harness-naming-model' for the model OPTS' `:model'
-names (by default that model's cheap tier), ephemeral and without
+names (by default that model's simple tier), ephemeral and without
 thinking, under an id of its own that is closed once it is answered.
 Nothing is stored and no session hears of it.  OPTS also give `:cwd'
 and `:host', where the request runs, and go to the `naming/system-prompt'
