@@ -66,13 +66,15 @@
   (plist-get (car (plist-get (car (harness-call 'session/messages id)) :content)) :text))
 
 (defun harness-compaction-test-long-session ()
-  "Create a demo session with twenty alternating messages."
+  "Create a demo session with twenty long alternating messages."
   (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
                                      :model "demo:scripted" :context-window 8000)
                        :id)))
     (dotimes (i 20)
-      (harness-call 'session/append id (list :kind (if (cl-evenp i) 'user 'assistant)
-                                             :content (format "message %d" i))))
+      (harness-call 'session/append id
+                    (list :kind (if (cl-evenp i) 'user 'assistant)
+                          :content (format "message %d %s" i
+                                           (string-join (make-list 50 "word") " ")))))
     id))
 
 (defun harness-compaction-test-request-text (request)
@@ -888,18 +890,6 @@ context goes inside a single message of structured text instead."
       (should-not (memq 'compaction (harness-compaction-test-kinds id))))))
 
 ;;;; Truncate
-
-(defun harness-compaction-test-long-session ()
-  "Create a demo session with twenty long alternating messages."
-  (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
-                                     :model "demo:scripted" :context-window 8000)
-                       :id)))
-    (dotimes (i 20)
-      (harness-call 'session/append id
-                    (list :kind (if (cl-evenp i) 'user 'assistant)
-                          :content (format "message %d %s" i
-                                           (string-join (make-list 50 "word") " ")))))
-    id))
 
 (defun harness-compaction-test-compactions (id)
   "Return the compaction nodes of ID, oldest first."
