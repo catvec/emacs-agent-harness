@@ -577,7 +577,7 @@ with or nil, ALL non-nil when the whole of it is looked through."
                               (or (plist-get (harness-node-handoff node) :from) "another model")))
                      (t (format "the %scompaction"
                                 (let ((kind (harness-node-compaction-kind node)))
-                                  (if (member kind '("summary" "brief" "transcript" "fresh"))
+                                  (if (member kind '("summary" "brief" "transcript" "fresh" "truncate"))
                                       (concat kind " ")
                                     ""))))))
          (stamp (and node (format "[%s %s, %s]" (plist-get node :kind) (plist-get node :id)

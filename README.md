@@ -338,7 +338,7 @@ default), or nil for nowhere.
 | `C-c h f` | `harness-fork-session` | Fork the current session |
 | `C-c h b` | `harness-btw` | Open a BTW side conversation |
 | `C-c h k` | `harness-cancel-turn` | Cancel the running turn |
-| `C-c h C` | `harness-compact` | Compact the conversation: choose a summary, a brief summary, a transcript file or a fresh start, each with what it costs |
+| `C-c h C` | `harness-compact` | Compact the conversation: choose a summary, a brief summary, a transcript file, a fresh start or a cut of its older context, each with what it costs; a session running a turn is asked to interrupt it or queue the compaction |
 | `C-c h D` | `harness-delete-session` | Delete the current session |
 | `C-c h m` | `harness-set-model` | Choose the model |
 | `C-c h M` | `harness-set-model-all` | Choose a model and switch every current session and task of every project to it |
@@ -797,7 +797,7 @@ its answer where it wanted to move.
 A conversation that nears its model's context window is compacted
 before the next turn, unless its provider compacts on its own side, as
 Claude Code does: something much smaller stands in for it from then on,
-and the earlier messages stay in the conversation tree. There are four
+and the earlier messages stay in the conversation tree. There are five
 kinds:
 
 - **Summary**: the session's model summarises the whole conversation.
@@ -814,6 +814,12 @@ kinds:
 - **Fresh start**: nothing is carried over, not even a summary. The
   model starts with a short note saying so, and looks back at what it
   needs with `session_history` (below). It costs nothing.
+- **Cut old context**: the oldest messages are dropped and the most
+  recent ones are kept as they were. A short note says what went, so
+  the model knows to look the rest up with `session_history` rather
+  than assume the conversation it has is all of it. It costs nothing,
+  and it is the one to reach for when the conversation is too big to
+  summarise: nothing has to be read to make it.
 
 Whichever kind it is, the conversation it replaced stays on record.
 The compaction ends in a line pointing the model at the
@@ -835,10 +841,22 @@ compacts the current session by hand, between turns: it asks which kind,
 naming what each costs, beside a table of who writes each, what it
 costs and what it does, and of what carrying on without compacting
 costs. Typing `/compact` in the message box asks the same;
-`/compact brief`, `/compact summary`, `/compact transcript` or
-`/compact fresh` (or just `b`, `s`, `t` or `f`) compacts that way at once. The chat then shows the
+`/compact brief`, `/compact summary`, `/compact transcript`,
+`/compact fresh` or `/compact truncate` (or just `b`, `s`, `t`, `f` or
+`c`) compacts that way at once. The chat then shows the
 compaction where the conversation now starts, with `[open the
 transcript]` for a transcript file.
+
+Asking mid-turn does not have to wait: when the session is running a
+turn, the question first offers to interrupt the step and compact now,
+or to queue the compaction for the turn's next boundary (its next step,
+or its end), and `/compact` offers the same. Interrupting ends the
+turn: the step in flight, and anything it had not recorded yet, are
+lost, so queueing is the one to pick when the turn has work to finish.
+The agent itself can do this with the `compact` tool: it names a kind
+and asks to `queue` the compaction (the default) or to `interrupt` the
+turn first, which is what an agent does when it sees the context
+filling up mid-task.
 
 A provider's prompt cache lasts only a while after its last use: five
 minutes or an hour for Claude, hours for DeepSeek (see
@@ -853,7 +871,7 @@ to compact the conversation first, a button and a key per kind with
 what each costs:
 
 ```
-Compact it first   b  Brief summary (~$0.011)   s  Summary (~$0.463)   t  Transcript file (free)   f  Fresh start (free)
+Compact it first   b  Brief summary (~$0.011)   s  Summary (~$0.463)   t  Transcript file (free)   f  Fresh start (free)   c  Cut old context (free)
 ```
 
 Press the key with point on that line, or click a button, and the

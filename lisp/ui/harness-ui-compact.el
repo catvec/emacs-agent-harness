@@ -17,7 +17,9 @@
 ;;   session's directory, and a note tells the model to read what it
 ;;   needs of it.  No request;
 ;; - a fresh start: nothing is carried over but a note saying so.  No
-;;   request either.
+;;   request either;
+;; - a cut old context: the oldest nodes go, the most recent are kept
+;;   as they were, and a note says what went.  No request either.
 ;;
 ;; The first three are the ways a handoff carries a conversation over to
 ;; another provider (`compact-new', `compact', `transcript'), on the
@@ -34,7 +36,10 @@
 ;; first: that is when carrying on is dearest, the whole context going
 ;; out uncached.  A message sent to such a session asks the same before
 ;; it goes (harness-cowboy.el, harness-ui-cowboy.el).  A session running
-;; a turn is not compacted.
+;; a turn is asked whether to interrupt the step and compact now, or to
+;; queue the compaction for the turn's next boundary
+;; (`harness-ui-compact-running-choice'): compacting it mid-step would
+;; let the turn go on writing after the conversation it replaces.
 
 ;;; Code:
 
@@ -55,7 +60,9 @@
     (transcript ?t "transcript file"
                 "the conversation goes to a file the model reads what it needs of; no request")
     (fresh ?f "fresh start"
-           "nothing is carried over; the model looks back with session_history when it needs to; no request"))
+           "nothing is carried over; the model looks back with session_history when it needs to; no request")
+    (truncate ?c "cut old context"
+              "the oldest messages are dropped and the most recent kept as they are; no request"))
   "The kinds of compaction offered by hand, the cheap one first.
 Each entry is (KIND KEY NAME DESCRIPTION): KIND a kind of
 `compaction/compact', KEY the key that picks it, NAME what it is called
@@ -81,16 +88,16 @@ Nil when the catalogue does not price the model that would write it."
 
 (defun harness-ui-compact-cost-text (estimate kind)
   "Return what KIND of compaction costs as ESTIMATE says, short: \"~$0.02\".
-A transcript and a fresh start, which ask no model, are \"free\"; a
-kind whose model the catalogue does not price is nil."
+A transcript, a fresh start and a cut old context, which ask no model,
+are \"free\"; a kind whose model the catalogue does not price is nil."
   (let ((cost (harness-ui-compact-cost estimate kind)))
-    (cond ((memq kind '(transcript fresh)) "free")
+    (cond ((memq kind '(transcript fresh truncate)) "free")
           (cost (concat "~" (harness-format-cost cost))))))
 
 (defun harness-ui-compact--writer (estimate kind)
   "Return the label of the model that would write KIND, as ESTIMATE says, or nil."
   (let ((k (harness-ui-compact--kind estimate kind)))
-    (and (not (memq kind '(transcript fresh)))
+    (and (not (memq kind '(transcript fresh truncate)))
          (or (plist-get k :model-label)
              (and (plist-get k :model) (harness-ui-model-label (plist-get k :model)))))))
 
@@ -121,6 +128,17 @@ goes beside it."
                        " note of ~%s tokens saying so, and searches and reads the old conversation"
                        " with session_history when it needs to.  No model is asked anything.")
                (harness-format-tokens (or (plist-get k :after) 100))))
+      ('truncate
+       (let ((dropped (or (plist-get k :dropped) 0))
+             (kept (or (plist-get k :kept) 0)))
+         (if (zerop dropped)
+             (concat "Nothing can be cut: the whole conversation already fits in the window."
+                     "  No model is asked anything.")
+           (format (concat "The oldest %d nodes (~%s tokens) are dropped and the most recent %d"
+                           " (~%s tokens) are kept as they were; a note says what went."
+                           "  No model is asked anything.")
+                   dropped (harness-format-tokens (or (plist-get k :dropped-tokens) 0))
+                   kept (harness-format-tokens (or (plist-get k :kept-tokens) 0))))))
       (_ ""))))
 
 (defun harness-ui-compact-carry-on-text (estimate)
@@ -194,6 +212,28 @@ Return a kind of `harness-ui-compact-kinds', or nil to cancel."
   "Non-nil while SESSION, a session plist, runs a turn or waits inside one."
   (member (format "%s" (plist-get session :status)) '("running" "blocked")))
 
+(defconst harness-ui-compact-running-choices
+  '((?i "interrupt the step and compact now"
+        "the turn is cancelled at once and the conversation compacted as soon as it is over")
+    (?q "queue for the next boundary"
+        "the turn goes on; the conversation is compacted at its next step, or when it ends")
+    (?c "cancel" "leave the turn and the conversation alone"))
+  "The choices offered when compacting a session that runs a turn.")
+
+(defun harness-ui-compact-running-choice (session)
+  "Ask how to compact SESSION, which is running a turn.
+Return `interrupt', `queue', or `cancel'.  Compacting a running
+session mid-step would let its turn go on writing after the
+conversation it replaces: it is interrupted first, or the compaction
+waits for the turn's next boundary."
+  (let ((answer (read-multiple-choice
+                 (format "Compacting %s, which is running a turn"
+                         (or (let ((name (plist-get session :name)))
+                               (and (stringp name) (not (string-blank-p name)) (format "“%s”" name)))
+                             "this session"))
+                 harness-ui-compact-running-choices)))
+    (pcase (car answer) (?i 'interrupt) (?q 'queue) (_ 'cancel))))
+
 (defun harness-ui-compact-outcome (node)
   "Say what the compaction NODE, as `compaction/compact' returned it, did."
   (let* ((meta (plist-get node :meta))
@@ -210,25 +250,42 @@ Return a kind of `harness-ui-compact-kinds', or nil to cancel."
                (harness-ui-model-label (plist-get meta :model))))
       ("fresh"
        (format "Started afresh, leaving %s behind; session_history reaches it" from))
+      ("truncate"
+       (format "Cut %s of older conversation away, keeping the most recent" from))
       (_ (format "Compacted %s into a summary" from)))))
 
 (defun harness-ui-compact-doing (kind)
   "Say that compacting as KIND is under way: \"Compacting … into a summary…\"."
-  (if (eq kind 'fresh)
-      "Starting afresh…"
-    (format "Compacting the conversation into a %s…"
-            (or (nth 2 (assq kind harness-ui-compact-kinds)) kind))))
+  (pcase kind
+    ('fresh "Starting afresh…")
+    ('truncate "Cutting the oldest context away…")
+    (_ (format "Compacting the conversation into a %s…"
+               (or (nth 2 (assq kind harness-ui-compact-kinds)) kind)))))
 
-(defun harness-ui-compact-run (session-id kind &optional callback)
+(defun harness-ui-compact-run (session-id kind &optional callback mode)
   "Compact SESSION-ID as KIND, saying how it went.
-KIND is one of `harness-ui-compact-kinds'.  CALLBACK, if any, is called
-once it is done with the compaction node, or with nil when it failed."
+KIND is one of `harness-ui-compact-kinds'.  MODE is how to treat a
+session that is running a turn, as `harness-ui-compact-running-choice'
+answers: nil compacts now and refuses a running turn (`:idle'), `queue'
+leaves the turn running and compacts at its next boundary, and
+`interrupt' cancels the turn first.  CALLBACK, if any, is called once
+it is settled -- with the queued result, the compaction node, or nil
+on failure."
   (message "%s" (harness-ui-compact-doing kind))
   (harness-ui-call "_harness/compaction/compact"
-                   (list :session-id session-id :opts (list :kind (symbol-name kind) :idle t))
-                   (lambda (node)
-                     (message "%s" (harness-ui-compact-outcome node))
-                     (when callback (funcall callback node)))
+                   (list :session-id session-id
+                         :opts (append (list :kind (symbol-name kind))
+                                       (pcase mode
+                                         ('queue (list :queue t))
+                                         ('interrupt (list :interrupt t))
+                                         (_ (list :idle t)))))
+                   (lambda (result)
+                     (if (harness-json-true-p (plist-get result :queued))
+                         (message "%s" (if (harness-json-true-p (plist-get result :interrupt))
+                                           "The turn is being interrupted; compacting as soon as it is over"
+                                         "Compaction queued; it runs at the turn's next boundary"))
+                       (message "%s" (harness-ui-compact-outcome result)))
+                     (when callback (funcall callback result)))
                    (lambda (err)
                      (unless (harness-ui-connection-replaced-p err)
                        ;; Short: the error can name a whole transcript as
@@ -245,7 +302,7 @@ Signal when it names none."
       (or (car (cl-find-if (lambda (entry)
                              (member text (list (symbol-name (car entry)) (char-to-string (nth 1 entry)))))
                            harness-ui-compact-kinds))
-          (user-error "No compaction kind %s: brief, summary, transcript or fresh" text)))))
+          (user-error "No compaction kind %s: brief, summary, transcript, fresh or truncate" text)))))
 
 (defun harness-ui-compact--session (session-id)
   "Return what the UI knows of SESSION-ID: the list's record, else its chat's."
@@ -256,22 +313,35 @@ Signal when it names none."
 
 ;;;###autoload
 (defun harness-compact (session-id &optional kind)
-  "Compact the conversation of SESSION-ID now, as KIND, or as you choose.
-KIND is `brief', `summary', `transcript' or `fresh'
+  "Compact the conversation of SESSION-ID, as KIND, or as you choose.
+KIND is `brief', `summary', `transcript', `fresh' or `truncate'
 \(`harness-ui-compact-kinds'); without it you are asked, with what each
 costs at list prices and what carrying on costs.  A brief summary is
 cheap however long the conversation, a summary reads all of it again,
-a transcript and a fresh start ask no model.  The session's next
-message then sends what stands in for the conversation, not the
-conversation, and the model searches and reads the rest with the
-session_history tool.  A session running a turn is not compacted.  In
-a chat, /compact does this too, and /compact brief (or b, summary,
-transcript, fresh) skips the question."
+a transcript, a fresh start and a cut old context ask no model.  The
+session's next message then sends what stands in for the conversation,
+not the conversation, and the model searches and reads the rest with
+the session_history tool.
+
+A session running a turn is asked how: interrupt the step and compact
+now (the turn is cancelled, and what it was doing is dropped), or
+queue the compaction for the turn's next boundary, when the turn goes
+on with the compacted conversation.  In a chat, /compact does this
+too, and /compact brief (or b, summary, transcript, fresh, truncate)
+skips the question."
   (interactive (list (harness-ui-current-session-id)))
-  (when (harness-ui-compact-running-p (harness-ui-compact--session session-id))
-    (user-error "This session is running a turn: compact it once the turn is over"))
+  (let* ((session (harness-ui-compact--session session-id))
+         (mode (if (harness-ui-compact-running-p session)
+                   (harness-ui-compact-running-choice session)
+                 'now)))
+    (unless (eq mode 'cancel)
+      (harness-ui-compact--choose session-id kind mode))))
+
+(defun harness-ui-compact--choose (session-id kind mode)
+  "Compact SESSION-ID as KIND, asking which kind when KIND is nil.
+MODE is how to treat a running turn (see `harness-ui-compact-run')."
   (if kind
-      (harness-ui-compact-run session-id kind)
+      (harness-ui-compact-run session-id kind nil mode)
     (let ((session (harness-ui-compact--session session-id)))
       (message "Working out what compacting costs…")
       (harness-ui-call "_harness/compaction/estimate" (list :session-id session-id)
@@ -280,7 +350,7 @@ transcript, fresh) skips the question."
                          (if (harness-json-true-p (plist-get estimate :compacting))
                              (message "This conversation is being compacted already")
                            (when-let* ((choice (harness-ui-compact-read session estimate)))
-                             (harness-ui-compact-run session-id choice))))))))
+                             (harness-ui-compact-run session-id choice nil mode))))))))
 
 (defun harness-ui-compact--chat-command (args)
   "Run /compact ARGS in a chat's message box: compact its session.
@@ -292,8 +362,9 @@ ARGS names the kind (`harness-ui-compact-parse-kind'), or is empty to ask."
 (defun harness-ui-compact--init ()
   "Bind `harness-compact', put it in the menu and take /compact in the chat."
   (define-key harness-ui-map (kbd "C") #'harness-compact)
-  (ignore-errors
-    (transient-append-suffix 'harness-menu "f" '("C" "Compact context" harness-compact)))
+  (condition-case err
+      (transient-append-suffix 'harness-menu "f" '("C" "Compact context" harness-compact))
+    (error (harness-log 'warn "compact: no menu entry: %s" (error-message-string err))))
   (setf (alist-get "compact" harness-chat-commands nil nil #'equal) #'harness-ui-compact--chat-command))
 
 (harness-define-module 'ui-compact
