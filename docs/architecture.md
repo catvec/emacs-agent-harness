@@ -4187,7 +4187,7 @@ supervisor module makes the commands of a supervising session read-only
 and offline this way.
 
 `spawn_agent` (tools-agent) runs its child on a deliberately shorter
-context window: `harness-subagent-context-limit` (128000 tokens; nil for
+context window: `harness-subagent-context-limit` (256000 tokens; nil for
 no cap) is the most a sub-agent adds of its own.
 `harness-tools-agent-context-limit PARENT-ID FORK &optional INHERITED`
 → the `:context-window-limit` for a sub-agent of session PARENT-ID, or
@@ -4202,9 +4202,9 @@ supervisor's workers pass the result to `session/create` or
 `session/fork`; without a cap a fork keeps its parent's limit.  The cap
 is never silent: `harness-tools-agent-context-limit-hint LIMIT FORK
 &optional INHERITED` → the text of a hint that says it, or nil when
-LIMIT is nil, such as "Context window capped at 128k tokens, as a
+LIMIT is nil, such as "Context window capped at 256k tokens, as a
 sub-agent's is (harness-subagent-context-limit)", and for a fork "Context
-window capped at 218k tokens: the 90k it starts with plus 128k of its
+window capped at 346k tokens: the 90k it starts with plus 256k of its
 own, as a sub-agent's is (harness-subagent-context-limit)" (INHERITED is
 `harness-tools-agent-inherited-context PARENT-ID`; a limit the parent's
 own holds lower adds ", and no higher than the limit of the session that

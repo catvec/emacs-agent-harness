@@ -705,7 +705,7 @@ Return how the turn ended.  A turn the session still runs ends first."
 The cap is never silent: a fork's hint says what it starts with, a fresh
 worker's the cap alone."
   (harness-supervisor-plan-test-with
-    (let ((harness-subagent-context-limit 128000)
+    (let ((harness-subagent-context-limit 256000)
           (sid (harness-supervisor-plan-test-session)))
       (harness-call 'session/usage-add sid '(:input 10 :output 5 :context 90000))
       (harness-supervisor-plan-test-submit
@@ -717,11 +717,11 @@ worker's the cap alone."
             (fresh (plist-get (harness-supervisor-plan-test-step sid "f") :session))
             (limit (harness-tools-agent-context-limit sid t)))
         (should (= limit (plist-get (harness-call 'session/get fork) :context-window-limit)))
-        (should (member (format "Context window capped at %s tokens: the 90k it starts with plus 128k of its own, as a sub-agent's is (harness-subagent-context-limit)"
+        (should (member (format "Context window capped at %s tokens: the 90k it starts with plus 256k of its own, as a sub-agent's is (harness-subagent-context-limit)"
                                 (harness-tools-agent--tokens limit))
                         (harness-supervisor-plan-test-hints fork)))
-        (should (= 128000 (plist-get (harness-call 'session/get fresh) :context-window-limit)))
-        (should (equal '("Context window capped at 128k tokens, as a sub-agent's is (harness-subagent-context-limit)")
+        (should (= 256000 (plist-get (harness-call 'session/get fresh) :context-window-limit)))
+        (should (equal '("Context window capped at 256k tokens, as a sub-agent's is (harness-subagent-context-limit)")
                        (harness-supervisor-plan-test-hints fresh))))
       (harness-supervisor-plan-test-wait-idle sid))))
 
@@ -1181,7 +1181,7 @@ compacted as the cowboy would, the supervisor is told, and so is the worker."
   "A compacted worker is capped from the summary it starts with, not from what
 the supervisor holds, and its transcript says so after the compaction."
   (harness-supervisor-plan-test-with-cache (compaction cowboy)
-    (let ((harness-subagent-context-limit 128000)
+    (let ((harness-subagent-context-limit 256000)
           (sid (harness-supervisor-plan-test-session)))
       (harness-call 'session/usage-add sid '(:input 10 :output 5 :context 90000))
       (harness-supervisor-plan-test-fail-first sid (harness-supervisor-plan-test-step-input "s1"))
@@ -1198,12 +1198,12 @@ the supervisor holds, and its transcript says so after the compaction."
                (cap (cl-position-if (lambda (h) (string-prefix-p "Context window capped at" h)) hints)))
           (should (= 1 (length (harness-supervisor-plan-test-own-compactions wid))))
           ;; The cap and the summary's few tokens, far below the 90k and the cap.
-          (should (<= 128000 limit))
-          (should (< limit (+ 128000 90000)))
+          (should (<= 256000 limit))
+          (should (< limit (+ 256000 90000)))
           (should cowboy)
           (should cap)
           (should (< cowboy cap))
-          (should (string-match-p (format "\\`Context window capped at %s tokens: the .* it starts with plus 128k of its own"
+          (should (string-match-p (format "\\`Context window capped at %s tokens: the .* it starts with plus 256k of its own"
                                           (regexp-quote (harness-tools-agent--tokens limit)))
                                   (nth cap hints)))
           ;; Set with no hint of its own: the one about the cap says it.

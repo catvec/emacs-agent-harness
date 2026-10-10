@@ -432,7 +432,7 @@ Replace the todos of the session in CTX with those in INPUT."
             (or (plist-get last-assistant :content) "(the sub-agent produced no answer)")
             child-id calls (harness-format-spend (plist-get child :usage)))))
 
-(defcustom harness-subagent-context-limit 128000
+(defcustom harness-subagent-context-limit 256000
   "Most tokens of context a sub-agent adds of its own, or nil for no cap.
 A sub-agent does one job, so it works on a deliberately shorter
 context window than the session that started it: it compacts once its
