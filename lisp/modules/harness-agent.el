@@ -1053,9 +1053,13 @@ tool asked it to (`:end-turn'), or decides what follows."
                                                       (list :duration (- (float-time) started)
                                                             :denied (plist-get result :denied)
                                                             :truncated (plist-get result :truncated))
-                                                      ;; The session a spawn_agent call ran.
-                                                      (let ((child (plist-get (plist-get result :meta) :child-id)))
-                                                        (and child (list :child-id child)))))))
+                                                      ;; What the tool recorded on its
+                                                      ;; result -- the child session a
+                                                      ;; spawn_agent call ran, the report a
+                                                      ;; hand_in handed in -- rides the
+                                                      ;; node, so the transcript can draw it
+                                                      ;; later.  Its `:child-id' is among it.
+                                                      (plist-get result :meta)))))
                     (content (harness-agent--with-steering turn (plist-get result :content))))
                (harness-emit 'agent/tool-result sid rnode)
                (when respond

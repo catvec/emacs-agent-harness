@@ -912,7 +912,7 @@ merging or in conflict; once it is through, the same call goes."
       (let ((r (harness-test-await
                 (harness-call 'tools/execute task
                               (list :id "c1" :name "hand_in"
-                                    :input (list :summary "Done." :evidence (list (list :note "the work"))))))))
+                                    :input (list :problem "The work must be in." :summary "Done." :evidence (list (list :note "the work"))))))))
         (should (plist-get r :is-error))
         (should (string-match-p "a merge into this session's worktree is not through yet: worker (queued)"
                                 (plist-get r :content)))
@@ -925,7 +925,7 @@ merging or in conflict; once it is through, the same call goes."
       (let ((r (harness-test-await
                 (harness-call 'tools/execute task
                               (list :id "c2" :name "hand_in"
-                                    :input (list :summary "Done." :evidence (list (list :note "the work"))))))))
+                                    :input (list :problem "The work must be in." :summary "Done." :evidence (list (list :note "the work"))))))))
         (should-not (plist-get r :is-error))
         (should (equal "Done." (plist-get (gethash "t-1" reports) :summary)))))))
 

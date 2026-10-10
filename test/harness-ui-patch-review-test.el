@@ -15,6 +15,9 @@
 (require 'harness-acp)
 (require 'harness-ui)
 (require 'harness-ui-patch-review)
+;; Loaded up front, so the comment command's own `(require ...)' is a no-op
+;; and the stubs below are what runs.
+(require 'string-edit)
 
 (defvar ediff-current-difference)
 (defvar ediff-number-of-differences)
@@ -444,7 +447,7 @@ main checkout, so it has no branch until BODY gives it one."
            (harness-provider-demo-script-override
             '((:type text :delta "All done.\n")
               (:type tool-call :id "h1" :name "hand_in"
-                     :input (:summary "Done: the flaky test is fixed." :evidence ("a note")))))
+                     :input (:problem "The flaky test fails in a random order." :summary "Done: the flaky test is fixed." :evidence ("a note")))))
            (harness-naming-auto nil)
            (harness-tasks-max-running 3)
            (harness-tasks-require-verification t)
@@ -495,7 +498,7 @@ main checkout, so it has no branch until BODY gives it one."
                      5 (format "the buffer %s %s" (if absent "to lose" "to show") regexp)))
 
 (defun harness-ui-patch-review-test--report (board id)
-  "Pop out the report of task ID as BOARD's [Review] does; return its buffer.
+  "Pop out the report of task ID as BOARD's [Review Changes] does; return its buffer.
 The board's record is the one the wire gives, as the UI sees it."
   (harness-ui-report-popout (with-current-buffer board (harness-ui-tasks--find id)))
   (let ((popout (harness-ui-popout-buffer (list 'report id))))
@@ -545,7 +548,8 @@ Nothing else does: the board has no button for them."
       (harness-ui-patch-review-test--wait-text popout "^    M  a\\.el")
       (let ((text (harness-ui-patch-review-test--text popout))
             (merge-base (harness-ui-patch-review-test--git repo "merge-base" "main" "task/fix")))
-        (should (string-match-p (format "^Changes (6)   task/fix against main @ %s   \\+7 −8$" (substring merge-base 0 7))
+        (should (string-match-p (format "^Changes (6)   0 of 6 files viewed, 6 left   task/fix against main @ %s   \\+7 −8$"
+                                        (substring merge-base 0 7))
                                 text))
         (should (< (string-match "^Evidence" text) (string-match "^Changes (6)" text)
                    (string-match "Ready for review" text)))
@@ -626,19 +630,29 @@ on the next one."
           (should (eq 'ediff-next-difference (key-binding "n")))
           (should (eq ediff-brief-help-message-function #'harness-ui-patch-review--ediff-help))
           (should (string-search "[Back to the report] q" (harness-ui-patch-review-test--text control)))
+          ;; The brief help says which file of the six this is; none seen yet.
+          (should (string-search "File 1 of 6 · 0 viewed · [Comment]" (harness-ui-patch-review-test--text control)))
           ;; On the first difference: line 2 on the branch.
           (should (= 0 ediff-current-difference))
           (should (= 2 ediff-number-of-differences))
           (should (equal '(:new . 2) (harness-ui-patch-review--ediff-position)))
-          (cl-letf (((symbol-function 'read-string) (lambda (p &rest _) (setq prompt p) "Why two?")))
+          ;; The comment is written in a buffer of its own, so it may be
+          ;; several lines: this one fills to two.
+          (cl-letf (((symbol-function 'string-edit)
+                     (lambda (p _initial callback &rest _)
+                       (setq prompt p)
+                       (funcall callback (concat "Why two?\nBecause the second one reads better and the test "
+                                                 "only ever sees one of them at a time.")))))
             (call-interactively #'harness-ui-patch-review-comment))
-          (should (equal "Comment on a.el, line 2: " prompt))
+          (should (equal "Comment on a.el, line 2:   C-c C-c comments, C-c C-k cancels" prompt))
           (call-interactively #'harness-ui-patch-review-ediff-next-file)))
-      ;; The comment is in the report's box, under its lines.
+      ;; The comment is in the report's box, under its lines, whole.
       (with-current-buffer popout
         (should (equal (concat (harness-ui-patch-review-test--attribution repo) "\n\n"
                                "> diff --git a/a.el b/a.el\n> @@ -1,2 +1,2 @@\n>  (setq a1 1)\n"
-                               "> -(setq a2 2)\n> +(setq a2 'two)\n\nWhy two?\n")
+                               "> -(setq a2 2)\n> +(setq a2 'two)\n\n"
+                               "Why two?  Because the second one reads better and the test only ever\n"
+                               "sees one of them at a time.\n")
                        (harness-compose-text))))
       ;; N: on to b.el, deleted on the branch, without the report between.
       (let ((control (harness-ui-patch-review-test--control review 1)))
@@ -647,12 +661,19 @@ on the next one."
         (with-current-buffer control
           (should (= 1 ediff-number-of-differences))
           (should (equal '(:old . 5) (harness-ui-patch-review--ediff-position)))
-          (let ((answers (list "Who used these?" "And where did they go?"))
-                said)
-            (cl-letf (((symbol-function 'read-string) (lambda (&rest _) (pop answers)))
+          (let ((answers (list (concat "Who used these?\nAnd where are they set now? Both questions are "
+                                       "about the same table and the same callers, so they belong together.")
+                               "And where did they go?"))
+                prompt said)
+            (cl-letf (((symbol-function 'string-edit)
+                       (lambda (p _initial callback &rest _)
+                         (setq prompt p)
+                         (funcall callback (pop answers))))
                       ((symbol-function 'message) (lambda (&rest args) (setq said (apply #'format args)))))
               (call-interactively #'harness-ui-patch-review-comment)
               (call-interactively #'harness-ui-patch-review-comment))
+            (should (equal "Comment on b.el, line 5 of the merge base:   C-c C-c comments, C-c C-k cancels"
+                           prompt))
             (should (equal "In the report's box: 2 comments on b.el; C-c C-c there sends the feedback" said)))
           (call-interactively #'harness-ui-patch-review-ediff-quit))
         (should-not (buffer-live-p control)))
@@ -671,9 +692,15 @@ on the next one."
           (should (string-match-p "^  ✓ M  a\\.el .*   1 comment$" text))
           (should (string-match-p "^  ✓ D  b\\.el .*   2 comments$" text))
           (should (string-match-p "^    R  c\\.el → d\\.el +\\+1 −1$" text))
+          ;; Two of the six files were compared, four to go.
+          (should (string-match-p "^Changes (6)   2 of 6 files viewed, 4 left" text))
           (should (string-match-p "^Changes (6) .*   3 comments$" text)))
         (should (string-search "> diff --git a/b.el b/b.el\n> @@ -1,5 +0,0 @@\n" (harness-compose-text)))
-        (should (string-suffix-p "> -(setq b5 5)\n\nWho used these?\n\nAnd where did they go?\n"
+        ;; The whole of the multi-line first comment is in the box, wrapped.
+        (should (string-suffix-p (concat "> -(setq b5 5)\n\n"
+                                         "Who used these?  And where are they set now? Both questions are about\n"
+                                         "the same table and the same callers, so they belong together.\n\n"
+                                         "And where did they go?\n")
                                  (harness-compose-text))))
       ;; The review stays, for Ediff again.
       (should (eq review (gethash id harness-ui-patch-review--reviews))))))
