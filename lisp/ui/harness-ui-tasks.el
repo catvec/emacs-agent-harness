@@ -68,9 +68,13 @@
 ;; against a remote harness too.  The list region is
 ;; redrawn as a whole when anything changes -- a board holds tens of
 ;; tasks, not a transcript -- while the compose box is never touched.
-;; Point and every window showing the board stay where they were through
-;; it all: on the same line of the same card, on the same button.  A
-;; click on a button pushes it, however long the click takes.
+;; A board taller than its window holds its least urgent cards back, a
+;; fitting found by measuring the cards once and then kept while only
+;; what the cards read changes, so a busy board of many tasks redraws
+;; the cards its window shows, not all of them.  Point and every window
+;; showing the board stay where they were through it all: on the same
+;; line of the same card, on the same button.  A click on a button
+;; pushes it, however long the click takes.
 
 ;;; Code:
 
@@ -161,6 +165,7 @@ show it (see `harness-ui-tasks-toggle-subtitle').")
 (declare-function harness-btw "harness-ui-btw")
 (declare-function harness-ui-popout-at-point "harness-ui-popout")
 (declare-function harness-ui-popout-try-at-point "harness-ui-popout")
+(declare-function harness-toggle-supervisor "harness-ui-supervisor")
 
 (defmacro harness-ui-tasks--with-task (id &rest body)
   "Run BODY with point on task ID's card.
@@ -182,9 +187,10 @@ rather than going up to the card's first line."
 (defvar-local harness-ui-tasks--settings nil "What `task/settings' returned.")
 (defvar-local harness-ui-tasks--new nil
   "Settings the next submitted task starts with.
-A plist of `:model', `:thinking', `:permission-mode' and
-`:non-interactive', seeded from the harness's task defaults and changed
-with the usual session commands.")
+A plist of `:model', `:thinking', `:permission-mode', `:non-interactive'
+and, when the harness has the supervisor module, `:supervisor', seeded
+from the harness's task defaults and changed with the usual session
+commands.")
 (defvar-local harness-ui-tasks--loading t)
 (defvar-local harness-ui-tasks--error nil "Last failure, shown above the compose box.")
 (defvar-local harness-ui-tasks--show-archived nil)
@@ -917,6 +923,14 @@ SHOWN is whether the subtitle shows now."
 ;; is drawn to fit: the least urgent sections cap their lists first,
 ;; each saying how many tasks it holds back, and a section you expanded
 ;; keeps its whole list until folded again.
+;;
+;; What fits is measured, not drawn again and again: one drawing of the
+;; whole board answers how tall each card is, and the cards are then
+;; held back in order until the box fits (`harness-ui-tasks--caps-that-fit').
+;; The fitting is kept (`harness-ui-tasks--fitting') and drawn again as it is
+;; while the board's shape -- tasks, folding, window -- is unchanged, so
+;; the figures that change while many tasks work cost a drawing of the
+;; cards the window shows, not of the whole board.
 
 (defun harness-ui-tasks--window ()
   "Return the window the board should be drawn for.
@@ -1055,48 +1069,197 @@ everything.  Point is left at the end of the board."
   (goto-char (point-min))
   (harness-ui-tasks--insert-board caps))
 
+(defun harness-ui-tasks--runs (property)
+  "Return (VALUE START END) for every run of PROPERTY in the board region.
+In the order they show, top first; the board region ends at
+`harness-ui-tasks--list-end', so the compose box is not part of it."
+  (let ((pos (point-min))
+        (end (marker-position harness-ui-tasks--list-end))
+        out)
+    (while (< pos end)
+      (let ((next (next-single-property-change pos property nil end)))
+        (when-let* ((value (get-text-property pos property)))
+          (push (list value pos next) out))
+        (setq pos next)))
+    (nreverse out)))
+
+(defun harness-ui-tasks--pixel-height (window from to)
+  "Return how many pixels the text FROM and TO take in WINDOW.
+An empty range takes no room."
+  (if (>= from to) 0 (cdr (window-text-pixel-size window from to))))
+
+(defun harness-ui-tasks--sections ()
+  "Return (COLUMN START END) for every section drawn, in display order."
+  (let ((heads (harness-ui-tasks--runs 'harness-task-section))
+        (end (marker-position harness-ui-tasks--list-end))
+        out)
+    (while heads
+      (push (list (nth 0 (car heads)) (nth 1 (car heads))
+                  (or (nth 1 (cadr heads)) end))
+            out)
+      (setq heads (cdr heads)))
+    (nreverse out)))
+
+(defun harness-ui-tasks--caps-that-fit (window groups body)
+  "Return the caps that fit WINDOW's BODY pixels, measured, not drawn.
+The board region is drawn whole now; this measures it -- every card,
+and everything around them -- to find the fewest cards to hold back, in
+the order `harness-ui-tasks--cap-cards' holds them back.  A card takes
+a line or two depending on the wrapping in WINDOW, so a measurement is
+what answers; the bisection this replaces drew the whole board again
+for every trial, 1 + log2(cards) of them.  GROUPS is the tasks shown,
+as `harness-ui-tasks--visible' returns them."
+  (let* ((line (frame-char-height (window-frame window)))
+         (cards (harness-ui-tasks--runs 'harness-task-id))
+         (sections (harness-ui-tasks--sections))
+         (tail (marker-position harness-ui-tasks--list-end))
+         (height 0)
+         (shapes nil))
+    ;; The board's own lines before the first heading, and below the box.
+    (when sections
+      (cl-incf height (harness-ui-tasks--pixel-height window (point-min) (nth 1 (car sections)))))
+    (cl-incf height (harness-ui-tasks--pixel-height window tail (point-max)))
+    ;; Each section: the cards it shows, top first, and the room its
+    ;; heading and notes take around them.
+    (while sections
+      (let ((end (nth 2 (car sections)))
+            (pos (nth 1 (car sections)))
+            (heights nil))
+        (while (and cards (< (nth 1 (car cards)) end))
+          (let ((card (pop cards)))
+            (cl-incf height (harness-ui-tasks--pixel-height window pos (nth 1 card)))
+            (let ((card-height (harness-ui-tasks--pixel-height window (nth 1 card) (nth 2 card))))
+              (push card-height heights)
+              (cl-incf height card-height))
+            (setq pos (nth 2 card))))
+        (cl-incf height (harness-ui-tasks--pixel-height window pos end))
+        (push (cons (nth 0 (car sections)) (nreverse heights)) shapes))
+      (setq sections (cdr sections)))
+    (setq shapes (nreverse shapes))
+    ;; What holding each card back saves, in the order the caps take
+    ;; them: the least urgent section first, its last card first, and the
+    ;; first card of a section costs the line saying how many it holds.
+    (let ((needed (- height body))
+          (savings nil))
+      (dolist (column harness-ui-tasks--cap-order)
+        (unless (or (memq column harness-ui-tasks--folded)
+                    (memq column harness-ui-tasks--expanded))
+          (let ((heights (cdr (assq column shapes))))
+            (when heights
+              (push (- (car (last heights)) line) savings)
+              (dolist (card-height (butlast heights))
+                (push card-height savings))))))
+      (setq savings (nreverse savings))
+      (let ((saved 0)
+            (held 0)
+            (n (length savings)))
+        (while (and (< saved needed) (< held n))
+          (cl-incf saved (nth held savings))
+          (cl-incf held))
+        (let ((caps (harness-ui-tasks--empty-caps)))
+          (when (> held 0) (harness-ui-tasks--cap-cards caps groups held))
+          caps)))))
+
+(defun harness-ui-tasks--held (caps)
+  "Return how many cards CAPS hold back."
+  (cl-loop for cap in caps sum (cdr (cdr cap))))
+
+(defun harness-ui-tasks--cappable (groups)
+  "Return how many cards of GROUPS the caps may hold back, at most.
+That is every card in a section `harness-ui-tasks--cap-cards' takes
+from: the board can hold back no more, whatever the window."
+  (cl-loop for column in harness-ui-tasks--cap-order
+           unless (or (memq column harness-ui-tasks--folded)
+                      (memq column harness-ui-tasks--expanded))
+           sum (length (cdr (assq column groups)))))
+
+(defvar-local harness-ui-tasks--fitting nil
+  "The board's last fitting: (SHAPE . CAPS).
+SHAPE, from `harness-ui-tasks--fit-shape', is what the fitting depends
+on.  While it is unchanged, `harness-ui-tasks--fit-board' draws with
+CAPS again without measuring: the figures that change while a task
+works -- its tokens, rate and cost -- only change what the cards read,
+so a board that many tasks are updating draws its window's cards only.")
+
+(defun harness-ui-tasks--fit-shape (window)
+  "Return what fitting the board to WINDOW depends on.
+The tasks and their order, the folding and the subsections shown, the
+room the window has and the lines the board must leave for the compose
+box: everything that decides which cards show and how tall they are.
+Not the figures that only change what a card reads -- a session's
+tokens, rate or cost, the clock -- so the caps of a board many tasks
+are updating stay good while their cards' figures change."
+  (list window
+        (window-body-width window t)
+        (window-body-height window t)
+        (car (harness-ui-tasks--tail-key window))
+        harness-ui-tasks--tasks
+        harness-ui-tasks--folded
+        harness-ui-tasks--expanded
+        harness-ui-tasks--subtitles
+        harness-ui-tasks--submitting
+        harness-ui-tasks--show-archived
+        harness-ui-tasks--loading
+        harness-ui-tasks-filter))
+
 (defun harness-ui-tasks--fit-board ()
   "Draw the board, holding back the least urgent cards until the box fits.
-The board region is drawn whole first and the whole buffer measured
-through `harness-ui-tasks--fits-p'; when the compose box would not stay
-in the window, the fewest cards that must be held back are found by
-bisection -- a card takes a line or two, and which sections give way
-depends on the wrapping in that window in a way only a drawing answers
--- each capped section getting the line that says how many it holds and
-its [Show all].  Nothing is capped without a window, when the window has
-no room to speak of, or when everything is folded away or expanded: the
-board then scrolls, and the box keeps its place at the bottom of the
-window."
+The board region is drawn whole and measured: when the compose box
+would not stay in the window, the fewest cards that must be held back
+are found by measuring what each holds -- its own lines, and the line a
+capped section costs -- in the order `harness-ui-tasks--cap-cards'
+holds them back (`harness-ui-tasks--caps-that-fit'), where a bisection
+would draw the whole board again for every trial.  Each capped section
+gets the line that says how many it holds and its [Show all].
+
+A fitting is kept for the next redraw of the same shape in the same
+window (`harness-ui-tasks--fitting'), so the figures that change while
+tasks work -- tokens, rates, costs, elapsed times -- cost one drawing
+of the cards the window shows, not a measurement and a drawing of every
+card.
+
+Nothing is capped without a window, when the window has no room to
+speak of, or when everything is folded away or expanded: the board then
+scrolls, and the box keeps its place at the bottom of the window."
   (let* ((window (harness-ui-tasks--window))
          (line (and window (frame-char-height (window-frame window))))
          (body (and window (window-body-height window t)))
          (groups (harness-ui-tasks--visible))
-         (empty (harness-ui-tasks--empty-caps)))
+         (empty (harness-ui-tasks--empty-caps))
+         (shape (and window (harness-ui-tasks--fit-shape window))))
     (cond
      ((or (null window) (null line) (null body)
           (< body (* line harness-ui-tasks--cap-min-lines))
           (not (harness-ui-tasks--cappable-p groups)))
+      (setq harness-ui-tasks--fitting nil)
       (harness-ui-tasks--draw-board nil)
       nil)
+     ;; The same shape, drawn the same way: the caps still fit it (the
+     ;; check is for a card that grew where the shape said it would not),
+     ;; and drawing them covers the figures that changed.
+     ((and (equal shape (car-safe harness-ui-tasks--fitting))
+           (progn (harness-ui-tasks--draw-board (cdr harness-ui-tasks--fitting))
+                  (harness-ui-tasks--fits-p window)))
+      (cdr harness-ui-tasks--fitting))
      (t
       (harness-ui-tasks--draw-board empty)
-      (if (harness-ui-tasks--fits-p window)
-          empty
-        (let* ((total (cl-loop for c in harness-ui-tasks--columns
-                               sum (length (cdr (assq (car c) groups)))))
-               (lo 0) (hi total))
-          (while (< lo hi)
-            (let* ((mid (/ (+ lo hi) 2))
-                   (caps (harness-ui-tasks--empty-caps)))
-              (harness-ui-tasks--cap-cards caps groups mid)
-              (harness-ui-tasks--draw-board caps)
-              (if (harness-ui-tasks--fits-p window)
-                  (setq hi mid)
-                (setq lo (1+ mid)))))
-          (let ((caps (harness-ui-tasks--empty-caps)))
-            (when (> hi 0) (harness-ui-tasks--cap-cards caps groups hi))
-            (harness-ui-tasks--draw-board caps)
-            caps)))))))
+      (let ((caps (if (harness-ui-tasks--fits-p window)
+                      empty
+                    (harness-ui-tasks--caps-that-fit window groups body))))
+        (harness-ui-tasks--draw-board caps)
+        ;; A "N more" line that wraps, or a card taller than the shape
+        ;; said, can leave the drawing taller than it measured: hold back
+        ;; one card at a time until the box fits, as the measurement
+        ;; promised it would.
+        (let ((held (harness-ui-tasks--held caps))
+              (total (harness-ui-tasks--cappable groups)))
+          (while (and (< held total) (not (harness-ui-tasks--fits-p window)))
+            (cl-incf held)
+            (setq caps (harness-ui-tasks--empty-caps))
+            (harness-ui-tasks--cap-cards caps groups held)
+            (harness-ui-tasks--draw-board caps)))
+        (setq harness-ui-tasks--fitting (cons shape caps))
+        caps)))))
 
 (defun harness-ui-tasks--insert-card (task column position)
   "Insert the card of TASK in COLUMN at point.
@@ -1116,7 +1279,11 @@ line, two when its subtitle shows; its text has TASK's id as its
                                   meta)
                         meta))))
          (meta (funcall meta-of nil))
-         (lean (funcall meta-of t))
+         ;; The lean facts -- without the token figures -- only when the
+         ;; whole facts would squeeze the title: a wide board never needs
+         ;; them, and computing both costs what the rest of the card does.
+         (lean nil)
+         (lean-of (lambda () (or lean (setq lean (funcall meta-of t)))))
          (buttons (harness-ui-tasks--card-buttons task))
          (shown (or (harness-ui-tasks--subtitle-shown-p task) narrow))
          (chevron (if narrow "" (harness-ui-tasks--subtitle-button task shown)))
@@ -1152,9 +1319,10 @@ line, two when its subtitle shows; its text has TASK's id as its
          (fits (lambda (right)
                  (>= (- width (string-width right) (string-width left) (string-width mark) 3)
                      harness-ui-tasks--min-title-room)))
-         (right (cond (subtitle (if (funcall fits meta) meta lean))
+         (right (cond (subtitle (if (funcall fits meta) meta (funcall lean-of)))
                       ((funcall fits (concat meta "  " buttons)) (concat meta "  " buttons))
-                      ((funcall fits (concat lean "  " buttons)) (concat lean "  " buttons))
+                      ((funcall fits (concat (funcall lean-of) "  " buttons))
+                       (concat (funcall lean-of) "  " buttons))
                       (t buttons)))
          (room (- width (string-width right) (string-width left) (string-width mark) 3)))
     (insert left mark
@@ -1589,6 +1757,7 @@ Review, done and archived tasks are history and are left alone.")
           :thinking (harness-ui-tasks--bulk-common tasks :thinking)
           :permission-mode (harness-ui-tasks--bulk-common tasks :permission-mode)
           :non-interactive (harness-ui-tasks--bulk-common tasks :non-interactive)
+          :supervisor (harness-ui-tasks--bulk-common tasks :supervisor)
           :priority (let ((priorities (delete-dups (mapcar #'harness-ui-tasks--priority tasks))))
                       (and (null (cdr priorities)) (car priorities))))))
 
@@ -1600,7 +1769,9 @@ priority included, stays as it is."
   (setq harness-ui-tasks--new (plist-put (copy-sequence harness-ui-tasks--new) key value))
   (let ((ids (mapcar (lambda (task) (plist-get task :id)) (harness-ui-tasks--bulk-tasks))))
     (harness-ui-call "_harness/task/set-all"
-                     (list :settings (list key (if (and (eq key :non-interactive) (not value)) :false value))
+                     (list :settings (list key (if (and (memq key '(:non-interactive :supervisor))
+                                                       (not value))
+                                                  :false value))
                            :filter (list :ids ids :cwd harness-ui-tasks--dir))
                      (lambda (_) (harness-ui-tasks--render-tail))
                      (lambda (e) (message "Bulk update failed: %s" (harness-error-message e))))))
@@ -1679,12 +1850,12 @@ the others'."
 
 (defun harness-ui-tasks-toggle-bulk ()
   "Switch bulk editing of the current tasks on or off.
-While on, the model, effort, permission-mode, non-interactive and
-priority buttons change every running, pending or blocked task, not
-just the new task or the one at point.  Each changes only its own
-setting, when it is used: a task's other settings, its priority among
-them, stay as they are.  Review, done and archived tasks are history
-and are left alone."
+While on, the model, effort, permission-mode, non-interactive,
+supervisor and priority buttons change every running, pending or
+blocked task, not just the new task or the one at point.  Each changes
+only its own setting, when it is used: a task's other settings, its
+priority among them, stay as they are.  Review, done and archived tasks
+are history and are left alone."
   (interactive)
   (setq harness-ui-tasks--bulk (not harness-ui-tasks--bulk))
   (harness-ui-tasks--render-tail)
@@ -1702,6 +1873,23 @@ and are left alone."
      (format "EDITING %d CURRENT TASK%s (running, pending, blocked) — the settings below change all of them"
              n (if (= 1 n) "" "S"))
      'face 'harness-task-attention-face)))
+
+(defun harness-ui-tasks--supervisor-p ()
+  "Non-nil when this board offers the supervisor setting.
+The harness then has the supervisor module, so `task/settings' carries
+`:supervisor' (a harness without it has no such setting to offer), and
+the UI its toggle command (`harness-toggle-supervisor'); otherwise
+there is nothing to show and nothing to run."
+  (and (plist-member harness-ui-tasks--settings :supervisor)
+       (fboundp 'harness-toggle-supervisor)))
+
+(defun harness-ui-tasks--supervisor-label (value)
+  "Return the label of a supervisor setting VALUE.
+t reads \"supervisor\", `:false' \"hands-on\" (the user turned it off)
+and nil \"mixed\": the current tasks differ, or none of them says."
+  (cond ((harness-json-true-p value) "supervisor")
+        (value "hands-on")
+        (t "mixed")))
 
 (defun harness-ui-tasks--new-settings-line ()
   "The settings line: each setting as a button.
@@ -1732,6 +1920,13 @@ new task's."
                     (harness-ui-tasks--setting-button
                      (harness-ui-non-interactive-label (plist-get values :non-interactive))
                      #'harness-toggle-non-interactive (format "Non-interactive mode of %s" scope))
+                    ;; Supervisor mode is the supervisor module's; a
+                    ;; harness without it has no setting to offer.
+                    (and (harness-ui-tasks--supervisor-p)
+                         (harness-ui-tasks--setting-button
+                          (harness-ui-tasks--supervisor-label (plist-get values :supervisor))
+                          #'harness-toggle-supervisor
+                          (format "Supervisor mode of %s: plan and delegate to workers, or work hands-on" scope)))
                     ;; The next task's priority is beside Submit; the
                     ;; current tasks' is here, changed only when clicked.
                     (and (harness-ui-tasks--bulk-priority-p)
@@ -2272,6 +2467,15 @@ QUIET refreshes in the background, without the loading indicator."
                                                        :permission-mode (plist-get s :permission-mode)
                                                        :non-interactive (harness-json-true-p
                                                                          (plist-get s :non-interactive)))))
+                                         ;; The supervisor setting appears with
+                                         ;; its module, without overriding a
+                                         ;; choice already made on the board.
+                                         (when (and (plist-member s :supervisor)
+                                                    (not (plist-member harness-ui-tasks--new :supervisor)))
+                                           (setq harness-ui-tasks--new
+                                                 (plist-put (copy-sequence harness-ui-tasks--new) :supervisor
+                                                            (if (harness-json-true-p (plist-get s :supervisor))
+                                                                t :false))))
                                          (when (and (harness-compose-live-p) (null harness-ui-tasks--target))
                                            (harness-ui-tasks--render-tail)))))
                          #'ignore)
@@ -2834,11 +3038,15 @@ and attachments go along, as in a chat."
              (harness-ui-tasks--send target text expanded atts refine))))))))
 
 (defun harness-ui-tasks--new-opts ()
-  "The new-task settings as `task/submit' options (unset ones are left out)."
+  "The new-task settings as `task/submit' options (unset ones are left out).
+Supervisor mode is sent only when the harness has its module, which
+`task/settings' says by carrying the setting."
   (let ((new harness-ui-tasks--new))
     (append (cl-loop for k in '(:model :thinking :permission-mode)
                      when (plist-get new k) append (list k (plist-get new k)))
             (and new (list :non-interactive (if (harness-json-true-p (plist-get new :non-interactive)) t :false)))
+            (and (plist-member harness-ui-tasks--settings :supervisor)
+                 (list :supervisor (if (harness-json-true-p (plist-get new :supervisor)) t :false)))
             (and (harness-json-true-p (plist-get new :main-tree)) (list :main-tree t))
             (and (plist-get new :priority) (list :priority (harness-ui-tasks--priority new))))))
 

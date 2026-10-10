@@ -883,6 +883,69 @@ An ACP error, (acp-error CODE MESSAGE DATA), reads as its MESSAGE."
            (error (format "%S" err))))
         (t (format "%S" err))))
 
+(defconst harness-error-message-limit 200
+  "Longest error text the harness reports, in characters.
+A message longer than this is cut where it is logged, hinted and shown:
+an error that carries a whole transcript, prompt or request body as its
+data would otherwise be repeated whole in *Messages*, in a session's
+history and in the tree.")
+
+(defun harness-error--cut (text limit)
+  "Return TEXT cut to LIMIT characters, with an ellipsis when it was."
+  (if (and (stringp text) (> (length text) limit))
+      (concat (substring text 0 (max 0 (1- (max 1 limit)))) "…")
+    text))
+
+(defun harness-error--short-data (data limit &optional depth)
+  "Return error DATA with long strings cut to LIMIT characters.
+Lists and vectors are walked, so a string nested in a plist an error
+carries is cut too.  DEPTH bounds the walk; deep data is left as a
+placeholder rather than walked at all."
+  (cond ((> (or depth 0) 4) (if (stringp data) (harness-error--cut data limit) "…"))
+        ((stringp data) (harness-error--cut data limit))
+        ((consp data)
+         (let ((items nil) (rest data) (n 0))
+           (while (and (consp rest) (< n 20))
+             (push (harness-error--short-data (car rest) limit (1+ (or depth 0))) items)
+             (setq rest (cdr rest) n (1+ n)))
+           (let ((items (nreverse items)))
+             (if (null rest) items
+               (append items (harness-error--short-data rest limit (1+ (or depth 0))))))))
+        ((vectorp data)
+         (apply #'vector
+                (mapcar (lambda (d) (harness-error--short-data d limit (1+ (or depth 0))))
+                        (cl-subseq (append data nil) 0 (min 20 (length data))))))
+        (t data)))
+
+(defun harness-error--one-line (text)
+  "Return TEXT with runs of whitespace, newlines included, as single spaces.
+A message reported in *Messages*, a hint or a tree row reads as one
+line; the transcript an error may quote is full of newlines."
+  (string-trim (replace-regexp-in-string "[ \t\n\r\f\v]+" " " (or text ""))))
+
+(defun harness-error-short-message (err &optional limit)
+  "Return a short, readable message for ERR, an error data list or string.
+Like `harness-error-message', but long strings among ERR's data are cut
+to LIMIT characters (`harness-error-message-limit' by default) and so is
+the message.  An error whose data carries a whole transcript or request
+body -- a `json-value-p' failure, say -- then reads in one short line in
+*Messages*, in a session hint and in the tree, rather than repeating it."
+  (let* ((limit (max 16 (or limit harness-error-message-limit)))
+         (msg (cond ((stringp err) err)
+                    ((and (eq (car-safe err) 'acp-error) (stringp (nth 2 err))
+                          (not (string-empty-p (nth 2 err))))
+                     (nth 2 err))
+                    ((and (consp err) (symbolp (car err)))
+                     (condition-case nil
+                         (error-message-string (cons (car err) (harness-error--short-data (cdr err) limit)))
+                       (error (harness-error--cut (let ((print-length 20) (print-level 6))
+                                                    (format "%S" err))
+                                                  limit))))
+                    (t (harness-error--cut (let ((print-length 20) (print-level 6))
+                                             (format "%S" err))
+                                           limit)))))
+    (harness-error--one-line (harness-error--cut msg limit))))
+
 (defmacro harness-ignore-errors-logged (context &rest body)
   "Run BODY, logging any error with CONTEXT instead of signalling."
   (declare (indent 1))

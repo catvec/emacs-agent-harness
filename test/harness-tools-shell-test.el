@@ -82,6 +82,24 @@ overwrote the user's saved agent details with a dead one."
       (should (string-search "killed after 1s timeout" (plist-get r :content)))
       (should (eq 'timeout (plist-get (plist-get r :meta) :exit))))))
 
+(ert-deftest harness-tools-shell-bash-note-says-still-running ()
+  "A long bash call shows under itself what it has written so far.
+The note says it is still running, how many lines the command has
+written, and opens its latest line."
+  (harness-tools-shell-test--setup)
+  (harness-tools-shell-test-in-dir
+    (let (notes)
+      (harness-on 'tools/note (lambda (_sid _cid text) (push text notes)))
+      (let ((p (harness-call 'tools/execute nil (list :id "c9" :name "bash"
+                                                      :input (list :command "echo one; sleep 0.4; echo two")))))
+        (should (cl-some (lambda (n) (string-match-p "still running . no output yet" n)) notes))
+        (harness-test-wait (lambda () (cl-some (lambda (n) (string-match-p "one" n)) notes)) 5 "the first line")
+        (should (cl-some (lambda (n) (string-match-p "1 line so far\none" n)) notes))
+        (harness-test-wait (lambda () (cl-some (lambda (n) (string-match-p "two" n)) notes)) 5 "the last line")
+        (should (cl-some (lambda (n) (string-match-p "2 lines so far\ntwo" n)) notes))
+        (harness-await p 10))
+      (should (cl-some (lambda (n) (string-match-p "two" n)) notes)))))
+
 (ert-deftest harness-tools-shell-bash-is-async ()
   (harness-tools-shell-test--setup)
   (harness-tools-shell-test-in-dir

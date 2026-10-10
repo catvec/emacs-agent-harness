@@ -41,7 +41,8 @@
 ;; `harness-supervisor-tasks' (`task/changed'; the session that writes a
 ;; backlog task up only reads, and takes the setting when the task
 ;; starts), and a fork its parent's value.  Only the user changes it
-;; later, with `supervisor/set': there is no tool for it.  A change
+;; later, with `supervisor/set' for one session or `supervisor/set-all'
+;; for every governed one: there is no tool for it.  A change
 ;; takes effect at the next tool call, since the permission stage reads
 ;; the live session, and at the next step for the tool list.
 ;;
@@ -63,8 +64,13 @@
 ;; turn.  A step runs in a worker, a session of its own with the full tool
 ;; set, on the model of its tier: `harness-supervisor-tiers', else the one
 ;; of the supervisor's provider that ranks alike (`provider/tier-model':
-;; cheap, balanced, frontier), else the supervisor's own, with a hint.  A
-;; fork step forks the supervisor at the call that submitted the plan, a
+;; cheap, balanced, frontier).  A provider whose catalogue has not answered
+;; yet is waited for, briefly (`harness-supervisor--tier-wait'), so a slow
+;; listing does not read as a provider with no model for the tier; only one
+;; that truly names none gives the step the supervisor's own model, and the
+;; hint says which provider it is and why (the step keeps the reason as
+;; `:model-fallback').  A fork step forks the supervisor at the call that
+;; submitted the plan, a
 ;; node every step of the plan shares; when a plan has two or more fork
 ;; steps on one model they all fork through one seed (`seed/fork'), so
 ;; that the context is written to that model's prompt cache once.  A fresh
@@ -77,6 +83,16 @@
 ;; have started it -- the call when it starts, its result when the step
 ;; ends -- recorded by the harness (`harness-outside-node-p'), so the
 ;; supervisor's model never sees it and nothing waits for it.
+;;
+;; Thinking is a role thing.  A session whose provider names a level in
+;; `harness-supervisor-thinking' (DeepSeek: max) has its thinking raised
+;; to it while it supervises, and back to what it was when the mode is
+;; turned off; its workers think at the level their own model's provider
+;; names in `harness-supervisor-worker-thinking' (DeepSeek: medium, the
+;; middle of its ladder), so the many small steps cost less thinking than
+;; the plan.  A provider neither setting names keeps the old behavior:
+;; sessions think as they were configured, and workers as their
+;; supervisor does.
 ;;
 ;; A step that starts again -- `retry_step', perhaps on a higher tier, or an
 ;; interrupted step after a restart -- decides its context by the cache.  A
@@ -105,9 +121,11 @@
 ;; :created :steps', a step `:id :title :prompt :tier :reason :context
 ;; :after :model :state :session :attempts :result :error', and, once it
 ;; ran, `:worker-model' (the model of its worker) and, once it started
-;; again, `:previous'.  A step is pending, running, done, failed,
-;; interrupted, cancelled or superseded: a new plan supersedes the steps
-;; of the earlier ones that have not started, and their running steps
+;; again, `:previous'.  A step whose tier found no model keeps
+;; `:model-fallback', the reason (`unknown', `unlisted' or `none'), and
+;; runs on the supervisor's own model.  A step is pending, running, done,
+;; failed, interrupted, cancelled or superseded: a new plan supersedes the
+;; steps of the earlier ones that have not started, and their running steps
 ;; finish as usual.
 ;;
 ;; What the supervisor hears.  A step that is done is a hint, and starts
@@ -146,7 +164,6 @@
 (require 'harness-util)
 (require 'harness-tools)
 
-(defvar harness-tasks--merge-session-name)
 (defvar harness-tools-agent-planning-section)
 (defvar harness-perms-dir-tool)
 (defvar harness-supervisor--ending)
@@ -222,8 +239,13 @@ An alist from a tier -- mundane, standard or hard -- to a model id.  A
 tier it leaves out runs on the tier of the supervising session's
 provider that ranks alike: mundane on its cheap model, standard on its
 balanced one, hard on its frontier one (see `harness-model-tiers').
-With nil, the default, all three do.  It is on the settings page, under
-Supervisor mode."
+With nil, the default, all three do.  A provider whose catalogue has
+not answered yet is given a few seconds to list its models, so a
+listing that answers late still gives a step the model of its tier.  A
+provider that names no model for a tier -- a static catalogue with no
+price to rank, say -- runs that step on the supervisor's own model, and
+the hint says which provider and why; name the model here to change
+that.  It is on the settings page, under Supervisor mode."
   :type '(alist :key-type (choice (const :tag "Mundane" mundane)
                                   (const :tag "Standard" standard)
                                   (const :tag "Hard" hard))
@@ -233,6 +255,46 @@ Supervisor mode."
                                                        (memq (car cell) '(mundane standard hard))
                                                        (stringp (cdr cell))))
                                    v)))
+  :group 'harness)
+
+(defcustom harness-supervisor-thinking '((deepseek . "max"))
+  "Thinking level a session runs at while it supervises, by provider.
+An alist from a provider id -- the `deepseek' of
+\"deepseek:deepseek-flash\" -- to a thinking level, as
+`harness-thinking' names one.  A provider it leaves out, and nil,
+leaves its sessions' thinking as it is.  DeepSeek sessions supervise at
+max by default: planning is what its top effort is for, while the many
+workers that carry a plan out think less (see
+`harness-supervisor-worker-thinking').  The level is raised when a
+session starts supervising and put back as it was when it stops, so
+turning the mode off returns a session to its own level and turning it
+on raises it again.  A level chosen while a session supervises stands
+until the mode changes.  A harness that restarts does not remember the
+level a raised session had, so the raised one then stands.  It is on
+the settings page, under Supervisor mode."
+  :type '(alist :key-type (symbol :tag "Provider") :value-type (string :tag "Level"))
+  :safe (lambda (v)
+          (and (listp v)
+               (cl-every (lambda (cell) (and (consp cell) (symbolp (car cell)) (stringp (cdr cell))))
+                         v)))
+  :group 'harness)
+
+(defcustom harness-supervisor-worker-thinking '((deepseek . "medium"))
+  "Thinking level the workers of a supervisor's plan run at, by provider.
+An alist from a provider id -- the `deepseek' of
+\"deepseek:deepseek-flash\" -- to a thinking level.  The provider
+looked up is the one of the worker's own model, so DeepSeek workers
+think at medium: DeepSeek acts on that as the middle of its ladder,
+one step below the max its supervisor plans at, and a step is small
+enough that less thinking is plenty.  A provider the alist does
+not name, and nil, leaves its workers at the level of the supervisor
+they work for, as they always were.  It is on the settings page, under
+Supervisor mode."
+  :type '(alist :key-type (symbol :tag "Provider") :value-type (string :tag "Level"))
+  :safe (lambda (v)
+          (and (listp v)
+               (cl-every (lambda (cell) (and (consp cell) (symbolp (car cell)) (stringp (cdr cell))))
+                         v)))
   :group 'harness)
 
 (defcustom harness-supervisor-step-budget 80
@@ -515,6 +577,20 @@ has no setting: sub-agents and side conversations are not governed, and
 neither is a session older than this module."
   (harness-supervisor--value (harness-call 'session/get session-id)))
 
+(defun harness-supervisor--set (session-id value)
+  "Set session SESSION-ID's supervisor mode to VALUE, t or `:false'.
+The one path of `supervisor/set' and `supervisor/set-all': store the
+setting in the session's `:ext', drop a pending judgement of how the
+session starts (the user's choice is the session's, see
+`harness-supervisor--judge-key'), leave the transcript hint that says
+which it is now, and emit `supervisor/changed'.  Return the session
+plist."
+  (let ((session (harness-call 'session/set-ext session-id :supervisor value
+                               (if (eq value t) "Supervisor mode on" "Supervisor mode off"))))
+    (harness-supervisor--forget-judge session-id)
+    (harness-emit 'supervisor/changed session-id value)
+    session))
+
 (harness-defmethod supervisor/set (session-id on)
   "Turn supervisor mode on or off for session SESSION-ID; return its plist.
 ON is true for on and `:false' or nil for off, which is stored as an
@@ -526,16 +602,108 @@ against the session as it is then; off gives the tools back from the
 next step.  A pending judgement of how the session starts is dropped:
 the user's choice is the session's (`harness-supervisor--judge-key').
 Only the user does this, over ACP as `_harness/supervisor/set'
-with `:sessionId' and `:on'; the agent has no tool for it."
-  (let ((value (if (harness-json-true-p on) t :false)))
-    (harness-call 'session/set-ext session-id :supervisor value
-                  (if (eq value t) "Supervisor mode on" "Supervisor mode off"))
-    (harness-supervisor--forget-judge session-id)
-    (harness-emit 'supervisor/changed session-id value)
-    (harness-call 'session/get session-id)))
+with `:sessionId' and `:on', or through the task board's bulk edit
+\(`task/set-all', which applies a task's setting to its session); the
+agent has no tool for it."
+  (harness-supervisor--set session-id (if (harness-json-true-p on) t :false)))
+
+(harness-defmethod supervisor/set-all (on &optional filter)
+  "Turn supervisor mode on or off for every governed session FILTER selects.
+ON is as for `supervisor/set': true is on, `:false' or nil is off,
+stored as an explicit off.  FILTER is the one of `session/select', as
+for `session/set-all': nil every session, `(:active t :tasks t)' the
+current ones, with the sessions of completed tasks left out.  Only a
+session the module governs changes: one whose `supervisor/get' is
+non-nil, a top-level session or a fork.  A sub-agent, a side
+conversation, a session from before the module and one already at the
+asked value are left alone.  Each change goes the way `supervisor/set'
+does -- the same `:ext' `:supervisor' setting, the same dropped
+judgement, transcript hint and `supervisor/changed' event.  Only the
+user does this, over ACP as `_harness/supervisor/set-all' with `:on'
+and `:filter'; the agent has no tool for it.  Return the ids changed,
+newest first."
+  (let ((value (if (harness-json-true-p on) t :false))
+        changed)
+    (dolist (session (harness-call 'session/select filter))
+      (let ((id (plist-get session :id))
+            (governed (harness-supervisor--value session)))
+        (when (and governed (not (eq governed value)))
+          (harness-supervisor--set id value)
+          (push id changed))))
+    (nreverse changed)))
 
 (harness-declare-event 'supervisor/changed
                        "(SESSION-ID ON) when the user turned supervisor mode on (ON t) or off (ON :false) for a session")
+
+;;;; Thinking levels
+
+(defvar harness-supervisor--raised (make-hash-table :test 'equal)
+  "Session id -> (:before LEVEL :level LEVEL) while the mode raised its thinking.
+BEFORE is the thinking the session had, nil for the model's own, and
+LEVEL the one it was raised to; the entry is what
+`harness-supervisor--lower-thinking' puts back.")
+
+(defun harness-supervisor--provider-thinking (model alist)
+  "Return the thinking level ALIST names for the provider of MODEL, or nil.
+ALIST is `harness-supervisor-thinking' or
+`harness-supervisor-worker-thinking'.  A model whose provider the alist
+does not name gives nil: leave the thinking as it is."
+  (when-let* ((provider (harness-model-provider model)))
+    (cdr (assq provider alist))))
+
+(defun harness-supervisor--raise-thinking (session-id)
+  "Raise the thinking of SESSION-ID to its provider's supervisor level.
+That is `harness-supervisor-thinking' for the model the session runs
+on.  Nothing changes for a provider it does not name, or when the
+session thinks at that level already; the level it had is remembered
+for `harness-supervisor--lower-thinking'.  A session whose thinking the
+policy fixes, or that is gone, is left alone."
+  (when (and (harness-call 'session/exists-p session-id)
+             (harness-method-exists-p 'session/update))
+    (let* ((session (harness-call 'session/get session-id))
+           (before (plist-get session :thinking))
+           (level (harness-supervisor--provider-thinking (plist-get session :model)
+                                                         harness-supervisor-thinking)))
+      (when (and (stringp level) (not (equal level before)))
+        (condition-case err
+            (progn
+              ;; The first raise remembers what the session had; a later
+              ;; one, after the level moved, does not overwrite it.
+              (unless (gethash session-id harness-supervisor--raised)
+                (puthash session-id (list :before before :level level) harness-supervisor--raised))
+              (harness-call 'session/update session-id :thinking level :silent t))
+          (error
+           (remhash session-id harness-supervisor--raised)
+           (harness-log 'warn "supervisor: raising the thinking of %s failed: %S" session-id err)))))))
+
+(defun harness-supervisor--lower-thinking (session-id)
+  "Put the thinking SESSION-ID had before the mode raised it back.
+A level the session was changed to meanwhile -- one the user chose
+while it supervised -- stands.  Nothing is put back for a session whose
+level was not remembered, as after a restart of the harness, or one
+that is gone; the memory of it is dropped either way."
+  (let* ((raised (gethash session-id harness-supervisor--raised))
+         (session (and (harness-call 'session/exists-p session-id)
+                       (harness-call 'session/get session-id))))
+    (remhash session-id harness-supervisor--raised)
+    (when (and raised session (harness-method-exists-p 'session/update)
+               ;; Only the level it was raised to: one chosen meanwhile stands.
+               (equal (plist-get raised :level) (plist-get session :thinking)))
+      (condition-case err
+          (harness-call 'session/update session-id :thinking (plist-get raised :before) :silent t)
+        (error (harness-log 'warn "supervisor: putting back the thinking of %s failed: %S"
+                            session-id err))))))
+
+(defun harness-supervisor--on-ext-changed (session-id key value)
+  "Raise or lower the thinking of SESSION-ID as its supervisor setting changed.
+A subscriber of `session/ext-changed' (ID KEY VALUE); only the
+`:supervisor' setting is this module's.  A session that starts
+supervising takes the level `harness-supervisor-thinking' names for its
+provider, and one that stops gets the level it had before back."
+  (when (eq key :supervisor)
+    (if (harness-json-true-p value)
+        (harness-supervisor--raise-thinking session-id)
+      (harness-supervisor--lower-thinking session-id))))
 
 ;;;; New sessions
 
@@ -576,14 +744,6 @@ starts, and a project may override either."
   (let ((kind (plist-get session :kind)))
     (if (stringp kind) (intern kind) kind)))
 
-(defun harness-supervisor--merge-session-p (session)
-  "Non-nil when SESSION, a plist, is the one task branches merge into.
-The tasks module makes it for itself and names it
-`harness-tasks--merge-session-name'; it is no one's conversation."
-  (and (boundp 'harness-tasks--merge-session-name)
-       (stringp (plist-get session :name))
-       (equal (plist-get session :name) (symbol-value 'harness-tasks--merge-session-name))))
-
 (defun harness-supervisor--set-ext (id key value)
   "Set KEY of session ID's `:ext' to VALUE (nil removes it), with no hint.
 A hint would start the transcript of a session that has no message yet."
@@ -616,16 +776,16 @@ dropped, and the mode the session now has stands."
 A subscriber of `session/created'.  A top-level session takes
 `harness-supervisor' for its directory (`harness-supervisor--start-session':
 `auto' is judged from its opening message), and a fork its parent's
-value when the parent has one, never the judge.  The merge session of
-the tasks module, a sub-agent, a side conversation and any other kind
-are never governed.  A setting its maker gave it in `:ext' stays."
+value when the parent has one, never the judge.  A sub-agent, a side
+conversation and any other kind are never governed; only a top-level
+session of its own starts supervised.  A setting its maker gave it in
+`:ext' stays."
   (condition-case err
       (unless (plist-member (plist-get session :ext) :supervisor)
         (let* ((kind (harness-supervisor--kind session))
                (parent-id (plist-get session :parent-id)))
           (cond
-           ((and (eq kind 'main) (null parent-id)
-                 (not (harness-supervisor--merge-session-p session)))
+           ((and (eq kind 'main) (null parent-id))
             (harness-supervisor--start-session
              id (harness-supervisor--setting 'harness-supervisor (plist-get session :cwd))))
            ((and (eq kind 'fork) parent-id (harness-call 'session/exists-p parent-id))
@@ -643,18 +803,29 @@ has none."
   (or (eq (plist-get task :state) 'refining)
       (and (eq (plist-get task :state) 'pending) (plist-get task :session) t)))
 
+(defun harness-supervisor--task-value (task cwd)
+  "Return the supervisor value the session of TASK takes: `auto', t or nil.
+A task submitted with its own setting keeps it (see `task/submit' and
+`task/set-all'); without one it takes `harness-supervisor-tasks' at the
+task's project -- which a project's .dir-locals.el may override -- with
+`auto' judged from the message that starts the work."
+  (if (plist-member task :supervisor)
+      (and (harness-json-true-p (plist-get task :supervisor)) t)
+    (harness-supervisor--setting 'harness-supervisor-tasks cwd)))
+
 (defun harness-supervisor--on-task-changed (task)
   "Set the supervisor setting of the session of TASK, a task view, when it is new.
 A subscriber of `task/changed'.  The tasks module makes the session of a
 task, and the one that writes a backlog task up, as top-level sessions,
 and links them to the task afterwards.  While the session has no
 message yet, the session of a write-up has no setting, as it only reads,
-and the session of the work takes `harness-supervisor-tasks' at the
-task's project -- which a project's .dir-locals.el may override -- with
-`auto' judged from the message that starts the work.  A session that
-wrote a task up takes it when the task starts.  Both act on a
-brand-new session only, once, so a restart never overrides the user's
-switch; a session the user adopted as a task is theirs already."
+and the session of the work takes the task's own setting, else
+`harness-supervisor-tasks' at the task's project -- which a project's
+.dir-locals.el may override -- with `auto' judged from the message that
+starts the work.  A session that wrote a task up takes it when the task
+starts.  Both act on a brand-new session only, once, so a restart never
+overrides the user's switch; a session the user adopted as a task is
+theirs already."
   (condition-case err
       (let* ((sid (plist-get task :session))
              (cwd (or (plist-get task :project) (plist-get task :cwd))))
@@ -667,7 +838,7 @@ switch; a session the user adopted as a task is theirs already."
                    (not write-up))
               (unless (harness-supervisor--value session)
                 (harness-supervisor--start-session
-                 sid (harness-supervisor--setting 'harness-supervisor-tasks cwd)))
+                 sid (harness-supervisor--task-value task cwd)))
               (harness-supervisor--set-ext sid harness-supervisor--write-up-key nil))
              ((or (plist-get session :head)
                   (plist-get task :adopted)
@@ -680,7 +851,7 @@ switch; a session the user adopted as a task is theirs already."
                          (harness-supervisor--forget-judge sid)
                          (harness-supervisor--set-ext sid harness-supervisor--write-up-key t))
                 (harness-supervisor--start-session
-                 sid (harness-supervisor--setting 'harness-supervisor-tasks cwd))))))))
+                 sid (harness-supervisor--task-value task cwd))))))))
     (error (harness-log 'warn "supervisor: setting up the session of task %s failed: %S"
                         (plist-get task :id) err))))
 
@@ -1119,6 +1290,7 @@ worker is cancelled (see `harness-supervisor--forget-plans')."
   (harness-supervisor--on-turn-started session-id)
   (remhash session-id harness-supervisor--configured)
   (remhash session-id harness-supervisor--judging)
+  (remhash session-id harness-supervisor--raised)
   (condition-case err
       (progn (harness-supervisor--forget-plans session-id)
              (harness-supervisor--worker-deleted session-id))
@@ -1524,41 +1696,142 @@ It is an error result so that the turn still owes a decision (see
 
 ;;;; The plan engine: models
 
-(defun harness-supervisor--provider-tier-model (model tier)
-  "Return the model of the provider of MODEL that ranks with TIER, or nil."
-  (when (and (stringp model) (harness-method-exists-p 'provider/tier-model))
-    (condition-case err
-        (let ((found (harness-call 'provider/tier-model model
-                                   (cdr (assoc tier harness-supervisor--provider-tiers)))))
-          (and (stringp found) (not (string-empty-p found)) found))
-      (error (harness-log 'warn "supervisor: finding the %s model for %s failed: %S" tier model err)
-             nil))))
+(defconst harness-supervisor--tier-wait 10
+  "Seconds a plan waits for a provider's model catalogue before choosing.
+When the model of a step's tier cannot be told yet because the provider
+has not listed its models, the plan waits this long for them
+\(`provider/tier-model-async'): a catalogue that answers late still
+gives the step the model of its tier.  After that the step runs on the
+supervisor's own model, and a hint says why.")
 
-(defun harness-supervisor--tier-model (session tier)
-  "Return (MODEL . FALLBACK) for the workers of TIER of the supervising SESSION.
+(defun harness-supervisor--provider-name (model)
+  "Return the label of MODEL's provider, to name it in a hint, or \"the provider\"."
+  (or (ignore-errors
+        (let* ((pid (and (stringp model) (harness-model-provider model)))
+               (provider (and pid (harness-provider-get pid))))
+          (and provider (harness-provider-label provider))))
+      "the provider"))
+
+(defun harness-supervisor--provider-tier-model (model rank wait)
+  "Return a promise of (MODEL . REASON) from the provider of MODEL for RANK.
+RANK is `cheap', `balanced' or `frontier'.  WAIT non-nil waits for a
+provider that has not listed its models yet, at most
+`harness-supervisor--tier-wait' seconds; without it the catalogue is
+read as it stands.  A provider that fails to answer counts as
+\(nil . unlisted), which the caller tells as such."
+  (cond
+   ((not (and (stringp model) (harness-method-exists-p 'provider/tier-model)))
+    (harness-resolved (cons nil 'unknown)))
+   (t
+    (let* ((async (and wait (harness-method-exists-p 'provider/tier-model-async)))
+           (method (cond (async 'provider/tier-model-async)
+                         ((harness-method-exists-p 'provider/tier-model-info) 'provider/tier-model-info)
+                         (t 'provider/tier-model)))
+           (answer (harness-call-async method model rank))
+           (failure (lambda (err)
+                      (harness-log 'warn "supervisor: finding the %s model for %s failed: %S"
+                                   rank model err)
+                      (cons nil 'unlisted))))
+      (if (not async)
+          (harness-then answer
+                        (lambda (found)
+                          (if (consp found)
+                              found
+                            (let ((id (and (stringp found) (not (string-empty-p found)) found)))
+                              (cons id (and (null id) 'unknown)))))
+                        failure)
+        ;; A provider that answers late must not hold the plan: give it
+        ;; `harness-supervisor--tier-wait' seconds, then decide without it.
+        (let* ((done (harness-make-promise))
+               (timer (run-at-time harness-supervisor--tier-wait nil
+                                   (lambda () (harness-resolve done (cons nil 'unlisted))))))
+          (harness-then answer
+                        (lambda (found) (cancel-timer timer) (harness-resolve done found))
+                        (lambda (err) (cancel-timer timer)
+                                (harness-resolve done (funcall failure err))))
+          done))))))
+
+(defun harness-supervisor--tier-model (session tier &optional wait)
+  "Return a promise of (MODEL . REASON) for the workers of TIER of SESSION.
 MODEL is the model of `harness-supervisor-tiers' for TIER, else the one
 of SESSION's provider that ranks with TIER (cheap, balanced or
-frontier), else SESSION's own, and FALLBACK is then non-nil."
-  (let ((override (cdr (assoc-string tier harness-supervisor-tiers))))
-    (if (and (stringp override) (not (string-empty-p override)))
-        (cons override nil)
-      (let ((found (harness-supervisor--provider-tier-model (plist-get session :model) tier)))
-        (if found
-            (cons found nil)
-          (cons (plist-get session :model) t))))))
+frontier); REASON is nil then.  Else MODEL is SESSION's own model and
+REASON says why no model was found: `unknown', `unlisted' or `none'
+\(see `harness-provider-tier-model-info').  WAIT non-nil waits, at most
+`harness-supervisor--tier-wait' seconds, for a provider that has not
+listed its models yet."
+  (let ((override (cdr (assoc-string tier harness-supervisor-tiers)))
+        (model (plist-get session :model)))
+    (cond
+     ((and (stringp override) (not (string-empty-p override)))
+      (harness-resolved (cons override nil)))
+     ((not (stringp model))
+      (harness-resolved (cons nil 'unknown)))
+     (t
+      (harness-then
+       (harness-supervisor--provider-tier-model
+        model (cdr (assoc tier harness-supervisor--provider-tiers)) wait)
+       (lambda (found)
+         (if (car found)
+             found
+           (cons model (cdr found)))))))))
+
+(defun harness-supervisor--tier-models (session steps)
+  "Return a promise of STEPS, each with the model of its tier, and why not.
+Each step gets `:model' and, when no model was found for its tier,
+`:model-fallback', the reason (`harness-supervisor--tier-model').  The
+provider's catalogue is waited for, briefly, so that one that answers
+late still gives the step the model of its tier."
+  (let ((tiers (delete-dups (delq nil (mapcar (lambda (step) (plist-get step :tier)) steps)))))
+    (harness-then
+     (harness-all (mapcar (lambda (tier) (harness-supervisor--tier-model session tier t)) tiers))
+     (lambda (answers)
+       (let ((found (cl-mapcar #'cons tiers answers)))
+         (mapcar (lambda (step)
+                   (let ((answer (or (cdr (assoc (plist-get step :tier) found))
+                                     (cons (plist-get session :model) 'unknown))))
+                     (harness-supervisor--with step
+                                               :model (car answer)
+                                               :model-fallback (and (cdr answer)
+                                                                    (symbol-name (cdr answer))))))
+                 steps))))))
+
+(defun harness-supervisor--fallback-why (session step)
+  "Return in words why no model was found for STEP's tier of SESSION."
+  (let* ((tier (plist-get step :tier))
+         (rank (cdr (assoc tier harness-supervisor--provider-tiers))))
+    (pcase (plist-get step :model-fallback)
+      ("none" (format "%s names no %s model"
+                      (harness-supervisor--provider-name (plist-get session :model))
+                      (or rank tier)))
+      ("unlisted" (format "%s has not listed its models"
+                          (harness-supervisor--provider-name (plist-get session :model))))
+      (_ "no model was found for it"))))
+
+(defun harness-supervisor--fallback-text (session steps)
+  "Return the text saying which STEPS run on SESSION's own model, and why, or nil.
+It has a line for each step and a last line naming the model they run
+on; the hint and the answer of `submit_plan' use it."
+  (when steps
+    (let ((n (length steps))
+          (model (plist-get session :model)))
+      (concat
+       (mapconcat (lambda (step)
+                    (format "No model was found for the tier of step %s (%s): %s."
+                            (plist-get step :id) (plist-get step :tier)
+                            (harness-supervisor--fallback-why session step)))
+                  steps "\n")
+       "\n"
+       (format "%s on this session's own model, %s: set harness-supervisor-tiers to name the model a tier runs on."
+               (if (> n 1) "They run" "It runs")
+               (or model "?"))))))
 
 (defun harness-supervisor--fallback-hint (session steps)
-  "Say in SESSION's transcript which STEPS run on its own model.
+  "Say in SESSION's transcript which STEPS run on its own model, and why.
 They do for want of another."
   (when steps
     (harness-call 'session/hint (plist-get session :id)
-                  (format "No model was found for the tier of %s: %s run%s on this session's own model, %s"
-                          (string-join (mapcar (lambda (step) (format "step %s (%s)" (plist-get step :id)
-                                                                      (plist-get step :tier)))
-                                               steps)
-                                       ", ")
-                          (if (cdr steps) "they" "it") (if (cdr steps) "" "s")
-                          (plist-get session :model)))))
+                  (harness-supervisor--fallback-text session steps))))
 
 ;;;; The plan engine: workers
 
@@ -1592,7 +1865,7 @@ hint that cannot be added fails nothing."
                              (harness-tools-agent-context-limit-hint limit fork inherited))))
         (harness-supervisor--hint (plist-get worker :id) text))
     (error (harness-log 'warn "supervisor: no context cap hint for %s: %s"
-                        (plist-get worker :id) (harness-error-message err)))))
+                        (plist-get worker :id) (harness-error-short-message err)))))
 
 (defun harness-supervisor--refit-limit (session-id worker)
   "Fit the context window limit of WORKER to its compacted conversation.
@@ -1613,7 +1886,7 @@ is set, nil when nothing caps a worker or the context cannot be told."
           (harness-call 'session/update wid :context-window-limit limit :silent t)
           (list :context-limit limit :context-inherited (round context))))
     (error (harness-log 'warn "supervisor: could not fit the context limit of %s: %s"
-                        (plist-get worker :id) (harness-error-message err))
+                        (plist-get worker :id) (harness-error-short-message err))
            nil)))
 
 (defun harness-supervisor--seeded-p (plan step)
@@ -1697,9 +1970,9 @@ what it now holds (`harness-supervisor--refit-limit'), whose
        (harness-resolved nil)))
      done
      (lambda (err)
-       (harness-log 'warn "supervisor: compacting the fork %s failed: %s" wid (harness-error-message err))
+       (harness-log 'warn "supervisor: compacting the fork %s failed: %s" wid (harness-error-short-message err))
        (harness-supervisor--hint
-        wid (format "No compaction (%s): carrying on with the whole conversation" (harness-error-message err)))
+        wid (format "No compaction (%s): carrying on with the whole conversation" (harness-error-short-message err)))
        (funcall done)))))
 
 (defun harness-supervisor--make-worker (session-id plan step)
@@ -1731,15 +2004,19 @@ the limit fitted to the compacted conversation for a fork compacted."
          (fresh (equal (plist-get step :context) "fresh"))
          (inherited (harness-supervisor--inherited session-id (not fresh)))
          (limit (harness-supervisor--context-limit session-id (not fresh) inherited))
+         ;; Workers of a provider a level is configured for think at it,
+         ;; rather than at the supervisor's own (see the setting).
+         (level (harness-supervisor--provider-thinking model harness-supervisor-worker-thinking))
          (options (and limit (list :context-window-limit limit)))
+         (forks (append (and level (list :thinking level)) options))
          (seed-fork (lambda ()
                       (apply #'harness-call-async 'seed/fork session-id model
                              :node (plist-get plan :node) :call-id (plist-get plan :call-id)
-                             :name name options)))
+                             :name name forks)))
          (plain-fork (lambda ()
                        (apply #'harness-call-async 'session/fork session-id
                               :node (plist-get plan :node) :call-id (plist-get plan :call-id)
-                              :kind 'subagent :model model :name name options))))
+                              :kind 'subagent :model model :name name forks))))
     (harness-then
      (cond
       (fresh
@@ -1748,7 +2025,7 @@ the limit fitted to the compacted conversation for a fork compacted."
               :kind 'subagent :parent-id session-id :name name :model model
               :host (plist-get session :host)
               :permission-mode (plist-get session :permission-mode)
-              :thinking (plist-get session :thinking)
+              :thinking (or level (plist-get session :thinking))
               ;; Off too, not left to the setting.
               :non-interactive (if (harness-json-true-p (plist-get session :non-interactive)) t :false)
               :allowed-dirs (plist-get session :allowed-dirs)
@@ -1907,7 +2184,7 @@ new worker is told of (`harness-supervisor--worker-text')."
          (lambda (err)
            (harness-supervisor--step-ended
             session-id plan-id step-id "failed"
-            (format "the worker could not be made: %s" (harness-error-message err)))))))))
+            (format "the worker could not be made: %s" (harness-error-short-message err)))))))))
 
 (defun harness-supervisor--start-ready (session-id plan-id)
   "Start the steps of plan PLAN-ID of session SESSION-ID that are ready."
@@ -1918,7 +2195,7 @@ new worker is told of (`harness-supervisor--worker-text')."
             (harness-supervisor--start-step session-id plan-id (plist-get step :id))
           (error (harness-supervisor--step-ended
                   session-id plan-id (plist-get step :id) "failed"
-                  (format "the worker could not be started: %s" (harness-error-message err)))))))))
+                  (format "the worker could not be started: %s" (harness-error-short-message err)))))))))
 
 (defun harness-supervisor--compaction-words (kind)
   "Return in words what a compaction of KIND, a string, leaves of a conversation."
@@ -1972,7 +2249,7 @@ whose supervisor was deleted, does not run."
               (condition-case hint-err
                   (harness-supervisor--restart-hint session-id step worker)
                 (error (harness-log 'warn "supervisor: no hint for step %s: %s"
-                                    step-id (harness-error-message hint-err))))
+                                    step-id (harness-error-short-message hint-err))))
               ;; The worker shows in the supervisor's chat as the
               ;; spawn_agent call that would have started it.
               (harness-supervisor--open-call session-id wid step)
@@ -1987,11 +2264,11 @@ whose supervisor was deleted, does not run."
                (lambda (err)
                  (harness-supervisor--turn-ended session-id plan-id step-id wid
                                                  (list :stop-reason 'error
-                                                       :error (harness-error-message err)))))))
+                                                       :error (harness-error-short-message err)))))))
         ;; A step must not stay running for a worker that never got its job.
         (error (harness-supervisor--step-ended
                 session-id plan-id step-id "failed"
-                (format "the worker could not be given its step: %s" (harness-error-message err))))))))
+                (format "the worker could not be given its step: %s" (harness-error-short-message err))))))))
 
 (defun harness-supervisor--turn-ended (session-id plan-id step-id worker-id result)
   "Settle step STEP-ID of plan PLAN-ID of SESSION-ID: the turn of WORKER-ID ended.
@@ -2056,7 +2333,7 @@ cannot be shown fails nothing.  Return the open call, or nil."
           (puthash worker-id (list :session session-id :call-id call-id :started (float-time))
                    harness-supervisor--spawns))
       (error (harness-log 'warn "supervisor: could not show the worker %s in %s: %s"
-                          worker-id session-id (harness-error-message err))
+                          worker-id session-id (harness-error-short-message err))
              nil))))
 
 (defun harness-supervisor--spawn-call-node (session-id worker-id)
@@ -2132,7 +2409,7 @@ result node, or nil."
                                             (and call (list :duration
                                                             (- (float-time) (plist-get call :started)))))))
         (error (harness-log 'warn "supervisor: could not record the result of the worker %s: %s"
-                            worker (harness-error-message err))
+                            worker (harness-error-short-message err))
                nil)))))
 
 ;;;; The plan engine: what the supervisor is told
@@ -2150,7 +2427,7 @@ QUEUE the message waits for the session's next message instead."
    (harness-call-async 'agent/prompt session-id text
                        (append (list :from (harness-supervisor--sender)) (and queue (list :queue t))))
    (lambda (err)
-     (harness-log 'warn "supervisor: reporting to %s failed: %s" session-id (harness-error-message err)))))
+     (harness-log 'warn "supervisor: reporting to %s failed: %s" session-id (harness-error-short-message err)))))
 
 (defun harness-supervisor--send (session-id text)
   "Report TEXT to the supervising session SESSION-ID.
@@ -2337,10 +2614,14 @@ direction, a mode turned on while the model has an old tool list."
 (defun harness-supervisor--submit-plan (input ctx)
   "Handler of the submit_plan tool: record INPUT's plan and start its workers.
 CTX is the call's context.  A plan with problems is refused as a whole,
-every problem named.  Otherwise the plan is recorded on the session --
-the steps of its earlier plans that have not started are superseded --
-shown like the `plan' tool shows one, and its ready steps start.  The
-answer ends the turn: the harness reports back."
+every problem named.  Otherwise each step is given the model of its
+tier -- the provider's catalogue is waited for, briefly, when it has
+not answered yet -- the plan is recorded on the session (the steps of
+its earlier plans that have not started are superseded), shown like the
+`plan' tool shows one, and its ready steps start.  The answer ends the
+turn: the harness reports back.  It may answer with a promise: a
+provider whose catalogue answers slowly delays the answer, not the
+mapping of tiers to models."
   (let* ((sid (plist-get ctx :session-id))
          (session (harness-call 'session/get sid))
          (read (harness-supervisor--read-plan input)))
@@ -2350,34 +2631,35 @@ answer ends the turn: the harness reports back."
      ((cdr read)
       (harness-supervisor--problems-result "submit_plan" (cdr read)))
      (t
-      (let* ((fallback nil)
-             (steps (mapcar (lambda (step)
-                              (let ((model (harness-supervisor--tier-model session (plist-get step :tier))))
-                                (when (cdr model) (push step fallback))
-                                (harness-supervisor--with step :model (car model))))
-                            (car read)))
-             ;; The call's own node, taken before the plan and its hint join the transcript.
-             (plan (harness-supervisor--make-plan input steps
-                                                  (harness-supervisor--call-node sid (plist-get ctx :call-id))
-                                                  (plist-get ctx :call-id)))
-             (n (length steps)))
-        (harness-supervisor--save-plans
-         sid (append (mapcar #'harness-supervisor--supersede (harness-supervisor--plans sid)) (list plan)))
-        (harness-call 'session/set-plan sid (plist-get plan :summary))
-        (harness-call 'session/append sid (list :kind 'plan :content (plist-get plan :summary)
-                                                :title (plist-get plan :title)
-                                                :meta (list :plan-id (plist-get plan :id))))
-        (harness-call 'session/hint sid (format "Plan submitted: %d step%s" n (if (= n 1) "" "s")))
-        (harness-supervisor--fallback-hint session (nreverse fallback))
-        (when (and (harness-method-exists-p 'agent/running) (harness-call 'agent/running sid))
-          (puthash sid t harness-supervisor--ending))
-        (harness-supervisor--start-ready sid (plist-get plan :id))
-        (harness-tool-ok
-         (concat (format "Plan %s submitted: %d step%s, started where they are ready.\n"
-                         (plist-get plan :id) n (if (= n 1) "" "s"))
-                 (mapconcat #'harness-supervisor--step-line steps "\n")
-                 "\nThis ends your turn. The harness reports a failed step, and the finished plan, to you in a new message: do not wait or poll.")
-         :end-turn t))))))
+      (harness-then
+       (harness-supervisor--tier-models session (car read))
+       (lambda (steps)
+         ;; The call's own node, taken before the plan and its hint join the transcript.
+         (let* ((plan (harness-supervisor--make-plan input steps
+                                                     (harness-supervisor--call-node sid (plist-get ctx :call-id))
+                                                     (plist-get ctx :call-id)))
+                (n (length steps))
+                (fallback (cl-remove-if-not (lambda (step) (plist-get step :model-fallback)) steps)))
+           (harness-supervisor--save-plans
+            sid (append (mapcar #'harness-supervisor--supersede (harness-supervisor--plans sid)) (list plan)))
+           (harness-call 'session/set-plan sid (plist-get plan :summary))
+           (harness-call 'session/append sid (list :kind 'plan :content (plist-get plan :summary)
+                                                   :title (plist-get plan :title)
+                                                   :meta (list :plan-id (plist-get plan :id))))
+           (harness-call 'session/hint sid (format "Plan submitted: %d step%s" n (if (= n 1) "" "s")))
+           (harness-supervisor--fallback-hint session fallback)
+           (when (and (harness-method-exists-p 'agent/running) (harness-call 'agent/running sid))
+             (puthash sid t harness-supervisor--ending))
+           (harness-supervisor--start-ready sid (plist-get plan :id))
+           (harness-tool-ok
+            (concat (format "Plan %s submitted: %d step%s, started where they are ready.\n"
+                            (plist-get plan :id) n (if (= n 1) "" "s"))
+                    (mapconcat #'harness-supervisor--step-line steps "\n")
+                    (if fallback
+                        (concat "\n" (harness-supervisor--fallback-text session fallback))
+                      "")
+                    "\nThis ends your turn. The harness reports a failed step, and the finished plan, to you in a new message: do not wait or poll.")
+            :end-turn t))))))))
 
 (harness-define-tool "submit_plan"
   :label "Submit plan"
@@ -2468,23 +2750,32 @@ and a hint tells the supervisor which."
       (let* ((plan-id (plist-get plan :id))
              (session (harness-call 'session/get sid))
              (attempt (1+ (or (plist-get step :attempts) 0)))
-             (new-tier (and (not (harness-string-blank-p tier)) (not (equal tier (plist-get step :tier))) tier))
-             (model (and new-tier (harness-supervisor--tier-model session new-tier)))
-             (now (apply #'harness-supervisor--update-step
-                         sid plan-id step-id
-                         :prompt (if (harness-string-blank-p notes)
-                                     (plist-get step :prompt)
-                                   (format "%s\n\nNotes for attempt %d: %s" (plist-get step :prompt) attempt notes))
-                         ;; A step that moves to another tier has its reason: why this one.
-                         (and new-tier (list :tier new-tier :model (car model) :reason reason)))))
-        (when (cdr model)
-          (harness-supervisor--fallback-hint session (list now)))
-        (harness-supervisor--hint sid (format "Retrying step %s on %s (attempt %d): %s"
-                                              step-id (plist-get now :model) attempt reason))
-        (harness-supervisor--start-step sid plan-id step-id)
-        (harness-tool-ok
-         (format "Step %s of plan %s runs again on %s (tier %s, attempt %d). The steps held on it start once it is done."
-                 step-id plan-id (plist-get now :model) (plist-get now :tier) attempt)))))))
+             (new-tier (and (not (harness-string-blank-p tier))
+                            (not (equal tier (plist-get step :tier))) tier)))
+        (harness-then
+         (if new-tier
+             (harness-supervisor--tier-model session new-tier t)
+           (harness-resolved nil))
+         (lambda (model)
+           (let ((now (apply #'harness-supervisor--update-step
+                             sid plan-id step-id
+                             :prompt (if (harness-string-blank-p notes)
+                                         (plist-get step :prompt)
+                                       (format "%s\n\nNotes for attempt %d: %s"
+                                               (plist-get step :prompt) attempt notes))
+                             ;; A step that moves to another tier has its reason: why this one.
+                             (and new-tier
+                                  (list :tier new-tier :model (car model) :reason reason
+                                        :model-fallback (and (cdr model)
+                                                             (symbol-name (cdr model))))))))
+             (when (and new-tier (cdr model))
+               (harness-supervisor--fallback-hint session (list now)))
+             (harness-supervisor--hint sid (format "Retrying step %s on %s (attempt %d): %s"
+                                                   step-id (plist-get now :model) attempt reason))
+             (harness-supervisor--start-step sid plan-id step-id)
+             (harness-tool-ok
+              (format "Step %s of plan %s runs again on %s (tier %s, attempt %d). The steps held on it start once it is done."
+                      step-id plan-id (plist-get now :model) (plist-get now :tier) attempt))))))))))
 
 (defun harness-supervisor--known-steps (plans)
   "Return a text naming the steps of the latest of PLANS, for an error."
@@ -2691,6 +2982,7 @@ appended.  Other sessions keep PROMPT."
   ;; After the sections the other modules add, before the seed freezes the prompt.
   (harness-add-filter 'agent/system-prompt #'harness-supervisor--system-prompt 900)
   (harness-on 'session/created #'harness-supervisor--on-created)
+  (harness-on 'session/ext-changed #'harness-supervisor--on-ext-changed)
   (harness-on 'task/changed #'harness-supervisor--on-task-changed)
   (harness-on 'agent/turn-started #'harness-supervisor--on-turn-started)
   ;; The judge of a session's opening message runs beside the first turn.
@@ -2720,6 +3012,7 @@ left once they are (`harness-tasks--pick-up').  A reload hooks in again
   (harness-remove-filter 'agent/stop #'harness-supervisor--stop)
   (harness-remove-filter 'agent/system-prompt #'harness-supervisor--system-prompt)
   (harness-off (cons 'session/created #'harness-supervisor--on-created))
+  (harness-off (cons 'session/ext-changed #'harness-supervisor--on-ext-changed))
   (harness-off (cons 'task/changed #'harness-supervisor--on-task-changed))
   (harness-off (cons 'agent/turn-started #'harness-supervisor--on-turn-started))
   (harness-off (cons 'agent/turn-started #'harness-supervisor--on-first-turn))
