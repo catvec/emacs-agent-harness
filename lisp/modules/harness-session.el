@@ -1027,12 +1027,17 @@ FILTER is `session/list''s filter (`:project' `:status' `:kind'
 `:parent-id' `:active'), plus `:except', a list of session ids to leave
 out, and `:tasks': non-nil adds the sessions of the current tasks of
 every project (`task/session-ids'), whatever the other keys say, so
-an inactive session a task goes on in is not missed.  Nil selects
-every session.  This is the selection of `session/set-all' and of the
-handoff's `handoff/check-all' and `handoff/switch-all'."
+an inactive session a task goes on in is not missed, and leaves out
+the sessions of completed tasks, the done column of the board, even an
+active one: a bulk change must not reach a task that is over.  Nil
+selects every session.  This is the selection of `session/set-all' and
+of the handoff's `handoff/check-all' and `handoff/switch-all'."
   (let* ((except (plist-get filter :except))
+         (tasks (plist-get filter :tasks))
+         (done (when (and tasks (harness-method-exists-p 'task/session-ids))
+                 (harness-call 'task/session-ids (list :columns '("done")))))
          (selected (harness-call 'session/list (harness-plist-remove filter :except :tasks))))
-    (when (and (plist-get filter :tasks) (harness-method-exists-p 'task/session-ids))
+    (when (and tasks (harness-method-exists-p 'task/session-ids))
       (let ((have (mapcar (lambda (s) (plist-get s :id)) selected))
             (more nil))
         (dolist (id (harness-call 'task/session-ids))
@@ -1042,7 +1047,9 @@ handoff's `handoff/check-all' and `handoff/switch-all'."
         (when more
           (setq selected (sort (append selected more)
                                (lambda (a b) (> (plist-get a :updated) (plist-get b :updated))))))))
-    (cl-remove-if (lambda (s) (member (plist-get s :id) except)) selected)))
+    (cl-remove-if (lambda (s) (or (member (plist-get s :id) except)
+                                  (member (plist-get s :id) done)))
+                  selected)))
 
 (harness-defmethod session/set-all (settings &optional filter)
   "Apply SETTINGS to every session FILTER selects; return the ids changed.

@@ -297,6 +297,7 @@ the menu's Version entry says so.
 | `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
 | `C-c h I` | `harness-set-non-interactive-all` | Turn non-interactive mode on or off for every current session and task of every project |
 | `C-c h V` | `harness-toggle-supervisor` | Toggle supervisor mode: a session that supervises plans and leaves the changes to workers on cheaper models, a hands-on one may change files itself (see [Supervisor mode](#supervisor-mode)) |
+| menu `V` | `harness-set-supervisor-all` | In the `C-c h ?` menu, turn supervisor mode on or off for every current session and task of every project (see [Supervisor mode](#supervisor-mode)) |
 | `C-c h d` | `harness-directories` | Manage the directories a session may access |
 | `C-c h W` | `harness-move-session` | Move a session to another working directory, and with it to that directory's project (see [Moving a session](#moving-a-session-to-another-directory)) |
 | `m` | `harness-ui-sessions-move` | In the session list, move the session at point to another directory |
@@ -660,7 +661,11 @@ unless a prefix argument (`C-u C-c h I`) leaves the default alone. It
 says how many sessions and tasks changed, and when it turns the mode
 off, what still turns it on for new work: a project's `.dir-locals.el`
 that sets `harness-non-interactive`, or `harness-tasks-non-interactive`.
-It changes neither.
+It changes neither. A completed task — one in the board's `done`
+column — is over: its session is left alone by this and by every other
+"for all sessions" command (`C-c h M`, `C-c h H`, the menu's `V`),
+even a session still running, idle or blocked (see
+[Task board](#task-board)).
 
 An agent can do the same when you ask it to, with its
 `set_non_interactive` tool, for itself, another session, or everything.
@@ -923,6 +928,18 @@ call to one anyway, in every permission mode.
   again from the next call, in a turn that is running too; the shorter
   tool list follows at its next step. Only you flip the mode: the agent
   has no tool for it.
+- **Every session at once.** `harness-set-supervisor-all` (the menu's
+  `V`, beside the other "for all sessions" entries) turns the mode on or
+  off for every current session the plugin governs, of every project:
+  the sessions of the current tasks (running, pending or blocked)
+  included, even a closed one. Sub-agents and side conversations are
+  left alone (they never supervise), and so is a session whose task is
+  [completed](#task-board) or already at the value asked for. Unless a
+  prefix argument says otherwise it also sets `harness-supervisor` and
+  `harness-supervisor-tasks`, so new top-level and task sessions
+  follow, and it says what still wins over those: a project whose
+  `.dir-locals.el` sets `harness-supervisor`. It never rewrites a
+  `.dir-locals.el`.
 - **What a supervising session can and cannot do.** It reads: files,
   search, other sessions and tasks, your Emacs's buffers and
   documentation, skills and the web. It coordinates: it asks you
@@ -1807,7 +1824,11 @@ board, unless a prefix argument (`C-u C-c h M`) says otherwise. Only
 idle, running and blocked sessions change — deactivated ones are history
 and are left alone, unless a current task goes on in one — no running
 turn is cancelled (it takes the new model at its next step), and each
-session records the change once, as a hint. When the default changes,
+session records the change once, as a hint. A session whose task is
+completed (in the board's `done` column) is over and is left alone too,
+even while it is still running, idle or blocked; so are the records of
+completed tasks, which `task/set-all` never touches. When the default
+changes,
 they then say what still wins over it: a project whose `.dir-locals.el`
 sets `harness-model` (or `harness-thinking`), at the project or the
 directory layer, and `harness-tasks-model` (or `harness-tasks-thinking`)
