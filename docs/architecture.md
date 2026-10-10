@@ -3212,7 +3212,7 @@ in memory and a string on disk and the wire; every read has it, and a
 record from before priorities reads `medium` without being rewritten.
 
 - `task/submit CWD PROMPT &optional (:attachments :model :permission-mode
-  :thinking :non-interactive :refine :main-tree :priority)` → task; it
+  :thinking :non-interactive :supervisor :refine :main-tree :priority)` → task; it
   starts when one of its project's `harness-tasks-max-running` slots is
   free.  The limit is per project: every project (a task's `:project`,
   the main checkout, else its `:cwd`) has that many slots of its own,
@@ -3239,9 +3239,14 @@ record from before priorities reads `medium` without being rewritten.
   `-non-interactive` (off), else from what the directory configures, so
   a task is interactive unless `harness-tasks-non-interactive` or the
   directory's `harness-non-interactive` is on; an explicit false turns
-  non-interactive off whatever they say.  `task/settings` reports the
-  values a new task would get, the configured ones included, and the
-  board submits them with each task.
+  non-interactive off whatever they say.  `:supervisor` is the task's
+  own switch of the supervisor module, `t` to plan and delegate or an
+  explicit false to work hands-on (`:false` in the record); without it
+  the task's session takes `harness-supervisor-tasks` when it starts,
+  and without that module it means nothing.  `task/settings` reports the
+  values a new task would get, the configured ones included --
+  `:supervisor' only while the module is loaded -- and the board submits
+  them with each task.
   With `:refine` the task goes to the backlog instead (below).
   With `:main-tree` it works in the project's main checkout: no worktree
   is made, it gets no branch, and nothing merges when its turn ends, so
@@ -3425,7 +3430,8 @@ record from before priorities reads `medium` without being rewritten.
   which reorders *Pending*),
   `task/update ID PROMPT` (not started only; writes a stopped write-up by
   hand; a task named from its prompt is named again), `task/set-all SETTINGS &optional FILTER` (apply `:model',
-  `:thinking', `:permission-mode' and `:non-interactive' to every task
+  `:thinking', `:permission-mode', `:non-interactive' and `:supervisor',
+  with an explicit false for the last two meaning off, to every task
   FILTER selects and, when started, its session, and `:priority' to the
   task alone; only the settings given change, so without `:priority' (or
   with null) every task keeps its own, and a bad one is refused before
@@ -3438,7 +3444,12 @@ record from before priorities reads `medium` without being rewritten.
   `harness-tasks-non-interactive`, else its directory's
   `harness-non-interactive`), and its session is sent only the
   settings it lacks, so one `session/set-all` changed first gets no
-  second hint; this is the board's bulk edit, and the all-sessions
+  second hint; a `:supervisor' is the session's `:ext' switch rather
+  than a `session/update' setting, so it is applied with
+  `supervisor/set' when the module is loaded
+  (`harness-tasks--apply-supervisor'), and a backlog write-up's session
+  is skipped, its setting waiting for the work; this is the board's bulk
+  edit, and the all-sessions
   commands' and `set_non_interactive`'s reach into tasks),
   `task/session-ids &optional FILTER` (the sessions of the tasks FILTER
   selects, whatever their status; `session/select`'s `:tasks` adds
@@ -3821,11 +3832,13 @@ than the module).  It is set when the session is created
 (`session/created`), so the header shows it from the start: a `main`
 session with no parent takes `harness-supervisor` as `config/get` has it
 at its directory, a fork its parent's value, and a setting its maker gave
-in `:ext` stays.  The session of a task takes `harness-supervisor-tasks`
-(`task/changed`, once, while it has no message and the task was not
-adopted); the session that writes a backlog task up only reads, so it
+in `:ext` stays.  The session of a task takes the task's own `:supervisor'
+setting (`task/submit', the board's button, `task/set-all'), else
+`harness-supervisor-tasks' (`task/changed`, once, while it has no
+message and the task was not adopted); the session that writes a backlog
+task up only reads, so it
 has no setting and `:ext` `:supervisor-write-up` t until the task
-starts.  Only the user changes it later.
+starts, when it takes the task's setting.  Only the user changes it later.
 
 - `supervisor/set SESSION-ID ON` → session plist: ON `t` for on, `:false`
   or nil for off, stored as `:false`, never removed.  Adds the hint
@@ -5251,9 +5264,13 @@ segment, and `V` in the harness keys (`C-c h V`,
 with `_harness/supervisor/set {sessionId, on}` and say what changed
 ("Supervisor mode on", "Supervisor mode off (hands-on)"), and the header
 follows the session as the harness sends it.  The command takes the
-buffer's setting target like the other session settings, so it refuses a
-task that has no session yet, a session the harness has not sent, and
-one the plugin does not govern; a harness without the supervisor module
+buffer's setting target like the other session settings: a session it
+refuses when the harness has not sent it or the plugin does not govern
+it, and the task board's non-session target -- the setting of the next
+task, or of every current task in bulk mode, offered only while the
+harness has the supervisor module -- it toggles through
+`harness-ui--setting-set' as the board's other setting buttons do; a
+harness without the supervisor module
 does not know the method, which is said plainly ("Supervisor mode is not
 available") rather than as a failure.
 
@@ -5691,7 +5708,13 @@ buttons under the New task label), and so does the worktree switch
 beside them: `own worktree` (the default in a git project) or `main
 tree`, where the next task works in the project's own checkout, with
 nothing to merge (`harness-ui-tasks-toggle-main-tree`; new tasks only,
-never bulk).  A
+never bulk).  While the harness has the supervisor module the line also
+shows the supervisor switch (`supervisor`, or `hands-on' once turned
+off, `harness-toggle-supervisor'): the setting of the next task's
+session, turned for every current task in bulk mode, sent with the
+task and applied to its session when it starts.  The harness says
+whether it has the module by carrying `:supervisor' in `task/settings';
+without it there is no button.  A
 Submit / Refine toggle beside that label, showing only the current mode
 (a click or `C-c C-t` switches it), picks what a new task does: start,
 or go to the backlog, written up by an agent and

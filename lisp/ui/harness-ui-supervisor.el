@@ -94,14 +94,25 @@ A supervising session plans and delegates to workers on cheaper models
 and changes no files itself; a hands-on one may change files itself.
 Only a session the supervisor plugin governs has the mode: sub-agents
 and side conversations never supervise.  The session's header line says
-which it is, and clicking there toggles too."
+which it is, and clicking there toggles too.
+
+On the task board the setting target is not a session: `C-c h V' or
+the settings line's button then turns the mode the next task starts
+with, or, in bulk mode, the mode of every current task, as the board's
+other setting buttons do.  Without the supervisor module the harness
+reports no such setting and the board offers no button."
   (interactive)
   (let* ((target (harness-ui--setting-target session-id))
          (session (and (stringp target) (harness-ui-session target)))
-         (value (plist-get (plist-get session :ext) :supervisor)))
+         (value (if (stringp target)
+                    (plist-get (plist-get session :ext) :supervisor)
+                  (harness-ui--setting-get target :supervisor))))
     (cond
      ((not (stringp target))
-      (message "Supervisor mode applies to a session, not to a task that has not started yet"))
+      ;; What the next task starts with, or the current tasks' setting.
+      (let ((on (not (harness-json-true-p value))))
+        (harness-ui--setting-set target :supervisor (if on t :false)
+                                 (if on "Supervisor mode on" "Supervisor mode off (hands-on)"))))
      ((null session)
       (message "Supervisor mode: the harness has not sent this session yet"))
      ((null value)
