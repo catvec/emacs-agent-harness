@@ -44,7 +44,7 @@
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
 (defvar harness-tasks--naming)
-(defvar harness-tasks--naming-queue)
+(defvar harness-tasks--naming-pool)
 (defvar harness-tasks--loaded)
 (defvar harness-tasks--dirty)
 (defvar harness-tasks-max-running)
@@ -75,6 +75,7 @@
 (declare-function harness-supervisor--send "harness-supervisor")
 (declare-function harness-tools-agent-context-limit "harness-tools-agent")
 (declare-function harness-tasks--forget-stores "harness-tasks")
+(declare-function harness-tasks--naming-pool-new "harness-tasks")
 (declare-function harness-acp--drop-client "harness-acp")
 (declare-function harness-session--load-all "harness-session")
 (declare-function harness-session-flush "harness-session")
@@ -2889,7 +2890,7 @@ A task's session supervises, and a finished task waits for review."
        (harness-tasks--forget-stores)
        (setq harness-tasks--loaded t
              harness-tasks--dirty nil
-             harness-tasks--naming-queue nil
+             harness-tasks--naming-pool (harness-tasks--naming-pool-new)
              harness-acp--clients nil)
        (let ((harness-naming-auto nil)
              (harness-tasks-max-running 3)

@@ -285,6 +285,52 @@ have none."
     (should (equal "session s2" (harness-sender-description '(:kind "session" :id "s2"))))
     (should (equal "the user" (harness-sender-description nil)))))
 
+(ert-deftest harness-thinking-level-fit-fits-a-level-to-a-model ()
+  "A thinking level is fitted to the levels a model offers, by their order.
+The level itself when the model has it; else the strongest it has below
+it; else, every one being stronger, its weakest.  A level the order
+does not know ranks after every one it does.  Nothing to fit is nil.
+It is the one rule a BTW's level, Copilot's effort and Bedrock's effort
+are fitted by."
+  (let ((ladder '("low" "medium" "high" "xhigh" "max"))
+        (deep '("low" "high" "max")))
+    ;; The order is weakest first, and the rank follows it.
+    (should (equal '("none" "minimal" "low" "medium" "high" "xhigh" "max") harness-thinking-level-order))
+    (should (equal '(0 1 2 3 4 5 6) (mapcar #'harness-thinking-level-rank harness-thinking-level-order)))
+    (should (> (harness-thinking-level-rank "ultra") (harness-thinking-level-rank "max")))
+    ;; The level itself, wherever it stands among the others.
+    (dolist (level ladder)
+      (should (equal level (harness-thinking-level-fit level ladder))))
+    (should (equal "medium" (harness-thinking-level-fit "medium" '("max" "medium" "low"))))
+    ;; Else the strongest below it, the order of the list no matter.
+    (should (equal "low" (harness-thinking-level-fit "medium" deep)))
+    (should (equal "low" (harness-thinking-level-fit "medium" (reverse deep))))
+    (should (equal "high" (harness-thinking-level-fit "xhigh" deep)))
+    (should (equal "medium" (harness-thinking-level-fit "xhigh" '("max" "low" "medium"))))
+    (should (equal "minimal" (harness-thinking-level-fit "low" '("high" "minimal" "none"))))
+    (should (equal "none" (harness-thinking-level-fit "minimal" '("none" "high"))))
+    ;; Else the weakest, everything it has being stronger.
+    (should (equal "high" (harness-thinking-level-fit "low" '("high" "max"))))
+    (should (equal "high" (harness-thinking-level-fit "medium" '("max" "high"))))
+    (should (equal "max" (harness-thinking-level-fit "low" '("max"))))
+    ;; A level the order does not know ranks after all it does: it is the
+    ;; strongest asked for, and the strongest a model can offer.
+    (should (equal "max" (harness-thinking-level-fit "ultra" ladder)))
+    (should (equal "ultra" (harness-thinking-level-fit "ultra" '("low" "ultra"))))
+    (should (equal "low" (harness-thinking-level-fit "max" '("low" "ultra"))))
+    (should (equal "ultra" (harness-thinking-level-fit "low" '("ultra" "turbo"))))
+    ;; Nothing to fit: no string, or no level to fit to.
+    (should-not (harness-thinking-level-fit nil ladder))
+    (should-not (harness-thinking-level-fit 'low ladder))
+    (should-not (harness-thinking-level-fit :false ladder))
+    (should-not (harness-thinking-level-fit "low" nil))
+    (should-not (harness-thinking-level-fit "low" '(nil low)))
+    (should (equal "low" (harness-thinking-level-fit "medium" '(nil "low" high))))
+    ;; The list it is given is left as it was.
+    (let ((levels (list "max" "low" "high")))
+      (should (equal "low" (harness-thinking-level-fit "medium" levels)))
+      (should (equal '("max" "low" "high") levels)))))
+
 (ert-deftest harness-http-sse-parser ()
   (let (events)
     (let ((f (harness-http-sse-parser (lambda (ev data) (push (cons ev data) events)))))

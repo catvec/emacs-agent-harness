@@ -33,7 +33,7 @@
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
 (defvar harness-tasks--naming)
-(defvar harness-tasks--naming-queue)
+(defvar harness-tasks--naming-pool)
 (defvar harness-tasks--loaded)
 (defvar harness-tasks--dirty)
 (defvar harness-tasks-max-running)
@@ -60,6 +60,7 @@
 (declare-function harness-tools-agent--system-prompt "harness-tools-agent")
 (declare-function harness-supervisor-prompt-section "harness-supervisor")
 (declare-function harness-tasks--forget-stores "harness-tasks")
+(declare-function harness-tasks--naming-pool-new "harness-tasks")
 (declare-function harness-acp-connect "harness-acp")
 (declare-function harness-acp-set-handler "harness-acp")
 (declare-function harness-acp-request "harness-acp")
@@ -1057,7 +1058,7 @@ session changes, an inactive one too, as `session/set-all' does."
        (harness-tasks--forget-stores)
        (setq harness-tasks--loaded t
              harness-tasks--dirty nil
-             harness-tasks--naming-queue nil
+             harness-tasks--naming-pool (harness-tasks--naming-pool-new)
              harness-acp--clients nil)
        (let ((harness-provider-demo-script-override harness-supervisor-test-task-script)
              (harness-naming-auto nil)

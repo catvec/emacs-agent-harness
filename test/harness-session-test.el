@@ -1704,7 +1704,10 @@ a budget given to a session after that stays."
 (defmacro harness-session-test-with-thinker (&rest body)
   "Run BODY in `harness-session-test-with' with provider `test-think' defined.
 Its model thinker has the thinking levels low, medium and high; its
-model plain has none."
+model plain has none.  Its model deep has low, high and max, as
+DeepSeek's do (no medium), and its model steep only high and max.  The
+provider names no cheap tier and prices no model, so a BTW over any of
+them stays on it."
   (declare (indent 0))
   `(harness-session-test-with
      (unwind-protect
@@ -1713,6 +1716,8 @@ model plain has none."
              :complete #'ignore
              :models (lambda ()
                        (harness-resolved (list (list :name "thinker" :thinking-levels '("low" "medium" "high"))
+                                               (list :name "deep" :thinking-levels '("low" "high" "max"))
+                                               (list :name "steep" :thinking-levels '("high" "max"))
                                                (list :name "plain")))))
            ,@body)
        (remhash 'test-think harness-providers)
@@ -1725,10 +1730,11 @@ model plain has none."
 (ert-deftest harness-session-btw-thinks-at-the-btw-level ()
   "A BTW starts at `harness-btw-thinking', low unless configured otherwise.
 It does whatever the level of the session it is opened over, which
-keeps its own.  A model the catalogue lists no such level for keeps the
-parent's level, as nil does.  The setting layers: a .dir-locals.el sets
-it for its directory.  The BTW can be changed afterwards like any
-session."
+keeps its own.  A model the catalogue lists the level for gets it; one
+that lacks it gets the nearest level it lists below it, never the
+parent's.  A model the catalogue lists no levels for keeps the parent's
+level, as nil does.  The setting layers: a .dir-locals.el sets it for
+its directory.  The BTW can be changed afterwards like any session."
   (harness-session-test-with-thinker
     (should (equal "low" (eval (car (get 'harness-btw-thinking 'standard-value)) t)))
     (let* ((harness-btw-thinking "low")
@@ -1745,16 +1751,22 @@ session."
       (should (equal "high" (plist-get (harness-call 'session/get high) :thinking)))
       ;; A model without levels gets no level it did not have.
       (should (equal "high" (harness-session-test-btw-level plain)))
-      ;; Another level, when the model offers it; else the parent's.
+      ;; Another level, when the model offers it; else the strongest it
+      ;; offers below it: here the top level, whatever the parent's.
       (let ((harness-btw-thinking "medium"))
         (should (equal "medium" (harness-session-test-btw-level high))))
       (let ((harness-btw-thinking "max"))
         (should (equal "high" (harness-session-test-btw-level high)))
-        (should-not (harness-session-test-btw-level default)))
+        (should (equal "high" (harness-session-test-btw-level default))))
       ;; nil: the parent's level, as before BTWs had one of their own.
       (let ((harness-btw-thinking nil))
         (should (equal "high" (harness-session-test-btw-level high)))
         (should-not (harness-session-test-btw-level default)))
+      ;; A model without levels: nothing to fit to, so the parent's level
+      ;; stays, the setting asking for another or not.
+      (dolist (setting '("low" "max" nil))
+        (let ((harness-btw-thinking setting))
+          (should (equal "high" (harness-session-test-btw-level plain)))))
       ;; Changed in the BTW, like in any session.
       (let ((btw (plist-get (harness-call 'session/btw high) :id)))
         (harness-call 'session/update btw :thinking "high" :silent t)
@@ -1769,7 +1781,8 @@ session."
 
 (ert-deftest harness-session-btw-created-without-a-level ()
   "A `btw' session created without a level, as a task board's is, starts at
-the BTW level when its model offers it, else at `harness-thinking'.  A
+the BTW level fitted to the levels its model offers, else at
+`harness-thinking' (no level configured, or a model that lists none).  A
 level given to it wins, and other kinds of session are left alone."
   (harness-session-test-with-thinker
     (let ((harness-btw-thinking "low")
@@ -1782,8 +1795,319 @@ level given to it wins, and other kinds of session are left alone."
         (should (equal "medium" (level :kind 'btw :model "test-think:thinker" :thinking "medium")))
         (should (equal "high" (level :model "test-think:thinker")))
         (should (equal "high" (level :kind 'fork :model "test-think:thinker")))
+        ;; A level its model lacks is the nearest below it, else the model's
+        ;; weakest -- not `harness-thinking', which a BTW falls back on
+        ;; only where nothing can be fitted (the plain model has no levels).
+        (let ((harness-btw-thinking "medium")
+              (harness-thinking "max"))
+          (should (equal "medium" (level :kind 'btw :model "test-think:thinker")))
+          (should (equal "low" (level :kind 'btw :model "test-think:deep")))
+          (should (equal "high" (level :kind 'btw :model "test-think:steep")))
+          (should (equal "max" (level :kind 'btw :model "test-think:plain")))
+          (should (equal "max" (level :model "test-think:deep"))))
         (let ((harness-btw-thinking nil))
           (should (equal "high" (level :kind 'btw :model "test-think:thinker"))))))))
+
+(ert-deftest harness-session-btw-thinks-lower-on-its-sessions-own-model ()
+  "A BTW that stays on its session's model still thinks lower, whatever the session's level.
+The provider has no cheaper tier here.  A model that lacks the level (a
+DeepSeek-like one has low, high and max, no medium) gives the nearest it
+has below it, never the session's own; one whose levels are all
+stronger than the one asked for gives its weakest."
+  (harness-session-test-with-thinker
+    (let* ((harness-btw-thinking "low")
+           (harness-thinking nil)
+           (cwd (harness-test-temp-dir))
+           (deep (plist-get (harness-call 'session/create :cwd cwd :model "test-think:deep" :thinking "max")
+                            :id))
+           (steep (plist-get (harness-call 'session/create :cwd cwd :model "test-think:steep" :thinking "max")
+                             :id)))
+      (cl-flet ((on (id) (let ((btw (harness-call 'session/btw id)))
+                           (cons (plist-get btw :model) (plist-get btw :thinking)))))
+        ;; The default: the model has it.
+        (should (equal '("test-think:deep" . "low") (on deep)))
+        ;; Medium: it has none, and gets low, not the session's max.
+        (let ((harness-btw-thinking "medium"))
+          (should (equal '("test-think:deep" . "low") (on deep))))
+        ;; The nearest it has below, whichever level is asked for.
+        (let ((harness-btw-thinking "high"))
+          (should (equal '("test-think:deep" . "high") (on deep))))
+        (let ((harness-btw-thinking "xhigh"))
+          (should (equal '("test-think:deep" . "high") (on deep))))
+        ;; Every level it has is stronger than the one asked for: its weakest.
+        (should (equal '("test-think:steep" . "high") (on steep)))
+        (let ((harness-btw-thinking "medium"))
+          (should (equal '("test-think:steep" . "high") (on steep))))
+        ;; Nothing configured: the session's own level, which its model has.
+        (let ((harness-btw-thinking nil))
+          (should (equal '("test-think:deep" . "max") (on deep))))
+        ;; The sessions keep theirs.
+        (should (equal "max" (plist-get (harness-call 'session/get deep) :thinking)))
+        (should (equal "max" (plist-get (harness-call 'session/get steep) :thinking)))))))
+
+;;;; The model of a BTW
+
+(defvar harness-model)
+(defvar harness-btw-model)
+(defvar harness-allowed-models)
+
+(defmacro harness-session-test-with-tiers (&rest body)
+  "Run BODY in `harness-session-test-with-thinker' with provider `test-tier' defined too.
+Its cheap tier is the model small, which offers the thinking levels
+low, medium and high; its model big offers up to max.  Provider
+`test-think' names no tier and prices no model."
+  (declare (indent 0))
+  `(harness-session-test-with-thinker
+     (unwind-protect
+         (progn
+           (harness-define-provider 'test-tier
+             :complete #'ignore
+             :tiers '(:cheap "small")
+             :models (lambda ()
+                       (harness-resolved
+                        (list (list :name "big" :thinking-levels '("low" "medium" "high" "xhigh" "max"))
+                              (list :name "small" :thinking-levels '("low" "medium" "high"))))))
+           ,@body)
+       (remhash 'test-tier harness-providers)
+       (harness-provider--forget 'test-tier))))
+
+(defun harness-session-test-parent (model &rest plist)
+  "Create a session on MODEL with PLIST in a directory of its own; return its id."
+  (plist-get (apply #'harness-call 'session/create :cwd (harness-test-temp-dir) :model model plist) :id))
+
+(defun harness-session-test-btw (parent &rest args)
+  "Start a BTW over session PARENT with ARGS after its name; return the session."
+  (apply #'harness-call 'session/btw parent "side" args))
+
+(ert-deftest harness-session-btw-runs-on-the-cheap-tier ()
+  "A BTW runs on the cheap tier of its model's provider, not on its session's.
+Over a session on the provider's top model it is made on the cheap one,
+as `session/get' says too, thinking at the BTW level; the session keeps
+its model and level, and a BTW already on the cheap tier stays there."
+  (harness-session-test-with-tiers
+    (let* ((harness-btw-thinking "low")
+           (harness-thinking nil)
+           (parent (harness-session-test-parent "test-tier:big" :thinking "max"
+                                                :permission-mode 'accept-edits))
+           (btw (harness-session-test-btw parent)))
+      (should (eq 'auto (eval (car (get 'harness-btw-model 'standard-value)) t)))
+      (should (eq 'btw (plist-get btw :kind)))
+      (should (equal parent (plist-get btw :parent-id)))
+      (should (equal "test-tier:small" (plist-get btw :model)))
+      (should (equal "test-tier:small" (plist-get (harness-call 'session/get (plist-get btw :id)) :model)))
+      (should (equal "low" (plist-get btw :thinking)))
+      (should (eq 'accept-edits (plist-get btw :permission-mode)))
+      (let ((session (harness-call 'session/get parent)))
+        (should (equal "test-tier:big" (plist-get session :model)))
+        (should (equal "max" (plist-get session :thinking))))
+      (let ((small (harness-session-test-parent "test-tier:small" :thinking "medium")))
+        (should (equal "test-tier:small" (plist-get (harness-session-test-btw small) :model)))))))
+
+(ert-deftest harness-session-btw-model-setting ()
+  "`harness-btw-model' picks the model of a BTW: `auto' the cheap tier, a model that model, nil its session's.
+It layers like the other settings: a .dir-locals.el sets it for its directory."
+  (harness-session-test-with-tiers
+    (let* ((harness-btw-thinking "low")
+           (cwd (harness-test-temp-dir))
+           (big (plist-get (harness-call 'session/create :cwd cwd :model "test-tier:big") :id))
+           (think (plist-get (harness-call 'session/create :cwd cwd :model "test-think:thinker") :id)))
+      (cl-flet ((model-of (id) (plist-get (harness-session-test-btw id) :model)))
+        ;; The default, spelled as the symbol or as a string.
+        (dolist (auto '(auto "auto"))
+          (let ((harness-btw-model auto))
+            (should (equal "test-tier:small" (model-of big)))))
+        ;; A model: that one, whoever the session's provider is.
+        (let ((harness-btw-model "test-tier:big"))
+          (should (equal "test-tier:big" (model-of big)))
+          (should (equal "test-tier:big" (model-of think))))
+        (let ((harness-btw-model "test-tier:small"))
+          (should (equal "test-tier:small" (model-of think))))
+        ;; nil, or nothing: the session's own.
+        (dolist (own '(nil ""))
+          (let ((harness-btw-model own))
+            (should (equal "test-tier:big" (model-of big)))
+            (should (equal "test-think:thinker" (model-of think)))))
+        ;; Configured for the directory the session works in.
+        (with-temp-file (expand-file-name ".dir-locals.el" cwd)
+          (insert "((nil . ((harness-btw-model . nil))))\n"))
+        (should (equal "test-tier:big" (model-of big)))
+        (with-temp-file (expand-file-name ".dir-locals.el" cwd)
+          (insert "((nil . ((harness-btw-model . \"test-think:thinker\"))))\n"))
+        (should (equal "test-think:thinker" (model-of big)))
+        (with-temp-file (expand-file-name ".dir-locals.el" cwd)
+          (insert "((nil . ((harness-btw-model . auto))))\n"))
+        (let ((harness-btw-model nil))
+          (should (equal "test-tier:small" (model-of big))))))))
+
+(ert-deftest harness-session-btw-model-setting-must-be-allowed ()
+  "A `harness-btw-model' that `harness-allowed-models' leaves out is not used.
+The BTW stays on its session's model, and the log says why."
+  (harness-session-test-with-tiers
+    (let ((think (harness-session-test-parent "test-think:thinker"))
+          (harness-btw-model "test-tier:big"))
+      (should (equal "test-tier:big" (plist-get (harness-session-test-btw think) :model)))
+      (harness-test-with-policy '((harness-allowed-models "test-think"))
+        (should (equal "test-think:thinker" (plist-get (harness-session-test-btw think) :model)))))))
+
+(ert-deftest harness-session-btw-model-can-be-chosen-for-one-btw ()
+  "A model given to `session/btw' runs that BTW on it, over the setting and the cheap tier.
+A blank one is none.  It is chosen at the start: the BTW is a session
+like any from then on, whose model can be switched, and its session
+keeps its own."
+  (harness-session-test-with-tiers
+    (let ((parent (harness-session-test-parent "test-tier:big" :thinking "max")))
+      ;; Over the cheap tier.
+      (should (equal "test-tier:big" (plist-get (harness-session-test-btw parent "test-tier:big") :model)))
+      (should (equal "test-think:thinker"
+                     (plist-get (harness-session-test-btw parent "test-think:thinker") :model)))
+      ;; Over the setting.
+      (let ((harness-btw-model "test-tier:small"))
+        (should (equal "test-think:thinker"
+                       (plist-get (harness-session-test-btw parent "test-think:thinker") :model)))
+        (should (equal "test-tier:small" (plist-get (harness-session-test-btw parent) :model))))
+      (let ((harness-btw-model nil))
+        (should (equal "test-tier:small" (plist-get (harness-session-test-btw parent "test-tier:small") :model)))
+        (should (equal "test-tier:big" (plist-get (harness-session-test-btw parent) :model))))
+      ;; Blank is none.
+      (dolist (blank '(nil "" "  "))
+        (should (equal "test-tier:small" (plist-get (harness-session-test-btw parent blank) :model))))
+      ;; Chosen once: after that the BTW switches models like any session.
+      (let ((id (plist-get (harness-session-test-btw parent "test-tier:big") :id)))
+        (harness-call 'session/update id :model "test-think:thinker" :silent t)
+        (should (equal "test-think:thinker" (plist-get (harness-call 'session/get id) :model))))
+      (should (equal "test-tier:big" (plist-get (harness-call 'session/get parent) :model))))))
+
+(ert-deftest harness-session-btw-model-and-thinking-are-independent ()
+  "The BTW level is checked against the model the BTW runs on, not its session's.
+`harness-btw-thinking' lowers the effort on the cheap model as on any
+other; a level that model lacks is not carried over from a session that
+had it, nor is the usual one used: the BTW gets the nearest level the
+model has below it."
+  (harness-session-test-with-tiers
+    (let* ((harness-thinking nil)
+           (max (harness-session-test-parent "test-tier:big" :thinking "max"))
+           (high (harness-session-test-parent "test-tier:big" :thinking "high")))
+      (cl-flet ((on (id) (let ((btw (harness-session-test-btw id)))
+                           (cons (plist-get btw :model) (plist-get btw :thinking)))))
+        ;; The effort is low on the cheap model, whatever the session's.
+        (let ((harness-btw-thinking "low"))
+          (should (equal '("test-tier:small" . "low") (on max)))
+          (should (equal '("test-tier:small" . "low") (on high))))
+        (let ((harness-btw-thinking "medium"))
+          (should (equal '("test-tier:small" . "medium") (on max))))
+        ;; A level the cheap model lacks is the nearest it has below it.
+        (let ((harness-btw-thinking "max"))
+          (should (equal '("test-tier:small" . "high") (on max)))
+          (should (equal '("test-tier:small" . "high") (on high))))
+        (let ((harness-btw-thinking "xhigh")
+              (harness-thinking "low"))
+          (should (equal '("test-tier:small" . "high") (on max))))
+        ;; The session's level, when the cheap model has it; else the usual one.
+        (let ((harness-btw-thinking nil))
+          (should (equal '("test-tier:small" . nil) (on max)))
+          (should (equal '("test-tier:small" . "high") (on high)))
+          (let ((harness-thinking "medium"))
+            (should (equal '("test-tier:small" . "medium") (on max)))))
+        ;; On the session's own model nothing is lost.
+        (let ((harness-btw-model nil))
+          (let ((harness-btw-thinking "low"))
+            (should (equal '("test-tier:big" . "low") (on max))))
+          (let ((harness-btw-thinking nil))
+            (should (equal '("test-tier:big" . "max") (on max)))))
+        ;; A model chosen for the BTW, too.
+        (let ((harness-btw-thinking nil))
+          (should (equal '("test-tier:big" . "max")
+                         (let ((btw (harness-session-test-btw max "test-tier:big")))
+                           (cons (plist-get btw :model) (plist-get btw :thinking)))))
+          (should (equal '("test-tier:small" . "high")
+                         (let ((btw (harness-session-test-btw high "test-tier:small")))
+                           (cons (plist-get btw :model) (plist-get btw :thinking))))))))))
+
+(ert-deftest harness-session-btw-keeps-the-model-without-a-cheap-tier ()
+  "A provider that names no cheap model and prices none leaves a BTW on its session's.
+So does a model whose provider nobody registered.  The level is fitted
+to the levels of the model it stays on; a model the catalogue lists no
+levels for has none to fit to, so its level is the session's, whatever
+`harness-btw-thinking' says."
+  (harness-session-test-with-tiers
+    (let ((harness-btw-thinking "low")
+          (think (harness-session-test-parent "test-think:thinker" :thinking "high"))
+          (plain (harness-session-test-parent "test-think:plain" :thinking "high"))
+          (nobody (harness-session-test-parent "nobody:model" :thinking "high")))
+      (should (equal "test-think:thinker" (plist-get (harness-session-test-btw think) :model)))
+      (should (equal "low" (plist-get (harness-session-test-btw think) :thinking)))
+      (should (equal "test-think:plain" (plist-get (harness-session-test-btw plain) :model)))
+      (should (equal "high" (plist-get (harness-session-test-btw plain) :thinking)))
+      (should (equal "nobody:model" (plist-get (harness-session-test-btw nobody) :model)))
+      (should (equal "high" (plist-get (harness-session-test-btw nobody) :thinking)))
+      ;; Nothing configured either: the session's level, as before.
+      (let ((harness-btw-thinking nil))
+        (should (equal "high" (plist-get (harness-session-test-btw plain) :thinking)))
+        (should (equal "high" (plist-get (harness-session-test-btw nobody) :thinking)))))))
+
+(ert-deftest harness-session-btw-created-without-a-model ()
+  "A `btw' session created without a model, as a task board's is, runs on `harness-btw-model'.
+That is applied to `harness-model' as configured at its directory.  A
+model it is given wins, and other kinds of session are left alone."
+  (harness-session-test-with-tiers
+    (let ((harness-model "test-tier:big")
+          (harness-thinking "high")
+          (harness-btw-thinking "low")
+          (cwd (harness-test-temp-dir)))
+      (cl-flet ((create (&rest plist) (apply #'harness-call 'session/create :cwd cwd plist)))
+        (should (equal "test-tier:small" (plist-get (create :kind 'btw) :model)))
+        (should (equal "low" (plist-get (create :kind 'btw) :thinking)))
+        (should (equal "test-tier:big" (plist-get (create :kind 'btw :model "test-tier:big") :model)))
+        (should (equal "test-tier:big" (plist-get (create) :model)))
+        (should (equal "test-tier:big" (plist-get (create :kind 'fork) :model)))
+        (let ((harness-btw-model nil))
+          (should (equal "test-tier:big" (plist-get (create :kind 'btw) :model))))
+        (let ((harness-btw-model "test-think:thinker"))
+          (should (equal "test-think:thinker" (plist-get (create :kind 'btw) :model))))
+        ;; The model the directory configures is the one the tier comes from.
+        (with-temp-file (expand-file-name ".dir-locals.el" cwd)
+          (insert "((nil . ((harness-model . \"test-think:thinker\"))))\n"))
+        (should (equal "test-think:thinker" (plist-get (create :kind 'btw) :model)))
+        (with-temp-file (expand-file-name ".dir-locals.el" cwd)
+          (insert "((nil . ((harness-model . \"test-tier:big\"))))\n"))
+        (should (equal "test-tier:small" (plist-get (create :kind 'btw) :model)))))))
+
+(ert-deftest harness-session-policy-fixes-the-model-of-a-btw ()
+  "A policy on `harness-model' fixes a BTW's model as every session's.
+Not the cheap tier then: neither `harness-btw-model' nor a model asked
+for changes it, and a model that is another is refused, creating
+nothing.  The level is not fixed, so it stays the BTW level."
+  (harness-session-test-with-tiers
+    (harness-test-with-policy '((harness-model . "test-tier:big"))
+      (let* ((harness-btw-thinking "low")
+             (cwd (harness-test-temp-dir))
+             (parent (plist-get (harness-call 'session/create :cwd cwd :thinking "max") :id)))
+        (should (equal "test-tier:big" (plist-get (harness-call 'session/get parent) :model)))
+        (should (equal "test-tier:big" (plist-get (harness-session-test-btw parent) :model)))
+        (should (equal "low" (plist-get (harness-session-test-btw parent) :thinking)))
+        (should (equal "test-tier:big" (plist-get (harness-call 'session/create :cwd cwd :kind 'btw) :model)))
+        (should (equal "test-tier:big"
+                       (plist-get (harness-call 'session/create :cwd cwd :kind 'btw :model "test-tier:small")
+                                  :model)))
+        (let ((harness-btw-model "test-think:thinker"))
+          (should (equal "test-tier:big" (plist-get (harness-session-test-btw parent) :model))))
+        ;; The policy's own model is no change.
+        (should (equal "test-tier:big" (plist-get (harness-session-test-btw parent "test-tier:big") :model)))
+        (let* ((sessions (length (harness-call 'session/list)))
+               (err (should-error (harness-session-test-btw parent "test-tier:small"))))
+          (should (string-match-p "harness-model is set by policy" (cadr err)))
+          (should (= sessions (length (harness-call 'session/list)))))))))
+
+(ert-deftest harness-session-btw-model-asked-for-must-be-allowed ()
+  "A model asked for that `harness-allowed-models' leaves out is refused, creating nothing."
+  (harness-session-test-with-tiers
+    (let ((parent (harness-session-test-parent "test-tier:big"))
+          (sessions (length (harness-call 'session/list))))
+      (harness-test-with-policy '((harness-allowed-models "test-tier"))
+        (should (equal "test-tier:small" (plist-get (harness-session-test-btw parent "test-tier:small") :model)))
+        (let ((err (should-error (harness-session-test-btw parent "test-think:thinker"))))
+          (should (string-match-p "test-think:thinker is not allowed" (cadr err))))
+        (should (= (1+ sessions) (length (harness-call 'session/list))))))))
 
 ;;;; Moving to another directory
 
