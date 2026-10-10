@@ -457,13 +457,26 @@ so the chat can open it from the call however the call ended."
            (call-id "call-2")
            (input '(:prompt "hi" :name "doomed")))
       (harness-tools-agent-test-record-call sid call-id input)
-      (let ((harness-provider-demo-script-override '((:type done :stop-reason error :error "boom"))))
+      ;; Only the sub-agent fails; the parent still hears its report.
+      (let ((harness-provider-demo-script-override
+             (lambda (request)
+               (if (eq 'subagent (plist-get (plist-get request :session) :kind))
+                   '((:type done :stop-reason error :error "boom"))
+                 (let ((harness-provider-demo-script-override nil))
+                   (harness-provider-demo--script request))))))
         (let* ((result (harness-test-await (harness-tools-agent-test-run sid "spawn_agent" input call-id)))
                (cid (plist-get (plist-get result :meta) :child-id))
                (node (harness-tools-agent--call-node sid call-id)))
-          (should (plist-get result :is-error))
+          ;; The call returned while the child ran, and it names the child.
+          (should-not (plist-get result :is-error))
           (should (stringp cid))
-          (should (equal cid (plist-get (plist-get node :meta) :child-id))))))))
+          (should (equal cid (plist-get (plist-get node :meta) :child-id)))
+          ;; The child's first turn fails; the call goes on naming it.
+          (harness-test-wait (lambda () (harness-tools-agent-test-reports sid)) 10 "the failure report")
+          (should (string-match-p "boom"
+                                  (plist-get (car (harness-tools-agent-test-reports sid)) :content)))
+          (should (equal cid (plist-get (plist-get (harness-tools-agent--call-node sid call-id) :meta)
+                                        :child-id))))))))
 
 (ert-deftest harness-tools-agent-no-call-node-nothing-to-name ()
   "A spawn run without a call node -- `tools/execute' from outside an

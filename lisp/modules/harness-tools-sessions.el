@@ -96,8 +96,8 @@ A wait is settled the moment its condition first holds, as the events
 that announce a session's or task's changes tell the module to look
 again; this is a floor under those events, so a change none of them
 announced -- a subscriber lost to a reload, a status a module set on its
-own, a finish that happened before the wait was made -- cannot hold a
-wait for its whole timeout while its condition already holds.  The
+own, a finish that happened before the wait was made -- cannot leave a
+wait or a registration while its condition already holds.  The
 re-check is a walk over the running waits; with none running, nothing
 runs."
   :type '(choice (const :tag "No safety re-check" nil)
@@ -1241,6 +1241,7 @@ once and blocks nothing."
                    (when (gethash id harness-tools-sessions--waiters)
                      (remhash id harness-tools-sessions--waiters)
                      (when timer (cancel-timer timer))
+                     (harness-tools-sessions--disarm-recheck)
                      (when (memq why '(met timeout))
                        (harness-tools-sessions--wake caller (funcall report why)))))))
     (if (funcall check)
@@ -1248,6 +1249,7 @@ once and blocks nothing."
       (puthash id (list :check check :finish finish :session-id caller :wake t
                         :label (string-join (mapcar #'harness-tools-sessions--short ids) ", "))
                harness-tools-sessions--waiters)
+      (harness-tools-sessions--arm-recheck)
       (when timeout (setq timer (run-at-time timeout nil finish 'timeout)))
       (harness-tool-ok
        (format (concat "Waiting in the background: you will be woken with a message when %s. "
@@ -1261,12 +1263,14 @@ once and blocks nothing."
   "Non-nil when session SID satisfies UNTIL; BASELINE is its state at the start.
 A `changed' wait is met by any new state of the session and also by an
 idle or closed one: a session that is not running and not waiting on
-the user has nothing new of its own coming, so waiting for a change
-that can never come would only hold the caller until the timeout.  It
-is what a wait made on a sub-agent meets: `spawn_agent' is blocking, so
-the parent can first wait on the child once its turn has ended.  A
-blocked session is left to the wait: its turn is not over, and it
-changes when its question is answered."
+the user has nothing new of its own coming, so asking for a change that
+can never come would only leave the wait or its registration unsettled
+(a registered wait may have no timeout at all).  It is what a wait made
+on a sub-agent meets: `spawn_agent' returns as soon as its child
+starts, but a wait can still be made once that child has finished -- by
+a session that only looks later, or a third one -- and then nothing is
+left to announce.  A blocked session is left to the wait: its turn is
+not over, and it changes when its question is answered."
   (if (not (harness-call 'session/exists-p sid))
       t
     (let ((status (harness-tools-sessions--status sid)))
