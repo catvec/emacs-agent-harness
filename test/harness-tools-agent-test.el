@@ -355,7 +355,7 @@ and the caller hears the answer, or that it was dismissed."
           ;; window is capped.
           (let ((nodes (harness-call 'session/nodes cid)))
             (should (eq 'hint (plist-get (car nodes) :kind)))
-            (should (string-match-p "\\`Context window capped at 128k tokens" (plist-get (car nodes) :content)))
+            (should (string-match-p "\\`Context window capped at 256k tokens" (plist-get (car nodes) :content)))
             (should (eq 'user (plist-get (cadr nodes) :kind)))
             (should (string-match-p "give me the tour" (plist-get (cadr nodes) :content)))
             (should (equal (list :kind 'session :id sid :name nil)
@@ -613,11 +613,11 @@ sub-agent the call started."
 (ert-deftest harness-tools-agent-context-limit-fresh-is-the-cap ()
   "A fresh sub-agent's window is the cap, whatever the parent has used."
   (harness-tools-agent-test-with
-    (should (= 128000 harness-subagent-context-limit))
+    (should (= 256000 harness-subagent-context-limit))
     (let ((sid (harness-tools-agent-test-session)))
-      (should (= 128000 (harness-tools-agent-context-limit sid nil)))
+      (should (= 256000 (harness-tools-agent-context-limit sid nil)))
       (harness-call 'session/usage-add sid '(:input 10 :output 40 :context 3020))
-      (should (= 128000 (harness-tools-agent-context-limit sid nil)))
+      (should (= 256000 (harness-tools-agent-context-limit sid nil)))
       (let ((harness-subagent-context-limit 5000))
         (should (= 5000 (harness-tools-agent-context-limit sid nil)))))))
 
@@ -626,17 +626,17 @@ sub-agent the call started."
   (harness-tools-agent-test-with
     (let ((sid (harness-tools-agent-test-session)))
       ;; Nothing known about the parent's context: it inherits nothing.
-      (should (= 128000 (harness-tools-agent-context-limit sid t)))
+      (should (= 256000 (harness-tools-agent-context-limit sid t)))
       (harness-call 'session/usage-add sid '(:input 10 :output 40 :context 3020))
-      (should (= (+ 128000 3020 40) (harness-tools-agent-context-limit sid t)))
+      (should (= (+ 256000 3020 40) (harness-tools-agent-context-limit sid t)))
       ;; Only the last request's output counts, not the totals.
       (harness-call 'session/usage-add sid '(:input 10 :output 60 :context 4000))
-      (should (= (+ 128000 4000 60) (harness-tools-agent-context-limit sid t)))
+      (should (= (+ 256000 4000 60) (harness-tools-agent-context-limit sid t)))
       (let ((harness-subagent-context-limit 1000))
         (should (= (+ 1000 4000 60) (harness-tools-agent-context-limit sid t))))
       ;; A flag that came over JSON counts as the boolean it is.
-      (should (= 128000 (harness-tools-agent-context-limit sid :false)))
-      (should (= (+ 128000 4000 60) (harness-tools-agent-context-limit sid 'yes))))))
+      (should (= 256000 (harness-tools-agent-context-limit sid :false)))
+      (should (= (+ 256000 4000 60) (harness-tools-agent-context-limit sid 'yes))))))
 
 (ert-deftest harness-tools-agent-context-limit-never-above-the-parents ()
   "The parent's own limit caps the child's, a fork's included."
@@ -650,6 +650,15 @@ sub-agent the call started."
         (should (= 10000 (harness-tools-agent-context-limit sid nil)))
         (should (= 13060 (harness-tools-agent-context-limit sid t)))))))
 
+(ert-deftest harness-tools-agent-context-limit-a-256k-parent-keeps-its-child-at-256k ()
+  "A sub-agent of a session capped at 256000 gets 256000, as a task session's does."
+  (harness-tools-agent-test-with
+    (let ((sid (harness-tools-agent-test-session)))
+      (harness-call 'session/update sid :context-window-limit 256000 :silent t)
+      (harness-call 'session/usage-add sid '(:input 10 :output 40 :context 3020))
+      (should (= 256000 (harness-tools-agent-context-limit sid nil)))
+      (should (= 256000 (harness-tools-agent-context-limit sid t))))))
+
 (ert-deftest harness-tools-agent-context-limit-nil-is-no-cap ()
   "Without a cap there is no limit to give, an unknown parent included."
   (harness-tools-agent-test-with
@@ -658,7 +667,7 @@ sub-agent the call started."
       (should-not (harness-tools-agent-context-limit sid nil))
       (should-not (harness-tools-agent-context-limit sid t)))
     ;; A parent nobody knows inherits nothing and limits nothing.
-    (should (= 128000 (harness-tools-agent-context-limit "no-such-session" t)))))
+    (should (= 256000 (harness-tools-agent-context-limit "no-such-session" t)))))
 
 (ert-deftest harness-tools-agent-spawn-fresh-child-has-the-cap ()
   "A fresh child of spawn_agent gets the cap, and never more than the parent has."
@@ -668,7 +677,7 @@ sub-agent the call started."
                                        (harness-tools-agent-test-run sid "spawn_agent" '(:prompt "hi")))
                                       :meta)
                            :child-id)))
-      (should (= 128000 (plist-get (harness-call 'session/get cid) :context-window-limit))))
+      (should (= 256000 (plist-get (harness-call 'session/get cid) :context-window-limit))))
     (let* ((sid (harness-tools-agent-test-session))
            (harness-subagent-context-limit 90000)
            (cid (plist-get (plist-get (harness-test-await
@@ -695,7 +704,7 @@ sub-agent the call started."
                       (harness-tools-agent-test-run sid "spawn_agent" '(:prompt "carry on" :fork t))))
              (cid (plist-get (plist-get result :meta) :child-id)))
         (should (> inherited 0))
-        (should (= (+ 128000 inherited)
+        (should (= (+ 256000 inherited)
                    (plist-get (harness-call 'session/get cid) :context-window-limit)))))
     ;; The parent's own limit still bounds it.
     (let ((sid (harness-tools-agent-test-session)))
@@ -745,20 +754,20 @@ sub-agent the call started."
     (should-not (harness-tools-agent-context-limit-hint nil nil))
     (should-not (harness-tools-agent-context-limit-hint nil t 90000))
     ;; A fresh sub-agent's window is the cap.
-    (should (equal "Context window capped at 128k tokens, as a sub-agent's is (harness-subagent-context-limit)"
-                   (harness-tools-agent-context-limit-hint 128000 nil)))
+    (should (equal "Context window capped at 256k tokens, as a sub-agent's is (harness-subagent-context-limit)"
+                   (harness-tools-agent-context-limit-hint 256000 nil)))
     ;; A fork's is what it starts with and the cap on top of that.
-    (should (equal "Context window capped at 218k tokens: the 90k it starts with plus 128k of its own, as a sub-agent's is (harness-subagent-context-limit)"
-                   (harness-tools-agent-context-limit-hint 218000 t 90000)))
-    (should (equal "Context window capped at 131k tokens: the 3.1k it starts with plus 128k of its own, as a sub-agent's is (harness-subagent-context-limit)"
-                   (harness-tools-agent-context-limit-hint 131060 t 3060)))
+    (should (equal "Context window capped at 346k tokens: the 90k it starts with plus 256k of its own, as a sub-agent's is (harness-subagent-context-limit)"
+                   (harness-tools-agent-context-limit-hint 346000 t 90000)))
+    (should (equal "Context window capped at 259k tokens: the 3.1k it starts with plus 256k of its own, as a sub-agent's is (harness-subagent-context-limit)"
+                   (harness-tools-agent-context-limit-hint 259060 t 3060)))
     ;; A fork that starts with nothing, and a flag that came over JSON as false, are as a fresh one.
-    (should (equal (harness-tools-agent-context-limit-hint 128000 nil)
-                   (harness-tools-agent-context-limit-hint 128000 t)))
-    (should (equal (harness-tools-agent-context-limit-hint 128000 nil)
-                   (harness-tools-agent-context-limit-hint 128000 t 0)))
-    (should (equal (harness-tools-agent-context-limit-hint 128000 nil)
-                   (harness-tools-agent-context-limit-hint 128000 :false 90000)))
+    (should (equal (harness-tools-agent-context-limit-hint 256000 nil)
+                   (harness-tools-agent-context-limit-hint 256000 t)))
+    (should (equal (harness-tools-agent-context-limit-hint 256000 nil)
+                   (harness-tools-agent-context-limit-hint 256000 t 0)))
+    (should (equal (harness-tools-agent-context-limit-hint 256000 nil)
+                   (harness-tools-agent-context-limit-hint 256000 :false 90000)))
     ;; The cap in the text is the setting's.
     (let ((harness-subagent-context-limit 5000))
       (should (equal "Context window capped at 5k tokens, as a sub-agent's is (harness-subagent-context-limit)"
@@ -786,7 +795,7 @@ sub-agent the call started."
   (harness-tools-agent-test-with
     (let* ((sid (harness-tools-agent-test-session))
            (cid (harness-tools-agent-test-spawn sid '(:prompt "hi"))))
-      (should (equal '("Context window capped at 128k tokens, as a sub-agent's is (harness-subagent-context-limit)")
+      (should (equal '("Context window capped at 256k tokens, as a sub-agent's is (harness-subagent-context-limit)")
                      (harness-tools-agent-test-hints cid)))
       (should (eq 'hint (plist-get (car (harness-call 'session/nodes cid)) :kind)))
       (should-not (harness-tools-agent-test-hints sid)))
@@ -809,8 +818,8 @@ sub-agent the call started."
              (cid (harness-tools-agent-test-spawn sid '(:prompt "carry on" :fork t)))
              (nodes (harness-call 'session/nodes cid)))
         (should (> inherited 0))
-        (should (equal (list (format "Context window capped at %s tokens: the %s it starts with plus 128k of its own, as a sub-agent's is (harness-subagent-context-limit)"
-                                     (harness-format-tokens (+ 128000 inherited))
+        (should (equal (list (format "Context window capped at %s tokens: the %s it starts with plus 256k of its own, as a sub-agent's is (harness-subagent-context-limit)"
+                                     (harness-format-tokens (+ 256000 inherited))
                                      (harness-format-tokens inherited)))
                        (harness-tools-agent-test-hints cid)))
         ;; It follows the parent's nodes the fork copied and comes before the prompt.

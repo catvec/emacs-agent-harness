@@ -526,7 +526,7 @@ arrives."
        (harness-log 'warn "tools-agent: reporting sub-agent %s to session %s failed: %s"
                     (harness-tools-agent--short-id cid) parent-id (harness-error-message err))))))
 
-(defcustom harness-subagent-context-limit 128000
+(defcustom harness-subagent-context-limit 256000
   "Most tokens of context a sub-agent adds of its own, or nil for no cap.
 A sub-agent does one job, so it works on a deliberately shorter
 context window than the session that started it: it compacts once its
