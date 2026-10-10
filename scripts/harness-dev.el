@@ -7,6 +7,12 @@
 ;; provides the functions the dev loop drives over emacsclient: opening
 ;; a frame that never steals focus, sending real key sequences,
 ;; exporting screenshots, and collecting errors.
+;;
+;; A daemon the harness opened (the `open_harness' tool, the board's
+;; Open harness) has HARNESS_DEV_OWNER set to the harness process that
+;; opened it.  The daemon exits once that process is gone, so a harness
+;; that quits or crashes leaves no Emacs behind.  One started by hand
+;; has no owner and runs until it is stopped.
 
 ;;; Code:
 
@@ -24,7 +30,45 @@
 
 (defvar harness-dev-frame nil)
 
+(defvar harness-dev-owner nil
+  "The harness process that opened this daemon, as (PID . START), or nil.
+From HARNESS_DEV_OWNER.  START is when that process started, in
+seconds, so that a process that gets the same PID later does not pass
+for it.")
+
+(defvar harness-dev-owner-interval 10
+  "Seconds between two checks that the owner still runs.")
+
 (defvar harness-tasks-store-in-repository)
+
+(defun harness-dev--process-start (pid)
+  "Return when process PID started, in seconds since the epoch, or nil."
+  (let* ((default-directory "/")
+         (start (alist-get 'start (ignore-errors (process-attributes pid)))))
+    (and start (float-time start))))
+
+(defun harness-dev-owner-alive-p ()
+  "Non-nil while the harness process that opened this daemon runs."
+  (let ((pid (car harness-dev-owner))
+        (start (cdr harness-dev-owner)))
+    (and (condition-case nil (eq 0 (signal-process pid 0)) (error nil))
+         ;; The start time is computed from the uptime, so two readings
+         ;; of the same process differ by a little.
+         (let ((now (and start (harness-dev--process-start pid))))
+           (or (null start) (null now) (< (abs (- now start)) 2))))))
+
+(defun harness-dev-watch-owner ()
+  "Exit once the harness process named by HARNESS_DEV_OWNER is gone.
+Nothing else would stop a daemon whose harness quit or crashed.
+Without HARNESS_DEV_OWNER, as when started by hand, do nothing."
+  (let ((owner (getenv "HARNESS_DEV_OWNER")))
+    (when (and owner (string-match-p "\\`[0-9]+\\'" owner))
+      (let ((pid (string-to-number owner)))
+        (setq harness-dev-owner (cons pid (harness-dev--process-start pid)))
+        (run-with-timer harness-dev-owner-interval harness-dev-owner-interval
+                        (lambda ()
+                          (unless (harness-dev-owner-alive-p)
+                            (kill-emacs))))))))
 
 (defun harness-dev-load ()
   "Load the checkout and start the harness."
@@ -106,6 +150,9 @@
     (redisplay t)
     (buffer-name)))
 
+;; Watch the owner first: should loading the harness fail, the daemon
+;; still goes once its owner does.
+(harness-dev-watch-owner)
 (harness-dev-load)
 
 (provide 'harness-dev)

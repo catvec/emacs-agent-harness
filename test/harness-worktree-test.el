@@ -375,6 +375,24 @@ cannot see for deleted."
         (harness-test-await (harness-call 'worktree/remove root gone)))
       (should (= 1 (length (harness-test-await (harness-call 'worktree/list root))))))))
 
+(ert-deftest harness-worktree-remove-lets-go-first ()
+  "What runs from a worktree lets go of it before git removes the directory.
+That is the `worktree/before-remove' filter, which may take its time."
+  (harness-worktree-test-with-repo
+    (let ((path (harness-worktree-test--create root "task/held"))
+          (seen nil))
+      (harness-add-filter 'worktree/before-remove
+                          (lambda (value _next r p)
+                            (harness-with-promise (resolve reject)
+                              (ignore reject)
+                              (run-at-time 0.2 nil (lambda ()
+                                                     (push (list r p (file-directory-p p)) seen)
+                                                     (funcall resolve value))))))
+      (should (equal path (harness-test-await (harness-call 'worktree/remove root path))))
+      ;; It ran once, with the directory still there.
+      (should (equal (list (list root path t)) seen))
+      (should-not (file-exists-p path)))))
+
 (defun harness-worktree-test--lifting-after-look (path)
   "Return a stand-in for `harness-worktree--find' that lifts PATH's lock once.
 It lifts it right after git listed the worktree locked, as the merge
