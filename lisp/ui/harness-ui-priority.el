@@ -11,10 +11,16 @@
 ;; submitted, so this is where a task's priority is set and shown too.
 ;;
 ;; A chat whose session's priority is not the default shows it in the
-;; header line, after the supervisor segment: "priority: high" in
-;; `harness-priority-high-face' or "priority: low" in
-;; `harness-priority-low-face' (dim).  A click there changes it, and so
-;; do the harness keys: + raises the priority of the session in front of
+;; header line, just before the session's name: an arrow up for high, an
+;; arrow down for low, each in its face
+;; (`harness-priority-high-face', `harness-priority-low-face', dim), and
+;; nothing where the priority is medium, which goes without saying.  The
+;; arrow is the one thing that shows a priority -- the session list's
+;; Priority column and a board's cards show the same arrow, made by
+;; `harness-ui-priority-arrow' -- and a click on it asks for that
+;; session's priority (`harness-ui-priority-click').
+;;
+;; The harness keys: + raises the priority of the session in front of
 ;; you and - lowers it, one level at a time
 ;; (`harness-priority-raise', `harness-priority-lower'), with C-u on
 ;; either asking for a level instead; y (`harness-set-priority') asks for
@@ -64,6 +70,72 @@ cut off there.")
   "The priority segment of a session whose priority is low."
   :group 'harness-ui)
 
+;; The arrows, in one place, for the chat header, the session list and
+;; the boards: the character where a display can draw it, a caret where
+;; it cannot.
+(define-icon harness-icon-priority-high nil
+  `((symbol ,(string #x2191)) (text "^"))
+  "A session of high priority: an arrow up." :version "29.1")
+
+(define-icon harness-icon-priority-low nil
+  `((symbol ,(string #x2193)) (text "v"))
+  "A session of low priority: an arrow down." :version "29.1")
+
+(defun harness-ui-priority-arrow-help (level)
+  "Return what the arrow of priority LEVEL says on hover."
+  (format "%s priority: %s (mouse-1: change the priority)"
+          (capitalize level)
+          (if (equal level "high")
+              "the harness serves this session's commands before lower ones'"
+            "the harness serves higher priority sessions' commands before it")))
+
+(defconst harness-ui-priority-arrow-property 'harness-priority-session
+  "Text property an arrow carries: the session whose priority it shows.
+`harness-ui-priority-click' reads it, so a click acts on the session of
+the arrow clicked, wherever that arrow is.")
+
+(defun harness-ui-priority-click (&optional event)
+  "Ask through a menu, and set, the priority of the session EVENT clicked.
+The arrow carries its session id in `harness-ui-priority-arrow-property',
+so a click acts on the session of the arrow clicked -- a chat's, a
+session list row's, a board card's -- not on the one in front of you,
+and shows the levels it may be given as a menu at the click
+\(`harness-ui-priority--ask').  Without an id, as on the arrow of a
+record that has no session, `harness-set-priority' falls back on the
+item at point."
+  (interactive (list last-nonmenu-event))
+  (let* ((posn (and (mouse-event-p event) (event-start event)))
+         (point (and posn (posn-point posn)))
+         (id (and (integer-or-marker-p point)
+                  (get-text-property point harness-ui-priority-arrow-property))))
+    (when (and posn (window-live-p (posn-window posn)))
+      (select-window (posn-window posn)))
+    (harness-set-priority id nil event)))
+
+(defvar harness-ui-priority-arrow-map (harness-ui-mouse-keymap #'harness-ui-priority-click)
+  "Keymap of a priority arrow: a click asks for that session's priority.")
+
+(defun harness-ui-priority-arrow (level &optional session)
+  "Return the arrow for priority LEVEL, or \"\" for the default, medium.
+Up for high and down for low, in `harness-priority-high-face' or
+`harness-priority-low-face' (dim): the one arrow a chat's header line,
+the session list's Priority column and a board's cards all show, so a
+priority reads the same everywhere (see
+`harness-ui-priority-arrow-help' for what it says on hover).  SESSION,
+the id of the session the arrow belongs to, is carried so that a click
+on the arrow asks for that session's priority
+\(`harness-ui-priority-click')."
+  (when (and level (not (equal level harness-ui-priority-default)))
+    (propertize (harness-ui-icon (if (equal level "high")
+                                     'harness-icon-priority-high
+                                   'harness-icon-priority-low))
+                'face (if (equal level "high") 'harness-priority-high-face
+                        'harness-priority-low-face)
+                'help-echo (harness-ui-priority-arrow-help level)
+                'mouse-face 'highlight
+                'keymap harness-ui-priority-arrow-map
+                harness-ui-priority-arrow-property session)))
+
 (defun harness-ui-priority--of (session)
   "Return SESSION's own priority, a string, or nil when it has none.
 A priority the harness has not sent, or one this UI does not know, is nil."
@@ -88,20 +160,15 @@ cuts a cycle of them off (`harness-ui-priority--parent-depth')."
 
 (defun harness-ui-priority--header ()
   "Return the priority segment of this chat's header line, or nil.
-It reads \"priority: high\" or \"priority: low\"; a session at the
+It is `harness-ui-priority-arrow' for the session's priority, drawn
+beside the session's name: up for high, down for low.  A session at the
 default (`harness-ui-priority-default') shows nothing, and so does one
-whose priority the harness has not sent.  Clicking the segment changes
-the priority."
-  (let ((level (harness-ui-priority--of (harness-chat--session))))
-    (when (and level (not (equal level harness-ui-priority-default)))
-      (concat
-       (harness-chat--segment
-        (format "priority: %s" level)
-        #'harness-set-priority
-        (format "Priority %s: the harness serves this session's commands before lower ones' (mouse-1: change the priority)"
-                level)
-        (if (equal level "high") 'harness-priority-high-face 'harness-priority-low-face))
-       " "))))
+whose priority the harness has not sent.  Clicking the arrow asks for
+that session's priority."
+  (let* ((session (harness-chat--session))
+         (level (harness-ui-priority--of session)))
+    (when-let* ((arrow (harness-ui-priority-arrow level (plist-get session :id))))
+      (concat arrow " "))))
 
 (defun harness-ui-priority--failed (err)
   "Say why the priority could not be set, given the failure ERR.
@@ -149,12 +216,51 @@ asking again."
                      (funcall (or done #'ignore) (or result level)))
                    #'harness-ui-priority--failed))
 
-(defun harness-ui-priority--ask (prompt session)
+(defun harness-ui-priority--menu-items (current)
+  "Return the entries of the priority menu, the level CURRENT greyed out.
+The levels come highest first, as the harness serves them, so the menu
+says both what the priority is now and what it may become."
+  (mapcar (lambda (level)
+            (vector level (capitalize level) (not (equal level current))))
+          (reverse harness-ui-priority-levels)))
+
+(defun harness-ui-priority--menu (session event)
+  "Pop up the levels at EVENT, the ones SESSION may be given, or return nil.
+The level the session is at now is greyed out; nil when nothing was
+chosen, or when this display cannot pop a menu up."
+  (when (and event (display-popup-menus-p))
+    (let ((choice (popup-menu
+                   (cons "Priority"
+                         (harness-ui-priority--menu-items
+                          (and session (harness-ui-priority-level-of session))))
+                   event)))
+      (and choice (car (member choice harness-ui-priority-levels))))))
+
+(defun harness-ui-priority--choose (prompt &optional current)
+  "Read one of `harness-ui-priority-levels' with PROMPT, highest first.
+CURRENT, the level in force, is what an empty answer takes; the levels
+are offered highest first, as the harness serves them, the one place the
+order and the prompt are known."
+  (let ((choices (reverse harness-ui-priority-levels)))
+    (car (member (completing-read
+                  prompt
+                  (lambda (string pred action)
+                    (if (eq action 'metadata)
+                        '(metadata (display-sort-function . identity)
+                                   (cycle-sort-function . identity))
+                      (complete-with-action action choices string pred)))
+                  nil t nil nil current)
+                 harness-ui-priority-levels))))
+
+(defun harness-ui-priority--ask (prompt session &optional event)
   "Ask for a priority, offering the level of SESSION, and return it.
 PROMPT is what the prompt line says; an answer that names no level is
-returned as it is, for the caller to refuse."
-  (completing-read prompt harness-ui-priority-levels nil t nil nil
-                   (and session (harness-ui-priority-level-of session))))
+returned as it is, for the caller to refuse.  With EVENT -- a click on
+an arrow (`harness-ui-priority-click') -- the possible levels are a menu
+at the click instead, and nothing chosen changes nothing."
+  (if (and event (display-popup-menus-p))
+      (harness-ui-priority--menu session event)
+    (harness-ui-priority--choose prompt (and session (harness-ui-priority-level-of session)))))
 
 ;;;###autoload
 (defun harness-priority-shift-session (session-id step &optional done)
@@ -179,15 +285,18 @@ session list's keys, share."
                       (message "Priority %s to %s" (if (> step 0) "raised" "lowered") level)))))))))
 
 ;;;###autoload
-(defun harness-set-priority (&optional session-id level)
+(defun harness-set-priority (&optional session-id level event)
   "Set the priority of SESSION-ID to LEVEL; ask for LEVEL when not given.
 A priority is low, medium (the default) or high, and is always a
 session's: it orders the queues the session's work waits in, the tool
 slots above all, which serve the calls of a high session before a low
 one's.  A task's priority is its session's, so on a task board the
 command sets the priority of the session of the task at point, waiting
-or working -- the same thing the board's own + and - set.  The chat
-header shows the priority when it is not the default."
+or working -- the same thing the board's own + and - set.  EVENT, a
+click on an arrow (`harness-ui-priority-click'), asks through a menu at
+the click instead of the minibuffer.  The chat header, the session list
+and the boards show the priority as an arrow when it is not the
+default."
   (interactive)
   (let ((target (or session-id (harness-ui-priority--target))))
     (cond
@@ -197,10 +306,11 @@ header shows the priority when it is not the default."
       (message "Priority: the harness has not sent this session yet"))
      (t
       (let ((level (or level
-                       (harness-ui-priority--ask "Priority: " (harness-ui-session target)))))
-        (if (not (member level harness-ui-priority-levels))
-            (message "Priority is low, medium or high, not %S" level)
-          (harness-ui-priority--set target level (lambda (level) (message "Priority: %s" level)))))))))
+                       (harness-ui-priority--ask "Priority: " (harness-ui-session target) event))))
+        (cond ((null level) nil)
+              ((not (member level harness-ui-priority-levels))
+               (message "Priority is low, medium or high, not %S" level))
+              (t (harness-ui-priority--set target level (lambda (level) (message "Priority: %s" level))))))))))
 
 (defun harness-ui-priority--shift (step)
   "Move the priority of the session in front of you STEP levels.

@@ -1274,6 +1274,30 @@ a step, and the card moves with it; off a card they type."
         (execute-kbd-macro "-")
         (should (equal "+-" (harness-compose-text)))))))
 
+(ert-deftest harness-ui-tasks-click-the-priority-arrow ()
+  "A click on a card's arrow asks for that task's session's priority.
+The arrow is the priority UI's, so it carries the task's session id --
+a task's priority being its session's -- and a click on it sets that
+session's level, whatever card point is on."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (harness-call 'task/submit default-directory "Click my arrow" (list :priority "high"))
+      (harness-ui-tasks-test--wait-text board "Pending  1")
+      (let* ((id (harness-ui-tasks-test--card-id board "Click my arrow"))
+             (sid (plist-get (harness-call 'task/get id) :session))
+             (pos (harness-ui-tasks-test--arrow-position board "Click my arrow")))
+        (should (stringp sid))
+        ;; The mark on the card is that arrow, and it names the session.
+        (with-current-buffer board
+          (should (equal sid (get-text-property pos 'harness-priority-session)))
+          (should (keymapp (get-text-property pos 'keymap)))
+          (should (eq 'harness-priority-high-face (get-text-property pos 'face))))
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "low")))
+          (harness-ui-tasks-test--goto-card board "Click my arrow")
+          (with-current-buffer board
+            (harness-ui-priority-click (list 'mouse-1 (list (selected-window) pos '(0 . 0) 0)))))
+        (should (equal "low" (harness-call 'priority/get sid)))))))
+
 (ert-deftest harness-ui-tasks-priority-goes-to-the-task-session ()
   "`+' and `-' on a card change the task's session's priority, not a task field.
 A task's priority is its session's (`harness-priority-of-task'), so
@@ -2105,6 +2129,20 @@ conflict which files its session is resolving."
   "The id of the task whose card in BOARD shows TEXT."
   (harness-ui-tasks-test--goto-card board text)
   (with-current-buffer board (plist-get (harness-ui-tasks--task) :id)))
+
+(defun harness-ui-tasks-test--arrow-position (board text)
+  "The buffer position of the priority arrow on the card in BOARD showing TEXT."
+  (with-current-buffer board
+    (harness-ui-tasks-test--goto-card board text)
+    (let ((end (line-end-position))
+          (glyphs (list (harness-ui-icon 'harness-icon-priority-high)
+                        (harness-ui-icon 'harness-icon-priority-low)))
+          found)
+      (dolist (glyph glyphs)
+        (save-excursion
+          (goto-char (line-beginning-position))
+          (when (search-forward glyph end t) (setq found (match-beginning 0)))))
+      found)))
 
 (defun harness-ui-tasks-test--line (&optional pos)
   "The text of the line at POS (default point)."

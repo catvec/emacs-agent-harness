@@ -10,12 +10,14 @@
 ;; toggles all projects; `b' shows only the sessions waiting for you;
 ;; `/' filters fuzzily; column headers sort.
 ;;
-;; The Priority column shows the level the harness serves the session's
-;; work at -- high or low, with the default, medium, left out as it is
-;; everywhere else.  + and - raise and lower the priority of the session
-;; at point, p sets it, and C-u on + or - asks for the level instead
-;; (`harness-ui-sessions-raise-priority' and the two beside it); the
-;; levels are the priority UI's (`harness-set-priority').
+;; The Priority column shows the arrow for the level the harness serves
+;; the session's work at -- up for high, down for low, the default,
+;; medium, left out as it is everywhere else -- and the arrow is a
+;; button: a click asks for that session's priority
+;; (`harness-ui-priority-arrow').  + and - raise and lower the priority
+;; of the session at point, p sets it, and C-u on + or - asks for the
+;; level instead (`harness-ui-sessions-raise-priority' and the two
+;; beside it); the levels are the priority UI's (`harness-set-priority').
 ;;
 ;; m moves the session at point to another working directory, and the
 ;; list then shows it under that directory's project
@@ -169,18 +171,13 @@ and medium, the default, for a harness without the priority plugin."
   (harness-ui-priority-level-of s))
 
 (defun harness-ui-sessions--priority-cell (s)
-  "Return the Priority cell of session S: high, low, or nothing.
-Medium, the default, goes without saying, as it does in the chat header
-and on the task board, so its cell is empty."
-  (let ((level (harness-ui-sessions--priority s)))
-    (if (equal level harness-ui-priority-default)
-        ""
-      (propertize level
-                  'face (if (equal level "high") 'harness-priority-high-face
-                          'harness-priority-low-face)
-                  'help-echo (if (equal level "high")
-                                 "High priority: the harness serves this session's commands before lower ones'"
-                               "Low priority: the harness serves higher priority sessions' commands before it")))))
+  "Return the Priority cell of session S: its arrow, or nothing.
+The arrow `harness-ui-priority-arrow' makes -- up for high, down for
+low -- which the chat's header line and a board's cards show too; medium,
+the default, goes without saying as it does everywhere, so its cell is
+empty.  A click on the arrow asks for that session's priority."
+  (or (harness-ui-priority-arrow (harness-ui-sessions--priority s) (plist-get s :id))
+      ""))
 
 (defun harness-ui-sessions--priority< (a b)
   "Order entries A and B by their sessions' priorities, lowest first."

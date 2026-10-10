@@ -1110,10 +1110,12 @@ The commands take the session in front of you:
 - `C-c h Y` gives every current session and task session of every
   project the level you choose (`harness-set-priority-all`);
 - in the session list (`C-c h l`), a **Priority** column shows each
-  session's own level, quiet at medium, and `+`, `-` and `p` change the
-  priority of the session at point;
-- the chat's header line shows `priority: high` or `priority: low` when
-  it is not the default, and a click there changes it.
+  session's arrow -- up for high, down for low, nothing at medium, the
+  default -- and a click on it, `+`, `-` and `p` all ask for and set the
+  priority of the session on that row;
+- the chat's header line shows the same arrow beside the session's name
+  when the priority is not the default, and a click on it, like the
+  list's and a card's, offers the levels as a menu at the click.
 
 A session with no priority of its own takes its parent's, so the
 sub-agents and forks working for a task work at the task's priority. An

@@ -5372,16 +5372,30 @@ available") rather than as a failure.
 
 Session priority (`harness-ui-priority`, module `ui-priority`, which
 requires `ui` and `ui-chat`): a session whose `:ext' `:priority' is not
-the default, medium, shows it in the chat's header line after the
-supervisor segment, through `harness-chat-header-functions`:
-"priority: high" in `harness-priority-high-face' or "priority: low"
-in `harness-priority-low-face' (dim).  A session at the default, one
-whose priority the harness has not sent, and one whose priority this UI
-does not know, show nothing.  A click on the segment, and `y` in the
-harness keys (`C-c h y', `harness-set-priority'), set the priority -- a
-level is read in the minibuffer, offering the session's own as the
-default -- with `_harness/priority/set {sessionId, priority}', and say
-what it is now ("Priority: high").  `+` and `-` in the harness keys
+the default, medium, shows it as an arrow, one arrow made in one place
+-- `harness-ui-priority-arrow', the arrow up of
+`harness-icon-priority-high' in `harness-priority-high-face', or the
+arrow down of `harness-icon-priority-low' in
+`harness-priority-low-face' (dim) -- which the chat's header line puts
+beside the session's name through `harness-chat-header-functions', the
+session list's Priority column shows in its row, and a board's cards
+carry before their title.  A session at the
+default, one whose priority the harness has not sent, and one whose
+priority this UI does not know, show nothing.  The arrow is a button
+(`harness-ui-priority-click', through `harness-ui-mouse-keymap'): it
+carries its session id in the `harness-priority-session' text property,
+so a click acts on the session of the arrow clicked rather than the one
+in front of you, and offers the possible levels as a menu at the click
+-- highest first, the level in force greyed out -- setting the one
+chosen (`harness-ui-priority--ask', `--menu'); a click that chooses
+nothing changes nothing.  `y` in the
+harness keys (`C-c h y', `harness-set-priority') does the same without
+a click, reading the level in the minibuffer with the session's own as
+the default (`harness-ui-priority--choose', the one place the levels'
+order and prompt live, which the board's bulk priority button reads
+through too); either way the request is
+`_harness/priority/set {sessionId, priority}', and the answer says what
+it is now ("Priority: high").  `+` and `-` in the harness keys
 (`C-c h +', `C-c h -', `harness-priority-raise' / `-lower') move the
 session in front of you one level up or down, saying so, and saying it
 is high or low already at the top and the bottom; with a prefix
@@ -6099,8 +6113,10 @@ Other buffers: settings page (`harness-ui-config`, above), sessions list (`tabul
 children, filter/sort by any column; the Context and Output columns show
 each session's token figures, which grow while it streams; a Tok/s column shows each session's
 output rate, dimmed while it is not running; a Priority column shows
-each session's own level, quiet at the default medium, as a task's card
-does; `+` and `-` raise and lower the session at point and `p` sets it
+each session's arrow (up for high, down for low, nothing at the default
+medium, as a task's card and a chat's header line do), and it is a
+button: a click asks for that row's session's priority as the header's
+arrow does; `+` and `-` raise and lower the session at point and `p` sets it
 (as the harness keys do, a prefix argument asking for the level, through
 `_harness/priority/set'; a priority is the session's, so a task is set
 on its own session); SPC on a session pops out what it

@@ -106,22 +106,24 @@ sessions and is not recorded, so `sent' holds what the test is about."
        ,@body)))
 
 (ert-deftest harness-ui-priority-segment-high-low-and-default ()
-  "The segment says priority: high or low; the default shows nothing.
+  "The segment is the arrow for high or low; the default shows nothing.
 Each state carries its face and its help, and a session whose priority
 the harness never sent has no segment."
   (harness-ui-priority-test-with
     (harness-ui-priority-test-chat "s1"
       (harness-ui-priority-test-session "s1" '(:priority "high"))
       (let ((seg (harness-ui-priority--header)))
-        (should (equal "priority: high " (substring-no-properties seg)))
+        (should (equal (concat (harness-ui-icon 'harness-icon-priority-high) " ")
+                       (substring-no-properties seg)))
         (should (eq 'harness-priority-high-face (get-text-property 0 'face seg)))
-        (should (equal "Priority high: the harness serves this session's commands before lower ones' (mouse-1: change the priority)"
+        (should (equal (harness-ui-priority-arrow-help "high")
                        (get-text-property 0 'help-echo seg))))
       (harness-ui-priority-test-session "s1" '(:priority "low"))
       (let ((seg (harness-ui-priority--header)))
-        (should (equal "priority: low " (substring-no-properties seg)))
+        (should (equal (concat (harness-ui-icon 'harness-icon-priority-low) " ")
+                       (substring-no-properties seg)))
         (should (eq 'harness-priority-low-face (get-text-property 0 'face seg)))
-        (should (equal "Priority low: the harness serves this session's commands before lower ones' (mouse-1: change the priority)"
+        (should (equal (harness-ui-priority-arrow-help "low")
                        (get-text-property 0 'help-echo seg))))
       ;; The default, a session the harness has sent nothing about, and
       ;; one whose priority this UI does not know.
@@ -175,7 +177,12 @@ the harness never sent has no segment."
                          (harness-ui-priority-test-messages
                           (lambda () (call-interactively #'harness-set-priority)))))
           (should (equal "Priority: " (car asked)))
-          (should (equal '("low" "medium" "high") (cadr asked)))
+          ;; The levels are offered highest first, through the metadata of
+          ;; the collection the chooser hands `completing-read'.
+          (should (functionp (cadr asked)))
+          (should (equal '(metadata (display-sort-function . identity)
+                                    (cycle-sort-function . identity))
+                         (funcall (cadr asked) "" nil 'metadata)))
           (should (equal "high" (nth 2 asked)))
           (should (equal '(("_harness/priority/set" (:sessionId "s1" :priority "low"))) sent))))))))
 
@@ -306,7 +313,9 @@ The key arrives as \":priority\", or as the keyword a local event carries."
         (should (= 2 (length refreshed)))))))
 
 (ert-deftest harness-ui-priority-click-sets-the-chat-session ()
-  "A click on the segment sets the priority of the session of its chat."
+  "A click on the arrow sets the priority of the session of its chat.
+With a display that can pop a menu up, the click asks through a menu of
+the levels instead (`harness-ui-priority--menu')."
   (harness-ui-priority-test-with
     (let (sent)
       (harness-ui-priority-test-recording
@@ -315,13 +324,40 @@ The key arrives as \":priority\", or as the keyword a local event carries."
         (harness-ui-priority-test-session "s1" '(:priority "high"))
         (harness-ui-priority-test-chat "s1"
           (let* ((seg (harness-ui-priority--header))
-                 (click (lookup-key (get-text-property 0 'local-map seg) [mouse-1])))
-            (should (equal "priority: high " (substring-no-properties seg)))
+                 (click (lookup-key (get-text-property 0 'keymap seg) [mouse-1])))
+            (should (equal (concat (harness-ui-icon 'harness-icon-priority-high) " ")
+                           (substring-no-properties seg)))
             (should (equal '("Priority: medium")
                            (harness-ui-priority-test-messages
                             (lambda ()
                               (funcall click (list 'mouse-1 (list (selected-window) 'header-line '(0 . 0) 0)))))))
             (should (equal '(("_harness/priority/set" (:sessionId "s1" :priority "medium"))) sent)))))))))
+
+(ert-deftest harness-ui-priority-click-offers-a-menu ()
+  "The arrow's click offers the levels, the one in force greyed out.
+The menu is popped up at the click, and the level chosen is the one set;
+dismissing it changes nothing."
+  (harness-ui-priority-test-with
+    (let (sent menu)
+      (harness-ui-priority-test-recording
+       (cl-letf (((symbol-function 'display-popup-menus-p) (lambda (&optional _) t))
+                 ((symbol-function 'popup-menu)
+                  (lambda (items event) (setq menu (list items event)) "high")))
+         (harness-ui-priority-test-session "s1" '(:priority "low"))
+         (harness-ui-priority-test-chat "s1"
+           (harness-ui-priority-click (list 'mouse-1 (list (selected-window) 'header-line '(0 . 0) 0)))
+           (should (equal '(("_harness/priority/set" (:sessionId "s1" :priority "high"))) sent))
+           ;; The menu says what the levels are and what it is now.
+           (should (equal "Priority" (car (car menu))))
+           (should (equal '(("high" "High" t) ("medium" "Medium" t) ("low" "Low" nil))
+                          (mapcar (lambda (item) (append item nil)) (cdr (car menu)))))))
+       ;; Nothing chosen: nothing set.
+       (setq sent nil)
+       (cl-letf (((symbol-function 'display-popup-menus-p) (lambda (&optional _) t))
+                 ((symbol-function 'popup-menu) (lambda (&rest _) nil)))
+         (harness-ui-priority-test-chat "s1"
+           (harness-ui-priority-click (list 'mouse-1 (list (selected-window) 'header-line '(0 . 0) 0)))
+           (should-not sent)))))))
 
 (ert-deftest harness-ui-priority-missing-method-says-so ()
   "A harness without the priority module says it is not available."
