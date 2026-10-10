@@ -16,6 +16,12 @@ OpenAI-compatible APIs and AWS Bedrock.
 - **Multiple providers.** Claude through the `claude` CLI (subscription
   or API key), GitHub Copilot through the `copilot` CLI, DeepSeek,
   OpenAI-compatible endpoints, and AWS Bedrock.
+- **Fault tolerance.** A connection reset, an empty reply, a refused
+  host or a timeout is tried again, bounded and waiting longer each
+  time; a rate limit waits the `Retry-After` it asked for. An answer cut
+  in the middle is retried as a step, and the partial answer the failed
+  step had streamed is dropped rather than sent to the model twice
+  (`harness-http-max-retries`, `harness-retry-max-attempts`).
 - **Built-in tools.** Tools for files (read, write, edit, search), the
   shell, commands on other hosts over ssh, the user's Emacs (buffers, windows, showing and editing a
   buffer, saving it, documentation, `*Messages*`, and debugging its

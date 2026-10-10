@@ -13,7 +13,7 @@ module needs something more, add it here first.
  ------------------------------- ACP (JSON-RPC over loopback TCP; in-process lisp objects
                                  when `harness-process' is nil)
  State          session, agent, config, project, store, usage, insights, fallback,
-                naming, compaction, handoff, worktree, merge, tasks, tasks-notify,
+                retry, naming, compaction, handoff, worktree, merge, tasks, tasks-notify,
                 supervisor, seed, skills, perms, sandbox, notifications
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
@@ -871,6 +871,16 @@ its sender, and the hint says so (`harness-session--requeue`).
 - `session/set-head ID NODE-ID` — time travel: the next message
   continues from NODE-ID, with a provider conversation cut to match (see
   "Node").  Refused while ID runs a turn.  Event `session/head-moved ID NODE-ID`.
+- `session/discard-nodes ID NODE-IDS` → the ids actually removed.
+  Removes the named nodes wherever they are; a kept node whose parent
+  went is re-parented to the last kept ancestor before it, so the
+  transcript stays one chain, in memory and loaded again (the removal is
+  written to the node log and the re-parenting with it).  The head moves
+  to the newest node kept.  Events `session/nodes-removed ID NODE-IDS`,
+  and `session/head-moved ID NODE-ID` when the head moved.  The agent
+  uses this to drop the partial answer of a step it is about to try
+  again (see agent, retry); a UI shows what went by reloading the head's
+  path.
 - `session/set-provider-state ID STATE`.  Event
   `session/provider-state-changed ID STATE` when STATE differs from the
   one held, so a provider whose live process holds the old conversation
@@ -2366,8 +2376,14 @@ non-interactive session it stays a denial.
   :resets FLOAT :model MODEL-ID :step N)`, the `done` event's keys plus
   the model the step ran on) — a handler that returns `(:retry t)`
   has the step run again, on the session's model as it is then: the
-  fallback module switches the model and retries.  A turn retries at
-  most `harness-agent--max-error-retries` (8) times; otherwise, and
+  fallback module switches the model and retries, and the retry module
+  tries the same model again after a transient failure.  Before the
+  step runs again, the partial answer it had streamed is dropped
+  (`harness-agent--rewind-step`, `session/discard-nodes'): neither the
+  transcript nor the model is sent the same tokens twice.  Nothing is
+  dropped for a hosted-loop provider, whose own conversation cannot be
+  rewound.  A turn retries at most
+  `harness-agent--max-error-retries` (8) times; otherwise, and
   without a handler, the turn ends with `error` as before.
 - Events `agent/turn-started SID`, `agent/turn-ended SID REASON`,
   `agent/cancelling SID`,
@@ -2732,6 +2748,56 @@ and hinted.
   forgets its models' marks too); → non-nil when one went.
   `fallback/mark KEY &rest (:kind :until :reason)` marks by hand.
   Event `fallback/changed` after any mark or session record changes.
+
+### retry
+
+A step that failed because the network hiccuped -- a connection reset,
+an empty reply, a timeout, a gateway's 502 -- or because the provider
+asked the caller to slow down, is tried again on the same provider.
+The HTTP layer already retries a request whose failure nothing reached
+the caller from (`harness-http--retry-delay' below), so what this module
+sees is a failure that got further: a stream cut in the middle of the
+answer, or a transport failure that outlived those tries.
+
+- What counts: a failed step whose FAILURE (see `agent/step-error`) has
+  `:error-kind` `transport` (`harness-provider-openai' names a 5xx, a
+  connection-level failure curl reported, and a stream that ended
+  without headers that way) or `rate-limit` (HTTP 429), or, without a
+  kind, whose error text reads as one of those
+  (`harness-retry--transient-text-p`: "connection reset", "empty
+  reply", "could not resolve", "timed out", "rate limit"...).  Quota
+  and billing failures are the fallback module's and are never answered
+  here; neither is a failure another handler already answered.
+- Bounded: at most `harness-retry-max-attempts` (3) times per turn; the
+  count resets when a turn starts.  The wait before each try doubles
+  (`harness-retry-delay`, 1s, doubled, spread by
+  `harness-retry-jitter`), capped at `harness-retry-max-delay` (30s)
+  and never shorter than the `:retry-after` a rate limit asked for.
+  Each wait, and the giving up, is a hint on the session
+  ("network error: the connection was reset by the peer (curl 56: ...);
+  trying again in 2 s (1 of 3)").
+- `agent/step-error` filter at priority 60, after the fallback (50), so
+  a provider that ran out is moved before this module is asked.
+- A step tried again runs with the partial answer the failed one
+  streamed already dropped by the agent (`session/discard-nodes'), so
+  a retry cannot duplicate content.  A turn cancelled while it waits
+  tries nothing (`harness-retry--wait').
+
+The HTTP layer's own retries (`harness-http'): a request that failed
+transiently -- curl exits 6, 7, 28 before the response began, 35, 52,
+55, 56 -- and of which no body byte reached the caller is tried again
+`harness-http-max-retries' (3) times, waiting `harness-http-retry-delay'
+doubled, capped at `harness-http-retry-max-delay' (15s) and spread by
+`harness-http-retry-jitter'; the delay a retryable response (408, 429,
+500, 502, 503, 504) asked for in Retry-After is a minimum.  A request
+streams when it has an `:on-chunk' function: a retryable response is
+then not retried by the HTTP layer (the step layer does it), and a
+request whose body already reached the caller is never retried at all.
+`harness-http-request' takes `:retry' (`t' for any method, a number, 0
+for none; nil retries a GET or a HEAD only), and a download is started
+over, partial file deleted, when a transfer is cut
+(`harness-http-max-retries' times by default).  A cancelled request and
+a request whose own timeout fired are never retried.
 
 ### compaction
 
