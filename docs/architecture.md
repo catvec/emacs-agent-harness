@@ -4168,7 +4168,11 @@ while it is about the revision running now and at most MAX-AGE seconds
 old; otherwise a check runs, or the one running is joined (replaced
 after five minutes).  Checks also run 30 s after the start, 3 s after
 `harness/reloaded` and every half hour; each report is announced as
-`version/checked REPORT`, forwarded to UIs.  Git always runs
+`version/checked REPORT`, forwarded to UIs.  `version/report` → the
+last report while it is about the revision running now, else nil, and
+never checks: a UI connecting asks for it, so its nag icon shows what
+the last check found without making a harness just started check
+early.  Git always runs
 asynchronously, without optional locks, with a timeout and never
 prompting (`harness-revision-git-environment`: no terminal, an empty
 GIT_ASKPASS, ssh in BatchMode, no credential helper for ls-remote).  A
@@ -4863,7 +4867,26 @@ checkout has them.
 Opening it shows the last report at once and asks `version/check` with
 a max-age of a minute; `g` asks with 0; `version/checked` redraws it,
 and the menu's Version entry says "not the latest" after a report that
-found the harness behind.
+found the harness behind.  So does a nag icon (`harness-icon-update`,
+an arrow up in a circle, in `harness-caution-face`;
+`harness-ui-version-nag`) in the places `harness-ui-version-nag-places`
+names: the mode line notifier after its "harness"
+(`harness-ui-notify-segment-functions`, which keeps the notifier
+showing with no session active), a chat's header line before [menu]
+(`harness-chat-header-end-functions`) and the board's
+(`harness-ui-tasks-header-functions`), both after the pet's face and
+at priority 65, so in a narrow window it goes after a chat's model and
+todos and the board's counts, and before a chat's name and the board's
+spend.  Its `help-echo` names the origins with commits the harness
+lacks; a click runs `harness-version`; it has no `mouse-face`, which
+would box the image.  `harness/reloaded` hides it until the next
+`version/checked` (`harness-ui-version-behind-p`: the report is about
+the commit that ran before), and connecting to a harness forgets the
+last one's report and asks `version/report` when no page shows (a page
+asks `version/check`); an answer arriving after an announced report is
+dropped.  The places redraw when the icon comes or goes
+(`harness-ui-version--nag-changed`); a reload of the file adds its
+hooks again, as the module is not initialised again.
 
 Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in six
 sections -- requires your input, ready for review, merging, in progress,
@@ -5207,7 +5230,9 @@ all again, RET a session or task line's session; a redraw keeps every
 window's start and point lines), worktrees (`harness-ui-worktree`),
 notifier
 (`harness-ui-notify`: global mode-line segment with blocked/running/idle
-counts, clickable), BTW side window (`harness-ui-btw`: a new, empty
+counts, clickable; `harness-ui-notify-segment-functions` add segments
+of other modules after its "harness", such as the version page's nag
+icon, and keep it showing with no session active), BTW side window (`harness-ui-btw`: a new, empty
 session listed under the session it is opened over but sharing nothing
 with it or with other BTWs (`session/btw`), or, over a view that sets
 `harness-ui-btw-start-function`, a new conversation the view starts, shown
