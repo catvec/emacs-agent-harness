@@ -18,6 +18,9 @@
 (declare-function harness-define-tool "harness-tools")
 (declare-function harness-compaction-needed-p "harness-compaction")
 (declare-function harness-compaction-hosted-p "harness-compaction")
+(declare-function harness-compaction--block-text "harness-compaction" (block))
+(declare-function harness-compaction--messages-text "harness-compaction" (messages))
+(declare-function harness-compaction--sample-messages "harness-compaction" (messages))
 
 (defmacro harness-compaction-test-with (&rest body)
   "Load the state layer with the demo provider and compaction, run BODY."
@@ -294,6 +297,155 @@ messages, whatever the session's model is."
     ;; An unknown kind is refused.
     (should-error (harness-await (harness-call 'compaction/compact (harness-compaction-test-session)
                                                (list :kind "sideways"))))))
+
+;;;; A brief summary of a long conversation with tool calls
+
+(defun harness-compaction-test-paired-p (messages)
+  "Non-nil when MESSAGES keep every tool call with the message that answers it.
+That is what a provider such as DeepSeek requires of a request: an
+assistant message's tool_calls must be answered by the tool messages
+right after it, and a tool message must answer the call before it."
+  (let ((ok t) (asked nil))
+    (dolist (m messages)
+      (let ((blocks (plist-get m :content)))
+        (if (equal (format "%s" (plist-get m :role)) "assistant")
+            (setq asked (delq nil (mapcar (lambda (b)
+                                            (and (equal (plist-get b :type) "tool_use")
+                                                 (plist-get b :id)))
+                                          blocks)))
+          (dolist (b blocks)
+            (when (equal (plist-get b :type) "tool_result")
+              (unless (member (plist-get b :tool_use_id) asked) (setq ok nil))))
+          (setq asked nil))))
+    ok))
+
+(defun harness-compaction-test-tool-call (call-id path)
+  "Return an assistant tool-call message for CALL-ID reading PATH."
+  (list :role 'assistant
+        :content (list (list :type "tool_use" :id call-id :name "read_file" :input (list :path path)))))
+
+(defun harness-compaction-test-tool-session ()
+  "Create a demo session holding a tool call with a non-ASCII input."
+  (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                     :model "demo:scripted" :context-window 8000)
+                       :id)))
+    (harness-call 'session/append id '(:kind user :content "please read the file"))
+    (harness-call 'session/append id (list :kind 'tool-call :tool "read_file" :call-id "c1"
+                                           :input (list :path "café/naïve.txt")))
+    (harness-call 'session/append id '(:kind tool-result :call-id "c1" :output "the file says café"))
+    id))
+
+(defun harness-compaction-test-tool-result (call-id text)
+  "Return the user message answering CALL-ID with TEXT."
+  (list :role 'user
+        :content (list (list :type "tool_result" :tool_use_id call-id :content text))))
+
+(defun harness-compaction-test-tool-messages ()
+  "Return a long conversation with a tool call at each sample boundary.
+The fourth message is an assistant tool call answered by the fifth, so a
+sample cut after `harness-compaction--sample-head' messages would take
+the call and leave its result behind; the result of the call before the
+tail begins would begin the tail on its own.  Twenty-one messages, with
+text every one of them needs: enough that a sample leaves a middle out."
+  (append
+   (list (list :role 'user :content (list (list :type "text" :text "one")))
+         (list :role 'assistant :content (list (list :type "text" :text "two")))
+         (list :role 'user :content (list (list :type "text" :text "three")))
+         (harness-compaction-test-tool-call "c1" "café/naïve.txt")
+         (harness-compaction-test-tool-result "c1" "the file says café")
+         (list :role 'assistant :content (list (list :type "text" :text "five")))
+         (list :role 'user :content (list (list :type "text" :text "six")))
+         (list :role 'assistant :content (list (list :type "text" :text "seven")))
+         (harness-compaction-test-tool-call "c2" "make")
+         (harness-compaction-test-tool-result "c2" "make: nothing to be done")
+         (list :role 'user :content (list (list :type "text" :text "eleven")))
+         (list :role 'assistant :content (list (list :type "text" :text "twelve")))
+         (list :role 'user :content (list (list :type "text" :text "thirteen")))
+         (list :role 'assistant :content (list (list :type "text" :text "fourteen")))
+         (list :role 'user :content (list (list :type "text" :text "fifteen")))
+         (list :role 'assistant :content (list (list :type "text" :text "sixteen")))
+         (list :role 'user :content (list (list :type "text" :text "seventeen")))
+         (list :role 'assistant :content (list (list :type "text" :text "eighteen")))
+         (list :role 'user :content (list (list :type "text" :text "nineteen")))
+         (list :role 'assistant :content (list (list :type "text" :text "twenty")))
+         (list :role 'user :content (list (list :type "text" :text "twenty-one"))))))
+
+(ert-deftest harness-compaction-block-text-is-json-text ()
+  "Tool-call JSON rendered into a transcript is text, not bytes.
+`harness-json-encode' gives the UTF-8 bytes; inside the transcript they
+turned into raw-byte characters, and `json-serialize' refused the whole
+request with `(wrong-type-argument json-value-p \"### user…\")' -- the
+error the user saw, with the transcript in *Messages*."
+  (let* ((block (list :type "tool_use" :name "bash" :input (list :command "echo café")))
+         (text (harness-compaction--block-text block)))
+    (should (multibyte-string-p text))
+    (should (equal "[called bash with {\"command\":\"echo café\"}]" text))
+    ;; The rendered conversation goes into a request as one text: it must
+    ;; serialize.
+    (should (stringp (harness-json-encode
+                      (list :role 'user
+                            :content (list (list :type "text"
+                                                 :text (harness-compaction--messages-text
+                                                        (list (list :role 'assistant :content (list block))))))))))))
+
+(ert-deftest harness-compaction-sample-keeps-tool-exchanges-whole ()
+  "A sample never parts a tool call from the message that answers it.
+Cutting after `harness-compaction--sample-head' messages used to take
+the assistant tool call of the fourth message and drop the result that
+follows it, and to begin the tail on a result whose call was left out;
+a provider rejects either."
+  (let* ((messages (harness-compaction-test-tool-messages))
+         (sampled (car (harness-compaction--sample-messages messages))))
+    (should (= 21 (length messages)))
+    (should (< (length sampled) (length messages)))
+    (should (harness-compaction-test-paired-p sampled))
+    ;; The tool call at the head's edge keeps its result; the elision
+    ;; follows both.
+    (should (equal "tool_use" (plist-get (car (plist-get (nth 3 sampled) :content)) :type)))
+    (should (equal "c1" (plist-get (car (plist-get (nth 4 sampled) :content)) :tool_use_id)))
+    (should (string-match-p "left out the 3 messages"
+                            (plist-get (car (plist-get (nth 5 sampled) :content)) :text)))
+    ;; The tool call before the tail keeps its result too: the result
+    ;; message follows the call rather than beginning the tail alone.
+    (let ((at (cl-position-if (lambda (m) (cl-some (lambda (b)
+                                                     (and (equal (plist-get b :type) "tool_use")
+                                                          (equal (plist-get b :id) "c2")))
+                                                   (plist-get m :content)))
+                              sampled)))
+      (should at)
+      (should (equal "c2" (plist-get (car (plist-get (nth (1+ at) sampled) :content)) :tool_use_id))))))
+
+(ert-deftest harness-compaction-brief-summary-serializes-a-tool-call ()
+  "A brief summary of a sample with tool-call JSON serializes and is accepted.
+A hosted-loop provider with no state of this session gets the sample as
+one message of text, which is where the tool call's input used to bring
+raw bytes in and `json-serialize' refused the whole request, naming the
+whole transcript."
+  (harness-compaction-test-with
+    (let ((requests nil))
+      (harness-define-provider 'hosty
+        :label "Hosty"
+        :models (lambda () (harness-resolved (list (list :name "m" :label "M"))))
+        :complete (lambda (req)
+                    (push req requests)
+                    (let ((on-event (plist-get req :on-event)))
+                      (run-at-time 0.005 nil (lambda ()
+                                               (funcall on-event '(:type text :delta "BRIEF"))
+                                               (funcall on-event '(:type done :stop-reason end-turn)))))
+                    (list :cancel #'ignore))
+        :capabilities '(:hosted-loop t))
+      (let* ((id (harness-compaction-test-tool-session))
+             (_ (harness-call 'session/update id :model "hosty:m" :silent t))
+             (node (harness-await (harness-call 'compaction/compact id (list :kind 'brief))))
+             (req (car requests))
+             (text (harness-compaction-test-request-text req)))
+        ;; The request the provider is sent serializes: no raw bytes.
+        (should (stringp (harness-json-encode (plist-get req :messages))))
+        (should (string-match-p (regexp-quote "[called read_file with {\"path\":\"café/naïve.txt\"}]") text))
+        (should (string-match-p "Harness note: .* wrote this summary from only the first"
+                                (plist-get node :content)))
+        (should (equal "brief" (plist-get (plist-get node :meta) :compaction)))))))
+
 
 (ert-deftest harness-compaction-by-hand-waits-for-the-turn ()
   "Compacting by hand (OPTS `:idle') refuses a session running a turn,

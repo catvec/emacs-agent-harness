@@ -445,7 +445,10 @@ goes on in it, so it is asked about and handed over like the others."
            (ids (lambda (checks) (sort (mapcar (lambda (c) (plist-get c :id)) checks) #'string<))))
       (harness-call 'session/deactivate closed)
       (harness-call 'session/deactivate history)
-      (harness-register-method 'task/session-ids (lambda (&optional _filter) (list closed)))
+      (harness-register-method 'task/session-ids
+                               (lambda (&optional filter)
+                                 (unless (equal '("done") (plist-get filter :columns))
+                                   (list closed))))
       ;; Without `:tasks' only the open one; with it the task's too, but
       ;; not a closed session no current task goes on in.
       (should (equal (list open) (funcall ids (harness-call 'handoff/check-all "hosted:m" '(:active t)))))
@@ -463,6 +466,27 @@ goes on in it, so it is asked about and handed over like the others."
       (should (equal "demo:scripted" (plist-get (harness-call 'session/get history) :model)))
       ;; Switched once: the second time nothing is left to switch.
       (should-not (harness-call 'handoff/switch-all "hosted:m" '(:active t :tasks t))))))
+
+(ert-deftest harness-handoff-all-leaves-the-sessions-of-completed-tasks-alone ()
+  "A completed task's session is not checked nor switched with `:tasks',
+though it is still active; the current tasks' sessions are."
+  (harness-handoff-test-with
+    (let* ((open (harness-handoff-test--session t))
+           (done (harness-handoff-test--session t))
+           (task (harness-handoff-test--session t))
+           (ids (lambda (checks) (sort (mapcar (lambda (c) (plist-get c :id)) checks) #'string<))))
+      (harness-call 'session/deactivate task)
+      (harness-register-method 'task/session-ids
+                               (lambda (&optional filter)
+                                 (if (equal '("done") (plist-get filter :columns))
+                                     (list done)
+                                   (list task))))
+      (should (equal (sort (list open task) #'string<)
+                     (funcall ids (harness-call 'handoff/check-all "hosted:m" '(:active t :tasks t)))))
+      (should (equal (sort (list open task) #'string<)
+                     (sort (copy-sequence (harness-call 'handoff/switch-all "hosted:m" '(:active t :tasks t) 'none))
+                           #'string<)))
+      (should (equal "demo:scripted" (plist-get (harness-call 'session/get done) :model))))))
 
 (ert-deftest harness-handoff-over-acp ()
   "A client checks and switches with string arguments, as the UI does."

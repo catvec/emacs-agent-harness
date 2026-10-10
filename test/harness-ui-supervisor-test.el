@@ -7,6 +7,13 @@
 ;; `_harness/supervisor/set', what the toggle says when the harness has
 ;; no supervisor module, when a session is not governed or not known,
 ;; and the module's key and header hook, added and removed again.
+;;
+;; `harness-set-supervisor-all' (the menu's V) is here too: it asks on
+;; or off, changes every governed session through
+;; `_harness/supervisor/set-all' with the everything filter, makes the
+;; mode the default for new work unless a prefix argument says
+;; otherwise, says how many sessions changed and what still overrides
+;; the defaults, and says plainly when the module is not there.
 
 ;;; Code:
 
@@ -24,6 +31,7 @@
 (declare-function harness-chat--header "harness-ui-chat")
 (declare-function harness-chat--header-prefix "harness-ui-chat")
 (declare-function harness-toggle-supervisor "harness-ui-supervisor")
+(declare-function harness-set-supervisor-all "harness-ui-supervisor")
 (declare-function harness-ui-supervisor--header "harness-ui-supervisor")
 (declare-function harness-ui-supervisor--failed "harness-ui-supervisor")
 (declare-function harness-ui-supervisor--init "harness-ui-supervisor")
@@ -49,7 +57,13 @@ The ACP module loads first, with its server off, as the UI requires it."
 
 (defun harness-ui-supervisor-test-session (id ext)
   "Cache session ID, whose :ext plist is EXT, as the UI keeps sessions."
-  (puthash id (list :id id :name "Work" :status "idle" :ext ext) harness-ui--sessions))
+  (puthash id (list :id id :name "Work" :status "idle" :model "demo:scripted"
+                    :permission-mode 'ask :ext ext)
+           harness-ui--sessions))
+
+(defun harness-ui-supervisor-test-priority (segment)
+  "Return the fit priority of the header SEGMENT, or nil."
+  (and (consp segment) (nth 1 segment)))
 
 (defmacro harness-ui-supervisor-test-chat (id &rest body)
   "Run BODY in a chat buffer of session ID, shown in the selected window."
@@ -71,21 +85,26 @@ The ACP module loads first, with its server off, as the UI requires it."
 
 (ert-deftest harness-ui-supervisor-segment-on-off-and-absent ()
   "The segment says supervisor or hands-on for a governed session, else nothing.
-Each state carries its face and its help, and a session never governed has none."
+Each state carries its face, its help and its fit priority, and a
+session never governed has none."
   (harness-ui-supervisor-test-with
     (harness-ui-supervisor-test-chat "s1"
       (harness-ui-supervisor-test-session "s1" '(:supervisor t))
-      (let ((seg (harness-ui-supervisor--header)))
-        (should (equal "supervisor " (substring-no-properties seg)))
-        (should (eq 'harness-supervisor-face (get-text-property 0 'face seg)))
+      (let* ((seg (harness-ui-supervisor--header))
+             (text (car seg)))
+        (should (equal " supervisor " (substring-no-properties text)))
+        (should (eq 'harness-supervisor-face (get-text-property 1 'face text)))
         (should (equal "Supervisor mode: this session plans and delegates to workers on cheaper models; it cannot change files itself (mouse-1: let it work hands-on)"
-                       (get-text-property 0 'help-echo seg))))
+                       (get-text-property 1 'help-echo text)))
+        (should (harness-ui-supervisor-test-priority seg)))
       (harness-ui-supervisor-test-session "s1" '(:supervisor :false))
-      (let ((seg (harness-ui-supervisor--header)))
-        (should (equal "hands-on " (substring-no-properties seg)))
-        (should (eq 'harness-dim-face (get-text-property 0 'face seg)))
+      (let* ((seg (harness-ui-supervisor--header))
+             (text (car seg)))
+        (should (equal " hands-on " (substring-no-properties text)))
+        (should (eq 'harness-dim-face (get-text-property 1 'face text)))
         (should (equal "Hands-on: this session may change files itself (mouse-1: back to supervisor mode)"
-                       (get-text-property 0 'help-echo seg))))
+                       (get-text-property 1 'help-echo text)))
+        (should (harness-ui-supervisor-test-priority seg)))
       ;; Sub-agents and side conversations carry no :supervisor at all.
       (harness-ui-supervisor-test-session "s1" nil)
       (should-not (harness-ui-supervisor--header))
@@ -96,15 +115,40 @@ Each state carries its face and its help, and a session never governed has none.
       (should-not (harness-ui-supervisor--header)))))
 
 (ert-deftest harness-ui-supervisor-segment-leads-the-header ()
-  "The segment comes first in the header line, through the header hook."
+  "The segment comes first in the header line, through the header hook.
+It is padded from the window's edge like the status icon, and separated
+from it as the header separates its other segments."
   (harness-ui-supervisor-test-with
     (harness-ui-supervisor-test-session "s1" '(:supervisor t))
     (harness-ui-supervisor-test-chat "s1"
-      (should (equal "supervisor " (substring-no-properties (harness-chat--header-prefix))))
-      (should (string-prefix-p "supervisor" (substring-no-properties (harness-chat--header most-positive-fixnum)))))
+      (should (equal " supervisor " (harness-chat--header-prefix)))
+      (should (string-prefix-p " supervisor  " (substring-no-properties (harness-chat--header most-positive-fixnum)))))
     (harness-ui-supervisor-test-session "s2" nil)
     (harness-ui-supervisor-test-chat "s2"
       (should (equal "" (harness-chat--header-prefix))))))
+
+(ert-deftest harness-ui-supervisor-segment-yields-before-the-session ()
+  "A narrow header drops the badge before any segment of the session's own.
+At a width too small for the badge and the session's own state together,
+the header reads as it would without the mode, so the model, the mode and
+the counts keep the room the badge would have taken."
+  (harness-ui-supervisor-test-with
+    (harness-ui-supervisor-test-session "s1" '(:supervisor t))
+    (harness-ui-supervisor-test-chat "s1"
+      (let* ((own (let ((harness-chat-header-functions nil))
+                    (harness-chat--header most-positive-fixnum)))
+             (full (harness-chat--header most-positive-fixnum))
+             (narrow (- (string-width full) 1)))
+        (should (< (string-width own) (string-width full)))
+        (should (string-match-p " supervisor " full))
+        ;; One column short of the whole line: the badge goes, the
+        ;; session's own stay.
+        (should-not (string-match-p "supervisor\\|hands-on" (harness-chat--header narrow)))
+        (should (equal (harness-chat--header narrow)
+                       (let ((harness-chat-header-functions nil))
+                         (harness-chat--header narrow))))
+        (should (string-match-p "Scripted (Demo)" (harness-chat--header narrow)))
+        (should (string-match-p "Ask" (harness-chat--header narrow)))))))
 
 (ert-deftest harness-ui-supervisor-toggle-sends-the-flip ()
   "Toggling a supervising session turns it hands-on, and back again.
@@ -136,8 +180,9 @@ Each toggle sends `_harness/supervisor/set' and says what it changed."
         (harness-ui-supervisor-test-session "s1" '(:supervisor :false))
         (harness-ui-supervisor-test-chat "s1"
           (let* ((seg (harness-ui-supervisor--header))
-                 (click (lookup-key (get-text-property 0 'local-map seg) [mouse-1])))
-            (should (equal "hands-on " (substring-no-properties seg)))
+                 (text (car seg))
+                 (click (lookup-key (get-text-property 1 'local-map text) [mouse-1])))
+            (should (equal " hands-on " (substring-no-properties text)))
             (should (equal '("Supervisor mode on")
                            (harness-ui-supervisor-test-messages
                             (lambda ()
@@ -209,6 +254,125 @@ Shut down, both go again."
     (harness-ui-supervisor--shutdown)
     (should-not (lookup-key harness-ui-map (kbd "V")))
     (should-not (memq #'harness-ui-supervisor--header harness-chat-header-functions))))
+
+;;;; Turning the mode on or off for every session
+
+(ert-deftest harness-ui-supervisor-set-all-changes-and-sets-the-defaults ()
+  "The command asks on first, changes every governed session through
+`_harness/supervisor/set-all' with the everything filter, makes the mode
+the default for new sessions and new tasks, and says how many sessions
+changed; a project's .dir-locals.el that still says otherwise is named."
+  (harness-ui-supervisor-test-with
+    (let ((calls nil) (said nil) (offered nil))
+      (cl-letf (((symbol-function 'harness-ui-call)
+                 (lambda (method params &optional callback _on-error)
+                   (push (cons method params) calls)
+                   (when callback
+                     (funcall callback
+                              (cond ((equal method "_harness/supervisor/set-all") '("s1" "s2" "s3"))
+                                    ((equal method "_harness/config/overrides")
+                                     '(:key "harness-supervisor" :value "t"
+                                       :files ((:file "/p/.dir-locals.el" :scope "project" :dir "/p/"
+                                                      :project "p" :value "nil"))))
+                                    (t nil))))))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args) (push (apply #'format format-string args) said)))
+                ((symbol-function 'completing-read)
+                 (lambda (_prompt table _pred require _initial _hist def)
+                   (setq offered (list (all-completions "" table)
+                                       (completion-metadata-get (completion-metadata "" table nil)
+                                                                'display-sort-function)
+                                       require def))
+                   def)))
+        (call-interactively #'harness-set-supervisor-all))
+      ;; On first, as offered.
+      (should (equal '(("on" "off") identity t "on") offered))
+      ;; The sessions first, then the two defaults, then what overrides them.
+      (should (equal '("_harness/supervisor/set-all" "_harness/config/set" "_harness/config/set"
+                       "_harness/config/overrides")
+                     (reverse (mapcar #'car calls))))
+      (should (equal '(:on t :filter (:active t :tasks t))
+                     (cdr (assoc "_harness/supervisor/set-all" calls))))
+      (should (equal '(("harness-supervisor" . "t") ("harness-supervisor-tasks" . "t"))
+                     (mapcar (lambda (call)
+                               (cons (plist-get (cdr call) :key) (plist-get (cdr call) :value)))
+                             (reverse (cl-remove-if-not (lambda (call)
+                                                          (equal (car call) "_harness/config/set"))
+                                                        calls)))))
+      (dolist (call (cl-remove-if-not (lambda (call) (equal (car call) "_harness/config/set")) calls))
+        (should (eq t (plist-get (cdr call) :printed)))
+        (should (equal "global" (plist-get (cdr call) :scope))))
+      (should (equal '(:key "harness-supervisor" :value "t" :printed t :dirs nil)
+                     (cdr (assoc "_harness/config/overrides" calls))))
+      (should (equal (list (concat "Supervisor mode on for 3 sessions, and for new sessions and the open"
+                                   " boards' new tasks.  But new sessions in p start hands-on"
+                                   " (harness-supervisor in /p/.dir-locals.el); M-x harness-settings"
+                                   " changes them."))
+                     said))
+      ;; Off, saying what still supervises new work.
+      (setq calls nil said nil)
+      (cl-letf (((symbol-function 'harness-ui-call)
+                 (lambda (method params &optional callback _on-error)
+                   (push (cons method params) calls)
+                   (when callback
+                     (funcall callback
+                              (cond ((equal method "_harness/supervisor/set-all") '("s1"))
+                                    ((equal method "_harness/config/overrides")
+                                     '(:key "harness-supervisor" :value "nil"
+                                       :files ((:file "/q/.dir-locals.el" :scope "project" :dir "/q/"
+                                                      :project "q" :value "t"))))
+                                    (t nil))))))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args) (push (apply #'format format-string args) said)))
+                ((symbol-function 'completing-read) (lambda (&rest _) "off")))
+        (harness-set-supervisor-all))
+      (should (equal '(:on :false :filter (:active t :tasks t))
+                     (cdr (assoc "_harness/supervisor/set-all" calls))))
+      (should (equal '(("harness-supervisor" . "nil") ("harness-supervisor-tasks" . "nil"))
+                     (mapcar (lambda (call)
+                               (cons (plist-get (cdr call) :key) (plist-get (cdr call) :value)))
+                             (reverse (cl-remove-if-not (lambda (call)
+                                                          (equal (car call) "_harness/config/set"))
+                                                        calls)))))
+      (should (equal (list (concat "Supervisor mode off for 1 session, and for new sessions and the open"
+                                   " boards' new tasks.  But new sessions in q supervise"
+                                   " (harness-supervisor in /q/.dir-locals.el); M-x harness-settings"
+                                   " changes them."))
+                     said)))))
+
+(ert-deftest harness-ui-supervisor-set-all-prefix-leaves-the-defaults-alone ()
+  "With a prefix argument the sessions change but the defaults for new
+sessions and new tasks stay as they were, and nothing is said about them."
+  (harness-ui-supervisor-test-with
+    (let ((calls nil) (said nil))
+      (cl-letf (((symbol-function 'harness-ui-call)
+                 (lambda (method params &optional callback _on-error)
+                   (push (cons method params) calls)
+                   (when callback (funcall callback (and (equal method "_harness/supervisor/set-all") '("s1"))))))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args) (push (apply #'format format-string args) said)))
+                ((symbol-function 'completing-read) (lambda (&rest _) "on")))
+        (harness-set-supervisor-all t))
+      (should (equal '(:on t :filter (:active t :tasks t))
+                     (cdr (assoc "_harness/supervisor/set-all" calls))))
+      (should-not (assoc "_harness/config/set" calls))
+      (should-not (assoc "_harness/config/overrides" calls))
+      (should (equal '("Supervisor mode on for 1 session") said)))))
+
+(ert-deftest harness-ui-supervisor-set-all-says-when-the-module-is-missing ()
+  "A harness without the supervisor module is told so plainly, as the
+toggle does; nothing is reported as changed."
+  (harness-ui-supervisor-test-with
+    (let (said)
+      (cl-letf (((symbol-function 'harness-ui-call)
+                 (lambda (_method _params _callback &optional on-error)
+                   (funcall on-error '(acp-error -32601 "Method not found: _harness/supervisor/set-all" nil))))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args) (push (apply #'format format-string args) said)))
+                ((symbol-function 'completing-read) (lambda (&rest _) "on")))
+        (harness-set-supervisor-all))
+      (should (equal '("Supervisor mode is not available (the supervisor module is not loaded)")
+                     said)))))
 
 (provide 'harness-ui-supervisor-test)
 ;;; harness-ui-supervisor-test.el ends here

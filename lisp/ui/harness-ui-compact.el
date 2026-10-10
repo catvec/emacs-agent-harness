@@ -231,7 +231,9 @@ once it is done with the compaction node, or with nil when it failed."
                      (when callback (funcall callback node)))
                    (lambda (err)
                      (unless (harness-ui-connection-replaced-p err)
-                       (message "Compaction failed: %s" (harness-error-message err)))
+                       ;; Short: the error can name a whole transcript as
+                       ;; its data, and this goes to *Messages*.
+                       (message "Compaction failed: %s" (harness-error-short-message err)))
                      (when callback (funcall callback nil))
                      nil)))
 

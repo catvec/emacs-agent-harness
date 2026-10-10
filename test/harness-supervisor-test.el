@@ -18,6 +18,8 @@
 (defvar harness-supervisor)
 (defvar harness-supervisor-tasks)
 (defvar harness-supervisor-tiers)
+(defvar harness-supervisor-thinking)
+(defvar harness-supervisor-worker-thinking)
 (defvar harness-supervisor-step-budget)
 (defvar harness-supervisor-tools)
 (defvar harness-tools)
@@ -26,7 +28,7 @@
 (defvar harness-supervisor--reminders)
 (defvar harness-supervisor--calls)
 (defvar harness-supervisor--configured)
-(defvar harness-tasks--merge-session-name)
+(defvar harness-supervisor--raised)
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
 (defvar harness-tasks--naming)
@@ -105,7 +107,8 @@ The demo provider plays the model through the script of the test."
      (clrhash harness-sessions)
      (clrhash harness-agent--turns)
      (dolist (table (list harness-supervisor--decisions harness-supervisor--reminders
-                          harness-supervisor--calls harness-supervisor--configured))
+                          harness-supervisor--calls harness-supervisor--configured
+                          harness-supervisor--raised))
        (clrhash table))
      (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override #'harness-supervisor-test--answer)
@@ -207,17 +210,27 @@ Return a function that gives the requests it got, newest first."
 ;;;; The settings
 
 (ert-deftest harness-supervisor-settings-have-their-defaults ()
-  "Sessions supervise by default, tasks too; a soft budget of 80 calls."
+  "Sessions supervise by default, tasks too; a soft budget of 80 calls.
+DeepSeek supervisors think at max, their workers at medium."
   (should (eq t (eval (car (get 'harness-supervisor 'standard-value)) t)))
   (should (eq t (eval (car (get 'harness-supervisor-tasks 'standard-value)) t)))
   (should (null (eval (car (get 'harness-supervisor-tiers 'standard-value)) t)))
+  (should (equal '((deepseek . "max"))
+                 (eval (car (get 'harness-supervisor-thinking 'standard-value)) t)))
+  (should (equal '((deepseek . "medium"))
+                 (eval (car (get 'harness-supervisor-worker-thinking 'standard-value)) t)))
   (should (= 80 (eval (car (get 'harness-supervisor-step-budget 'standard-value)) t)))
   (should (harness-test-fits-p (get 'harness-supervisor-tiers 'custom-type)
                                '((mundane . "demo:cheap") (hard . "demo:big"))))
   (should-not (harness-test-fits-p (get 'harness-supervisor-tiers 'custom-type) '((easy . "demo:cheap"))))
+  (dolist (option '(harness-supervisor-thinking harness-supervisor-worker-thinking))
+    (should (harness-test-fits-p (get option 'custom-type) '((deepseek . "max"))))
+    (should-not (harness-test-fits-p (get option 'custom-type) '((deepseek . max))))
+    (should-not (harness-test-fits-p (get option 'custom-type) '(("deepseek" . "max")))))
   ;; The module is loaded in here, so the documentation can be read.
   (harness-supervisor-test-with
     (dolist (option '(harness-supervisor harness-supervisor-tasks harness-supervisor-tiers
+                      harness-supervisor-thinking harness-supervisor-worker-thinking
                       harness-supervisor-step-budget))
       (ert-info ((symbol-name option))
         (should (assq option (get 'harness 'custom-group)))
@@ -293,16 +306,6 @@ Return a function that gives the requests it got, newest first."
              (fork (plist-get (harness-test-await (harness-call 'session/fork child :kind 'subagent)) :id)))
         (should-not (harness-supervisor-test-get fork))))))
 
-(ert-deftest harness-supervisor-the-merge-session-of-tasks-is-not-governed ()
-  "The session task branches merge into is named by the tasks module, and not governed."
-  (harness-supervisor-test-with
-    (let ((harness-tasks--merge-session-name "Task merges"))
-      (should-not (harness-supervisor-test-get (harness-supervisor-test-session :name "Task merges")))
-      (should (eq t (harness-supervisor-test-get (harness-supervisor-test-session :name "Other")))))
-    ;; Without the tasks module there is no such name to look for.
-    (makunbound 'harness-tasks--merge-session-name)
-    (should (eq t (harness-supervisor-test-get (harness-supervisor-test-session :name "Task merges"))))))
-
 (ert-deftest harness-supervisor-a-setting-its-maker-gave-stays ()
   "A session made with its setting in `:ext' keeps it."
   (harness-supervisor-test-with
@@ -321,6 +324,46 @@ Return a function that gives the requests it got, newest first."
       (should-not (harness-call 'supervisor/active-p sid))
       (should (member "read_file" (harness-supervisor-test-tool-names sid)))
       (should-not (member "no_plan_needed" (harness-supervisor-test-tool-names sid))))))
+
+;;;; Thinking levels
+
+(ert-deftest harness-supervisor-the-mode-raises-the-thinking-its-provider-names ()
+  "A session that starts supervising takes the level of its provider, and gets its own back."
+  (harness-supervisor-test-with
+    (let ((harness-supervisor-thinking '((demo . "max"))))
+      (let* ((sid (harness-supervisor-test-session :thinking "low"))
+             (thinking (lambda () (plist-get (harness-call 'session/get sid) :thinking))))
+        (should (equal "max" (funcall thinking)))
+        ;; Off puts back what it had; on raises it again and remembers that.
+        (harness-call 'supervisor/set sid :false)
+        (should (equal "low" (funcall thinking)))
+        (harness-call 'supervisor/set sid t)
+        (should (equal "max" (funcall thinking)))
+        (harness-call 'supervisor/set sid :false)
+        (should (equal "low" (funcall thinking)))))
+    ;; A session that had no level of its own gets none back.
+    (let ((harness-supervisor-thinking '((demo . "max"))))
+      (let* ((sid (harness-supervisor-test-session))
+             (thinking (lambda () (plist-get (harness-call 'session/get sid) :thinking))))
+        (should (equal "max" (funcall thinking)))
+        (harness-call 'supervisor/set sid :false)
+        (should (null (funcall thinking)))))
+    ;; A provider the setting does not name keeps the session's own level.
+    (let ((harness-supervisor-thinking '((deepseek . "max"))))
+      (let ((sid (harness-supervisor-test-session :thinking "low")))
+        (should (equal "low" (plist-get (harness-call 'session/get sid) :thinking)))
+        (harness-call 'supervisor/set sid :false)
+        (should (equal "low" (plist-get (harness-call 'session/get sid) :thinking)))))))
+
+(ert-deftest harness-supervisor-a-level-chosen-while-supervising-stands ()
+  "Turning the mode off keeps a level the session was changed to meanwhile."
+  (harness-supervisor-test-with
+    (let ((harness-supervisor-thinking '((demo . "max"))))
+      (let ((sid (harness-supervisor-test-session :thinking "low")))
+        (should (equal "max" (plist-get (harness-call 'session/get sid) :thinking)))
+        (harness-call 'session/update sid :thinking "high")
+        (harness-call 'supervisor/set sid :false)
+        (should (equal "high" (plist-get (harness-call 'session/get sid) :thinking)))))))
 
 ;;;; Methods
 
@@ -383,6 +426,69 @@ Return a function that gives the requests it got, newest first."
       (let ((stored (harness-json-parse (harness-json-encode (plist-get (harness-call 'session/get sid) :ext)))))
         (should (eq t (plist-get stored :supervisor)))))))
 
+;;;; Methods, for every session at once
+
+(ert-deftest harness-supervisor-set-all-changes-the-governed ()
+  "`supervisor/set-all' turns the mode on or off for every governed session
+the filter selects, and for no other: a sub-agent, a side conversation
+and a session already at the asked value keep theirs.  Each change is
+the hint and the event of `supervisor/set', and the ids changed come
+back, newest first."
+  (harness-supervisor-test-with
+    (let* ((one (harness-supervisor-test-session :ext '(:supervisor :false)))
+           (two (harness-supervisor-test-session :ext '(:supervisor :false)))
+           (on (harness-supervisor-test-session))
+           (sub (harness-supervisor-test-session :kind 'subagent :parent-id one))
+           (btw (harness-supervisor-test-session :kind 'btw :parent-id one))
+           (events nil))
+      (harness-on 'supervisor/changed (lambda (id on) (push (list id on) events)))
+      (let ((changed (harness-call 'supervisor/set-all t (list :active t))))
+        (should (equal (sort (list one two) #'string<) (sort changed #'string<))))
+      (dolist (sid (list one two))
+        (should (eq t (harness-supervisor-test-get sid)))
+        (should (equal '("Supervisor mode on") (harness-supervisor-test-hints sid))))
+      (dolist (sid (list sub btw))
+        (should-not (harness-supervisor-test-get sid))
+        (should-not (harness-supervisor-test-hints sid)))
+      (should (equal (sort (list (list one t) (list two t))
+                           (lambda (a b) (string< (car a) (car b))))
+                     (sort events (lambda (a b) (string< (car a) (car b))))))
+      ;; Already on, and ungoverned: asking again changes nothing.
+      (setq events nil)
+      (should-not (harness-call 'supervisor/set-all t (list :active t)))
+      (should-not events)
+      ;; Off, as `supervisor/set' stores it, for every governed session.
+      (should (equal (sort (list one two on) #'string<)
+                     (sort (harness-call 'supervisor/set-all :false (list :active t)) #'string<)))
+      (dolist (sid (list one two on))
+        (should (eq :false (harness-supervisor-test-get sid))))
+      (should (equal '("Supervisor mode on" "Supervisor mode off")
+                     (harness-supervisor-test-hints one)))
+      ;; A session that is not there is not selected, and no error.
+      (should-not (harness-call 'supervisor/set-all nil (list :active t :except (list one two on)))))))
+
+(ert-deftest harness-supervisor-set-all-takes-the-filter-and-every-session-without-one ()
+  "`supervisor/set-all' changes what the filter selects: `:except' skips a
+session, `:active' an inactive one, and without a filter every governed
+session changes, an inactive one too, as `session/set-all' does."
+  (harness-supervisor-test-with
+    (let ((here (harness-supervisor-test-session :ext '(:supervisor :false)))
+          (away (harness-supervisor-test-session :ext '(:supervisor :false)))
+          (left (harness-supervisor-test-session :ext '(:supervisor :false))))
+      (harness-call 'supervisor/set-all t (list :active t :except (list left)))
+      (should (eq t (harness-supervisor-test-get here)))
+      (should (eq :false (harness-supervisor-test-get left)))
+      ;; Inactive, and so out of an active-only filter.
+      (harness-call 'session/deactivate away)
+      (harness-call 'supervisor/set away :false)
+      (should-not (harness-call 'supervisor/set-all t (list :active t :except (list left))))
+      (should (eq :false (harness-supervisor-test-get away)))
+      ;; Without a filter, every governed session changes, inactive included.
+      (should (equal (sort (list away left) #'string<)
+                     (sort (harness-call 'supervisor/set-all t) #'string<)))
+      (should (eq t (harness-supervisor-test-get away)))
+      (should (eq t (harness-supervisor-test-get left))))))
+
 ;;;; The ACP call
 
 (defvar harness-supervisor-test--messages nil
@@ -435,6 +541,32 @@ Return a function that gives the requests it got, newest first."
       (should (harness-test-await
                (harness-acp-request conn "_harness/supervisor/active-p" (list :sessionId sid))))
       (should (equal '("Supervisor mode off" "Supervisor mode on") (harness-supervisor-test-hints sid))))))
+
+(ert-deftest harness-supervisor-acp-call-from-the-ui-all ()
+  "The call the UI makes, `_harness/supervisor/set-all' with `:on' and `:filter', works."
+  (harness-supervisor-test-with-acp
+    (let* ((conn (harness-supervisor-test-connect))
+           (one (harness-supervisor-test-session :ext '(:supervisor :false)))
+           (two (harness-supervisor-test-session :ext '(:supervisor :false)))
+           (sub (harness-supervisor-test-session :kind 'subagent :parent-id one)))
+      (let ((changed (harness-test-await
+                      (harness-acp-request conn "_harness/supervisor/set-all"
+                                           (list :on t :filter (list :active t))))))
+        (should (equal (sort (list one two) #'string<) (sort changed #'string<))))
+      (should (eq t (harness-supervisor-test-get one)))
+      (should (eq t (harness-supervisor-test-get two)))
+      (should-not (harness-supervisor-test-get sub))
+      (should (equal (sort (list (list one t) (list two t))
+                           (lambda (a b) (string< (car a) (car b))))
+                     (sort (harness-supervisor-test-events "supervisor/changed")
+                           (lambda (a b) (string< (car a) (car b))))))
+      ;; Off for one of them: the filter reaches exactly what it names.
+      (should (equal (list one)
+                     (harness-test-await
+                      (harness-acp-request conn "_harness/supervisor/set-all"
+                                           (list :on :false :filter (list :active t :except (list two)))))))
+      (should (eq :false (harness-supervisor-test-get one)))
+      (should (eq t (harness-supervisor-test-get two))))))
 
 (ert-deftest harness-supervisor-acp-call-needs-its-arguments ()
   "A call without the session or without the switch is refused, and changes nothing."
@@ -518,6 +650,17 @@ Return a function that gives the requests it got, newest first."
         (should (eq t (plist-get (harness-supervisor-test-ext sid) :supervisor)))
         (harness-supervisor-test-wait-task id 'done)))))
 
+(ert-deftest harness-supervisor-a-task-that-does-not-supervise-keeps-its-thinking ()
+  "A task session raised as a top-level session is put back when tasks work hands-on."
+  (harness-supervisor-test-with-tasks
+    (let ((harness-supervisor-thinking '((demo . "max")))
+          (harness-supervisor-tasks nil))
+      (let* ((id (plist-get (harness-call 'task/submit default-directory "fix the parser") :id))
+             (sid (harness-supervisor-test-task-session id)))
+        (should (eq :false (plist-get (harness-supervisor-test-ext sid) :supervisor)))
+        (should (null (plist-get (harness-call 'session/get sid) :thinking)))
+        (harness-supervisor-test-wait-task id 'done)))))
+
 (ert-deftest harness-supervisor-write-ups-only-read-and-do-not-supervise ()
   "The session of a backlog write-up has no setting, until its task starts."
   (harness-supervisor-test-with-tasks
@@ -579,6 +722,30 @@ Return a function that gives the requests it got, newest first."
       (harness-call 'supervisor/set sid t)
       (harness-supervisor--on-task-changed (list :id "t-y" :session sid :state 'active))
       (should (eq t (harness-supervisor-test-get sid))))))
+
+(ert-deftest harness-supervisor-set-all-leaves-a-completed-tasks-session-alone ()
+  "With the everything filter, a done task's session is left alone by
+`supervisor/set-all', even though it is still active and would be
+selected by `:active' alone; the active sessions change as ever."
+  (harness-supervisor-test-with-tasks
+    (let* ((done-task (plist-get (harness-call 'task/submit default-directory "finish this") :id))
+           (done-sid (harness-supervisor-test-task-session done-task))
+           (open (harness-supervisor-test-session)))
+      (harness-supervisor-test-wait-task done-task 'done)
+      (should (eq 'done (plist-get (harness-supervisor-test-task done-task) :column)))
+      ;; The session of the finished task is still active, and supervises.
+      (should-not (eq 'inactive (plist-get (harness-call 'session/get done-sid) :status)))
+      (should (eq t (harness-supervisor-test-get done-sid)))
+      (let ((changed (harness-call 'supervisor/set-all :false (list :active t :tasks t))))
+        (should (member open changed))
+        (should-not (member done-sid changed)))
+      (should (eq t (harness-supervisor-test-get done-sid)))
+      (should (eq :false (harness-supervisor-test-get open)))
+      ;; Wanted on again: the finished task's session stays hands-on.
+      (harness-call 'supervisor/set done-sid :false)
+      (harness-call 'supervisor/set-all t (list :active t :tasks t))
+      (should (eq :false (harness-supervisor-test-get done-sid)))
+      (should (eq t (harness-supervisor-test-get open))))))
 
 ;;;; The allowlist
 
@@ -1423,7 +1590,7 @@ Return a function that gives the requests it got, newest first."
 ;;;; The settings page
 
 (ert-deftest harness-supervisor-the-settings-are-on-the-settings-page ()
-  "`config/describe' lists the four settings, and the context cap, for the settings page."
+  "`config/describe' lists the settings, and the context cap, for the settings page."
   (harness-supervisor-test-with
     (let* ((description (harness-call 'config/describe default-directory))
            (settings (plist-get description :settings))
@@ -1431,11 +1598,14 @@ Return a function that gives the requests it got, newest first."
            (sections (mapcar (lambda (section) (plist-get section :name)) (plist-get description :sections))))
       (should (member "supervisor" sections))
       (dolist (key '("harness-supervisor" "harness-supervisor-tasks" "harness-supervisor-tiers"
+                     "harness-supervisor-thinking" "harness-supervisor-worker-thinking"
                      "harness-supervisor-step-budget" "harness-subagent-context-limit"))
         (should (funcall find key)))
       (should (equal "sessions" (plist-get (funcall find "harness-supervisor") :section)))
       (should (plist-get (funcall find "harness-supervisor") :layered))
-      (dolist (key '("harness-supervisor-tasks" "harness-supervisor-tiers" "harness-supervisor-step-budget"))
+      (dolist (key '("harness-supervisor-tasks" "harness-supervisor-tiers"
+                     "harness-supervisor-thinking" "harness-supervisor-worker-thinking"
+                     "harness-supervisor-step-budget"))
         (should (equal "supervisor" (plist-get (funcall find key) :section)))))))
 
 ;;;; Taking the module off
