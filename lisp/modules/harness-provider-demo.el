@@ -54,6 +54,12 @@ A list of events, or a function of the request returning one: a test
 that needs a reply per request (a search that looks further, then
 answers) gives a function.")
 
+(defconst harness-provider-demo--judge-prompt
+  "You decide how one session of a coding agent should start"
+  "The opening of the session judge's system prompt (harness-supervisor.el).
+The demo answers it (`harness-provider-demo--judge') rather than the
+generic script, so a demo session under `auto' is judged like any other.")
+
 (defconst harness-provider-demo--layouts
   '(("Sidebar on the left"
      . "+----------+---------------------------+
@@ -167,6 +173,12 @@ user wrote."
     (or text "")))
 
 (defun harness-provider-demo--script (request)
+  "Return the events the demo plays for REQUEST.
+`harness-provider-demo-script-override' wins when set.  Otherwise the
+system prompt picks a script for a request to name a session, write a
+task up, search a task board, name the companion pet, give it its
+lines, write the Insights report or judge how a session starts; else
+the last user message picks one (see the Commentary)."
   (let ((text (downcase (harness-provider-demo--last-user-text request)))
         (cwd (or (plist-get (plist-get request :session) :cwd) default-directory)))
     (cond
@@ -183,6 +195,8 @@ user wrote."
       (harness-provider-demo--pet request))
      ((string-prefix-p "You write the Insights report" (or (plist-get request :system) ""))
       (harness-provider-demo--insights request))
+     ((string-prefix-p harness-provider-demo--judge-prompt (or (plist-get request :system) ""))
+      (harness-provider-demo--judge request))
      ((string-match-p "\\btour\\b" text)
       `((:type thinking :delta "The user wants a tour. ")
         (:type thinking :delta "I will read a file, then summarise.")
@@ -375,6 +389,28 @@ as it ends.  The prompt grows with REQUEST's messages."
       ,@(harness-provider-demo--paced 'text (plist-get texts :second) 28 0.09)
       (:type usage :input ,(- second-prompt 1000) :output ,second-output :cache-read 1000 :cache-write 0
              :cost 0.0018 :context ,second-prompt)
+      (:type done :stop-reason end-turn))))
+
+(defconst harness-provider-demo--judge-supervise-re
+  (regexp-opt '("plan" "supervise" "coordinate" "delegate" "orchestrate" "refactor"
+                "redesign" "overhaul" "rewrite" "migrate" "feature" "implement"
+                "architecture" "whole" "across" "several" "multiple" "steps" "rework")
+              'symbols)
+  "Words in an opening message that read to the demo as a supervising job.")
+
+(defun harness-provider-demo--judge (request)
+  "Answer the session judge about REQUEST's opening message, as a cheap model.
+The demo calls the job supervising when the message asks for something
+big enough to plan and share out, and hands-on otherwise.  Only the
+message counts: the judge's own question names both words."
+  (let* ((text (harness-provider-demo--last-user-text request))
+         (opening (if (string-match "<message>\n\\(\\(?:.\\|\n\\)*?\\)\n</message>" text)
+                      (match-string 1 text)
+                    text)))
+    `((:type text :delta ,(if (string-match-p harness-provider-demo--judge-supervise-re
+                                              (downcase opening))
+                              "SUPERVISE" "HANDS-ON"))
+      (:type usage :input 60 :output 2 :cost 0.0001)
       (:type done :stop-reason end-turn))))
 
 (defun harness-provider-demo--title (request)
@@ -615,6 +651,11 @@ the JSON the report asks for."
   "Session id -> remaining script after a tool call, resumed on the next request.")
 
 (defun harness-provider-demo--complete (request)
+  "Play REQUEST's script (`harness-provider-demo--script') to its `:on-event'.
+Events go out one at a time, `harness-provider-demo--delay' apart.  At a
+tool call the turn stops for the agent to run it, and the rest of the
+script waits for the session's next request that carries tool results.
+Return the handle plist, whose `:cancel' stops the script."
   (let* ((on-event (plist-get request :on-event))
          (sid (or (plist-get (plist-get request :session) :id) "none"))
          (script (harness-provider-demo--script request))
@@ -664,6 +705,7 @@ the JSON the report asks for."
                     (funcall on-event '(:type done :stop-reason cancelled))))))
 
 (defun harness-provider-demo--has-tool-results-p (request)
+  "Non-nil when the last message of REQUEST carries tool results."
   (let ((last (car (last (plist-get request :messages)))))
     (and last (cl-some (lambda (b) (equal (plist-get b :type) "tool_result"))
                        (plist-get last :content)))))

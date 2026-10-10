@@ -495,37 +495,87 @@ conversation sends now."
   (and (harness-method-exists-p 'provider/capabilities)
        (harness-json-true-p (plist-get (harness-call 'provider/capabilities model) :hosted-loop))))
 
+(defun harness-compaction--tool-use-message-p (message)
+  "Non-nil when MESSAGE asks a tool: it holds a tool_use block."
+  (cl-some (lambda (b) (equal (plist-get b :type) "tool_use")) (plist-get message :content)))
+
+(defun harness-compaction--tool-result-message-p (message)
+  "Non-nil when MESSAGE answers a tool: it holds a tool_result block."
+  (cl-some (lambda (b) (equal (plist-get b :type) "tool_result")) (plist-get message :content)))
+
+(defun harness-compaction--sample-units (messages)
+  "Return MESSAGES in units (START . END), each tool exchange kept whole.
+A message that asks tools (an assistant message with tool_use blocks)
+and the message that answers them are one unit: `session/messages'
+pairs every call with the results right after it
+\(`harness-session--pair-tools'), and a sample that cut between them
+would be a request the provider rejects (\"an assistant message with
+tool_calls must be followed by tool messages\").  Every other message is
+a unit of its own.  START and END are indices into MESSAGES, END
+exclusive, in order."
+  (let ((n (length messages)) (i 0) units)
+    (while (< i n)
+      (let ((end (1+ i)))
+        (when (harness-compaction--tool-use-message-p (nth i messages))
+          (while (and (< end n) (harness-compaction--tool-result-message-p (nth end messages)))
+            (cl-incf end)))
+        (push (cons i end) units)
+        (setq i end)))
+    (nreverse units)))
+
 (defun harness-compaction--sample-messages (messages)
   "Keep the first and last few of MESSAGES, naming what is left out.
 Return (LIMITED . OMITTED): LIMITED is `harness-compaction--sample-head'
 messages from the start of MESSAGES, a user message saying how many
 were left out, then `harness-compaction--sample-tail' from its end.
-OMITTED is that number, 0 when nothing was dropped."
+OMITTED is that number, 0 when nothing was dropped.  Cuts are made only
+between the units of `harness-compaction--sample-units', so a tool call
+and the message that answers it are never parted and the sample is a
+request the provider accepts; a sample that would leave no middle cuts
+nothing instead."
   (let* ((n (length messages))
          (head harness-compaction--sample-head)
-         (tail harness-compaction--sample-tail))
+         (tail harness-compaction--sample-tail)
+         (units (harness-compaction--sample-units messages))
+         (head-end 0)
+         (tail-start n))
     (if (<= n (+ head tail))
         (cons messages 0)
-      (let* ((omitted (- n head tail))
-             (elision (list :role 'user
-                            :content (list (list :type "text"
-                                                 :text (format (concat "[The harness left out the %d messages between here"
-                                                                       " and the next one, so this context is only the start"
-                                                                       " and the most recent part of the conversation.]")
+      ;; Whole units only: stop as soon as the head has what it wants,
+      ;; and walk back from the end while the tail is still short, each
+      ;; an exchange further when that keeps a call with its results.
+      (dolist (unit units)
+        (when (< head-end head)
+          (setq head-end (cdr unit))))
+      (dolist (unit (reverse units))
+        (when (< (- n tail-start) tail)
+          (setq tail-start (car unit))))
+      (if (<= tail-start head-end)
+          (cons messages 0)
+        (let* ((omitted (- tail-start head-end))
+               (elision (list :role 'user
+                              :content (list (list :type "text"
+                                                   :text (format (concat "[The harness left out the %d messages between here"
+                                                                         " and the next one, so this context is only the start"
+                                                                         " and the most recent part of the conversation.]")
                                                                  omitted))))))
-        (cons (append (cl-subseq messages 0 head)
-                      (list elision)
-                      (cl-subseq messages (- n tail)))
-              omitted)))))
+          (cons (append (cl-subseq messages 0 head-end)
+                        (list elision)
+                        (cl-subseq messages tail-start))
+                omitted))))))
 
 (defun harness-compaction--block-text (block)
   "Return BLOCK as text for a summariser sent the conversation in one message."
   (pcase (plist-get block :type)
     ("text" (or (plist-get block :text) ""))
     ("thinking" (format "[thinking] %s" (or (plist-get block :text) "")))
+    ;; The input is JSON inside text, so it must be text: the bytes
+    ;; `harness-json-encode' gives turn into raw-byte characters here,
+    ;; which the next `json-serialize' rejects with `json-value-p'
+    ;; naming the whole message.
     ("tool_use" (format "[called %s with %s]" (plist-get block :name)
                         (condition-case nil
-                            (harness-json-encode (or (plist-get block :input) :empty))
+                            (harness-json-encode-text (or (plist-get block :input) :empty))
                           (error ""))))
     ("tool_result" (format "[result] %s" (or (plist-get block :content) "")))
     (_ "")))
@@ -720,7 +770,7 @@ MODEL gets the transcript as messages."
                                          (harness-call 'session/provider-state session-id model))
                      (lambda (e)
                        (harness-log 'warn "compaction: provider fork failed, sending the transcript: %s"
-                                    (harness-error-message e))
+                                    (harness-error-short-message e))
                        nil))
     (harness-resolved nil)))
 
@@ -863,8 +913,11 @@ writing after the conversation it replaces."
         promise)))
 
 (defun harness-compaction--fail (session-id promise err)
-  "Reject PROMISE with ERR and tell SESSION-ID about it."
-  (let ((msg (harness-error-message err)))
+  "Reject PROMISE with ERR and tell SESSION-ID about it.
+ERR is reported short (`harness-error-short-message'): the failure of a
+summariser can carry a whole transcript or request body as its data, and
+none of that belongs in *Messages*, in a hint or in the tree."
+  (let ((msg (harness-error-short-message err)))
     (harness-log 'warn "compaction of %s failed: %s" session-id msg)
     (ignore-errors (harness-call 'session/hint session-id (format "Compaction failed: %s" msg)))
     (harness-emit 'compaction/failed session-id msg)

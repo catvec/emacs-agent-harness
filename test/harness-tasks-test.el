@@ -24,6 +24,8 @@
 (defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
+(defvar harness-agent--cancel-grace)
+(defvar harness-tasks--paused-message)
 (declare-function harness-tasks--save "harness-tasks")
 (declare-function harness-tasks--forget-stores "harness-tasks")
 (declare-function harness-acp-connect "harness-acp")
@@ -42,7 +44,8 @@ turn `harness-tasks-require-verification' on themselves."
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
      (let ((harness-acp--server-enabled nil))
-       (dolist (m '(store project config provider provider-demo tools session agent tasks acp))
+       (dolist (m '(store project config provider provider-demo tools session agent priority
+                          tasks acp))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
      (clrhash harness-tools)
@@ -75,6 +78,9 @@ turn `harness-tasks-require-verification' on themselves."
 (defun harness-tasks-test-task (id) (harness-call 'task/get id))
 (defun harness-tasks-test-session (id)
   (harness-call 'session/get (plist-get (harness-tasks-test-task id) :session)))
+(defun harness-tasks-test-session-id (id)
+  "The id of task ID's session, which every task has from submission."
+  (plist-get (harness-tasks-test-task id) :session))
 (defun harness-tasks-test-default (option)
   "Return the default value of OPTION, which the tests' setup may have bound."
   (eval (car (get option 'standard-value)) t))
@@ -110,12 +116,12 @@ turn `harness-tasks-require-verification' on themselves."
 (ert-deftest harness-tasks-session-runs-on-a-capped-context ()
   "A task's session is capped by `harness-tasks-context-limit'.
 The demo model's window is 8000: a 4000-token limit halves the window
-the session works on, the default 256000 leaves it whole, and nil
+the session works on, the default 384000 leaves it whole, and nil
 leaves it whole too."
   (harness-tasks-test-with
     (let* ((id (harness-tasks-test-submit "fix the parser"))
            (session (harness-tasks-test-session id)))
-      (should (= 256000 (plist-get session :context-window-limit)))
+      (should (= 384000 (plist-get session :context-window-limit)))
       (should (= 8000 (plist-get session :context-window))))
     (let ((harness-tasks-context-limit 4000))
       (let* ((id (harness-tasks-test-submit "keep it small"))
@@ -135,10 +141,19 @@ leaves it whole too."
             (b (harness-tasks-test-submit "second")))
         (should (eq 'active (harness-tasks-test-state a)))
         (should (eq 'pending (harness-tasks-test-state b)))
-        (should-not (plist-get (harness-tasks-test-task b) :session))
-        (harness-tasks-test-wait-state a 'done)
-        (harness-tasks-test-wait-state b 'done)
-        (should (plist-get (harness-tasks-test-task b) :session))))))
+        ;; Every task has its session from submission: the waiting one's
+        ;; is idle, in the main checkout, and holds its priority.  The
+        ;; work goes on in it once a slot frees.
+        (let ((sid (harness-tasks-test-session-id b)))
+          (should sid)
+          (should (not (equal sid (harness-tasks-test-session-id a))))
+          (should (eq 'idle (plist-get (harness-tasks-test-session b) :status)))
+          (should (equal (file-name-as-directory (expand-file-name default-directory))
+                         (plist-get (harness-tasks-test-session b) :cwd)))
+          (should-not (plist-get (harness-tasks-test-task b) :started))
+          (harness-tasks-test-wait-state a 'done)
+          (harness-tasks-test-wait-state b 'done)
+          (should (equal sid (harness-tasks-test-session-id b))))))))
 
 (declare-function harness-tasks--free-slots "harness-tasks")
 (declare-function harness-tasks--slot-project "harness-tasks")
@@ -162,8 +177,15 @@ another project is, and its second waits only for its own first one."
         (should (eq 'pending (harness-tasks-test-state a2)))
         (should (eq 'active (harness-tasks-test-state b1)))
         (should (eq 'pending (harness-tasks-test-state b2)))
-        (should-not (plist-get (harness-tasks-test-task a2) :session))
-        (should-not (plist-get (harness-tasks-test-task b2) :session))
+        ;; Each waiting task has its own session already (idle, in its
+        ;; project's main checkout); the slot decides whose work starts.
+        (let ((a2-sid (harness-tasks-test-session-id a2))
+              (b2-sid (harness-tasks-test-session-id b2)))
+          (should a2-sid)
+          (should b2-sid)
+          (should-not (equal a2-sid b2-sid))
+          (dolist (task (list a2 b2))
+            (should (eq 'idle (plist-get (harness-tasks-test-session task) :status)))))
         (dolist (id (list a1 a2 b1 b2)) (harness-tasks-test-wait-state id 'done))
         ;; Each second task started once its own project's first one was done.
         (should (>= (plist-get (harness-tasks-test-task a2) :started)
@@ -224,15 +246,21 @@ With one slot, the tasks run one after the other in that order."
                        (harness-tasks-test-start-order (list low med high med2 high2))))))))
 
 (ert-deftest harness-tasks-priority-reorders-the-queue ()
-  "`task/set-priority' moves a waiting task up or down the queue."
+  "Setting a waiting task's priority moves it up or down the queue.
+A task's priority is its session's (see the priority plugin): the board
+reads and orders by `harness-priority-of-task'."
   (harness-tasks-test-with
     (let (a b c)
       (let ((harness-tasks-max-running 0))
         (setq a (harness-tasks-test-submit "first")
               b (harness-tasks-test-submit "second")
               c (harness-tasks-test-submit "third"))
-        (should (eq 'high (plist-get (harness-call 'task/set-priority c "high") :priority)))
-        (should (eq 'low (plist-get (harness-call 'task/set-priority a 'low) :priority)))
+        (should (equal "high" (harness-call 'priority/set (harness-tasks-test-session-id c) "high")))
+        (should (equal "low" (harness-call 'priority/set (harness-tasks-test-session-id a) 'low)))
+        ;; The board says what the sessions say.
+        (should (eq 'high (plist-get (harness-tasks-test-task c) :priority)))
+        (should (eq 'low (plist-get (harness-tasks-test-task a) :priority)))
+        (should (eq 'medium (plist-get (harness-tasks-test-task b) :priority)))
         ;; Changing a priority frees no slot: nothing starts.
         (dolist (id (list a b c)) (should (eq 'pending (harness-tasks-test-state id)))))
       (let ((harness-tasks-max-running 1))
@@ -241,52 +269,110 @@ With one slot, the tasks run one after the other in that order."
         (dolist (id (list a b c)) (harness-tasks-test-wait-state id 'done))
         (should (equal (list c b a) (harness-tasks-test-start-order (list a b c))))))))
 
-(ert-deftest harness-tasks-priority-is-checked-and-persisted ()
+(ert-deftest harness-tasks-priority-is-checked-and-kept-on-the-session ()
   "A priority is low, medium or high, from a symbol or a string (\"med\" too).
-It is a symbol in memory, a string on disk and over the wire, and a
-record without one is medium."
+A task's is its session's: nothing about it is stored on the task's
+record, reading it is forgiving, a name no level has is refused, and it
+reaches the session over the wire."
   (harness-tasks-test-with
     (let ((harness-tasks-max-running 0))
       (let ((high (harness-tasks-test-submit-at "urgent" "High"))
             (plain (harness-tasks-test-submit "whenever")))
         (should (eq 'high (plist-get (harness-tasks-test-task high) :priority)))
         (should (eq 'medium (plist-get (harness-tasks-test-task plain) :priority)))
-        (should (eq 'medium (plist-get (harness-call 'task/set-priority plain "med") :priority)))
-        ;; Anything else is refused, and adds or changes nothing.
+        ;; On the session, as its `:ext', where the queues read it.
+        (should (equal "high" (harness-call 'priority/get (harness-tasks-test-session-id high))))
+        (should (equal '(:priority "high") (plist-get (harness-tasks-test-session high) :ext)))
+        (should (equal "medium" (harness-call 'priority/get (harness-tasks-test-session-id plain))))
+        ;; Nothing of a task's own stores it, in memory or on disk.
+        (should-not (plist-member (gethash high harness-tasks--table) :priority))
+        (should-not (plist-member (gethash plain harness-tasks--table) :priority))
+        ;; A name no level has is refused, and adds or changes nothing.
         (should-error (harness-call 'task/submit default-directory "nope" (list :priority "urgent")))
         (should (= 2 (length (harness-call 'task/list))))
-        (should-error (harness-call 'task/set-priority high 'critical))
-        (should-error (harness-call 'task/set-priority "t-missing" 'low))
+        (should-error (harness-call 'priority/set (harness-tasks-test-session-id high) 'critical))
         (should (eq 'high (plist-get (harness-tasks-test-task high) :priority)))
-        ;; A record from before priorities is medium.
-        (puthash plain (harness-plist-remove (gethash plain harness-tasks--table) :priority)
-                 harness-tasks--table)
-        (should (eq 'medium (plist-get (harness-tasks-test-task plain) :priority)))
-        (should-not (plist-member (gethash plain harness-tasks--table) :priority))
-        (harness-call 'task/set-priority plain "low")
-        ;; Saved as strings, read back as symbols.
+        ;; The level is kept on the session, which the store keeps: a task
+        ;; read back from disk says it.
         (harness-tasks--save)
-        (should (equal "high" (plist-get (cl-find high (harness-tasks-test--read (harness-tasks-test--global))
-                                                  :key (lambda (r) (plist-get r :id)) :test #'equal)
-                                         :priority)))
+        (should-not (plist-member
+                     (cl-find high (harness-tasks-test--read (harness-tasks-test--global))
+                              :key (lambda (r) (plist-get r :id)) :test #'equal)
+                     :priority))
         (clrhash harness-tasks--table)
         (setq harness-tasks--loaded nil)
         (should (= 2 (length (harness-call 'task/list))))
         (should (eq 'high (plist-get (harness-tasks-test-task high) :priority)))
-        (should (eq 'low (plist-get (harness-tasks-test-task plain) :priority)))
-        ;; Over the wire: strings both ways.
+        (should (eq 'medium (plist-get (harness-tasks-test-task plain) :priority)))
+        ;; Over the wire: a session id in, the level's name back.
         (let* ((conn (harness-acp-connect))
-               (task (harness-test-await
-                      (harness-acp-request conn "_harness/task/set-priority"
-                                           (list :id high :priority "low")))))
-          (should (equal "low" (plist-get task :priority)))
+               (level (harness-test-await
+                       (harness-acp-request conn "_harness/priority/set"
+                                            (list :sessionId (harness-tasks-test-session-id high)
+                                                  :priority "low"))))
+               (sent (harness-test-await
+                      (harness-acp-request conn "_harness/task/submit"
+                                           (list :cwd default-directory :prompt "from a client"
+                                                 :opts (list :priority "high"))))))
+          (should (equal "low" level))
           (should (eq 'low (plist-get (harness-tasks-test-task high) :priority)))
-          (let ((sent (harness-test-await
-                       (harness-acp-request conn "_harness/task/submit"
-                                            (list :cwd default-directory :prompt "from a client"
-                                                  :opts (list :priority "high"))))))
-            (should (equal "high" (plist-get sent :priority)))
-            (should (eq 'high (plist-get (harness-tasks-test-task (plist-get sent :id)) :priority)))))))))
+          ;; The new task's session carries what it was submitted with.
+          (should (equal "high" (plist-get sent :priority)))
+          (should (equal "high" (harness-call 'priority/get (plist-get sent :session)))))))))
+
+(ert-deftest harness-tasks-a-task-session-works-at-the-tasks-priority ()
+  "A task's priority is its session's (see the priority plugin).
+Every task has its session from submission, so the level is there
+before the task starts, and what works for the task -- a sub-agent
+above all -- takes it from the session.  Raising and lowering a task
+is setting its session's level."
+  (harness-tasks-test-with
+    (let* ((high (harness-tasks-test-submit-at "urgent" "high"))
+           (plain (harness-tasks-test-submit "whenever"))
+           (high-sid (harness-tasks-test-session-id high))
+           (plain-sid (harness-tasks-test-session-id plain)))
+      (should (equal "high" (harness-call 'priority/get high-sid)))
+      (should (equal "medium" (harness-call 'priority/get plain-sid)))
+      (should (equal "high" (plist-get (plist-get (harness-tasks-test-session high) :ext) :priority)))
+      ;; Raising and lowering a task reaches its session's queue.
+      (harness-call 'priority/set plain-sid "low")
+      (should (equal "low" (harness-call 'priority/get plain-sid)))
+      (should (eq 'low (plist-get (harness-tasks-test-task plain) :priority)))
+      (harness-call 'priority/set high-sid "medium")
+      (should (equal "medium" (harness-call 'priority/get high-sid)))
+      (should (eq 'medium (plist-get (harness-tasks-test-task high) :priority)))
+      ;; A session working for the task has none of its own: it works at
+      ;; the task's priority, and follows it when the task changes.
+      (let ((sub (plist-get (harness-call 'session/create :cwd default-directory
+                                          :parent-id high-sid)
+                            :id)))
+        (should (equal "medium" (harness-call 'priority/get sub)))
+        (harness-call 'priority/set high-sid "high")
+        (should (equal "high" (harness-call 'priority/get sub))))
+      ;; A bulk change reaches the sessions of the tasks it selects.
+      (harness-call 'task/set-all (list :priority "high" :ids (list plain)))
+      (should (equal "high" (harness-call 'priority/get plain-sid)))
+      (should (eq 'high (plist-get (harness-tasks-test-task plain) :priority)))
+      (harness-tasks-test-wait-state high 'done)
+      (harness-tasks-test-wait-state plain 'done))))
+
+(ert-deftest harness-tasks-a-write-up-session-takes-the-priority ()
+  "A backlog task's write-up runs at the task's priority, and keeps it."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running nil)
+          (harness-provider-demo-script-override
+           `((:type text :delta ,harness-tasks-test-write-up) (:type done :stop-reason end-turn))))
+      (let* ((id (plist-get (harness-call 'task/submit default-directory "the parser chokes"
+                                          (list :refine t :priority "high"))
+                            :id))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (should (equal "high" (harness-call 'priority/get sid)))
+        (harness-tasks-test-wait-state id 'pending)
+        ;; The session that wrote it up goes on with the work, at the same
+        ;; priority.
+        (harness-call 'task/start id)
+        (should (equal "high" (harness-call 'priority/get sid)))
+        (harness-tasks-test-wait-state id 'done)))))
 
 (ert-deftest harness-tasks-free-slots-count-per-project ()
   "A project's free slots count its own working tasks only.
@@ -315,6 +401,53 @@ A task's project is its `:project', else its `:cwd'."
         (should (eq 'active (harness-tasks-test-state id)))
         (harness-tasks-test-wait-state id 'done)
         (should-error (harness-call 'task/start id))))))
+
+(ert-deftest harness-tasks-limit-changed-starts-waiting-tasks ()
+  "A limit raised through `config/set', as the board's button sets it, starts waiting tasks.
+At once, not when a task at work ends: here none ever does.  A lower
+limit stops no task at work, no limit lets every waiting task start,
+and a limit below 0 is refused."
+  (harness-tasks-test-with
+    ;; Turns that never end: only a new limit can start a task.
+    (let ((harness-provider-demo-script-override '((:type text :delta "Working on it.")))
+          (harness-tasks-max-running 0)
+          (passes 0)
+          (schedule (symbol-function 'harness-tasks--schedule)))
+      (cl-letf (((symbol-function 'harness-save-user-option) (lambda (symbol value) (set symbol value)))
+                ((symbol-function 'harness-tasks--schedule)
+                 (lambda () (cl-incf passes) (funcall schedule))))
+        (let ((a (harness-tasks-test-submit "first"))
+              (b (harness-tasks-test-submit "second"))
+              (c (harness-tasks-test-submit "third"))
+              (limit (lambda (value)
+                       (let ((before passes))
+                         (harness-call 'config/set "harness-tasks-max-running" value :printed t :scope 'global)
+                         ;; The scheduler runs once the change is announced.
+                         (harness-test-wait (lambda () (> passes before)) 5 "a scheduling pass")))))
+          (unwind-protect
+              (progn
+                ;; The pass the module's start queued is over: what runs
+                ;; the scheduler from here on is the new limit.
+                (accept-process-output nil 0.05)
+                (dolist (id (list a b c)) (should (eq 'pending (harness-tasks-test-state id))))
+                ;; Two slots: the two oldest start, the third waits.
+                (funcall limit "2")
+                (should (eql 2 harness-tasks-max-running))
+                (should (eq 'active (harness-tasks-test-state a)))
+                (should (eq 'active (harness-tasks-test-state b)))
+                (should (eq 'pending (harness-tasks-test-state c)))
+                ;; One: the two at work go on, and the third still waits.
+                (funcall limit "1")
+                (dolist (id (list a b)) (should (eq 'active (harness-tasks-test-state id))))
+                (should (eq 'pending (harness-tasks-test-state c)))
+                ;; No limit: the third starts too.
+                (funcall limit "nil")
+                (should-not harness-tasks-max-running)
+                (should (eq 'active (harness-tasks-test-state c)))
+                ;; A number of tasks is never negative.
+                (should-error (harness-call 'config/set "harness-tasks-max-running" "-1" :printed t :scope 'global))
+                (should-not harness-tasks-max-running))
+            (dolist (id (list a b c)) (ignore-errors (harness-call 'task/cancel id)))))))))
 
 (declare-function harness-tasks--holds-slot-p "harness-tasks")
 (declare-function harness-tasks--put "harness-tasks")
@@ -347,6 +480,12 @@ does; nor review, done, refining or pending."
       ;; Idle: it stopped, or waits for a follow-up.
       (harness-call 'session/set-status top 'idle)
       (should-not (harness-tasks--holds-slot-p (harness-tasks-test--record 'active top)))
+      ;; Idle but waiting on work it left running (a supervisor's
+      ;; workers): that work is the task's, so it keeps the slot.
+      (should (harness-tasks--holds-slot-p
+               (append (harness-tasks-test--record 'active top) (list :waiting "2 workers running"))))
+      (should-not (harness-tasks--holds-slot-p
+                   (append (harness-tasks-test--record 'active sub) (list :waiting "2 workers running"))))
       ;; Starting holds one before there is a session at all.
       (let ((starting (harness-tasks-test--record 'active nil)))
         (should-not (harness-tasks--holds-slot-p starting))
@@ -435,12 +574,46 @@ task's sub-agent runs, another task starts at once."
 (ert-deftest harness-tasks-edit-and-cancel-pending ()
   (harness-tasks-test-with
     (let ((harness-tasks-max-running 0))
-      (let ((id (harness-tasks-test-submit "draft")))
+      (let* ((id (harness-tasks-test-submit "draft"))
+             (sid (harness-tasks-test-session-id id)))
         (harness-call 'task/update id "better prompt")
         (should (equal "better prompt" (plist-get (harness-tasks-test-task id) :prompt)))
         (should-error (harness-call 'task/update id "  "))
         (harness-call 'task/cancel id)
-        (should-not (gethash id harness-tasks--table))))))
+        (should-not (gethash id harness-tasks--table))
+        ;; A task dropped before it started takes its session with it:
+        ;; the session held the task's priority and nothing else.
+        (should-not (harness-call 'session/exists-p sid))))))
+
+(ert-deftest harness-tasks-delete-a-waiting-task ()
+  "Deleting a task that never started takes its session with it.
+The session is what holds a waiting task's priority; nothing of the
+work exists yet, so nothing of it is kept."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (let* ((id (harness-tasks-test-submit "never started"))
+             (sid (harness-tasks-test-session-id id)))
+        (should sid)
+        (should (harness-call 'session/exists-p sid))
+        (harness-call 'task/delete id)
+        (should-not (gethash id harness-tasks--table))
+        (should-not (harness-call 'session/exists-p sid))))))
+
+(ert-deftest harness-tasks-prompt-refuses-a-waiting-task ()
+  "A message to a task waiting for a slot is refused, and reaches nobody.
+`task/prompt' sends a message to a task's session; one still waiting
+for a slot has not been given the work, and the message would start it
+rather than reach a task at work."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (let* ((id (harness-tasks-test-submit "waiting"))
+             (sid (harness-tasks-test-session-id id)))
+        (should sid)
+        (should-error (harness-call 'task/prompt id "are you there?"))
+        ;; Nothing was said to the session, and it still waits.
+        (should-not (harness-call 'session/nodes sid))
+        (should (eq 'pending (harness-tasks-test-state id)))
+        (should-not (plist-get (harness-tasks-test-task id) :started))))))
 
 (ert-deftest harness-tasks-set-all-updates-current-tasks ()
   "task/set-all changes a pending task's record and a started task's session."
@@ -450,8 +623,8 @@ task's sub-agent runs, another task starts at once."
       (let* ((running (harness-tasks-test-submit "running"))
              (waiting (harness-tasks-test-submit "waiting")))
         (harness-call 'task/start running)
-        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task running) :session))
-                           5 "the started task's session")
+        (harness-test-wait (lambda () (eq 'active (harness-tasks-test-state running)))
+                           5 "the task to start")
         (let ((ids (harness-call 'task/set-all (list :model "demo:other" :thinking "high"))))
           (should (member running ids))
           (should (member waiting ids))
@@ -478,8 +651,9 @@ task's sub-agent runs, another task starts at once."
 (ert-deftest harness-tasks-set-all-sets-priority-only-when-given ()
   "task/set-all changes priorities only when its settings carry one.
 Without `:priority' (or with nil) every task keeps its own; with one,
-the tasks that differ take it, a started one too, on their records
-only; a bad one is refused before any task changes."
+the tasks that differ take it, a started one too, on their sessions
+\(a task's priority is its session's); a bad one is refused before any
+task changes."
   (harness-tasks-test-with
     (let ((harness-provider-demo--delay 5)          ; keep the started one running
           (harness-tasks-max-running 0))
@@ -489,8 +663,8 @@ only; a bad one is refused before any task changes."
              (plain (harness-tasks-test-submit "medium"))
              (all (list running low high plain)))
         (harness-call 'task/start running)
-        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task running) :session))
-                           5 "the started task's session")
+        (harness-test-wait (lambda () (eq 'active (harness-tasks-test-state running)))
+                           5 "the task to start")
         (cl-flet ((priorities ()
                     (mapcar (lambda (id) (plist-get (harness-tasks-test-task id) :priority)) all)))
           ;; Other settings leave every priority as it was.
@@ -508,7 +682,8 @@ only; a bad one is refused before any task changes."
           (should (seq-set-equal-p (list running low plain)
                                    (harness-call 'task/set-all (list :priority "High"))))
           (should (equal '(high high high high) (priorities)))
-          ;; ...on their records: the session keeps its settings, and nothing starts.
+          ;; ...on their sessions: the session keeps its other settings,
+          ;; and nothing starts.
           (should (equal "demo:other" (plist-get (harness-tasks-test-session running) :model)))
           (dolist (id (list low high plain)) (should (eq 'pending (harness-tasks-test-state id))))
           (should (equal (list high) (harness-call 'task/set-all (list :priority 'med)
@@ -525,8 +700,10 @@ only; a bad one is refused before any task changes."
 `session/set-all' with `:tasks' takes the sessions of the current tasks
 besides the active ones, one closed meanwhile included, and
 `task/set-all' without `:cwd' then the current tasks of every project.
-A task's session the first changed is not changed a second time, so
-each change adds exactly one hint, whichever comes first."
+Every task has its session from submission, a waiting one too, so the
+waiting task's session is reached as well.  A task's session the first
+changed is not changed a second time, so each change adds exactly one
+hint, whichever comes first."
   (harness-tasks-test-with
     (let ((harness-provider-demo--delay 5)          ; keep the started ones running
           (harness-tasks-max-running 0)
@@ -540,22 +717,28 @@ each change adds exactly one hint, whichever comes first."
              (plain (plist-get (harness-call 'session/create :cwd other :model "demo:scripted") :id)))
         (harness-call 'task/start here)
         (harness-call 'task/start there)
-        (let ((here-sid (plist-get (harness-tasks-test-task here) :session))
-              (there-sid (plist-get (harness-tasks-test-task there) :session)))
+        (let ((here-sid (harness-tasks-test-session-id here))
+              (there-sid (harness-tasks-test-session-id there))
+              ;; The waiting task's session waits with it, idle, in the
+              ;; main checkout of its project.
+              (waiting-sid (harness-tasks-test-session-id waiting)))
+          (should (eq 'idle (plist-get (harness-tasks-test-session waiting) :status)))
+          (should (equal (file-name-as-directory (expand-file-name other))
+                         (plist-get (harness-tasks-test-session waiting) :cwd)))
           ;; The task over there goes on in a session closed meanwhile.
           (harness-call 'session/deactivate there-sid)
           (should-not (member there-sid (harness-tasks-test--ids (harness-call 'session/list '(:active t)))))
-          (should (equal (funcall sorted (list here-sid there-sid))
+          (should (equal (funcall sorted (list here-sid there-sid waiting-sid))
                          (funcall sorted (harness-call 'task/session-ids))))
-          (should (equal (funcall sorted (list here-sid there-sid plain))
+          (should (equal (funcall sorted (list here-sid there-sid waiting-sid plain))
                          (funcall sorted (harness-tasks-test--ids (harness-call 'session/select everything)))))
-          ;; Sessions first, then the tasks: three sessions and three tasks.
-          (should (equal (funcall sorted (list here-sid there-sid plain))
+          ;; Sessions first, then the tasks: four sessions, three tasks.
+          (should (equal (funcall sorted (list here-sid there-sid waiting-sid plain))
                          (funcall sorted (harness-call 'session/set-all '(:non-interactive t) everything))))
           (should (equal (list here there waiting) (harness-call 'task/set-all '(:non-interactive t))))
           (dolist (id (list here there waiting))
             (should (eq t (plist-get (harness-tasks-test-task id) :non-interactive))))
-          (dolist (sid (list here-sid there-sid plain))
+          (dolist (sid (list here-sid there-sid waiting-sid plain))
             (should (plist-get (harness-call 'session/get sid) :non-interactive))
             (should (= 1 (harness-tasks-test--count-hints sid "non-interactive on"))))
           ;; Asked again, nothing changes.
@@ -564,12 +747,58 @@ each change adds exactly one hint, whichever comes first."
           ;; The tasks first, then the sessions: still one hint each.
           (should (equal (list here there waiting) (harness-call 'task/set-all '(:non-interactive :false))))
           (should (equal (list plain) (harness-call 'session/set-all '(:non-interactive :false) everything)))
-          (dolist (sid (list here-sid there-sid plain))
+          (dolist (sid (list here-sid there-sid waiting-sid plain))
             (should-not (plist-get (harness-call 'session/get sid) :non-interactive))
             (should (= 1 (harness-tasks-test--count-hints sid "non-interactive off"))))
           (dolist (id (list here there waiting))
             (should (eq :false (plist-get (harness-tasks-test-task id) :non-interactive)))))
         (dolist (id (list here there)) (harness-call 'task/cancel id))))))
+
+(ert-deftest harness-tasks-all-commands-leave-a-done-tasks-session-alone ()
+  "A completed task is over: its session is left out with `:tasks', and so
+changes no more, even while that session is active and `:active' alone
+would select it.  The active sessions and the current tasks change as
+ever, their records too, and `task/set-all' leaves a done task alone."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 3)
+          ;; Sessions start interactive, so an all-command changes them.
+          (harness-tasks-non-interactive nil)
+          (everything '(:active t :tasks t))
+          (sorted (lambda (ids) (sort (copy-sequence ids) #'string<))))
+      (let* ((done (harness-tasks-test-submit "finish this")))
+        (harness-tasks-test-wait-state done 'done)
+        (let* ((done-sid (plist-get (harness-tasks-test-task done) :session))
+               ;; A current task that keeps running, and a plain session.
+               (running (let ((harness-provider-demo--delay 5))
+                          (harness-tasks-test-submit "keep working")))
+               (running-sid (plist-get (harness-tasks-test-task running) :session))
+               (plain (plist-get (harness-call 'session/create :cwd default-directory
+                                               :model "demo:scripted")
+                                 :id)))
+          (should (eq 'done (plist-get (harness-tasks-test-task done) :column)))
+          ;; The finished task's session is still active: `:active' alone
+          ;; selects it, `:tasks' takes it out again.
+          (should (member done-sid (harness-tasks-test--ids (harness-call 'session/list '(:active t)))))
+          (should (equal (funcall sorted (list running-sid plain))
+                         (funcall sorted (harness-tasks-test--ids (harness-call 'session/select everything)))))
+          ;; The all-commands' sessions change, the finished task's does not.
+          (should (equal (funcall sorted (list running-sid plain))
+                         (funcall sorted (harness-call 'session/set-all '(:non-interactive t)
+                                                       everything))))
+          (should (plist-get (harness-call 'session/get running-sid) :non-interactive))
+          (should (plist-get (harness-call 'session/get plain) :non-interactive))
+          (should-not (plist-get (harness-call 'session/get done-sid) :non-interactive))
+          (should (zerop (harness-tasks-test--count-hints done-sid "non-interactive on")))
+          ;; Nor does `task/set-all' reach the finished task's record.
+          (should (equal (list running) (harness-call 'task/set-all '(:non-interactive t))))
+          (should (eq t (plist-get (harness-tasks-test-task running) :non-interactive)))
+          (should-not (plist-member (harness-tasks-test-task done) :non-interactive))
+          ;; Turning it off again is the same: only the current work.
+          (should (equal (funcall sorted (list running-sid plain))
+                         (funcall sorted (harness-call 'session/set-all '(:non-interactive :false)
+                                                       everything))))
+          (should (equal (list running) (harness-call 'task/set-all '(:non-interactive :false))))
+          (harness-call 'task/cancel running))))))
 
 (ert-deftest harness-tasks-set-all-off-reaches-tasks-the-defaults-turn-on ()
   "Turning non-interactive off reaches a task with no setting of its own
@@ -883,6 +1112,30 @@ A task that already waits in review waits on until the user verifies it."
       (should (equal "high" (plist-get session :thinking)))
       (should-not (plist-get session :non-interactive)))))
 
+(ert-deftest harness-tasks-supervisor-setting-without-the-module ()
+  "The supervisor setting is a task setting even where no module governs it.
+`task/settings' does not carry it, the session gets no `:supervisor' in
+its `:ext', and giving it one all the same does not error."
+  (harness-tasks-test-with
+    (should-not (boundp 'harness-supervisor-tasks))
+    (should-not (plist-member (harness-call 'task/settings default-directory) :supervisor))
+    (let ((harness-tasks-max-running 0))
+      (let ((hands-on (plist-get (harness-call 'task/submit default-directory "hands-on please"
+                                               (list :supervisor :false))
+                                 :id)))
+        (should (eq :false (plist-get (harness-tasks-test-task hands-on) :supervisor)))
+        (harness-call 'task/start hands-on)
+        (should-not (plist-member (plist-get (harness-tasks-test-session hands-on) :ext)
+                                  :supervisor))
+        ;; A bulk change records the setting and reaches no session.
+        (let ((supervising (plist-get (harness-call 'task/submit default-directory "waiting")
+                                      :id)))
+          (should (equal (list supervising)
+                         (harness-call 'task/set-all (list :supervisor t)
+                                       (list :ids (list supervising) :cwd default-directory))))
+          (should (eq t (plist-get (harness-tasks-test-task supervising) :supervisor))))
+        (harness-tasks-test-wait-state hands-on 'done)))))
+
 (ert-deftest harness-tasks-start-interactive-by-default ()
   "Unless the configuration says otherwise, a new task's session is interactive.
 It asks the user for what needs a permission instead of being denied."
@@ -929,7 +1182,7 @@ too; so does `harness-tasks-non-interactive', wherever the task is."
         (should (equal "Tidy the imports" (plist-get task :prompt)))
         (should (equal sid (plist-get task :session)))
         ;; The task's shorter context applies from now on.
-        (should (= 256000 (plist-get (harness-call 'session/get sid) :context-window-limit)))
+        (should (= 384000 (plist-get (harness-call 'session/get sid) :context-window-limit)))
         (should (= 8000 (plist-get (harness-call 'session/get sid) :context-window)))
         ;; An idle session is waiting for the user.
         (should (eq 'needs-input (plist-get task :column)))
@@ -1065,14 +1318,22 @@ too; so does `harness-tasks-non-interactive', wherever the task is."
         (should-not (harness-node-sender reply))))))
 
 (ert-deftest harness-tasks-interrupted-while-starting-starts-over ()
-  "A task stopped before its session existed starts again from scratch."
+  "A task stopped before its work began starts again from scratch.
+Its session, made at submission, was never given the task: the restart
+sends it the task itself, not a \"carry on\"."
   (harness-tasks-test-with
     (let ((id (let ((harness-tasks-max-running 0)) (harness-tasks-test-submit "barely begun"))))
-      ;; Where `harness-tasks--start' leaves a task until its session exists.
+      ;; Where a start cut short leaves a task: active, its session made
+      ;; but never given the work (`harness-tasks--work-begun-p').
       (harness-tasks--set id :state 'active :started (float-time))
       (harness-tasks-test--restart)
       (harness-tasks-test-wait-state id 'done)
-      (should (plist-get (harness-tasks-test-task id) :session)))))
+      (let ((sid (harness-tasks-test-session-id id)))
+        (should sid)
+        (should (equal "barely begun"
+                       (plist-get (cl-find 'user (harness-call 'session/nodes sid)
+                                           :key (lambda (n) (plist-get n :kind)))
+                                  :content)))))))
 
 (ert-deftest harness-tasks-recover-leaves-working-tasks-alone ()
   "Tasks this process works on are not interrupted, whatever their state says."
@@ -1127,7 +1388,7 @@ too; so does `harness-tasks-non-interactive', wherever the task is."
           (should-not (plist-get session :worktree))
           (should (string-match-p "## Task refinement" (harness-run-filter 'agent/system-prompt "" session))))
         ;; A write-up runs on the task's shorter context too.
-        (should (= 256000 (plist-get (harness-call 'session/get sid) :context-window-limit)))
+        (should (= 384000 (plist-get (harness-call 'session/get sid) :context-window-limit)))
         (should (= 8000 (plist-get (harness-call 'session/get sid) :context-window)))
         (harness-tasks-test-wait-state id 'pending)
         (setq task (harness-tasks-test-task id))
@@ -1240,12 +1501,17 @@ too; so does `harness-tasks-non-interactive', wherever the task is."
         (should-not (harness-call 'session/exists-p sid))))))
 
 (ert-deftest harness-tasks-refine-a-queued-task ()
+  "A queued task written up by hand is written up in the session it has.
+Every task has one from submission, idle and holding its priority; the
+write-up goes to it, not to a new one."
   (harness-tasks-test-with
     (let ((harness-tasks-max-running 0)
           (harness-provider-demo-script-override
            '((:type text :delta "Queued, then written up") (:type done :stop-reason end-turn))))
-      (let ((id (harness-tasks-test-submit "a queued idea")))
-        (should-not (plist-get (harness-tasks-test-task id) :session))
+      (let* ((id (harness-tasks-test-submit "a queued idea"))
+             (sid (harness-tasks-test-session-id id)))
+        (should sid)
+        (should (eq 'idle (plist-get (harness-tasks-test-session id) :status)))
         (harness-call 'task/refine id)
         (harness-test-wait (lambda () (equal "Queued, then written up" (plist-get (harness-tasks-test-task id) :prompt)))
                            5 "the write-up")
@@ -1253,7 +1519,9 @@ too; so does `harness-tasks-non-interactive', wherever the task is."
           (should (eq 'pending (plist-get task :state)))
           (should (plist-get task :backlog))
           (should (equal "a queued idea" (plist-get task :note)))
-          (should (plist-get task :session)))
+          ;; The write-up ran in the task's own session, which keeps the
+          ;; prompt written up for when the work starts.
+          (should (equal sid (plist-get task :session))))
         (should-error (harness-call 'task/refine "t-nonexistent"))))))
 
 (defvar harness-tasks--refine-tool-calls)
@@ -1700,20 +1968,25 @@ ANSWER is the `harness-tasks-test--title-answer'."
 (ert-deftest harness-tasks-named-while-it-waits ()
   "A task is named as soon as it is submitted, while it waits for a slot.
 Its prompt goes out in the request that names a session from its first
-message, asked for a ticket title.  When the task starts, its session
-takes the title: it is not named again."
+message, asked for a ticket title.  Every task has its session from
+submission, so the title reaches the waiting task's session at once;
+that session does the work later, and is not named again."
   (harness-tasks-test-with-titles
       (lambda (request)
         (if (string-prefix-p "fix" (harness-tasks-test--quoted request)) "Fix the parser" "Export orders as CSV"))
     (let ((harness-tasks-max-running 1))
       (let* ((first (harness-tasks-test-submit "fix the parser, it drops comments"))
              (second (harness-tasks-test-submit "export the orders as CSV for finance"))
-             (first-sid (plist-get (harness-tasks-test-task first) :session)))
+             (first-sid (plist-get (harness-tasks-test-task first) :session))
+             (second-sid (plist-get (harness-tasks-test-task second) :session)))
         (should (eq 'pending (harness-tasks-test-state second)))
+        (should second-sid)
+        (should (eq 'idle (plist-get (harness-tasks-test-session second) :status)))
         (harness-test-wait (lambda () (harness-tasks-test-name second)) 5 "the waiting task's name")
         (should (equal "Export orders as CSV" (harness-tasks-test-name second)))
         (should (eq 'pending (harness-tasks-test-state second)))
-        (should-not (plist-get (harness-tasks-test-task second) :session))
+        ;; Its own session, waiting with it, takes the title now.
+        (should (equal "Export orders as CSV" (harness-tasks-test-session-name second-sid)))
         (let ((request (harness-tasks-test-title-request "export the orders as CSV for finance")))
           (should (equal (concat harness-naming--base-system-prompt "\n\n" harness-tasks--naming-instructions)
                          (plist-get request :system)))
@@ -1724,8 +1997,9 @@ takes the title: it is not named again."
         (should (equal "Fix the parser" (harness-tasks-test-name first)))
         (harness-tasks-test-release first-sid)
         (harness-tasks-test-wait-state first 'done)
-        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task second) :session)) 5 "the second to start")
+        (harness-test-wait (lambda () (eq 'active (harness-tasks-test-state second))) 5 "the second to start")
         (let ((sid (plist-get (harness-tasks-test-task second) :session)))
+          (should (equal second-sid sid))
           (should (equal "Export orders as CSV" (harness-tasks-test-session-name sid)))
           (harness-tasks-test-turn sid)
           ;; Two requests in all, one a task; no session asked for its own.
@@ -1787,8 +2061,9 @@ The title names its session when it comes."
         (should (= 2 (length harness-tasks-test--titles)))
         (harness-tasks-test-release first-sid)
         (harness-tasks-test-wait-state first 'done)
-        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task second) :session)) 5 "the second to start")
-        (let ((sid (plist-get (harness-tasks-test-task second) :session)))
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task second) :started))
+                           5 "the second to start")
+        (let ((sid (harness-tasks-test-session-id second)))
           (harness-tasks-test-turn sid)
           (should-not (harness-tasks-test-session-name sid))
           (harness-tasks-test-answer (harness-tasks-test-title-request "export the orders as CSV")
@@ -1880,7 +2155,6 @@ tasks with a title are left alone."
 (defvar harness-merge--locks)
 (defvar harness-merge--holds)
 (defvar harness-tasks-worktrees)
-(defvar harness-tasks--merge-session-name)
 
 (defun harness-tasks-test--git (dir &rest args)
   "Run git ARGS synchronously in DIR; signal on failure, return stdout."
@@ -1961,11 +2235,18 @@ commits from call `harness-tasks-test--commit-on-call' on."
   (harness-tasks-test-with-git
     (let ((id (harness-tasks-test-submit "Change the shared file"))
           (task nil))
-      (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :session)) 5 "a session")
+      ;; The task's session is made at submission: what says it started is
+      ;; the worktree it works in.
+      (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :branch))
+                         5 "the task's worktree")
       (setq task (harness-tasks-test-task id))
       (should (string-prefix-p "task/change-the-shared-file-" (plist-get task :branch)))
       (should (equal "main" (plist-get task :base)))
       (should (file-directory-p (plist-get task :worktree)))
+      (harness-test-wait
+       (lambda () (equal (plist-get task :worktree)
+                         (plist-get (harness-call 'session/get (plist-get task :session)) :cwd)))
+       5 "the session to move into the worktree")
       (let ((session (harness-call 'session/get (plist-get task :session))))
         (should (equal (plist-get task :worktree) (plist-get session :cwd)))
         (should (equal (plist-get task :worktree) (plist-get session :worktree)))
@@ -1975,8 +2256,10 @@ commits from call `harness-tasks-test--commit-on-call' on."
       (should (equal "two\n" (harness-tasks-test--main-text root)))
       (should (plist-get (harness-tasks-test-task id) :merged))
       (should (string-match-p "Merge branch" (harness-tasks-test--git root "log" "-1" "--format=%s")))
-      (should (cl-find harness-tasks--merge-session-name (harness-call 'session/list)
-                       :key (lambda (s) (plist-get s :name)) :test #'equal))
+      ;; The merge went into the main checkout itself: no session was made
+      ;; to stand behind it, only the task's own.
+      (should (equal (list (plist-get task :session))
+                     (mapcar (lambda (s) (plist-get s :id)) (harness-call 'session/list))))
       ;; Its record is in the main repository's git directory, out of every
       ;; working tree: neither the checkout the merge went into nor the
       ;; task's worktree shows it.
@@ -2015,7 +2298,7 @@ commits from call `harness-tasks-test--commit-on-call' on."
             '((:type tool-call :id "h1" :name "hang" :input (:path "x")) (:type done :stop-reason end-turn)))
            (id (harness-tasks-test-submit "Change the shared file"))
            (sid nil))
-      (harness-test-wait (lambda () (setq sid (plist-get (harness-tasks-test-task id) :session))) 5 "a session")
+      (setq sid (harness-tasks-test-session-id id))
       (harness-test-wait (lambda () (harness-tasks-test--node sid (lambda (n) (eq (plist-get n :kind) 'tool-call))))
                          5 "the hanging tool call")
       (harness-tasks-test--die)
@@ -2127,7 +2410,8 @@ the task's own session.  With one slot, the next task starts meanwhile."
   (harness-tasks-test-with-git
     (let* ((id (plist-get (harness-call 'task/submit root "Change the shared file" (list :main-tree t)) :id))
            (task nil))
-      (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :session)) 5 "a session")
+      (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :started))
+                         5 "the task to start")
       (setq task (harness-tasks-test-task id))
       (should (harness-json-true-p (plist-get task :main-tree)))
       (should-not (plist-get task :worktree))
@@ -2141,11 +2425,9 @@ the task's own session.  With one slot, the next task starts meanwhile."
       (setq task (harness-tasks-test-task id))
       (should-not (plist-get task :merged))
       (should-not (plist-get task :worktree-removed))
-      ;; The agent's commit landed on main itself: no merge, no merge session.
+      ;; The agent's commit landed on main itself: no merge at all.
       (should (equal "change shared" (string-trim (harness-tasks-test--git root "log" "-1" "--format=%s"))))
-      (should (equal "two\n" (harness-tasks-test--main-text root)))
-      (should-not (cl-find harness-tasks--merge-session-name (harness-call 'session/list)
-                           :key (lambda (s) (plist-get s :name)) :test #'equal)))))
+      (should (equal "two\n" (harness-tasks-test--main-text root))))))
 
 (ert-deftest harness-tasks-git-refined-main-tree-task-stays-at-the-root ()
   "A backlog task that needs the main tree keeps its session at the root and merges nothing."
@@ -2990,6 +3272,164 @@ A session the user has to answer for comes first: the queue waits too."
         (should (equal "three\n" (harness-tasks-test--main-text root)))
         (should (= 2 harness-tasks-test--calls))))))
 
+;;;; Work that goes on outside the session's turn
+;;
+;; A module can start work for a session that runs without its turn (a
+;; supervisor plan's workers) and report it through `agent/outstanding'.
+;; A turn that ends cleanly while some is outstanding does not finish
+;; the task: it stays active and says what it waits for.
+
+(defvar harness-tasks-test--outstanding nil
+  "What the test's `agent/outstanding' handler reports, a text, or nil for nothing.")
+
+(defun harness-tasks-test--report-outstanding (value _session-id)
+  "`agent/outstanding' handler: add `harness-tasks-test--outstanding' to VALUE."
+  (if harness-tasks-test--outstanding
+      (concat (and value (concat value "; ")) harness-tasks-test--outstanding)
+    value))
+
+(defun harness-tasks-test--waiting (id)
+  "Return what task ID waits for, or nil."
+  (plist-get (harness-tasks-test-task id) :waiting))
+
+(ert-deftest harness-tasks-outstanding-work-keeps-the-task-active ()
+  "A task whose turn ends while work it started runs stays active, and says why.
+It is not in review, not done and not merging.  Once nothing runs, the
+turn after that ends as usual, in review, and the wait is gone."
+  (harness-tasks-test-with
+    (let ((harness-tasks-require-verification t)
+          (harness-tasks-test--outstanding "2 workers running")
+          (reviews nil)
+          (changes nil))
+      (harness-add-filter 'agent/outstanding #'harness-tasks-test--report-outstanding)
+      (harness-on 'task/review (lambda (task) (push (plist-get task :id) reviews)))
+      (harness-on 'task/changed
+                  (lambda (task) (push (list (plist-get task :state) (plist-get task :waiting)) changes)))
+      (let* ((id (harness-tasks-test-submit "fix the parser"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (harness-test-wait (lambda () (harness-tasks-test--waiting id)) 5 "the task to wait")
+        (harness-test-wait (lambda () (not (harness-call 'agent/running sid))) 5 "the turn to end")
+        (let ((task (harness-tasks-test-task id)))
+          (should (equal "2 workers running" (plist-get task :waiting)))
+          (should (eq 'active (plist-get task :state)))
+          (should (eq 'active (plist-get task :column)))
+          (should-not (plist-get task :outcome))
+          (should-not (plist-get task :finished))
+          (should-not (plist-get task :merge-status)))
+        ;; Nothing takes it further, however long it waits, and the other
+        ;; changes to the task leave the wait alone.
+        (harness-tasks--schedule)
+        (harness-call 'task/set-recap id :recap "Fixing the parser")
+        (accept-process-output nil 0.2)
+        (should (eq 'active (harness-tasks-test-state id)))
+        (should (equal "2 workers running" (harness-tasks-test--waiting id)))
+        (should-not reviews)
+        ;; The work is done: the session takes a turn and, with nothing
+        ;; outstanding, ends it in review.
+        (setq harness-tasks-test--outstanding nil)
+        (harness-call 'agent/prompt sid "The workers are done." (harness-tasks--from-harness))
+        (harness-tasks-test-wait-state id 'review)
+        (let ((task (harness-tasks-test-task id)))
+          (should-not (plist-get task :waiting))
+          (should-not (plist-member task :waiting))
+          (should (eq 'review (plist-get task :column)))
+          (should (eq 'end-turn (plist-get task :outcome)))
+          (should (plist-get task :finished)))
+        (should (equal (list id) reviews))
+        ;; The wait ended when the state next changed, and never came back.
+        (let* ((seen (reverse changes))
+               (first (cl-position-if #'cadr seen)))
+          (should first)
+          (should (equal '(active "2 workers running") (nth first seen)))
+          (should (equal '(review nil) (car (last seen))))
+          (should-not (cl-some #'cadr (nthcdr (1+ (cl-position-if-not #'cadr seen :start first)) seen))))))))
+
+(ert-deftest harness-tasks-outstanding-work-is-asked-each-time-a-turn-ends ()
+  "A task goes on waiting for as long as work is outstanding, whatever it is.
+A turn that ends again with some left puts the text it says then."
+  (harness-tasks-test-with
+    (let ((harness-tasks-require-verification t)
+          (harness-tasks-test--outstanding "3 workers running"))
+      (harness-add-filter 'agent/outstanding #'harness-tasks-test--report-outstanding)
+      (let* ((id (harness-tasks-test-submit "fix the parser"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (harness-test-wait (lambda () (harness-tasks-test--waiting id)) 5 "the task to wait")
+        (harness-test-wait (lambda () (not (harness-call 'agent/running sid))) 5 "the turn to end")
+        (setq harness-tasks-test--outstanding "1 worker running")
+        (harness-call 'agent/prompt sid "One is done." (harness-tasks--from-harness))
+        (harness-test-wait (lambda () (equal "1 worker running" (harness-tasks-test--waiting id))) 5
+                           "the new text")
+        (harness-test-wait (lambda () (not (harness-call 'agent/running sid))) 5 "the turn to end")
+        (should (eq 'active (harness-tasks-test-state id)))
+        (should (equal "1 worker running" (harness-tasks-test--waiting id)))))))
+
+(ert-deftest harness-tasks-outstanding-work-holds-back-done-too ()
+  "Without review a task is done when nothing is outstanding, not before."
+  (harness-tasks-test-with
+    (let ((harness-tasks-require-verification nil)
+          (harness-tasks-test--outstanding "a worker running"))
+      (harness-add-filter 'agent/outstanding #'harness-tasks-test--report-outstanding)
+      (let* ((id (harness-tasks-test-submit "fix the parser"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (harness-test-wait (lambda () (harness-tasks-test--waiting id)) 5 "the task to wait")
+        (harness-test-wait (lambda () (not (harness-call 'agent/running sid))) 5 "the turn to end")
+        (should (eq 'active (harness-tasks-test-state id)))
+        (should-not (plist-get (harness-tasks-test-task id) :finished))
+        (setq harness-tasks-test--outstanding nil)
+        (harness-call 'agent/prompt sid "It is done." (harness-tasks--from-harness))
+        (harness-tasks-test-wait-state id 'done)
+        (should-not (plist-member (harness-tasks-test-task id) :waiting))))))
+
+(ert-deftest harness-tasks-outstanding-work-is-no-reason-to-hide-a-stop ()
+  "A turn that stops some other way than cleanly needs the user, as it always did.
+Nor does a write-up wait: it is not the work."
+  (harness-tasks-test-with
+    (let ((harness-tasks-require-verification t)
+          (harness-tasks-test--outstanding "2 workers running"))
+      (harness-add-filter 'agent/outstanding #'harness-tasks-test--report-outstanding)
+      (let ((harness-provider-demo-script-override
+             '((:type text :delta "oops") (:type done :stop-reason error :error "boom"))))
+        (let ((id (harness-tasks-test-submit "will fail")))
+          (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :outcome)) 5 "an outcome")
+          (should (eq 'active (harness-tasks-test-state id)))
+          (should (eq 'needs-input (plist-get (harness-tasks-test-task id) :column)))
+          (should-not (harness-tasks-test--waiting id))))
+      (let ((harness-provider-demo-script-override
+             `((:type text :delta ,harness-tasks-test-write-up) (:type done :stop-reason end-turn))))
+        (let ((id (harness-tasks-test-refine "the parser chokes on nested quotes")))
+          (harness-tasks-test-wait-state id 'pending)
+          (should (plist-get (harness-tasks-test-task id) :backlog))
+          (should-not (harness-tasks-test--waiting id)))))))
+
+(declare-function harness-tasks--on-turn-ended "harness-tasks")
+
+(ert-deftest harness-tasks-outstanding-work-does-not-hold-up-a-merge ()
+  "A turn for the merge queue, resolving a conflict, is not the work's end.
+The merge decides what happens to the task, whatever is outstanding."
+  (harness-tasks-test-with
+    (let* ((id (harness-tasks-test-submit "fix the parser"))
+           (sid (plist-get (harness-tasks-test-task id) :session)))
+      (harness-tasks-test-wait-state id 'done)
+      (harness-tasks--set id :state 'merging :merge-status 'conflict)
+      (harness-add-filter 'agent/outstanding #'harness-tasks-test--report-outstanding)
+      (let ((harness-tasks-test--outstanding "2 workers running"))
+        (harness-tasks--on-turn-ended sid 'end-turn))
+      (let ((task (harness-tasks-test-task id)))
+        (should (eq 'merging (plist-get task :state)))
+        (should (eq 'conflict (plist-get task :merge-status)))
+        (should-not (plist-member task :waiting))))))
+
+(ert-deftest harness-tasks-outstanding-work-needs-the-agent-method ()
+  "Without the method that tells what is outstanding, a task finishes as usual."
+  (harness-tasks-test-with
+    (let ((harness-tasks-require-verification t)
+          (harness-tasks-test--outstanding "2 workers running"))
+      (harness-add-filter 'agent/outstanding #'harness-tasks-test--report-outstanding)
+      (harness-unregister-method 'agent/outstanding)
+      (let ((id (harness-tasks-test-submit "fix the parser")))
+        (harness-tasks-test-wait-state id 'review)
+        (should-not (harness-tasks-test--waiting id))))))
+
 ;;;; Handing the finished work in
 ;;
 ;; `hand_in' is how a task's session says it is done: the tool records
@@ -3051,24 +3491,28 @@ The refusal says what to fix, and the task keeps working."
     (harness-test-load-module 'tools-handin)
     (let* ((id (harness-tasks-test-submit "fix the parser"))
            (sid (plist-get (harness-tasks-test-task id) :session)))
-      (dolist (case '((:summary "" :evidence ("x"))
-                      (:summary "done" :evidence nil)
-                      (:summary "done" :evidence (1))
-                      (:summary "done" :evidence ((:image "/no/such/file.png")))
-                      (:summary "done" :evidence ((:image "shared.txt")))
-                      (:summary "done" :evidence ((:tool_call "nope")))
-                      (:summary "done" :evidence ((:code "x" :note "y")))))
-        (let* ((input (pcase case
-                        (`(:evidence (1)) (list :summary "done" :evidence (list (list :note "x" :caption 7))))
-                        (`(:evidence nil) (list :summary "done" :evidence nil))
-                        (`(:evidence ((:image ,p))) (list :summary "done" :evidence (list (list :image p))))
-                        (`(:evidence ((:tool_call ,c))) (list :summary "done" :evidence (list (list :tool_call c))))
-                        (`(:evidence ((:code "x" :note "y"))) (list :summary "done" :evidence (list (list :code "x" :note "y"))))
-                        (`(:summary "" :evidence _) (list :summary "" :evidence (list "x")))
-                        (`(:summary "done" :evidence _) (list :summary "done" :evidence (list "x")))))
-              (result (harness-test-await (harness-call-async 'tools/execute sid (list :id "bad" :name "hand_in" :input input)))))
+      (with-temp-file (expand-file-name "notes.txt" (plist-get (harness-call 'session/get sid) :cwd))
+        (insert "not a picture\n"))
+      ;; Each refusal is a tool result that says what to fix, not a Lisp
+      ;; error; the broken items are listed, one per line.
+      (pcase-dolist (`(,input ,says)
+                     '(((:summary "" :evidence ("x")) "\\`hand_in needs summary: ")
+                       ((:summary "done" :evidence nil) "\\`hand_in needs evidence: ")
+                       ((:summary "done" :evidence (1)) "\\`Evidence 1 is neither text nor an object\\'")
+                       ((:summary "done" :evidence ((:image "/no/such/file.png")))
+                        "\\`Evidence 1: /no/such/file.png not found")
+                       ((:summary "done" :evidence ((:image "notes.txt"))) "\\`Evidence 1: notes.txt is not an image")
+                       ((:summary "done" :evidence ((:tool_call "nope"))) "\\`Evidence 1: no tool call nope in this session")
+                       ((:summary "done" :evidence ((:code "x" :note "y")))
+                        "\\`Evidence 1 gives code and note: give it exactly one of")
+                       ((:summary "done" :evidence ((:image "a.png" :tool_call "c1")))
+                        "\\`Evidence 1 gives image and tool_call: ")
+                       ((:summary "done" :evidence ("fine" 1 (:note " ")))
+                        "\\`Evidence 2 is neither text nor an object\nEvidence 3 says nothing: ")))
+        (let ((result (harness-test-await (harness-call-async 'tools/execute sid (list :id "bad" :name "hand_in" :input input)))))
           (should (plist-get result :is-error))
-          (should-not (plist-get result :end-turn))))
+          (should-not (plist-get result :end-turn))
+          (should (string-match-p says (plist-get result :content)))))
       (should-not (plist-get (harness-tasks-test-task id) :report))
       (should (eq 'active (harness-tasks-test-state id))))))
 
@@ -3093,6 +3537,35 @@ The refusal says what to fix, and the task keeps working."
         (should (equal "echo: hello" (plist-get item :output)))
         (should (equal "the command" (plist-get item :caption)))
         (should (string-match-p "hello" (plist-get item :input)))))))
+
+(ert-deftest harness-tasks-hand-in-copies-the-child-session ()
+  "A referenced spawn_agent call carries the sub-agent it started into
+the report, so the report links the same session the chat does; a call
+that started none carries no key."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-handin)
+    (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (kid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-call 'session/append sid
+                    (list :kind 'tool-call :tool "spawn_agent" :call-id "sp1"
+                          :title "Sub-agent: kid" :input (list :name "kid" :prompt "go")
+                          :meta (list :model "demo:scripted" :child-id kid)))
+      (harness-call 'session/append sid (list :kind 'tool-result :call-id "sp1" :output "done"))
+      (let ((item (harness-tools-handin--call sid "sp1" 1)))
+        (should (equal "tool-call" (plist-get item :kind)))
+        (should (equal kid (plist-get item :child-id)))
+        (should (equal "done" (plist-get item :output))))
+      ;; The result's own name counts too, when the call carries none.
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "bash" :call-id "b1"
+                                              :title "Bash" :input '(:command "true")))
+      (harness-call 'session/append sid (list :kind 'tool-result :call-id "b1" :output "ok"
+                                              :meta (list :child-id kid)))
+      (should (equal kid (plist-get (harness-tools-handin--call sid "b1" 1) :child-id)))
+      ;; A call that started no session carries no key.
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "bash" :call-id "b2"
+                                              :title "Bash" :input '(:command "true")))
+      (harness-call 'session/append sid (list :kind 'tool-result :call-id "b2" :output "ok"))
+      (should-not (plist-get (harness-tools-handin--call sid "b2" 1) :child-id)))))
 
 (ert-deftest harness-tasks-hand-in-offered-to-task-sessions-only ()
   "Only a task's session is offered hand_in; the catalogue keeps every tool."
@@ -3219,6 +3692,213 @@ hand_in, the report says so instead of standing on the first round's."
           (should (= 1700000000.0 (plist-get task :recap-at)))
           (should (= 2 (plist-get task :recap-turns)))
           (should (= 3 (plist-get task :recap-tools))))))))
+
+;;;; Queue suspension and return to pending
+
+(defun harness-tasks-test--queue-suspended-p (&optional cwd)
+  "Whether the queue of CWD's project is suspended, as `task/settings' says."
+  (harness-json-true-p (plist-get (harness-call 'task/settings (or cwd default-directory)) :queue-suspended)))
+
+(defun harness-tasks-test--idle (id)
+  "Non-nil once task ID's session has no turn running."
+  (let ((sid (plist-get (harness-tasks-test-task id) :session)))
+    (and sid (not (harness-call 'agent/running sid)))))
+
+(ert-deftest harness-tasks-suspend-queue-holds-back-starts ()
+  "A suspended queue starts nothing on its own; an explicit start still works.
+Resuming starts the waiting tasks again, up to the limit."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-tasks-max-running 1) a b c d)
+      (setq a (harness-tasks-test-submit "first")
+            b (harness-tasks-test-submit "second"))
+      (should (eq 'active (harness-tasks-test-state a)))
+      (should (eq 'pending (harness-tasks-test-state b)))
+      (harness-call 'task/suspend-queue default-directory)
+      (should (harness-tasks-test--queue-suspended-p))
+      ;; The slot the first task frees starts nothing: the queue is suspended.
+      (harness-tasks-test-wait-state a 'done)
+      (should (eq 'pending (harness-tasks-test-state b)))
+      ;; Its session waits with it -- every task has one from submission --
+      ;; and no work was begun.
+      (should-not (plist-get (harness-tasks-test-task b) :started))
+      ;; An explicit start goes ahead all the same.
+      (harness-call 'task/start b)
+      (should (eq 'active (harness-tasks-test-state b)))
+      (harness-tasks-test-wait-state b 'done)
+      ;; Two more wait; resuming starts one, the limit's worth.
+      (setq c (harness-tasks-test-submit "third")
+            d (harness-tasks-test-submit "fourth"))
+      (should (eq 'pending (harness-tasks-test-state c)))
+      (harness-call 'task/resume-queue default-directory)
+      (should-not (harness-tasks-test--queue-suspended-p))
+      (should (eq 'active (harness-tasks-test-state c)))
+      (should (eq 'pending (harness-tasks-test-state d)))
+      (dolist (id (list c d)) (harness-tasks-test-wait-state id 'done)))))
+
+(ert-deftest harness-tasks-suspended-queue-is-kept-per-project ()
+  "Which queues are suspended is kept, per project, across a restart."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((other (harness-test-temp-dir)) id)
+      (let ((harness-tasks-max-running 0))
+        (harness-call 'task/suspend-queue default-directory)
+        (setq id (harness-tasks-test-submit "waits for the queue"))
+        (should (eq 'pending (harness-tasks-test-state id))))
+      (harness-tasks-test--restart)
+      ;; The suspension came back with the records, and it is this
+      ;; project's: the other project's queue runs.
+      (should (harness-tasks-test--queue-suspended-p))
+      (should-not (harness-tasks-test--queue-suspended-p other))
+      (should (eq 'pending (harness-tasks-test-state id)))
+      ;; Resuming starts the task it held back.
+      (harness-call 'task/resume-queue default-directory)
+      (should-not (harness-tasks-test--queue-suspended-p))
+      (harness-tasks-test-wait-state id 'done))))
+
+(ert-deftest harness-tasks-returned-tasks-lead-their-priority-queue ()
+  "A returned task starts ahead of the never-started ones of its priority.
+Higher priority still goes first, and among returned tasks the first
+returned starts first."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-agent--cancel-grace 0.05)
+          (harness-tasks-max-running 0)
+          (harness-provider-demo-script-override '((:type wait :seconds 30)))
+          first second returned1 returned2 high)
+      (setq first (harness-tasks-test-submit "never started, first")
+            second (harness-tasks-test-submit "never started, second")
+            returned1 (harness-tasks-test-submit "returned, first")
+            returned2 (harness-tasks-test-submit "returned, second")
+            high (harness-tasks-test-submit-at "never started, high" "high"))
+      ;; Two start by hand (no slot is free for the queue) and are
+      ;; returned, in order.
+      (dolist (id (list returned1 returned2)) (harness-call 'task/start id))
+      (should (eq 'active (harness-tasks-test-state returned1)))
+      (harness-call 'task/return-to-pending returned1)
+      (harness-call 'task/return-to-pending returned2)
+      (dolist (id (list returned1 returned2))
+        (should (eq 'pending (harness-tasks-test-state id)))
+        (harness-test-wait (lambda () (harness-tasks-test--idle id)) 5 "its turn to stop"))
+      ;; A quick script for the runs that follow.
+      (setq harness-provider-demo-script-override
+            '((:type text :delta "Done.\n") (:type done :stop-reason end-turn)))
+      (let ((harness-tasks-max-running 1))
+        (harness-tasks--schedule)
+        ;; The high one goes first; then the returned ones, in the order
+        ;; they were returned; then the never-started ones, oldest first.
+        (should (eq 'active (harness-tasks-test-state high)))
+        (should (eq 'pending (harness-tasks-test-state returned1)))
+        (dolist (id (list first second returned1 returned2 high)) (harness-tasks-test-wait-state id 'done))
+        (should (equal (list high returned1 returned2 first second)
+                       (harness-tasks-test-start-order (list first second returned1 returned2 high))))))))
+
+(ert-deftest harness-tasks-returned-task-keeps-a-message-until-it-starts ()
+  "A message to a returned task is kept while its queue is suspended.
+The task stays pending and its prompt is not rewritten; the message
+goes to its session with the start, when the queue resumes."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-agent--cancel-grace 0.05)
+          (harness-tasks-max-running 1)
+          (harness-provider-demo-script-override '((:type wait :seconds 30))))
+      (let ((id (harness-tasks-test-submit "first")))
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :session)) 5 "a session")
+        (let ((sid (plist-get (harness-tasks-test-task id) :session)))
+          (harness-call 'task/suspend-queue default-directory)
+          (harness-call 'task/return-to-pending id)
+          (harness-test-wait (lambda () (harness-tasks-test--idle id)) 5 "its turn to stop")
+          (harness-call 'task/prompt id "also update the docs")
+          (let ((task (harness-tasks-test-task id)))
+            (should (eq 'pending (plist-get task :state)))
+            (should (equal "first" (plist-get task :prompt)))
+            (should (equal "also update the docs" (plist-get (car (plist-get task :queued)) :text)))
+            (should (equal sid (plist-get task :session))))
+          ;; Resuming starts it and delivers the message with the start.
+          (setq harness-provider-demo-script-override
+                '((:type text :delta "Carried on.\n") (:type done :stop-reason end-turn)))
+          (harness-call 'task/resume-queue default-directory)
+          (harness-test-wait
+           (lambda ()
+             (and (harness-tasks-test--node sid (lambda (n) (equal "also update the docs" (plist-get n :content))))
+                  (harness-tasks-test--node sid (lambda (n) (equal harness-tasks--paused-message (plist-get n :content))))))
+           10 "the kept message and the carry-on")
+          (should-not (plist-get (harness-tasks-test-task id) :queued))
+          (harness-tasks-test-wait-state id 'done))))))
+
+(ert-deftest harness-tasks-reject-waits-while-the-queue-is-suspended ()
+  "Sending a task back while the queue is suspended puts it back in pending.
+Its feedback is kept, and goes to its session when the queue starts it."
+  (harness-tasks-test-with
+    (harness-tasks-test--settle)
+    (let ((harness-tasks-require-verification t)
+          (harness-provider-demo-script-override
+           '((:type text :delta "Done.\n") (:type done :stop-reason end-turn))))
+      (let ((id (harness-tasks-test-submit "fix the parser")))
+        (harness-tasks-test-wait-state id 'review)
+        (let ((sid (plist-get (harness-tasks-test-task id) :session)))
+          (harness-call 'task/suspend-queue default-directory)
+          (harness-call 'task/reject id "handle tabs too")
+          (let ((task (harness-tasks-test-task id)))
+            (should (eq 'pending (plist-get task :state)))
+            (should (plist-get task :returned))
+            (should (equal sid (plist-get task :session)))
+            (should (equal "handle tabs too" (plist-get (car (last (plist-get task :feedback))) :text)))
+            (should (equal (harness-tasks--reject-text "handle tabs too")
+                           (plist-get (car (plist-get task :queued)) :text))))
+          ;; It waits: the queue is suspended.
+          (should (eq 'pending (harness-tasks-test-state id)))
+          (harness-call 'task/resume-queue default-directory)
+          (harness-test-wait
+           (lambda () (harness-tasks-test--node sid (lambda (n) (equal (harness-tasks--reject-text "handle tabs too")
+                                                                       (plist-get n :content)))))
+           10 "the kept feedback")
+          (harness-tasks-test-wait-state id 'review))))))
+
+(ert-deftest harness-tasks-returned-task-carries-on-in-its-session ()
+  "A returned task keeps its session, branch and worktree.
+Starting it again has that session carry on where it stopped, told so
+by the harness; no new session or worktree is made."
+  (harness-tasks-test-with-git
+    (harness-tasks-test--settle)
+    (let ((harness-agent--cancel-grace 0.05)
+          (harness-tasks-max-running 1)
+          (harness-provider-demo-script-override '((:type wait :seconds 30))))
+      (let ((id (harness-tasks-test-submit "Change the shared file")))
+        ;; Every task has its session from submission; wait for the work to
+        ;; have begun in it, in a worktree.
+        (harness-test-wait (lambda () (plist-get (harness-tasks-test-task id) :worktree)) 5 "a worktree")
+        (let* ((task (harness-tasks-test-task id))
+               (sid (plist-get task :session))
+               (worktree (plist-get task :worktree))
+               (branch (plist-get task :branch))
+               (sessions (length (harness-call 'session/list))))
+          (should (file-directory-p worktree))
+          (harness-call 'task/return-to-pending id)
+          (let ((stopped (harness-tasks-test-task id)))
+            (should (eq 'pending (plist-get stopped :state)))
+            (should (plist-get stopped :returned))
+            (should (equal sid (plist-get stopped :session)))
+            (should (equal branch (plist-get stopped :branch)))
+            (should (equal worktree (plist-get stopped :worktree))))
+          (harness-test-wait (lambda () (harness-tasks-test--idle id)) 5 "its turn to stop")
+          ;; It waits: the return itself started nothing.
+          (should (eq 'pending (harness-tasks-test-state id)))
+          ;; Starting it again carries on in the same session and worktree.
+          (setq harness-provider-demo-script-override
+                '((:type tool-call :id "c1" :name "change_shared" :input (:text "two"))
+                  (:type text :delta "Carried on.\n")
+                  (:type done :stop-reason end-turn)))
+          (harness-call 'task/start id)
+          (should (eq 'active (harness-tasks-test-state id)))
+          (should (equal sid (plist-get (harness-tasks-test-task id) :session)))
+          (should (= sessions (length (harness-call 'session/list))))
+          (should (equal worktree (plist-get (harness-call 'session/get sid) :cwd)))
+          (harness-test-wait
+           (lambda () (harness-tasks-test--node sid (lambda (n) (equal harness-tasks--paused-message (plist-get n :content)))))
+           10 "the carry-on message")
+          (harness-tasks-test-wait-state id 'done)
+          (should (equal "two\n" (harness-tasks-test--main-text root))))))))
 
 (provide 'harness-tasks-test)
 ;;; harness-tasks-test.el ends here

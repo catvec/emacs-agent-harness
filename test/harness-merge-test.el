@@ -707,5 +707,227 @@ conflicts, stays where the merge expects it, until the merge is through."
       (should (equal elsewhere (plist-get (harness-call 'session/get parent) :cwd)))
       (should (equal elsewhere (plist-get (harness-call 'session/get helper) :cwd))))))
 
+;;;; Nested merges: a worker's branch into a worktree session, and that
+;;;; session's branch into the main checkout.
+
+(defun harness-merge-test--session-in (base root branch name parent-id)
+  "Add a worktree on BRANCH under BASE and a session NAME in it, of PARENT-ID.
+Return the session's id."
+  (let ((path (harness-merge-test--worktree base root branch)))
+    (plist-get (harness-call 'session/create :cwd path :worktree path :parent-id parent-id
+                             :kind 'fork :model "demo:scripted" :name name)
+               :id)))
+
+(defun harness-merge-test--cwd (sid)
+  "Return the working directory of session SID."
+  (plist-get (harness-call 'session/get sid) :cwd))
+
+(defun harness-merge-test--text (dir name)
+  "Return the contents of NAME under DIR."
+  (with-temp-buffer (insert-file-contents (expand-file-name name dir)) (buffer-string)))
+
+(defun harness-merge-test--steering (sid)
+  "Wait for and return the steering message the merge queue sent SID."
+  (harness-test-wait
+   (lambda () (cl-find-if (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes sid)))
+   10 "the steering message")
+  (cl-find-if (lambda (n) (eq (plist-get n :kind) 'user)) (harness-call 'session/nodes sid)))
+
+(ert-deftest harness-merge-nested-worker-task-main ()
+  "A worker's branch reaches main through its task's worktree, in order.
+The task's branch waits in the main queue while the worker's merge into
+its worktree is not through yet; one queue, the same events, at both
+levels."
+  (harness-merge-test-with
+    (let* ((root-key (directory-file-name (expand-file-name root)))
+           (task (harness-merge-test--session-in base root "task" "tasker" parent))
+           (task-wt (harness-merge-test--cwd task))
+           (worker (harness-merge-test--session-in base root "worker" "worker" task))
+           (worker-wt (harness-merge-test--cwd worker))
+           (finished nil) (started nil))
+      (harness-merge-test--write worker-wt "worker.txt" "from the worker\n")
+      (harness-merge-test--commit worker-wt "worker work" "worker.txt")
+      (harness-merge-test--write task-wt "task.txt" "from the task\n")
+      (harness-merge-test--commit task-wt "task work" "task.txt")
+      (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
+      (harness-on 'merge/started (lambda (c p) (push (list c p) started)))
+      ;; Nothing merges into the task yet: its own queue holds.
+      (puthash task "someone" harness-merge--locks)
+      (should (= 1 (harness-call 'merge/enqueue worker task)))
+      ;; The task's branch is queued into the main checkout, and waits.
+      (should (= 1 (harness-call 'merge/enqueue task root)))
+      (should (eq 'queued (harness-call 'merge/status task)))
+      (let ((item (car (harness-call 'merge/queue root-key))))
+        (should (equal task (plist-get item :child)))
+        (should (plist-get item :waiting))
+        (should (null (plist-get item :parent))))
+      (accept-process-output nil 0.3)
+      (should-not started)
+      (should-not (file-exists-p (expand-file-name "task.txt" root)))
+      ;; Let the task's queue through: the worker merges, then the task.
+      (remhash task harness-merge--locks)
+      (harness-run-soon #'harness-merge--pump task)
+      (harness-test-wait (lambda () (= 2 (length finished))) 20 "both merges")
+      (should (equal (list (list worker task 'merged) (list task root-key 'merged))
+                     (reverse finished)))
+      (should (= 2 (length started)))
+      (should (file-exists-p (expand-file-name "worker.txt" task-wt)))
+      (should (file-exists-p (expand-file-name "task.txt" root)))
+      (should (file-exists-p (expand-file-name "worker.txt" root)))
+      (should (null (harness-call 'merge/queue root-key)))
+      (should (null (gethash root-key harness-merge--locks)))
+      ;; Each level's view keeps the merge it finished.
+      (let ((view (harness-call 'merge/view root-key)))
+        (should (= 1 (length view)))
+        (should (eq 'merged (plist-get (car view) :status)))
+        (should (equal "tasker" (plist-get (car view) :name))))
+      (let ((view (harness-call 'merge/view task)))
+        (should (eq 'merged (plist-get (car view) :status)))
+        (should (equal "worker" (plist-get (car view) :name)))))))
+
+(ert-deftest harness-merge-nested-conflict-in-the-worktree ()
+  "A conflict at the inner level is resolved in the worker's worktree, and
+the task's branch then carries the resolution to main.  The task's own
+merge upward waits while the conflict is unresolved."
+  (harness-merge-test-with
+   (let* ((harness-merge-conflict-resolver 'child)
+          (root-key (directory-file-name (expand-file-name root)))
+          (task (harness-merge-test--session-in base root "task" "tasker" parent))
+          (task-wt (harness-merge-test--cwd task))
+          (worker (harness-merge-test--session-in base root "worker" "worker" task))
+          (worker-wt (harness-merge-test--cwd worker))
+          (conflicts nil) (finished nil)
+          (task-head nil))
+     ;; Both sides change README, so the worker cannot merge into the task.
+     (harness-merge-test--write worker-wt "README" "worker version\n")
+     (harness-merge-test--commit worker-wt "worker edit" "README")
+     (harness-merge-test--write task-wt "README" "task version\n")
+     (harness-merge-test--commit task-wt "task edit" "README")
+     (setq task-head (string-trim (harness-merge-test--git task-wt "rev-parse" "HEAD")))
+     (harness-on 'merge/conflict (lambda (c p files) (push (list c p files) conflicts)))
+     (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
+     (harness-call 'merge/enqueue worker task)
+     (harness-test-wait (lambda () conflicts) 10 "the conflict")
+     (should (equal (list worker task '("README")) (car conflicts)))
+     (should (eq 'conflict (harness-call 'merge/status worker)))
+     ;; The task's worktree is untouched, its lock free, its own merge
+     ;; upward queued but waiting for the worker.
+     (should (equal task-head (string-trim (harness-merge-test--git task-wt "rev-parse" "HEAD"))))
+     (should (null (gethash task harness-merge--locks)))
+     (should (= 1 (harness-call 'merge/enqueue task root)))
+     (should (plist-get (car (harness-call 'merge/queue root-key)) :waiting))
+     (should (eq 'conflict (plist-get (car (harness-call 'merge/view task)) :status)))
+     ;; The worker was steered to bring the task's commit into its worktree.
+     (let ((user (harness-merge-test--steering worker)))
+       (should (string-match-p "- README" (plist-get user :content)))
+       (should (string-match-p (regexp-quote (concat "git merge " (substring task-head 0 12)))
+                               (plist-get user :content)))
+       (should (equal (harness-sender-system "merge queue") (harness-node-sender user))))
+     (harness-test-wait (lambda () (eq 'idle (plist-get (harness-call 'session/get worker) :status)))
+                        10 "the worker to settle")
+     ;; Resolve it there, as the merge queue asked: the merge conflicts,
+     ;; as it must, and its conflicts are resolved and committed.
+     (ignore-errors (harness-merge-test--git worker-wt "merge" "-q" task-head))
+     (harness-merge-test--write worker-wt "README" "resolved version\n")
+     (harness-merge-test--git worker-wt "add" "README")
+     (harness-merge-test--git worker-wt "commit" "-q" "--no-edit")
+     (let ((r (harness-merge-test--merge-done worker)))
+       (should-not (plist-get r :is-error)))
+     (harness-test-wait (lambda () (= 2 (length finished))) 20 "both levels")
+     (should (equal (list (list worker task 'merged) (list task root-key 'merged))
+                    (reverse finished)))
+     (should (equal "resolved version\n" (harness-merge-test--text task-wt "README")))
+     (should (equal "resolved version\n" (harness-merge-test--text root "README")))
+     (should (= 2 (length (split-string (harness-merge-test--git root "log" "-1" "--format=%P") " " t))))
+     (should (null (harness-call 'merge/queue root-key))))))
+
+(ert-deftest harness-merge-view-shows-each-state ()
+  "The view a chat renders from lists a target's live merges, then what it
+finished recently, with the states, names and reasons it shows."
+  (harness-merge-test-with
+    (let* ((wt2 (harness-merge-test--worktree base root "second"))
+           (child2 (plist-get (harness-call 'session/create :cwd wt2 :worktree wt2 :parent-id parent
+                                            :kind 'fork :model "demo:scripted" :name "second")
+                              :id))
+           (finished nil))
+      (harness-merge-test--write wt "one.txt" "1\n")
+      (harness-merge-test--commit wt "one" "one.txt")
+      (harness-merge-test--write wt2 "two.txt" "2\n")
+      (harness-merge-test--commit wt2 "two" "two.txt")
+      (harness-on 'merge/finished (lambda (c _p s) (push (cons c s) finished)))
+      ;; Held: both stay queued.
+      (puthash parent "someone" harness-merge--locks)
+      (harness-call 'merge/enqueue child parent)
+      (harness-call 'merge/enqueue child2 parent)
+      (let ((view (harness-call 'merge/view parent)))
+        (should (equal (list child child2) (mapcar (lambda (i) (plist-get i :child)) view)))
+        (should (equal '(1 2) (mapcar (lambda (i) (plist-get i :position)) view)))
+        (should (equal '("fixer" "second") (mapcar (lambda (i) (plist-get i :name)) view)))
+        (should (equal '(queued queued) (mapcar (lambda (i) (plist-get i :status)) view)))
+        (should-not (cl-some (lambda (i) (plist-get i :waiting)) view)))
+      (remhash parent harness-merge--locks)
+      (harness-run-soon #'harness-merge--pump parent)
+      (harness-test-wait (lambda () (= 2 (length finished))) 20 "both merges")
+      ;; Both merged: the live queue is empty and the view keeps them,
+      ;; newest first, with the time they finished.
+      (should (null (harness-call 'merge/queue parent)))
+      (let ((view (harness-call 'merge/view parent)))
+        (should (equal (list child2 child) (mapcar (lambda (i) (plist-get i :child)) view)))
+        (should (equal '(merged merged) (mapcar (lambda (i) (plist-get i :status)) view)))
+        (should (numberp (plist-get (car view) :finished)))
+        (should (null (plist-get (car view) :reason))))
+      ;; A merge that fails shows with its reason.
+      (harness-merge-test--write wt "uncommitted.txt" "u\n")
+      (harness-call 'merge/enqueue child parent)
+      (harness-test-wait (lambda () (= 3 (length finished))) 10 "the failed merge")
+      (let ((view (harness-call 'merge/view parent)))
+        (should (= 3 (length view)))
+        (should (eq 'failed (plist-get (car view) :status)))
+        (should (string-match-p "commit your changes" (plist-get (car view) :reason)))
+        (should (equal "fixer" (plist-get (car view) :name)))))))
+
+(ert-deftest harness-merge-hand-in-waits-for-merges-into-the-session ()
+  "A session does not hand in while a merge into its worktree is queued,
+merging or in conflict; once it is through, the same call goes."
+  (harness-merge-test-with
+    (harness-test-load-module 'tools-handin)
+    (let* ((reports (make-hash-table :test 'equal))
+           (task (harness-merge-test--session-in base root "task" "tasker" parent))
+           (task-wt (harness-merge-test--cwd task))
+           (worker (harness-merge-test--session-in base root "worker" "worker" task))
+           (worker-wt (harness-merge-test--cwd worker)))
+      (harness-defmethod task/for-session (session-id)
+        "The task of SESSION-ID, nil for none."
+        (and (equal session-id task) (list :id "t-1" :session task)))
+      (harness-defmethod task/hand-in (id report)
+        "Record REPORT as task ID's."
+        (puthash id report reports) t)
+      (harness-merge-test--write worker-wt "worker.txt" "w\n")
+      (harness-merge-test--commit worker-wt "worker work" "worker.txt")
+      (harness-merge-test--write task-wt "task.txt" "t\n")
+      (harness-merge-test--commit task-wt "task work" "task.txt")
+      ;; Hold the task's queue, so the worker's merge stays queued.
+      (puthash task "someone" harness-merge--locks)
+      (harness-call 'merge/enqueue worker task)
+      (let ((r (harness-test-await
+                (harness-call 'tools/execute task
+                              (list :id "c1" :name "hand_in"
+                                    :input (list :summary "Done." :evidence (list (list :note "the work"))))))))
+        (should (plist-get r :is-error))
+        (should (string-match-p "a merge into this session's worktree is not through yet: worker (queued)"
+                                (plist-get r :content)))
+        (should (string-match-p "then hand in" (plist-get r :content)))
+        (should (= 0 (hash-table-count reports))))
+      ;; The merge through, the same call goes.
+      (remhash task harness-merge--locks)
+      (harness-run-soon #'harness-merge--pump task)
+      (harness-test-wait (lambda () (null (harness-call 'merge/status worker))) 20 "the worker's merge")
+      (let ((r (harness-test-await
+                (harness-call 'tools/execute task
+                              (list :id "c2" :name "hand_in"
+                                    :input (list :summary "Done." :evidence (list (list :note "the work"))))))))
+        (should-not (plist-get r :is-error))
+        (should (equal "Done." (plist-get (gethash "t-1" reports) :summary)))))))
+
 (provide 'harness-merge-test)
 ;;; harness-merge-test.el ends here

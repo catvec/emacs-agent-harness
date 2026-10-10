@@ -71,6 +71,10 @@ on, and RET opens one in its project (`harness-sessions-waiting')."
           (t (call-interactively #'harness-switch-session)))))
 
 (defun harness-ui-notify--segment (count icon face help)
+  "Return the notifier's segment for COUNT sessions, or nil when there are none.
+It shows ICON and COUNT in FACE, with HELP as its tooltip, and a click
+on it runs `harness-ui-notify-show-waiting'.  The blocked count shows
+in `harness-notify-flash-face' while it flashes."
   (when (> count 0)
     (propertize (format " %s%d" (harness-ui-icon icon) count)
                 'face (if (and harness-ui-notify--flashing (eq face 'harness-notify-blocked-face))
@@ -106,6 +110,7 @@ on, and RET opens one in its project (`harness-sessions-waiting')."
     (force-mode-line-update t)))
 
 (defun harness-ui-notify--flash ()
+  "Make the blocked count flash for a second and a half."
   (setq harness-ui-notify--flashing t)
   (when harness-ui-notify--flash-timer (cancel-timer harness-ui-notify--flash-timer))
   (setq harness-ui-notify--flash-timer
@@ -114,6 +119,7 @@ on, and RET opens one in its project (`harness-sessions-waiting')."
                                (harness-ui-notify-refresh)))))
 
 (defun harness-ui-notify--on-sessions-changed ()
+  "Refresh the notifier once the sessions stop changing for a tenth of a second."
   (harness-debounce 'harness-ui-notify 0.1 #'harness-ui-notify-refresh))
 
 ;;;###autoload
@@ -135,6 +141,7 @@ on, and RET opens one in its project (`harness-sessions-waiting')."
     (force-mode-line-update t)))
 
 (defun harness-ui-notify--init ()
+  "Turn on `harness-notify-mode', the notifier in every mode line."
   (harness-notify-mode 1))
 
 (harness-define-module 'ui-notify

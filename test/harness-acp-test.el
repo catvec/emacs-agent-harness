@@ -336,6 +336,82 @@ extension data, for a client that reads chunks rather than nodes."
                                :queued)))
       (should (= 1 (length (plist-get (harness-call 'session/get sid) :queue)))))))
 
+(ert-deftest harness-acp-reaches-the-supervisor-and-seed-plugins ()
+  "The methods of the supervisor and cache-seed plugins are callable as
+_harness/NAME, and clients hear the events they follow them by: a
+supervisor's change, and a module-owned setting of a session."
+  (harness-acp-test-with
+    ;; Any method of the two plugins, and only theirs.
+    (dolist (name '("supervisor/plan" "supervisor/status" "seed/start" "seed/status"))
+      (should (harness-acp--extension-allowed-p name)))
+    (dolist (name '("supervisors/plan" "supervise/x" "seeds/start" "seed" "store/save"))
+      (should-not (harness-acp--extension-allowed-p name)))
+    (should (memq 'session/ext-changed harness-acp--forwarded-events))
+    (should (memq 'supervisor/changed harness-acp--forwarded-events))
+    (harness-register-method 'supervisor/ping (lambda (x) (list :pong x)))
+    (harness-register-method 'seed/ping (lambda () "seeded"))
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn))
+           (listed (plist-get (plist-get (harness-test-await (harness-acp-initialize conn)) :_harness) :methods))
+           (heard (lambda (event)
+                    (cl-find-if (lambda (m) (and (equal (car m) "_harness/event")
+                                                 (equal event (plist-get (cadr m) :event))))
+                                harness-acp-test-messages))))
+      (should (member "supervisor/ping" listed))
+      (should (member "seed/ping" listed))
+      (should (member "session/set-ext" listed))
+      (should (equal '(:pong "x") (harness-acp-test-request conn "_harness/supervisor/ping" '(:x "x"))))
+      (should (equal "seeded" (harness-acp-test-request conn "_harness/seed/ping" nil)))
+      ;; A plugin's own event.
+      (harness-emit 'supervisor/changed sid)
+      (harness-test-wait (lambda () (funcall heard "supervisor/changed")) 5 "supervisor/changed")
+      (should (equal (list sid) (plist-get (cadr (funcall heard "supervisor/changed")) :args)))
+      ;; The setting a module keeps for a session, set over ACP.
+      (let ((s (harness-acp-test-request conn "_harness/session/set-ext"
+                                         (list :id sid :key "supervisor" :value t))))
+        (should (equal t (plist-get (plist-get s :ext) :supervisor))))
+      (harness-test-wait (lambda () (funcall heard "session/ext-changed")) 5 "session/ext-changed")
+      (should (equal (list sid ":supervisor" t)
+                     (plist-get (cadr (funcall heard "session/ext-changed")) :args))))))
+
+(defun harness-acp-test-events (event)
+  "Return the args of each `_harness/event' EVENT the primary connection got, oldest first."
+  (let (out)
+    (dolist (m harness-acp-test-messages out)
+      (when (and (equal (car m) "_harness/event")
+                 (equal event (plist-get (cadr m) :event)))
+        (push (plist-get (cadr m) :args) out)))))
+
+(ert-deftest harness-acp-local-extra-methods-and-events ()
+  "A module of the user's own offers clients its methods and events.
+Its methods are callable as `_harness/NAME' once their prefix is in
+`harness-acp-extra-method-prefixes', and its events reach clients once
+they are in `harness-acp-extra-events'.  `harness/modules' lists every
+module."
+  (harness-acp-test-with
+    (let ((conn (harness-acp-test-connect))
+          (harness-acp-extra-method-prefixes harness-acp-extra-method-prefixes)
+          (harness-acp-extra-events harness-acp-extra-events))
+      (harness-register-method 'hello/greet
+                               (lambda (name)
+                                 (harness-emit 'hello/greeted name)
+                                 (format "hello, %s" name)))
+      (should (= -32601 (car (harness-acp-test-error conn "_harness/hello/greet" '(:name "you")))))
+      (push "hello/" harness-acp-extra-method-prefixes)
+      (should (equal "hello, you" (harness-acp-test-request conn "_harness/hello/greet" '(:name "you"))))
+      (should (member "hello/greet" (harness-acp--extension-methods)))
+      (should-not (harness-acp-test-events "hello/greeted"))
+      (push 'hello/greeted harness-acp-extra-events)
+      (should (equal "hello, me" (harness-acp-test-request conn "_harness/hello/greet" '(:name "me"))))
+      (harness-test-wait (lambda () (harness-acp-test-events "hello/greeted")) 5 "the event")
+      (should (equal '(("me")) (harness-acp-test-events "hello/greeted")))
+      (let ((modules (harness-acp-test-request conn "_harness/harness/modules" nil)))
+        (should (equal (mapcar (lambda (m) (symbol-name (harness-module-name m))) (harness-modules))
+                       (mapcar (lambda (m) (plist-get m :name)) modules)))
+        (should (equal "ready" (plist-get (cl-find "acp" modules :key (lambda (m) (plist-get m :name))
+                                                   :test #'equal)
+                                          :state)))))))
+
 (defvar harness-provider-demo-script-override)
 
 (ert-deftest harness-acp-local-queue-while-running ()

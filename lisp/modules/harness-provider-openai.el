@@ -597,12 +597,21 @@ sent."
   (cdr (assoc (harness-openai--string level) harness-openai--deepseek-effort-map)))
 
 (defun harness-openai--body (endpoint name request)
-  "Build the chat completions body for model NAME at ENDPOINT from REQUEST."
+  "Build the chat completions body for model NAME at ENDPOINT from REQUEST.
+A request that asks for no thinking with `:no-thinking' says so on the
+wire: `:no-thinking' wins over `:thinking', as it does for the Claude
+provider (`harness-provider-claude--effort'), and a DeepSeek endpoint
+gets `reasoning_effort' \"none\", its off switch.  Without it a model
+whose thinking is on by default spends a short output budget on the
+reasoning and stops at `max-tokens' with no text, as a naming request's
+40 tokens did.  An endpoint with no off switch sends no effort, as
+before."
   (let* ((openrouter (harness-openai--openrouter-p endpoint))
          (deepseek (harness-openai--deepseek-p endpoint))
+         (level (if (plist-get request :no-thinking) "none" (plist-get request :thinking)))
          (effort (if deepseek
-                     (harness-openai--deepseek-effort (plist-get request :thinking))
-                   (harness-openai--effort (plist-get request :thinking))))
+                     (harness-openai--deepseek-effort level)
+                   (harness-openai--effort level)))
          (tools (harness-openai--tools (plist-get request :tools)))
          (body (list :model name
                      :messages (harness-openai--messages request endpoint)

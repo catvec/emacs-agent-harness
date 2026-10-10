@@ -104,6 +104,14 @@ before, so no other test sees it."
 ;; Tests of repository stores bind it in repositories of their own.
 (setq harness-tasks-store-in-repository nil)
 
+(defvar harness-tools-dev--processes-function)
+(defvar harness-tools-dev--first-sweep)
+;; No test looks for the machine's harness instances, nor sweeps them on
+;; a timer: only an instance a test started itself may be stopped.
+;; Tests of the sweep give it the instances to find.
+(setq harness-tools-dev--processes-function #'ignore
+      harness-tools-dev--first-sweep nil)
+
 (add-hook 'kill-emacs-hook
           (lambda () (ignore-errors (delete-directory harness-test-state-root t)))
           ;; Appended, so the modules' exit flushes write here first.
@@ -227,8 +235,9 @@ session's sandbox, where $HOME is the sandbox's own empty home."
 (defun harness-test-harness-checkout ()
   "Make a directory that looks like a checkout of the harness.
 harness.el and an executable scripts/dev.sh are there; the script
-appends its cwd, arguments and HARNESS_DEV_SOCKET to invocation.log in
-the checkout and exits 0.  Return the directory."
+appends its cwd, arguments, HARNESS_DEV_SOCKET, HARNESS_DEV_OWNER and
+HARNESS_DEV_STATE to invocation.log in the checkout and exits 0.
+Return the directory."
   (let* ((dir (file-name-as-directory (make-temp-file "harness-checkout-" t)))
          (scripts (expand-file-name "scripts/" dir))
          (script (expand-file-name "dev.sh" scripts)))
@@ -240,13 +249,16 @@ the checkout and exits 0.  Return the directory."
               "printf 'cwd=%s\\n' \"$PWD\" >> \"$PWD/invocation.log\"\n"
               "printf 'args=%s\\n' \"$*\" >> \"$PWD/invocation.log\"\n"
               "printf 'socket=%s\\n' \"$HARNESS_DEV_SOCKET\" >> \"$PWD/invocation.log\"\n"
+              "printf 'owner=%s\\n' \"$HARNESS_DEV_OWNER\" >> \"$PWD/invocation.log\"\n"
+              "printf 'state=%s\\n' \"$HARNESS_DEV_STATE\" >> \"$PWD/invocation.log\"\n"
               "exit 0\n"))
     (set-file-modes script #o755)
     dir))
 
 (defun harness-test-dev-invocations (dir)
   "Return the fake dev loop's invocations recorded in DIR, oldest first.
-Each invocation is an alist of the script's fields (cwd, args, socket)."
+Each invocation is an alist of the script's fields (cwd, args, socket,
+owner, state)."
   (let ((log (expand-file-name "invocation.log" dir)))
     (when (file-exists-p log)
       (with-temp-buffer
