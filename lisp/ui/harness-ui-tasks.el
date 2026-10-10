@@ -42,13 +42,17 @@
 ;; the board then shows only the tasks it is about
 ;; (harness-ui-tasks-search.el, through `harness-ui-tasks-filter').
 ;;
-;; Priority: a task is low, medium (the default) or high priority.  While
-;; the project's slots are full (`harness-tasks-max-running'), a higher
-;; priority starts first, oldest first among equals.  + and - on a card
-;; raise and lower its priority, the card's facts say high or low, and
-;; the button beside the Submit / Refine toggle sets the next task's.  In
-;; bulk mode (B) a priority button on the settings line gives every
-;; current task one; the other bulk settings leave priorities alone.
+;; Priority: a task is low, medium (the default) or high priority, and
+;; that priority is its session's -- every task has its session from
+;; submission, holding the level, so the board and the queues the
+;; task's work waits in serve it by the same thing.  While the project's
+;; slots are full (`harness-tasks-max-running'), a higher priority starts
+;; first, oldest first among equals.  + and - on a card raise and lower
+;; its priority (the change goes to the task's session), the card's
+;; facts say high or low, and the button beside the Submit / Refine
+;; toggle sets the next task's.  In bulk mode (B) a priority button on
+;; the settings line gives every current task one; the other bulk
+;; settings leave priorities alone.
 ;;
 ;; Review can be turned off (V, or the [Review: on] switch in the header
 ;; line): finished tasks then merge and complete by themselves, and Ready
@@ -325,12 +329,15 @@ it is by default, until they say it is off."
   (or (plist-get task :verified-at) (plist-get task :finished) 0))
 
 (defconst harness-ui-tasks--priorities '("low" "medium" "high")
-  "The priorities a task may have, lowest first, as the harness sends them.
-Waiting tasks start by priority, the oldest first among equals
-\(`harness-priority-levels', the levels the priority plugin owns).")
+  "The levels a task's priority may be, lowest first, as the harness sends them.
+A task's priority is its session's (`harness-priority-of-task'), and
+the levels are the priority plugin's (`harness-priority-levels').
+Waiting tasks start by priority, the oldest first among equals.")
 
 (defun harness-ui-tasks--priority (task)
-  "TASK's priority: \"low\", \"medium\" or \"high\"; medium when it has none."
+  "TASK's priority: \"low\", \"medium\" or \"high\"; medium when it has none.
+TASK is a view, whose `:priority' the harness computes from the task's
+session (`harness-priority-of-task')."
   (let* ((value (plist-get task :priority))
          (name (if (and value (symbolp value)) (symbol-name value) value)))
     (if (member name harness-ui-tasks--priorities) name "medium")))
@@ -1648,7 +1655,8 @@ It is the priority button of bulk editing (\\<harness-ui-tasks-board-map>\\[harn
 running, pending and blocked tasks, as the other bulk settings do.
 Interactively it asks which; an empty answer changes nothing, and
 neither does quitting.  It is the only way a bulk edit changes
-priorities: the other settings leave each task its own.  The next task
+priorities: the other settings leave each task's alone.  A task's
+priority is its session's, which `task/set-all' changes; the next task
 keeps its own priority too, as a priority only means something against
 the others'."
   (interactive)
@@ -2331,10 +2339,19 @@ turn's end and the budget events also change what its budgets show.")
 (defun harness-ui-tasks--on-event (event args)
   "Follow EVENT with ARGS on every board; reload them after related events.
 A task event updates the boards it concerns, and a task ready for
-review is announced when `harness-ui-tasks--notify-review' is non-nil."
+review is announced when `harness-ui-tasks--notify-review' is non-nil.
+A task's priority is its session's, so a board with a card of the
+session whose `:ext' changed reloads: the task's view, which carries
+the level the card shows, is asked for again."
   (when (member event harness-ui-tasks--refresh-events)
     (mapc #'harness-ui-tasks--refresh-soon (harness-ui-tasks--buffers)))
   (pcase event
+    ("session/ext-changed"
+     (when (member (format "%s" (cadr args)) '(":priority" "priority"))
+       (dolist (b (harness-ui-tasks--buffers))
+         (when (cl-some (lambda (task) (equal (plist-get task :session) (car args)))
+                        (buffer-local-value 'harness-ui-tasks--tasks b))
+           (harness-ui-tasks--refresh-soon b)))))
     ("task/changed"
      (let ((task (car args)))
        (dolist (b (harness-ui-tasks--buffers))
@@ -2893,21 +2910,49 @@ A new task is refined for the backlog when REFINE is non-nil."
   (harness-ui-tasks--request-then "_harness/task/start" (list :id (plist-get (harness-ui-tasks--task) :id))
                                   "Starting the task"))
 
+(defun harness-ui-tasks--priority-shown (id priority)
+  "Show task ID at PRIORITY at once, the reload behind it confirming.
+A priority is the task's session's, and the harness announces the
+change as the session's (`session/ext-changed'), which reloads the
+board; until that lands, the card would still read the old level and a
+second `+' would send it again.  The task's view in the board is
+changed here, so the card moves as it used to."
+  (when (harness-ui-tasks--find id)
+    (setq harness-ui-tasks--tasks
+          (mapcar (lambda (other)
+                    (if (equal id (plist-get other :id))
+                        (plist-put (copy-sequence other) :priority priority)
+                      other))
+                  harness-ui-tasks--tasks))
+    (harness-ui-tasks--render)))
+
 (defun harness-ui-tasks--shift-priority (step)
   "Move the priority of the task at point STEP places: 1 up, -1 down.
-Priorities are low, medium and high (`harness-ui-tasks--priorities');
-the harness starts waiting tasks by priority, then oldest first, and
-Pending shows them in that order, so the card moves with it."
+Priorities are low, medium and high (`harness-ui-tasks--priorities'),
+and a task's priority is its session's (`harness-priority-of-task'):
+the change goes to the task's session, where the board's queue and the
+queues the task's work waits in read it.  The harness starts waiting
+tasks by priority, then oldest first, and Pending shows them in that
+order, so the card moves with it."
   (let* ((task (harness-ui-tasks--task))
+         (id (plist-get task :id))
+         (sid (plist-get task :session))
          (rank (harness-ui-tasks--priority-rank task))
-         (priority (nth (+ rank step) harness-ui-tasks--priorities)))
+         (priority (nth (+ rank step) harness-ui-tasks--priorities))
+         (buffer (current-buffer)))
     (when (eq (harness-ui-tasks--column task) 'done)
       (user-error "This task is completed; priority orders the tasks still to start"))
     (unless (and priority (>= (+ rank step) 0))
       (user-error "It is %s priority already" (harness-ui-tasks--priority task)))
-    (harness-ui-tasks--request-then "_harness/task/set-priority"
-                                    (list :id (plist-get task :id) :priority priority)
-                                    "Changing the priority")
+    (unless sid
+      (user-error "Task %s has no session, and a task's priority is its session's" id))
+    (harness-ui-tasks--request-then "_harness/priority/set"
+                                    (list :sessionId sid :priority priority)
+                                    "Changing the priority"
+                                    (lambda (_result)
+                                      (when (buffer-live-p buffer)
+                                        (with-current-buffer buffer
+                                          (harness-ui-tasks--priority-shown id priority)))))
     (message "%s is %s priority now" (harness-ui-tasks--quote (harness-ui-tasks--title task)) priority)))
 
 (defun harness-ui-tasks-raise-priority ()
