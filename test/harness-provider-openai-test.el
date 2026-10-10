@@ -315,6 +315,41 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
       (should (equal (cdr case) (plist-get (harness-openai-test--last-request-json)
                                             :reasoning_effort))))))
 
+(ert-deftest harness-provider-openai-no-thinking-in-the-body ()
+  "A request that asks for no thinking says so on the wire.
+`:no-thinking' wins over `:thinking', as it does for Claude."
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                                          "[DONE]")))))
+    ;; DeepSeek's thinking is on by default, so its off switch must go
+    ;; out, with or without a level beside it; naming and recap send a
+    ;; 40/60-token budget that the reasoning would otherwise eat whole.
+    ;; The dialect follows the host, so a plain-OpenAI-flavoured endpoint
+    ;; pointed at DeepSeek counts too.
+    (dolist (endpoint (list harness-openai-test-deepseek-endpoint
+                            harness-openai-test-deepseek-host-endpoint))
+      (dolist (extra '(() (:thinking "high")))
+        (harness-openai-test--complete
+         endpoint
+         (append (copy-sequence extra)
+                 '(:model "testdeepseek:deepseek-flash" :no-thinking t :max-tokens 40
+                   :messages ((:role user :content ((:type "text" :text "hi")))))))
+        (let ((body (harness-openai-test--last-request-json)))
+          (should (equal "none" (plist-get body :reasoning_effort)))
+          (should-not (plist-get body :reasoning))
+          (should (= 40 (plist-get body :max_tokens))))))
+    ;; An endpoint with no off switch sends no effort, as it always did:
+    ;; OpenRouter takes `:reasoning', plain OpenAI `:reasoning_effort'.
+    (dolist (endpoint (list harness-openai-test-openai-endpoint harness-openai-test-endpoint))
+      (harness-openai-test--complete
+       endpoint
+       '(:model "test:model" :no-thinking t :max-tokens 40
+         :messages ((:role user :content ((:type "text" :text "hi"))))))
+      (let ((body (harness-openai-test--last-request-json)))
+        (should-not (plist-get body :reasoning_effort))
+        (should-not (plist-get body :reasoning))))))
+
 (ert-deftest harness-provider-openai-deepseek-replays-reasoning-content ()
   ;; DeepSeek's thinking mode rejects a tool-using history whose assistant
   ;; messages omit reasoning_content, so the recorded thinking goes back.
