@@ -4368,8 +4368,19 @@ outlives the turn that made it, and counts for `agent/outstanding` as
 settles -- except after a turn the user cancelled, which drops it
 (`harness-tools-sessions--on-turn-ended`); its optional
 `timeout_seconds` wakes the session with a "still waiting" report
-instead.  Nothing here grants permissions: permission requests and
-permission modes stay with the user, and `task_submit` uses the task
+instead.  The subscriber is not the only look at a wait: while any
+runs, the safety re-check (`harness-tools-sessions-wait-recheck`) walks
+them every few seconds too, so a change none of those events announced
+-- a subscriber lost to a reload, a session settled by a module of its
+own, a finish that happened before the wait was made -- cannot leave a
+registration while its condition already holds; and a `changed` wait is
+met at once by an idle or closed session, whose own work is over and
+from which nothing new of its own is coming -- a wait on a sub-agent
+that has already finished is such a session, and since a registration
+may have no timeout at all, asking it for a change that can never come
+would leave it waiting forever.  Nothing here grants permissions:
+permission requests and permission modes stay with the user, and
+`task_submit` uses the task
 defaults.  Nor does `session_control` answer the harness's question
 about a cold prompt cache (its payload's `:cowboy`): what to spend on
 another session's conversation is the user's call.  The task tools need the `tasks` module.
