@@ -164,7 +164,11 @@ collects the sockets that are."
         (should (equal (harness-tools-dev-socket dir) (cdr (assoc "socket" (car calls)))))
         ;; The instance knows the Emacs it belongs to: here, this one.
         (should (equal (number-to-string (harness-tools-dev--owner))
-                       (cdr (assoc "owner" (car calls)))))))))
+                       (cdr (assoc "owner" (car calls)))))
+        ;; Its state is its own, whatever this Emacs inherited: an
+        ;; instance opening another passes its own HARNESS_DEV_STATE on.
+        (should (equal (harness-tools-dev-state dir (harness-tools-dev-socket dir))
+                       (cdr (assoc "state" (car calls)))))))))
 
 (ert-deftest harness-tools-dev-instances-belong-to-the-users-emacs ()
   "An instance belongs to the Emacs the harness process serves, else this one.

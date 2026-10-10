@@ -214,15 +214,21 @@ instances running, for the harness started again to look after."
   "Run DIR's scripts/dev.sh with ARGS; return a promise of the result.
 TIMEOUT bounds the run, in seconds (default `harness-tools-dev-timeout').
 HARNESS_DEV_SOCKET names the checkout's instance, so every call of a
-checkout drives the same Emacs.  HARNESS_DEV_OWNER names the Emacs the
-instance belongs to (`harness-tools-dev--owner'), which the instance
-watches: it exits once that Emacs is gone."
-  (harness-run-command (cons (expand-file-name harness-tools-dev--script dir) args)
-                       :cwd dir
-                       :timeout (or timeout harness-tools-dev-timeout)
-                       :name "harness-dev"
-                       :env `(("HARNESS_DEV_SOCKET" . ,(harness-tools-dev-socket dir))
-                              ("HARNESS_DEV_OWNER" . ,(number-to-string (harness-tools-dev--owner))))))
+checkout drives the same Emacs.  HARNESS_DEV_STATE is its state
+directory (`harness-tools-dev-state'), given rather than left to
+scripts/dev.sh, which keeps one it inherits: an instance opened from
+the harness of another one would share that one's state otherwise.
+HARNESS_DEV_OWNER names the Emacs the instance belongs to
+\(`harness-tools-dev--owner'), which the instance watches: it exits
+once that Emacs is gone."
+  (let ((socket (harness-tools-dev-socket dir)))
+    (harness-run-command (cons (expand-file-name harness-tools-dev--script dir) args)
+                         :cwd dir
+                         :timeout (or timeout harness-tools-dev-timeout)
+                         :name "harness-dev"
+                         :env `(("HARNESS_DEV_SOCKET" . ,socket)
+                                ("HARNESS_DEV_STATE" . ,(harness-tools-dev-state dir socket))
+                                ("HARNESS_DEV_OWNER" . ,(number-to-string (harness-tools-dev--owner)))))))
 
 (defun harness-tools-dev--describe (info &optional lifetime)
   "Return what the model is told about the instance INFO.

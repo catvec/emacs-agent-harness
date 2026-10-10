@@ -3638,7 +3638,9 @@ checkout's own live development loop (`scripts/dev.sh start`) with
 `HARNESS_DEV_SOCKET=harness-dev-HASH`, a socket derived from the
 checkout's true name, so the same worktree reuses its instance and two
 worktrees never share one; the instance's state and compiled files stay
-in that checkout's `scripts/.dev/state-SOCKET`.  The result lists the
+in that checkout's `scripts/.dev/state-SOCKET`, passed as
+`HARNESS_DEV_STATE` (dev.sh keeps one it inherits, so an instance
+opened by the harness of another would share that one's state).  The result lists the
 `scripts/dev.sh` commands that drive it (shot, keys, eval, errors,
 reload, stop) prefixed with that socket.  `path` defaults to the
 session's worktree, else its cwd; a directory that is not a checkout

@@ -235,8 +235,9 @@ session's sandbox, where $HOME is the sandbox's own empty home."
 (defun harness-test-harness-checkout ()
   "Make a directory that looks like a checkout of the harness.
 harness.el and an executable scripts/dev.sh are there; the script
-appends its cwd, arguments, HARNESS_DEV_SOCKET and HARNESS_DEV_OWNER to
-invocation.log in the checkout and exits 0.  Return the directory."
+appends its cwd, arguments, HARNESS_DEV_SOCKET, HARNESS_DEV_OWNER and
+HARNESS_DEV_STATE to invocation.log in the checkout and exits 0.
+Return the directory."
   (let* ((dir (file-name-as-directory (make-temp-file "harness-checkout-" t)))
          (scripts (expand-file-name "scripts/" dir))
          (script (expand-file-name "dev.sh" scripts)))
@@ -249,6 +250,7 @@ invocation.log in the checkout and exits 0.  Return the directory."
               "printf 'args=%s\\n' \"$*\" >> \"$PWD/invocation.log\"\n"
               "printf 'socket=%s\\n' \"$HARNESS_DEV_SOCKET\" >> \"$PWD/invocation.log\"\n"
               "printf 'owner=%s\\n' \"$HARNESS_DEV_OWNER\" >> \"$PWD/invocation.log\"\n"
+              "printf 'state=%s\\n' \"$HARNESS_DEV_STATE\" >> \"$PWD/invocation.log\"\n"
               "exit 0\n"))
     (set-file-modes script #o755)
     dir))
@@ -256,7 +258,7 @@ invocation.log in the checkout and exits 0.  Return the directory."
 (defun harness-test-dev-invocations (dir)
   "Return the fake dev loop's invocations recorded in DIR, oldest first.
 Each invocation is an alist of the script's fields (cwd, args, socket,
-owner)."
+owner, state)."
   (let ((log (expand-file-name "invocation.log" dir)))
     (when (file-exists-p log)
       (with-temp-buffer
