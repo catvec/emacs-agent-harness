@@ -973,25 +973,57 @@ effect at AT; `usage/price` uses its answer instead of `:pricing`.  This
 is how the DeepSeek provider follows its peak and off-peak tiers, and it
 keeps the catalogue plain data that crosses the wire unchanged.
 
-Model tiers: `:tiers' names a model (`:cheap' `:balanced' `:frontier'
-are the common ones) by a name, id or regexp, so the harness can pick a
-model on its own - the auto-mode judge asks for the cheap one -
-without the user naming one.  A tier the provider does not name, and a
-provider that declares none, falls back to its own catalogue sorted by
-price: `provider/tier-model MODEL-ID &optional TIER' returns the `:cheap'
-one by default, or nil when the provider is unknown or lists nothing
-(the caller then uses what it has).  MODEL-ID may also be a provider id
-alone.  This is what ties the judge to the
-session's provider.  Claude, DeepSeek, Bedrock and Copilot name their
-tiers; the dynamic OpenAI-compatible catalogues fall back to price.
+Model tiers: `:tiers` names a model for each of the four tiers of
+`harness-model-tiers`, weakest first, so the harness can pick a model on
+its own without the user naming one:
+
+| Tier | For | Claude | DeepSeek |
+|---|---|---|---|
+| `:simple` | small, well-specified work and the harness's own calls (auto-mode judge, naming, summaries, a plan's simple steps) | Haiku | Flash at `low` |
+| `:medium` | everyday work: a plan's medium steps | Sonnet | Flash at `high` |
+| `:hard` | the strongest model the harness picks on its own: what a supervisor plans on, and a step `retry_step` escalates | Opus | Flash at `max` |
+| `:frontier` | the very top model, which the harness never picks on its own: only the user does | Fable | nil (none) |
+
+A tier's value is a model name, id or regexp of the catalogue; a plist
+`(:model MATCHER :thinking LEVEL)`, the model run at that thinking level
+(how DeepSeek makes three tiers of one model); or nil, which says the
+provider has no model for the tier (`harness-provider-tiers-type` is
+the customize type).  The names of old, `:cheap` and `:balanced`, read
+as `:simple` and `:medium`, and a plist saved in them reads its
+`:frontier` as `:hard`, the strongest model the harness picked then
+(`harness-provider-normalize-tiers`).
+
+`provider/tier-model MODEL-ID &optional TIER` returns the `:simple` one
+by default.  A tier the provider does not name, and a provider that
+declares none, falls back to its own catalogue sorted by price (the
+four tiers spread over the priced models, `:simple` the cheapest and
+`:frontier` the dearest); a tier named as nil has no model and no price
+picks one.  It returns nil when the provider is unknown, lists nothing
+or has no model for the tier (the caller then uses what it has);
+`provider/tier-model-info` returns `(MODEL . REASON)`, REASON
+`unknown`, `unlisted` or `none` saying why not, and
+`provider/tier-model-async` waits for a catalogue that answers late.
+MODEL-ID may also be a provider id alone.  This is what ties the judge
+to the session's provider.  Claude, DeepSeek, Bedrock and Copilot name
+their tiers; the dynamic OpenAI-compatible catalogues fall back to
+price unless an endpoint names `:tiers`.  `provider/tier-thinking
+MODEL-ID &optional TIER` returns the level the tier names, nil for a
+tier that names none (Claude's), without reading the catalogue; and
+`provider/fit-thinking MODEL-ID LEVEL` brings a level within the
+`:thinking-levels` of the model (`max` is `high` on a model whose
+strongest is `high`).
+
 The other way round, `provider/model-tier MODEL-ID` says which tier a
-model is in its provider: the one `:tiers' names it for (`:balanced'
-first, then `:frontier', then `:cheap', when several do), else its
-place in the catalogue by price (cheapest third `:cheap', dearest third
-`:frontier'), else `:balanced'.  So Claude's Fable 5.1, which no tier
-names and which costs the most, is `:frontier'.  The fallback module
-maps a model to "its model of similar ability" at another provider
-through the two.
+model is in its provider (`simple`, `medium`, `hard` or `frontier`, a
+symbol without a colon): the one `:tiers` names it for (`:medium`
+first, then `:hard`, `:frontier` and `:simple`, when several do, as
+DeepSeek's three name one model), else its place in the catalogue by
+price (the cheapest sixth simple, the dearest sixth frontier, the
+nearest tier the provider has a model for), else `medium`.  So Claude's
+Fable 5.1 is `frontier` and Opus 5.5 `hard`.  The fallback module maps a
+model to "its model of similar ability" at another provider through the
+two, stepping to the nearest tier the other provider has (below first):
+a Fable session falls back to DeepSeek's hard tier.
 
 The catalogue is cached per provider.  Defining a provider again, as
 every `harness-reload` does, forgets that provider's models and no
@@ -2016,7 +2048,7 @@ non-interactive session it stays a denial.
   `auto` (reads inside the jail allowed; a cheap model,
   `harness-perms-auto-model`, decides the rest with a reason; falls back
   to ask).  The judge model defaults to `auto', which asks the session's
-  own provider for its `:cheap' tier (`provider/tier-model'), so a
+  own provider for its `:simple' tier (`provider/tier-model'), so a
   session on DeepSeek is judged by a DeepSeek model and one on Claude by
   Claude Haiku; a provider without tiers is sorted by price, and the
   session's own model is the last resort.  Naming a model, or nil for
@@ -2670,7 +2702,7 @@ decision log), so it is the same for every provider.  Methods are
 - `insights/narrative &key since until project period refresh` →
   promise of `(:summary :themes :patterns :friction :suggestions :model
   :at :stale)`, or `(:skipped TEXT [:error t])`.  A model of the user's
-  provider (`harness-insights-model`, `auto` the cheap tier of
+  provider (`harness-insights-model`, `auto` the simple tier of
   `harness-model` as configured for the project) gets a digest of the
   REPORT (figures, and each session's kind, name and first request,
   at most `harness-insights--prompt-chars` characters) and answers in
@@ -2699,7 +2731,8 @@ another.  `harness-fallback-models` (global, *Models and services*) is
 the order of preference, first used to last, its first entry the
 preferred provider: each entry a provider id, standing for that
 provider's model of similar ability (the tier of the session's model,
-see `provider/model-tier`), or a model id used as it is.  nil turns the
+see `provider/model-tier`, or the nearest tier that provider has a model
+for, weaker first), or a model id used as it is.  nil turns the
 switching off; running out is still noticed, shown and hinted.
 
 - Marks: a provider that ran out is marked, the whole provider (key
@@ -2750,9 +2783,11 @@ switching off; running out is still noticed, shown and hinted.
   ((:session SID :original MODEL :model MODEL) …) :enabled BOOL)`,
   ENTRY = `(:entry STRING :provider ID :model MODEL-OR-NIL :label
   :provider-label :registered BOOL :mark MARK-OR-NIL :tiers
-  ((:tier "cheap" :model ID :label …) …))`, `:tiers` for a provider
-  entry only.  `fallback/clear KEY` forgets the mark KEY (a provider's
-  forgets its models' marks too); → non-nil when one went.
+  ((:tier "simple" :model ID :label … :out BOOL [:thinking LEVEL]) …))`,
+  `:tiers` for a provider entry only: the model of each of its four
+  tiers, and the thinking level the tier names, if any.
+  `fallback/clear KEY` forgets the mark KEY (a provider's forgets its
+  models' marks too); → non-nil when one went.
   `fallback/mark KEY &rest (:kind :until :reason)` marks by hand.
   Event `fallback/changed` after any mark or session record changes.
 
@@ -2822,7 +2857,7 @@ a request whose own timeout fired are never retried.
     summariser sent the conversation as text costs.  A summary of a
     sample is a brief one.
   - `brief`: a summary of a sample, written by OPTS `:model`, else
-    `harness-compaction-brief-model` (`auto`, the default: the cheap
+    `harness-compaction-brief-model` (`auto`, the default: the simple
     tier of the session's provider, `provider/tier-model`, else the
     session's model; nil: the session's model; or a model named), and
     ending in a note that it was written from only the first and last
@@ -3065,7 +3100,7 @@ so switching to either loses nothing.
   latest one when the conversation has moved on since, as a fork's has),
   each cut to 3000 characters, and the question.  It goes to
   `harness-naming-model` (`auto`, the default: the session provider's
-  `:cheap` tier, `provider/tier-model`) with `:ephemeral t`,
+  `:simple` tier, `provider/tier-model`) with `:ephemeral t`,
   `:no-thinking t`, a 40-token budget and no provider state, so the
   hosted providers answer it apart from the session's conversation (a
   CLI process of its own for Claude Code, a throwaway session for
@@ -3826,7 +3861,7 @@ on them, answered by a cheap model that returns JSON only.
   one more round (`harness-tasks-search--final-text` closes it) and must
   answer then.
 - The model is `harness-tasks-search-model`: `auto` (the default) takes
-  the provider of the task model's `cheap` tier (`provider/tier-model`),
+  the provider of the task model's `simple` tier (`provider/tier-model`),
   nil uses the task model itself, a string forces one.
   `harness-tasks-search-thinking` (nil) is its thinking level, the
   output budget is `harness-tasks-search--max-tokens`, and a call taking
@@ -3952,7 +3987,7 @@ again brings it back as it was.
   longer than `harness-pet--timeout` is cancelled.  Its cost is recorded
   with `usage/record` with `:session nil`, under the project of the
   session it spoke about.
-- Model: `harness-pet-model`, `auto` (the default) the cheap tier
+- Model: `harness-pet-model`, `auto` (the default) the simple tier
   (`provider/tier-model`) of the session's model, or of `harness-model`
   for a hatching or a petting; nil that model itself; a string forces
   one.
@@ -4122,7 +4157,7 @@ starts the session supervising and sets `:ext` `:supervisor-judge` t,
 and a cheap model decides from the opening message: a subscriber of
 `agent/turn-started` sends an ephemeral request beside the session's
 first turn (no tools, no thinking, one word asked;
-`harness-supervisor-judge-model`, the provider's cheap tier by default)
+`harness-supervisor-judge-model`, the provider's simple tier by default)
 holding the message alone, so the turn never waits for it.  A verdict
 starts the session as `supervisor/set` would and writes the note that
 says so, with `supervisor/changed`; a provider error, an unusable word
@@ -4177,18 +4212,20 @@ and a message for the echo area.  Only the user calls it.
   `harness-supervisor-tasks` (the same three, for the sessions of
   tasks, also layered, so a project decides how its tasks start),
   `harness-supervisor-judge-model`
-  (`auto`: the provider's cheap tier, else the session's own model),
+  (`auto`: the provider's simple tier, else the session's own model),
   `harness-supervisor-tiers`
-  (nil: an alist from `mundane`, `standard` or `hard` to a model id),
-  `harness-supervisor-thinking` (`((deepseek . "max"))`: an alist from a
-  provider id to the level its sessions run at while they supervise),
-  `harness-supervisor-worker-thinking` (`((deepseek . "medium"))`: an
-  alist from a provider id to the level workers on its models run at),
+  (nil: an alist from `simple`, `medium` or `hard`, or the names of old
+  `mundane` and `standard`, to a model id or a plist `(:model ID
+  :thinking LEVEL)`, either key left out to keep the default)
   and `harness-supervisor-step-budget` (80), in the settings section
-  "Supervisor mode".
-- Thinking levels.  A session whose provider
-  `harness-supervisor-thinking` names has its thinking raised to that
-  level while it supervises: `session/ext-changed` on `:supervisor` with
+  "Supervisor mode".  The thinking levels are the tiers' own, in the
+  providers' tier settings (section "Model tiers": see provider).
+- Thinking levels go with the tier.  A supervisor plans on the hard
+  tier, so a session whose provider's hard tier names a thinking level
+  (`provider/tier-thinking MODEL 'hard`: DeepSeek's `max`, none for
+  Claude), fitted to its model (`provider/fit-thinking`), has its
+  thinking raised to that level while it supervises:
+  `session/ext-changed` on `:supervisor` with
   a true value calls `session/update` `:thinking LEVEL` `:silent t`,
   remembering what it had in `harness-supervisor--raised` (and the level
   it raised it to), and a false or nil value puts the remembered level
@@ -4198,8 +4235,8 @@ and a message for the echo area.  Only the user calls it.
   This covers a top-level session, a fork that takes its parent's
   setting, a task session (including one `harness-supervisor-tasks` turns
   hands-on right after creation, whose level is put back), and the user
-  turning the mode on or off.  `harness-supervisor--provider-thinking`
-  reads the alist by `harness-model-provider`.
+  turning the mode on or off.  `harness-supervisor--thinking` reads the
+  level.
 - Enforcement, in order.  Filter `agent/tools` (90) offers a supervising
   session only an allowlist: the reading tools (`read_file grep glob
   list_dir file_info`, the `session_*` and `task_*` that only look,
@@ -4271,9 +4308,11 @@ and a message for the echo area.  Only the user calls it.
   `(:id "p-…" :title :summary :node :call-id :created F :steps (STEP…))`,
   `:node` and `:call-id` being the call that submitted it, which every
   fork step forks the supervisor at.  Step: `(:id :title :prompt :tier
-  :reason :context :after (ID…) :model :state :session :attempts N
-  :result :error :worker-model :previous)`: `:tier`
-  mundane|standard|hard, `:context` fork|fresh, `:state`
+  :reason :context :after (ID…) :model :thinking :state :session
+  :attempts N :result :error :worker-model :previous)`: `:tier`
+  simple|medium|hard (hard only after `retry_step`; a plan of old's
+  mundane and standard read as simple and medium), `:thinking` the
+  level its tier names, if any, `:context` fork|fresh, `:state`
   pending|running|done|failed|interrupted|cancelled|superseded,
   `:session` the worker, `:result` its last reply, `:worker-model` the
   model the worker was made for (`retry_step` may change `:model`
@@ -4284,19 +4323,28 @@ and a message for the echo area.  Only the user calls it.
 - `submit_plan summary steps &optional title`, `steps` being `{id, title,
   prompt, tier, reason, context, after}`, is refused whole, every
   problem named, for an id used twice, an `after` naming no step, a
-  cycle, an unknown tier or context or a blank prompt.  Otherwise it
+  cycle, a `hard` or unknown tier (a plan's steps are simple or medium:
+  the supervisor runs on the hard model, and a step that would need it
+  is not broken down enough), an unknown context or a blank prompt.
+  Otherwise it
   records the plan, sets the session's plan (`session/set-plan`) to the
   summary, adds a `plan` node and the hint "Plan submitted: N steps",
   starts the ready steps and ends the turn (`:end-turn t`).
   `retry_step step reason &optional plan tier prompt` runs a failed,
   interrupted or cancelled step again on a new worker (`plan` defaults
-  to the latest that has the step, `tier` moves it to that tier's model,
-  `prompt` adds notes to its prompt) and does not end the turn.  Both are
-  kind meta.
+  to the latest that has the step, `tier` moves it to that tier's model
+  and level, simple, medium or hard, the only way a step reaches hard;
+  `prompt` adds notes to its prompt) and does not end the turn.  Both
+  are kind meta.  No step ever runs on the frontier tier.
 - Models.  A step runs on `harness-supervisor-tiers` for its tier, else
-  the model of the supervisor's provider that ranks alike
-  (`provider/tier-model` cheap, balanced, frontier for mundane,
-  standard, hard), else the supervisor's own, with a hint.
+  the model of the supervisor's provider of the same tier
+  (`provider/tier-model` simple, medium or hard), else the supervisor's
+  own, with a hint.  Its `:thinking` is the level
+  `harness-supervisor-tiers` gives the tier, else the one the worker
+  model's provider names for it (`provider/tier-thinking`: DeepSeek's
+  `low`, `high` and `max`), fitted to the worker's model; nil when
+  neither names one.  The answers of `submit_plan` and `retry_step` and
+  the report of a failed step name it.
 - Workers.  A step whose `:after` steps are all done starts: a worker
   session of kind `subagent` named "Step ID: TITLE" is made, with
   `:context-window-limit` from `harness-tools-agent-context-limit`.  A
@@ -4307,10 +4355,10 @@ and a message for the echo area.  Only the user calls it.
   supervisor's directory, worktree and host, with the supervisor as its
   parent and the supervisor's permission mode, thinking level,
   non-interactive switch and allowed directories; the thinking level is
-  the one `harness-supervisor-worker-thinking` names for the provider of
-  the worker's own model, else the supervisor's own, and the same
-  `:thinking` is passed to a fork so that a raised supervisor level is
-  not inherited.  The worker gets one
+  the step's `:thinking`, else the supervisor's own, fitted to the
+  worker's model (`harness-supervisor--worker-thinking`), and a fork is
+  given it as `:thinking` when it differs from the supervisor's, so that
+  a raised supervisor level is not inherited.  The worker gets one
   `agent/prompt`, from the supervisor session: the `:preamble` of
   `seed/fork`, an opening that tells a fork it is a worker now, the step,
   the attempt before it when the step starts again (below), what the
@@ -4777,7 +4825,7 @@ A recap of a session that is no task's is written here too, by
 `(:text TEXT :at FLOAT)', the task card's recap for a session that is
 a task's, since the card shows it and already keeps it fresh, else the
 one kept for the session in `harness-recap--sessions' with the same
-short call a card's is (the `harness-tasks-recap-model' cheap tier, at
+short call a card's is (the `harness-tasks-recap-model' simple tier, at
 most `harness-tasks-recap-max-tokens' tokens, without thinking unless
 `harness-tasks-recap-thinking' names a level) and the same thresholds
 `harness-tasks-recap-turns', `harness-tasks-recap-seconds' and
@@ -5029,8 +5077,8 @@ three gates before its code runs, in order:
 1. The permission chain decides it as any call of kind exec, in every
    mode (the same approval as bash).
 2. The handler asks a judge model, as the auto-mode permission judge
-   is asked: one `:ephemeral` `provider/complete` on the cheap tier of
-   the session's model (`provider/tier-model MODEL 'cheap`, else the
+   is asked: one `:ephemeral` `provider/complete` on the simple tier of
+   the session's model (`provider/tier-model MODEL 'simple`, else the
    model itself), no tools, no thinking, 200 output tokens and once
    more with 2048 when those ran out, at most 30 s in all.  It reads
    the very code that would run, fenced by a tag of the call's own, and

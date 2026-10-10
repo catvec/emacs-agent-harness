@@ -258,7 +258,7 @@ and the tasks module would prompt the session while a test runs."
       (should-not (harness-recap--maybe sid)))))
 
 (ert-deftest harness-recap-model-choice ()
-  "`auto' takes the provider's cheap tier; a name or nil says which model."
+  "`auto' takes the provider's simple tier; a name or nil says which model."
   (harness-recap-test-with
     (let ((harness-tasks-recap-model 'auto))
       (cl-letf (((symbol-function 'harness-method/provider/tier-model)

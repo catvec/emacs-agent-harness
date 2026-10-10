@@ -391,9 +391,9 @@ Whichever comes first of this, `harness-tasks-recap-turns' and
 
 (defcustom harness-tasks-recap-model 'auto
   "Model that writes task recaps.
-`auto' asks the session's provider for its cheap tier, falling back
+`auto' asks the session's provider for its simple tier, falling back
 to the session's own model; nil uses the session's own model."
-  :type '(choice (const :tag "Provider's cheap tier" auto)
+  :type '(choice (const :tag "Provider's simple tier" auto)
                  (const :tag "The task's model" nil)
                  (string :tag "Model" :names model))
   :group 'harness)

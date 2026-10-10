@@ -449,8 +449,8 @@ an interactive one with nobody able to answer is denied too."
                                     :behavior)))
       (should-not (harness-perms--judge-prompt-reason (list :behavior 'ask))))))
 
-(ert-deftest harness-perms-auto-model-takes-the-providers-cheap-tier ()
-  "`harness-perms-auto-model' `auto' judges with the session provider's cheap tier.
+(ert-deftest harness-perms-auto-model-takes-the-providers-simple-tier ()
+  "`harness-perms-auto-model' `auto' judges with the session provider's simple tier.
 A model named by the provider's `:tiers' is used; an explicit model wins."
   (harness-perms-test--setup :permission-mode 'auto :model "judge2:big")
   (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler #'ignore)
@@ -462,7 +462,7 @@ A model named by the provider's `:tiers' is used; an explicit model wins."
                                 (list :name "small" :pricing '(:input 1.0 :output 5.0))
                                 (list :name "mid" :pricing '(:input 3.0 :output 15.0)))))
       ;; Not the cheapest: the declared tier is what decides.
-      :tiers '(:cheap "mid")
+      :tiers '(:simple "mid")
       :complete (lambda (req)
                   (push req requests)
                   (let ((cb (plist-get req :on-event)))

@@ -74,13 +74,19 @@ Only a request that has not streamed anything yet is retried.")
   "Seconds between reports of how much of a tool call's input has streamed.")
 
 (defcustom harness-bedrock-tiers
-  '(:cheap "haiku" :balanced "sonnet" :frontier "opus")
-  "Model names or id regexps Bedrock names for the common tiers.
-A model of the endpoint's catalogue matching the value is used: the
-cheapest `haiku', say, for `cheap'.  The auto-mode judge runs on the
-`cheap' one.  A tier nothing matches falls back to the catalogue's
-prices."
+  '(:simple "haiku" :medium "sonnet" :hard "opus" :frontier "fable")
+  "Model names or id regexps Bedrock names for the tiers.
+A model of the endpoint's catalogue matching the value is used:
+`haiku', say, for `simple'.  The auto-mode judge runs on the `simple'
+one, and supervisors plan on the `hard' one; the harness never picks
+the `frontier' one on its own (see `harness-model-tiers').  A tier may
+name a thinking level too, as (:model \"sonnet\" :thinking \"high\"),
+or be nil, for no model.  A tier nothing matches falls back to the
+catalogue's prices."
   :type harness-provider-tiers-type :group 'harness)
+
+(harness-renew-default 'harness-bedrock-tiers
+                       '(:cheap "haiku" :balanced "sonnet" :frontier "opus"))
 
 (defconst harness-bedrock--model-defaults-type
   `(repeat

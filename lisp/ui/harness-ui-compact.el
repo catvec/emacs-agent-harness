@@ -7,7 +7,7 @@
 ;; This file compacts one by hand, in any of the kinds, and says first
 ;; what each costs (`compaction/estimate'), at list prices:
 ;;
-;; - a brief summary: a cheap model (by default the cheap tier of the
+;; - a brief summary: a cheap model (by default the simple tier of the
 ;;   session's provider) summarises only the first and last messages,
 ;;   for a few cents however long the conversation, but most of its
 ;;   middle is left out, which the summary says;
