@@ -2832,6 +2832,143 @@ and either change closed the groups the user had opened."
           (should (= 2 (length (harness-ui-chat-test-check-groups buf))))
           (should-not (invisible-p (harness-ui-chat-test-find buf "Now the rest"))))))))
 
+;;;; Jumping between blocks
+
+(ert-deftest harness-ui-chat-jumps-between-messages-and-work ()
+  "M-n and M-p walk the real messages, C-M-n and C-M-p the agent's work.
+The jump lands where the block starts, passes over the blocks it is not
+about, and signals rather than move when the transcript has none left."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        ;; Nothing to jump to yet.
+        (goto-char harness-compose-end)
+        (should-error (harness-chat-previous-message) :type 'user-error)
+        (should-error (harness-chat-next-user-message) :type 'user-error)
+        (should-error (harness-chat-previous-action) :type 'user-error))
+      (harness-ui-chat-test-prompt buf "give me the tour")
+      (with-current-buffer buf
+        (let* ((start (lambda (b) (marker-position (harness-chat-block-start b))))
+               (users (harness-ui-chat-test-blocks buf "user"))
+               (texts (harness-ui-chat-test-blocks buf "assistant"))
+               (thinks (harness-ui-chat-test-blocks buf "thinking"))
+               (calls (harness-ui-chat-test-blocks buf "tool-call")))
+          (should (= 1 (length users)))
+          (should (= 2 (length texts)))
+          (should (= 1 (length thinks)))
+          (should (= 1 (length calls)))
+          ;; Backwards from the box: the agent's last words, its first, then
+          ;; the prompt, thinking and the tool call passed over.
+          (goto-char harness-compose-end)
+          (harness-chat-previous-message)
+          (should (= (point) (funcall start (car (last texts)))))
+          (harness-chat-previous-message)
+          (should (= (point) (funcall start (car texts))))
+          (harness-chat-previous-message)
+          (should (= (point) (funcall start (car users))))
+          (should-error (harness-chat-previous-message) :type 'user-error)
+          ;; The error leaves point where it was.
+          (should (= (point) (funcall start (car users))))
+          ;; Forwards again, one message at a time.
+          (harness-chat-next-message)
+          (should (= (point) (funcall start (car texts))))
+          (harness-chat-next-message 1)
+          (should (= (point) (funcall start (car (last texts)))))
+          (should-error (harness-chat-next-message) :type 'user-error)
+          ;; A negative N moves the other way.
+          (harness-chat-next-message -1)
+          (should (= (point) (funcall start (car texts))))
+          ;; Only the user's side: the prompt, and nothing else.
+          (goto-char harness-compose-end)
+          (harness-chat-previous-user-message)
+          (should (= (point) (funcall start (car users))))
+          (should-error (harness-chat-previous-user-message) :type 'user-error)
+          ;; The agent's work: its tool call, then the thinking before it.
+          (goto-char harness-compose-end)
+          (harness-chat-previous-action)
+          (should (= (point) (funcall start (car calls))))
+          (harness-chat-previous-action)
+          (should (= (point) (funcall start (car thinks))))
+          (should-error (harness-chat-previous-action) :type 'user-error)
+          (harness-chat-next-action)
+          (should (= (point) (funcall start (car calls))))
+          (should-error (harness-chat-next-action) :type 'user-error)
+          ;; Every jump key is bound, and none types into the box.
+          (dolist (key '("M-n" "M-p" "M-N" "M-P" "C-M-n" "C-M-p"))
+            (should (commandp (lookup-key harness-chat-mode-map (kbd key)))))
+          (should (eq (lookup-key harness-chat-mode-map (kbd "M-n")) #'harness-chat-next-message))
+          (should (eq (lookup-key harness-chat-mode-map (kbd "M-N")) #'harness-chat-next-user-message))
+          (should (eq (lookup-key harness-chat-mode-map (kbd "C-M-n")) #'harness-chat-next-action)))))))
+
+(ert-deftest harness-ui-chat-jumps-between-only-the-users-messages ()
+  "M-N and M-P reach the prompt the session started with, however far up."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-ui-chat-test-prompt buf "give me the tour")
+      (harness-ui-chat-test-prompt buf "run the tools")
+      (with-current-buffer buf
+        (let* ((start (lambda (b) (marker-position (harness-chat-block-start b))))
+               (users (harness-ui-chat-test-blocks buf "user")))
+          (should (= 2 (length users)))
+          (should (string-prefix-p "give me the tour"
+                                   (harness-chat-block-content (car users))))
+          (goto-char harness-compose-end)
+          ;; N at once: back past the second prompt, to the first.
+          (harness-chat-previous-user-message 2)
+          (should (= (point) (funcall start (car users))))
+          (should-error (harness-chat-previous-user-message) :type 'user-error)
+          ;; The agent's messages between them are passed over both ways.
+          (harness-chat-next-user-message)
+          (should (= (point) (funcall start (car (last users)))))
+          (should-error (harness-chat-next-user-message) :type 'user-error)
+          ;; A negative N moves the other way.
+          (harness-chat-next-user-message -1)
+          (should (= (point) (funcall start (car users))))
+          (harness-chat-previous-user-message -1)
+          (should (= (point) (funcall start (car (last users))))))))))
+
+(ert-deftest harness-ui-chat-jumps-to-a-coalesced-run-as-one-stop ()
+  "A folded run of tool calls is one stop; opened, its calls are stops."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (let ((harness-provider-demo-script-override
+             `((:type text :delta "Reading around.\n")
+               (:type tool-call :id "r1" :name "read_file" :input (:path "a.el"))
+               (:type tool-call :id "r2" :name "read_file" :input (:path "b.el"))
+               (:type tool-call :id "r3" :name "read_file" :input (:path "c.el"))
+               (:type text :delta "Done reading.")
+               (:type done :stop-reason end-turn))))
+        (harness-ui-chat-test-prompt buf "read things"))
+      (with-current-buffer buf
+        (let* ((start (lambda (b) (marker-position (harness-chat-block-start b))))
+               (group (car (hash-table-values harness-chat--groups)))
+               (calls (harness-ui-chat-test-blocks buf "tool-call")))
+          (should group)
+          (should (= 3 (length calls)))
+          (should (invisible-p (funcall start (car calls))))
+          ;; Its summary line stands for the whole run.
+          (goto-char harness-compose-end)
+          (harness-chat-previous-action)
+          (should (= (point) (marker-position (harness-chat-group-start group))))
+          (should (get-text-property (point) 'harness-chat-group))
+          (should-error (harness-chat-previous-action) :type 'user-error)
+          (should-error (harness-chat-next-action) :type 'user-error)
+          ;; Opened, every call is a stop of its own.
+          (harness-chat-toggle-group (harness-chat-group-id group))
+          (goto-char harness-compose-end)
+          (harness-chat-previous-action)
+          (should (= (point) (funcall start (car (last calls)))))
+          (harness-chat-previous-action)
+          (should (= (point) (funcall start (nth 1 calls))))
+          (harness-chat-previous-action)
+          (should (= (point) (funcall start (car calls))))
+          (should-error (harness-chat-previous-action) :type 'user-error)
+          (harness-chat-next-action)
+          (should (= (point) (funcall start (nth 1 calls)))))))))
+
 ;;;; Images and videos in the transcript
 
 (defun harness-ui-chat-test--video (dir name seconds)
