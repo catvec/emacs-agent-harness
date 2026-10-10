@@ -160,6 +160,7 @@ reader of the layers skips it (see `harness-config--layered-keys').")
      :title "Supervisor mode"
      :doc "Top-level sessions plan and delegate: the session's model investigates and writes a plan, and worker sub-agents on cheaper models carry it out. The supervisor cannot change files itself."
      :keys (harness-supervisor harness-supervisor-tasks harness-supervisor-tiers
+            harness-supervisor-thinking harness-supervisor-worker-thinking
             harness-supervisor-step-budget))
     (spending
      :title "Spending"

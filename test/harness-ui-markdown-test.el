@@ -69,6 +69,20 @@ few tenths of a second as it streamed in."
   (should (string-match-p "still code" (substring-no-properties (harness-ui-markdown-render "```\nstill code"))))
   (should (equal "plain" (substring-no-properties (harness-ui-markdown-render "plain")))))
 
+(ert-deftest harness-md-horizontal-rule-checked-without-regexp ()
+  "A horizontal rule renders as one, and an enormous line of one character does not overflow.
+The regexp that recognized a rule backtracked through a line of a
+hundred thousand characters until the regexp engine gave up with
+\"Stack overflow in regexp matcher\", taking the whole rendering of a
+message with it (2026-10-09)."
+  (dolist (rule '("---" "- - -" "***" "___" "  * * *  "))
+    (should (eq 'harness-md-rule (get-text-property 0 'face (harness-ui-markdown-render rule)))))
+  (dolist (text '("-" "*-*" "a - - -" "    ---" "--*"))
+    (should-not (eq 'harness-md-rule (get-text-property 0 'face (harness-ui-markdown-render text)))))
+  ;; The line that overflowed: rendered as the text it is.
+  (should (stringp (harness-ui-markdown-render (make-string 200000 ?-))))
+  (should (stringp (harness-ui-markdown-render (make-string 200000 ?x)))))
+
 ;; Regression tests for agent answers follow.
 
 (ert-deftest harness-md-list-with-icon-glyphs ()

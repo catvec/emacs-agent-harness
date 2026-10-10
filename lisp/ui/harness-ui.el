@@ -1521,18 +1521,297 @@ session's context window, when the context is shown against it."
                          (harness-format-tokens estimated))
                "")))))
 
+;;;; The context limit behind the token figure
+;;
+;; The token figure ("12.3k/200k") is a button wherever it shows: a
+;; click offers to change the session's context window limit, up to the
+;; model's own window, and to remove the limit so the whole window is
+;; used.  A sub-agent's and a task's window are capped by
+;; `harness-subagent-context-limit' and `harness-tasks-context-limit';
+;; the offer names the cap that holds the session, and never offers
+;; more than the model has -- read from its catalogue entry, never
+;; assumed.
+
+(defun harness-ui-model-context-window (model)
+  "Return the context window of MODEL from the UI's model cache, or nil.
+The cache is what `harness-ui-refresh-models' last fetched; nil when it
+does not hold MODEL, and then the caller reads the window from the
+harness (`provider/model') instead."
+  (let ((entry (and (stringp model) (gethash model harness-ui--models))))
+    (plist-get entry :context-window)))
+
+(defun harness-ui-context-cap-name (session limit &optional full)
+  "Return the name of what caps SESSION's window at LIMIT.
+A sub-agent's cap is `harness-subagent-context-limit', a task's
+`harness-tasks-context-limit'; anything else is a limit set for the
+session itself.  Best effort: the session's kind says it is a
+sub-agent, the tasks module's own cap value says a task's.  FULL adds
+the option's name, as the tooltip shows it; the prompt stays short."
+  (let ((kind (format "%s" (plist-get session :kind))))
+    (cond ((member kind '("subagent" "fork"))
+           (if full "a sub-agent's limit (harness-subagent-context-limit)"
+             "a sub-agent's limit"))
+          ((and (boundp 'harness-tasks-context-limit)
+                (numberp (symbol-value 'harness-tasks-context-limit))
+                (equal limit (symbol-value 'harness-tasks-context-limit)))
+           (if full "a task's limit (harness-tasks-context-limit)"
+             "a task's limit"))
+          (t "a limit set for this session"))))
+
+(defun harness-ui-context-limit-state (session &optional model-window)
+  "Return how SESSION's context window is limited, as a plist.
+MODEL-WINDOW is the model's own window, read from its catalogue entry
+by the caller, or nil when unknown.  The value has:
+  :window        the window in effect now
+  :model-window  the model's own window, when known
+  :limit         the limit set for the session, nil for none
+  :override      the window set for the session outright, nil for none
+  :limited       non-nil when the limit is what holds the window
+  :capped        non-nil when it holds it below the model's own window
+  :cap           what set the limit, when `:limited' (see
+                 `harness-ui-context-cap-name')"
+  (let* ((window (plist-get session :context-window))
+         (limit (plist-get session :context-window-limit))
+         (override (plist-get session :context-window-override))
+         ;; A window set for the session outright wins over any limit.
+         (limited (and (numberp limit) (null override) (equal limit window)))
+         (capped (and limited (numberp model-window) (< limit model-window))))
+    (list :window window
+          :model-window model-window
+          :limit limit
+          :override override
+          :limited limited
+          :capped capped
+          :cap (and limited (harness-ui-context-cap-name session limit)))))
+
+(defun harness-ui-context-limit-help (session &optional model-window)
+  "Return the tooltip of SESSION's token figure, with its context limit.
+MODEL-WINDOW is the model's own window when the caller knows it; the
+tooltip then says when a limit holds the window below the model's, and
+by what.  It ends by naming the key that changes the limit."
+  (let* ((state (harness-ui-context-limit-state session model-window))
+         (limit (plist-get state :limit))
+         (window (plist-get state :window))
+         (model (plist-get state :model-window))
+         (cap (and (plist-get state :limited)
+                   (harness-ui-context-cap-name session limit t)))
+         (sentence
+          (cond
+           ((plist-get state :override)
+            (format "Its window of %s is set for the session itself and wins over any limit."
+                    (harness-format-tokens window)))
+           ((plist-get state :capped)
+            (format "The model's window is %s, but this session is capped at %s by %s."
+                    (harness-format-tokens model) (harness-format-tokens limit) cap))
+           ((plist-get state :limited)
+            (format "This session is capped at %s by %s."
+                    (harness-format-tokens limit) cap))
+           ((and limit model)
+            (format "A limit of %s is set, but the model's own window of %s is what applies."
+                    (harness-format-tokens limit) (harness-format-tokens model)))
+           (limit
+            (format "A limit of %s is set, above the model's own window, which is what applies."
+                    (harness-format-tokens limit)))
+           (t ""))))
+    (harness-ui-one-line
+     (string-join (delq nil (list (harness-ui-tokens-help (harness-ui-session-tokens session) window)
+                                  (unless (string-empty-p sentence) sentence)
+                                  (substitute-command-keys
+                                   "Mouse-1 or \\[harness-set-context-limit] changes the limit.")))
+                  " "))))
+
+(defun harness-ui--token-count (string)
+  "Return the number of tokens STRING names, or nil.
+Reads what `harness-format-tokens' shows -- \"950\", \"12.3k\",
+\"1.2M\" -- case-insensitively, with thousands separators allowed.
+Zero and anything else name none."
+  (when (and (stringp string)
+             (string-match "\\`[ \t]*\\([0-9][0-9_,']*\\(?:\\.[0-9]+\\)?\\)[ \t]*\\([kKmM]\\)?[ \t]*\\'"
+                           string))
+    (let ((value (string-to-number (replace-regexp-in-string "[_,']" "" (match-string 1 string))))
+          (suffix (and (match-string 2 string) (downcase (match-string 2 string)))))
+      (when (> value 0)
+        (round (* value (cond ((equal suffix "k") 1000.0)
+                              ((equal suffix "m") 1000000.0)
+                              (t 1.0))))))))
+
+(defun harness-ui-context-limit-prompt (session state)
+  "Return the `completing-read' prompt for SESSION's context limit.
+STATE is what `harness-ui-context-limit-state' returned."
+  (let* ((name (or (plist-get session :name) "session"))
+         (model (plist-get state :model-window))
+         (window (plist-get state :window))
+         (limit (plist-get state :limit))
+         (now (cond
+               ((plist-get state :override)
+                (format "now %s, set for the session itself; a change clears it"
+                        (harness-format-tokens window)))
+               ((plist-get state :limited)
+                (format "now %s, capped by %s"
+                        (harness-format-tokens limit)
+                        (plist-get state :cap)))
+               (limit
+                (format "now %s, its model's window; a limit of %s is set above it"
+                        (harness-format-tokens window) (harness-format-tokens limit)))
+               (t (format "now %s" (harness-format-tokens window))))))
+    (format "Context limit for %s (model window %s; %s): "
+            name (if model (harness-format-tokens model) "unknown") now)))
+
+(defun harness-ui--context-limit-options (model-window limit)
+  "Return the choices offered for a context limit, as (LABEL . VALUE).
+MODEL-WINDOW is the model's own window, or nil when unknown; LIMIT the
+limit in effect.  VALUE is a number of tokens, or nil for no limit.
+The current limit comes first, then a few round sizes that stay under
+the model's window, then no limit, which uses the whole of it."
+  (let ((options nil))
+    (dolist (n (delq nil (delete-dups (list limit 128000 256000 512000 1000000))))
+      (when (or (null model-window) (< n model-window))
+        (push (cons (if (equal n limit)
+                        (format "%s (current)" (harness-format-tokens n))
+                      (harness-format-tokens n))
+                    n)
+              options)))
+    (push (cons (if model-window
+                    (format "no limit: the whole %s the model has"
+                            (harness-format-tokens model-window))
+                  "no limit: the model's whole window")
+                nil)
+          options)
+    (nreverse options)))
+
+(defun harness-ui--apply-context-limit (session limit model-window)
+  "Set SESSION's context limit to LIMIT tokens, nil for none.
+MODEL-WINDOW is the model's own window, or nil; a LIMIT above it is
+brought down to it, the window being able to be no larger.  A window
+set for the session outright is cleared, whatever is chosen: it wins
+over any limit, so the choice must clear it to take effect -- with
+LIMIT nil the whole of MODEL-WINDOW is then used.  The session is
+updated, its views redrawn and the change said; its conversation is
+untouched, and nothing restarts or compacts it."
+  (let* ((id (plist-get session :id))
+         (name (or (plist-get session :name) id))
+         (clamped (and (numberp limit) (numberp model-window) (> limit model-window)))
+         (limit (if clamped model-window limit))
+         (override (plist-get session :context-window-override))
+         (cleared (and override ", its own window cleared"))
+         (label (cond ((null limit)
+                       (format "Context limit removed for %s: the whole %s window%s"
+                               name
+                               (if model-window (harness-format-tokens model-window) "model's")
+                               (or cleared "")))
+                      (clamped (format "Context limit for %s → %s (the model's window)%s"
+                                       name (harness-format-tokens limit) (or cleared "")))
+                      (t (format "Context limit for %s → %s%s"
+                                 name (harness-format-tokens limit) (or cleared ""))))))
+    (harness-ui-call
+     "_harness/session/update"
+     (append (list :id id :context-window-limit limit)
+             (and override (list :context-window nil)))
+     (lambda (updated)
+       (when (and (listp updated) (plist-get updated :id))
+         (harness-ui-cache-session updated))
+       ;; At once, rather than at the next session push.
+       (force-mode-line-update t)
+       (message "%s" label)))))
+
+(defun harness-ui--offer-context-limit (session model-window)
+  "Offer to set SESSION's context limit, up to MODEL-WINDOW, and set it.
+MODEL-WINDOW is the model's own window, or nil when it is unknown.  The
+choices are `harness-ui--context-limit-options'; a number typed instead
+is read as a number of tokens (\"300k\", \"1.5M\") and anything else
+chooses nothing."
+  (let* ((state (harness-ui-context-limit-state session model-window))
+         (options (harness-ui--context-limit-options model-window (plist-get state :limit)))
+         (choice (completing-read (harness-ui-context-limit-prompt session state)
+                                  options nil nil)))
+    (cond ((assoc choice options)
+           (harness-ui--apply-context-limit session (cdr (assoc choice options)) model-window))
+          ((string-empty-p (string-trim choice))
+           (message "Context limit unchanged"))
+          (t
+           (let ((count (harness-ui--token-count choice)))
+             (cond (count (harness-ui--apply-context-limit session count model-window))
+                   ((member (downcase (string-trim choice))
+                            '("no limit" "none" "unlimited"))
+                    (harness-ui--apply-context-limit session nil model-window))
+                   (t (user-error "Not a number of tokens: %s" choice))))))))
+
+(defun harness-ui--context-limit-session (session-id)
+  "Return the session id the context limit commands apply to.
+SESSION-ID when given, else the session of the buffer or of the item at
+point, else one read with completion."
+  (or session-id
+      (harness-ui-session-at-point t)
+      (harness-ui-current-session-id)))
+
+;;;###autoload
+(defun harness-set-context-limit (&optional session-id)
+  "Change the context window limit of SESSION-ID.
+The limit caps what the model's window allows, so the session compacts
+sooner; the offer names the model's own window as the most it can be,
+and \"no limit\", which uses the whole of it.  A number typed at the
+prompt instead sets that many tokens (\"300k\", \"1.5M\").  The change
+neither restarts nor compacts the session: it takes effect at its next
+request, and the header line shows the new window at once.  In the chat
+header, a click on the token figure runs this; the figure is clickable
+in the session list and the task board too."
+  (interactive)
+  (let* ((id (harness-ui--context-limit-session session-id))
+         (session (harness-ui-session id)))
+    (unless session (user-error "No session %s" id))
+    (let* ((model (plist-get session :model))
+           (cached (harness-ui-model-context-window model))
+           (continue (lambda (model-window)
+                       (harness-ui--offer-context-limit session model-window))))
+      (if (or cached (null model))
+          (funcall continue cached)
+        ;; The model's own window comes from its catalogue entry, never
+        ;; from a number of our own.
+        (harness-ui-call "_harness/provider/model" (list :model-id model)
+                         (lambda (m) (funcall continue (plist-get m :context-window)))
+                         (lambda (_err) (funcall continue nil) nil))))))
+
+(defun harness-ui-context-limit-click (&optional event)
+  "Change the context limit of the session whose token figure EVENT clicked.
+The figure carries its session id in the `harness-context-session' text
+property, so a click acts on the figure clicked, not on point.  A click
+that carries none -- the chat header's segment, say -- falls back to
+the session of the buffer or of the item at point."
+  (interactive (list last-nonmenu-event))
+  (let* ((posn (and (mouse-event-p event) (event-start event)))
+         (point (and posn (posn-point posn)))
+         (id (and (integer-or-marker-p point)
+                  (get-text-property point 'harness-context-session))))
+    (when (and posn (window-live-p (posn-window posn)))
+      (select-window (posn-window posn)))
+    (harness-set-context-limit id)))
+
+(defvar harness-ui-context-limit-map
+  (let ((map (make-sparse-keymap)))
+    (dolist (key '([mouse-1] [mouse-2] [header-line mouse-1] [header-line mouse-2]
+                   [mode-line mouse-1] [mode-line mouse-2]))
+      (define-key map key #'harness-ui-context-limit-click))
+    map)
+  "Keymap of the token figure: a click changes its session's context limit.")
+
 (defun harness-ui-format-context (session)
   "Return \"12.3k/200k\" for SESSION with the warning face applied.
 The tokens in use are the size of SESSION's conversation.  While it runs
 they grow as its model streams; \"~\" marks a figure partly estimated
-from what streamed since its provider last reported usage."
+from what streamed since its provider last reported usage.  The figure
+is a button: a click changes SESSION's context window limit (see
+`harness-set-context-limit')."
   (let* ((tokens (harness-ui-session-tokens session))
          (context (plist-get tokens :context))
          (window (plist-get session :context-window)))
     (propertize (format "%s%s/%s" (if (> (plist-get tokens :estimated) 0) "~" "")
                         (harness-format-tokens context) (harness-format-tokens window))
                 'face (harness-ui-context-face context window)
-                'help-echo (harness-ui-tokens-help tokens window))))
+                'help-echo (harness-ui-context-limit-help
+                            session (harness-ui-model-context-window (plist-get session :model)))
+                'mouse-face 'highlight
+                'keymap harness-ui-context-limit-map
+                'harness-context-session (plist-get session :id))))
 
 (defun harness-ui-format-output (session &optional bare)
   "Return SESSION's output tokens as \"3.4k out\", or nil when it wrote none.
@@ -3136,7 +3415,9 @@ fails is logged and the others still run."
 Every active session (idle, running or blocked) of every project, and
 the session of every current task whatever its status: a task's session
 may be closed, after a restart say, and still be where the task goes
-on.  Inactive sessions of no current task are history."
+on.  Inactive sessions of no current task are history.  A completed
+task's session, in the board's done column, is left out by the
+selection itself (`session/select'), even an active one."
   (list :active t :tasks t))
 
 (defun harness-ui--count (n word)
@@ -3594,6 +3875,8 @@ worktrees, task sessions and sessions merges are queued into."
     (define-key map (kbd "T") #'harness-set-thinking)
     (define-key map (kbd "H") #'harness-set-thinking-all)
     (define-key map (kbd "p") #'harness-set-permission-mode)
+    ;; e: expand the context limit, to the model's whole window.
+    (define-key map (kbd "e") #'harness-set-context-limit)
     (define-key map (kbd "f") #'harness-fork-session)
     (define-key map (kbd "k") #'harness-cancel-turn)
     (define-key map (kbd "D") #'harness-delete-session)
@@ -3920,9 +4203,12 @@ leaves the buffer's commands out, never the whole menu."
     ("T" "Thinking" harness-set-thinking)
     ("H" "Thinking for all sessions" harness-set-thinking-all)
     ("p" "Permission mode" harness-set-permission-mode)
+    ("e" "Context limit" harness-set-context-limit)
     ("d" "Directory access" harness-directories :if (lambda () (harness-ui--command-available-p 'harness-directories)))
     ("i" (lambda () (harness-ui--non-interactive-menu-label)) harness-toggle-non-interactive)
     ("I" "Non-interactive for all sessions" harness-set-non-interactive-all)
+    ("V" "Supervisor mode for all sessions" harness-set-supervisor-all
+     :if (lambda () (harness-ui--command-available-p 'harness-set-supervisor-all)))
     ("r" "Rename" harness-rename-session)
     ("W" "Move to another directory" harness-move-session)]
    ["Tools"

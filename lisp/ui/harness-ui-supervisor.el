@@ -20,6 +20,13 @@
 ;; `harness-toggle-supervisor'), which asks the harness for the change with
 ;; `_harness/supervisor/set' and says what it changed.  The header follows
 ;; the session as the harness sends it.
+;;
+;; `harness-set-supervisor-all' (the menu's V, beside the other "for all
+;; sessions" commands) does the same for every governed session at once
+;; and, unless a prefix argument says otherwise, makes the mode the
+;; default for new work (`harness-supervisor' and
+;; `harness-supervisor-tasks').  It changes nothing for a session the
+;; plugin does not govern, nor for one whose task is completed.
 
 ;;; Code:
 
@@ -106,6 +113,57 @@ which it is, and clicking there toggles too."
                          (lambda (_session)
                            (message (if on "Supervisor mode on" "Supervisor mode off (hands-on)")))
                          #'harness-ui-supervisor--failed))))))
+
+;;;###autoload
+(defun harness-set-supervisor-all (&optional no-default)
+  "Turn supervisor mode on or off for every governed session at once.
+It asks which, offering on first, and asks the harness for the change
+with `_harness/supervisor/set-all': every current session the
+supervisor module governs, idle, running or blocked, of every project,
+and the sessions of the current tasks (running, pending or blocked),
+even a closed one.  A sub-agent, a side conversation and a session
+whose task is completed are left alone, as is a session already at the
+asked value.  Unless NO-DEFAULT, the prefix argument, says otherwise,
+the mode also becomes the default for new work: `harness-supervisor'
+for new top-level sessions and `harness-supervisor-tasks' for the
+sessions of new tasks.  Then it says how many sessions changed, and
+what still has new work start otherwise, such as a project whose
+.dir-locals.el sets `harness-supervisor'; it changes neither the file
+nor the sessions that are already hands-on on purpose.  See
+`harness-toggle-supervisor' for one session."
+  (interactive "P")
+  (let* ((choices '("on" "off"))
+         (choice (completing-read "Supervisor mode for every session: "
+                                  (lambda (string pred action)
+                                    ;; On first, as offered.
+                                    (if (eq action 'metadata)
+                                        '(metadata (display-sort-function . identity)
+                                                   (cycle-sort-function . identity))
+                                      (complete-with-action action choices string pred)))
+                                  nil t nil nil "on"))
+         (on (not (equal choice "off"))))
+    (harness-ui-call
+     "_harness/supervisor/set-all"
+     (list :on (if on t :false) :filter (harness-ui--everything-filter))
+     (lambda (sessions)
+       (unless no-default
+         (dolist (key '("harness-supervisor" "harness-supervisor-tasks"))
+           (harness-ui-call "_harness/config/set"
+                            (list :key key :value (prin1-to-string on)
+                                  :printed t :scope "global")
+                            (lambda (_) nil))))
+       (harness-ui--report-all
+        (format "Supervisor mode %s for %s%s"
+                (if on "on" "off")
+                (harness-ui--count (length sessions) "session")
+                (harness-ui--new-work-text no-default (not no-default)))
+        "harness-supervisor" on
+        ;; Turning it off says what still supervises, whatever the
+        ;; default; turning it on, what keeps the new default hands-on.
+        (or (not on) (not no-default))
+        nil
+        (lambda (value) (if (harness-json-true-p value) "supervise" "start hands-on"))))
+     #'harness-ui-supervisor--failed)))
 
 ;;;; Module
 
