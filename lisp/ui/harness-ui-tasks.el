@@ -616,7 +616,7 @@ which the queue never starts.  TODOS its session's.  A queued task
 NAMED (its name is the card's title) has the first line of its prompt
 after its place in line, else the line after it, as a backlog task's
 write-up has, its first line being a title.  A task returned to
-pending says it carries on where it stopped."
+pending says why it waits (`harness-ui-tasks--returned-why')."
   (let ((body (harness-ui-tasks--body-line task))
         (sep (concat " " harness-ui-tasks--dot " ")))
     (cond
@@ -627,9 +627,43 @@ pending says it carries on where it stopped."
               (if body (concat sep body) "")))
      ((plist-get task :returned)
       (format "#%d in line%s" (or position 1)
-              (concat sep "returned, carries on where it stopped")))
+              (concat sep (harness-ui-tasks--returned-why task))))
      (t (let ((line (if named (harness-first-line (plist-get task :prompt) 70) body)))
           (format "#%d in line%s" (or position 1) (if line (concat sep line) "")))))))
+
+(defun harness-ui-tasks--returned-why (task)
+  "Why TASK, returned to pending, waits in the queue, for its card.
+A task returned by hand carries on where it stopped, and so does one
+pre-empted (`:return-reason' preempted): a task sent back from review
+took its slot, named by its title when the board has it.  One the user
+sent back from review while no slot could take it waits with their
+feedback."
+  (pcase (format "%s" (or (plist-get task :return-reason) "returned"))
+    ("preempted"
+     (let* ((id (plist-get task :preempted-by))
+            (by (and id (harness-ui-tasks--find id))))
+       (format "pre-empted by %s, carries on where it stopped"
+               (cond (by (format "\"%s\"" (harness-truncate-end (harness-ui-tasks--title by) 40)))
+                     (id (format "%s" id))
+                     (t "a task sent back")))))
+    ("sent-back" "sent back from review, waits for a slot with your feedback")
+    (_ "returned, carries on where it stopped")))
+
+(defun harness-ui-tasks--sent-back-message (task)
+  "Say where TASK went once `task/reject' sent it back, as a message.
+TASK is the task the harness returned: at work on the feedback, or
+waiting in the queue with it when no slot could take it -- every slot
+taken by work that goes first, or the queue suspended."
+  (cond
+   ((not (equal (format "%s" (plist-get task :state)) "pending"))
+    "Sent back: its session works on your feedback")
+   ((harness-json-true-p (plist-get task :queue-suspended))
+    "Sent back: it waits in the suspended queue with your feedback; resume the queue or start it now")
+   (t "Sent back: no slot is free for it, so it waits in the queue with your feedback")))
+
+(defun harness-ui-tasks--say-sent-back (task)
+  "Show where TASK went once `task/reject' sent it back."
+  (message "%s" (harness-ui-tasks--sent-back-message task)))
 
 (defun harness-ui-tasks--took (task)
   "How long TASK worked until it finished, as \"took 12m\"; nil if unknown."
@@ -3281,21 +3315,23 @@ A new task is refined for the backlog when REFINE is non-nil."
                                        "Editing the task")
        (message "Task updated"))
       (`(reply . ,id)
-       (let ((kept (and (plist-get (harness-ui-tasks--find id) :returned)
-                        (harness-ui-tasks--queue-suspended-p))))
+       (let* ((task (harness-ui-tasks--find id))
+              (returned (plist-get task :returned)))
          (harness-ui-tasks--request-then "_harness/task/prompt" (list :id id :text expanded :attachments atts)
                                          "Sending the message")
-         (message "%s" (if kept
-                           "Kept: the queue starts the task with your message when you resume it"
-                         "Sent to the task's session"))))
+         (message "%s" (cond
+                        ((and returned (harness-ui-tasks--queue-suspended-p))
+                         "Kept: the queue starts the task with your message when you resume it")
+                        ((and returned (equal (format "%s" (plist-get task :return-reason)) "sent-back"))
+                         "Kept: the task waits for a slot with your feedback, and gets your message when it starts")
+                        (t "Sent to the task's session")))))
       (`(refine . ,id)
        (harness-ui-tasks--request-then "_harness/task/prompt" (list :id id :text expanded :attachments atts)
                                        "Sending the feedback")
        (message "Sent: the task is being written up again"))
       (`(reject . ,id)
        (harness-ui-tasks--request-then "_harness/task/reject" (list :id id :feedback expanded :attachments atts)
-                                       "Sending the task back")
-       (message "Sent back: its session works on your feedback"))
+                                       "Sending the task back" #'harness-ui-tasks--say-sent-back))
       (_
        (harness-ui-call
         "_harness/task/submit" (list :cwd harness-ui-tasks--dir :prompt expanded
@@ -3591,9 +3627,12 @@ task is completed once merged; otherwise it is completed at once."
   "Send the task at point back from review with feedback.
 The compose box takes the feedback, which \\<harness-ui-tasks-mode-map>\\[harness-ui-tasks-submit] sends to the task's
 session: it works on the task again, in its own worktree, and the task
-comes back for your review once that is done.  With a prefix argument
-the feedback is read in the minibuffer instead; from Lisp, FEEDBACK is
-sent at once."
+comes back for your review once that is done.  Sending it back keeps
+to the limit of tasks at once: with no slot free it takes the slot of
+a task at work it outranks, which goes back to the queue, or waits in
+the queue with your feedback when every task at work goes first.  With
+a prefix argument the feedback is read in the minibuffer instead; from
+Lisp, FEEDBACK is sent at once."
   (interactive (list (and current-prefix-arg
                           (progn (harness-ui-tasks--review-task) (read-string "Feedback: ")))))
   (let ((task (harness-ui-tasks--review-task)))
@@ -3601,8 +3640,7 @@ sent at once."
      ((null feedback) (harness-ui-tasks--set-compose "" (cons 'reject (plist-get task :id))))
      ((harness-string-blank-p feedback) (user-error "Sending a task back needs feedback"))
      (t (harness-ui-tasks--request-then "_harness/task/reject" (list :id (plist-get task :id) :feedback feedback)
-                                        "Sending the task back")
-        (message "Sent back: its session works on your feedback")))))
+                                        "Sending the task back" #'harness-ui-tasks--say-sent-back)))))
 
 (defun harness-ui-tasks-open-harness ()
   "Open an Emacs running the harness from the task's worktree.
