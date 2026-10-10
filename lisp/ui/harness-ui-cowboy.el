@@ -293,7 +293,7 @@ leaves the ordinary question panel to show instead."
               (session-id (harness-ui-pending-session))
               (text (condition-case err
                         (harness-ui-cowboy-panel-string session-id r)
-                      (error (message "Cold-cache panel: %s" (error-message-string err)) nil))))
+                      (error (message "Cold-cache panel: %s" (harness-error-short-message err)) nil))))
     (let ((start (point))
           (pid (plist-get r :id)))
       (insert text)

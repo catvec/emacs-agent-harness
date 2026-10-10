@@ -184,15 +184,46 @@ ITEM is a string (a note), or an object with exactly one of `:image',
   "Return VALUE as a non-blank trimmed string, or nil."
   (and (stringp value) (not (harness-string-blank-p value)) (string-trim value)))
 
+(defun harness-tools-handin--merges-pending (sid)
+  "Return the merges SID waits for, or nil.
+Those are the branches its own sub-agents have merging into its working
+directory that are not through yet -- queued, merging or in conflict.
+Nothing of the session's own can be handed in while any of them is: the
+work it builds on has to be in the branch first.  A merge that failed
+does not wait here; the queue told the session, and the child's work is
+the child's to fix."
+  (and (harness-method-exists-p 'merge/pending)
+       (ignore-errors (harness-call 'merge/pending sid))))
+
+(defun harness-tools-handin--merges-text (pending)
+  "Return the refusal for PENDING, the merges the session waits for."
+  (format "hand_in: %s into this session's worktree %s not through yet: %s"
+          (if (cdr pending) (format "%d merges" (length pending)) "a merge")
+          (if (cdr pending) "are" "is")
+          (string-join
+           (mapcar (lambda (item)
+                     (format "%s (%s)" (or (plist-get item :name)
+                                           (substring (plist-get item :child) 0 8))
+                             (plist-get item :status)))
+                   pending)
+           ", ")))
+
 (defun harness-tools-handin--hand-in (input ctx)
   "Handler of the hand_in tool: record the report of INPUT and end the turn.
 The report goes on the task of the session in CTX.  A malformed call
-returns an error saying what to fix, and ends nothing."
+returns an error saying what to fix, and ends nothing.  A session whose
+sub-agents' merges are not through yet cannot hand in either: the work
+the session's branch is built on has to be in it first."
   (let* ((sid (plist-get ctx :session-id))
          (summary (let ((s (plist-get input :summary)))
                     (and (stringp s) (not (harness-string-blank-p s)) (string-trim s))))
-         (raw (append (plist-get input :evidence) nil)))
+         (raw (append (plist-get input :evidence) nil))
+         (pending (harness-tools-handin--merges-pending sid)))
     (cond
+     (pending
+      (harness-tools-handin--invalid
+       "%s. Let them merge (the queue takes them in turn), or have the conflicts of the one in conflict resolved in the child's worktree, then hand in."
+       (harness-tools-handin--merges-text pending)))
      ((null summary)
       (harness-tools-handin--invalid "hand_in needs summary: your final message to the user, in markdown"))
      ((null raw)

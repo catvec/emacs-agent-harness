@@ -25,6 +25,7 @@
 (defvar harness-cowboy-min-context)
 (defvar harness-non-interactive)
 (defvar harness-session-interrupted-output)
+(defvar harness-log-hook)
 (declare-function harness-cowboy-parse-answer "harness-cowboy" (text))
 (declare-function harness-cowboy-cold-p "harness-cowboy" (session &optional now))
 (declare-function harness-cowboy-cost-text "harness-cowboy" (estimate choice))
@@ -415,6 +416,105 @@ message goes all the same."
         (should (plist-get (plist-get (plist-get node :meta) :cowboy) :fallback)))
       (should (cl-some (lambda (h) (string-match-p "\\`No brief summary (.*): writing the conversation to a transcript file instead\\'" h))
                        (harness-cowboy-test--hints sid))))))
+
+(defun harness-cowboy-test-paired-p (messages)
+  "Non-nil when MESSAGES keep every tool call with the message that answers it.
+That is what a provider such as DeepSeek requires of a request: an
+assistant message's tool_calls must be answered by the tool messages
+right after it, and a tool message must answer the call before it."
+  (let ((ok t) (asked nil))
+    (dolist (m messages)
+      (let ((blocks (plist-get m :content)))
+        (if (equal (format "%s" (plist-get m :role)) "assistant")
+            (setq asked (delq nil (mapcar (lambda (b)
+                                            (and (equal (plist-get b :type) "tool_use")
+                                                 (plist-get b :id)))
+                                          blocks)))
+          (dolist (b blocks)
+            (when (equal (plist-get b :type) "tool_result")
+              (unless (member (plist-get b :tool_use_id) asked) (setq ok nil))))
+          (setq asked nil))))
+    ok))
+
+(ert-deftest harness-cowboy-brief-summarises-a-sample-with-tool-calls ()
+  "A brief summary of a long conversation with tool calls is made and used.
+The sample names the middle it leaves out and keeps every tool call with
+the message that answers it -- a provider rejects a request that parts
+them -- and the tool-call JSON in it serializes."
+  (harness-cowboy-test-with
+    (let* ((sid (harness-cowboy-test-session))
+           (summaries nil)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (when (string-match-p "handoff summary" (or (plist-get request :system) ""))
+                (push request summaries))
+              (harness-cowboy-test--script request))))
+      ;; A long conversation, with a tool call right where a sample's head
+      ;; ends: its result must go with it.
+      (harness-call 'session/append sid '(:kind user :content "next: read it"))
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "read_file" :call-id "c1"
+                                              :input (list :path "café/naïve.txt")))
+      (harness-call 'session/append sid '(:kind tool-result :call-id "c1" :output "the file says café"))
+      (dotimes (i 16)
+        (harness-call 'session/append sid (list :kind (if (cl-evenp i) 'assistant 'user)
+                                                :content (format "message %d" i))))
+      (let ((p (harness-call 'agent/prompt sid "feedback: fix it")))
+        (harness-cowboy-test--answer sid "b")
+        (harness-test-await p 10))
+      (should (= 1 (length summaries)))
+      (let* ((request (car summaries))
+             (messages (plist-get request :messages))
+             (text (harness-cowboy-test--request-text request)))
+        (should (string-match-p "left out the 4 messages" text))
+        (should (harness-cowboy-test-paired-p messages))
+        (should (cl-some (lambda (m) (cl-some (lambda (b) (and (equal (plist-get b :type) "tool_use")
+                                                              (equal (plist-get b :id) "c1")))
+                                             (plist-get m :content)))
+                         messages))
+        ;; What the provider would put in its body serializes.
+        (should (stringp (harness-json-encode messages))))
+      (should (equal "brief" (harness-node-compaction-kind (car (harness-cowboy-test--compactions sid))))))))
+
+(ert-deftest harness-cowboy-a-failure-reports-short-and-asks-no-more ()
+  "A failure is reported short, falls back openly, and is not asked again.
+The error carries a whole transcript, as the `json-value-p' one did; the
+hint, the log and the fallback name only a short line, and the question
+that was answered is over -- it is not put again."
+  (harness-cowboy-test-with
+    (let* ((big (make-string 5000 ?x))
+           (sid (harness-cowboy-test-session))
+           (logged nil)
+           (harness-log-hook (list (lambda (_level msg) (push msg logged))))
+           (orig (symbol-function 'harness-method/provider/complete)))
+      (cl-letf (((symbol-function 'harness-method/provider/complete)
+                 (lambda (req)
+                   (if (string-match-p "handoff summary" (or (plist-get req :system) ""))
+                       (signal 'wrong-type-argument (list 'json-value-p big))
+                     (funcall orig req)))))
+        (let ((p (harness-call 'agent/prompt sid "feedback: fix it")))
+          (harness-cowboy-test--answer sid "b")
+          (should (eq 'end-turn (plist-get (harness-test-await p 10) :stop-reason)))))
+      ;; The choice was handled: nothing waits, and nothing asks again.
+      (should-not (harness-call 'question/pending sid))
+      (should-not (harness-call 'cowboy/asking sid))
+      (should (zerop (hash-table-count harness-cowboy--asking)))
+      ;; The fallback is the transcript file, said in a hint, chosen as brief.
+      (let ((node (car (harness-cowboy-test--compactions sid))))
+        (should (equal "transcript" (harness-node-compaction-kind node)))
+        (should (equal "brief" (plist-get (plist-get (plist-get node :meta) :cowboy) :choice)))
+        (should (plist-get (plist-get (plist-get node :meta) :cowboy) :fallback)))
+      ;; Short: no hint, and no log line about the compaction, repeats the
+      ;; transcript the error carried.
+      (dolist (hint (harness-cowboy-test--hints sid))
+        (should (< (length hint) 400))
+        (should-not (string-match-p "x\\{300\\}" hint)))
+      (should (cl-some (lambda (h) (string-match-p "\\`No brief summary (.*): writing the conversation to a transcript file instead\\'" h))
+                       (harness-cowboy-test--hints sid)))
+      (let ((lines (cl-remove-if-not (lambda (l) (string-match-p "json-value-p" l)) logged)))
+        (should lines)
+        (dolist (line lines)
+          (should (< (length line) 600))
+          (should-not (string-match-p "x\\{300\\}" line)))))))
 
 ;;;; Compacting unasked
 
