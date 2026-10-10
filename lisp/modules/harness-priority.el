@@ -164,10 +164,11 @@ module): the higher it is, the sooner its calls and its commands go."
 ;; (`priority/set').
 
 (defconst harness-priority-task-key :priority
-  "The key a task's record kept its priority under, before it lived on
-the task's session.  A record from before that is read once, for the
-session its task gets (`harness-priority-of-task'); nothing writes it
-any more, and a task submitted since has no such field.")
+  "The key a task's record used to keep its priority under.
+Before a priority lived on a task's session, a task kept it in its own
+record, under this key.  A record from before that is read once, for
+the session its task gets (`harness-priority-of-task'), and nothing
+writes it any more: a task submitted since has no such field.")
 
 (defun harness-priority-of-task (task)
   "Return TASK's priority: the one its session has (`harness-priority-of').
