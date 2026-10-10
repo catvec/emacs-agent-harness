@@ -16,12 +16,17 @@
 ;;   and the merge queue, so plans can use them).
 ;; - `todo_write' replaces the session's todo list.
 ;; - `spawn_agent' creates a child session (fresh or forked, optionally
-;;   in its own git worktree), runs one prompt in it and returns the
-;;   child's final answer.  A sub-agent works on a deliberately shorter
-;;   context window (`harness-subagent-context-limit'); the limit a
-;;   child gets is `harness-tools-agent-context-limit', which other
-;;   modules that start sub-agents use too.  The cap is never silent: a
-;;   hint at the start of the child's transcript says it
+;;   in its own git worktree) and runs one prompt in it.  The call
+;;   returns the child's final answer when it finishes; with
+;;   `background' true it returns as soon as the child starts instead,
+;;   and the child's answer arrives later in a message of its own, so
+;;   several sub-agents can run at once.  Several spawn_agent calls made
+;;   in one step run at once either way.  A sub-agent works on a
+;;   deliberately shorter context window
+;;   (`harness-subagent-context-limit'); the limit a child gets is
+;;   `harness-tools-agent-context-limit', which other modules that start
+;;   sub-agents use too.  The cap is never silent: a hint at the start of
+;;   the child's transcript says it
 ;;   (`harness-tools-agent-context-limit-hint').
 ;; - `session_info' describes the current session to the model.
 ;;
@@ -307,7 +312,8 @@ When a task is complex (several files, several steps, anything you cannot verify
 
 Split work with the mechanisms this harness provides:
 - Session forks share the cached context of the current session, so they are much cheaper than a fresh sub-agent that has to gather all the context again. Prefer a fork (spawn_agent with fork=true) when the sub-task needs what you already know.
-- spawn_agent starts a fresh sub-agent (fork=false) when the sub-task is self-contained and does not need the current context; it gets its own session and returns its final answer to you.
+- spawn_agent starts a fresh sub-agent (fork=false) when the sub-task is self-contained and does not need the current context; it gets its own session, and the call returns its final answer when it finishes.
+- Several spawn_agent calls made in the same step run at once. With background=true a call returns as soon as its child starts, and the child's answer arrives later in a message of its own: start independent sub-tasks that way, together, and carry on while they run instead of waiting for one after another.
 - Each sub-agent can work in its own git worktree (worktree=true), so independent steps run in parallel worktrees without touching each other's files.
 - A merge queue brings a worktree's branch back into the parent session's working directory, one child at a time; conflicts are handed to the child to resolve. Plan independent steps as parallel worktrees that merge back, and dependent steps sequentially in this session.
 Keep the plan short and concrete; update the todo list (todo_write) as steps complete."
@@ -404,11 +410,24 @@ Replace the todos of the session in CTX with those in INPUT."
 ;;;; Sub-agents
 
 (defvar harness-tools-agent--children (make-hash-table :test 'equal)
-  "Child session id -> (:report FN :calls N) while a spawn_agent call runs.")
+  "Child session id -> what a spawn_agent call knows of a running child.
+A plist (:parent PARENT-ID :name NAME :worktree PATH :branch BRANCH
+:calls N :report FN :background BOOL).  A blocking child keeps `:report',
+the report function of the call it runs in; a background child has none,
+its call having returned already.  The entry stays until the child's
+turn ends, so a background child that outlives its call counts as work
+its parent still runs (`harness-tools-agent--outstanding').")
 
 (defun harness-tools-agent--short-id (id)
   "Return the first eight characters of session ID."
   (substring id 0 (min 8 (length id))))
+
+(defun harness-tools-agent--child-name (cid entry)
+  "Return how reports name child CID, from ENTRY: its name, or its short id."
+  (let ((name (plist-get entry :name)))
+    (if (and (stringp name) (not (harness-string-blank-p name)))
+        name
+      (harness-tools-agent--short-id cid))))
 
 (defun harness-tools-agent--on-child-tool-call (session-id node)
   "Report the tool call NODE of a running child SESSION-ID to its parent's call."
@@ -421,6 +440,30 @@ Replace the todos of the session in CTX with those in INPUT."
                    (format "sub-agent %s: %s" (harness-tools-agent--short-id session-id)
                            (or (plist-get node :title) (plist-get node :tool)))))))))
 
+(defun harness-tools-agent--running-children (session-id)
+  "Return the names of the sub-agents of SESSION-ID still running."
+  (let (names)
+    (maphash (lambda (cid entry)
+               (when (equal (plist-get entry :parent) session-id)
+                 (push (harness-tools-agent--child-name cid entry) names)))
+             harness-tools-agent--children)
+    (nreverse names)))
+
+(defun harness-tools-agent--outstanding (value session-id)
+  "Add the sub-agents of SESSION-ID that still run to VALUE.
+The `agent/outstanding' filter: a task whose session's turn ended stays
+active, waiting, while this says something, as it does while a
+supervisor's steps run."
+  (let ((names (harness-tools-agent--running-children session-id)))
+    (if (null names)
+        value
+      (let ((text (format "Sub-agent%s %s running"
+                          (if (cdr names) "s" "")
+                          (string-join names ", "))))
+        (if (and (stringp value) (not (harness-string-blank-p value)))
+            (concat value "; " text)
+          text)))))
+
 (defun harness-tools-agent--child-summary (child-id)
   "Return the final text of CHILD-ID plus a footer with its tool calls and cost."
   (let* ((child (harness-call 'session/get child-id))
@@ -431,6 +474,57 @@ Replace the todos of the session in CTX with those in INPUT."
     (format "%s\n\n[sub-agent session: %s, %d tool calls, cost %s]"
             (or (plist-get last-assistant :content) "(the sub-agent produced no answer)")
             child-id calls (harness-format-spend (plist-get child :usage)))))
+
+(defun harness-tools-agent--child-report-text (cid entry result)
+  "Return the report of background child CID, of ENTRY, ended RESULT.
+ENTRY is the child's entry in `harness-tools-agent--children'.  RESULT
+is what `agent/prompt' answered for the child: the text names the
+child, says how its turn ended, holds its summary, and says where it
+worked when it had a worktree."
+  (let* ((name (harness-tools-agent--child-name cid entry))
+         (reason (plist-get result :stop-reason))
+         (error (plist-get result :error))
+         (summary (condition-case err
+                      (harness-tools-agent--child-summary cid)
+                    (error (format "(its session is gone: %s)" (harness-error-message err)))))
+         (summary (if (> (length summary) harness-tools-max-output-chars)
+                      (concat (harness-truncate-middle summary harness-tools-max-output-chars)
+                              (format "\n\n(Its answer was long; session_read on %s shows the rest.)" cid))
+                    summary))
+         (state (pcase reason
+                  ('end-turn "finished")
+                  ('cancelled "stopped: its turn was cancelled")
+                  ('max-tokens "stopped: it hit its output limit")
+                  ('blocked "stopped: its turn was blocked")
+                  ('error (format "stopped: it failed%s"
+                                  (if (and (stringp error) (not (harness-string-blank-p error)))
+                                      (format ": %s" error)
+                                    "")))
+                  (_ (format "stopped: its turn ended (%s)" (or reason "no reason")))))
+         (worktree (plist-get entry :worktree))
+         (branch (plist-get entry :branch)))
+    (concat
+     (format "Sub-agent report: %s (session %s) %s.\n\n%s" name cid state summary)
+     (when worktree
+       (format (concat "\n\nIt worked in worktree %s%s; its branch merges back into this session's "
+                       "working directory through the merge queue, one branch at a time.")
+               (abbreviate-file-name worktree)
+               (if (and (stringp branch) (not (harness-string-blank-p branch)))
+                   (format " on branch %s" branch)
+                 ""))))))
+
+(defun harness-tools-agent--report-child (parent-id cid entry result)
+  "Tell PARENT-ID that its background child CID, of ENTRY, ended with RESULT.
+The report is a message of the harness's: an idle parent starts a turn
+on it and a running one is steered, as a supervisor step's report
+arrives."
+  (when (harness-call 'session/exists-p parent-id)
+    (harness-catch
+     (harness-call-async 'agent/prompt parent-id (harness-tools-agent--child-report-text cid entry result)
+                         (list :from (harness-sender-system "sub-agent")))
+     (lambda (err)
+       (harness-log 'warn "tools-agent: reporting sub-agent %s to session %s failed: %s"
+                    (harness-tools-agent--short-id cid) parent-id (harness-error-message err))))))
 
 (defcustom harness-subagent-context-limit 256000
   "Most tokens of context a sub-agent adds of its own, or nil for no cap.
@@ -569,10 +663,14 @@ added once it exists."
 
 (defun harness-tools-agent--spawn (input ctx)
   "Handler of the spawn_agent tool.
-Run INPUT's prompt in a child of the session in CTX."
+Run INPUT's prompt in a child of the session in CTX.  With INPUT's
+`background' true the call returns as soon as the child starts, and the
+child's answer is reported to the parent in a message of its own when
+its turn ends."
   (let* ((sid (plist-get ctx :session-id))
          (parent (harness-call 'session/get sid))
          (prompt (or (plist-get input :prompt) ""))
+         (background (harness-json-true-p (plist-get input :background)))
          (child-id (harness-uuid))
          (want-worktree (and (harness-json-true-p (plist-get input :worktree))
                              (harness-method-exists-p 'worktree/create)))
@@ -584,42 +682,75 @@ Run INPUT's prompt in a child of the session in CTX."
          (harness-then
           (harness-call 'worktree/create (or (plist-get parent :project) (plist-get parent :cwd))
                         :branch (concat "harness/" (harness-tools-agent--short-id child-id)))
-          (lambda (wt) (plist-get wt :path)))
+          (lambda (wt) (list :path (plist-get wt :path) :branch (plist-get wt :branch))))
        (harness-resolved nil))
-     (lambda (worktree)
-       (harness-then
-        (harness-tools-agent--create-child parent input child-id (or worktree cwd) worktree
-                                           (plist-get ctx :call-id))
-        (lambda (child)
-          (let ((cid (plist-get child :id)))
-            (puthash cid (list :report (plist-get ctx :report) :calls 0) harness-tools-agent--children)
-            (harness-emit 'agent/spawned sid cid)
-            (when (plist-get ctx :report)
-              (funcall (plist-get ctx :report)
-                       (format "sub-agent %s started%s" (harness-tools-agent--short-id cid)
-                               (if worktree (format " in worktree %s" (abbreviate-file-name worktree)) ""))))
-            (harness-then
-             ;; The parent's agent wrote the prompt, not the user.
-             (harness-call-async 'agent/prompt cid prompt (list :from (harness-sender-session parent)))
-             (lambda (result)
-               (remhash cid harness-tools-agent--children)
-               (let ((text (harness-tools-agent--child-summary cid)))
-                 (if (memq (plist-get result :stop-reason) '(end-turn max-tokens))
-                     (harness-tool-ok text :meta (list :child-id cid))
-                   (harness-tool-error
-                    (format "%s\n\n(sub-agent stopped: %s%s)" text (plist-get result :stop-reason)
-                            (if (plist-get result :error) (format ", %s" (plist-get result :error)) ""))
-                    :meta (list :child-id cid)))))
-             (lambda (err)
-               (remhash cid harness-tools-agent--children)
-               (signal 'harness-error (list (harness-error-message err))))))))))))
+     (lambda (wt)
+       (let ((worktree (plist-get wt :path))
+             (branch (plist-get wt :branch)))
+         (harness-then
+          (harness-tools-agent--create-child parent input child-id (or worktree cwd) worktree
+                                             (plist-get ctx :call-id))
+          (lambda (child)
+            (let* ((cid (plist-get child :id))
+                   (entry (list :parent sid :name (plist-get child :name)
+                                :worktree worktree :branch branch :calls 0
+                                :background background
+                                :report (and (not background) (plist-get ctx :report)))))
+              (puthash cid entry harness-tools-agent--children)
+              (harness-emit 'agent/spawned sid cid)
+              (when (plist-get ctx :report)
+                (funcall (plist-get ctx :report)
+                         (format "sub-agent %s started%s" (harness-tools-agent--short-id cid)
+                                 (if worktree (format " in worktree %s" (abbreviate-file-name worktree)) ""))))
+              (let ((running (harness-call-async 'agent/prompt cid prompt
+                                                 (list :from (harness-sender-session parent)))))
+                (if background
+                    (progn
+                      ;; The parent hears of the child's end in a message of its
+                      ;; own; this call returns now, while the child runs.
+                      (harness-then
+                       running
+                       (lambda (result)
+                         (when (gethash cid harness-tools-agent--children)
+                           (remhash cid harness-tools-agent--children)
+                           (harness-tools-agent--report-child sid cid entry result)))
+                       (lambda (err)
+                         (when (gethash cid harness-tools-agent--children)
+                           (remhash cid harness-tools-agent--children)
+                           (harness-tools-agent--report-child
+                            sid cid entry
+                            (list :stop-reason 'error :error (harness-error-message err))))))
+                      (harness-tool-ok
+                       (format (concat "Sub-agent %s started in the background (session %s%s). "
+                                       "It runs on its own; its answer arrives in a message of its own "
+                                       "when its turn ends, so do not wait or poll. Start more sub-agents "
+                                       "the same way, or carry on with other work.")
+                               (harness-tools-agent--child-name cid entry) cid
+                               (if worktree (format ", worktree %s" (abbreviate-file-name worktree)) ""))
+                       :meta (list :child-id cid)))
+                  (harness-then
+                   ;; The parent's agent wrote the prompt, not the user.
+                   running
+                   (lambda (result)
+                     (remhash cid harness-tools-agent--children)
+                     (let ((text (harness-tools-agent--child-summary cid)))
+                       (if (memq (plist-get result :stop-reason) '(end-turn max-tokens))
+                           (harness-tool-ok text :meta (list :child-id cid))
+                         (harness-tool-error
+                          (format "%s\n\n(sub-agent stopped: %s%s)" text (plist-get result :stop-reason)
+                                  (if (plist-get result :error) (format ", %s" (plist-get result :error)) ""))
+                          :meta (list :child-id cid)))))
+                   (lambda (err)
+                     (remhash cid harness-tools-agent--children)
+                     (signal 'harness-error (list (harness-error-message err)))))))))))))))
 
 (harness-define-tool "spawn_agent"
   :label "Sub-agent"
-  :description "Run a sub-agent on a prompt and return its final answer. fork=true forks this session (the child shares your context and its cached prefix; cheaper when the task needs what you already know); fork=false starts a fresh session with only the prompt. worktree=true gives the child its own git worktree and branch so it can change files in parallel; merge its branch back afterwards through the merge queue. The call returns when the child finishes."
+  :description "Run a sub-agent on a prompt. fork=true forks this session (the child shares your context and its cached prefix; cheaper when the task needs what you already know); fork=false starts a fresh session with only the prompt. worktree=true gives the child its own git worktree and branch so it can change files in parallel; merge its branch back afterwards through the merge queue. The call returns when the child finishes, with its final answer; with background=true it returns as soon as the child starts, naming its session, and the child's answer arrives later in a message of its own, so you can start several sub-agents at once and carry on. Several spawn_agent calls made in the same step run at once either way."
   :schema '(:type "object"
             :properties (:prompt (:type "string" :description "The task for the sub-agent.")
                          :fork (:type "boolean" :description "Fork this session instead of starting fresh (default false).")
+                         :background (:type "boolean" :description "Return as soon as the child starts instead of waiting for its answer: the answer arrives later in a message of its own (default false).")
                          :model (:type "string" :description "Model id for the child (default: this session's model).")
                          :name (:type "string" :description "Display name for the child session.")
                          :cwd (:type "string" :description "Working directory for the child (default: this session's), inside this session's allowed directories.")
@@ -692,8 +823,9 @@ Run INPUT's prompt in a child of the session in CTX."
 ;;;; Registration
 
 (defun harness-tools-agent--init ()
-  "Register the module's filter and subscriber (idempotent)."
+  "Register the module's filters and subscriber (idempotent)."
   (harness-add-filter 'agent/system-prompt #'harness-tools-agent--system-prompt 40)
+  (harness-add-filter 'agent/outstanding #'harness-tools-agent--outstanding)
   (harness-on 'agent/tool-call #'harness-tools-agent--on-child-tool-call))
 
 (harness-tools-agent--init)
