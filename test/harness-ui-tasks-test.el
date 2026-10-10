@@ -40,6 +40,10 @@
 (defvar harness-ui-tasks--list-end)
 (defvar harness-ui-tasks--error)
 (defvar harness-ui-tasks--collapse-min-width)
+(defvar harness-ui-tasks--fitting)
+(declare-function harness-ui-tasks--held "harness-ui-tasks")
+(declare-function harness-ui-tasks--caps-that-fit "harness-ui-tasks")
+(declare-function harness-ui-cache-session "harness-ui")
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-ui-tasks-submit "harness-ui-tasks")
 (declare-function harness-ui-tasks-edit "harness-ui-tasks")
@@ -2438,6 +2442,76 @@ the test: a batch window is too short for the headings alone."
               (should-not (memq 'done harness-ui-tasks--expanded))
               (should (string-match-p "more +\\[Show all\\]" (harness-ui-tasks-test--board-text board)))))
       (set-frame-height nil 25)))))
+
+(ert-deftest harness-ui-tasks-holds-back-the-fewest-cards ()
+  "A capped board holds back as few cards as the window needs held back.
+The fitting measures what each card takes instead of bisecting the
+number to hold back; showing one card more than it holds back must then
+overflow the window, or a card that fits went missing."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--fake-done board 60)
+    (unwind-protect
+        (progn
+          (set-frame-height nil 40)
+          (let ((window (get-buffer-window board)))
+            (should window)
+            (select-window window)
+            (with-current-buffer board
+              (harness-ui-tasks--render t)
+              (should (harness-ui-tasks--fits-p window))
+              (let ((held (harness-ui-tasks--held (cdr harness-ui-tasks--fitting))))
+                (should (> held 0))
+                ;; One card fewer held back: the compose box would not fit.
+                (let ((inhibit-read-only t)
+                      (caps (harness-ui-tasks--empty-caps)))
+                  (harness-ui-tasks--cap-cards caps (harness-ui-tasks--visible) (1- held))
+                  (harness-ui-tasks--draw-board caps)
+                  (should-not (harness-ui-tasks--fits-p window))))))
+      (set-frame-height nil 25)))))
+
+(ert-deftest harness-ui-tasks-redraw-for-figures-keeps-the-fitting ()
+  "A redraw for a card's figures draws the caps again, without measuring.
+A working task's cost, tokens and rate change many times a second: the
+board then draws the cards its window shows, with the fitting it
+measured, and the card reads the new figure."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--fake-done board 60)
+    (let ((figures (list :id "t-figures" :name "A task whose figures change"
+                         :prompt "A task whose figures change" :state "done" :column "done"
+                         :merged t :session "s-figures" :verified-at (float-time)
+                         :created (- (float-time) 600) :started (- (float-time) 590)
+                         :finished (float-time))))
+      (with-current-buffer board
+        (setq harness-ui-tasks--tasks (cons figures harness-ui-tasks--tasks))
+        (harness-ui-cache-session (list :id "s-figures" :name "A task whose figures change"
+                                        :status "inactive" :usage (list :cost 0.5 :list-cost 0.5))))
+      (unwind-protect
+          (progn
+            (set-frame-height nil 40)
+            (let ((window (get-buffer-window board)))
+              (should window)
+              (select-window window)
+              (with-current-buffer board
+                (harness-ui-tasks--render t)
+                (should (string-match-p "\\$0\\.500" (harness-ui-tasks-test--board-text board))))
+              (let ((measured 0)
+                    (fitting (cdr harness-ui-tasks--fitting)))
+                (cl-letf* ((real (symbol-function 'harness-ui-tasks--caps-that-fit))
+                           ((symbol-function 'harness-ui-tasks--caps-that-fit)
+                            (lambda (w g b) (cl-incf measured) (funcall real w g b))))
+                  (with-current-buffer board
+                    ;; The cost changes: the card reads it, the board's
+                    ;; shape -- which cards show and how tall they are --
+                    ;; does not.
+                    (harness-ui-cache-session
+                     (list :id "s-figures" :name "A task whose figures change"
+                           :status "inactive" :usage (list :cost 2.0 :list-cost 2.0)))
+                    (harness-ui-tasks--render)
+                    (should (zerop measured))
+                    ;; The same fitting, not a new one that happens to fit.
+                    (should (eq fitting (cdr harness-ui-tasks--fitting)))
+                    (should (string-match-p "\\$2\\.00" (harness-ui-tasks-test--board-text board)))))))))
+      (set-frame-height nil 25))))
 
 (ert-deftest harness-ui-tasks-typing-outlives-a-board-redraw ()
   "The box keeps point and the window after the board is drawn again.
