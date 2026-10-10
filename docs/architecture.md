@@ -686,8 +686,12 @@ See docs/configuration-audit.md for the rule and the audit behind it.
 Persistence under `harness-state-directory`:
 - `store/save NAME OBJ`, `store/load NAME` (JSON files, atomic write).
 - `store/append NAME OBJ`, `store/read-all NAME` (JSONL).
-- `store/sqlite` → open built-in sqlite handle for `usage.db` (nil when
-  Emacs lacks sqlite; callers fall back to JSONL).
+- `store/sqlite &optional NAME` → open built-in sqlite handle for
+  `NAME.db`, `usage.db` by default (nil when Emacs lacks sqlite; callers
+  fall back to JSONL).  One handle per database, kept open; a handle of
+  another state directory is closed first.  `store/sqlite-close
+  &optional NAME` closes one.  The session search keeps its index in
+  `search.db` this way (see session-search).
 - `store/list PREFIX` → names.
 
 ### session
@@ -996,9 +1000,23 @@ its sender, and the hint says so (`harness-session--requeue`).
   :close FN             ; (SESSION-ID) → BOOL: free what it keeps for one   [optional]
   :resolve FN           ; (NAME &optional MODELS) → MODEL plist or nil: a name
                         ; its listing lacks (an alias, a variant)          [optional]
+  :embed FN             ; (NAME TEXTS OPTS) → promise of (:vectors :usage) [optional]
   :capabilities PLIST   ; static defaults, merged with per-model ones
   :tiers PLIST)         ; a model per tier, see below
 ```
+
+Embeddings: `provider/embed MODEL-ID TEXTS &optional OPTS` → promise of
+`(:vectors VECTORS :usage (:input N))`, one vector of floats per string
+of TEXTS, in their order.  OPTS `:dimensions` asks for shorter vectors.
+It rejects a model the policy refuses (`harness-allowed-models`), one
+of no provider, and one whose provider has no `:embed`.  The model
+need not be in the provider's catalogue, which lists chat models: an
+embedding model is named only by settings, such as
+`harness-session-search-embedding-model`.  `provider/embeds-p MODEL-ID`
+says whether its provider embeds.  The OpenAI-compatible endpoints embed
+(`POST /embeddings`; in corporate mode only an endpoint on this machine
+does); the demo provider embeds offline, words of a few related groups
+near each other, for the tests and the dev daemon.
 
 MODEL = `(:id "ID:NAME" :provider ID :name "NAME" :label "…"
 :context-window N :context-window-estimated BOOL :context-window-basis "…"
@@ -4074,6 +4092,97 @@ priority).
   nil: `:outcome interrupted`).  Merges in flight are queued again, and
   tasks in review wait on for the user.
 
+### session-search
+
+One search over the transcripts of every session
+(lisp/modules/harness-session-search.el), for the `session_search` tool,
+the task board's search and the UI's `harness-search-sessions` (C-c h g;
+lisp/ui/harness-ui-search.el).
+
+- The transcripts stay in their node logs.  The index is a cache of
+  them in SQLite, `search.db` beside `usage.db` (`store/sqlite
+  "search"`): a row per node with its readable text
+  (`harness-session-search-node-text`: a message's text, a call's tool
+  and input, a result's output, a plan's entries…), an FTS5 table over
+  the rows (`porter unicode61 remove_diacritics 2`, kept in step by
+  triggers), and per log the byte offset read up to.  It is a database
+  of its own because it grows about as large as the logs, while
+  `usage.db` is small and holds what nothing rebuilds.  Deleting it
+  loses nothing.
+- Keeping it current: only the complete lines a log gained since its
+  offset are read.  An update line (a streamed reply's final text, a
+  changed `:meta`) is merged into its node's row, so a reply is
+  searchable in full; grep over the logs saw only what one line holds.
+  `session/node-added`, `session/node-updated` (not the transient ones)
+  and `session/forked` schedule a catch-up a second later; a search
+  catches up first with the logs it covers when little is left (else it
+  falls back, below); logs never read are read in the background, newest
+  session first, in slices of `harness-session-search--slice` seconds
+  `harness-session-search--gap` apart (`run-at-time`, starting
+  `harness-session-search--start-delay` after the module), and
+  `session/deleted` drops a session's rows there too.
+- `session/search QUERY &optional OPTS` → promise of `(:query :mode
+  :engine :note :loose :total :sessions)`.  OPTS: `:mode` (`text`, the
+  default, `literal`, `regexp`, `semantic`; a symbol or its name),
+  `:sessions` (ids, all by default), `:exclude` (ids), `:project` (a
+  directory: that project's sessions, its worktrees included), `:kinds`
+  (node kinds), `:max-sessions` (20), `:max-matches` (3).  `:engine` says
+  what searched: `fts`, `vectors`, `hybrid` (both), `grep`, or `none`
+  when no session was to be searched; `:note` why a text search fell
+  back; `:loose` that no session has every word and these have some;
+  `:total` how many sessions match.  Each session is `(:id :name
+  :updated :status :kind :cwd :project :name-match :matches :score
+  :hits)`, each hit `(:node :kind :tool :ts :from :from-text :snippet
+  :ranges :score)`, `:ranges` the matches in the snippet as `(START
+  END)`.
+  - `text`: every word must match, in any form (porter stemming; case
+    and accents ignored); `"a phrase"`, `prefix*`, `OR` and `-word`
+    work, and each term goes to FTS5 quoted, so nothing else in a query
+    is read as FTS5 syntax.
+    Sessions rank by their best node (BM25), fused by reciprocal rank
+    fusion with the sessions whose name has the words and, with
+    vectors, with how near they are in meaning.  When no session has
+    every word, those with some come back (`:loose`); when none has
+    any and there are vectors, the sessions nearly as near in meaning
+    as the nearest (`harness-session-search--near-share`), with a note.
+  - `literal` and `regexp`: grep
+    (`harness-session-search--grep-program`) over the logs,
+    case-insensitively, newest session first; an extended regexp is
+    translated for Emacs to check the node's final text, so a node
+    matches on the text it ends with, update lines and all.
+  - `semantic`: the nearest in meaning, by the vectors.
+  - Without SQLite or FTS5, with `harness-session-search-index` nil, or
+    with more of the logs it covers still to index than a search reads
+    first (`harness-session-search--catch-up-bytes`, 4 MB), text search
+    greps for the text as typed, and `:note` says why.
+- Embeddings, off unless `harness-session-search-embedding-model` names
+  a model whose provider embeds (`provider/embed`), with
+  `harness-session-search-embedding-dimensions` for shorter vectors.
+  User messages, replies, plans and compaction summaries are cut into
+  chunks, embedded in batches in the background, newest first, and
+  stored as int8 vectors with a scale, keyed by the SHA-1 of the chunk,
+  so text met twice is embedded once.  A query's vector is compared
+  with every vector in memory, in integer arithmetic.  A failing
+  provider is retried later with smaller batches, then shorter chunks;
+  changing the model or the dimensions drops the vectors and embeds
+  everything again.  Its cost is recorded with `usage/record` under no
+  session.
+- `session/search-status` → `(:index BOOL :file :size :sessions :nodes
+  :pending :progress :embedding (:model :chunks :pending :error))`, or
+  `(:index nil :reason …)`; `session/search-rebuild` drops the index
+  and builds it again from the logs.
+- The UI's results buffer (`harness-ui-search-mode`) lists the sessions
+  found, each with its best matches, what was found highlighted.  `m`
+  cycles the mode, `a` narrows to the project the search started from
+  or widens to every project, `s` asks another query, `g` searches
+  again and `+` shows more sessions.  RET opens a session at a match:
+  `harness-ui-chat-goto-node NODE SESSION REGEXP` loads the transcript
+  and its older pages until the node shows, opens a group or fold that
+  hides it (and a long output's hidden part), and puts point on the
+  first match of REGEXP in it, the text the snippet marked; a node off
+  the session's current branch is reported.  The conversation tree
+  opens a node the same way.
+
 ### tasks-search
 
 The task board's search: a query in words ("did I have a task about the
@@ -4106,11 +4215,16 @@ on them, answered by a cheap model that returns JSON only.
   answer one line of JSON `{"show":[ID…],"do":[{"task":ID,"action":…}]}`.
   Unknown ids are dropped and acted-on tasks are always shown.  When the
   model asks to look further instead of answering -- `{"grep":TEXT}` over
-  the sessions' transcript logs (`sessions/*.nodes.jsonl` under the state
-  directory, searched in a subprocess) or `{"read":[ID…]}` for the latest
-  transcript, at most `harness-tasks-search--read-limit` tasks -- it gets
-  one more round (`harness-tasks-search--final-text` closes it) and must
-  answer then.
+  the transcripts of the tasks' sessions or `{"read":[ID…]}` for the
+  latest transcript, at most `harness-tasks-search--read-limit` tasks --
+  it gets one more round (`harness-tasks-search--final-text` closes it)
+  and must answer then.  TEXT is searched by `session/search` in text
+  mode (see session-search): its words in any form, the best two matches
+  of each task session that has them; when none has every word the
+  answer says these have some of them, and when none has any, with an
+  embedding model set, that they are the nearest in meaning.  Without
+  the session-search module the logs (`sessions/*.nodes.jsonl` under the
+  state directory) are grepped in a subprocess for TEXT as typed.
 - The model is `harness-tasks-search-model`: `auto` (the default) takes
   the provider of the task model's `simple` tier (`provider/tier-model`),
   nil uses the task model itself, a string forces one.
@@ -4827,7 +4941,7 @@ TRAMP prefixes come from the session host):
 | `spawn_agent` | Sub-agent | prompt, fork, model, thinking, name, cwd, worktree, priority (of the child's session: low/medium/high; default: what it inherits) | meta (runs the child in the background and returns at once; the jail checks `cwd`, as it checks bash's) |
 | `skill_search` / `skill_load` | Search skills / Load skill | query / name, file (one of the skill's supporting files) | read (needs no approval: `harness-perms--auto-allow-tools`) |
 | `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit (a session's priority is shown in its line when it is not medium) | read (needs no approval: `harness-perms--inspection-tools`) |
-| `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read (needs no approval: `harness-perms--inspection-tools`) |
+| `session_search` | Search sessions | query, mode (text/literal/regexp/semantic), regexp, all_projects, max_sessions, max_matches | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_read` | Read session | session_id, limit, before, kinds, max_chars | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_history` | Session history | query, regexp, node_id, before, limit, max_chars, kinds, all | read (this session's own conversation from before its last compaction or handoff; needs no approval: `harness-perms--inspection-tools`) |
 | `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
@@ -5284,15 +5398,14 @@ at a time, paging back with `before`; `node_id` shows one node whole
 nodes before the compaction, oldest first.  `kinds` filters (default:
 all but hints).  Every compaction points the model at it (see
 compaction), whatever its kind.
-`session_search` greps the `sessions/*.nodes.jsonl` logs in a subprocess,
-so transcripts are not loaded into memory to be searched.  A node is one
-line of its log and can be megabytes long, so a hit is split from its
-file name by a plain search (`harness-grep-hit`, which the task board's
-search uses too), never a backtracking regexp that would overflow the
-matcher.  Its snippet, a few hundred characters at most, is cut from a
-window around the match.  In regexp mode grep decides the hits; a
-pattern that overflows the matcher over a whole node is run over pieces
-of it just to place the snippet.  `session_send`
+`session_search` is `session/search` (see session-search), in the mode
+the agent asks for: `text` (the default; words in any form, ranked),
+`literal`, `regexp` (an extended regexp; `regexp: true` still asks for
+it) or `semantic`.  Each session found lists its best matches, each
+tagged with its kind, node id and who sent it, a snippet a few hundred
+characters long at most, then how many more match; a note says when the
+search fell back to grep, and when no session has every word, that
+these have some of them.  `session_send`
 prefixes the message with `[Message from session ID "NAME"]` and goes
 through `agent/prompt` (a turn, steering, or the queue) with
 `:from` naming the calling session, so that session's chat shows the

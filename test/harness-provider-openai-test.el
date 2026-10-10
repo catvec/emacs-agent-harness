@@ -704,6 +704,81 @@ the step layer can then retry one that had already streamed something."
         (setq harness-openai-endpoints saved)
         (harness-openai--register-all)))))
 
+;;;; Embeddings
+
+(defvar harness-corporate-mode)
+
+(ert-deftest harness-provider-openai-embeds-text ()
+  "An embedding request is POST /embeddings with the model, the texts and
+the dimensions asked for; the vectors come back in the order of the
+texts, whatever order the server lists them in, with the tokens taken."
+  (harness-openai-test-with-fake
+      '(("/embeddings\\'" . (:body "{\"object\":\"list\",\"data\":[{\"object\":\"embedding\",\"index\":1,\"embedding\":[0.5,-0.25]},{\"object\":\"embedding\",\"index\":0,\"embedding\":[1,0.0]}],\"model\":\"text-embedding-3-small\",\"usage\":{\"prompt_tokens\":7,\"total_tokens\":7}}")))
+    (let ((result (harness-test-await (harness-openai--embed harness-openai-test-openai-endpoint
+                                                             "text-embedding-3-small" '("first" "second")
+                                                             '(:dimensions 2))))
+          (request (car harness-openai-test--requests)))
+      (should (equal '((1 0.0) (0.5 -0.25)) (plist-get result :vectors)))
+      (should (equal '(:input 7) (plist-get result :usage)))
+      (should (equal "https://api.openai.example/v1/embeddings" (plist-get request :url)))
+      (should (equal "POST" (plist-get request :method)))
+      (should (equal '(:model "text-embedding-3-small" :input ["first" "second"] :dimensions 2)
+                     (plist-get request :json)))
+      (should (equal "Bearer sk-test-openai" (cdr (assoc "Authorization" (plist-get request :headers)))))))
+  ;; Through the bus, by the endpoint's provider; without dimensions, none asked for.
+  (harness-openai-test-with-fake
+      '(("/embeddings\\'" . (:body "{\"data\":[{\"index\":0,\"embedding\":[0.1,0.2,0.3]}]}")))
+    (let ((saved harness-openai-endpoints))
+      (unwind-protect
+          (progn
+            (apply #'harness-openai-add-endpoint harness-openai-test-openai-endpoint)
+            (should (harness-call 'provider/embeds-p "testopenai:nomic-embed-text"))
+            (should (equal '(:vectors ((0.1 0.2 0.3)) :usage (:input 0))
+                           (harness-test-await (harness-call 'provider/embed "testopenai:nomic-embed-text" '("hi")))))
+            (should (equal '(:model "nomic-embed-text" :input ["hi"])
+                           (harness-openai-test--last-request-json))))
+        (setq harness-openai-endpoints saved)
+        (harness-openai--register-all)))))
+
+(ert-deftest harness-provider-openai-embedding-failures ()
+  "A server that answers too few vectors, an HTTP error and a missing key
+reject the request, saying why."
+  (cl-flet ((failure (endpoint)
+              (error-message-string
+               (should-error (harness-test-await (harness-openai--embed endpoint "m" '("a" "b") nil))))))
+    (harness-openai-test-with-fake
+        '(("/embeddings\\'" . (:body "{\"data\":[{\"index\":0,\"embedding\":[0.1]}]}")))
+      (should (string-match-p "testopenai answered 1 embeddings for 2 texts"
+                              (failure harness-openai-test-openai-endpoint))))
+    (harness-openai-test-with-fake
+        '(("/embeddings\\'" . (:status 404 :body "{\"error\":{\"message\":\"model m does not exist\"}}")))
+      (should (string-match-p "model m does not exist" (failure harness-openai-test-openai-endpoint))))
+    (with-environment-variables (("HARNESS_TEST_MISSING_KEY" nil))
+      (harness-openai-test-with-fake nil
+        (should (string-match-p "no API key for nokey: set HARNESS_TEST_MISSING_KEY"
+                                (failure '(:id nokey :base-url "https://nokey.example/v1"
+                                           :api-key-env "HARNESS_TEST_MISSING_KEY"))))
+        (should-not harness-openai-test--requests)))))
+
+(ert-deftest harness-provider-openai-corporate-mode-embeds-only-here ()
+  "In corporate mode only a server on this machine embeds: the text of the
+sessions would leave it otherwise."
+  (let ((harness-corporate-mode t))
+    (harness-openai-test-with-fake
+        '(("/embeddings\\'" . (:body "{\"data\":[{\"index\":0,\"embedding\":[0.1]}]}")))
+      (should (string-match-p "corporate mode embeds text only on this machine, and testopenai is at api.openai.example"
+                              (error-message-string
+                               (should-error (harness-test-await
+                                              (harness-openai--embed harness-openai-test-openai-endpoint
+                                                                     "m" '("a") nil))))))
+      (should-not harness-openai-test--requests)
+      (dolist (url '("http://localhost:11434/v1" "http://127.0.0.1:1234/v1" "http://[::1]:8080/v1"))
+        (should (equal '((0.1))
+                       (plist-get (harness-test-await
+                                   (harness-openai--embed (list :id 'local :base-url url) "m" '("a") nil))
+                                  :vectors))))
+      (should (= 3 (length harness-openai-test--requests))))))
+
 ;;;; Models
 
 (ert-deftest harness-provider-openai-models-openrouter-mapping ()

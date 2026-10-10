@@ -73,6 +73,11 @@ OpenAI-compatible APIs and AWS Bedrock.
   BTW conversations, browse the conversation tree, and compact long
   conversations, automatically or by hand: into a summary, a cheap
   brief one, or a transcript file the model reads from.
+- **Session search.** Find any session by what was said in it: words
+  in any form, ranked by a full-text index the harness keeps in SQLite,
+  the exact text, a regular expression, or, with an embedding model,
+  meaning. A match opens its session right where it was said. Agents
+  search the same way.
 - **Cost tracking.** Cost per turn, subscription quotas, budgets and a
   usage dashboard.
 - **Insights.** A report on how a day, a week or a month of work with
@@ -331,6 +336,7 @@ default), or nil for nowhere.
 | `+` / `-` | `harness-ui-sessions-raise-priority` / `harness-ui-sessions-lower-priority` | In the session list, raise or lower the priority of the session at point (with `C-u`, ask for the level) |
 | `p` | `harness-ui-sessions-set-priority` | In the session list, set the priority of the session at point |
 | `y` / `n` | `harness-ui-sessions-allow` / `harness-ui-sessions-deny` | On the lines of a listed session waiting on a permission request, answer it with Allow or Deny, as the request's own `y` and `n` do |
+| `C-c h g` | `harness-search-sessions` | Search what was said in every session: words, the exact text, a regexp or meaning (see [Searching sessions](#searching-sessions)) |
 | `C-c h a` | `harness-tasks` | Show the task board |
 | `C-c h /` | `harness-tasks-search` | Find tasks, or act on them, by saying so in words |
 | `C-c h F` | `harness-fullscreen` | Start or end the fullscreen layout: the task board, session list or a main session on one side, a session beside it |
@@ -938,6 +944,66 @@ leaves the model a summary to go on. A summary that cannot be made gives
 way to the transcript file, and that to carrying on: the message always
 goes, unless you hold it. `harness-cowboy-min-context` leaves smaller
 conversations to go uncached without asking.
+
+### Searching sessions
+
+`C-c h g` (`M-x harness-search-sessions`) asks what to look for and
+lists the sessions that said it, best match first, each with its best
+matches and what was found in them highlighted. `RET` on a match opens
+its session there, with point on the words found, however far back
+they are. On a session's line it opens at its best match.
+
+```
+ 2 sessions match “sqlite cost”  ·  full-text index
+
+ ● Usage dashboard  emacs-agent-harness · 3d ago
+     you          …record the cost of each turn in sqlite, one row per…
+     agent        …usage.db now keeps the cost per model…
+```
+
+There are four ways to search. `m` goes from one to the next, and the
+header line shows them all:
+
+- **Words** (the default): every word must be there, in any form, so
+  "crash" finds "crashes" too. The best matches come first. `"a
+  phrase"` matches as a phrase, `pars*` matches a prefix, `OR` between
+  two words takes either, and `-word` leaves out the sessions that have
+  it. When no session has every word, the ones with some of them are
+  listed, and the line above them says so.
+- **Literal**: the text exactly as you typed it, symbols and all.
+- **Regexp**: an extended regular expression, as `grep -E` reads it.
+- **Meaning**: what is near in meaning, even in other words. This needs
+  an embedding model (below).
+
+`a` switches between every project and the project you searched from
+(`harness-ui-search-default-scope` sets where a search starts), `s`
+searches for something else, `g` searches again, `+` lists more
+sessions, and `n` and `p` go from match to match. With `C-u`, `C-c h g`
+asks how to search first.
+
+The search reads a full-text index of the transcripts, which the
+harness keeps in `search.db` beside `usage.db` in its state directory.
+It is built in the background from the transcripts and kept up to date
+as sessions go on. It is only a cache: deleting it loses nothing, and
+it is built again. Until it is built, or with
+`harness-session-search-index` set to nil, a word search matches the
+text as you typed it, and the results say so. Agents search the same
+index with the `session_search` tool, and so does the task board's
+search when it looks in the tasks' transcripts.
+
+Searching by meaning needs an embedding model. Set
+`harness-session-search-embedding-model` to one, such as
+`"openai:text-embedding-3-small"`, or a local server's: with an entry
+`(:id local :base-url "http://localhost:11434/v1" :api-key "ollama")`
+in `harness-openai-endpoints` for Ollama, `"local:nomic-embed-text"`.
+Then the text of your messages, the replies, plans and summaries is
+embedded in the background, and word searches rank their matches by
+meaning too. When no session has the words, they list the sessions
+nearest in meaning instead. That text goes to the model's provider,
+which is why this is off until you set it. In corporate mode only a
+server on this machine embeds.
+`harness-session-search-embedding-dimensions` asks a model that can
+shorten its vectors for fewer dimensions.
 
 ### Forks and side conversations
 
@@ -2403,6 +2469,10 @@ It turns off:
   call is denied and the model is told why.
 - The `ssh` tool, which runs commands on other machines. Sessions do
   not get it, and a call to it is denied.
+- Embedding session text on another machine. Searching sessions by
+  meaning embeds their text only with a server on this machine (see
+  [Searching sessions](#searching-sessions)); the full-text index never
+  leaves it.
 
 It leaves alone:
 
