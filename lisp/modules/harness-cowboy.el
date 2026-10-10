@@ -204,7 +204,7 @@ A switch the policy sets wins, then the session's own, then
   (and (harness-method-exists-p 'compaction/estimate)
        (condition-case err
            (harness-call 'compaction/estimate session-id)
-         (error (harness-log 'warn "cowboy: no estimate for %s: %s" session-id (harness-error-message err))
+         (error (harness-log 'warn "cowboy: no estimate for %s: %s" session-id (harness-error-short-message err))
                 nil))))
 
 (defun harness-cowboy--kind-estimate (estimate choice)
@@ -396,7 +396,7 @@ say, which then stays as it is."
           (harness-save-user-option 'harness-cowboy-default choice)
           (harness-save-user-option 'harness-cowboy-ask nil))
         nil)
-    (error (let ((msg (harness-error-message err)))
+    (error (let ((msg (harness-error-short-message err)))
              (harness-log 'warn "cowboy: could not make %s the default: %s" choice msg)
              msg))))
 
@@ -442,7 +442,7 @@ the message."
                                           (format "“%s” is not one of the choices."
                                                   (harness-truncate-end (harness-first-line text) 60)))
                    (error (harness-log 'warn "cowboy: could not ask %s again: %s"
-                                       session-id (harness-error-message err))
+                                       session-id (harness-error-short-message err))
                           (funcall settle 'hold 'user))))
                 ((and (cdr parsed) (not (eq (car parsed) 'hold)))
                  (let ((failed (harness-cowboy--remember (car parsed))))
@@ -516,7 +516,9 @@ cannot be written to carrying on, each said in a hint."
     (harness-catch
      (harness-call-async 'compaction/compact session-id (list :kind choice :meta (funcall meta)))
      (lambda (err)
-       (let ((msg (harness-error-message err)))
+       ;; Short: the error can carry a whole transcript or request body
+       ;; (`harness-error-short-message'), and the hint is read.
+       (let ((msg (harness-error-short-message err)))
          (if (and (memq choice '(brief summary)) (harness-call 'session/exists-p session-id))
              (progn
                (harness-call 'session/hint session-id
@@ -525,7 +527,7 @@ cannot be written to carrying on, each said in a hint."
                (harness-catch
                 (harness-call-async 'compaction/compact session-id
                                     (list :kind 'transcript :meta (funcall meta msg)))
-                (lambda (err) (funcall carry-on (harness-error-message err)))))
+                (lambda (err) (funcall carry-on (harness-error-short-message err)))))
            (funcall carry-on msg)))))))
 
 (defun harness-cowboy--busy (session-id)
@@ -539,7 +541,7 @@ starts, and its end, cancelled or not, when it ends."
         (harness-call 'session/set-status session-id 'running)
         (when (harness-method-exists-p 'agent/note-activity)
           (harness-call 'agent/note-activity session-id (list :phase 'compacting))))
-    (error (harness-log 'warn "cowboy: could not mark %s busy: %s" session-id (harness-error-message err)))))
+    (error (harness-log 'warn "cowboy: could not mark %s busy: %s" session-id (harness-error-short-message err)))))
 
 (defun harness-cowboy--apply (session-id choice by value estimate)
   "Do CHOICE before SESSION-ID's turn, as BY decided; promise the gate value.
@@ -581,7 +583,7 @@ the turn goes on with: asked (`harness-cowboy--ask') or taken unasked
         (condition-case err
             (harness-cowboy--ask session-id session value estimate settle)
           (error
-           (harness-log 'warn "cowboy: could not ask %s: %s" session-id (harness-error-message err))
+           (harness-log 'warn "cowboy: could not ask %s: %s" session-id (harness-error-short-message err))
            (funcall settle (harness-cowboy--default) 'unasked)))
         promise))))
 
@@ -644,10 +646,10 @@ OPTS keys:
                           (lambda (_) choice)
                           (lambda (err)
                             (harness-log 'warn "cowboy: compacting %s unasked failed: %s"
-                                         session-id (harness-error-message err))
+                                         session-id (harness-error-short-message err))
                             nil)))))
     (error (harness-log 'warn "cowboy: compacting %s unasked failed: %s"
-                        session-id (harness-error-message err))
+                        session-id (harness-error-short-message err))
            (harness-resolved nil))))
 
 ;;;; The gate
@@ -665,7 +667,7 @@ changed it."
       (harness-then (harness-cowboy--decide id session value)
                     (lambda (gate) (funcall next gate) nil)
                     (lambda (err)
-                      (harness-log 'warn "cowboy: deciding for %s failed: %s" id (harness-error-message err))
+                      (harness-log 'warn "cowboy: deciding for %s failed: %s" id (harness-error-short-message err))
                       (funcall next value)
                       nil))))
   nil)
