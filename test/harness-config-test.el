@@ -182,6 +182,34 @@ reaching a custom file."
     (should (eq 'none (harness-config-test--read root)))
     (should-not saved)))
 
+(ert-deftest harness-config-btw-model-layers-with-the-session-settings ()
+  "The model BTWs run on layers like the other settings a new session starts with.
+`auto', nil and a model are its values, and nil is a value, not an unset
+layer; anything else is refused."
+  (skip-unless (executable-find "git"))
+  (harness-config-test-with
+    (should (memq 'harness-btw-model harness-config-keys))
+    (let ((setting (harness-config-test--setting (harness-call 'config/describe sub) "harness-btw-model")))
+      (should (eq t (plist-get setting :layered)))
+      (should (equal "sessions" (plist-get setting :section)))
+      (should (equal "auto" (plist-get setting :value)))
+      (should (equal "global" (plist-get setting :source))))
+    (should (eq 'auto (harness-call 'config/get 'harness-btw-model sub)))
+    ;; The project's value, then the directory's over it.
+    (harness-call 'config/set 'harness-btw-model "\"claude:haiku\"" :printed t :scope 'project :cwd sub)
+    (should (equal "claude:haiku" (harness-call 'config/get 'harness-btw-model sub)))
+    (harness-call 'config/set 'harness-btw-model "nil" :printed t :scope 'directory :cwd sub)
+    (should (null (harness-call 'config/get 'harness-btw-model sub)))
+    (should (equal "directory"
+                   (plist-get (harness-config-test--setting (harness-call 'config/describe sub) "harness-btw-model")
+                              :source)))
+    (harness-call 'config/set 'harness-btw-model "auto" :printed t :scope 'directory :cwd sub)
+    (should (eq 'auto (harness-call 'config/get 'harness-btw-model sub)))
+    ;; Only a model, `auto' or nil fits.
+    (should-error (harness-call 'config/set 'harness-btw-model 5 :scope 'project :cwd sub))
+    (should-error (harness-call 'config/set 'harness-btw-model 'sonnet :scope 'project :cwd sub))
+    (should (equal '((nil . ((harness-btw-model . auto)))) (harness-config-test--read sub)))))
+
 (ert-deftest harness-config-corporate-mode-is-set-in-the-init-file-only ()
   "The settings page never lists `harness-corporate-mode', and neither
 `config/set' nor `config/unset' changes it, here or over ACP."

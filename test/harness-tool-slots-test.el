@@ -11,6 +11,7 @@
 ;;; Code:
 
 (require 'harness-test-helpers)
+(require 'harness-slots)
 
 ;;;; The probes
 
@@ -57,6 +58,27 @@ handler runs, which is when the plugin has given it a slot.  Return NAME."
   (clrhash harness-tool-slots--machines)
   (setq harness-tool-slots-test--started nil
         harness-tool-slots-test--waiting nil))
+
+(defun harness-tool-slots-test--pool (machine)
+  "Return the pool of slots MACHINE has, nil while it has none."
+  (gethash machine harness-tool-slots--machines))
+
+(defun harness-tool-slots-test--running (machine)
+  "Return how many calls hold a slot of MACHINE, 0 while it has no pool."
+  (let ((pool (harness-tool-slots-test--pool machine)))
+    (if pool (harness-slots-running pool) 0)))
+
+(defun harness-tool-slots-test--waiting (machine)
+  "Return how many calls wait for a slot of MACHINE, 0 while it has no pool."
+  (let ((pool (harness-tool-slots-test--pool machine)))
+    (if pool (harness-slots-waiting pool) 0)))
+
+(defun harness-tool-slots-test--idle-p (machine)
+  "Non-nil when MACHINE has a pool of slots and no call holds one or waits.
+A machine keeps its pool once its last call is done."
+  (and (harness-tool-slots-test--pool machine)
+       (= 0 (harness-tool-slots-test--running machine))
+       (= 0 (harness-tool-slots-test--waiting machine))))
 
 (defun harness-tool-slots-test--call (name &optional input ctx)
   "Run probe NAME with INPUT under CTX as `tools/execute' would; return a promise.
@@ -117,7 +139,7 @@ with :report records what the call says as it waits."
       (should (equal "slots-probe" (harness-tool-slots-test--content second)))
       (should (equal "slots-probe" (harness-tool-slots-test--content third)))
       ;; Nothing is left running or waiting.
-      (should (equal (cons 0 nil) (gethash "test-machine" harness-tool-slots--machines))))))
+      (should (harness-tool-slots-test--idle-p "test-machine")))))
 
 (ert-deftest harness-tool-slots-the-burst-lets-a-few-calls-more-run ()
   "A call over the count starts while the burst is left, the next waits."
@@ -154,8 +176,8 @@ with :report records what the call says as it waits."
       (harness-tool-slots-test--settle-all)
       (should (equal "slots-probe" (harness-tool-slots-test--content one)))
       (should (equal "slots-probe" (harness-tool-slots-test--content other)))
-      (should (equal (cons 0 nil) (gethash "one" harness-tool-slots--machines)))
-      (should (equal (cons 0 nil) (gethash "two" harness-tool-slots--machines))))))
+      (should (harness-tool-slots-test--idle-p "one"))
+      (should (harness-tool-slots-test--idle-p "two")))))
 
 (ert-deftest harness-tool-slots-a-call-of-another-tool-never-waits ()
   "Only the tools `harness-tool-slots-tools' names hold slots."
@@ -193,7 +215,7 @@ with :report records what the call says as it waits."
                    (harness-tool-get "slots-boom") nil (list :cwd default-directory))))
         ;; The failure is the call's result, and the slot is free again.
         (should (plist-get (harness-await boom 5) :is-error))
-        (should (equal (cons 0 nil) (gethash "test-machine" harness-tool-slots--machines)))
+        (should (harness-tool-slots-test--idle-p "test-machine"))
         (let ((next (harness-tool-slots-test--call "slots-probe")))
           (should (equal '("slots-probe") harness-tool-slots-test--started))
           (harness-tool-slots-test--settle-all)
@@ -206,7 +228,7 @@ with :report records what the call says as it waits."
         (let ((rejected (harness-tools--run-handler
                          (harness-tool-get "slots-reject") nil (list :cwd default-directory))))
           (should (plist-get (harness-await rejected 5) :is-error))
-          (should (equal (cons 0 nil) (gethash "test-machine" harness-tool-slots--machines)))
+          (should (harness-tool-slots-test--idle-p "test-machine"))
           (let ((next (harness-tool-slots-test--call "slots-probe")))
             (harness-tool-slots-test--settle-all)
             (should (equal "slots-probe" (harness-tool-slots-test--content next)))))))))
@@ -261,6 +283,217 @@ call under a one-slot limit would wait for itself and never run."
       (should (equal "slots-probe" (harness-tool-slots-test--content held)))
       (should (equal "slots-probe" (harness-tool-slots-test--content waited))))))
 
+(ert-deftest harness-tool-slots-shutdown-lets-the-waiting-calls-of-every-machine-run ()
+  "Giving the slots up at shutdown starts the calls waiting on each machine."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-tools '("slots-probe"))
+        (harness-tool-slots-count 1)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-machine-function
+         (lambda (_name input _ctx) (or (plist-get input :machine) "one"))))
+    (harness-tool-slots-test--probe "slots-probe")
+    (let ((calls (list (harness-tool-slots-test--call "slots-probe" '(:machine "one"))
+                       (harness-tool-slots-test--call "slots-probe" '(:machine "two"))
+                       (harness-tool-slots-test--call "slots-probe" '(:machine "one"))
+                       (harness-tool-slots-test--call "slots-probe" '(:machine "two")))))
+      ;; One call runs on each machine, the other two wait.
+      (should (= 2 (length harness-tool-slots-test--started)))
+      (should (= 1 (harness-tool-slots-test--waiting "one")))
+      (should (= 1 (harness-tool-slots-test--waiting "two")))
+      (harness-tool-slots--shutdown)
+      (should (= 4 (length harness-tool-slots-test--started)))
+      (should (= 0 (harness-tool-slots-test--waiting "one")))
+      (should (= 0 (harness-tool-slots-test--waiting "two")))
+      (harness-tool-slots--init)
+      (harness-tool-slots-test--settle-all)
+      (dolist (call calls)
+        (should (equal "slots-probe" (harness-tool-slots-test--content call))))
+      (should (harness-tool-slots-test--idle-p "one"))
+      (should (harness-tool-slots-test--idle-p "two")))))
+
+(ert-deftest harness-tool-slots-slots-from-before-pools-are-taken-over ()
+  "A reload may leave a machine's slots in the shape they had before pools.
+A call asking then is served, not failed, and the calls that waited in
+the old slots start in the new pool, in the order they came."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-tools '("slots-probe"))
+        (harness-tool-slots-count 1)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-machine-function #'harness-tool-slots-test--machine)
+        (old-first (harness-make-promise))
+        (old-second (harness-make-promise)))
+    (harness-tool-slots-test--probe "slots-probe")
+    ;; (RUNNING . WAITERS): one call held a slot, two waited for one.
+    (puthash "test-machine"
+             (cons 1 (list (list :promise old-first :session nil)
+                           (list :promise old-second :session nil)))
+             harness-tool-slots--machines)
+    (let ((call (harness-tool-slots-test--call "slots-probe")))
+      ;; The machine has a pool now, and its one slot went to the oldest
+      ;; waiter; the other waiter and the new call wait behind it.
+      (should (harness-slots-limit (harness-tool-slots-test--pool "test-machine")))
+      (should (functionp (harness-promise-value old-first)))
+      (should-not (harness-promise-settled-p old-second))
+      (should-not harness-tool-slots-test--started)
+      (should (= 1 (harness-tool-slots-test--running "test-machine")))
+      (should (= 2 (harness-tool-slots-test--waiting "test-machine")))
+      ;; Each gives its slot back in turn, and the call runs last.
+      (funcall (harness-promise-value old-first))
+      (should (functionp (harness-promise-value old-second)))
+      (should-not harness-tool-slots-test--started)
+      (funcall (harness-promise-value old-second))
+      (should (equal '("slots-probe") harness-tool-slots-test--started))
+      (harness-tool-slots-test--settle-all)
+      (should (equal "slots-probe" (harness-tool-slots-test--content call)))
+      (should (harness-tool-slots-test--idle-p "test-machine")))))
+
+;;;; Tickets from before pools
+;;
+;; A reload keeps the calls that run through it, and with them the
+;; tickets they made when a machine's slots were a (RUNNING . WAITERS)
+;; cons.  Such a ticket gives its slot back by the name
+;; `harness-tool-slots--give', which a pool no longer answers to by
+;; counting: the pool that took over counted none of those calls.
+
+(ert-deftest harness-tool-slots-a-give-from-before-pools-counts-nothing-down ()
+  "A slot given back by a call from before pools takes no count from the pool.
+The pool that took over counted the calls it admitted itself, so a call
+that held a slot before it was never counted there: giving that slot
+back must neither signal nor let a call start into a slot a call of the
+pool still holds."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-tools '("slots-probe"))
+        (harness-tool-slots-count 1)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-machine-function #'harness-tool-slots-test--machine))
+    (harness-tool-slots-test--probe "slots-probe")
+    ;; (RUNNING . WAITERS): one call held the only slot, none waited.
+    (puthash "test-machine" (cons 1 nil) harness-tool-slots--machines)
+    (let ((first (harness-tool-slots-test--call "slots-probe"))
+          (second (harness-tool-slots-test--call "slots-probe")))
+      ;; The pool counts the calls it admitted: the first holds the
+      ;; only slot, and the second waits for it.
+      (should (equal '("slots-probe") harness-tool-slots-test--started))
+      (should (= 1 (harness-tool-slots-test--running "test-machine")))
+      (should (= 1 (harness-tool-slots-test--waiting "test-machine")))
+      ;; The call from before ends, and its ticket gives its slot back
+      ;; by name, as it was made to.  That signals nothing and counts
+      ;; nothing down: the second still waits for the first's slot.
+      (harness-tool-slots--give "test-machine")
+      (should (= 1 (harness-tool-slots-test--running "test-machine")))
+      (should (= 1 (harness-tool-slots-test--waiting "test-machine")))
+      (should (equal '("slots-probe") harness-tool-slots-test--started))
+      ;; The first call's own ticket does, and the second starts.
+      (harness-tool-slots-test--settle-oldest)
+      (should (equal '("slots-probe" "slots-probe") harness-tool-slots-test--started))
+      (should (= 1 (harness-tool-slots-test--running "test-machine")))
+      (should (= 0 (harness-tool-slots-test--waiting "test-machine")))
+      (harness-tool-slots-test--settle-all)
+      (should (equal "slots-probe" (harness-tool-slots-test--content first)))
+      (should (equal "slots-probe" (harness-tool-slots-test--content second)))
+      (should (harness-tool-slots-test--idle-p "test-machine")))))
+
+(ert-deftest harness-tool-slots-a-give-from-before-pools-takes-the-old-slots-over ()
+  "A slot given back from before pools may be the first to ask the machine.
+No new call has made a pool then: the machine's slots are still a
+\(RUNNING . WAITERS) cons.  The give signals nothing, the machine has a
+pool afterwards, and the call that waited is served by it."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-count 1)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-machine-function #'harness-tool-slots-test--machine)
+        (waiter (harness-make-promise)))
+    ;; One call held the only slot, and one waited for it.
+    (puthash "test-machine"
+             (cons 1 (list (list :promise waiter :session nil)))
+             harness-tool-slots--machines)
+    (harness-tool-slots--give "test-machine")
+    (should (harness-slots--pool-p (harness-tool-slots-test--pool "test-machine")))
+    ;; The waiter has a slot of the pool, and the ticket that gives it back.
+    (should (functionp (harness-promise-value waiter)))
+    (should (= 1 (harness-tool-slots-test--running "test-machine")))
+    (should (= 0 (harness-tool-slots-test--waiting "test-machine")))
+    (funcall (harness-promise-value waiter))
+    (should (harness-tool-slots-test--idle-p "test-machine"))))
+
+;;;; A call settles whatever happens to its slot
+;;
+;; `harness-tools--run-handler' turns every failure of a handler into a
+;; result, so the ways the plugin itself rejects a call -- the promise
+;; of a handler that rejects, a handler that signals before it has a
+;; promise to give -- are driven here through `harness-tool-slots--hold'
+;; with a handler of their own.
+
+(ert-deftest harness-tool-slots-a-hold-that-fails-gives-its-slot-back ()
+  "A hold whose handler fails rejects its call and frees the slot.
+That is a handler whose promise rejects, and one that signals before it
+has a promise to give."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-tools '("slots-probe"))
+        (harness-tool-slots-count 1)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-machine-function #'harness-tool-slots-test--machine))
+    (harness-tool-slots-test--probe "slots-probe")
+    (let ((tool (harness-tool-get "slots-probe")))
+      ;; The handler's promise rejects.
+      (let ((call (harness-tool-slots--hold
+                   (lambda (&rest _) (harness-rejected "Handler failed"))
+                   tool nil nil)))
+        (should (eq 'rejected (harness-promise-state call)))
+        (should (equal "Handler failed" (harness-promise-value call)))
+        (should (harness-tool-slots-test--idle-p "test-machine")))
+      ;; The handler signals before it has a promise to give.
+      (let ((call (harness-tool-slots--hold
+                   (lambda (&rest _) (error "Handler signalled"))
+                   tool nil nil)))
+        (should (eq 'rejected (harness-promise-state call)))
+        (should (equal '(error "Handler signalled") (harness-promise-value call)))
+        (should (harness-tool-slots-test--idle-p "test-machine")))
+      ;; The machine's only slot is free for the next call.
+      (let ((next (harness-tool-slots-test--call "slots-probe")))
+        (should (equal '("slots-probe") harness-tool-slots-test--started))
+        (harness-tool-slots-test--settle-all)
+        (should (equal "slots-probe" (harness-tool-slots-test--content next)))
+        (should (harness-tool-slots-test--idle-p "test-machine"))))))
+
+(ert-deftest harness-tool-slots-a-ticket-that-signals-leaves-no-call-hanging ()
+  "A call settles even when giving its slot back signals.
+Such a ticket would otherwise stop the settling that follows it, and
+the turn waiting for the call would wait for ever.  The error is not
+hidden: it is logged, and a call that failed is failed with its own
+error, not the ticket's."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-tools '("slots-probe"))
+        (harness-tool-slots-count 1)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-machine-function #'harness-tool-slots-test--machine)
+        (logged nil))
+    (harness-tool-slots-test--probe "slots-probe")
+    (cl-letf (((symbol-function 'harness-tool-slots--acquire)
+               (lambda (_machine _session)
+                 (harness-resolved (lambda () (error "Ticket boom")))))
+              (harness-log-hook
+               (list (lambda (level msg) (when (eq level 'error) (push msg logged))))))
+      (let ((tool (harness-tool-get "slots-probe")))
+        ;; The handler answers: the call has its result.
+        (let ((call (harness-tool-slots-test--call "slots-probe")))
+          (should (equal '("slots-probe") harness-tool-slots-test--started))
+          (harness-tool-slots-test--settle-all)
+          (should (equal "slots-probe" (harness-tool-slots-test--content call))))
+        (should (cl-some (lambda (msg) (string-match-p "Ticket boom" msg)) logged))
+        ;; The handler fails: the call is rejected with that failure.
+        (let ((call (harness-tool-slots--hold
+                     (lambda (&rest _) (harness-rejected "Handler failed"))
+                     tool nil nil)))
+          (should (eq 'rejected (harness-promise-state call)))
+          (should (equal "Handler failed" (harness-promise-value call))))
+        ;; The handler signals before it has a promise to give.
+        (let ((call (harness-tool-slots--hold
+                     (lambda (&rest _) (error "Handler signalled"))
+                     tool nil nil)))
+          (should (eq 'rejected (harness-promise-state call)))
+          (should (equal '(error "Handler signalled") (harness-promise-value call))))))))
+
 (ert-deftest harness-tool-slots-tools-execute-holds-a-slot ()
   "A call through `tools/execute' takes a slot like any other."
   (harness-tool-slots-test--setup)
@@ -280,6 +513,76 @@ call under a one-slot limit would wait for itself and never run."
       (harness-tool-slots-test--settle-all)
       (should (equal "slots-probe" (plist-get (harness-await first 5) :content)))
       (should (equal "slots-probe" (plist-get (harness-await second 5) :content))))))
+
+;;;; Judges decide before the wait
+;;
+;; The auto-mode judge, and the one of emacs_eval, are model calls of the
+;; harness's own.  They are `permission/decide' stages, and `tools/execute'
+;; runs that chain to its end before it runs the handler, which is where a
+;; governed tool waits for its slot.  So a judge never holds a slot nor
+;; queues for one, and a call that waits for a slot has been judged.
+
+(defvar harness-tool-slots-test--judged nil
+  "What the stand-in judge decided, newest first, as (CALL-ID HELD WAITING).
+HELD is how many calls held a slot of the test machine, and WAITING how
+many waited for one, when the verdict came.")
+
+(defun harness-tool-slots-test--judge (decision next request)
+  "Stand in for the auto-mode judge, a `permission/decide' stage.
+It takes a moment, as a model call does, and then allows the call,
+noting the state of the test machine's slots (`harness-tool-slots-test--judged')."
+  (if (not (eq 'ask (plist-get decision :behavior)))
+      (funcall next decision)
+    (run-at-time 0.02 nil
+                 (lambda ()
+                   (push (list (plist-get request :call-id)
+                               (harness-tool-slots-test--running "test-machine")
+                               (harness-tool-slots-test--waiting "test-machine"))
+                         harness-tool-slots-test--judged)
+                   (funcall next (list :behavior 'allow :reason "ordinary work"))))
+    nil))
+
+(ert-deftest harness-tool-slots-a-judge-decides-before-the-slot-wait ()
+  "A call is judged before it asks for a slot, so a full machine does not hold a judge up.
+The first call is judged and takes the only slot.  The second is judged
+while that slot is held, and nobody waits for one at that moment; its
+verdict is in, and only then does it wait.  A slot freed, it runs."
+  (harness-test-reset-bus)
+  (harness-tool-slots-test--setup)
+  (setq harness-tool-slots-test--judged nil)
+  (harness-add-filter 'permission/decide #'harness-tool-slots-test--judge 30)
+  (unwind-protect
+      (let ((harness-tool-slots-tools '("slots-probe"))
+            (harness-tool-slots-count 1)
+            (harness-tool-slots-burst 0)
+            (harness-tool-slots-machine-function #'harness-tool-slots-test--machine))
+        (harness-tool-slots-test--probe "slots-probe")
+        (let ((first (harness-call 'tools/execute nil (list :id "c1" :name "slots-probe" :input nil))))
+          ;; Judged with the machine idle, then it takes the only slot.
+          (harness-test-wait (lambda () (equal '("slots-probe") harness-tool-slots-test--started)) 5
+                             "the first call to run")
+          (should (equal '(("c1" 0 0)) harness-tool-slots-test--judged))
+          (let ((second (harness-call 'tools/execute nil (list :id "c2" :name "slots-probe" :input nil))))
+            ;; The slot is held, and the second call is judged all the same:
+            ;; at that moment it was not waiting for one.
+            (harness-test-wait (lambda () (assoc "c2" harness-tool-slots-test--judged)) 5
+                               "the second call to be judged")
+            (should (equal '("c2" 1 0) (assoc "c2" harness-tool-slots-test--judged)))
+            ;; Its verdict is in, and it waits for the slot now.
+            (harness-test-wait (lambda () (> (harness-tool-slots-test--waiting "test-machine") 0)) 5
+                               "the second call to wait for a slot")
+            (should (equal '("slots-probe") harness-tool-slots-test--started))
+            (should-not (harness-promise-settled-p second))
+            ;; A slot frees: it runs.
+            (harness-tool-slots-test--settle-oldest)
+            (harness-test-wait (lambda () (= 2 (length harness-tool-slots-test--started))) 5
+                               "the second call to run")
+            (should (equal '("c2" "c1") (mapcar #'car harness-tool-slots-test--judged)))
+            (harness-tool-slots-test--settle-all)
+            (should (equal "slots-probe" (plist-get (harness-await first 5) :content)))
+            (should (equal "slots-probe" (plist-get (harness-await second 5) :content)))
+            (should (harness-tool-slots-test--idle-p "test-machine")))))
+    (harness-remove-filter 'permission/decide #'harness-tool-slots-test--judge)))
 
 ;;;; The limit, and which machine it is for
 

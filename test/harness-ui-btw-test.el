@@ -60,6 +60,10 @@
 (declare-function harness-ui-tasks-btw "harness-ui-tasks")
 (declare-function harness-tree "harness-ui-tree")
 (declare-function harness-btw "harness-ui-btw")
+(declare-function harness-ui-tree-btw "harness-ui-tree")
+(declare-function harness-ui-tree-node-at-point "harness-ui-tree")
+(declare-function harness-ui-choose-model "harness-ui")
+(declare-function harness-ui-request "harness-ui")
 (declare-function harness-ui-btw-close "harness-ui-btw")
 (declare-function harness-ui-btw-promote "harness-ui-btw")
 (declare-function harness-chat-buffer "harness-ui-chat")
@@ -734,6 +738,189 @@ moves.  The tree shows the BTW, still empty, at the top."
           (with-selected-window window (harness-ui-btw-close))
           (should (eq tree-window (selected-window)))
           (harness-ui-btw-test--wait-gone btw buffer))))))
+
+;;;; The model of one BTW
+
+(defmacro harness-ui-btw-test-recording-requests (var &rest body)
+  "Run BODY with the requests for a BTW the UI sends pushed onto VAR.
+Each is (METHOD . PARAMS), newest first, and the request goes on as it
+would."
+  (declare (indent 1))
+  (let ((orig (make-symbol "orig")))
+    `(let ((,orig (symbol-function 'harness-ui-request)))
+       (cl-letf (((symbol-function 'harness-ui-request)
+                  (lambda (method &optional params)
+                    (when (string-match-p "/btw\\'" method) (push (cons method params) ,var))
+                    (funcall ,orig method params))))
+         ,@body))))
+
+(defun harness-ui-btw-test--prefixed (window command)
+  "Run COMMAND in WINDOW with a prefix argument; return the BTW window it opens."
+  (let ((current-prefix-arg '(4)))
+    (harness-ui-btw-test--open-btw window command)))
+
+(ert-deftest harness-ui-btw-a-prefix-argument-asks-for-the-model ()
+  "C-u b reads a model from the catalogue and runs that one BTW on it.
+Without the argument nothing is asked and no model goes to the harness,
+which gives the BTW the cheap tier of the session's provider; with it
+the model reaches `_harness/session/btw' and the BTW is created on it,
+under a session that keeps its own.  An empty answer opens nothing."
+  (harness-ui-btw-test-with
+    (pcase-let ((`(,parent . ,parent-window) (harness-ui-btw-test--open-session)))
+      (let ((requests nil) (asked 0) (answer '("demo:other" "Other (Demo)")))
+        (harness-ui-btw-test-recording-requests requests
+          (cl-letf (((symbol-function 'harness-ui-choose-model)
+                     (lambda (callback)
+                       (cl-incf asked)
+                       (when answer (apply callback answer)))))
+            ;; Without the argument: nothing asked, nothing sent.
+            (let* ((window (harness-ui-btw-test--open-btw parent-window #'harness-btw))
+                   (buffer (window-buffer window))
+                   (sid (buffer-local-value 'harness-ui-session-id buffer)))
+              (should (= 0 asked))
+              (should (equal "_harness/session/btw" (car (car requests))))
+              (should-not (plist-member (cdr (car requests)) :model))
+              (should (equal "demo:scripted" (plist-get (harness-call 'session/get sid) :model)))
+              (with-selected-window window (harness-ui-btw-close))
+              (harness-ui-btw-test--wait-gone sid buffer))
+            ;; With it: asked for, sent, and the BTW runs on it.
+            (let* ((window (harness-ui-btw-test--prefixed parent-window #'harness-btw))
+                   (buffer (window-buffer window))
+                   (sid (buffer-local-value 'harness-ui-session-id buffer))
+                   (session (harness-call 'session/get sid)))
+              (should (= 1 asked))
+              (should (equal "_harness/session/btw" (car (car requests))))
+              (should (equal "demo:other" (plist-get (cdr (car requests)) :model)))
+              (should (equal parent (plist-get (cdr (car requests)) :id)))
+              (should (equal "demo:other" (plist-get session :model)))
+              (should (equal parent (plist-get session :parent-id)))
+              (should (equal "demo:scripted" (plist-get (harness-call 'session/get parent) :model)))
+              ;; It opens as a BTW does: blank, with point in its box.
+              (should (harness-ui-btw-test--ready-p window))
+              (should-not (harness-call 'session/nodes sid))
+              (with-selected-window window (harness-ui-btw-close))
+              (harness-ui-btw-test--wait-gone sid buffer))
+            ;; An empty answer: nothing is opened, and nothing asked of the harness.
+            (setq answer nil)
+            (let ((sessions (length (harness-call 'session/list)))
+                  (sent (length requests))
+                  (promise (let ((current-prefix-arg '(4)))
+                             (with-selected-window parent-window
+                               (call-interactively #'harness-btw)))))
+              (should (= 2 asked))
+              (should (harness-promise-p promise))
+              (should-not (harness-promise-settled-p promise))
+              (should (= sent (length requests)))
+              (should (= sessions (length (harness-call 'session/list))))
+              (should-not (cl-some (lambda (w) (buffer-local-value 'harness-ui-btw-minor-mode (window-buffer w)))
+                                   (window-list nil 'nomini))))))))))
+
+(ert-deftest harness-ui-btw-model-from-lisp ()
+  "A model given to `harness-btw' runs the BTW on it, nothing being asked.
+The symbol `choose' reads one first, as a prefix argument does."
+  (harness-ui-btw-test-with
+    (pcase-let ((`(,_parent . ,parent-window) (harness-ui-btw-test--open-session)))
+      (let ((requests nil) (asked 0))
+        (harness-ui-btw-test-recording-requests requests
+          (cl-letf (((symbol-function 'harness-ui-choose-model)
+                     (lambda (callback) (cl-incf asked) (funcall callback "demo:chosen" "Chosen (Demo)"))))
+            (dolist (case '(("demo:given" "demo:given" 0) (choose "demo:chosen" 1)))
+              (with-selected-window parent-window
+                (harness-btw nil "which model?" (car case)))
+              (let* ((window (harness-ui-btw-test--window))
+                     (buffer (window-buffer window))
+                     (sid (buffer-local-value 'harness-ui-session-id buffer)))
+                (should (equal (nth 1 case) (plist-get (cdr (car requests)) :model)))
+                (should (equal (nth 1 case) (plist-get (harness-call 'session/get sid) :model)))
+                (should (= (nth 2 case) asked))
+                (setq asked 0)
+                ;; Something was asked, so closing keeps the BTW.
+                (harness-ui-btw-test--wait-reply sid)
+                (with-selected-window window (harness-ui-btw-close))
+                (should-not (window-live-p window))
+                (harness-test-wait (lambda () (eq 'inactive (plist-get (harness-call 'session/get sid) :status)))
+                                   5 "the BTW to be closed")))
+            ;; Blank is none: the cheap tier of the session's provider.
+            (with-selected-window parent-window
+              (harness-btw nil "which model?" "  "))
+            (let* ((window (harness-ui-btw-test--window))
+                   (sid (buffer-local-value 'harness-ui-session-id (window-buffer window))))
+              (should-not (plist-member (cdr (car requests)) :model))
+              (should (equal "demo:scripted" (plist-get (harness-call 'session/get sid) :model)))
+              (should (= 0 asked))
+              (harness-ui-btw-test--wait-reply sid)
+              (with-selected-window window (harness-ui-btw-close))
+              (harness-test-wait (lambda () (eq 'inactive (plist-get (harness-call 'session/get sid) :status)))
+                                 5 "the BTW to be closed"))))))))
+
+(ert-deftest harness-ui-btw-over-the-board-takes-a-model-too ()
+  "C-u b on the board runs the conversation about the tasks on the model chosen.
+The board's start function gets it, and `_harness/task/btw' too, only
+when one was chosen; the BTW is created on it."
+  (harness-ui-btw-test-with
+    (let* ((board (harness-ui-btw-test--board))
+           (board-window (get-buffer-window board))
+           (requests nil))
+      (harness-ui-btw-test-recording-requests requests
+        (cl-letf (((symbol-function 'harness-ui-choose-model)
+                   (lambda (callback) (funcall callback "demo:other" "Other (Demo)"))))
+          (let* ((window (harness-ui-btw-test--prefixed board-window #'harness-ui-tasks-btw))
+                 (buffer (window-buffer window))
+                 (sid (buffer-local-value 'harness-ui-session-id buffer)))
+            (should (equal "_harness/task/btw" (car (car requests))))
+            (should (equal "demo:other" (plist-get (cdr (car requests)) :model)))
+            (should (equal "demo:other" (plist-get (harness-call 'session/get sid) :model)))
+            (should-not (plist-get (harness-call 'session/get sid) :parent-id))
+            (with-selected-window window (harness-ui-btw-close))
+            (harness-ui-btw-test--wait-gone sid buffer))
+          (let* ((window (harness-ui-btw-test--open-btw board-window #'harness-ui-tasks-btw))
+                 (buffer (window-buffer window))
+                 (sid (buffer-local-value 'harness-ui-session-id buffer)))
+            (should (equal "_harness/task/btw" (car (car requests))))
+            (should-not (plist-member (cdr (car requests)) :model))
+            (should (equal "demo:scripted" (plist-get (harness-call 'session/get sid) :model)))
+            (with-selected-window window (harness-ui-btw-close))
+            (harness-ui-btw-test--wait-gone sid buffer)))))))
+
+(ert-deftest harness-ui-btw-start-function-gets-the-model-only-when-chosen ()
+  "A view's start function is called with the BTW's name, and the model only when given.
+A function that takes the name alone works as it always did."
+  (harness-ui-btw-test-with
+    (let ((calls nil))
+      (with-temp-buffer
+        (setq-local harness-ui-btw-start-function
+                    (lambda (name &optional model) (push (list name model) calls) (harness-rejected "stop")))
+        (harness-btw)
+        (harness-btw nil nil "demo:other")
+        (harness-btw nil "why?" "  ")
+        (should (equal '(("btw: why?" nil) ("btw" "demo:other") ("btw" nil)) calls)))
+      (with-temp-buffer
+        (setq calls nil)
+        (setq-local harness-ui-btw-start-function
+                    (lambda (name) (push name calls) (harness-rejected "stop")))
+        (harness-btw)
+        (should (equal '("btw") calls))))))
+
+(ert-deftest harness-ui-btw-from-the-tree-takes-a-model-too ()
+  "C-u b on a node of the tree asks for the model of the BTW over the node's session."
+  (harness-ui-btw-test-with
+    (let ((sid (plist-get (harness-call 'session/create :cwd default-directory :model "demo:scripted"
+                                        :name "Main")
+                          :id))
+          (requests nil))
+      (harness-ui-refresh-sessions)
+      (harness-test-wait (lambda () (harness-ui-session sid)) 5 "the session cache")
+      (harness-ui-btw-test-recording-requests requests
+        (cl-letf (((symbol-function 'harness-ui-tree-node-at-point) (lambda () (list :session sid)))
+                  ((symbol-function 'harness-ui-choose-model)
+                   (lambda (callback) (funcall callback "demo:other" "Other (Demo)"))))
+          (let* ((window (harness-ui-btw-test--prefixed (selected-window) #'harness-ui-tree-btw))
+                 (btw (buffer-local-value 'harness-ui-session-id (window-buffer window))))
+            (should (equal sid (plist-get (cdr (car requests)) :id)))
+            (should (equal "demo:other" (plist-get (cdr (car requests)) :model)))
+            (should (equal "demo:other" (plist-get (harness-call 'session/get btw) :model)))
+            (should (equal sid (plist-get (harness-call 'session/get btw) :parent-id)))
+            (should (equal "demo:scripted" (plist-get (harness-call 'session/get sid) :model)))))))))
 
 (provide 'harness-ui-btw-test)
 ;;; harness-ui-btw-test.el ends here

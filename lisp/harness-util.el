@@ -194,6 +194,12 @@ in a request.  Anything else compares with `equal'."
           ((< n 1000000) (format "%dk" (round (/ n 1000.0))))
           (t (format "%.2fM" (/ n 1000000.0))))))
 
+(defun harness-format-tokens-compact (n)
+  "Format token count N as `harness-format-tokens' does, but \"96k\" for \"96.0k\".
+Whole thousands read without the decimal part, which a hint about a
+window or a limit is easier to read as."
+  (replace-regexp-in-string "\\.0+\\([kM]\\)\\'" "\\1" (harness-format-tokens n)))
+
 (defun harness-format-cost (usd)
   "Format USD amount compactly."
   (let ((usd (or usd 0)))
@@ -360,6 +366,51 @@ The harness reads \"the harness (SOURCE)\", another session's agent
     ('nil "the user")
     (kind (format "the %s" kind))))
 
+;;;; Thinking levels
+
+(defconst harness-thinking-level-order
+  '("none" "minimal" "low" "medium" "high" "xhigh" "max")
+  "Every thinking level the harness knows, weakest first.
+A model offers some of these (its `:thinking-levels'), and whatever has
+to order levels or tell which of two is stronger -- the thinking menu,
+the level a BTW is given, the effort a provider asks a model for --
+goes by this one list, so there is a single idea of what is stronger.
+A level that is not in it ranks after all that are (see
+`harness-thinking-level-rank').")
+
+(defun harness-thinking-level-rank (level)
+  "Return how strong thinking LEVEL is, as a number: a higher one thinks harder.
+That is its place in `harness-thinking-level-order'.  A level that is
+not there ranks after every one that is."
+  (or (cl-position level harness-thinking-level-order :test #'equal)
+      most-positive-fixnum))
+
+(defun harness-thinking-level-fit (level levels)
+  "Return the one of thinking LEVELS that stands for LEVEL, or nil.
+This is the one rule the harness fits a level to what a model offers
+by: a BTW's level, the reasoning effort Copilot is asked for and the
+effort Bedrock's adaptive models are asked for all go through it, so
+that nothing thinks harder than it was asked to.  LEVELS are what a
+model offers (its `:thinking-levels').  That is LEVEL itself when
+LEVELS has it; else the strongest of LEVELS weaker than LEVEL, the
+nearest the model comes to it without thinking harder; else, every one
+of LEVELS being stronger, the weakest of them.  Strength is that of
+`harness-thinking-level-order': a level that is not in it ranks after
+every one that is.  Entries of LEVELS that are not strings are ignored.
+nil when LEVEL is not a string or LEVELS has no string."
+  (let ((levels (cl-remove-if-not #'stringp levels)))
+    (when (and (stringp level) levels)
+      (if (member level levels)
+          level
+        (let* ((rank (harness-thinking-level-rank level))
+               ;; Weakest first, the order of LEVELS kept among equals.
+               (sorted (sort (copy-sequence levels)
+                             (lambda (a b) (< (harness-thinking-level-rank a)
+                                              (harness-thinking-level-rank b)))))
+               (weaker (cl-remove-if-not (lambda (l) (< (harness-thinking-level-rank l) rank))
+                                         sorted)))
+          (if weaker (car (last weaker)) (car sorted)))))))
+
 ;;;; Models and provider state
 ;;
 ;; A model id is "PROVIDER:NAME".  A session's provider state (the CLI
@@ -406,8 +457,9 @@ model of another provider holds (:mode transcript|compact :file PATH
   "Return the kind of compaction NODE is, as a string, or nil for no compaction.
 That is its `:meta' `:compaction': \"summary\", \"brief\" (a summary of
 only the first and last messages), \"transcript\" (a note pointing at
-the conversation written to the file of its `:meta' `:file') or
-\"fresh\" (a note saying nothing of the conversation was carried over).  A
+the conversation written to the file of its `:meta' `:file'),
+\"fresh\" (a note saying nothing of the conversation was carried over)
+or \"truncate\" (a note saying the oldest nodes were cut).  A
 compaction node from before there were kinds is a \"summary\"; so is
 one a handoff's old model wrote, while the new model's is \"brief\".
 NODE's kind may be the symbol or, as a client hears it, its name."
@@ -869,6 +921,20 @@ logged."
           (customize-save-variable symbol value)
         (error (harness-log 'warn "could not save %s: %S" symbol err)))))
   nil)
+
+(defun harness-renew-default (symbol &rest old)
+  "Give option SYMBOL its default again when it holds one of OLD.
+OLD are the defaults it had before.  A reload evaluates a `defcustom'
+again without changing the value it has, so a default that changed
+would stay as it was until Emacs restarts, and would look like a choice
+of the user's meanwhile, which the UI passes on to its harness process.
+A value the user saved through Customize is theirs and stays; so does
+any other value.  Return non-nil when the default was given again."
+  (when (and (default-boundp symbol)
+             (member (default-value symbol) old)
+             (get symbol 'standard-value))
+    (custom-reevaluate-setting symbol)
+    t))
 
 ;;;; Errors
 

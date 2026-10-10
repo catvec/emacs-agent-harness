@@ -19,7 +19,7 @@
 ;;   summary of the whole conversation.  It reads all of it again, from
 ;;   the prompt cache while that lasts and uncached once it lapsed.
 ;; - `brief': a cheap model (`harness-compaction-brief-model', by
-;;   default the cheap tier of the session's provider) summarises only
+;;   default the simple tier of the session's provider) summarises only
 ;;   the first and last messages, as a handoff's new model does
 ;;   (`compact-new'): cheap and bounded however long the conversation,
 ;;   but most of its middle is not in it, which the summary's caveat says.
@@ -31,6 +31,9 @@
 ;;   summary; the node is a note saying so, and telling the model to
 ;;   look back at what it needs with the session_history tool.  No
 ;;   request either, and the smallest context of all.
+;; - `truncate': the oldest nodes are dropped and the most recent are
+;;   kept, verbatim, whole tool exchanges, after a note saying what was
+;;   cut; for a conversation too big to summarise.  No request either.
 ;;
 ;; Whatever the kind, the conversation it replaces stays on the
 ;; session's path, where the session_history tool searches and reads it
@@ -56,6 +59,12 @@
 ;; the last request's context exceeds window minus reserve, the turn
 ;; waits for the compaction and then proceeds.  Providers that report
 ;; `:compaction hosted' compact on their own side and are left alone.
+;; A compaction asked for while a turn runs (`compaction/compact' OPTS
+;; `:queue' or `:interrupt') is recorded in `harness-compaction--pending'
+;; and runs at the turn's next boundary, as a handoff waiting on a turn
+;; does (harness-handoff.el): the `agent/step' and `agent/before-turn'
+;; gates hold that boundary, and `agent/turn-ended' runs it when the
+;; turn ends first.
 ;;
 ;; The summarisation request has no tools.  An API provider gets the
 ;; transcript as ordinary messages.  A hosted-loop provider keeps the
@@ -87,7 +96,7 @@
 
 (defvar harness-provider-fallback-context-window)
 
-(defconst harness-compaction-kinds '(summary brief transcript fresh)
+(defconst harness-compaction-kinds '(summary brief transcript fresh truncate)
   "The kinds of compaction: what stands in for the conversation from then on.
 `summary' is a summary the session's model writes from the whole
 conversation; `brief' one `harness-compaction-brief-model' writes from
@@ -96,10 +105,12 @@ conversation, but without most of its middle; `transcript' is the whole
 conversation written to a file in the session's directory, with a note
 telling the model to read what it needs of it, which takes no request;
 `fresh' carries nothing over but a note saying so, which takes no
-request either.  The first three are the handoff's `compact',
-`compact-new' and `transcript' (see harness-handoff.el), on the
-session's own provider.  After any of them the model can still search
-and read the conversation it replaced with the session_history tool.")
+request either; `truncate' drops the oldest nodes and keeps the most
+recent ones as they were, which takes no request either.  The first
+three are the handoff's `compact', `compact-new' and `transcript' (see
+harness-handoff.el), on the session's own provider.  After any of them
+the model can still search and read the conversation it replaced with
+the session_history tool.")
 
 (defcustom harness-compaction-kind 'summary
   "How a conversation that nears its model's context window is compacted.
@@ -111,26 +122,29 @@ most of its middle out; `transcript' writes the whole conversation to a
 file in the session's directory and leaves the model a note to read
 what it needs of it, which costs no request at all; `fresh' carries
 nothing over, and the model looks back at what it needs of the
-conversation with the session_history tool.  Automatic compaction makes
+conversation with the session_history tool; `truncate' drops the oldest
+messages and keeps the most recent ones as they were, for a conversation
+too big to summarise.  Automatic compaction makes
 this kind; compacting by hand (`harness-compact', or the panel above
 the message box of a session whose prompt cache expired) offers every
 kind, with what each costs."
   :type '(choice (const :tag "Summary: the session's model summarises the whole conversation" summary)
                  (const :tag "Brief summary: a cheap model summarises the first and last messages" brief)
                  (const :tag "Transcript: a file the model reads what it needs of" transcript)
-                 (const :tag "Fresh start: nothing carried over; the model looks back when it needs to" fresh))
-  :safe (lambda (v) (memq v '(summary brief transcript fresh)))
+                 (const :tag "Fresh start: nothing carried over; the model looks back when it needs to" fresh)
+                 (const :tag "Cut old context: drop the oldest messages and keep the newest as they are" truncate))
+  :safe (lambda (v) (memq v '(summary brief transcript fresh truncate)))
   :group 'harness)
 
 (defcustom harness-compaction-brief-model 'auto
   "Model that writes a brief summary, as PROVIDER:NAME, or `auto'.
 A brief summary is made from only the first and last messages of a
 conversation, a job a cheap model does about as well as any.  `auto'
-\(the default) asks the session's provider for its `cheap' tier (see
+\(the default) asks the session's provider for its `simple' tier (see
 `harness-provider-tier-model'), falling back to the session's own model
 when the provider names none.  A PROVIDER:NAME forces that model, and
 nil uses the session's own model."
-  :type '(choice (const :tag "The session provider's cheap model" auto)
+  :type '(choice (const :tag "The session provider's simple model" auto)
                  (const :tag "The session's own model" nil)
                  (string :tag "Model" :names model))
   :safe (lambda (v) (or (memq v '(auto nil)) (stringp v)))
@@ -180,8 +194,22 @@ The latest exchange is what a summary of a long session needs most.")
 A thorough one runs to one or two thousand, short of
 `harness-compaction--max-tokens', which bounds it.")
 
+(defconst harness-compaction--truncate-keep 0.7
+  "Fraction of the usable window a `truncate' compaction keeps, at most.
+The most recent nodes are kept until their tokens would pass this much
+of the window; the rest, oldest first, are dropped.")
+
 (defvar harness-compaction--running (make-hash-table :test 'equal)
   "Session id -> promise of the compaction in flight.")
+
+(defvar harness-compaction--pending (make-hash-table :test 'equal)
+  "Session id -> the compaction waiting for that session's next boundary.
+A plist (:opts OPTS :interrupt BOOL :running PROMISE), `:running' set
+once it is under way.")
+
+(defun harness-compaction-busy-p (session-id)
+  "Non-nil while a compaction of SESSION-ID is under way."
+  (and (gethash session-id harness-compaction--running) t))
 
 ;;;; Kinds
 
@@ -195,7 +223,7 @@ a `sample' is a `brief' one, of anything else a `summary'."
                  (t kind))))
     (unless (memq k harness-compaction-kinds)
       (signal 'harness-error
-              (list (format "Unknown compaction kind %s (use summary, brief, transcript or fresh)" kind))))
+              (list (format "Unknown compaction kind %s (use summary, brief, transcript, fresh or truncate)" kind))))
     k))
 
 (defun harness-compaction--model-label (model)
@@ -211,7 +239,7 @@ See `harness-compaction-brief-model'."
         (choice harness-compaction-brief-model))
     (cond ((or (eq choice 'auto) (equal choice "auto"))
            (or (and model (harness-method-exists-p 'provider/tier-model)
-                    (ignore-errors (harness-call 'provider/tier-model model 'cheap)))
+                    (ignore-errors (harness-call 'provider/tier-model model 'simple)))
                model))
           ((and (stringp choice) (not (string-empty-p choice))) choice)
           (t model))))
@@ -436,6 +464,28 @@ the conversation."
   (list :kind 'fresh :model nil :model-label nil :input 0 :output 0 :cached nil :cost 0.0
         :after (harness-estimate-tokens (harness-compaction--fresh-note count context t))))
 
+(defun harness-compaction--estimate-truncate (session-id context)
+  "Estimate a `truncate' of a conversation of CONTEXT tokens.
+No model is asked anything: the oldest nodes go and the most recent are
+kept as they were, with only the note added.  `:kept' and `:dropped'
+are how many nodes each holds; when nothing can be cut, `:after' is
+CONTEXT and `:dropped' is 0."
+  (condition-case nil
+      (let* ((plan (harness-compaction--truncate-plan session-id))
+             (kept (plist-get plan :kept))
+             (dropped (plist-get plan :dropped))
+             (kept-tokens (plist-get plan :kept-tokens))
+             (dropped-tokens (plist-get plan :dropped-tokens))
+             (note (harness-compaction--truncate-note (length dropped) dropped-tokens
+                                                      (length kept) kept-tokens t)))
+        (list :kind 'truncate :model nil :model-label nil :input 0 :output 0 :cached nil :cost 0.0
+              :after (+ (harness-estimate-tokens note) kept-tokens)
+              :kept (length kept) :dropped (length dropped)
+              :kept-tokens kept-tokens :dropped-tokens dropped-tokens))
+    (harness-error
+     (list :kind 'truncate :model nil :model-label nil :input 0 :output 0 :cached nil :cost 0.0
+           :after context :kept (length (harness-call 'session/messages session-id)) :dropped 0))))
+
 (harness-defmethod compaction/estimate (session-id)
   "Say what compacting SESSION-ID costs, kind by kind, and what carrying on does.
 Return (:context N :model MODEL :model-label LABEL :cached BOOL
@@ -471,7 +521,8 @@ conversation sends now."
           :kinds (list (harness-compaction--estimate-summary session-id session context warm)
                        (harness-compaction--estimate-brief session messages)
                        (harness-compaction--estimate-transcript context)
-                       (harness-compaction--estimate-fresh (length messages) context)))))
+                       (harness-compaction--estimate-fresh (length messages) context)
+                       (harness-compaction--estimate-truncate session-id context)))))
 
 ;;;; Compacting
 
@@ -650,7 +701,8 @@ stays."
 
 (defun harness-compaction--done-hint (kind input-tokens meta)
   "Return the hint saying INPUT-TOKENS of context became KIND.
-META is the compaction node's, whose `:file' names a transcript."
+META is the compaction node's, whose `:file' names a transcript and
+`:truncate-dropped' how many nodes a truncation dropped."
   (format "Compacted: %s tokens → %s"
           (harness-format-tokens input-tokens)
           (pcase kind
@@ -658,6 +710,8 @@ META is the compaction node's, whose `:file' names a transcript."
             ('transcript (format "transcript in %s"
                                  (abbreviate-file-name (or (plist-get meta :file) "a file"))))
             ('fresh "a fresh start")
+            ('truncate (format "a cut conversation (%d nodes dropped)"
+                               (plist-get meta :truncate-dropped)))
             (_ "summary"))))
 
 (defun harness-compaction--with-history (session-id content kind)
@@ -671,22 +725,25 @@ note says so already."
     content))
 
 (defun harness-compaction--finish (session-id content old-head model usage input-tokens trailing context
-                                               &optional kind meta)
+                                               &optional kind meta keep)
   "Record CONTENT for SESSION-ID and return the compaction node.
 CONTENT is the summary, its caveat included, or for KIND `transcript'
 the note pointing at the file, for `fresh' the note saying nothing was
-carried over.  It gets the line pointing at the session_history tool
+carried over, for `truncate' the note saying the oldest nodes were cut.
+It gets the line pointing at the session_history tool
 \(`harness-compaction--with-history').  OLD-HEAD is the head that was
-compacted, MODEL the summariser (the session's model for a transcript
-or a fresh start, which none wrote), USAGE its usage event (nil when no
-request was made), INPUT-TOKENS the size of what was compacted,
-TRAILING the unanswered user nodes to carry over, CONTEXT what the
-summariser was given (see `compaction/compact'), KIND one of
-`harness-compaction-kinds' \(`summary' by default) and META more for
-the node's `:meta': a transcript's `:file', a handoff's `:handoff'.
-The conversation starts over from the node
+compacted, MODEL the summariser (the session's model for a transcript,
+a fresh start or a truncation, which none wrote), USAGE its usage event
+(nil when no request was made), INPUT-TOKENS the size of what was
+compacted, TRAILING the unanswered user nodes to carry over, CONTEXT what
+the summariser was given (see `compaction/compact'), KIND one of
+`harness-compaction-kinds' \(`summary' by default), META more for
+the node's `:meta': a transcript's `:file', a handoff's `:handoff', and
+KEEP nodes to append after the compaction node, verbatim, before
+TRAILING.  The conversation starts over from the node
 \(`harness-compaction--start-over')."
   (let* ((kind (or kind 'summary))
+         (keep (append keep nil))
          (content (harness-compaction--with-history session-id content kind))
          (node (harness-call 'session/append session-id
                              (list :kind 'compaction :content content
@@ -697,6 +754,8 @@ The conversation starts over from the node
                                                        :summary-tokens (harness-estimate-tokens content))
                                                  meta)))))
     (harness-call 'session/hint session-id (harness-compaction--done-hint kind input-tokens meta))
+    (dolist (n keep)
+      (harness-call 'session/append session-id n))
     (dolist (u trailing)
       (harness-call 'session/append session-id
                     (list :kind 'user :content (plist-get u :content) :blocks (plist-get u :blocks)
@@ -710,7 +769,9 @@ The conversation starts over from the node
                         :cache-write (plist-get usage :cache-write)
                         :cost (plist-get usage :cost)
                         ;; The compaction is all the conversation holds now.
-                        :context (harness-estimate-tokens content) :last-output 0
+                        :context (+ (harness-estimate-tokens content)
+                                    (harness-compaction--nodes-tokens keep))
+                        :last-output 0
                         :model model
                         :cache-reset t))
     (harness-emit 'compaction/done session-id node)
@@ -758,6 +819,127 @@ back with."
     (harness-compaction--finish session-id (if caveat (concat note "\n\n" caveat) note)
                                 old-head (plist-get session :model) nil input trailing 'full
                                 'fresh meta)))
+
+;;;; Truncating
+
+(defun harness-compaction--node-tokens (node)
+  "Cheap token estimate for NODE."
+  (harness-estimate-tokens
+   (concat (or (plist-get node :content) "")
+           (let ((output (plist-get node :output)))
+             (if (stringp output) output ""))
+           (if-let* ((input (plist-get node :input)))
+               (condition-case nil (harness-json-encode-text input) (error ""))
+             ""))))
+
+(defun harness-compaction--nodes-tokens (nodes)
+  "Cheap token estimate for NODES."
+  (cl-reduce (lambda (sum n) (+ sum (harness-compaction--node-tokens n))) nodes :initial-value 0))
+
+(defun harness-compaction--node-units (nodes)
+  "Return NODES in units (START . END), each tool call with its results.
+A `tool-call' node and the `tool-result' nodes that answer it, right
+after it, are one unit, as `session/messages' pairs them; every other
+node is a unit of its own.  START and END are indices into NODES, END
+exclusive, in order."
+  (let ((n (length nodes)) (i 0) units)
+    (while (< i n)
+      (let ((end (1+ i)))
+        (when (eq (plist-get (nth i nodes) :kind) 'tool-call)
+          (let ((call-id (plist-get (nth i nodes) :call-id)))
+            (while (and (< end n)
+                        (eq (plist-get (nth end nodes) :kind) 'tool-result)
+                        (equal (plist-get (nth end nodes) :call-id) call-id))
+              (cl-incf end))))
+        (push (cons i end) units)
+        (setq i end)))
+    (nreverse units)))
+
+(defun harness-compaction--truncate-plan (session-id)
+  "Return what `truncate' keeps of SESSION-ID and what it drops.
+The result is (:keep NODES :dropped NODES :kept-tokens N :dropped-tokens N
+:trailing NODES): the newest nodes kept verbatim, whole units
+\(`harness-compaction--node-units'), up to `harness-compaction--truncate-keep'
+of the usable window, and the unanswered user nodes carried over after
+them.  The path before the last compaction, if any, is dropped too.
+Signal `harness-error' when nothing would be dropped."
+  (let* ((session (harness-call 'session/get session-id))
+         (path (harness-call 'session/nodes session-id))
+         (start (cl-position 'compaction path :key (lambda (n) (plist-get n :kind)) :from-end t))
+         (tail (if start (nthcdr (1+ start) path) path))
+         (trailing (harness-compaction--trailing-user-nodes tail))
+         (candidates (if trailing (butlast tail (length trailing)) tail))
+         (units (harness-compaction--node-units candidates))
+         (budget (max 1 (floor (* harness-compaction--truncate-keep
+                                   (harness-compaction--usable (harness-compaction--window session)
+                                                               (harness-compaction--reserve session))))))
+         (kept-units nil) (tokens 0) (stopped nil))
+    (dolist (unit (reverse units))
+      (unless stopped
+        (let ((toks (harness-compaction--nodes-tokens (cl-subseq candidates (car unit) (cdr unit)))))
+          (if (or (null kept-units) (<= (+ tokens toks) budget))
+              (progn (push unit kept-units) (cl-incf tokens toks))
+            (setq stopped t)))))
+    (if (null kept-units)
+        (signal 'harness-error (list "Nothing to truncate: the conversation already fits the window"))
+      ;; Kept-units is oldest-first (each older unit was pushed on top),
+      ;; so its head is the first node the kept suffix begins at.
+      (let* ((keep-start (car (car kept-units)))
+             (keep (cl-subseq candidates keep-start))
+             (dropped (cl-subseq candidates 0 keep-start)))
+        (if (null dropped)
+            (signal 'harness-error (list "Nothing to truncate: the conversation already fits the window"))
+          (list :keep keep :dropped dropped :kept-tokens tokens
+                :dropped-tokens (- (harness-compaction--nodes-tokens candidates) tokens)
+                :trailing trailing))))))
+
+(defun harness-compaction--truncate-note (dropped-n dropped-tokens kept-n kept-tokens history)
+  "Return the note that opens a conversation whose oldest nodes were cut.
+DROPPED-N nodes of about DROPPED-TOKENS tokens were dropped, and
+KEPT-N of about KEPT-TOKENS tokens kept, verbatim, below.  HISTORY
+non-nil says the model has the session_history tool to look the rest up
+with; without it, the user is the one to ask."
+  (concat
+   (format (concat "This conversation was cut short, to keep the context small: the oldest %d"
+                   " node%s, about %s tokens, are not carried over.  The most recent %d node%s,"
+                   " about %s tokens, are kept below as they were.")
+           dropped-n (if (= dropped-n 1) "" "s") (harness-format-tokens dropped-tokens)
+           kept-n (if (= kept-n 1) "" "s") (harness-format-tokens kept-tokens))
+   "  "
+   (if history
+       (format (concat "You start without the older part, so before you answer, look back at what you"
+                       " need of it with the %s tool -- the task, what was decided and done, where the"
+                       " work stood -- rather than guessing, and check the files and the state before"
+                       " you act.")
+               harness-compaction-history-tool)
+     (concat "You start without the older part: check the files and the state before you act, and"
+             " ask the user for what you need of the earlier conversation rather than guessing."))))
+
+(defun harness-compaction--truncate (session-id session &optional meta)
+  "Cut SESSION-ID's oldest context away; return the compaction node.
+SESSION is its record from before the compaction began, META more for
+the node's `:meta'.  The newest nodes, whole units, are kept verbatim
+after the note (`harness-compaction--truncate-note'); the rest are
+dropped, and the note points at the session_history tool.  No model is
+asked anything."
+  (let* ((old-head (plist-get session :head))
+         (plan (harness-compaction--truncate-plan session-id))
+         (keep (plist-get plan :keep))
+         (dropped (plist-get plan :dropped))
+         (input (or (let ((c (plist-get (plist-get session :usage) :context)))
+                      (and (numberp c) (> c 0) c))
+                    (harness-compaction--messages-tokens (harness-call 'session/messages session-id))))
+         (note (harness-compaction--truncate-note (length dropped) (plist-get plan :dropped-tokens)
+                                                  (length keep) (plist-get plan :kept-tokens)
+                                                  (harness-compaction-history-p session-id))))
+    (harness-log 'info "compaction: %s cuts %d nodes, keeping %d" session-id (length dropped) (length keep))
+    (harness-compaction--finish session-id note old-head (plist-get session :model) nil input
+                                (plist-get plan :trailing) 'full 'truncate
+                                (append (list :truncate-dropped (length dropped)
+                                              :truncate-kept (length keep)
+                                              :dropped-tokens (plist-get plan :dropped-tokens))
+                                        meta)
+                                keep)))
 
 (defun harness-compaction--forked-state (session-id model)
   "Return a promise of the provider state to summarise SESSION-ID with on MODEL.
@@ -825,51 +1007,13 @@ end it with, or nil, and META more for the node's `:meta' (see
                       (error (harness-compaction--fail session-id promise err))))))
                (_ nil)))))))
 
-(harness-defmethod compaction/compact (session-id &optional opts)
-  "Compact the transcript of SESSION-ID; return a promise of the compaction node.
-OPTS `:kind' is one of `harness-compaction-kinds': `summary' (the
-default), `brief', `transcript' or `fresh'.
-
-A `summary' is written by the session's model, or OPTS `:model'.  OPTS
-`:context' is `full' (the default), which lets the summariser see the
-whole conversation (on a fork of the session's provider state when its
-provider can), or `sample', which sends it only the first and last few
-messages with a note of what was left out, never the whole
-conversation: a bound on what a summariser that has to be sent the
-conversation as text costs.  A summary of a sample is a `brief' one,
-and a `brief' one is always of a sample, written by OPTS `:model' or
-else `harness-compaction-brief-model' (the cheap tier of the session's
-provider by default), and ends in a note saying what it lacks.  OPTS
-`:caveat' replaces that note, nil for none; a handoff ends its summary
-with its own.  A summariser that keeps the conversation itself (a hosted
-loop) works on a fork of the session's provider state when it can; one
-with no state of this session gets the context as one message of text,
-since that is all such a provider is ever sent.
-
-A `transcript' is written to a file in the session's directory
-\(`session/write-transcript'), and the node holds a note telling the
-model to read what it needs of it; no model is asked anything.  A
-`fresh' start carries nothing over: the node holds a note saying so,
-ending in OPTS `:caveat' when given; no model is asked anything either.
-Every node ends in a line pointing the model at the session_history
-tool, which searches and reads the conversation it replaced, when the
-session has that tool.
-
-The node replaces the transcript for the provider (`session/messages'
-restarts at it, as a user message); unanswered user messages at the end
-of the transcript are carried over after it, and the conversation the
-session's provider kept, if any, goes (`harness-compaction--start-over').
-OPTS `:meta' is more for the node's `:meta'.  A second call while one
-is running returns the running promise.  OPTS `:idle' refuses a session
-running a turn, as compacting by hand does: the turn would go on
-writing after the conversation it replaces."
+(defun harness-compaction--compact-now (session-id opts)
+  "Compact SESSION-ID at once as OPTS says; return a promise of the node.
+OPTS are those of `compaction/compact' without the flags that decide when
+to run (`:queue', `:interrupt', `:idle').  A compaction already running
+returns its promise."
   (or (gethash session-id harness-compaction--running)
       (let* ((session (harness-call 'session/get session-id))
-             (_ (when (and (plist-get opts :idle)
-                           (harness-method-exists-p 'agent/running)
-                           (harness-call 'agent/running session-id))
-                  (signal 'harness-error
-                          (list "The session is running a turn: compact it once the turn is over"))))
              (kind (harness-compaction--kind (plist-get opts :kind) (plist-get opts :context)))
              (context (if (eq kind 'brief) 'sample (harness-compaction--context (plist-get opts :context))))
              (kind (if (and (eq kind 'summary) (eq context 'sample)) 'brief kind))
@@ -884,13 +1028,14 @@ writing after the conversation it replaces."
              (promise (harness-make-promise)))
         (puthash session-id promise harness-compaction--running)
         (harness-finally promise (lambda () (remhash session-id harness-compaction--running)))
-        (if (memq kind '(transcript fresh))
+        (if (memq kind '(transcript fresh truncate))
             (condition-case err
                 (harness-resolve promise
-                                 (if (eq kind 'fresh)
-                                     (harness-compaction--fresh session-id session
-                                                                (plist-get opts :caveat) meta)
-                                   (harness-compaction--transcript session-id session meta)))
+                                 (pcase kind
+                                   ('truncate (harness-compaction--truncate session-id session meta))
+                                   ('fresh (harness-compaction--fresh session-id session
+                                                                      (plist-get opts :caveat) meta))
+                                   (_ (harness-compaction--transcript session-id session meta))))
               (error (harness-compaction--fail session-id promise err)))
           (harness-call 'session/hint session-id
                         (if (eq kind 'brief)
@@ -912,6 +1057,68 @@ writing after the conversation it replaces."
                         (lambda (err) (harness-compaction--fail session-id promise err))))
         promise)))
 
+(harness-defmethod compaction/compact (session-id &optional opts)
+  "Compact the transcript of SESSION-ID; return a promise.
+OPTS `:kind' is one of `harness-compaction-kinds': `summary' (the
+default), `brief', `transcript', `fresh' or `truncate'.
+
+A `summary' is written by the session's model, or OPTS `:model'.  OPTS
+`:context' is `full' (the default), which lets the summariser see the
+whole conversation (on a fork of the session's provider state when its
+provider can), or `sample', which sends it only the first and last few
+messages with a note of what was left out, never the whole
+conversation: a bound on what a summariser that has to be sent the
+conversation as text costs.  A summary of a sample is a `brief' one,
+and a `brief' one is always of a sample, written by OPTS `:model' or
+else `harness-compaction-brief-model' (the simple tier of the session's
+provider by default), and ends in a note saying what it lacks.  OPTS
+`:caveat' replaces that note, nil for none; a handoff ends its summary
+with its own.  A summariser that keeps the conversation itself (a hosted
+loop) works on a fork of the session's provider state when it can; one
+with no state of this session gets the context as one message of text,
+since that is all such a provider is ever sent.
+
+A `transcript' is written to a file in the session's directory
+\(`session/write-transcript'), and the node holds a note telling the
+model to read what it needs of it; no model is asked anything.  A
+`fresh' start carries nothing over: the node holds a note saying so,
+ending in OPTS `:caveat' when given; no model is asked anything either.
+A `truncate' cuts the oldest nodes away and keeps the most recent, whole
+tool exchanges, verbatim after the note (`harness-compaction--truncate'),
+up to `harness-compaction--truncate-keep' of the usable window; no model
+is asked anything either, for a conversation too big to summarise.
+Every node ends in a line pointing the model at the session_history
+tool, which searches and reads the conversation it replaced, when the
+session has that tool.
+
+The node replaces the transcript for the provider (`session/messages'
+restarts at it, as a user message); unanswered user messages at the end
+of the transcript are carried over after it, and the conversation the
+session's provider kept, if any, goes (`harness-compaction--start-over').
+OPTS `:meta' is more for the node's `:meta'.  A second call while one
+is running returns the running promise.
+
+While a turn runs (`agent/running'), OPTS `:queue' registers the
+compaction and runs it at the turn's next boundary -- the next step, or
+its end -- and OPTS `:interrupt' also cancels the running turn first
+\(`agent/cancel') and compacts once it is over; both resolve at once to
+\(:queued t :kind KIND :interrupt BOOL), never when the compaction later
+runs.  OPTS `:idle' refuses a session running a turn, as compacting by
+hand does: the turn would go on writing after the conversation it
+replaces.  An idle session with `:queue' or `:interrupt' compacts at
+once."
+  (or (gethash session-id harness-compaction--running)
+      (let ((running (and (harness-method-exists-p 'agent/running)
+                          (harness-call 'agent/running session-id))))
+        (cond
+         ((and running (or (harness-json-true-p (plist-get opts :queue))
+                           (harness-json-true-p (plist-get opts :interrupt))))
+          (harness-compaction--enqueue session-id opts))
+         ((and running (harness-json-true-p (plist-get opts :idle)))
+          (signal 'harness-error
+                  (list "The session is running a turn: compact it once the turn is over")))
+         (t (harness-compaction--compact-now session-id opts))))))
+
 (defun harness-compaction--fail (session-id promise err)
   "Reject PROMISE with ERR and tell SESSION-ID about it.
 ERR is reported short (`harness-error-short-message'): the failure of a
@@ -922,6 +1129,99 @@ none of that belongs in *Messages*, in a hint or in the tree."
     (ignore-errors (harness-call 'session/hint session-id (format "Compaction failed: %s" msg)))
     (harness-emit 'compaction/failed session-id msg)
     (harness-reject promise err)))
+
+;;;; Waiting for the next boundary
+
+(defun harness-compaction--kind-name (kind)
+  "Return the name people read for KIND."
+  (pcase kind
+    ('brief "brief summary")
+    ('transcript "transcript file")
+    ('fresh "fresh start")
+    ('truncate "cut old context")
+    (_ "summary")))
+
+(defun harness-compaction--enqueue (session-id opts)
+  "Register OPTS as the compaction SESSION-ID gets at its next boundary.
+The running turn goes on.  Return a promise that resolves at once to
+\(:queued t :kind KIND :interrupt BOOL), never when the compaction later
+runs -- a tool awaiting it would otherwise hold its own step.  OPTS
+`:interrupt' also cancels the running turn (`agent/cancel'), after the
+entry is stored, so the compaction runs once the turn is over.  A
+compaction already waiting is replaced."
+  (let* ((kind (harness-compaction--kind (plist-get opts :kind) (plist-get opts :context)))
+         (interrupt (and (harness-json-true-p (plist-get opts :interrupt)) t))
+         (opts (plist-put (copy-sequence opts) :kind (symbol-name kind))))
+    (when (gethash session-id harness-compaction--pending)
+      (harness-log 'info "compaction: replacing the compaction queued for %s" session-id))
+    (puthash session-id (list :opts opts :interrupt interrupt) harness-compaction--pending)
+    (harness-call 'session/hint session-id
+                  (if interrupt
+                      (format (concat "Compaction queued: the turn is being interrupted and the"
+                                      " conversation compacted (%s) once it is over")
+                              (harness-compaction--kind-name kind))
+                    (format "Compaction queued: a %s at the turn's next boundary"
+                            (harness-compaction--kind-name kind))))
+    (when interrupt
+      (harness-call 'agent/cancel session-id))
+    (harness-resolved (list :queued t :kind (symbol-name kind) :interrupt interrupt))))
+
+(defun harness-compaction--run-pending (session-id)
+  "Run the compaction waiting for SESSION-ID; return a promise.
+None waiting resolves to nil at once; one already under way returns its
+promise."
+  (let ((entry (gethash session-id harness-compaction--pending)))
+    (cond
+     ((null entry) (harness-resolved nil))
+     ((plist-get entry :running) (plist-get entry :running))
+     (t
+      (let* ((promise (harness-make-promise))
+             (running (plist-put (copy-sequence entry) :running promise)))
+        (puthash session-id running harness-compaction--pending)
+        (condition-case err
+            (harness-then (harness-compaction--compact-now session-id (plist-get entry :opts))
+                          (lambda (node)
+                            (when (eq (gethash session-id harness-compaction--pending) running)
+                              (remhash session-id harness-compaction--pending))
+                            (harness-resolve promise node)
+                            nil)
+                          (lambda (err)
+                            (when (eq (gethash session-id harness-compaction--pending) running)
+                              (remhash session-id harness-compaction--pending))
+                            (harness-reject promise err)))
+          (error
+           (when (eq (gethash session-id harness-compaction--pending) running)
+             (remhash session-id harness-compaction--pending))
+           (harness-reject promise err)))
+        promise)))))
+
+(defun harness-compaction--gate (value next session)
+  "Hold SESSION's next boundary until the compaction queued for it is done.
+VALUE and NEXT are those of the `agent/step' and `agent/before-turn'
+filters: the step that goes on must find the compaction in its messages."
+  (if (or (not (plist-get value :proceed))
+          (not (gethash (plist-get session :id) harness-compaction--pending)))
+      (funcall next value)
+    (harness-then (harness-compaction--run-pending (plist-get session :id))
+                  (lambda (_) (funcall next value))
+                  (lambda (_) (funcall next value))))
+  nil)
+
+(defun harness-compaction--on-turn-ended (session-id &rest _)
+  "Run the compaction that waited for SESSION-ID's turn, now that it is over.
+A turn interrupted by a queued compaction ends `cancelled', so it runs
+then too."
+  (when (gethash session-id harness-compaction--pending)
+    (harness-run-soon
+     (lambda ()
+       (when (and (harness-call 'session/exists-p session-id)
+                  (or (not (harness-method-exists-p 'agent/running))
+                      (not (harness-call 'agent/running session-id))))
+         (harness-compaction--run-pending session-id))))))
+
+(defun harness-compaction--on-deleted (session-id &rest _)
+  "Forget the compaction of SESSION-ID, which is gone."
+  (remhash session-id harness-compaction--pending))
 
 ;;;; Automatic compaction
 
@@ -943,8 +1243,14 @@ The compaction is of `harness-compaction-kind'."
   nil)
 
 (defun harness-compaction--init ()
-  "Hook automatic compaction into the turn loop."
-  (harness-add-filter 'agent/before-turn #'harness-compaction--before-turn 20))
+  "Hook automatic and queued compaction into the turn loop."
+  ;; A queued compaction runs before cowboy (15) and the automatic
+  ;; compaction (20), so the fresh context is what those gates see.
+  (harness-add-filter 'agent/before-turn #'harness-compaction--gate 12)
+  (harness-add-filter 'agent/step #'harness-compaction--gate 12)
+  (harness-add-filter 'agent/before-turn #'harness-compaction--before-turn 20)
+  (harness-on 'agent/turn-ended #'harness-compaction--on-turn-ended)
+  (harness-on 'session/deleted #'harness-compaction--on-deleted))
 
 (harness-compaction--init)
 
@@ -952,7 +1258,7 @@ The compaction is of `harness-compaction-kind'."
 (harness-declare-event 'compaction/failed "(SESSION-ID MESSAGE) when a compaction fails.")
 
 (harness-define-module 'compaction
-  :doc "Summarise the transcript when it nears the context window."
+  :doc "Summarise the transcript when it nears the context window; queue or interrupt one while a turn runs."
   :requires '(session provider agent)
   :init #'harness-compaction--init)
 

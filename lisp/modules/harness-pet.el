@@ -91,10 +91,10 @@ model is asked anything but the name and personality it hatches with."
   "Model the companion pet speaks with, as PROVIDER:NAME, or `auto'.
 `auto' (the default) asks the provider of the session the pet comments
 on -- of `harness-model' when it hatches or is petted -- for its
-`cheap' tier (see `harness-provider-tier-model'): the pet says one
+`simple' tier (see `harness-provider-tier-model'): the pet says one
 short line, which the cheapest model does well.  nil uses that model
 itself, and a PROVIDER:NAME forces one."
-  :type '(choice (const :tag "The provider's cheap model" auto)
+  :type '(choice (const :tag "The provider's simple model" auto)
                  (const :tag "The session's model" nil)
                  (string :tag "Model" :names model))
   :group 'harness)
@@ -605,7 +605,7 @@ See `harness-pet-model'."
          (choice harness-pet-model))
     (cond ((or (eq choice 'auto) (equal choice "auto"))
            (or (and base (harness-method-exists-p 'provider/tier-model)
-                    (ignore-errors (harness-call 'provider/tier-model base 'cheap)))
+                    (ignore-errors (harness-call 'provider/tier-model base 'simple)))
                base))
           ((and (stringp choice) (not (string-empty-p choice))) choice)
           (t base))))
