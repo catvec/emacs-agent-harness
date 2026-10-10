@@ -33,6 +33,7 @@
 (defvar harness-supervisor--live)
 (defvar harness-supervisor--ending)
 (defvar harness-supervisor--held)
+(defvar harness-supervisor--spawns)
 (defvar harness-tools)
 (defvar harness-sessions)
 (defvar harness-agent--turns)
@@ -209,7 +210,7 @@ and the tiers map to the demo models cheap, balanced and frontier."
      (dolist (table (list harness-supervisor--decisions harness-supervisor--reminders
                           harness-supervisor--calls harness-supervisor--configured
                           harness-supervisor--live harness-supervisor--ending
-                          harness-supervisor--held))
+                          harness-supervisor--held harness-supervisor--spawns))
        (clrhash table))
      (harness-register-method 'provider/tier-model #'harness-supervisor-plan-test--tier-model)
      (harness-add-filter 'permission/decide #'harness-supervisor-plan-test--allow 10)
@@ -347,6 +348,30 @@ promise that never settles, so the steps stay running."
   "Return the arguments of the noted calls of METHOD, oldest first."
   (nreverse (mapcar #'cdr (cl-remove-if-not (lambda (call) (eq method (car call)))
                                             (copy-sequence harness-supervisor-plan-test--calls)))))
+
+;;;; The workers' spawn_agent calls
+
+(defun harness-supervisor-plan-test-spawn-calls (sid)
+  "Return the spawn_agent calls of session SID's transcript, oldest first."
+  (cl-remove-if-not (lambda (node) (and (eq (plist-get node :kind) 'tool-call)
+                                        (equal "spawn_agent" (plist-get node :tool))))
+                    (harness-call 'session/nodes sid)))
+
+(defun harness-supervisor-plan-test-spawn-call-of (sid worker-id)
+  "Return the spawn_agent call of session SID that names WORKER-ID."
+  (cl-find worker-id (harness-supervisor-plan-test-spawn-calls sid)
+           :key (lambda (node) (plist-get (plist-get node :meta) :child-id))
+           :test #'equal))
+
+(defun harness-supervisor-plan-test-spawn-results (sid call)
+  "Return the tool results of session SID that answer the spawn_agent CALL."
+  (cl-remove-if-not (lambda (node) (and (eq (plist-get node :kind) 'tool-result)
+                                        (equal (plist-get call :call-id) (plist-get node :call-id))))
+                    (harness-call 'session/nodes sid)))
+
+(defun harness-supervisor-plan-test-node-position (sid pred)
+  "Return where in session SID's transcript the first node satisfying PRED is."
+  (cl-position-if pred (harness-call 'session/nodes sid)))
 
 ;;;; Reading the plan
 
@@ -1636,6 +1661,240 @@ With no cowboy and no compaction the retried fork goes on with the whole convers
         (should (string-match-p "^- a1 (Title of a1) on demo:cheap, session [^ ]+: Done a1\\.$" (nth 1 reports)))
         (should (string-match-p "^- a2 (Title of a2): superseded by a later plan, it never ran$" (nth 1 reports)))))))
 
+;;;; The workers' spawn_agent calls
+
+(ert-deftest harness-supervisor-plan-every-worker-shows-as-a-spawn-agent-call ()
+  "Every worker shows in the supervisor's transcript as the spawn_agent
+call that would have started it: the step, its tier and model in the
+input, the worker as a clickable `:child-id', and the call is outside
+the conversation, so the supervisor's model never gets it."
+  (harness-supervisor-plan-test-with
+    (let ((sid (harness-supervisor-plan-test-session)))
+      (harness-supervisor-plan-test-behave "a" '(reply "Done a." 2.0))
+      (harness-supervisor-plan-test-behave "b" '(reply "Done b." 2.0))
+      (harness-supervisor-plan-test-submit
+       sid
+       (harness-supervisor-plan-test-step-input "a" :tier "standard" :reason "ordinary")
+       (harness-supervisor-plan-test-step-input "b" :context "fresh" :tier "hard" :reason "subtle"))
+      (let* ((a (harness-supervisor-plan-test-worker sid "a"))
+             (b (harness-supervisor-plan-test-worker sid "b"))
+             (calls (harness-supervisor-plan-test-spawn-calls sid))
+             (call-a (harness-supervisor-plan-test-spawn-call-of sid a))
+             (call-b (harness-supervisor-plan-test-spawn-call-of sid b)))
+        ;; One call for each worker, naming it, and the step runs on it.
+        (should (= 2 (length calls)))
+        (should call-a)
+        (should call-b)
+        (should (equal a (plist-get (harness-supervisor-plan-test-step sid "a") :session)))
+        (should (equal b (plist-get (harness-supervisor-plan-test-step sid "b") :session)))
+        (dolist (call (list call-a call-b))
+          (should (equal "spawn_agent" (plist-get call :tool)))
+          (should (string-prefix-p "sup-" (plist-get call :call-id)))
+          (should (harness-outside-node-p call))
+          (should (equal (harness-sender-system "supervisor") (harness-node-sender call))))
+        ;; The fork step's call says it forks, on its tier's model, first attempt.
+        (should (equal "Sub-agent: Step a: Title of a (fork)" (plist-get call-a :title)))
+        (should (equal "Step a: Title of a" (plist-get (plist-get call-a :input) :name)))
+        (should (equal "Do a." (plist-get (plist-get call-a :input) :prompt)))
+        (should (equal "demo:balanced" (plist-get (plist-get call-a :input) :model)))
+        (should (equal "standard" (plist-get (plist-get call-a :input) :tier)))
+        (should (= 1 (plist-get (plist-get call-a :input) :attempt)))
+        (should (harness-json-true-p (plist-get (plist-get call-a :input) :fork)))
+        ;; A fresh step's call forks nothing and names its own model.
+        (should (equal "Sub-agent: Step b: Title of b" (plist-get call-b :title)))
+        (should (equal "demo:frontier" (plist-get (plist-get call-b :input) :model)))
+        (should-not (plist-get (plist-get call-b :input) :fork))
+        ;; The plan block is still shown once, before the first call.
+        (let ((plan (harness-supervisor-plan-test-nodes sid 'plan)))
+          (should (= 1 (length plan)))
+          (should (equal (plist-get (harness-supervisor-plan-test-plan sid) :id)
+                         (plist-get (plist-get (car plan) :meta) :plan-id)))
+          (should (< (harness-supervisor-plan-test-node-position
+                      sid (lambda (n) (equal (plist-get n :id) (plist-get (car plan) :id))))
+                     (harness-supervisor-plan-test-node-position
+                      sid (lambda (n) (equal (plist-get n :id) (plist-get call-a :id)))))))
+        ;; The model's own messages hold no spawn_agent call.
+        (should-not (cl-some (lambda (message)
+                               (cl-some (lambda (block) (equal "spawn_agent" (plist-get block :name)))
+                                        (plist-get message :content)))
+                             (harness-call 'session/messages sid)))
+        (harness-supervisor-plan-test-wait-state sid "a" "done")
+        (harness-supervisor-plan-test-wait-state sid "b" "done")
+        (harness-supervisor-plan-test-wait-idle sid)))))
+
+(ert-deftest harness-supervisor-plan-a-done-workers-result-joins-its-call ()
+  "A done step's result joins its call: what the worker reported, then a
+footer with the step, its model, its session and what it cost, before
+the hint that says the step is done."
+  (harness-supervisor-plan-test-with
+    (let ((sid (harness-supervisor-plan-test-session)))
+      (harness-supervisor-plan-test-behave "a" "Checked it: all good.")
+      (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "a"))
+      (harness-supervisor-plan-test-wait-state sid "a" "done")
+      (let* ((step (harness-supervisor-plan-test-step sid "a"))
+             (worker (plist-get step :session))
+             (call (harness-supervisor-plan-test-spawn-call-of sid worker))
+             (results (harness-supervisor-plan-test-spawn-results sid call))
+             (result (car results)))
+        (should (= 1 (length results)))
+        (should (equal (plist-get call :call-id) (plist-get result :call-id)))
+        (should-not (plist-get result :is-error))
+        (should (harness-outside-node-p result))
+        (should (equal (harness-sender-system "supervisor") (harness-node-sender result)))
+        (should (equal worker (plist-get (plist-get result :meta) :child-id)))
+        (should (numberp (plist-get (plist-get result :meta) :duration)))
+        (should (string-prefix-p "Checked it: all good." (plist-get result :output)))
+        (should (string-match-p
+                 (format "\\[step a (Title of a) done on demo:cheap, session %s, [0-9]+ tool calls, cost "
+                         (regexp-quote worker))
+                 (plist-get result :output)))
+        ;; Before the hint that says the step is done.
+        (should (< (harness-supervisor-plan-test-node-position
+                    sid (lambda (n) (equal (plist-get n :id) (plist-get result :id))))
+                   (harness-supervisor-plan-test-node-position
+                    sid (lambda (n) (and (eq (plist-get n :kind) 'hint)
+                                         (equal "Step a done on demo:cheap" (plist-get n :content))))))))
+      (harness-supervisor-plan-test-wait-reports sid 1)
+      (harness-supervisor-plan-test-wait-idle sid))))
+
+(ert-deftest harness-supervisor-plan-a-failed-workers-result-is-an-error ()
+  "A step whose worker's turn failed gets an error result naming why,
+with the footer saying the step failed."
+  (harness-supervisor-plan-test-with
+    (let ((sid (harness-supervisor-plan-test-session)))
+      (harness-supervisor-plan-test-behave "a" 'error)
+      (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "a"))
+      (harness-supervisor-plan-test-wait-state sid "a" "failed")
+      (let* ((worker (plist-get (harness-supervisor-plan-test-step sid "a") :session))
+             (call (harness-supervisor-plan-test-spawn-call-of sid worker))
+             (results (harness-supervisor-plan-test-spawn-results sid call))
+             (result (car results)))
+        (should (= 1 (length results)))
+        (should (plist-get result :is-error))
+        (should (equal worker (plist-get (plist-get result :meta) :child-id)))
+        (should (string-match-p "the worker's turn ended with error: boom" (plist-get result :output)))
+        (should (string-match-p
+                 (format "\\[step a (Title of a) failed on demo:cheap, session %s]" (regexp-quote worker))
+                 (plist-get result :output))))
+      (harness-supervisor-plan-test-wait-reports sid 1)
+      (harness-supervisor-plan-test-wait-idle sid))))
+
+(ert-deftest harness-supervisor-plan-a-retried-step-shows-a-call-of-its-own ()
+  "A step that starts again gets a new call for its new worker, after the
+first attempt's call and its error result: the attempts do not share one."
+  (harness-supervisor-plan-test-with
+    (let ((sid (harness-supervisor-plan-test-session)))
+      (harness-supervisor-plan-test-behave "a" 'error "Done again.")
+      (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "a"))
+      (harness-supervisor-plan-test-wait-state sid "a" "failed")
+      (harness-supervisor-plan-test-wait-reports sid 1)
+      (harness-supervisor-plan-test-wait-idle sid)
+      (let* ((first (plist-get (harness-supervisor-plan-test-step sid "a") :session))
+             (first-call (harness-supervisor-plan-test-spawn-call-of sid first))
+             (first-result (car (harness-supervisor-plan-test-spawn-results sid first-call))))
+        (should first-call)
+        (should (plist-get first-result :is-error))
+        (harness-supervisor-plan-test-retry-step sid "a")
+        (harness-supervisor-plan-test-wait-state sid "a" "done")
+        (harness-supervisor-plan-test-wait-reports sid 2)
+        (harness-supervisor-plan-test-wait-idle sid)
+        (let* ((step (harness-supervisor-plan-test-step sid "a"))
+               (second (plist-get step :session))
+               (second-call (harness-supervisor-plan-test-spawn-call-of sid second))
+               (second-result (car (harness-supervisor-plan-test-spawn-results sid second-call))))
+          (should (= 2 (plist-get step :attempts)))
+          (should-not (equal first second))
+          (should-not (equal (plist-get first-call :call-id) (plist-get second-call :call-id)))
+          (should (= 1 (plist-get (plist-get first-call :input) :attempt)))
+          (should (= 2 (plist-get (plist-get second-call :input) :attempt)))
+          ;; Both calls are in the transcript, each with its one result.
+          (should (= 2 (length (harness-supervisor-plan-test-spawn-calls sid))))
+          (should (plist-get first-result :is-error))
+          (should-not (plist-get second-result :is-error))
+          (should (string-prefix-p "Done again." (plist-get second-result :output))))))))
+
+(ert-deftest harness-supervisor-plan-a-restart-closes-the-call-of-an-interrupted-step ()
+  "The harness stopping while a worker ran leaves its call open; recovering
+interrupts the step and answers the call once, naming the interruption."
+  (harness-supervisor-plan-test-with
+    (let ((sid (harness-supervisor-plan-test-session)))
+      (let ((worker (harness-supervisor-plan-test-running-plan sid)))
+        (harness-supervisor-plan-test-restart sid)
+        ;; The call in memory is gone, as it is after a restart.
+        (should (zerop (hash-table-count harness-supervisor--spawns)))
+        (harness-supervisor--recover)
+        (let* ((call (harness-supervisor-plan-test-spawn-call-of sid worker))
+               (results (harness-supervisor-plan-test-spawn-results sid call)))
+          (should call)
+          (should (= 1 (length results)))
+          (should (plist-get (car results) :is-error))
+          (should (equal worker (plist-get (plist-get (car results) :meta) :child-id)))
+          (should (string-match-p "interrupted" (plist-get (car results) :output)))
+          (should (string-match-p "step s1 (Title of s1)" (plist-get (car results) :output)))
+          (should (string-match-p "the harness stopped while the worker was running"
+                                  (plist-get (car results) :output)))
+          ;; Recovering again, for a step that is not running any more, adds nothing.
+          (harness-supervisor--recover)
+          (should (= 1 (length (harness-supervisor-plan-test-spawn-results sid call)))))))))
+
+(ert-deftest harness-supervisor-plan-a-new-plan-leaves-a-running-workers-call-alone ()
+  "A superseding plan forks at its own submit_plan call, not the one the
+plan before it used, and the worker of the plan it replaced keeps its
+call and still gets its result."
+  (harness-supervisor-plan-test-with
+    (let ((sid (harness-supervisor-plan-test-session)))
+      (harness-supervisor-plan-test-behave "a1" '(reply "Done a1." 2.0))
+      (harness-supervisor-plan-test-submit
+       sid
+       (harness-supervisor-plan-test-step-input "a1")
+       (harness-supervisor-plan-test-step-input "a2" :after '("a1")))
+      (let ((old (harness-supervisor-plan-test-worker sid "a1")))
+        (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "b1" :tier "hard"))
+        (harness-supervisor-plan-test-wait-state sid "b1" "done" 1)
+        (let* ((plan (harness-supervisor-plan-test-plan sid 1))
+               (b1 (plist-get (harness-supervisor-plan-test-step sid "b1" 1) :session))
+               (submits (cl-remove-if-not (lambda (n) (and (eq (plist-get n :kind) 'tool-call)
+                                                          (equal "submit_plan" (plist-get n :tool))))
+                                          (harness-call 'session/nodes sid))))
+          ;; The new plan's fork point is the last submit_plan call, its own.
+          (should (= 2 (length submits)))
+          (should (equal (plist-get (car (last submits)) :id) (plist-get plan :node)))
+          (should (equal (plist-get plan :node) (plist-get (harness-call 'session/get b1) :fork-node)))
+          ;; The running worker's call is untouched: no result yet.
+          (let ((call (harness-supervisor-plan-test-spawn-call-of sid old)))
+            (should call)
+            (should-not (harness-supervisor-plan-test-spawn-results sid call)))
+          (harness-supervisor-plan-test-wait-state sid "a1" "done" 0)
+          (harness-supervisor-plan-test-wait-idle sid)
+          ;; It still gets its one result, and the superseded step ran nothing.
+          (should (= 2 (length (harness-supervisor-plan-test-spawn-calls sid))))
+          (should (= 1 (length (harness-supervisor-plan-test-spawn-results
+                                sid (harness-supervisor-plan-test-spawn-call-of sid old)))))
+          (should-not (harness-supervisor-plan-test-step-request "a2")))))))
+
+(ert-deftest harness-supervisor-plan-deleting-a-worker-closes-its-call ()
+  "Deleting the session of a running worker answers its spawn_agent call
+with the cancellation."
+  (harness-supervisor-plan-test-with
+    (let ((sid (harness-supervisor-plan-test-session)))
+      (harness-supervisor-plan-test-behave "s1" 'hold)
+      (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "s1"))
+      (let ((worker (harness-supervisor-plan-test-worker sid "s1")))
+        (harness-call 'session/delete worker)
+        (should (equal "cancelled" (harness-supervisor-plan-test-state sid "s1")))
+        (let* ((call (harness-supervisor-plan-test-spawn-call-of sid worker))
+               (results (harness-supervisor-plan-test-spawn-results sid call))
+               (result (car results)))
+          (should (= 1 (length results)))
+          (should (plist-get result :is-error))
+          (should (equal worker (plist-get (plist-get result :meta) :child-id)))
+          (should (string-match-p "the worker's session was deleted" (plist-get result :output)))
+          (should (string-match-p
+                   (format "\\[step s1 (Title of s1) cancelled on demo:cheap, session %s]"
+                           (regexp-quote worker))
+                   (plist-get result :output))))
+        (harness-supervisor-plan-test-wait-reports sid 1)))))
+
 ;;;; When something else goes wrong
 
 (ert-deftest harness-supervisor-plan-a-worker-that-cannot-be-made-fails-its-step ()
@@ -1854,6 +2113,9 @@ Its workers die, memory is forgotten and the sessions come back from the disk."
         (harness-test-wait (lambda () (not (harness-call 'agent/running w))) 10 "the worker to stop"))))
   (clrhash harness-supervisor--ending)
   (clrhash harness-supervisor--held)
+  ;; A real restart loses the calls in memory too: the open call is
+  ;; found in the transcript when its result is recorded.
+  (clrhash harness-supervisor--spawns)
   (harness-session-flush)
   (clrhash harness-sessions)
   (harness-session--load-all))
