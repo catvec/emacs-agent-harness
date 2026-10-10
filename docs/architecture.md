@@ -3427,7 +3427,8 @@ priority).
   `:prompt` (the original stays in `:note`) and the task waits in
   `pending` with `:backlog t`, whose column is the backlog, apart from
   the queued pending tasks: the scheduler never starts it, only
-  `task/start`, so the backlog survives restarts.  A turn of a backlog
+  `task/start`, so the backlog survives restarts; `task/queue` (the
+  board's [Queue it]) puts it back in that queue, the write-up kept.  A turn of a backlog
   task's session before it starts is feedback (`task/prompt`) and
   rewrites the write-up; a write-up that stops needs input (restarts:
   below).  `task/refine ID &optional TEXT` refines a queued task or
@@ -3567,6 +3568,8 @@ priority).
   (what new tasks start with, and `:max-running`, the limit, nil for
   none),
   `task/start ID` (ignores the limit; not while a write-up runs),
+  `task/queue ID` (a backlog task back in the pending queue, where the
+  scheduler starts it as slots free; the suspended queue holds it there),
   `task/update ID PROMPT` (not started only; writes a stopped write-up by
   hand; a task named from its prompt is named again), `task/set-all SETTINGS &optional FILTER` (apply `:model',
   `:thinking', `:permission-mode', `:non-interactive' and `:supervisor',
@@ -4389,7 +4392,7 @@ TRAMP prefixes come from the session host):
 | `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds (optional: wake anyway after this long) | read (registers a wake-up prompt and returns at once; needs no approval: `harness-perms--inspection-tools`) |
 | `task_list` | List tasks | column (pending/backlog/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: given to the session the task is submitted with, and the order waiting tasks start in) | meta |
-| `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete/priority), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives) | meta |
+| `task_control` | Control task | task_id, action (start/queue/message/cancel/merge/verify/reject/complete/archive/restore/delete/priority), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus (for the user: stays until the task is done) | exec (tools-dev; offered in a checkout of the harness only; the instance stops by itself once nothing needs it; needs no approval: `harness-perms--auto-allow-tools`) |

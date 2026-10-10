@@ -1514,7 +1514,8 @@ tests that check a card's detail line show it first."
       ;; Its card starts it, and its session does the work.
       (harness-ui-tasks-test--goto-card board "Fix nested quotes")
       (with-current-buffer board
-        (should (equal '("Start now" "Edit")
+        ;; The backlog's way out: the queue first, then an explicit start.
+        (should (equal '("Queue it" "Start now")
                        (take 2 (mapcar #'car (harness-ui-tasks--actions (harness-ui-tasks--task))))))
         (should (eq 'harness-ui-tasks-refine (key-binding (kbd "r"))))
         (harness-ui-tasks-start))
@@ -3043,6 +3044,32 @@ backlog task stays where it is."
       (harness-ui-tasks-test--wait-text board "Pending  0")
       (should (string-match-p "Backlog  1\\(.\\|\n\\)*Fix the lexer"
                               (harness-ui-tasks-test--board-text board))))))
+
+(ert-deftest harness-ui-tasks-queue-a-backlog-task ()
+  "Queue it on a backlog card moves it to Pending, where the queue starts it."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-provider-demo-script-override
+           '((:type text :delta "Fix the lexer\n\nIt drops the last token.") (:type done :stop-reason end-turn))))
+      (with-current-buffer board (harness-ui-tasks-toggle-refine))
+      (harness-ui-tasks-test--type-and-submit board "jot the lexer down")
+      (harness-ui-tasks-test--wait-text board "Backlog  1\\(.\\|\n\\)*Fix the lexer")
+      ;; The card offers the queue first, and the board key does the same.
+      (harness-ui-tasks-test--goto-card board "Fix the lexer")
+      (with-current-buffer board
+        (should (equal '("Queue it" "Start now")
+                       (take 2 (mapcar #'car
+                                       (cl-remove 'harness-ui-tasks-open
+                                                  (harness-ui-tasks--actions (harness-ui-tasks--task))
+                                                  :key #'cadr)))))
+        (should (eq 'harness-ui-tasks-queue (key-binding (kbd "Q"))))
+        (harness-ui-tasks-queue))
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Fix the lexer")
+      (let ((task (car (harness-call 'task/list default-directory))))
+        (should (eq 'pending (plist-get task :state)))
+        (should (eq 'pending (plist-get task :column)))
+        (should-not (plist-get task :backlog)))
+      (should (string-match-p "Backlog  0" (harness-ui-tasks-test--board-text board))))))
 
 (ert-deftest harness-ui-tasks-return-to-pending-from-the-card ()
   "u returns the task at point to the pending queue, keeping its session.

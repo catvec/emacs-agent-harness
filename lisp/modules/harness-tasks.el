@@ -76,7 +76,10 @@
 ;; session is the one that refined it: starting moves that session into
 ;; the task's worktree and tells it to do the work.  A message to a
 ;; backlog task's session is feedback on the write-up, which the agent
-;; rewrites.
+;; rewrites.  `task/queue' (the board's [Queue it]) puts a backlog task
+;; back in the pending queue, where the scheduler starts it like any
+;; queued task -- as soon as its project has a free slot -- the write-up
+;; kept for the start.
 ;;
 ;; Main tree: a task submitted with `:main-tree' (the `task_submit'
 ;; tool's `main_tree', or the board's worktree switch) gets no worktree
@@ -695,6 +698,15 @@ write-up from work waiting for a slot: `harness-tasks--to-pending'
 clears it."
   (or (eq (plist-get task :state) 'refining)
       (and (eq (plist-get task :state) 'pending) (harness-tasks--backlog-p task))))
+
+(defun harness-tasks--written-up-p (task)
+  "Non-nil when TASK's prompt is a write-up of the request in `:note'.
+That is a backlog task, and one the user queued from the backlog
+\(`task/queue'): it waits for a slot like any other queued task, but
+its work still opens with the write-up and the request it came from
+\(`harness-tasks--start-text')."
+  (or (harness-tasks--backlog-p task)
+      (not (harness-string-blank-p (plist-get task :note)))))
 
 (defun harness-tasks--turn-p (task)
   "Non-nil while a turn of TASK's session runs (from the moment it is prompted)."
@@ -1986,12 +1998,12 @@ session that has no name yet takes the task's title."
                         (format "Task started in the main tree %s" (abbreviate-file-name cwd)))
                        (t "Task started")))
         (harness-catch (harness-call-async 'agent/prompt sid
-                                           (if (harness-tasks--backlog-p task)
+                                           (if (harness-tasks--written-up-p task)
                                                (harness-tasks--blocks
                                                 (list :prompt (harness-tasks--start-text task)
                                                       :attachments (plist-get task :attachments)))
                                              (harness-tasks--blocks task))
-                                           (and (harness-tasks--backlog-p task)
+                                           (and (harness-tasks--written-up-p task)
                                                 (harness-tasks--from-harness)))
                        (lambda (e) (harness-tasks--fail id e))))
     (error (harness-tasks--fail id err))))
@@ -2882,8 +2894,9 @@ queue is suspended, :false once it runs again."
 
 (harness-defmethod task/start (id)
   "Start pending task ID now, even when every slot of its project is taken.
-A backlog task starts too, and so does one whose write-up stopped (with
-the prompt it has), but not one an agent is writing up right now.  A
+A backlog task starts too (or `task/queue' leaves it to the queue), and
+so does one whose write-up stopped (with the prompt it has), but not
+one an agent is writing up right now.  A
 task returned to pending starts in the session that already worked on
 it, which carries on where it stopped (`harness-tasks--start-paused').
 Its project's queue being suspended (task/suspend-queue) does not hold
@@ -2894,6 +2907,22 @@ this up: an explicit start always starts the task."
       (error "Task %s is still being written up; wait for it or stop it" id))
     (harness-tasks--start task)
     (harness-call 'task/get id)))
+
+(harness-defmethod task/queue (id)
+  "Put backlog task ID back in the pending queue, where it starts by itself.
+The scheduler starts it as soon as its project has a free slot, by
+priority, as it starts any queued task; while the project's queue is
+suspended (`task/suspend-queue') it waits in pending until the queue is
+resumed or it is started by hand.  The write-up is kept: the work opens
+with the write-up and the request it came from
+\(`harness-tasks--start-text').  Return the task's view."
+  (let ((task (harness-tasks--get id)))
+    (unless (and (eq (plist-get task :state) 'pending) (harness-tasks--backlog-p task))
+      (error "Task %s is not waiting in the backlog (%s)" id (or (plist-get task :state) "?")))
+    (when (harness-tasks--turn-p task)
+      (error "Task %s is still being written up; wait for it or stop it" id))
+    (prog1 (harness-tasks--set id :backlog nil)
+      (harness-tasks--schedule))))
 
 (harness-defmethod task/return-to-pending (id)
   "Stop the turn of active task ID and put it back in the pending queue.

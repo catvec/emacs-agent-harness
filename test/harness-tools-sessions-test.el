@@ -1179,7 +1179,15 @@ task that waits to be started."
         (should-not (string-match-p (regexp-quote backlog) pending-list)))
       ;; The queued task is still waiting for a slot: the backlog task's
       ;; settling is its own.
-      (should (eq 'pending (plist-get (harness-call 'task/get queued) :column))))))
+      (should (eq 'pending (plist-get (harness-call 'task/get queued) :column)))
+      ;; Queue it: a backlog task becomes a queued pending one.
+      (harness-tools-sessions-test-ok me "task_control" (list :task_id backlog :action "queue"))
+      (let ((task (harness-call 'task/get backlog)))
+        (should (eq 'pending (plist-get task :state)))
+        (should (eq 'pending (plist-get task :column)))
+        (should-not (plist-get task :backlog)))
+      (should-not (string-match-p "backlog"
+                                  (harness-tools-sessions--task-line (harness-call 'task/get backlog)))))))
 
 (ert-deftest harness-tools-sessions-task-submit-main-tree ()
   "task_submit passes main_tree through; the result and task_list say so."

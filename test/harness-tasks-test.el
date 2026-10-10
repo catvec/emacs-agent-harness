@@ -1424,6 +1424,32 @@ sends it the task itself, not a \"carry on\"."
           (should-not (harness-node-sender request))
           (should (equal (harness-sender-system "tasks") (harness-node-sender start))))))))
 
+(ert-deftest harness-tasks-queue-a-backlog-task ()
+  "task/queue puts a backlog task back in the queue; a free slot starts it.
+Its work still opens with the write-up and the request it came from."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-provider-demo-script-override
+           `((:type text :delta ,harness-tasks-test-write-up) (:type done :stop-reason end-turn))))
+      (let ((id (harness-tasks-test-refine "the parser chokes on nested quotes")))
+        (harness-tasks-test-wait-state id 'pending)
+        (let ((sid (harness-tasks-test-session-id id)))
+          (should (eq 'backlog (plist-get (harness-tasks-test-task id) :column)))
+          ;; Queueing hands it to the schedule: pending, not the backlog.
+          (harness-call 'task/queue id)
+          (should (eq 'pending (harness-tasks-test-state id)))
+          (should-not (plist-get (harness-tasks-test-task id) :backlog))
+          (should (eq 'pending (plist-get (harness-tasks-test-task id) :column)))
+          ;; No slot yet; one frees and the queue starts it on its own,
+          ;; with the write-up and the request it came from.
+          (setq harness-tasks-max-running nil)
+          (harness-tasks--schedule)
+          (harness-tasks-test-wait-state id 'done)
+          (let ((texts (harness-tasks-test-user-texts sid)))
+            (should (= 2 (length texts)))
+            (should (string-match-p (regexp-quote harness-tasks-test-write-up) (cadr texts)))
+            (should (string-match-p "^> the parser chokes on nested quotes$" (cadr texts)))))))))
+
 (ert-deftest harness-tasks-backlog-work-is-interactive-by-default ()
   "A write-up is non-interactive, to keep it read-only; the work it leads to is not."
   (harness-tasks-test-with

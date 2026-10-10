@@ -19,8 +19,10 @@
 ;;                         startable; in the order they start: by
 ;;                         priority, then oldest first
 ;;   Backlog               jotted down or written up for later: the queue
-;;                         never starts one, only you do (s); editable,
-;;                         refinable; where a write-up runs too
+;;                         never starts one by itself; Q queues it, so it
+;;                         drains like any pending task, and s starts it
+;;                         now; editable, refinable; where a write-up
+;;                         runs too
 ;;   Completed             finished and verified; reply to reopen,
 ;;                         archive to hide
 ;;
@@ -788,9 +790,11 @@ session's priority.  See `harness-ui-tasks--shown-priority'."
         (if (harness-ui-tasks--refining-p task)
             '(("Open" harness-ui-tasks-open) ("Steer" harness-ui-tasks-reply)
               ("Stop" harness-ui-tasks-cancel))
-          '(("Start now" harness-ui-tasks-start) ("Edit" harness-ui-tasks-edit)
-            ("Open" harness-ui-tasks-open) ("Refine" harness-ui-tasks-refine)
-            ("Drop" harness-ui-tasks-cancel))))
+          ;; Queued first: the backlog's usual way out is the queue, which
+          ;; starts it as a slot frees; Start now ignores the limit.
+          '(("Queue it" harness-ui-tasks-queue) ("Start now" harness-ui-tasks-start)
+            ("Edit" harness-ui-tasks-edit) ("Open" harness-ui-tasks-open)
+            ("Refine" harness-ui-tasks-refine) ("Drop" harness-ui-tasks-cancel))))
        ('needs-input
         (pcase (plist-get (harness-ui-tasks--pending task) :kind)
           ("permission" '(("Allow" harness-ui-tasks-allow) ("Deny" harness-ui-tasks-deny)
@@ -2895,7 +2899,8 @@ so they type, into the compose box (`harness-compose-acts-p')."
       (get-text-property (point) 'harness-task-id)))
 
 ;; Typing off a card, the board's keys for the task at point (see above).
-(dolist (command '(harness-ui-tasks-open-other harness-ui-tasks-start harness-ui-tasks-edit
+(dolist (command '(harness-ui-tasks-open-other harness-ui-tasks-start harness-ui-tasks-queue
+                   harness-ui-tasks-edit
                    harness-ui-tasks-reply harness-ui-tasks-requests harness-ui-tasks-refine
                    harness-ui-tasks-allow harness-ui-tasks-deny harness-ui-tasks-cancel
                    harness-ui-tasks-complete harness-ui-tasks-verify harness-ui-tasks-reject
@@ -2913,6 +2918,7 @@ so they type, into the compose box (`harness-compose-acts-p')."
   (define-key map (kbd "<backtab>") #'harness-ui-tasks-previous)
   (define-key map (kbd "a") #'harness-ui-tasks-compose)
   (define-key map (kbd "s") #'harness-ui-tasks-start)
+  (define-key map (kbd "Q") #'harness-ui-tasks-queue)
   (define-key map (kbd "e") #'harness-ui-tasks-edit)
   (define-key map (kbd "m") #'harness-ui-tasks-reply)
   (define-key map (kbd "SPC") #'harness-ui-tasks-requests)
@@ -3000,6 +3006,7 @@ task's key typed off a card.
         (". o" "Open in position" harness-ui-tasks-open-other)
         (". TAB" "Fold the section or the recap" harness-ui-tasks-tab)
         (". s" "Start now" harness-ui-tasks-start)
+        (". Q" "Queue it (start it when a slot frees)" harness-ui-tasks-queue)
         (". e" "Edit prompt" harness-ui-tasks-edit)
         (". m" "Message session" harness-ui-tasks-reply)
         (". SPC" "View what point needs" harness-ui-tasks-requests)
@@ -3360,12 +3367,29 @@ A new task is refined for the backlog when REFINE is non-nil."
               (harness-ui-tasks--fail buffer "Submitting the task" e)))))))))
 
 (defun harness-ui-tasks-start ()
-  "Start the pending task at point now, even when every slot is busy.
+  "Start the pending or backlog task at point now, even when every slot is busy.
 A task returned to pending carries on in the session that already
-worked on it, where it stopped."
+worked on it, where it stopped; a backlog task starts with its
+write-up.  \<harness-ui-tasks-board-map>\[harness-ui-tasks-queue] leaves it to the queue instead."
   (interactive)
   (harness-ui-tasks--request-then "_harness/task/start" (list :id (plist-get (harness-ui-tasks--task) :id))
                                   "Starting the task"))
+
+(defun harness-ui-tasks-queue ()
+  "Put the backlog task at point back in the pending queue.
+It then starts on its own as soon as its project has a free slot, by
+priority, as any queued task does; while the queue is suspended
+\(\<harness-ui-tasks-board-map>\[harness-ui-tasks-toggle-queue]) it waits in Pending until the queue is
+resumed.  \<harness-ui-tasks-board-map>\[harness-ui-tasks-start] starts it at once instead, whatever the limit."
+  (interactive)
+  (let ((task (harness-ui-tasks--task)))
+    (unless (and (harness-ui-tasks--backlog-p task) (not (harness-ui-tasks--refining-p task)))
+      (user-error "Only a task waiting in the backlog can be queued"))
+    (harness-ui-tasks--request-then "_harness/task/queue" (list :id (plist-get task :id))
+                                    "Queueing the task")
+    (message "%s" (if (harness-ui-tasks--queue-suspended-p)
+                      "Queued: it starts when you resume the queue (or now with s)"
+                    "Queued: it starts as soon as the project has a free slot"))))
 
 (defun harness-ui-tasks-return-to-pending ()
   "Stop the turn of the task at point and put it back in the pending queue.

@@ -1641,6 +1641,7 @@ sends work back."
              (id (plist-get task :id)))
         (pcase action
           ("start" (harness-call 'task/start id))
+          ("queue" (harness-call 'task/queue id))
           ("message"
            (let ((text (or (plist-get input :message) "")))
              (when (harness-string-blank-p text) (signal 'harness-error (list "message needs a message")))
@@ -1680,16 +1681,17 @@ sends work back."
                      (pcase action
                        ("priority" (format "Priority %s" (harness-priority-of-task task)))
                        ("return-to-pending" "Returned to pending; it starts again where it stopped")
+                       ("queue" "Queued: it starts as soon as the project has a free slot")
                        (_ (concat action " done")))
                      (harness-tools-sessions--task-line task))
            (format "%s done; task %s is gone." action id)))))))
 
 (harness-define-tool "task_control"
   :label "Control task"
-  :description "Act on a task, or on its project's pending queue. start runs a pending task now, whatever the limit or a suspended queue; message sends a follow-up to its session, marked as coming from this session (while pending, it appends to the prompt instead -- a task returned to pending that waits with its queue suspended keeps the message and gets it when it starts, otherwise it starts now); cancel drops a pending task or stops a working one's turn; return-to-pending stops a working task's turn and puts it back at the front of its project's pending queue, keeping its session, branch and worktree so it carries on where it stopped when it starts again; reject sends a task in review back to its session with the feedback in message, to work on it again (with the queue suspended the task waits in pending with the feedback kept instead); merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept); priority sets its priority to the given one (low, medium or high), given to the task's session, which is where a task's priority lives (`harness-priority-of-task'), and which reorders the tasks waiting for a slot: high starts before medium, medium before low. suspend-queue stops a project's pending tasks from starting on their own -- the queue waits until resume-queue, while start still starts a task -- and resume-queue starts them again at once, by priority; both act on the project of cwd (default: this session's) and need no task_id."
+  :description "Act on a task, or on its project's pending queue. start runs a pending task now, whatever the limit or a suspended queue; queue puts a backlog task back in the pending queue, where it starts on its own as soon as a slot frees (or waits there while the queue is suspended); message sends a follow-up to its session, marked as coming from this session (while pending, it appends to the prompt instead -- a task returned to pending that waits with its queue suspended keeps the message and gets it when it starts, otherwise it starts now); cancel drops a pending task or stops a working one's turn; return-to-pending stops a working task's turn and puts it back at the front of its project's pending queue, keeping its session, branch and worktree so it carries on where it stopped when it starts again; reject sends a task in review back to its session with the feedback in message, to work on it again (with the queue suspended the task waits in pending with the feedback kept instead); merge retries the merge queue after a failed merge; verify accepts the work of a task in review (its branch then merges and it is done); complete marks it done by hand; archive hides a done task (removing a merged task's worktree); restore unarchives; delete forgets the task (its session and worktree are kept); priority sets its priority to the given one (low, medium or high), given to the task's session, which is where a task's priority lives (`harness-priority-of-task'), and which reorders the tasks waiting for a slot: high starts before medium, medium before low. suspend-queue stops a project's pending tasks from starting on their own -- the queue waits until resume-queue, while start still starts a task -- and resume-queue starts them again at once, by priority; both act on the project of cwd (default: this session's) and need no task_id."
   :schema '(:type "object"
             :properties (:task_id (:type "string" :description "Task id or unique prefix; not needed by suspend-queue and resume-queue.")
-                         :action (:type "string" :enum ("start" "message" "cancel" "return-to-pending" "merge" "verify" "reject" "complete" "archive" "restore" "delete" "priority" "suspend-queue" "resume-queue"))
+                         :action (:type "string" :enum ("start" "queue" "message" "cancel" "return-to-pending" "merge" "verify" "reject" "complete" "archive" "restore" "delete" "priority" "suspend-queue" "resume-queue"))
                          :message (:type "string" :description "Text, for message; the feedback, for reject.")
                          :priority (:type "string" :enum ("low" "medium" "high") :description "The new priority, for priority.")
                          :cwd (:type "string" :description "Project directory, for suspend-queue and resume-queue (default: this session's)."))
