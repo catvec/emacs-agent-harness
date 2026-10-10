@@ -225,7 +225,10 @@
           (should (string-match-p "\\$0.0042" header))
           ;; The context in use: the last prompt and what its call wrote.
           (should (string-match-p "2.2k/" header))
-          (should (string-match-p " 180 out " header)))
+          ;; The output tokens are the session list's, the status the
+          ;; mode line's.
+          (should-not (string-match-p "180 out" header))
+          (should-not (string-match-p "idle" header)))
         (should (string-match-p "idle" (harness-chat--mode-line)))
         (should (equal "" (harness-compose-text)))))))
 
@@ -545,10 +548,11 @@ on a background and bar of its own; the user's own messages are as before."
             (should-not (string-match-p "\n" (get-text-property pos 'help-echo header)))
             (should (get-text-property pos 'local-map header))))))))
 
-(ert-deftest harness-ui-chat-header-shows-the-output-rate ()
-  "The header says how fast the session's model wrote, as the harness measured it.
-The harness times the turn's streaming; the figure stays once the
-session is idle, dimmed, and makes room first in a narrow window."
+(ert-deftest harness-ui-chat-header-leaves-the-output-rate-out ()
+  "The header leaves how fast the model writes to the session list and the cards.
+The harness times the turn's streaming and the UI keeps the figure,
+which the session list's Tok/s column and a task's card show; nothing
+in the chat turns on it, so its header goes without."
   (harness-ui-chat-test-with
     (harness-test-load-module 'usage)
     (clrhash harness-ui--rates)
@@ -559,36 +563,27 @@ session is idle, dimmed, and makes room first in a narrow window."
             (append (make-list 8 '(:type text :delta "word "))
                     '((:type usage :input 100 :output 40 :cost 0.0001 :context 100)
                       (:type done :stop-reason end-turn)))))
-      (with-current-buffer buf
-        (should-not (string-match-p "tok/s" (harness-chat--header most-positive-fixnum))))
       (harness-ui-chat-test-prompt buf "hello")
       (harness-test-wait (lambda () (harness-ui-session-rate sid)) 5 "the rate")
       (let ((rate (harness-ui-session-rate sid)))
         (should (= 40 (plist-get rate :output)))
         (should (= 1 (plist-get rate :calls)))
         (should (equal "demo:scripted" (plist-get rate :model)))
+        ;; Measured, for the session list and the cards...
+        (should (equal (harness-ui-format-rate-number (plist-get rate :rate))
+                       (substring-no-properties (harness-ui-format-rate (harness-ui-session sid) t))))
+        ;; ...and left out of the header.
         (with-current-buffer buf
-          (let* ((full (harness-chat--header most-positive-fixnum))
-                 (text (concat (harness-ui-format-rate-number (plist-get rate :rate)) " tok/s"))
-                 (pos (string-search text full)))
-            (should pos)
-            ;; After the context, before the spend.
-            (should (< (string-search (harness-ui-format-context (harness-ui-session sid)) full) pos))
-            (should (< pos (string-search "$" full)))
-            (should (memq 'harness-dim-face (ensure-list (get-text-property pos 'face full))))
-            (should (string-prefix-p "Last output rate: " (get-text-property pos 'help-echo full)))
-            ;; A column short, the rate goes and the rest stays.
-            (should (equal (string-replace (concat "  " text) "" (substring-no-properties full))
-                           (substring-no-properties
-                            (harness-chat--header (1- (harness-ui-header-string-width full))))))))))))
+          (should-not (string-match-p "tok/s" (harness-chat--header most-positive-fixnum))))))))
 
 (ert-deftest harness-ui-chat-header-counts-tokens-as-they-stream ()
-  "The header's token figures grow while the model streams, not at the end.
+  "The header's context in use grows while the model streams, not at the end.
 The harness counts what streams, a token for every four characters, and
-the header marks figures so estimated with \"~\".  The call's usage
+the header marks the figure so estimated with \"~\".  The call's usage
 report replaces the estimate with the real numbers, which stay once the
 turn ended: the context in use is then the prompt plus what the call
-wrote.  The output goes after the context and before the rate."
+wrote.  The output tokens, counted the same way, are for the session
+list and the task cards: the header leaves them out."
   (harness-ui-chat-test-with
     (harness-test-load-module 'usage)
     (clrhash harness-ui--live)
@@ -603,7 +598,6 @@ wrote.  The output goes after the context and before the rate."
                       (:type done :stop-reason end-turn))))
            (out (lambda (live) (plist-get live :output))))
       (with-current-buffer buf
-        (should-not (string-match-p " out" (harness-chat--header most-positive-fixnum)))
         (harness-ui-chat-test-type buf "hello")
         (harness-chat-send))
       ;; Streaming: two tokens for each delta of eight characters, all estimated.
@@ -616,7 +610,10 @@ wrote.  The output goes after the context and before the rate."
         (with-current-buffer buf
           (let ((header (harness-chat--header most-positive-fixnum)))
             (should (string-search (format "  ~%d/" (plist-get live :context)) header))
-            (should (string-search (format "  ~%d out" (funcall out live)) header))))
+            (should-not (string-search " out" header))))
+        ;; The output grows too, where the session list and the cards read it.
+        (should (equal (format "~%d" (funcall out live))
+                       (substring-no-properties (harness-ui-format-output (harness-ui-session sid) t))))
         (harness-test-wait (lambda () (> (or (funcall out (harness-ui-session-live sid)) 0) (funcall out live)))
                            5 "the live count to grow"))
       (should (equal "running" (plist-get (harness-ui-session sid) :status)))
@@ -628,16 +625,15 @@ wrote.  The output goes after the context and before the rate."
       (should-not (gethash sid harness-ui--live))
       (with-current-buffer buf
         (let* ((header (harness-chat--header most-positive-fixnum))
-               (context (string-search "  170/" header))
-               (output (string-search "  70 out" header))
-               (rate (string-search " tok/s" header)))
+               (context (string-search "  170/" header)))
           (should context)
-          (should output)
-          (should rate)
-          (should (< context output rate))
           (should-not (string-search "~" header))
-          (should (equal "Context tokens in use: 170; output tokens: 70."
-                         (get-text-property (+ 2 output) 'help-echo header))))))))
+          (should-not (string-search " out" header))
+          (should-not (string-search " tok/s" header))
+          ;; The context's tooltip gives the output tokens.
+          (should (string-match-p "\\`Context tokens in use: 170[ ;].*output tokens: 70\\."
+                                  (get-text-property (+ 2 context) 'help-echo header)))))
+      (should (equal "70" (substring-no-properties (harness-ui-format-output (harness-ui-session sid) t)))))))
 
 (ert-deftest harness-ui-chat-header-context-figure-raises-the-limit ()
   "The token figure in the chat header is a button.  It offers the
@@ -786,10 +782,12 @@ costs the session no segment however narrow the window is."
       (list (substring-no-properties header found (next-single-property-change found 'local-map header (length header)))
             found))))
 
-(ert-deftest harness-ui-chat-header-shows-and-toggles-non-interactive ()
-  "The header line says whether the session waits for the user, right
-after its permission mode.  A click there toggles it in the harness,
-the header follows, and the transcript notes each change."
+(ert-deftest harness-ui-chat-header-shows-non-interactive-while-on ()
+  "The header line says the session never waits for the user while it is so.
+An interactive session, the usual kind, has nothing there: the command
+or the menu turns the mode on, and the header then says so right after
+the permission mode.  A click there turns it off in the harness, the
+header follows, and the transcript notes each change."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session "Away"))
            (buf (harness-ui-chat-test-open sid))
@@ -804,21 +802,20 @@ the header follows, and the transcript notes each change."
                                    (lambda () (eq on (harness-json-true-p
                                                       (plist-get (harness-ui-session sid) :non-interactive))))
                                    5 what)))
-        (should (equal "interactive" (car (segment))))
-        (should (eq 'harness-dim-face (prop 'face)))
-        (should (string-match-p "waits for your answer.*mouse-1: make it non-interactive" (prop 'help-echo)))
-        ;; Next to the permission mode.
-        (should (string-match-p "Ask  interactive  " (substring-no-properties (header))))
-        (click)
+        (should-not (segment))
+        (should-not (string-match-p "interactive" (substring-no-properties (header))))
+        (with-current-buffer buf (harness-toggle-non-interactive))
         (await t "switched on")
         (should (eq t (plist-get (harness-call 'session/get sid) :non-interactive)))
         (should (equal "non-interactive" (car (segment))))
         (should (eq 'harness-non-interactive-face (prop 'face)))
         (should (string-match-p "never waits for you.*mouse-1: make it interactive" (prop 'help-echo)))
+        ;; Next to the permission mode.
+        (should (string-match-p "Ask  non-interactive  " (substring-no-properties (header))))
         (click)
         (await nil "switched off")
         (should-not (plist-get (harness-call 'session/get sid) :non-interactive))
-        (should (equal "interactive" (car (segment))))
+        (should-not (segment))
         (harness-test-wait (lambda () (harness-ui-chat-test-find buf "non-interactive off")) 5 "the hint")
         (should (< (harness-ui-chat-test-find buf "non-interactive on")
                    (harness-ui-chat-test-find buf "non-interactive off")))))))
@@ -1142,8 +1139,13 @@ the buffer -- and laid out on every redisplay -- until then."
         ;; Tools go by their labels.
         (activity :phase "tool-input" :tool "bash" :chars 4200 :since (float-time))
         (should (shows "Preparing Bash.*4\\.2k chars"))
+        ;; The mode line says only that it runs: what it does is this
+        ;; line's, and the tooltip of the mode line's spinner.
         (with-current-buffer buf
-          (should (string-match-p "running.* preparing Bash" (harness-chat--mode-line))))
+          (let ((mode-line (harness-chat--mode-line)))
+            (should (string-match-p "running" mode-line))
+            (should-not (string-match-p "Bash\\|preparing" mode-line))
+            (should (equal "Preparing Bash\N{U+2026}" (get-text-property 0 'help-echo mode-line)))))
         ;; One the harness does not know goes by its name.
         (activity :phase "tool-input" :tool "write_file" :chars 4200 :since (float-time))
         (should (shows "Preparing write_file.*4\\.2k chars"))
@@ -1152,7 +1154,9 @@ the buffer -- and laid out on every redisplay -- until then."
         (activity :phase "tool" :tool "bash" :title "Bash: npm test" :detail "PASS b.test" :since (float-time))
         (should (shows "Running Bash: npm test.*PASS b\\.test"))
         (with-current-buffer buf
-          (should (string-match-p "running.* Bash" (harness-chat--mode-line))))
+          (let ((mode-line (harness-chat--mode-line)))
+            (should-not (string-match-p "Bash" mode-line))
+            (should (equal "Running Bash: npm test\N{U+2026}" (get-text-property 0 'help-echo mode-line)))))
         (activity :phase "tool" :tool "bash" :title "Bash: npm test" :count 3 :since (float-time))
         (should (shows "Running Bash: npm test and 2 more"))
         ;; A title from before tools had labels names the tool by its label too.
@@ -4176,9 +4180,10 @@ arrives meanwhile applies once the transcript is in."
         (should (= (- (window-body-height window t) (frame-char-height))
                    (cdr (window-text-pixel-size window (window-start window) harness-compose-end))))))))
 
-(ert-deftest harness-ui-chat-todos-show-in-header-and-panel ()
+(ert-deftest harness-ui-chat-todos-show-in-the-panel ()
   "A session's todo list is conspicuous without opening its tool block:
-a progress segment in the header, the items in a panel above the box."
+the progress and the items in a panel above the box.  The header line
+leaves the list to the panel, right above the box."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session "Todos"))
            (buf (harness-ui-chat-test-open sid)))
@@ -4191,34 +4196,34 @@ a progress segment in the header, the items in a panel above the box."
                                            (harness-ui-chat-test-find buf "Check the result"))))
                          5 "the todo list to show")
       (with-current-buffer buf
-        ;; The header names the progress and the item in hand.
-        (let* ((header (harness-chat--header))
-               (segment (harness-ui-chat-test-segment header #'harness-chat-toggle-todos)))
-          (should segment)
-          (should (string-match-p "1/3" (car segment)))
-          (should (string-match-p "Make the change" (car segment)))
-          (let ((help (get-text-property (cadr segment) 'help-echo header)))
-            (should (string-match-p "\\[x\\] Survey the project" help))
-            (should (string-match-p "\\[~\\] Make the change" help))
-            (should (string-match-p "\\[ \\] Check the result" help))))
-        ;; The panel shows every item; the one in progress is bold.
+        ;; Not in the header.
+        (let ((header (harness-chat--header most-positive-fixnum)))
+          (should-not (harness-ui-chat-test-segment header #'harness-chat-toggle-todos))
+          (should-not (string-match-p "1/3\\|Make the change" header)))
+        ;; The panel shows the progress and every item; the one in
+        ;; progress is bold.
+        (should (harness-ui-chat-test-find buf "Todo list  1/3"))
         (should (harness-ui-chat-test-find buf "Survey the project"))
         (should (harness-ui-chat-test-find buf "Check the result"))
         (should (harness-ui-chat-test-face-at
                  (1- (harness-ui-chat-test-find buf "Make the change")) 'bold))
-        ;; Folding leaves the title line; unfolding brings the items back.
+        ;; Folding leaves the title line, with the item in hand;
+        ;; unfolding brings the items back.
         (harness-chat-toggle-todos)
         (should-not (harness-ui-chat-test-find buf "Check the result"))
-        (should (harness-ui-chat-test-find buf "1/3"))
+        (let ((title (harness-ui-chat-test-find buf "Todo list  1/3")))
+          (should title)
+          (should (string-match-p "Make the change"
+                                  (save-excursion (goto-char title)
+                                                  (buffer-substring (point) (line-end-position))))))
         (harness-chat-toggle-todos)
         (should (harness-ui-chat-test-find buf "Check the result"))
-        ;; Clearing the list takes the segment and the panel away.
+        ;; Clearing the list takes the panel away.
         (harness-call 'session/set-todos sid nil)
         (harness-test-wait (lambda () (with-current-buffer buf (null harness-chat--todos)))
                            5 "the list to clear")
         (with-current-buffer buf
-          (should-not (harness-ui-chat-test-segment (harness-chat--header)
-                                                    #'harness-chat-toggle-todos))
+          (should-not (harness-ui-chat-test-find buf "Todo list"))
           (should-not (harness-ui-chat-test-find buf "Check the result")))))))
 
 (ert-deftest harness-ui-chat-todos-follow-todo-write ()
@@ -4237,7 +4242,7 @@ own, which the task board shows."
       (with-current-buffer buf
         (should (equal '("done" "done" "done")
                        (mapcar (lambda (item) (plist-get item :status)) harness-chat--todos)))
-        (should (string-match-p "3/3" (harness-chat--header)))
+        (should (harness-ui-chat-test-find buf "Todo list  3/3"))
         (should (harness-ui-chat-test-find buf "Survey the project"))
         (should (harness-ui-chat-test-find buf "Check the result"))
         ;; What the view shows is the session's list, item for item.
@@ -4246,7 +4251,7 @@ own, which the task board shows."
                        (mapcar (lambda (item) (plist-get item :text)) harness-chat--todos)))))))
 
 (ert-deftest harness-ui-chat-todos-take-the-plan-update ()
-  "An ACP `plan' update alone fills the header and the panel.
+  "An ACP `plan' update alone fills the panel.
 It is the live signal of a `todo_write' call, with ACP's own status
 spellings; the chat used to drop it.  A long list is capped."
   (harness-ui-chat-test-with
@@ -4258,9 +4263,8 @@ spellings; the chat used to drop it.  A long list is capped."
                                 (cl-loop for i from 3 to 25
                                          collect (list :content (format "item %d" i) :status "pending")))))
         (should (equal 25 (length harness-chat--todos)))
-        (let ((header (harness-chat--header)))
-          (should (string-match-p "1/25" header))
-          (should (string-match-p "item 2" header)))
+        (should (harness-ui-chat-test-find buf "Todo list  1/25"))
+        (should-not (string-match-p "1/25" (harness-chat--header most-positive-fixnum)))
         ;; The panel lists the cap, then counts the rest.
         (should (harness-ui-chat-test-find buf "item 20"))
         (should (harness-ui-chat-test-find buf "… 5 more"))

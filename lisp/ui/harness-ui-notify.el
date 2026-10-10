@@ -3,10 +3,11 @@
 ;;; Commentary:
 
 ;; A small segment in every mode line (through `global-mode-string')
-;; showing how many sessions need the user, are working, or are idle.
-;; It is visible from any buffer as long as one session is active
-;; anywhere in this Emacs, so a user hopping between projects sees
-;; when they are needed.  Clicking it while sessions wait for you opens
+;; showing how many sessions need the user and how many are working;
+;; `harness-ui-notify-show-idle' adds how many are idle.  It is visible
+;; from any buffer while a session waits or works anywhere in this
+;; Emacs, so a user hopping between projects sees when they are needed,
+;; and it is gone when none does.  Clicking it while sessions wait for you opens
 ;; the session list on them, from every project (`harness-sessions-waiting'):
 ;; each with buttons answering what it waits on, the task board's, and
 ;; RET or a click on one switches to its project and opens it there,
@@ -30,8 +31,11 @@
 (defgroup harness-ui-notify nil
   "Mode line notifier for sessions." :group 'harness-ui)
 
-(defcustom harness-ui-notify-show-idle t
-  "Whether idle sessions are counted in the notifier."
+(defcustom harness-ui-notify-show-idle nil
+  "Whether idle sessions are counted in the notifier.
+Off, the notifier counts only the sessions that wait for you and the
+ones at work, and shows nothing while every session is idle: an idle
+session needs nothing, and the session list has them all."
   :type 'boolean :group 'harness-ui-notify)
 
 (defface harness-notify-blocked-face '((t :inherit (harness-status-blocked-face mode-line-emphasis)))
@@ -150,7 +154,8 @@ in `harness-notify-flash-face' while it flashes."
 
 ;;;###autoload
 (define-minor-mode harness-notify-mode
-  "Show blocked, running and idle session counts in every mode line."
+  "Show how many sessions wait for you and how many work, in every mode line.
+`harness-ui-notify-show-idle' adds how many are idle."
   :global t :group 'harness-ui-notify
   (if harness-notify-mode
       (progn
