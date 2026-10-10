@@ -320,7 +320,7 @@ default), or nil for nowhere.
 | `C-c h F` | `harness-fullscreen` | Start or end the fullscreen layout: the task board or session list on the left, a session beside it |
 | `C-c h t` | `harness-tree` | Show the conversation tree |
 | `C-c h f` | `harness-fork-session` | Fork the current session |
-| `C-c h b` | `harness-btw` | Open a BTW side conversation |
+| `C-c h b` | `harness-btw` | Open a BTW side conversation (`C-u`: on a model of your choice) |
 | `C-c h k` | `harness-cancel-turn` | Cancel the running turn |
 | `C-c h C` | `harness-compact` | Compact the conversation: choose a summary, a brief summary, a transcript file or a fresh start, each with what it costs |
 | `C-c h D` | `harness-delete-session` | Delete the current session |
@@ -919,8 +919,9 @@ this), the new conversation gets the transcript up to the message.
 below the session. A BTW is a new, empty session that shares nothing
 with the session or with other BTWs, which makes it a good place for
 quick questions. It has the full chat interface, including the header
-line with the model and permission mode, which start from the
-session's, the thinking level and whether it is non-interactive. Two
+line with its model, permission mode, thinking level and whether it is
+non-interactive. The permission mode starts from the session's; the
+model and the thinking level are those of a quick question, below. Two
 extra controls appear at the front of its header line:
 
 - `[close]` (`C-c C-k`) closes the BTW. A BTW in which nothing was
@@ -930,11 +931,29 @@ extra controls appear at the front of its header line:
 The rest of its keys are the chat's: `C-c >`, for one, quotes its
 answer, or the part of it you select, in the box to follow up on it.
 
-So that quick questions get quick answers, a BTW starts at the `low`
-thinking level, whatever the session's level is. Set
-`harness-btw-thinking` to choose another level, or to nil to start
-from the session's level. A BTW whose model does not offer that level
-starts at the session's.
+So that quick questions get quick answers and cost little, a BTW runs on
+a cheap model and starts at the `low` thinking level, whatever the
+session's model and level are. Two settings, independent of each other:
+
+- `harness-btw-model` is the model. By default (`auto`) it is the
+  cheap tier of the provider of the session's model (Haiku for a Claude
+  Code session on Opus, say); the BTW keeps the session's own model when
+  its provider names no cheap one. Set it to a model (`PROVIDER:MODEL`)
+  to run every BTW on that one, or to nil to keep the session's model.
+- `harness-btw-thinking` is the level. Set it to choose another one, or
+  to nil to start from the session's level. A BTW whose model does not
+  offer the level starts at the session's level when its model offers
+  that too, else at the usual one (`harness-thinking`).
+
+A project can set both for itself (see [Configuration](#configuration)),
+and the BTW's model and level can be changed in the BTW like in any
+session. `C-u C-c h b` asks which model to run that one BTW on, from
+the models the providers list, instead of `harness-btw-model`; an empty
+answer opens nothing. The same goes for the BTW on the task board
+(`C-u b`) and on a node of the conversation tree. A policy that fixes
+`harness-model` ([docs/policy.md](docs/policy.md)) fixes a BTW's model
+too: it runs on that model, `harness-btw-model` changes nothing, and a
+model asked for must be the policy's.
 
 ### Sub-agents
 
@@ -1296,6 +1315,12 @@ your checkout itself can be submitted to the **main tree** instead (the
   sessions working for it -- its sub-agents and forks, and the sessions
   resolving its merge conflicts -- never take one, and neither does a
   task in *Merging*, so the merge queue never holds up the next task.
+  The harness's own model calls -- a task's title, the recaps, the
+  permission judges and the like -- are neither tasks nor turns: they
+  never take a slot or wait for one, so a title or a verdict comes even
+  with the board full or the limit at `0`. A title that fails is asked
+  for again while its task waits (after 30 seconds, then 2 minutes, then
+  10), rather than only once the task starts.
 - Each card is one line, with a subtitle that recaps the task: what it is
   doing or has done so far, written by a short model call and refreshed
   at the first of so many turns, seconds or tool calls since the last
@@ -1521,7 +1546,8 @@ your checkout itself can be submitted to the **main tree** instead (the
   title rather than being named again, and shows in the session list
   (`C-c h l`) under it, of kind task. Nothing waits for the title: a
   task whose naming fails starts all the same, and its session is named
-  from its first message.
+  from its first message. One that is still waiting for a slot when the
+  naming fails is asked for its title again a little later, a few times.
 
 Press `?` on the board, or `C-c h ?` in its compose box, to see all of
 the board's commands.
@@ -1823,6 +1849,7 @@ project's, and a project's over the global value.
 - `harness-model`
 - `harness-thinking`
 - `harness-btw-thinking`
+- `harness-btw-model`
 - `harness-permission-mode`
 - `harness-allowed-directories`
 - `harness-sandbox-policy`

@@ -1309,19 +1309,55 @@ SESSION is the session named, or the options of a task's own request
 ;; task is named the same way, from the words it was written up from,
 ;; and so is every task of a board found without a title when the
 ;; harness starts or reloads.
+;;
+;; The request is a model call of the harness's own, an internal job:
+;; it goes straight to the provider (`provider/complete'), under an id
+;; of its own that is no session and no task.  So it takes none of the
+;; project's slots (`harness-tasks-max-running'), waits for none and
+;; counts against none: it goes out whatever the limit, a full board or
+;; a limit of 0 included, and the task it titles stays in the queue.
+;; The same goes for the harness's other calls of the kind -- recaps, the
+;; permission judges, compaction's summaries.  The only thing that holds
+;; a request back is the throttle below, which is no part of the limit.
+;;
+;; A request that fails while its task still waits -- the model was
+;; overloaded, the request ran out of time -- is made again after a
+;; delay (`harness-tasks--naming-retry-delays'), and again after a
+;; longer one, until the delays are used up.  Without that the task
+;; stays nameless until it gets its slot and its first turn names the
+;; session, so its title would wait for the very limit a request is
+;; meant to be independent of.  A title that comes, an edited prompt,
+;; and a task that is archived or removed end the retrying.
 
 (defvar harness-naming-auto)
 
 (defconst harness-tasks--naming-concurrency 2
   "Naming requests of tasks that may be out at once; the others wait their turn.
 A burst of submissions, or a board of nameless tasks found at start-up,
-would otherwise send them all at once: a process each, with Claude Code.")
+would otherwise send them all at once: a process each, with Claude Code.
+This throttle is the title requests' own and has nothing to do with the
+project's slots (`harness-tasks-max-running'): a request takes none and
+waits for none.")
+
+(defvar harness-tasks--naming-retry-delays '(30 120 600)
+  "Seconds to wait before each new request for a title that failed.
+A request that fails while its task still waits is made again after the
+first of these, and again after the next should that fail too; with the
+delays used up the task is asked for no more, until its prompt changes
+or the harness starts or reloads (`harness-tasks--name-untitled').  nil
+never asks again.")
 
 (defvar harness-tasks--naming (make-hash-table :test 'equal)
   "Task id -> the text its naming request asks a title for, while it is out.")
 
 (defvar harness-tasks--naming-queue nil
   "Ids of the tasks whose naming request waits to go out, oldest first.")
+
+(defvar harness-tasks--naming-retries (make-hash-table :test 'equal)
+  "Task id -> (FAILED . TIMER) for a title that failed to come.
+FAILED is how many requests for the current prompt failed, which picks
+the next of `harness-tasks--naming-retry-delays'.  TIMER makes the next
+request, nil once it did or when the delays are used up.")
 
 (defun harness-tasks--naming-p ()
   "Non-nil when tasks are named as they are submitted.
@@ -1374,6 +1410,52 @@ while it waited has its session named as the turn starts."
       (when (and task (harness-tasks--wants-name-p task))
         (harness-tasks--ask-name task)))))
 
+(defun harness-tasks--naming-forget (id)
+  "Stop asking again for the title of task ID, and forget its failed requests.
+The next prompt it is named from starts counting afresh."
+  (when-let* ((entry (gethash id harness-tasks--naming-retries)))
+    (when (timerp (cdr entry)) (cancel-timer (cdr entry)))
+    (remhash id harness-tasks--naming-retries)))
+
+(defun harness-tasks--naming-forget-all ()
+  "Stop asking again for any title: the harness shuts down, or a test starts."
+  (dolist (id (hash-table-keys harness-tasks--naming-retries))
+    (harness-tasks--naming-forget id)))
+
+(defun harness-tasks--naming-retry-later (id)
+  "Ask again for the title of task ID after a delay, its request having failed.
+The delays are `harness-tasks--naming-retry-delays', one for each
+request that failed since the task was last named from a new prompt;
+with none left it is asked for no more.  The request goes out through
+`harness-tasks--name' when the time comes, so it waits its turn like any."
+  (let* ((entry (gethash id harness-tasks--naming-retries))
+         (failed (1+ (or (car entry) 0)))
+         (delay (nth (1- failed) harness-tasks--naming-retry-delays)))
+    (when (timerp (cdr entry)) (cancel-timer (cdr entry)))
+    (puthash id (cons failed (and (numberp delay)
+                                  (run-at-time delay nil #'harness-tasks--naming-retry id)))
+             harness-tasks--naming-retries)
+    (if (numberp delay)
+        (harness-log 'info "task %s: its title request failed (%d); asking again in %ss" id failed delay)
+      (harness-log 'info "task %s: its title request failed (%d); asking no more" id failed))))
+
+(defun harness-tasks--naming-retry (id)
+  "Ask again for the title of task ID, when the time comes.
+That is only if it still wants one (`harness-tasks--wants-name-p'): a
+task that got a title, started or went away meanwhile is left alone,
+and with it the count of its failed requests, since its turn names
+its session now.  This never signals."
+  (condition-case err
+      (let ((task (gethash id harness-tasks--table)))
+        (if (not (and task (harness-tasks--wants-name-p task)))
+            (harness-tasks--naming-forget id)
+          ;; The timer has done its work; the count stays for the next failure.
+          (when-let* ((entry (gethash id harness-tasks--naming-retries)))
+            (setcdr entry nil))
+          (harness-log 'info "task %s: asking again for its title" id)
+          (harness-tasks--name id)))
+    (error (harness-log 'warn "naming task %s failed: %s" id (harness-error-message err)))))
+
 (defun harness-tasks--naming-model (task)
   "Return the model whose naming tier titles TASK: its session's, now or to be.
 That is the model of the session it has, else the one it will get: a
@@ -1409,7 +1491,9 @@ The task takes NAME as its `:name', and its session too when it has no
 name.  A title of a prompt edited since is dropped, and the task named
 again.  When the request failed, or its title was dropped, a nameless
 session whose turn runs is named from its first message right away, as
-the start of that turn left it to this request."
+the start of that turn left it to this request.  A request that failed
+for the prompt as it is, of a task still waiting, is made again later
+\(`harness-tasks--naming-retry-later')."
   (remhash id harness-tasks--naming)
   (harness-run-soon #'harness-tasks--naming-next)
   (condition-case problem
@@ -1419,14 +1503,20 @@ the start of that turn left it to this request."
                (current (equal text (harness-tasks--naming-text task))))
           (if (and name current)
               (progn
+                (harness-tasks--naming-forget id)
                 (harness-tasks--set id :name name)
                 (when nameless (harness-call 'session/update (plist-get session :id) :name name)))
             (if name
                 (harness-log 'info "task %s: its prompt changed while it was named, so %S is dropped" id name)
               (harness-log 'warn "naming task %s failed: %s" id (harness-error-message err)))
             (cond ((and nameless (harness-tasks--turn-p task))
+                   (harness-tasks--naming-forget id)
                    (harness-tasks--name-session (plist-get session :id)))
-                  ((not current) (harness-tasks--name id))))))
+                  ((not current)
+                   (harness-tasks--naming-forget id)
+                   (harness-tasks--name id))
+                  ((and (harness-tasks--naming-p) (harness-tasks--wants-name-p task))
+                   (harness-tasks--naming-retry-later id))))))
     (error (harness-log 'warn "naming task %s failed: %s" id (harness-error-message problem)))))
 
 (defun harness-tasks--auto-name-p (verdict session)
@@ -1551,6 +1641,17 @@ SUSPENDED), which the boards follow."
 ;; queue, which the limit does not hold up (`task/verify' queues a
 ;; branch at once): a task in it (merging) holds no slot, even while
 ;; its own session commits or resolves the conflicts.
+;;
+;; The harness's own model calls -- the title of a task (see Titles), a
+;; recap, a permission or emacs_eval judge, a compaction's summary -- are
+;; internal jobs: none is a turn, and none makes a session or a task, so
+;; the limit is blind to them.  They go straight to `provider/complete',
+;; take no slot, wait for none and are not counted; the gate that holds
+;; the turns of a waiting task's session (`harness-tasks--before-turn')
+;; never sees them.  Nor do they wait for a tool slot (see the
+;; tool-slots module): a judge decides before its call asks for one.
+;; They cannot ask the user anything, so non-interactive mode has
+;; nothing to say to them.
 ;;
 ;; The limit changes while tasks wait: the board's "N at a time" button
 ;; sets it through `config/set', and its `config/changed' runs the
@@ -2902,6 +3003,7 @@ task waits (`harness-tasks--before-turn')."
   "Drop task ID, write the stores and emit `task/deleted'."
   (remhash id harness-tasks--table)
   (remhash id harness-tasks--starting)
+  (harness-tasks--naming-forget id)
   (harness-tasks--save-soon)
   (harness-emit 'task/deleted id)
   (harness-run-soon #'harness-tasks--schedule))
@@ -3154,17 +3256,26 @@ task context limit applies from now on when there is one."
                         #'ignore)))
       (harness-tasks--view task))))
 
-(harness-defmethod task/btw (cwd &optional name)
+(harness-defmethod task/btw (cwd &optional name model)
   "Start a BTW conversation about the task board of CWD's project.
 Return its session, where the user asks how the tasks are going: a new
 `btw' session named NAME at the project root on every call, sharing
 nothing with earlier ones, and without a parent (a BTW over a session is
 listed under it instead, see `session/btw'), which
 `harness-tasks--btw-prompt' tells to answer with the task and session
-tools.  Like every BTW it thinks at `harness-btw-thinking' when its
-model offers that level (see `session/create').  The caller sends the
-first question."
-  (harness-call 'session/create :cwd (harness-tasks--project cwd) :kind 'btw :name name))
+tools.  Like every BTW it runs on `harness-btw-model' -- by default the
+cheap tier of the provider of `harness-model' there -- and thinks at
+`harness-btw-thinking' when that model offers the level (see
+`session/create').  MODEL, a PROVIDER:NAME, picks another model for this
+one BTW instead; blank is none, and a model the policy does not allow
+signals an error (see `session/btw').  The caller sends the first
+question."
+  (let ((asked (and (stringp model) (not (string-blank-p model)) (string-trim model))))
+    (when (and asked (fboundp 'harness-session-check-policy))
+      (harness-session-check-policy (list :model asked) 'btw))
+    (apply #'harness-call 'session/create
+           :cwd (harness-tasks--project cwd) :kind 'btw :name name
+           (and asked (list :model asked)))))
 
 (harness-defmethod task/list (&optional cwd)
   "Return the tasks of CWD's project, oldest first; every task without CWD."
@@ -3393,6 +3504,8 @@ so it takes the new one too."
           (let ((session (harness-tasks--session task)))
             (when (and session (not (harness-string-blank-p (plist-get session :name))))
               (harness-call 'session/update (plist-get session :id) :silent t :name nil)))
+          ;; A new prompt is asked for afresh, whatever failed for the old one.
+          (harness-tasks--naming-forget id)
           (harness-tasks--name id))))))
 
 (harness-defmethod task/prompt (id text &optional attachments opts)
@@ -3647,6 +3760,7 @@ A merged task's worktree is removed and its merged branch deleted."
     (when (and (not restore) (plist-get task :merged) (plist-get task :worktree)
                (not (plist-get task :worktree-removed)) (harness-method-exists-p 'worktree/remove))
       (harness-tasks--remove-worktree task))
+    (unless restore (harness-tasks--naming-forget id))
     (harness-tasks--set id :archived (and (not restore) t))))
 
 (harness-defmethod task/archive-done (&optional cwd)
@@ -3726,7 +3840,8 @@ up again, merges in flight are queued again and waiting tasks start."
   (harness-tasks--pick-up))
 
 (defun harness-tasks--shutdown ()
-  "Write what waits to be written."
+  "Write what waits to be written, and ask for no more titles."
+  (harness-tasks--naming-forget-all)
   (harness-tasks-flush))
 
 (harness-declare-event 'task/changed "(TASK) after a task is submitted or changes state or column.")

@@ -281,6 +281,75 @@ call under a one-slot limit would wait for itself and never run."
       (should (equal "slots-probe" (plist-get (harness-await first 5) :content)))
       (should (equal "slots-probe" (plist-get (harness-await second 5) :content))))))
 
+;;;; Judges decide before the wait
+;;
+;; The auto-mode judge, and the one of emacs_eval, are model calls of the
+;; harness's own.  They are `permission/decide' stages, and `tools/execute'
+;; runs that chain to its end before it runs the handler, which is where a
+;; governed tool waits for its slot.  So a judge never holds a slot nor
+;; queues for one, and a call that waits for a slot has been judged.
+
+(defvar harness-tool-slots-test--judged nil
+  "What the stand-in judge decided, newest first, as (CALL-ID HELD WAITING).
+HELD is how many calls held a slot of the test machine, and WAITING how
+many waited for one, when the verdict came.")
+
+(defun harness-tool-slots-test--judge (decision next request)
+  "Stand in for the auto-mode judge, a `permission/decide' stage.
+It takes a moment, as a model call does, and then allows the call,
+noting the state of the test machine's slots (`harness-tool-slots-test--judged')."
+  (if (not (eq 'ask (plist-get decision :behavior)))
+      (funcall next decision)
+    (run-at-time 0.02 nil
+                 (lambda ()
+                   (let ((state (gethash "test-machine" harness-tool-slots--machines)))
+                     (push (list (plist-get request :call-id) (or (car state) 0) (length (cdr state)))
+                           harness-tool-slots-test--judged))
+                   (funcall next (list :behavior 'allow :reason "ordinary work"))))
+    nil))
+
+(ert-deftest harness-tool-slots-a-judge-decides-before-the-slot-wait ()
+  "A call is judged before it asks for a slot, so a full machine does not hold a judge up.
+The first call is judged and takes the only slot.  The second is judged
+while that slot is held, and nobody waits for one at that moment; its
+verdict is in, and only then does it wait.  A slot freed, it runs."
+  (harness-test-reset-bus)
+  (harness-tool-slots-test--setup)
+  (setq harness-tool-slots-test--judged nil)
+  (harness-add-filter 'permission/decide #'harness-tool-slots-test--judge 30)
+  (unwind-protect
+      (let ((harness-tool-slots-tools '("slots-probe"))
+            (harness-tool-slots-count 1)
+            (harness-tool-slots-burst 0)
+            (harness-tool-slots-machine-function #'harness-tool-slots-test--machine))
+        (harness-tool-slots-test--probe "slots-probe")
+        (let ((first (harness-call 'tools/execute nil (list :id "c1" :name "slots-probe" :input nil))))
+          ;; Judged with the machine idle, then it takes the only slot.
+          (harness-test-wait (lambda () (equal '("slots-probe") harness-tool-slots-test--started)) 5
+                             "the first call to run")
+          (should (equal '(("c1" 0 0)) harness-tool-slots-test--judged))
+          (let ((second (harness-call 'tools/execute nil (list :id "c2" :name "slots-probe" :input nil))))
+            ;; The slot is held, and the second call is judged all the same:
+            ;; at that moment it was not waiting for one.
+            (harness-test-wait (lambda () (assoc "c2" harness-tool-slots-test--judged)) 5
+                               "the second call to be judged")
+            (should (equal '("c2" 1 0) (assoc "c2" harness-tool-slots-test--judged)))
+            ;; Its verdict is in, and it waits for the slot now.
+            (harness-test-wait (lambda () (cdr (gethash "test-machine" harness-tool-slots--machines))) 5
+                               "the second call to wait for a slot")
+            (should (equal '("slots-probe") harness-tool-slots-test--started))
+            (should-not (harness-promise-settled-p second))
+            ;; A slot frees: it runs.
+            (harness-tool-slots-test--settle-oldest)
+            (harness-test-wait (lambda () (= 2 (length harness-tool-slots-test--started))) 5
+                               "the second call to run")
+            (should (equal '("c2" "c1") (mapcar #'car harness-tool-slots-test--judged)))
+            (harness-tool-slots-test--settle-all)
+            (should (equal "slots-probe" (plist-get (harness-await first 5) :content)))
+            (should (equal "slots-probe" (plist-get (harness-await second 5) :content)))
+            (should (equal (cons 0 nil) (gethash "test-machine" harness-tool-slots--machines))))))
+    (harness-remove-filter 'permission/decide #'harness-tool-slots-test--judge)))
+
 ;;;; The limit, and which machine it is for
 
 (ert-deftest harness-tool-slots-the-limits-come-from-the-options ()

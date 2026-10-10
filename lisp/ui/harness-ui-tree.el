@@ -748,10 +748,13 @@ the node's session is left as it is, its head included."
 Like every BTW it is a new session, listed under that session but
 sharing nothing with it, so the node only says which session: its head
 stays where it is.  It opens blank, over the tree, for a question
-written in its compose box."
+written in its compose box.  Like any BTW it runs on a cheap model
+\(`harness-btw-model'); with a prefix argument it asks which model to
+run this one on."
   (interactive)
   (unless (fboundp 'harness-btw) (user-error "The BTW module is not loaded"))
-  (harness-btw (plist-get (harness-ui-tree-node-at-point) :session)))
+  (harness-btw (plist-get (harness-ui-tree-node-at-point) :session) nil
+               (and current-prefix-arg 'choose)))
 
 (defun harness-ui-tree-toggle ()
   "Expand or collapse the node at point."

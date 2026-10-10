@@ -96,6 +96,25 @@ session."
   :safe (lambda (v) (or (null v) (member v '("low" "medium" "high" "xhigh" "max"))))
   :group 'harness)
 
+(defcustom harness-btw-model 'auto
+  "Model BTW side conversations run on, as PROVIDER:NAME, or `auto'.
+A BTW is for quick questions on the side, so by default (`auto') it
+runs on the cheap tier of the provider of the model it would
+otherwise use (see `harness-provider-tier-model'): the model of the
+session it is opened over, or `harness-model' as configured for a BTW
+about a task board.  It keeps that model when the provider names no
+cheap one.  A PROVIDER:NAME forces that model, and nil keeps the
+model of the session.  How hard it thinks is `harness-btw-thinking',
+a setting of its own.  Either can be changed in the BTW like in any
+session, and one BTW can start on another model: a prefix argument to
+`harness-btw' asks for it.  A policy that fixes `harness-model' fixes
+a BTW's model too, and this setting then changes nothing."
+  :type '(choice (const :tag "The session provider's cheap model" auto)
+                 (const :tag "The session's own model" nil)
+                 (string :tag "Model" :names model))
+  :safe (lambda (v) (or (null v) (eq v 'auto) (stringp v)))
+  :group 'harness)
+
 (defcustom harness-allowed-directories nil
   "Extra directories sessions may touch besides their working directory.
 An entry may also be a glob pattern, such as ~/notes/*.org, to allow
@@ -143,6 +162,7 @@ non-interactive anyway."
 
 (defconst harness-config-keys
   '(harness-model harness-permission-mode harness-thinking harness-btw-thinking
+    harness-btw-model
     harness-allowed-directories harness-sandbox-policy harness-non-interactive
     harness-supervisor harness-supervisor-tasks)
   "Settings that take part in layering.
@@ -154,8 +174,8 @@ reader of the layers skips it (see `harness-config--layered-keys').")
   '((sessions
      :title "New sessions"
      :doc "What a new session starts with.  A project can override these in its .dir-locals.el."
-     :keys (harness-model harness-thinking harness-btw-thinking harness-permission-mode
-            harness-non-interactive harness-supervisor))
+     :keys (harness-model harness-thinking harness-btw-thinking harness-btw-model
+            harness-permission-mode harness-non-interactive harness-supervisor))
     (supervisor
      :title "Supervisor mode"
      :doc "Top-level sessions plan and delegate: the session's model investigates and writes a plan, and worker sub-agents on cheaper models carry it out. The supervisor cannot change files itself."
