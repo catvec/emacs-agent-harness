@@ -4784,6 +4784,82 @@ The slots belong to the harness process that loads the module, so a
 second harness on the same machine has slots of its own (the limit is
 about one harness's own work, not about the machine's load).
 
+### tool-slots-load
+
+A plugin of its own -- a module, not part of tool-slots -- that lowers
+the slots the machine this harness runs on allows while that machine is
+loaded, and gives the configured limit back as the load falls (see
+tool-slots for the slots themselves).  A machine running a build, a
+test run or a game has no processor to spare for one more process tree,
+and the governed calls only queue up anyway.  Disable it
+\(`harness-disabled-modules`) to stop watching the load; the limit is
+the baseline again, as plain tool-slots leaves it.
+
+Options:
+
+- `harness-tool-slots-load-enabled` (default t): the watch, on or off,
+  without unloading the module.
+- `harness-tool-slots-load-window` (default 1): which load average is
+  read, over 1, 5 or 15 minutes.  The 1-minute average feels a build at
+  once; a longer one is steadier, and slower to give the slots back.
+- `harness-tool-slots-load-low` (default 1.0) and
+  `harness-tool-slots-load-high` (default 2.0): the load per processor
+  at or below which the limit is the baseline, and at or above which it
+  is the floor.  Load per processor is the average divided by
+  `num-processors`, so 1.0 means one processor's worth of runnable work
+  on each processor; between the two the slots fall with the load.
+- `harness-tool-slots-load-floor` (default 1): how few slots the
+  machine keeps, never below one and never above the baseline.
+- `harness-tool-slots-load-interval` (default 5.0) and
+  `harness-tool-slots-load-cooldown` (default 30.0): the seconds
+  between load samples, and the least time between changes.  The load
+  is sampled often and the limit changed rarely: a sample inside the
+  cooldown is read and changes nothing, so a spike cannot make the
+  slots flap, and the sessions are not told about a change that a
+  quieter reading would take back at once.
+- `harness-tool-slots-load-deadband` (default 0.15): how far the load
+  must move from the load that took the last change, in the direction
+  of this one, before another change is taken, so noise around a
+  threshold does not move the limit.  A rise back to the baseline is
+  taken as soon as the load is at or below the low threshold, deadband
+  or not, so a quiet machine always gets its full limit back.
+- `harness-tool-slots-load-function`: the function that returns the
+  machine's load average (`load-average` by default, the same numbers
+  /proc/loadavg shows on GNU/Linux); a system it cannot read from --
+  nil, or an error -- leaves the limit alone.
+
+The number in force is the smaller of the baseline
+\(`harness-tool-slots-count` plus `harness-tool-slots-burst`) and what
+the load allows, so the plugin can only take slots away and give them
+back: it never allows more than tool-slots would, and at low load it is
+the baseline exactly.  Only this machine's slots are modulated: a call
+on another host -- over TRAMP or through the ssh tool -- runs on a
+machine whose load this harness cannot read, and keeps that host's
+baseline slots.  When the limit rises, the calls already waiting start
+at once, up to what now fits, in the priority order the queue keeps
+\(a module that raises a limit admits them through
+`harness-tool-slots--admit'); when it falls, the calls running are left
+alone and no new one starts until the machine is under the limit again.
+A sample is taken once at startup and then every
+`harness-tool-slots-load-interval'.
+
+A change in the number in force, down or back up, is appended to every
+active session as a system message (`session/list` and `session/hint`;
+a closed or inactive session is left alone), so the user and the models
+see why calls are waiting: "Tool slots reduced from 18 to 5: system
+load 1.8x on this machine", and "Tool slots restored to 18: system load
+back to normal".  It is sent only when the number really changes, not
+on every sample.  The calls that had to wait still say so themselves
+("Waited 3.2s for a free slot on this machine"), as tool-slots has
+them.
+
+The watch is around advice on `harness-tool-slots--slots`, added by the
+module's `:init` and removed by its `:shutdown`, which gives the
+machine its baseline slots back at once.  That function takes the
+machine a limit is asked for, the extension point a module modulates a
+machine's limit through; this machine's key is "local:NAME", and it is
+the only one the advice touches.
+
 ### acp
 
 Server: `acp/start &key host port` (default 127.0.0.1, port from
