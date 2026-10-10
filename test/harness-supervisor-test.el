@@ -18,6 +18,8 @@
 (defvar harness-supervisor)
 (defvar harness-supervisor-tasks)
 (defvar harness-supervisor-tiers)
+(defvar harness-supervisor-thinking)
+(defvar harness-supervisor-worker-thinking)
 (defvar harness-supervisor-step-budget)
 (defvar harness-supervisor-tools)
 (defvar harness-tools)
@@ -26,6 +28,7 @@
 (defvar harness-supervisor--reminders)
 (defvar harness-supervisor--calls)
 (defvar harness-supervisor--configured)
+(defvar harness-supervisor--raised)
 (defvar harness-tasks--merge-session-name)
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
@@ -105,7 +108,8 @@ The demo provider plays the model through the script of the test."
      (clrhash harness-sessions)
      (clrhash harness-agent--turns)
      (dolist (table (list harness-supervisor--decisions harness-supervisor--reminders
-                          harness-supervisor--calls harness-supervisor--configured))
+                          harness-supervisor--calls harness-supervisor--configured
+                          harness-supervisor--raised))
        (clrhash table))
      (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override #'harness-supervisor-test--answer)
@@ -207,17 +211,27 @@ Return a function that gives the requests it got, newest first."
 ;;;; The settings
 
 (ert-deftest harness-supervisor-settings-have-their-defaults ()
-  "Sessions supervise by default, tasks too; a soft budget of 80 calls."
+  "Sessions supervise by default, tasks too; a soft budget of 80 calls.
+DeepSeek supervisors think at max, their workers at medium."
   (should (eq t (eval (car (get 'harness-supervisor 'standard-value)) t)))
   (should (eq t (eval (car (get 'harness-supervisor-tasks 'standard-value)) t)))
   (should (null (eval (car (get 'harness-supervisor-tiers 'standard-value)) t)))
+  (should (equal '((deepseek . "max"))
+                 (eval (car (get 'harness-supervisor-thinking 'standard-value)) t)))
+  (should (equal '((deepseek . "medium"))
+                 (eval (car (get 'harness-supervisor-worker-thinking 'standard-value)) t)))
   (should (= 80 (eval (car (get 'harness-supervisor-step-budget 'standard-value)) t)))
   (should (harness-test-fits-p (get 'harness-supervisor-tiers 'custom-type)
                                '((mundane . "demo:cheap") (hard . "demo:big"))))
   (should-not (harness-test-fits-p (get 'harness-supervisor-tiers 'custom-type) '((easy . "demo:cheap"))))
+  (dolist (option '(harness-supervisor-thinking harness-supervisor-worker-thinking))
+    (should (harness-test-fits-p (get option 'custom-type) '((deepseek . "max"))))
+    (should-not (harness-test-fits-p (get option 'custom-type) '((deepseek . max))))
+    (should-not (harness-test-fits-p (get option 'custom-type) '(("deepseek" . "max")))))
   ;; The module is loaded in here, so the documentation can be read.
   (harness-supervisor-test-with
     (dolist (option '(harness-supervisor harness-supervisor-tasks harness-supervisor-tiers
+                      harness-supervisor-thinking harness-supervisor-worker-thinking
                       harness-supervisor-step-budget))
       (ert-info ((symbol-name option))
         (should (assq option (get 'harness 'custom-group)))
@@ -321,6 +335,46 @@ Return a function that gives the requests it got, newest first."
       (should-not (harness-call 'supervisor/active-p sid))
       (should (member "read_file" (harness-supervisor-test-tool-names sid)))
       (should-not (member "no_plan_needed" (harness-supervisor-test-tool-names sid))))))
+
+;;;; Thinking levels
+
+(ert-deftest harness-supervisor-the-mode-raises-the-thinking-its-provider-names ()
+  "A session that starts supervising takes the level of its provider, and gets its own back."
+  (harness-supervisor-test-with
+    (let ((harness-supervisor-thinking '((demo . "max"))))
+      (let* ((sid (harness-supervisor-test-session :thinking "low"))
+             (thinking (lambda () (plist-get (harness-call 'session/get sid) :thinking))))
+        (should (equal "max" (funcall thinking)))
+        ;; Off puts back what it had; on raises it again and remembers that.
+        (harness-call 'supervisor/set sid :false)
+        (should (equal "low" (funcall thinking)))
+        (harness-call 'supervisor/set sid t)
+        (should (equal "max" (funcall thinking)))
+        (harness-call 'supervisor/set sid :false)
+        (should (equal "low" (funcall thinking)))))
+    ;; A session that had no level of its own gets none back.
+    (let ((harness-supervisor-thinking '((demo . "max"))))
+      (let* ((sid (harness-supervisor-test-session))
+             (thinking (lambda () (plist-get (harness-call 'session/get sid) :thinking))))
+        (should (equal "max" (funcall thinking)))
+        (harness-call 'supervisor/set sid :false)
+        (should (null (funcall thinking)))))
+    ;; A provider the setting does not name keeps the session's own level.
+    (let ((harness-supervisor-thinking '((deepseek . "max"))))
+      (let ((sid (harness-supervisor-test-session :thinking "low")))
+        (should (equal "low" (plist-get (harness-call 'session/get sid) :thinking)))
+        (harness-call 'supervisor/set sid :false)
+        (should (equal "low" (plist-get (harness-call 'session/get sid) :thinking)))))))
+
+(ert-deftest harness-supervisor-a-level-chosen-while-supervising-stands ()
+  "Turning the mode off keeps a level the session was changed to meanwhile."
+  (harness-supervisor-test-with
+    (let ((harness-supervisor-thinking '((demo . "max"))))
+      (let ((sid (harness-supervisor-test-session :thinking "low")))
+        (should (equal "max" (plist-get (harness-call 'session/get sid) :thinking)))
+        (harness-call 'session/update sid :thinking "high")
+        (harness-call 'supervisor/set sid :false)
+        (should (equal "high" (plist-get (harness-call 'session/get sid) :thinking)))))))
 
 ;;;; Methods
 
@@ -516,6 +570,17 @@ Return a function that gives the requests it got, newest first."
       (let* ((id (plist-get (harness-call 'task/submit default-directory "fix the linker") :id))
              (sid (harness-supervisor-test-task-session id)))
         (should (eq t (plist-get (harness-supervisor-test-ext sid) :supervisor)))
+        (harness-supervisor-test-wait-task id 'done)))))
+
+(ert-deftest harness-supervisor-a-task-that-does-not-supervise-keeps-its-thinking ()
+  "A task session raised as a top-level session is put back when tasks work hands-on."
+  (harness-supervisor-test-with-tasks
+    (let ((harness-supervisor-thinking '((demo . "max")))
+          (harness-supervisor-tasks nil))
+      (let* ((id (plist-get (harness-call 'task/submit default-directory "fix the parser") :id))
+             (sid (harness-supervisor-test-task-session id)))
+        (should (eq :false (plist-get (harness-supervisor-test-ext sid) :supervisor)))
+        (should (null (plist-get (harness-call 'session/get sid) :thinking)))
         (harness-supervisor-test-wait-task id 'done)))))
 
 (ert-deftest harness-supervisor-write-ups-only-read-and-do-not-supervise ()
@@ -1423,7 +1488,7 @@ Return a function that gives the requests it got, newest first."
 ;;;; The settings page
 
 (ert-deftest harness-supervisor-the-settings-are-on-the-settings-page ()
-  "`config/describe' lists the four settings, and the context cap, for the settings page."
+  "`config/describe' lists the settings, and the context cap, for the settings page."
   (harness-supervisor-test-with
     (let* ((description (harness-call 'config/describe default-directory))
            (settings (plist-get description :settings))
@@ -1431,11 +1496,14 @@ Return a function that gives the requests it got, newest first."
            (sections (mapcar (lambda (section) (plist-get section :name)) (plist-get description :sections))))
       (should (member "supervisor" sections))
       (dolist (key '("harness-supervisor" "harness-supervisor-tasks" "harness-supervisor-tiers"
+                     "harness-supervisor-thinking" "harness-supervisor-worker-thinking"
                      "harness-supervisor-step-budget" "harness-subagent-context-limit"))
         (should (funcall find key)))
       (should (equal "sessions" (plist-get (funcall find "harness-supervisor") :section)))
       (should (plist-get (funcall find "harness-supervisor") :layered))
-      (dolist (key '("harness-supervisor-tasks" "harness-supervisor-tiers" "harness-supervisor-step-budget"))
+      (dolist (key '("harness-supervisor-tasks" "harness-supervisor-tiers"
+                     "harness-supervisor-thinking" "harness-supervisor-worker-thinking"
+                     "harness-supervisor-step-budget"))
         (should (equal "supervisor" (plist-get (funcall find key) :section)))))))
 
 ;;;; Taking the module off
