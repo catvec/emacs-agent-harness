@@ -336,7 +336,7 @@ default), or nil for nowhere.
 | `C-c h F` | `harness-fullscreen` | Start or end the fullscreen layout: the task board or session list on the left, a session beside it |
 | `C-c h t` | `harness-tree` | Show the conversation tree |
 | `C-c h f` | `harness-fork-session` | Fork the current session |
-| `C-c h b` | `harness-btw` | Open a BTW side conversation |
+| `C-c h b` | `harness-btw` | Open a BTW side conversation (`C-u`: on a model of your choice) |
 | `C-c h k` | `harness-cancel-turn` | Cancel the running turn |
 | `C-c h C` | `harness-compact` | Compact the conversation: choose a summary, a brief summary, a transcript file, a fresh start or a cut of its older context, each with what it costs; a session running a turn is asked to interrupt it or queue the compaction |
 | `C-c h D` | `harness-delete-session` | Delete the current session |
@@ -813,9 +813,11 @@ kinds:
   It reads all of it again, from the prompt cache while that lasts.
 - **Brief summary**: a cheap model (the simple tier of the session's
   provider, such as Claude Haiku or DeepSeek Flash; see
-  `harness-compaction-brief-model`) summarises only the first and last
-  messages. It costs cents however long the conversation, but most of
-  the middle is left out, and the summary says so.
+  `harness-compaction-brief-model`) summarises the conversation's
+  narrative: every user and assistant message, each tool call and
+  result named in a line, never a payload. It costs cents however long
+  the conversation, but what tools read and wrote is left out, and the
+  summary says so.
 - **Transcript file**: the whole conversation goes to a file in
   `.harness/transcripts/` in the session's directory (git ignores it),
   and the model is told to read what it needs of it. No model is asked
@@ -903,7 +905,7 @@ popout) shows it in place of the cache panel:
    A message from the harness (tasks) waits: “The tests fail on CI; …”
    Carrying on sends the whole conversation again, uncached: about $0.315 instead of the $0.025 it would cost cached.  What goes first?
 
-    b  Brief summary    ~$0.011           a cheap model summarises the first and last messages · the default
+    b  Brief summary    ~$0.011           a cheap model summarises the narrative, tool calls in brief · the default
     s  Summary          ~$0.463           the session's model summarises it all, reading it uncached
     t  Transcript file  free              the conversation goes to a file the model reads as it needs
     f  Start afresh     free              nothing is carried over; the model looks back when it needs to
@@ -966,8 +968,9 @@ this), the new conversation gets the transcript up to the message.
 below the session. A BTW is a new, empty session that shares nothing
 with the session or with other BTWs, which makes it a good place for
 quick questions. It has the full chat interface, including the header
-line with the model and permission mode, which start from the
-session's, the thinking level and whether it is non-interactive. Two
+line with its model, permission mode, thinking level and whether it is
+non-interactive. The permission mode starts from the session's; the
+model and the thinking level are those of a quick question, below. Two
 extra controls appear at the front of its header line:
 
 - `[close]` (`C-c C-k`) closes the BTW. A BTW in which nothing was
@@ -977,11 +980,35 @@ extra controls appear at the front of its header line:
 The rest of its keys are the chat's: `C-c >`, for one, quotes its
 answer, or the part of it you select, in the box to follow up on it.
 
-So that quick questions get quick answers, a BTW starts at the `low`
-thinking level, whatever the session's level is. Set
-`harness-btw-thinking` to choose another level, or to nil to start
-from the session's level. A BTW whose model does not offer that level
-starts at the session's.
+So that quick questions get quick answers and cost little, a BTW runs on
+a cheap model and starts at the `low` thinking level, whatever the
+session's model and level are. Two settings, independent of each other:
+
+- `harness-btw-model` is the model. By default (`auto`) it is the
+  simple tier of the provider of the session's model (Haiku for a Claude
+  Code session on Opus, say); the BTW keeps the session's own model when
+  its provider names no simple one. Set it to a model (`PROVIDER:MODEL`)
+  to run every BTW on that one, or to nil to keep the session's model.
+- `harness-btw-thinking` is the level. Set it to choose another one, or
+  to nil to start from the session's level. A model that does not offer
+  the level gets the nearest one it offers below it (DeepSeek, which has
+  `low`, `high` and `max`, thinks at `low` for `medium`), or its weakest
+  when it has none below. So a BTW thinks no harder than its model has
+  to, on the session's own model (when its provider has no cheaper one)
+  as on a cheap one, whatever the session's level is. Only a model that
+  lists no levels leaves it to the session: the BTW then starts at the
+  session's level when its model is the session's or offers that too,
+  else at the usual one (`harness-thinking`).
+
+A project can set both for itself (see [Configuration](#configuration)),
+and the BTW's model and level can be changed in the BTW like in any
+session. `C-u C-c h b` asks which model to run that one BTW on, from
+the models the providers list, instead of `harness-btw-model`; an empty
+answer opens nothing. The same goes for the BTW on the task board
+(`C-u b`) and on a node of the conversation tree. A policy that fixes
+`harness-model` ([docs/policy.md](docs/policy.md)) fixes a BTW's model
+too: it runs on that model, `harness-btw-model` changes nothing, and a
+model asked for must be the policy's.
 
 ### Sub-agents
 
@@ -1363,6 +1390,14 @@ your checkout itself can be submitted to the **main tree** instead (the
   sessions working for it -- its sub-agents and forks, and the sessions
   resolving its merge conflicts -- never take one, and neither does a
   task in *Merging*, so the merge queue never holds up the next task.
+  The harness's own model calls -- a task's title, the recaps, the
+  permission judges and the like -- are neither tasks nor turns: they
+  never take a slot or wait for one, so a title or a verdict comes even
+  with the board full or the limit at `0`. Being ordinary requests to
+  the model, they are tried again below the board when the connection is
+  lost, as any request is; a title that still fails is not asked for
+  again while its task waits, and its session is named from its first
+  message once the task starts.
 - Each card is one line, with a subtitle that recaps the task: what it is
   doing or has done so far, written by a short model call and refreshed
   at the first of so many turns, seconds or tool calls since the last
@@ -1590,7 +1625,11 @@ your checkout itself can be submitted to the **main tree** instead (the
   title rather than being named again, and shows in the session list
   (`C-c h l`) under it, of kind task. Nothing waits for the title: a
   task whose naming fails starts all the same, and its session is named
-  from its first message.
+  from its first message; one still waiting for a slot stays untitled
+  until it starts. At most two titles are asked for at once, and when
+  more wait (a burst of new tasks, or a board of untitled ones found at
+  start-up), the highest priority task's goes first, the oldest first
+  among equals.
 
 Press `?` on the board, or `C-c h ?` in its compose box, to see all of
 the board's commands.
@@ -1894,6 +1933,7 @@ project's, and a project's over the global value.
 - `harness-model`
 - `harness-thinking`
 - `harness-btw-thinking`
+- `harness-btw-model`
 - `harness-permission-mode`
 - `harness-allowed-directories`
 - `harness-sandbox-policy`
@@ -2151,11 +2191,12 @@ has no chat buffer open. Then choose:
 - **`c` current model summarises**: it summarises the conversation,
   whose cache is warm, and the new one starts from that summary;
 - **`n` new model summarises** (advanced): the new model writes the
-  summary itself, from only the first and last messages of the session,
-  so the whole conversation never runs through it. Use this when the
+  summary itself, from the conversation's narrative — every user and
+  assistant message, each tool call and result in a line — so the whole
+  conversation's payloads never run through it. Use this when the
   current provider cannot answer at all — its plan ran out, it is down —
-  or to keep the job cheap. The middle of the conversation is left out,
-  so the summary is a lossy one;
+  or to keep the job cheap. What tools read and wrote is left out, so
+  the summary is a lossy one;
 - **`t` full transcript**: the whole transcript is written to
   `.harness/handoff/` in the session's directory (git ignores it), and
   the new model is told to read it before it answers; its prompt cache

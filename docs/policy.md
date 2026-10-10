@@ -185,9 +185,19 @@ policy came (when they are loaded) and those that exist when a reload
 brings a new policy.  `session/update`, `session/set-all` and the task
 board refuse another value, with the reason above.
 
-A BTW thinks at `harness-btw-thinking` when its model offers that
-level, so a policy on `harness-thinking` alone leaves a BTW's level to
-that; set both to fix every session's.
+A BTW thinks at `harness-btw-thinking`, or at the nearest level below
+it that its model offers (its weakest when it has none that low), so a
+policy on `harness-thinking` alone leaves a BTW's level to that
+setting; set both to fix every session's.
+
+A BTW's model is not left to its own setting: a policy on
+`harness-model` fixes a BTW's model like every session's.  The BTW then
+runs on the policy's model rather than the cheap one it would pick
+(`harness-btw-model`, which changes nothing), and a model asked for one
+BTW (`C-u` on `harness-btw`) must be the policy's own, or the request is
+refused and no BTW is made.  A policy on `harness-allowed-models` also
+refuses a BTW model it leaves out; a `harness-btw-model` it leaves out is
+not used, and the BTW keeps its session's model.
 
 ### Permissions
 

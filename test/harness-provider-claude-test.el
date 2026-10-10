@@ -1402,11 +1402,11 @@ returning the user messages every CLI got so far."
       (should (equal "claude" (plist-get (plist-get (harness-call 'session/get sid) :provider-state) :provider))))))
 
 (ert-deftest harness-provider-claude-handoff-summary-by-the-new-model ()
-  "Compact-new: the new CLI session writes the summary, from a bounded context.
+  "Compact-new: the new CLI session writes the summary, from the narrative.
 The old provider cannot answer in the incident this guards (its plan ran
-out), so the new model makes the summary itself: the first and last
-messages of the session reach it inside one message, since a hosted loop
-with no state of the session is sent no ordinary transcript."
+out), so the new model makes the summary itself: the conversation's
+narrative reaches it inside one message, since a hosted loop with no
+state of the session is sent no ordinary transcript."
   (harness-provider-claude-test-with-handoff
     (let* ((sid (harness-provider-claude-test--demo-session cwd))
            (claude "claude:claude-fable-5-1")
@@ -1493,7 +1493,7 @@ which has the whole conversation, and the session's own is let go."
 
 (ert-deftest harness-provider-claude-brief-compaction-on-the-cheap-model ()
   "A brief compaction of a Claude Code session is the cheap model's, beside the session.
-Haiku gets the first and last messages as text in a CLI session of its
+Haiku gets the conversation's narrative as text in a CLI session of its
 own, the session's own process untouched until the next turn, which
 starts a new CLI session that the brief summary opens."
   (harness-provider-claude-test-with-handoff
@@ -1512,7 +1512,7 @@ starts a new CLI session that the brief summary opens."
         (should (member "claude-haiku-4-5-20251001" argv))
         (should-not (plist-get asked :resumed))
         (should (string-match-p "\\`### user\n\nfix the parser" (plist-get asked :text)))
-        (should (string-match-p "Claude Haiku 4.5 wrote this summary from only the first and the most recent"
+        (should (string-match-p "Claude Haiku 4.5 wrote this summary from the conversation's user and assistant"
                                 (plist-get node :content)))
         ;; The summariser's process was its own: the session's was let go
         ;; only with the conversation it held.

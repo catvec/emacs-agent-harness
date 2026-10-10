@@ -21,9 +21,10 @@
 ;;   (`compaction/compact'); `session/messages' turns the compaction
 ;;   node into the user message that opens the new conversation.
 ;;   `compact-new' has the *new* model write the summary instead, from
-;;   only the first and last messages of the session: the old provider
-;;   may not be able to answer at all (its plan ran out, it is down),
-;;   and a bounded context keeps the job cheap.  `transcript' writes the
+;;   the conversation's narrative -- every user and assistant message,
+;;   each tool call and result in a line --: the old provider may not be
+;;   able to answer at all (its plan ran out, it is down), and a bounded
+;;   context keeps the job cheap.  `transcript' writes the
 ;;   whole transcript (`session/write-transcript') to a file in the
 ;;   session's directory, which its tools may read and the new
 ;;   provider's cache holds as it reads, and leaves a user message
@@ -258,8 +259,8 @@ asks the model to re-investigate rather than trust it."
                (format "it is a summary %s wrote just before the handoff, not the conversation itself"
                        (harness-handoff--model-label (plist-get plan :from))))
               ('compact-new
-               (format (concat "it is a summary %s wrote from only the first and the most recent messages,"
-                               " so most of the middle of the conversation is not in it")
+               (format (concat "it is a summary %s wrote from the conversation's narrative, each tool call and"
+                               " result named in a line rather than in full, so what tools read and wrote is not in it")
                        (harness-handoff--model-label (plist-get plan :to))))
               (_ "the whole conversation reached you as text, without the other provider's own state, tool-call structure or thinking")))))
 
@@ -333,9 +334,10 @@ resolves with `:error'."
   "Hand SESSION-ID's conversation over as a summary made on SUMMARIZER.
 CONTEXT is what SUMMARIZER is given (see `compaction/compact'):
 `full' for the old model, which has the conversation -- a `summary' --
-or `sample' for the new one, which does not and gets only the first and
-last messages -- a `brief' summary, as ordinary compaction makes on a
-cheap model.  The summary ends in the handoff's caveat and its node
+or `sample' for the new one, which does not and gets the conversation's
+narrative, each tool call and result in a line -- a `brief' summary, as
+ordinary compaction makes on a cheap model.  The summary ends in the
+handoff's caveat and its node
 records the handoff (`:handoff').  PLAN is the handoff.  When no summary
 can be made, the transcript goes over instead.  Return a promise of the
 result."
@@ -428,9 +430,10 @@ Return a promise of the result; see `handoff/switch'."
 (harness-defmethod handoff/switch (session-id model &optional mode)
   "Switch SESSION-ID to MODEL, handing its conversation over as MODE says.
 MODE is `compact' (the current model summarises first), `compact-new'
-\(the new model summarises, from only the first and last messages of the
-session: use it when the current provider cannot answer, its plan having
-run out, or to keep the job small), `transcript' (a file in the
+\(the new model summarises, from the conversation's narrative -- every
+user and assistant message, each tool call and result in a line: use it
+when the current provider cannot answer, its plan having run out, or to
+keep the job small), `transcript' (a file in the
 session's directory, and a note telling the new model to read it) or
 `none' (nil: only switch); see the Commentary.  A switch `handoff/check'
 does not find lossy is a plain switch whatever MODE says.  The model

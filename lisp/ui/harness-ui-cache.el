@@ -20,8 +20,9 @@
 ;; kind with what it costs (`compaction/estimate', asked once per thing
 ;; the panel says and drawn when it comes), the brief summary first.
 ;; That one is the cheap way out of a long conversation gone cold: a
-;; cheap model reads only its first and last messages, for cents,
-;; where a summary on the session's model reads all of it uncached, as
+;; cheap model reads the conversation's narrative -- every message,
+;; tool calls in brief -- for cents, where a summary on the session's
+;; model reads all of it uncached, as
 ;; carrying on would.  A transcript file asks no model at all.  The
 ;; buttons' keys work while point is on their line.  A session blocked
 ;; on an answer is in the middle of a turn, so it shows no panel at all.

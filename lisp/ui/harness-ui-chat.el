@@ -1486,33 +1486,34 @@ running call, each with its `:note' when it has one (see
          (media (and result (mapconcat #'harness-chat--attachment-string
                                        (plist-get result :attachments) "")))
          (details
-          (concat
-           (if input (concat (propertize "  input\n" 'face 'harness-label-face)
-                             (propertize (harness-ui-link-session-ids (harness-chat--input-listing input))
-                                         'line-prefix indent 'wrap-prefix indent))
-             "")
-           (cond
-            ;; A question's answer, or its dismissal, is the block's
-            ;; reply, after the fold and outside it; the error of one that
-            ;; failed and the reason of one refused fold as any call's do.
-            ((and ask (not (memq outcome '(failed denied)))) "")
-            ((null result) "")
-            ((string-empty-p output) (propertize "  (no output)\n" 'face 'harness-dim-face))
-            ;; A refused call never ran: its text is the permission
-            ;; system's reason, not output.
-            (t (concat (propertize (if (eq outcome 'denied)
-                                       "  reason\n"
-                                     (format "  output (%s chars)\n" (harness-format-tokens (length output))))
-                                   'face 'harness-label-face)
-                       (harness-ui-link-session-ids
-                        (propertize (harness-chat--ensure-newline shown) 'face 'harness-ui-output-face
-                                    'line-prefix indent 'wrap-prefix indent))
-                       (if long
-                           (concat "  " (harness-chat--button
-                                         (format "show all (%d more chars)" (- (length output) limit))
-                                         (lambda () (harness-chat--show-all id)))
-                                   "\n")
-                         "")))))))
+          (or (run-hook-with-args-until-success 'harness-chat-tool-body-functions block result)
+              (concat
+               (if input (concat (propertize "  input\n" 'face 'harness-label-face)
+                                 (propertize (harness-ui-link-session-ids (harness-chat--input-listing input))
+                                             'line-prefix indent 'wrap-prefix indent))
+                 "")
+               (cond
+                ;; A question's answer, or its dismissal, is the block's
+                ;; reply, after the fold and outside it; the error of one that
+                ;; failed and the reason of one refused fold as any call's do.
+                ((and ask (not (memq outcome '(failed denied)))) "")
+                ((null result) "")
+                ((string-empty-p output) (propertize "  (no output)\n" 'face 'harness-dim-face))
+                ;; A refused call never ran: its text is the permission
+                ;; system's reason, not output.
+                (t (concat (propertize (if (eq outcome 'denied)
+                                           "  reason\n"
+                                         (format "  output (%s chars)\n" (harness-format-tokens (length output))))
+                                       'face 'harness-label-face)
+                           (harness-ui-link-session-ids
+                            (propertize (harness-chat--ensure-newline shown) 'face 'harness-ui-output-face
+                                        'line-prefix indent 'wrap-prefix indent))
+                           (if long
+                               (concat "  " (harness-chat--button
+                                             (format "show all (%d more chars)" (- (length output) limit))
+                                             (lambda () (harness-chat--show-all id)))
+                                       "\n")
+                             ""))))))))
     (harness-chat--margin
      (harness-chat--face (concat header summary media (harness-chat--foldable details) reply) bg)
      bg)))
@@ -2667,6 +2668,14 @@ the tail and returns a string, or nil for nothing.  The strings go
 between the queue and the attachments, in order, read-only and above
 the compose box.  Add to it buffer-locally, with a symbol, so a reload
 redefines it.  The task module shows its review banner this way.")
+
+(defvar harness-chat-tool-body-functions nil
+  "Functions giving a tool call block a body of their own.
+Each is called with the BLOCK and its result node in the chat buffer and
+returns a string to show in place of the call's input and output, or nil
+to let the generic rendering show them.  The header, the one-line
+summary, the status and the fold stay the chat's either way.  The report
+module shows the report a hand_in call handed in this way.")
 
 (defun harness-chat--insert-panels ()
   "Insert what `harness-chat-panel-functions' return, in order.

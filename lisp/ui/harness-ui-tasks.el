@@ -955,11 +955,12 @@ offers for it, the session list too (`harness-ui-pending-view-actions'):
 
 (defun harness-ui-tasks--card-buttons (task)
   "Buttons for TASK's two most useful actions besides opening it.
-A task that handed a report in (`hand_in') gets a [Review] button too:
-its final message and evidence, in a popout.  One whose turn ended
-without it gets [No report] there instead, which pops out what the
-harness recorded for it: that nothing was handed in, and the session's
-last message (`harness-tasks--missing-report').
+A task that handed a report in (`hand_in') gets a [Review Changes]
+button too: the changes, the final message and the evidence, in a
+popout.  One whose turn ended without it gets [No report] there
+instead, which pops out what the harness recorded for it: that nothing
+was handed in, and the session's last message
+\(`harness-tasks--missing-report').
 
 A card has no button for opening its session: a click on its title
 does that.  Nor for Open harness, which stays in the card's menu
@@ -969,15 +970,15 @@ harness (`harness-ui-tasks--open-harness-p')."
     (concat
      (harness-ui-tasks--action-buttons task)
      (when (and (plist-get task :report) (fboundp 'harness-ui-report-popout))
-       ;; [Review] rather than [Report], which reads as reporting the
-       ;; agent for something bad: the button opens the work it handed
-       ;; in, to look it over.
+       ;; [Review Changes] rather than [Report], which reads as
+       ;; reporting the agent for something bad: the button opens the
+       ;; changes and the work it handed in, to look them over.
        (concat " " (harness-ui-tasks--button
-                     (if missing "[No report]" "[Review]")
+                     (if missing "[No report]" "[Review Changes]")
                      (lambda () (harness-ui-report-popout task))
                      (if missing
                          "It handed no report in: no summary, no evidence; see what its session said last"
-                       "Review what it handed in: the final message and the evidence")
+                       "Review the changes and what it handed in: the final message and the evidence")
                      "report"))))))
 
 (defun harness-ui-tasks--subtitle-button (task shown)
@@ -3828,10 +3829,12 @@ on when ARG is positive and off otherwise."
   "Ask about the tasks in a BTW side conversation over the board.
 It opens blank, for a question written in its compose box.  Its agent
 answers with the task and session tools: what a task is doing, how far
-along it is, what it changed, why it is stuck."
+along it is, what it changed, why it is stuck.  Like any BTW it runs on
+a cheap model (`harness-btw-model'); with a prefix argument it asks
+which model to run this one on."
   (interactive)
   (unless (fboundp 'harness-btw) (user-error "The BTW module is not loaded"))
-  (harness-btw))
+  (harness-btw nil nil (and current-prefix-arg 'choose)))
 
 (declare-function harness-tasks-search "harness-ui-tasks-search")
 
@@ -3846,14 +3849,18 @@ tasks it is about and says what was done.  See `harness-tasks-search'."
     (user-error "The task search module (ui-tasks-search) is not loaded"))
   (call-interactively #'harness-tasks-search))
 
-(defun harness-ui-tasks--start-btw (name)
+(defun harness-ui-tasks--start-btw (name &optional model)
   "Start a conversation NAME about the board's tasks; return a promise of it.
 Every call starts a new session (`task/btw'), never an earlier one.
-The BTW module calls this (`harness-ui-btw-start-function') to open a
-BTW over the board; a failure shows on the board too."
+MODEL, a PROVIDER:NAME, is the model to run it on; without one it runs
+on `harness-btw-model', and no model goes over the wire.  The BTW
+module calls this (`harness-ui-btw-start-function') to open a BTW over
+the board; a failure shows on the board too."
   (setq harness-ui-tasks--error nil)
   (let ((buffer (current-buffer))
-        (promise (harness-ui-request "_harness/task/btw" (list :cwd harness-ui-tasks--dir :name name))))
+        (promise (harness-ui-request "_harness/task/btw"
+                                     (append (list :cwd harness-ui-tasks--dir :name name)
+                                             (and model (list :model model))))))
     (harness-then promise #'ignore (lambda (e) (harness-ui-tasks--fail buffer "Starting a BTW" e)))
     promise))
 

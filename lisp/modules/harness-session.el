@@ -275,8 +275,11 @@ policy sets the option (see harness-policy.el), the copy of every
 session -- new, forked, a sub-agent's, a task's, one saved before the
 policy came -- is the policy's value instead, and `session/update'
 refuses to change it.  A BTW session's thinking starts from
-`harness-btw-thinking' when its model offers that level, so it is left
-to `session/create', which reads both options as the policy has them.")
+`harness-btw-thinking', fitted to the levels its model offers, so it is
+left to `session/create', which reads both options as the policy has
+them.
+Its model is not left: a policy on `harness-model' fixes a BTW's model
+too, and `harness-btw-model' then changes nothing.")
 
 (defun harness-session--policy-option (key kind)
   "Return the option that fixes setting KEY of a session of KIND, or nil."
@@ -647,23 +650,33 @@ for the session, by the user or through `session/update'."
   "Return USAGE with the prompt cache stamp of usage RECORD.
 MODEL is the session's model.  A record with `:cache-reset' drops the
 stamp: the conversation starts over, from a summary say, so nothing its
-next request sends is cached yet.  A record of a request, one that
-counts tokens, that read or wrote the cache stamps when that was (its
-`:cache-at', else now), the model it was sent to (its `:model', else
-MODEL), and the lifetime its provider reported (its `:cache-ttl', else
-none).  One that used no cache drops the stamp: nothing is cached to
-lose.  A record without tokens, a turn counted, leaves it."
+next request sends is cached yet -- and, when the conversation had a
+cache, remembers it (`:cache-pending'), so the first request that
+follows, which populates the new conversation's cache, stamps it even
+when the provider reports no cache tokens for it.  A record of a
+request, one that counts tokens, that read or wrote the cache stamps
+when that was (its `:cache-at', else now), the model it was sent to
+(its `:model', else MODEL), and the lifetime its provider reported (its
+`:cache-ttl', else none); one that was the first after a `:cache-reset'
+stamps the same way.  A record without tokens, a turn counted, leaves
+it.  A record of a request that used no cache and follows no reset
+drops the stamp: nothing is cached to lose."
   (cond
    ((harness-json-true-p (plist-get record :cache-reset))
-    (harness-plist-remove usage :cache-at :cache-ttl :cache-model))
+    (let ((u (harness-plist-remove usage :cache-at :cache-ttl :cache-model)))
+      (if (numberp (plist-get usage :cache-at))
+          (plist-put u :cache-pending t)
+        u)))
    ((not (or (numberp (plist-get record :input)) (numberp (plist-get record :output))))
     usage)
-   ((> (+ (harness-session--tokens (plist-get record :cache-read))
-          (harness-session--tokens (plist-get record :cache-write)))
-       0)
+   ((or (> (+ (harness-session--tokens (plist-get record :cache-read))
+              (harness-session--tokens (plist-get record :cache-write)))
+           0)
+        (harness-json-true-p (plist-get usage :cache-pending)))
     (let* ((at (plist-get record :cache-at))
            (ttl (plist-get record :cache-ttl))
-           (u (plist-put usage :cache-at (if (numberp at) (float at) (float-time))))
+           (u (harness-plist-remove usage :cache-pending))
+           (u (plist-put u :cache-at (if (numberp at) (float at) (float-time))))
            (u (plist-put u :cache-model (or (plist-get record :model) model))))
       (if (and (numberp ttl) (> ttl 0))
           (plist-put u :cache-ttl ttl)
@@ -709,10 +722,12 @@ it, when it lapses unless another request comes first, and the model it
 was sent to.  A cache serves its MODEL only: one of a model S no longer
 uses holds nothing S's next request reads back, which then sends the
 conversation uncached.  Nil while S has no context, before any of its
-requests used a cache, after one that did not, after a compaction, and
-while S's next request starts a conversation of its own on its new
-model (`harness-session--new-conversation-p'), which sends none of the
-old one."
+requests used a cache, after one that did not, after a compaction --
+which, when the conversation had a cache, leaves `:cache-pending'
+until the first request that follows stamps the new cache -- and while
+S's next request starts a conversation of its own on its new model
+(`harness-session--new-conversation-p'), which sends none of the old
+one."
   (let* ((u (harness-session-usage s))
          (at (plist-get u :cache-at))
          (model (or (plist-get u :cache-model) (harness-session-model s))))
@@ -732,14 +747,46 @@ old one."
 
 (defun harness-session--btw-thinking (model cwd)
   "Return the thinking level a BTW with MODEL at CWD starts at, or nil.
-That is `harness-btw-thinking' as configured at CWD, provided the
-provider catalogue lists it among MODEL's thinking levels: a model
-without levels may refuse a request that asks for one.  nil leaves the
-BTW the level it would have otherwise."
-  (let ((level (harness-session--config 'harness-btw-thinking cwd)))
-    (and (stringp level)
-         (member level (harness-session--model-levels model))
-         level)))
+That is `harness-btw-thinking' as configured at CWD, fitted to the
+thinking levels the provider catalogue gives MODEL
+\(`harness-thinking-level-fit'): the level itself when MODEL offers
+it, else the strongest it offers below it, else its weakest.  So a BTW
+thinks as little as asked for, or as little as its model allows,
+whatever level the session it is opened over thinks at and whether it
+runs on that session's model or on another: a model with no `medium'
+is not left to the session's `max'.  nil when no level is configured,
+and for a model whose catalogue lists no levels, which may refuse a
+request that asks for one: the BTW then has the level it would have
+otherwise."
+  (harness-thinking-level-fit (harness-session--config 'harness-btw-thinking cwd)
+                              (harness-session--model-levels model)))
+
+(defun harness-session--btw-model (model cwd)
+  "Return the model a BTW at CWD runs on; MODEL is the one it would otherwise use.
+MODEL is the model of the session the BTW is opened over, or
+`harness-model' as configured at CWD for a BTW over no session.  The
+answer is what `harness-btw-model' says at CWD: `auto' (or the string
+\"auto\"), the default, is the simple tier of MODEL's provider, MODEL
+itself when the provider names none (see `harness-provider-tier-model');
+a PROVIDER:NAME is that model, unless `harness-allowed-models' leaves it
+out, which the log says and MODEL stands for; nil is MODEL.  A policy
+that fixes `harness-model' is no concern of this function: it fixes a
+BTW's model too (`harness-session--pinned'), whatever this answers."
+  (let ((choice (harness-session--config 'harness-btw-model cwd)))
+    (cond
+     ((or (eq choice 'auto) (equal choice "auto"))
+      (or (and model (harness-method-exists-p 'provider/tier-model)
+               (ignore-errors (harness-call 'provider/tier-model model 'simple)))
+          model))
+     ((and (stringp choice) (not (string-blank-p choice)))
+      (let ((refusal (and (fboundp 'harness-provider-model-refusal)
+                          (harness-provider-model-refusal choice))))
+        (cond (refusal
+               (harness-log 'warn "session: harness-btw-model: %s; a BTW runs on %s instead"
+                            refusal model)
+               model)
+              (t choice))))
+     (t model))))
 
 ;;;; Temporary directories
 
@@ -836,11 +883,16 @@ deleted; symbolic links inside it are removed, never followed."
 
 (harness-defmethod session/create (&rest plist)
   "Create a session.  PLIST needs `:cwd'; see docs/architecture.md for the rest.
-A `btw' session without `:thinking' thinks at `harness-btw-thinking'
-when its model offers that level, else at `harness-thinking', as
-configured at `:cwd'.  A setting the policy fixes (see
-`harness-session--policy-options') has the policy's value, whatever
-PLIST asks for.  `:ext' gives it settings of the modules that keep
+A `btw' session without `:model' runs on `harness-btw-model', by
+default the simple tier of the provider of `harness-model', both as
+configured at `:cwd'; without `:thinking' it thinks at
+`harness-btw-thinking' fitted to the levels its model offers (that
+level, else the nearest it offers below it, else its weakest:
+`harness-session--btw-thinking'), else at `harness-thinking' when no
+level is configured or the model lists none.  A setting the policy
+fixes (see `harness-session--policy-options') has the policy's value,
+whatever PLIST asks for: a BTW's model is the policy's `harness-model',
+its thinking is not.  `:ext' gives it settings of the modules that keep
 some for a session (see `session/set-ext'), a plist."
   (let* ((plist (harness-session--without-pinned plist (or (plist-get plist :kind) 'main)))
          (cwd (or (plist-get plist :cwd) (error "The session/create method needs :cwd")))
@@ -849,7 +901,12 @@ some for a session (see `session/set-ext'), a plist."
          (kind (or (plist-get plist :kind) 'main))
          (project (or (plist-get plist :project)
                       (if (harness-method-exists-p 'project/root) (harness-call 'project/root cwd) cwd)))
-         (model (or (plist-get plist :model) (harness-session--config 'harness-model cwd)))
+         (model (or (plist-get plist :model)
+                    (let ((usual (harness-session--config 'harness-model cwd)))
+                      ;; A model the policy fixes is no one's to choose.
+                      (if (and (eq kind 'btw) (not (harness-session--pinned :model kind)))
+                          (harness-session--btw-model usual cwd)
+                        usual))))
          (s (make-harness-session)))
     (setf (harness-session-id s) (or (plist-get plist :id) (harness-uuid))
           (harness-session-name s) (plist-get plist :name)
@@ -1565,32 +1622,61 @@ no fork; see `session/btw'."
        (harness-session--touch cs)
        (harness-session-plist cs)))))
 
-(harness-defmethod session/btw (id &optional name)
+(harness-defmethod session/btw (id &optional name model)
   "Start a BTW side conversation over session ID; return its session.
 It is a new, empty session of kind `btw' named NAME, sharing nothing
 with ID or with any other BTW, even one opened over ID before.  It has
 no transcript and no fork node.  It has no provider state either, so
 its first turn starts a provider conversation of its own (a new CLI
 session for Claude Code).  It has no directory grants.  It works where
-ID does, with ID's model: cwd, project, host, worktree, model and
-permission mode are ID's, everything else is the configured default,
-as for any new session.  It thinks at `harness-btw-thinking' as
-configured there, a low level for quick questions, when the model
-offers that level, else at ID's level.  Its `:parent-id' is ID only so
-that the session list and the tree show it under ID."
+ID does: cwd, project, host, worktree and permission mode are ID's,
+everything else is the configured default, as for any new session.
+
+A BTW is a quick question on the side, so it does not run on ID's model
+but on a cheap one: `harness-btw-model' as configured at ID's cwd, by
+default the simple tier of the provider of ID's model, which stays ID's
+when the provider names none (`harness-session--btw-model').  MODEL, a
+PROVIDER:NAME, picks another model for this one BTW and wins over that
+setting; blank is none.  It is chosen here, once: from then on the BTW
+is a session like any, and its model can be switched like any other's.
+A model the policy does not allow signals an error
+\(`harness-session-check-policy'), and a policy that fixes
+`harness-model' fixes a BTW's too, whatever the setting or MODEL say.
+
+It thinks at `harness-btw-thinking' as configured there, a low level
+for quick questions, fitted to the levels its model offers: that level,
+else the nearest it offers below it, else the model's weakest
+\(`harness-session--btw-thinking').  So on ID's own model, as on a
+cheaper one, it thinks no harder than the model has to, whatever ID's
+level is.  It starts at ID's level only where nothing is fitted: with
+no level configured (nil), or a model whose catalogue lists none.  That
+level is kept only if its own model is ID's or lists it, else the BTW
+thinks at `harness-thinking'.  Its `:parent-id' is ID only so that the
+session list and the tree show it under ID."
   (let* ((parent (harness-session--get id))
          (cwd (harness-session-cwd parent))
-         (model (harness-session-model parent)))
-    (harness-call 'session/create
-                  :kind 'btw :parent-id id :name name
-                  :cwd cwd
-                  :project (harness-session-project parent)
-                  :host (harness-session-host parent)
-                  :worktree (harness-session-worktree parent)
-                  :model model
-                  :thinking (or (harness-session--btw-thinking model cwd)
-                                (harness-session-thinking parent))
-                  :permission-mode (harness-session-permission-mode parent))))
+         (asked (and (stringp model) (not (string-blank-p model)) (string-trim model))))
+    (when asked
+      (harness-session-check-policy (list :model asked) 'btw))
+    (let* ((btw-model (or (car (harness-session--pinned :model 'btw))
+                          asked
+                          (harness-session--btw-model (harness-session-model parent) cwd)))
+           (inherited (harness-session-thinking parent)))
+      (harness-call 'session/create
+                    :kind 'btw :parent-id id :name name
+                    :cwd cwd
+                    :project (harness-session-project parent)
+                    :host (harness-session-host parent)
+                    :worktree (harness-session-worktree parent)
+                    :model btw-model
+                    :thinking (or (harness-session--btw-thinking btw-model cwd)
+                                  ;; ID's level is for ID's model: another
+                                  ;; one may not offer it.
+                                  (and inherited
+                                       (or (equal btw-model (harness-session-model parent))
+                                           (member inherited (harness-session--model-levels btw-model)))
+                                       inherited))
+                    :permission-mode (harness-session-permission-mode parent)))))
 
 (defun harness-session--family (s)
   "Return every session struct in the fork family of S."
@@ -1884,7 +1970,10 @@ RECORD keys: :input :output :cache-read :cache-write :cost :list-cost
 was paid, :model the model the request was sent to (the session's when
 unsaid), :cache-at and :cache-ttl, when the request used the prompt
 cache and how long its provider said it keeps it, and :cache-reset,
-which says the conversation starts over (a compaction).  Counters
+which says the conversation starts over (a compaction) and, when the
+conversation had a cache, leaves `:cache-pending' until the first
+request that follows stamps the new cache (see
+`harness-session--cache-stamp').  Counters
 accumulate; `:context' replaces, and so do `:billing' and `:plan' when
 RECORD has a billing.  With `:context', the size of the latest prompt,
 comes the totals' `:last-output': the output of that request, which the
