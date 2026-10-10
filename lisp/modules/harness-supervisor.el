@@ -145,27 +145,38 @@
 ;; (it is failed), or its worker session was deleted (cancelled) -- is a
 ;; message of its own, from the harness: the step, its tier and
 ;; model, why, the steps held on it, and the ways on (`retry_step',
-;; perhaps on a higher tier; a new plan; the user).  When the last step of
-;; a plan is done the message lists each step with its result and asks the
-;; supervisor to check the work and decide.  An idle session starts a turn
-;; on a message and a running turn is steered; one that arrives while the
-;; turn that submitted the plan is ending would be lost with it, so it
-;; waits for the turn's end.  `retry_step' runs a step again on a new
-;; worker, and does not end the turn.
+;; perhaps on a higher tier; a new plan; the user).  Steps interrupted
+;; together, as their task went back to the queue, share one message.
+;; When the last step of a plan is done the message lists each step with
+;; its result and asks the supervisor to check the work and decide.  An
+;; idle session starts a turn on a message and a running turn is steered;
+;; one that arrives while the turn that submitted the plan is ending would
+;; be lost with it, so it waits for the turn's end.  `retry_step' runs a
+;; step again on a new worker, and does not end the turn.
 ;;
 ;; Work that runs outside the turn is `agent/outstanding' for the tasks
 ;; module, which keeps the task of the session working, with a line of what
 ;; it waits for, instead of ending it in review: steps running, and pending
 ;; steps that can still start.  A step held behind one that did not get
-;; done is not counted: the supervisor was told and has to decide.
+;; done is not counted: the supervisor was told and has to decide.  It is
+;; `agent/stop-outstanding' too, which stops that work.
 ;;
 ;; When the harness restarts its workers die.  Once every module is up,
 ;; the steps still stored as running are interrupted and reported as a
 ;; failure is: to the session of a task as a message, so that the task
 ;; carries on, and to any other session queued, to go with the user's next
-;; message rather than start an expensive turn unasked.  Deleting a
-;; supervisor cancels its workers, and turning the mode off lets them
-;; carry on.
+;; message rather than start an expensive turn unasked.  A task pre-empted
+;; or returned to the queue has its running steps interrupted the same
+;; way, once no turn of its session runs (`agent/stop-outstanding', which
+;; says why): their workers are cancelled, with the sub-agents they
+;; started, a worker still being made is never given its step, and the
+;; steps are reported in one message, which waits in the transcript while
+;; the task waits in the queue (`harness-supervisor--stop-outstanding').
+;; Nothing starts again on its own: the steps held on them wait for the
+;; supervisor.  A worker's late end changes nothing, as the step no longer
+;; runs that attempt.
+;; Deleting a supervisor cancels its workers, and turning the mode off
+;; lets them carry on.
 
 ;;; Code:
 
@@ -1504,6 +1515,11 @@ that is no tier comes back downcased, for the problem that names it."
 (defconst harness-supervisor--retryable-states '("failed" "interrupted" "cancelled")
   "The states of a step that ended without being done, which `retry_step' accepts.")
 
+(defconst harness-supervisor--stop-reason "its task was returned to the queue"
+  "Why the running steps were interrupted, when no reason was given.
+That is the reason of `agent/stop-outstanding', which the tasks module
+gives when a task goes back to the queue.")
+
 (defconst harness-supervisor--result-limit 4000
   "Most characters of a worker's final reply that its step keeps as its result.")
 
@@ -2291,27 +2307,50 @@ by the time its turn comes.
 A step that starts again loses its session and its error, which belong
 to the attempt before; when that attempt had a worker, the step keeps
 it as `:previous' (`harness-supervisor--previous-attempt'), which the
-new worker is told of (`harness-supervisor--worker-text')."
+new worker is told of (`harness-supervisor--worker-text').
+
+The worker is made for this attempt only: should the step be
+interrupted while it is made (`harness-supervisor--stop-outstanding'),
+and perhaps started again, what the making comes to later changes
+nothing (`harness-supervisor--making-p')."
   (let* ((plan (harness-supervisor--plan (harness-supervisor--plans session-id) plan-id))
          (old (and plan (harness-supervisor--step plan step-id))))
     (when (and old (harness-supervisor--state-p old "pending" "failed" "interrupted" "cancelled"))
-      (puthash (harness-supervisor--step-key session-id plan-id step-id) t harness-supervisor--live)
-      (apply #'harness-supervisor--update-step session-id plan-id step-id
-             :state "running" :attempts (1+ (or (plist-get old :attempts) 0))
-             :session nil :result nil :error nil :worker-model nil
-             (let ((previous (harness-supervisor--previous-attempt old)))
-               (and previous (list :previous previous))))
-      (let ((plan (harness-supervisor--plan (harness-supervisor--plans session-id) plan-id)))
-        (harness-then
-         (condition-case err
-             (harness-supervisor--make-worker session-id plan (harness-supervisor--step plan step-id))
-           (error (harness-rejected err)))
-         (lambda (worker)
-           (harness-supervisor--worker-made session-id plan-id step-id worker))
-         (lambda (err)
-           (harness-supervisor--step-ended
-            session-id plan-id step-id "failed"
-            (format "the worker could not be made: %s" (harness-error-short-message err)))))))))
+      (let ((attempt (1+ (or (plist-get old :attempts) 0))))
+        (puthash (harness-supervisor--step-key session-id plan-id step-id) t harness-supervisor--live)
+        (apply #'harness-supervisor--update-step session-id plan-id step-id
+               :state "running" :attempts attempt
+               :session nil :result nil :error nil :worker-model nil
+               (let ((previous (harness-supervisor--previous-attempt old)))
+                 (and previous (list :previous previous))))
+        (let ((plan (harness-supervisor--plan (harness-supervisor--plans session-id) plan-id)))
+          (harness-then
+           (condition-case err
+               (harness-supervisor--make-worker session-id plan (harness-supervisor--step plan step-id))
+             (error (harness-rejected err)))
+           (lambda (worker)
+             (harness-supervisor--worker-made session-id plan-id step-id worker attempt))
+           (lambda (err)
+             (when (harness-supervisor--making-p session-id plan-id step-id attempt)
+               (harness-supervisor--step-ended
+                session-id plan-id step-id "failed"
+                (format "the worker could not be made: %s" (harness-error-short-message err)))))))))))
+
+(defun harness-supervisor--making-p (session-id plan-id step-id attempt)
+  "Non-nil when attempt ATTEMPT of a step still waits for its worker.
+The step is STEP-ID of plan PLAN-ID of session SESSION-ID.  That is
+when the session exists, the step's entry in `harness-supervisor--live'
+says its worker is being made, and the step is stored running, on
+ATTEMPT.  A step interrupted meanwhile (`harness-supervisor--stop-outstanding')
+or ended, perhaps started again since by `retry_step', or whose
+supervisor was deleted is not: the worker made for ATTEMPT has nothing
+to do."
+  (and (eq t (gethash (harness-supervisor--step-key session-id plan-id step-id) harness-supervisor--live))
+       (harness-call 'session/exists-p session-id)
+       (let ((step (harness-supervisor--step (harness-supervisor--plan (harness-supervisor--plans session-id) plan-id)
+                                             step-id)))
+         (and (harness-supervisor--state-p step "running")
+              (equal (plist-get step :attempts) attempt)))))
 
 (defun harness-supervisor--start-ready (session-id plan-id)
   "Start the steps of plan PLAN-ID of session SESSION-ID that are ready."
@@ -2352,7 +2391,7 @@ nothing is said for any other."
                         (harness-supervisor--compaction-words (plist-get worker :compaction))))
                (_ "no warm prompt cache holds the plan's conversation and it was not compacted, so its worker reads it all uncached"))))))
 
-(defun harness-supervisor--worker-made (session-id plan-id step-id worker)
+(defun harness-supervisor--worker-made (session-id plan-id step-id worker attempt)
   "Run the step STEP-ID of plan PLAN-ID of session SESSION-ID on its new WORKER.
 WORKER is the session `seed/fork', `session/fork' or `session/create'
 made, plus `:context-cache' and `:compaction' for a fork step that
@@ -2360,11 +2399,18 @@ starts again (see `harness-supervisor--make-worker'), whose supervisor
 is told how its context stands (`harness-supervisor--restart-hint').
 The step notes the model of the worker, which `retry_step' may change
 before the step starts again.  The worker's turn is the step: when it
-ends the step is done or it failed.  A step that was ended meanwhile, or
-whose supervisor was deleted, does not run."
+ends the step is done or it failed.
+
+WORKER was made for ATTEMPT of the step.  A step that no longer waits
+for it (`harness-supervisor--making-p') -- interrupted or ended
+meanwhile, perhaps started again since, or whose supervisor was
+deleted -- does not run on it: the worker is given up, left as it was
+made, and never gets the step."
   (let ((key (harness-supervisor--step-key session-id plan-id step-id))
         (wid (plist-get worker :id)))
-    (when (and (gethash key harness-supervisor--live) (harness-call 'session/exists-p session-id))
+    (if (not (harness-supervisor--making-p session-id plan-id step-id attempt))
+        (harness-log 'info "supervisor: step %s of %s no longer waits for its worker %s (attempt %s); it is given up"
+                     step-id session-id wid attempt)
       (condition-case err
           (progn
             (puthash key wid harness-supervisor--live)
@@ -2428,7 +2474,8 @@ running on that worker any more."
 ;; worker as `:child-id', which the chat renders as a clickable session
 ;; line (`harness-chat--child-line'), and its input carries the step,
 ;; its tier, its model and the attempt.  The result joins the call when
-;; the step ends -- done, failed, cancelled or interrupted by a restart.
+;; the step ends -- done, failed, cancelled, or interrupted by a restart
+;; or by its task going back to the queue.
 ;; A retried step gets a call of its own for its new worker.
 
 (defun harness-supervisor--spawn-input (step &optional thinking)
@@ -2622,8 +2669,12 @@ on it, and the ways on."
                  (mapconcat #'harness-supervisor--step-name held ", "))
        "No step waits for it.\n")
      (and running (format "Still running: %s.\n" (string-join running ", ")))
-     (format "Plan %s. Decide: retry_step %s (on a higher tier, up to hard, if its model was not up to it), a new plan with submit_plan (smaller steps, if it was too big), or ask the user with ask_user."
-             (plist-get plan :id) id))))
+     (format "Plan %s. Decide: retry_step %s %s, a new plan with submit_plan (smaller steps, if it was too big), or ask the user with ask_user."
+             (plist-get plan :id) id
+             ;; An interruption says nothing about the model.
+             (if (equal state "interrupted")
+                 "to run it again"
+               "(on a higher tier, up to hard, if its model was not up to it)")))))
 
 (defun harness-supervisor--finished-p (plan)
   "Non-nil when nothing is left to do in PLAN: every step is done or superseded.
@@ -2691,17 +2742,23 @@ that step ends."
 (defun harness-supervisor--step-ended (session-id plan-id step-id state error)
   "Record that step STEP-ID of plan PLAN-ID of SESSION-ID ended, for ERROR.
 STATE is \"failed\", \"interrupted\" or \"cancelled\".  The supervisor
-is told in a message of its own, which names the steps now held on it."
-  (remhash (harness-supervisor--step-key session-id plan-id step-id) harness-supervisor--live)
-  (when (harness-call 'session/exists-p session-id)
-    (let ((step (harness-supervisor--update-step session-id plan-id step-id :state state :error error)))
-      (when step
-        ;; The call's result joins the call before the report.
-        (harness-supervisor--close-call session-id step state error)
-        (harness-supervisor--send
-         session-id
-         (harness-supervisor--failure-text
-          session-id (harness-supervisor--plan (harness-supervisor--plans session-id) plan-id) step))))))
+is told in a message of its own, which names the steps now held on it.
+A step this process runs no worker for any more -- interrupted
+\(`harness-supervisor--stop-outstanding') or ended already: it has no
+entry in `harness-supervisor--live' -- is left alone, so that a late
+end of its worker changes nothing and reports nothing."
+  (let ((key (harness-supervisor--step-key session-id plan-id step-id)))
+    (when (gethash key harness-supervisor--live)
+      (remhash key harness-supervisor--live)
+      (when (harness-call 'session/exists-p session-id)
+        (let ((step (harness-supervisor--update-step session-id plan-id step-id :state state :error error)))
+          (when step
+            ;; The call's result joins the call before the report.
+            (harness-supervisor--close-call session-id step state error)
+            (harness-supervisor--send
+             session-id
+             (harness-supervisor--failure-text
+              session-id (harness-supervisor--plan (harness-supervisor--plans session-id) plan-id) step))))))))
 
 ;;;; The plan engine: submit_plan
 
@@ -2926,7 +2983,7 @@ and a hint tells the supervisor which."
 
 (harness-define-tool "retry_step"
   :label "Retry step"
-  :description "Run a step of a submitted plan again on a new worker: a step that failed, was interrupted by a restart, or was cancelled. step is its id. plan is the id of its plan and defaults to the latest plan that has the step. tier moves the step to another tier, usually a higher one, when its model was not up to it: simple, medium, or hard, the model you run on, which only a retry reaches; a step that was too big is better split up in a new plan. reason says in a line why. prompt adds notes to the step's prompt for the new worker, such as what went wrong the first time. The steps held on the step start once it is done. It does not end your turn, so you can retry several steps in one message."
+  :description "Run a step of a submitted plan again on a new worker: a step that failed, was interrupted (by a restart, or when its task went back to the queue), or was cancelled. step is its id. plan is the id of its plan and defaults to the latest plan that has the step. tier moves the step to another tier, usually a higher one, when its model was not up to it: simple, medium, or hard, the model you run on, which only a retry reaches; a step that was too big is better split up in a new plan. reason says in a line why. prompt adds notes to the step's prompt for the new worker, such as what went wrong the first time. The steps held on the step start once it is done. It does not end your turn, so you can retry several steps in one message."
   :schema '(:type "object"
             :properties (:step (:type "string" :description "Id of the step to run again.")
                          :plan (:type "string" :description "Id of the plan (default: the latest plan that has the step).")
@@ -2976,6 +3033,117 @@ nothing running or waiting."
     (cond ((null line) value)
           ((and (stringp value) (not (string-blank-p value))) (concat value "; " line))
           (t line))))
+
+(defun harness-supervisor--interrupt-running (session-id why)
+  "Interrupt every running step of SESSION-ID's plans, for WHY; return them.
+Each step's entry leaves `harness-supervisor--live' first, so that what
+its worker does later -- its turn ending, cancelled, or the worker
+being made at last -- finds the step no longer running it and changes
+nothing (`harness-supervisor--turn-ended', `harness-supervisor--making-p').
+Then each is stored interrupted, with WHY as its error, every step
+before any call is answered, so that no report names another as still
+running; the call that shows its worker gets its result
+\(`harness-supervisor--close-call'), and the worker is stopped
+\(`harness-supervisor--stop-worker').  A worker still being made has no
+call and no turn yet: it is never given the step.  Nothing is reported,
+and nothing starts.  Return the keys of the steps (see
+`harness-supervisor--step-key'), in plan order."
+  (let ((stopped nil))
+    (dolist (plan (harness-supervisor--plans session-id))
+      (dolist (step (plist-get plan :steps))
+        (when (harness-supervisor--state-p step "running")
+          (let ((key (harness-supervisor--step-key session-id (plist-get plan :id) (plist-get step :id))))
+            (push (cons key (gethash key harness-supervisor--live)) stopped)
+            (remhash key harness-supervisor--live)))))
+    (setq stopped (nreverse stopped))
+    (dolist (entry stopped)
+      (harness-supervisor--update-step session-id (nth 1 (car entry)) (nth 2 (car entry))
+                                       :state "interrupted" :error why))
+    (dolist (entry stopped)
+      (let* ((plan (harness-supervisor--plan (harness-supervisor--plans session-id) (nth 1 (car entry))))
+             (step (harness-supervisor--step plan (nth 2 (car entry))))
+             (worker (cdr entry)))
+        (when step
+          (harness-supervisor--close-call session-id step "interrupted" why))
+        (when (stringp worker)
+          (harness-supervisor--stop-worker worker why))))
+    (mapcar #'car stopped)))
+
+(defun harness-supervisor--stop-worker (worker why)
+  "Stop session WORKER, whose step was interrupted for WHY.
+What it started that runs on without its turn -- its own sub-agents --
+stops first (`agent/stop-outstanding' for WORKER), as a sub-agent's does
+\(`harness-tools-agent--stop-child'), so that nothing the step started
+is left running; then its turn is cancelled, which also cancels a turn
+the reports of what stopped just started.  Their later reports reach a
+worker nothing waits on: its turns change no step.  A failure is logged
+and stops nothing else."
+  (when (harness-call 'session/exists-p worker)
+    (when (harness-method-exists-p 'agent/stop-outstanding)
+      (condition-case err
+          (let ((text (harness-call 'agent/stop-outstanding worker why)))
+            (when text
+              (harness-log 'info "supervisor: stopped the work of worker %s: %s" worker text)))
+        (error (harness-log 'warn "supervisor: stopping the work of worker %s failed: %s"
+                            worker (harness-error-short-message err)))))
+    (when (and (harness-method-exists-p 'agent/cancel)
+               (harness-call 'session/exists-p worker))
+      (condition-case err
+          (harness-call 'agent/cancel worker)
+        (error (harness-log 'warn "supervisor: cancelling worker %s failed: %s"
+                            worker (harness-error-short-message err)))))))
+
+(defun harness-supervisor--interrupted-text (session-id keys why)
+  "Return the one report to SESSION-ID that the steps KEYS were interrupted.
+KEYS are the steps' `harness-supervisor--step-key's, WHY the reason.  A
+first part says the plan's workers were stopped, why, and that nothing
+goes on by itself; then each step is reported as a failure is
+\(`harness-supervisor--failure-text'), between blank lines, as
+`harness-supervisor--flush' joins the reports it holds."
+  (let* ((plans (harness-supervisor--plans session-id))
+         (found (delq nil (mapcar (lambda (key) (harness-supervisor--find-step plans (nth 2 key) (nth 1 key)))
+                                  keys)))
+         (n (length found)))
+    (concat
+     (format "Supervisor report: the plan's workers were stopped, interrupting %d running step%s: %s.\nWhy: %s.\nNothing runs or starts again on its own: decide for %s below."
+             n (if (= n 1) "" "s")
+             (mapconcat (lambda (pair) (plist-get (cdr pair) :id)) found ", ")
+             (string-remove-suffix "." why)
+             (if (= n 1) "the step" "each step"))
+     (mapconcat (lambda (pair)
+                  (concat "\n\n" (harness-supervisor--failure-text session-id (car pair) (cdr pair))))
+                found ""))))
+
+(defun harness-supervisor--stop-outstanding (value session-id reason)
+  "Interrupt the running steps of SESSION-ID's plans, for REASON; say so in VALUE.
+An `agent/stop-outstanding' filter: the tasks module calls it when the
+task of SESSION-ID is pre-empted or returned to the queue, once no turn
+of the session runs.  Every step stored running is interrupted, its
+worker stopped with the sub-agents it started
+\(`harness-supervisor--interrupt-running'), with REASON as its error --
+`harness-supervisor--stop-reason' when REASON is blank -- and
+`retry_step' can run it again.  The steps are reported in
+one message, so that a session whose task waits in the queue refuses one
+turn for them, not one each, and keeps the message for the task's start:
+to a task's session it goes at once, to any other queued, as
+`harness-supervisor--recover-session' reports.  Nothing starts: the
+pending steps behind them are held (`harness-supervisor--waiting-p'), so
+nothing is outstanding afterwards.
+
+VALUE is what the handlers before this one stopped; it comes back as it
+is when nothing ran, else with \"Supervisor plan: N steps interrupted\"
+added after \"; \"."
+  (let* ((why (if (harness-string-blank-p reason) harness-supervisor--stop-reason (string-trim reason)))
+         (keys (and (harness-call 'session/exists-p session-id)
+                    (harness-supervisor--interrupt-running session-id why))))
+    (if (null keys)
+        value
+      (harness-supervisor--deliver session-id (harness-supervisor--interrupted-text session-id keys why)
+                                   (not (harness-supervisor--task-p session-id)))
+      (let ((line (format "Supervisor plan: %d step%s interrupted" (length keys) (if (cdr keys) "s" ""))))
+        (if (and (stringp value) (not (string-blank-p value)))
+            (concat value "; " line)
+          line)))))
 
 (defun harness-supervisor--flush (session-id reason)
   "Send the reports held for SESSION-ID, whose turn ended with REASON.
@@ -3130,7 +3298,8 @@ appended.  Other sessions keep PROMPT."
   (harness-on 'tools/finished #'harness-supervisor--on-tool-finished)
   (harness-on 'session/deleted #'harness-supervisor--on-session-deleted)
   (harness-on 'agent/turn-ended #'harness-supervisor--on-turn-ended)
-  (harness-add-filter 'agent/outstanding #'harness-supervisor--outstanding))
+  (harness-add-filter 'agent/outstanding #'harness-supervisor--outstanding)
+  (harness-add-filter 'agent/stop-outstanding #'harness-supervisor--stop-outstanding))
 
 (defun harness-supervisor--start ()
   "Start the module: hook it into the bus, then recover from a restart.
@@ -3159,7 +3328,8 @@ left once they are (`harness-tasks--pick-up').  A reload hooks in again
   (harness-off (cons 'tools/finished #'harness-supervisor--on-tool-finished))
   (harness-off (cons 'session/deleted #'harness-supervisor--on-session-deleted))
   (harness-off (cons 'agent/turn-ended #'harness-supervisor--on-turn-ended))
-  (harness-remove-filter 'agent/outstanding #'harness-supervisor--outstanding))
+  (harness-remove-filter 'agent/outstanding #'harness-supervisor--outstanding)
+  (harness-remove-filter 'agent/stop-outstanding #'harness-supervisor--stop-outstanding))
 
 ;; A reload does not initialise a running module again: hook in what
 ;; this version brings now.

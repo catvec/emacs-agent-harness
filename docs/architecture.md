@@ -2459,6 +2459,25 @@ non-interactive session it stays a denial.
   not a text with words in it counts as nothing outstanding.  The tasks
   module keeps the task of a session whose turn ended active while this
   says something (see tasks).
+- `agent/stop-outstanding SESSION-ID &optional REASON` → a short text, or
+  nil: stops what runs for the session outside its own turn, the
+  counterpart of `agent/outstanding`, and says what it stopped.  A module
+  that started that work stops it when asked through the sync filter
+  `agent/stop-outstanding`, whose value starts at nil and whose arguments
+  are SESSION-ID and REASON: a short text saying why ("its task was
+  returned to the queue"), or nil.  A handler records REASON where the
+  owner of the work reads it, such as a supervisor step's `:error`, and
+  has nothing to do (returns the value unchanged) when it started
+  nothing for the session; one that stopped something returns a text
+  saying what, or appends it to the text before it, separated by "; ".
+  Registrations that only wait, those of `session_wait`, are left alone.
+  A value that is not a text with words in it counts as nothing stopped.
+  The tasks module calls it when a task is pre-empted or returned to
+  pending, once no turn of the task's session runs, so that the reports
+  of the stopped work reach a session with no turn to steer (see tasks).
+  The handlers are the supervisor module's, which interrupts the running
+  steps of the session's plans, and tools-agent's, which cancels the
+  sub-agents the session spawned (see supervisor and tools).
 - Sync filter `agent/system-prompt` (value string, args session); sync
   filter `agent/tools`; sync filter `agent/builtin-tools` (see
   `tools/builtin`); async filter `agent/before-turn` (value
@@ -3575,7 +3594,9 @@ priority).
   (`harness-tasks--holds-slot-p`): a task holds one while it starts,
   and while it is `active` with its own session -- one without a
   `:parent-id` -- running or blocked mid-turn, or idle with work it
-  left running (`:waiting`, a supervisor's workers say).  The sessions working for
+  left running (`:waiting`, a supervisor's workers say), which it holds
+  through that work: such a task can be pre-empted (below), and its work
+  stops with it.  The sessions working for
   a task never take one of their own: its sub-agents and forks, and the
   merge queue's conflict resolvers (`subagent` children of its session).
   Nor does the merge queue, which the limit never holds up: a task in it
@@ -3793,6 +3814,9 @@ priority).
   `:waiting` unless the same change sets it), and the turn the session
   takes when that work reports back, or any turn that ends with nothing
   outstanding, ends the task as above.  Only a clean `end-turn` is asked.
+  A task waiting on such work still holds its slot (`harness-tasks--holds-slot-p`),
+  so it counts as at work: work sent back from review can pre-empt it, and
+  a return to pending frees its slot.  Both stop that work, below.
 - Review (`harness-tasks-require-verification`, default t): finished
   work is not done until the user has looked at it.  A turn ending
   `end-turn` puts the task in `review` instead, and emits `task/review
@@ -3844,19 +3868,25 @@ priority).
   (`harness-tasks--outranks-p`: a lower priority, or its own priority
   when that task is not work sent back itself, `:sent-back` being when
   it was).  Of those, `harness-tasks--victim` takes the lowest priority,
-  then work that is not feedback, then the one at work since last; a
-  task waiting on work its session left running (`:waiting`), another
-  project's task, and any task while the limit is 0 give none up.  The
+  then work that is not feedback, then the one at work since last;
+  another project's task, and any task while the limit is 0, give none
+  up.  A task waiting on work its session left running (`:waiting`, a
+  supervisor's workers say) holds its slot through that work, so it is a
+  candidate like any other (`harness-tasks--preemptible-p` is
+  `harness-tasks--holds-slot-p`).  The
   victim is pre-empted (`harness-tasks--preempt`): returned to pending
   with `:return-reason` `preempted` and `:preempted-by` the task sent
   back, its turn stopped, and a hint in its session once the turn has
-  ended ("Task pre-empted: ...").  A task still starting (its worktree
-  being made) is pre-empted the same way: its start launches nothing
-  (`harness-tasks--start-current-p`), and its next start reuses the
-  worktree being made (`harness-tasks--worktree-promise`).  When a slot
-  frees, it carries on in its session, prompted with
+  ended ("Task pre-empted: ...").  The work its session left running
+  outside its turn stops too (next bullet).  A task still starting (its
+  worktree being made) is pre-empted the same way: its start launches
+  nothing (`harness-tasks--start-current-p`), and its next start reuses
+  the worktree being made (`harness-tasks--worktree-promise`).  When a
+  slot frees, it carries on in its session, prompted with
   `harness-tasks--preempted-message`, as a task returned to pending is
-  with `harness-tasks--paused-message`.  With no task it outranks, or
+  with `harness-tasks--paused-message`; both say that workers and
+  sub-agents still running were stopped, and that what they were on is
+  reported above.  With no task it outranks, or
   its queue suspended, the task sent back waits instead
   (`harness-tasks--hold-back`): pending, `:return-reason` `sent-back`,
   its round kept in `:feedback` and the reject text queued (`:queued`)
@@ -3877,6 +3907,38 @@ priority).
   pending, pre-empted or sent back while it waits; the user's own
   message to a returned or pre-empted task starts it, as `task/start`
   would.  A task that never started is left alone.
+- Stopping the work left running.  A task that goes back to the queue
+  after its work began -- pre-empted (`harness-tasks--preempt`), or
+  returned to pending by hand (`task/return-to-pending`) -- has nothing
+  at work, so what its session started that goes on without its turn
+  stops with it (`harness-tasks--stop-outstanding`): the tasks module
+  asks `agent/stop-outstanding SESSION-ID REASON` (see agent), REASON
+  being "its task was pre-empted: task T, sent back from review, took
+  its slot" or "its task was returned to the queue".  It asks once no
+  turn of the session runs: at once when none did, which is the case of
+  a task that only waited on its workers (`:waiting`), else when the
+  turn the pre-emption or the return stopped has ended
+  (`harness-tasks--returning` says it is being stopped;
+  `harness-tasks--on-turn-ended`).  What the stopped work reports then
+  reaches a session with no turn to steer, rather than steering the turn
+  being cancelled and getting lost.  A task started again before that
+  turn ended keeps its work, and nothing is stopped.  What was stopped is
+  a hint in the session ("Stopped while the task waits in the queue:
+  Supervisor plan: 2 steps interrupted"); a handler that fails is logged
+  and stops nothing else.  The reports of the stopped work -- one message
+  for all the interrupted steps of a supervisor's plans, one for each
+  sub-agent cancelled, from the harness's `supervisor` and `sub-agent`
+  senders -- reach the session while its task waits: the tasks module's
+  `agent/before-turn` filter refuses the turn each would start, so they
+  stay in the transcript, and the scheduling pass the end of a refused
+  turn asks for leaves the task out, as the return itself does, so
+  nothing starts it again but a free slot reaching it in line,
+  `task/resume-queue` or an explicit `task/start`.  The turn that
+  starts it reads them before the opening message, and nothing of the
+  stopped work restarts by itself: its session retries the step
+  (`retry_step`) or plans again.  A task returned by hand that only
+  waited on its workers has them stopped at once, as one pre-empted
+  does.
 - A turn starting in a task's session makes the task active again, so a
   message sent from a done task's chat buffer reopens it; an archived task
   comes back to the board.
@@ -3890,6 +3952,17 @@ priority).
   `task/start ID` (ignores the limit; not while a write-up runs),
   `task/queue ID` (a backlog task back in the pending queue, where the
   scheduler starts it as slots free; the suspended queue holds it there),
+  `task/return-to-pending ID` (a task at work, not one still starting:
+  its turn is stopped as `task/cancel` stops one, and the task goes back
+  to `pending` at the front of its priority's queue -- ahead of the tasks
+  that never started, the first returned first -- with its session,
+  branch and worktree kept and `:return-reason` `returned`; the work its
+  session left running outside its turn stops with it, once no turn of
+  the session runs, see "Stopping the work left running" above.  Its slot
+  is free for the others, and the return starts nothing itself, the
+  queue suspended or not: it waits for the next task the queue starts,
+  `task/resume-queue` or an explicit `task/start`, and carries on in its
+  session, prompted with `harness-tasks--paused-message`),
   `task/update ID PROMPT` (not started only; writes a stopped write-up by
   hand; a task named from its prompt is named again), `task/set-all SETTINGS &optional FILTER` (apply `:model',
   `:thinking', `:permission-mode', `:non-interactive' and `:supervisor',
@@ -4514,7 +4587,8 @@ and a message for the echo area.  Only the user calls it.
   summary, adds a `plan` node and the hint "Plan submitted: N steps",
   starts the ready steps and ends the turn (`:end-turn t`).
   `retry_step step reason &optional plan tier prompt` runs a failed,
-  interrupted or cancelled step again on a new worker (`plan` defaults
+  interrupted (by a restart, or as its task went back to the queue) or
+  cancelled step again on a new worker (`plan` defaults
   to the latest that has the step, `tier` moves it to that tier's model
   and level, simple, medium or hard, the only way a step reaches hard;
   `prompt` adds notes to its prompt) and does not end the turn.  Both
@@ -4590,7 +4664,9 @@ and a message for the echo area.  Only the user calls it.
   interrupted or was cancelled (its worker session deleted) is a message
   of its own: the step, tier, model and attempt, why, the worker's last
   reply, the steps held on it and those running, and the ways on
-  (`retry_step`, a new plan, `ask_user`).  When no step is left but done
+  (`retry_step`, a new plan, `ask_user`); the steps interrupted together
+  because their task went back to the queue share one message (below).
+  When no step is left but done
   or superseded ones, a message lists each step's result and asks to
   check the work and decide (`hand_in` in a task).  A report that comes
   while the turn that submitted the plan is ending would be lost with
@@ -4601,6 +4677,33 @@ and a message for the echo area.  Only the user calls it.
   still start or a report is held; a step held behind one that did not
   get done is not counted, the supervisor having been told.  The tasks
   module keeps the task of the session active, waiting, meanwhile.
+- Filter `agent/stop-outstanding` (see agent) stops that work when the
+  tasks module sends the session's task back to the queue, pre-empted or
+  returned (`harness-supervisor--stop-outstanding`).  Every step stored
+  `running` becomes `interrupted`, with REASON as its `:error` ("its task
+  was returned to the queue" without one), and `retry_step` runs it
+  again.  Each step's entry in `harness-supervisor--live` goes first, so
+  that nothing its worker does later changes the step: its turn ending,
+  being cancelled, or the worker being made at last
+  (`harness-supervisor--making-p`: a worker is made for one attempt, so
+  one made after its step was interrupted, perhaps started again since,
+  is given up and never gets the step).  Every step is stored before any
+  call is closed, so that no report names another as still running; each
+  step's `spawn_agent` call gets its result, and the worker is stopped
+  (`harness-supervisor--stop-worker`): `agent/stop-outstanding` for the
+  worker first, which stops the sub-agents it started, then
+  `agent/cancel`.  A step stored running that no worker runs in this
+  process, one a restart left, is interrupted too, so that nothing is
+  outstanding afterwards.  The steps are reported in one message of the
+  harness's `supervisor` -- that the plan's workers were stopped, why,
+  that nothing runs or starts again on its own, then each step as a
+  failure is reported, ending "Decide: retry_step ID to run it again" --
+  so that a task's session, which refuses the turn it would start while
+  its task waits in the queue, keeps one message and not one for each
+  step; the session of anything else gets it queued, for the user's next
+  message.  Nothing starts: the steps held behind an interrupted one wait
+  for the supervisor.  The value of the filter gains "Supervisor plan: N
+  steps interrupted", and is left as it was when no step ran.
 - Restarts and deletion.  Workers die with the harness: once every
   module is up (`harness-run-soon`), the steps stored as running that
   this process has no worker for are `interrupted` and reported as a
@@ -4929,10 +5032,34 @@ counts as work outstanding for its parent:
 `agent/outstanding`, reports every entry of
 `harness-tools-agent--children` whose `:parent` is the session, as
 "Sub-agent NAME running" or "Sub-agents A, B running" (an entry says
-`:parent`, `:name`, `:worktree`, `:branch` and `:result`, kept until the
-child is done), so a task whose session's turn ended stays active
-(`harness-tasks--on-turn-ended`) instead of going to review while its
-sub-agents run.
+`:parent`, `:name`, `:worktree`, `:branch`, `:result` and `:stopped`,
+kept until the child is done), so a task whose session's turn ended
+stays active (`harness-tasks--on-turn-ended`) instead of going to review
+while its sub-agents run.
+
+The sub-agents of a session stop with the rest of its outstanding work
+(`agent/stop-outstanding SESSION-ID REASON`, see agent), which the tasks
+module asks when the session's task is pre-empted or returned to the
+queue.  `harness-tools-agent--stop-outstanding`, a handler of that sync
+filter, stops each entry of `harness-tools-agent--children` whose
+`:parent` is the session (`harness-tools-agent--stop-child`), in the
+order they were spawned.  The work a child has of its own goes first:
+`agent/stop-outstanding` for the child stops its sub-agents, at any
+depth, so that nothing a stopped child started is left running.  Then
+the turn the child runs is cancelled, the one the reports of that stopped
+work just woke included, and a child with no turn running is reported at
+once, unless work of its own is still stopping and reports back first.
+The child's entry is marked stopped (`:stopped`, REASON or t) before its
+turn can end, so its report says what happened, whatever the child's last
+turn said: a cancelled sub-agent, "stopped: its turn was cancelled",
+with REASON in parentheses after it, and where it worked when it had a
+worktree.  The report is the usual message of the harness's `sub-agent`
+to the session, one for each child.  Nothing is merged: a child in a
+worktree keeps its branch and worktree, as any cancelled sub-agent does.
+A child with nothing running and nothing to stop is left as it is: one
+done with everything, or one that only waits, as `session_wait` makes it,
+which a stop leaves alone.  The filter's value gains "Sub-agent A stopped"
+or "Sub-agents A, B stopped", and stays as it was when none was stopped.
 
 `spawn_agent` (tools-agent) runs its child on a deliberately shorter
 context window: `harness-subagent-context-limit` (256000 tokens; nil for
@@ -5191,7 +5318,10 @@ session starts a turn on it, a running one is steered) when
 outlives the turn that made it, and counts for `agent/outstanding` as
 "Waiting on IDS" (`harness-tools-sessions--outstanding`) until it
 settles -- except after a turn the user cancelled, which drops it
-(`harness-tools-sessions--on-turn-ended`); its optional
+(`harness-tools-sessions--on-turn-ended`).  Stopping the session's
+outstanding work (`agent/stop-outstanding`, see agent) leaves it alone: it
+holds no work, and the message that wakes the session waits in its
+transcript if the session takes no turn then.  A registration's optional
 `timeout_seconds` wakes the session with a "still waiting" report
 instead.  The subscriber is not the only look at a wait: while any
 runs, the safety re-check (`harness-tools-sessions-wait-recheck`) walks
