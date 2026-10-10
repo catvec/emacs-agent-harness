@@ -4207,6 +4207,18 @@ leaves the buffer's commands out, never the whole menu."
     ("I" "Non-interactive for all sessions" harness-set-non-interactive-all)
     ("r" "Rename" harness-rename-session)
     ("W" "Move to another directory" harness-move-session)]
+   ;; A priority is the session's, so its commands stand beside the
+   ;; session's other settings, in a column of their own: they are four,
+   ;; and the settings column is long already.
+   ["Priority"
+    ("+" "Raise priority" harness-priority-raise
+     :if (lambda () (harness-ui--command-available-p 'harness-priority-raise)))
+    ("-" "Lower priority" harness-priority-lower
+     :if (lambda () (harness-ui--command-available-p 'harness-priority-lower)))
+    ("y" "Set priority…" harness-set-priority
+     :if (lambda () (harness-ui--command-available-p 'harness-set-priority)))
+    ("Y" "Priority for all sessions…" harness-set-priority-all
+     :if (lambda () (harness-ui--command-available-p 'harness-set-priority-all)))]
    ["Tools"
     ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
     ("A" "Insights" harness-insights :if (lambda () (harness-ui--command-available-p 'harness-insights)))

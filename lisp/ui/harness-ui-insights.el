@@ -750,7 +750,7 @@ Only for a report of every project."
                                        'harness-ui-insights-session (plist-get task :session)
                                        'mouse-face 'highlight
                                        'help-echo (if (plist-get task :session) "RET / mouse-1: open this task's session"
-                                                    "This task has no session yet")))
+                                                    "This task has no session to open")))
             (insert "\n")))))))
 
 (defun harness-ui-insights--insert-activity (data)
@@ -1013,7 +1013,7 @@ nil covers every project.  Interactively, read it with completion."
   (let ((sid (get-text-property (point) 'harness-ui-insights-session))
         (task (get-text-property (point) 'harness-ui-insights-task)))
     (cond (sid (harness-ui-usage--open-session sid))
-          (task (user-error "Task %s has no session yet" task))
+          (task (user-error "Task %s has no session to open" task))
           ((button-at (point)) (push-button))
           (t (user-error "Nothing to open here")))))
 
