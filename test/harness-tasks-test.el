@@ -42,7 +42,8 @@ turn `harness-tasks-require-verification' on themselves."
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
      (let ((harness-acp--server-enabled nil))
-       (dolist (m '(store project config provider provider-demo tools session agent tasks acp))
+       (dolist (m '(store project config provider provider-demo tools session agent priority
+                          tasks acp))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
      (clrhash harness-tools)
@@ -287,6 +288,59 @@ record without one is medium."
                                                   :opts (list :priority "high"))))))
             (should (equal "high" (plist-get sent :priority)))
             (should (eq 'high (plist-get (harness-tasks-test-task (plist-get sent :id)) :priority)))))))))
+
+(ert-deftest harness-tasks-a-task-session-works-at-the-tasks-priority ()
+  "A task's session carries the task's priority (see the priority plugin).
+The board queues pending tasks by the record; the session's priority is
+what the rest of the harness -- the tool slots above all -- orders the
+work of the session by, so setting a task's priority reaches its
+session, and the sessions working for it take it from there."
+  (harness-tasks-test-with
+    (let* ((high (harness-tasks-test-submit-at "urgent" "high"))
+           (plain (harness-tasks-test-submit "whenever"))
+           (high-session (harness-tasks-test-session high))
+           (plain-session (harness-tasks-test-session plain))
+           (high-sid (plist-get high-session :id))
+           (plain-sid (plist-get plain-session :id)))
+      (should (equal "high" (harness-call 'priority/get high-sid)))
+      (should (equal "medium" (harness-call 'priority/get plain-sid)))
+      (should (equal "high" (plist-get (plist-get high-session :ext) :priority)))
+      ;; Raising and lowering a task reaches its session's queue.
+      (harness-call 'task/set-priority plain "low")
+      (should (equal "low" (harness-call 'priority/get plain-sid)))
+      (harness-call 'task/set-priority high "medium")
+      (should (equal "medium" (harness-call 'priority/get high-sid)))
+      ;; A session working for the task has none of its own: it works at
+      ;; the task's priority, and follows it when the task changes.
+      (let ((sub (plist-get (harness-call 'session/create :cwd default-directory
+                                          :parent-id high-sid)
+                            :id)))
+        (should (equal "medium" (harness-call 'priority/get sub)))
+        (harness-call 'task/set-priority high "high")
+        (should (equal "high" (harness-call 'priority/get sub))))
+      ;; A bulk change reaches the sessions of the tasks it selects.
+      (harness-call 'task/set-all (list :priority "high" :ids (list plain)))
+      (should (equal "high" (harness-call 'priority/get plain-sid)))
+      (harness-tasks-test-wait-state high 'done)
+      (harness-tasks-test-wait-state plain 'done))))
+
+(ert-deftest harness-tasks-a-write-up-session-takes-the-priority ()
+  "A backlog task's write-up runs at the task's priority, and keeps it."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running nil)
+          (harness-provider-demo-script-override
+           `((:type text :delta ,harness-tasks-test-write-up) (:type done :stop-reason end-turn))))
+      (let* ((id (plist-get (harness-call 'task/submit default-directory "the parser chokes"
+                                          (list :refine t :priority "high"))
+                            :id))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (should (equal "high" (harness-call 'priority/get sid)))
+        (harness-tasks-test-wait-state id 'pending)
+        ;; The session that wrote it up goes on with the work, at the same
+        ;; priority.
+        (harness-call 'task/start id)
+        (should (equal "high" (harness-call 'priority/get sid)))
+        (harness-tasks-test-wait-state id 'done)))))
 
 (ert-deftest harness-tasks-free-slots-count-per-project ()
   "A project's free slots count its own working tasks only.

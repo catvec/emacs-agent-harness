@@ -327,7 +327,7 @@ it is by default, until they say it is off."
 (defconst harness-ui-tasks--priorities '("low" "medium" "high")
   "The priorities a task may have, lowest first, as the harness sends them.
 Waiting tasks start by priority, the oldest first among equals
-\(`harness-tasks-priorities').")
+\(`harness-priority-levels', the levels the priority plugin owns).")
 
 (defun harness-ui-tasks--priority (task)
   "TASK's priority: \"low\", \"medium\" or \"high\"; medium when it has none."
