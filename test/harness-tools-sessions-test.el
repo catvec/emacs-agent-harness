@@ -354,7 +354,16 @@ tell it from the user's messages."
           (should (string-match-p "\\[user n-[a-z0-9]+\\] from the user" text)))
         (should (string-match-p tag (harness-tools-sessions-test-ok third "session_search" '(:query "status?"))))))))
 
+(defun harness-tools-sessions-test-wakes (sid)
+  "Return the wake-up messages `session_wait' sent to SID, oldest first."
+  (cl-remove-if-not
+   (lambda (node)
+     (and (eq (plist-get node :kind) 'user)
+          (equal '(:kind system :source "session wait") (harness-node-sender node))))
+   (harness-call 'session/nodes sid)))
+
 (ert-deftest harness-tools-sessions-send-then-wait ()
+  "session_wait registers at once and wakes the session when the others stop."
   (harness-tools-sessions-test-with
     (let ((harness-provider-demo--delay 0.1)
           (me (harness-tools-sessions-test-session))
@@ -364,46 +373,86 @@ tell it from the user's messages."
       (harness-tools-sessions-test-ok me "session_send" (list :session_id b :message "go"))
       ;; Running at once: a wait right after the send cannot see a stale idle.
       (should (harness-call 'agent/running a))
-      (let ((p (harness-call 'tools/execute me (list :id "w1" :name "session_wait" :input (list :session_ids (list a b))))))
-        (should-not (harness-promise-settled-p p))
-        (let ((text (plist-get (harness-test-await p 10) :content)))
-          (should (string-match-p "Done waiting" text))
-          (should (= 2 (cl-count-if (lambda (l) (string-match-p "Reply from the other session" l))
-                                    (split-string text "\n"))))))
+      ;; The call does not block: it registers while both still run.
+      (should (string-match-p "Waiting in the background"
+                              (harness-tools-sessions-test-ok me "session_wait" (list :session_ids (list a b)))))
+      (should (= 1 (hash-table-count harness-tools-sessions--waiters)))
+      (should (string-match-p (regexp-quote (harness-tools-sessions--short a))
+                              (harness-call 'agent/outstanding me)))
+      ;; The wake-up message arrives when both have stopped.
+      (harness-test-wait (lambda () (harness-tools-sessions-test-wakes me)) 10 "the wake-up")
+      (let ((text (plist-get (car (harness-tools-sessions-test-wakes me)) :content)))
+        (should (string-match-p "Done waiting" text))
+        (should (= 2 (cl-count-if (lambda (l) (string-match-p "Reply from the other session" l))
+                                  (split-string text "\n")))))
       (should (zerop (hash-table-count harness-tools-sessions--waiters))))))
 
-(ert-deftest harness-tools-sessions-wait-timeout-and-any ()
+(ert-deftest harness-tools-sessions-wait-already-met-and-timeout ()
+  "A wait that already holds returns the report; a timeout wakes the session."
   (harness-tools-sessions-test-with
     (let ((me (harness-tools-sessions-test-session))
           (idle (harness-tools-sessions-test-session)))
-      ;; Already stopped: returns at once.
+      ;; Already stopped: the report is the call's result, nothing is registered.
       (should (string-match-p "Done waiting" (harness-tools-sessions-test-ok me "session_wait" (list :session_id idle))))
-      ;; Never starts running: times out with a report, not an error.
-      (let ((text (harness-tools-sessions-test-ok me "session_wait" (list :session_id idle :until "running" :timeout_seconds 0.2))))
+      (should (zerop (hash-table-count harness-tools-sessions--waiters)))
+      ;; Never starts running: the call registers, and the timeout wakes it.
+      (should (string-match-p
+               "Waiting in the background"
+               (harness-tools-sessions-test-ok me "session_wait"
+                                               (list :session_id idle :until "running" :timeout_seconds 0.2))))
+      (should (= 1 (hash-table-count harness-tools-sessions--waiters)))
+      (harness-test-wait (lambda () (harness-tools-sessions-test-wakes me)) 5 "the timeout wake-up")
+      (let ((text (plist-get (car (harness-tools-sessions-test-wakes me)) :content)))
         (should (string-match-p "Still waiting" text))
         (should (string-match-p (regexp-quote idle) text)))
       (should (zerop (hash-table-count harness-tools-sessions--waiters))))))
 
-(ert-deftest harness-tools-sessions-wait-ends-with-the-waiting-turn ()
+(ert-deftest harness-tools-sessions-wait-outlives-its-turn-and-drops-on-cancel ()
+  "A registered wait survives the turn that made it, until it fires.
+A turn the user cancelled drops its registrations instead: a turn they
+stopped is not one to start another on."
   (harness-tools-sessions-test-with
-    (let* ((me (harness-tools-sessions-test-session))
-           (other (harness-tools-sessions-test-session))
-           (p (harness-call 'tools/execute me (list :id "w" :name "session_wait"
-                                                    :input (list :session_id other :until "running")))))
-      (harness-test-wait (lambda () (= 1 (hash-table-count harness-tools-sessions--waiters))) 5 "a waiter")
+    (let ((me (harness-tools-sessions-test-session))
+          (other (harness-tools-sessions-test-session))
+          (third (harness-tools-sessions-test-session)))
+      (harness-tools-sessions-test-ok me "session_wait" (list :session_id other :until "running"))
+      (should (= 1 (hash-table-count harness-tools-sessions--waiters)))
+      ;; The turn that registered it ends on its own; the wait stays.
+      (harness-emit 'agent/turn-ended me 'end-turn)
+      (should (= 1 (hash-table-count harness-tools-sessions--waiters)))
+      (should (string-match-p (regexp-quote (harness-tools-sessions--short other))
+                              (harness-call 'agent/outstanding me)))
+      ;; The other session starts running; the wait fires.
+      (harness-tools-sessions-test-ok me "session_send" (list :session_id other :message "go"))
+      (harness-test-wait (lambda () (harness-tools-sessions-test-wakes me)) 5 "the wake-up")
+      (should (zerop (hash-table-count harness-tools-sessions--waiters)))
+      ;; A discarded turn drops what it registered.  Wait for the first
+      ;; wake's own turn to be over so the count below is stable.
+      (harness-tools-sessions-test-idle me)
+      (harness-test-wait (lambda () (not (harness-call 'agent/running other))) 5 "the other turn to end")
+      (harness-tools-sessions-test-ok third "session_send" (list :session_id other :message "again"))
+      (harness-tools-sessions-test-ok me "session_wait" (list :session_id other))
+      (should (= 1 (hash-table-count harness-tools-sessions--waiters)))
       (harness-emit 'agent/turn-ended me 'cancelled)
-      (should (string-match-p "interrupted" (plist-get (harness-test-await p 5) :content)))
-      (should (zerop (hash-table-count harness-tools-sessions--waiters))))))
+      (should (zerop (hash-table-count harness-tools-sessions--waiters)))
+      ;; Nothing woke for the dropped wait, and none of it is outstanding.
+      (should (= 1 (length (harness-tools-sessions-test-wakes me))))
+      (should-not (harness-call 'agent/outstanding me)))))
 
 (ert-deftest harness-tools-sessions-wait-until-blocked-and-answer ()
+  "A wait until another session blocks wakes the session that registered."
   (harness-tools-sessions-test-with
     (let* ((me (harness-tools-sessions-test-session))
            (other (harness-tools-sessions-test-session))
-           (wait (harness-call 'tools/execute me (list :id "w" :name "session_wait"
-                                                       :input (list :session_id other :until "blocked"))))
-           (ask (harness-call 'tools/execute other (list :id "q" :name "ask_user" :input '(:question "Which colour?")))))
-      (let ((text (plist-get (harness-test-await wait 5) :content)))
+           (ask nil))
+      (should (string-match-p
+               "Waiting in the background"
+               (harness-tools-sessions-test-ok me "session_wait" (list :session_id other :until "blocked"))))
+      (setq ask (harness-call 'tools/execute other (list :id "q" :name "ask_user" :input '(:question "Which colour?"))))
+      (harness-test-wait (lambda () (harness-tools-sessions-test-wakes me)) 5 "the wake-up")
+      (let ((text (plist-get (car (harness-tools-sessions-test-wakes me)) :content)))
         (should (string-match-p "waiting on the user: question .*Which colour\\?" text)))
+      (harness-tools-sessions-test-idle me)
       (should (string-match-p "Answered" (harness-tools-sessions-test-ok me "session_control"
                                                                           (list :session_id other :action "answer" :answer "teal"))))
       (should (equal "teal" (plist-get (harness-test-await ask 5) :content))))))
