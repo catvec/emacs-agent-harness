@@ -167,6 +167,7 @@ it can answer for another one.")
     fallback/changed fallback/switched
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed worktree/locked worktree/unlocked session/forked session/head-moved
+    session/nodes-removed
     session/moved session/ext-changed supervisor/changed
     question/answered task/changed task/deleted task/review task/done task/queue permission/dir-allowed permission/dir-revoked
     config/changed harness/reloaded tools/file-written acp/remote-changed pet/changed pet/said version/checked)

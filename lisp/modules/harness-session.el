@@ -406,18 +406,23 @@ A string `:kind' becomes a symbol, and `:is-error' becomes t or nil."
     n))
 
 (defun harness-session--load-nodes (s)
-  "Load the node log of S into memory if not yet done."
+  "Load the node log of S into memory if not yet done.
+A record marked `update' is merged into the node it names, and one
+marked `delete' (see `session/discard-nodes') removes it, so a node
+discarded during a turn stays gone after a reload."
   (unless (harness-session-loaded s)
     (let ((table (harness-session-nodes s)))
       (dolist (rec (harness-call 'store/read-all (harness-session--nodes-name (harness-session-id s))))
         (let ((rec (harness-session--intern-node rec)))
-          (if (equal (plist-get rec :_op) "update")
-              (let ((existing (gethash (plist-get rec :id) table)))
-                (when existing
-                  (puthash (plist-get rec :id)
-                           (harness-plist-merge existing (harness-plist-remove rec :_op))
-                           table)))
-            (puthash (plist-get rec :id) rec table)))))
+          (cond
+           ((equal (plist-get rec :_op) "delete") (remhash (plist-get rec :id) table))
+           ((equal (plist-get rec :_op) "update")
+            (let ((existing (gethash (plist-get rec :id) table)))
+              (when existing
+                (puthash (plist-get rec :id)
+                         (harness-plist-merge existing (harness-plist-remove rec :_op))
+                         table))))
+           (t (puthash (plist-get rec :id) rec table))))))
     (setf (harness-session-loaded s) t)))
 
 (defun harness-session--persist-node (s node &optional update)
@@ -1675,6 +1680,56 @@ after the new head."
     (harness-session--touch s)
     node-id))
 
+(harness-defmethod session/discard-nodes (id node-ids)
+  "Remove NODE-IDS from the transcript of session ID; return the ids removed.
+The named nodes go wherever they are.  A node that kept nodes follow --
+a hint written after the failure, say, before the step is tried again
+-- is no reason to keep a partial answer, so it is re-parented to the
+last node kept before the removed one, and the transcript stays one
+whole chain, in memory and when it is loaded again.  The head moves to
+the newest node that stays, and the removal is announced
+\(`session/nodes-removed', and `session/head-moved' when it moved), so a
+UI following the session drops what went.  This is how the agent drops
+the partial answer of a step that failed and is tried again, rather
+than sending it to the model twice.  Ids that name no node are ignored;
+the return value says what was removed."
+  (let* ((s (harness-session--get id))
+         (table (progn (harness-session--load-nodes s) (harness-session-nodes s)))
+         (gone (make-hash-table :test 'equal))
+         (removed nil))
+    (dolist (node-id node-ids)
+      (when (gethash node-id table) (puthash node-id t gone) (push node-id removed)))
+    (setq removed (nreverse removed))
+    (when removed
+      ;; Every node whose parent goes moves to the last kept ancestor
+      ;; before it, and says so where the node log is kept.
+      (dolist (node (let (all) (maphash (lambda (_ n) (push n all)) table) all))
+        (let ((parent (plist-get node :parent)))
+          (when (and parent (gethash parent gone))
+            (let ((ancestor (plist-get (gethash parent table) :parent)))
+              (while (and ancestor (gethash ancestor gone))
+                (setq ancestor (plist-get (gethash ancestor table) :parent)))
+              (puthash (plist-get node :id)
+                       (plist-put (copy-sequence node) :parent ancestor)
+                       table)
+              (harness-session--persist-node
+               s (list :id (plist-get node :id) :parent ancestor) t)))))
+      ;; The head cannot be a node that went.
+      (let* ((old-head (harness-session-head s))
+             (head old-head))
+        (while (and head (gethash head gone))
+          (setq head (plist-get (gethash head table) :parent)))
+        (setf (harness-session-head s) head)
+        (dolist (node-id removed)
+          (remhash node-id table)
+          (harness-call 'store/append (harness-session--nodes-name id)
+                        (list :_op "delete" :id node-id)))
+        (harness-session--touch s)
+        (harness-emit 'session/nodes-removed id removed)
+        (unless (equal head old-head)
+          (harness-emit 'session/head-moved id head))))
+    removed))
+
 (harness-defmethod session/hint (id text)
   "Append a system hint TEXT to session ID."
   (harness-call 'session/append id (list :kind 'hint :content text)))
@@ -2245,6 +2300,7 @@ its turn ends, and write every record when Emacs exits."
               (session/ext-changed . "(ID KEY VALUE) when a module's setting of the session changed (`session/set-ext'); VALUE nil once removed")
               (session/provider-state-changed . "(ID STATE) when the provider state is replaced by another")
               (session/node-added . "(ID NODE)") (session/node-updated . "(ID NODE TRANSIENT)")
+              (session/nodes-removed . "(ID NODE-IDS) after nodes were dropped from the transcript (`session/discard-nodes')")
               (session/head-moved . "(ID NODE-ID)")
               (session/moved . "(ID OLD-CWD NEW-CWD) after the session moved to another working directory")
               (session/queue-changed . "(ID ITEMS)") (session/pending-changed . "(ID ITEMS)")

@@ -3498,6 +3498,107 @@ keeps it only while it is visible."
   (unless harness-chat--spinner-timer
     (setq harness-chat--spinner-timer (run-at-time 0.1 0.1 #'harness-chat--spinner-tick))))
 
+;;;; Jumping between blocks
+
+(defconst harness-chat--message-kinds '("user" "assistant" "plan")
+  "Node kinds of the transcript's real messages.
+What you and the agent wrote, the agent's plan included.  Thinking, tool
+calls and their results, hints and compactions are the agent's work and
+the harness's notes, not messages.")
+
+(defconst harness-chat--action-kinds '("thinking" "tool-call" "tool-result")
+  "Node kinds of the agent's work between messages.
+A tool result is its call's block, so `tool-result' is here for the
+result of a call the transcript does not show.")
+
+(defun harness-chat--jump-stops (kinds)
+  "Return where the buffer shows the blocks of KINDS, oldest first.
+A run of blocks folded into a collapsed group is one stop, on its
+summary line; expanded, its blocks are stops of their own.  A block the
+buffer does not show yet -- one still streaming, say -- is no stop."
+  (let ((stops nil) (groups nil))
+    ;; Newest first in `harness-chat--order'; the stops are collected
+    ;; oldest first, so a collapsed group is met before its members.
+    (dolist (id (reverse harness-chat--order))
+      (let* ((block (gethash id harness-chat--blocks))
+             (kind (and block (harness-chat-block-kind block))))
+        (when (member kind kinds)
+          (let* ((gid (harness-chat-block-group block))
+                 (group (and gid (gethash gid harness-chat--groups)))
+                 (pos (marker-position (harness-chat-block-start block))))
+            (cond
+             ;; The run's blocks are hidden under one summary line: that
+             ;; line is what a jump can show the reader.
+             ((and group (not (harness-chat-group-expanded group)))
+              (unless (member gid groups)
+                (push gid groups)
+                (when-let* ((start (marker-position (harness-chat-group-start group))))
+                  (push start stops))))
+             (pos (push pos stops)))))))
+    (nreverse stops)))
+
+(defun harness-chat--jump (kinds n what)
+  "Move point N blocks of KINDS on, back when N is negative.
+WHAT names the class of block in the error when the transcript has none
+left that way.  Point lands where the target block starts; a block it is
+already on is passed over, not counted again."
+  (let ((forward (> n 0))
+        (stops (harness-chat--jump-stops kinds)))
+    (unless forward (setq stops (reverse stops)))
+    (dotimes (_ (abs n))
+      (let ((target (cl-find-if (if forward
+                                    (lambda (pos) (> pos (point)))
+                                  (lambda (pos) (< pos (point))))
+                                stops)))
+        (unless target
+          (user-error "No %s %s" what (if forward "below" "above")))
+        (goto-char target)))))
+
+(defun harness-chat-next-message (&optional n)
+  "Move point to the next real message.
+A real message is what you or the agent wrote, the agent's plan
+included; thinking, tool calls and their results are passed over.  With
+prefix argument N, move N messages on; a negative N moves back."
+  (interactive "p")
+  (harness-chat--jump harness-chat--message-kinds (or n 1) "message"))
+
+(defun harness-chat-previous-message (&optional n)
+  "Move point to the previous real message.
+With prefix argument N, move N messages back; a negative N moves on.
+See `harness-chat-next-message'."
+  (interactive "p")
+  (harness-chat--jump harness-chat--message-kinds (- (or n 1)) "message"))
+
+(defun harness-chat-next-user-message (&optional n)
+  "Move point to the next message of your side of the conversation.
+The agent's messages, thinking and tool calls are passed over, so the
+first of them is the prompt the session started with.  With a prefix
+argument N, move N messages on; a negative N moves back."
+  (interactive "p")
+  (harness-chat--jump '("user") (or n 1) "message of yours"))
+
+(defun harness-chat-previous-user-message (&optional n)
+  "Move point to the previous message of your side of the conversation.
+With prefix argument N, move N messages back; a negative N moves on.
+See `harness-chat-next-user-message'."
+  (interactive "p")
+  (harness-chat--jump '("user") (- (or n 1)) "message of yours"))
+
+(defun harness-chat-next-action (&optional n)
+  "Move point to the next tool call or thinking block.
+A run of tool calls folded under one summary line is one stop, however
+many calls it holds.  With a prefix argument N, move N blocks on; a
+negative N moves back."
+  (interactive "p")
+  (harness-chat--jump harness-chat--action-kinds (or n 1) "tool call or thinking"))
+
+(defun harness-chat-previous-action (&optional n)
+  "Move point to the previous tool call or thinking block.
+With prefix argument N, move N blocks back; a negative N moves on.
+See `harness-chat-next-action'."
+  (interactive "p")
+  (harness-chat--jump harness-chat--action-kinds (- (or n 1)) "tool call or thinking"))
+
 ;;;; Other commands
 
 (defun harness-chat-search ()
@@ -3628,6 +3729,15 @@ message sent from it resumes it."
   (define-key map (kbd "C-c C-p") #'harness-chat-edit-permission-pattern)
   (define-key map (kbd "C-c C-f") #'harness-chat-next-diagram)
   (define-key map (kbd "C-c C-b") #'harness-chat-previous-diagram)
+  ;; Moving by block: M-n and M-p by message, M-N and M-P by one of
+  ;; yours, C-M-n and C-M-p by tool call or thinking.  No printable key,
+  ;; so typing still goes to the box wherever point is.
+  (define-key map (kbd "M-n") #'harness-chat-next-message)
+  (define-key map (kbd "M-p") #'harness-chat-previous-message)
+  (define-key map (kbd "M-N") #'harness-chat-next-user-message)
+  (define-key map (kbd "M-P") #'harness-chat-previous-user-message)
+  (define-key map (kbd "C-M-n") #'harness-chat-next-action)
+  (define-key map (kbd "C-M-p") #'harness-chat-previous-action)
   (define-key map (kbd "C-c C-w") #'harness-chat-copy-last-response)
   (define-key map (kbd "C-c C-t") #'harness-chat-toggle-todos)
   (define-key map (kbd "C-c C-u") #'harness-up-to-parent)
@@ -3647,6 +3757,16 @@ e when it has a pattern to edit.
 
 \\[harness-compose-quote-reply] quotes the region, or the agent's message at point, in
 the box, to reply to it; from the box, the agent's last message.
+
+Point moves from block to block without a mouse:
+\\[harness-chat-next-message] and \\[harness-chat-previous-message] go to the next and previous
+real message -- what you or the agent wrote, plans included -- past
+thinking and tool calls;
+\\[harness-chat-next-user-message] and \\[harness-chat-previous-user-message] to the next and
+previous message of your own, the prompt the session started with
+included; \\[harness-chat-next-action] and \\[harness-chat-previous-action] to the next and
+previous tool call or thinking block.  A run of tool calls folded under
+one summary line is one stop.
 
 \\{harness-chat-mode-map}"
   (setq buffer-read-only nil)
@@ -3692,6 +3812,12 @@ the box, to reply to it; from the box, the agent's last message.
         ("C-c C-u" "Go to the session this one came from" harness-up-to-parent)]
        ["Transcript"
         (". TAB" "Fold block" harness-chat-tab)
+        ("M-n" "Next message" harness-chat-next-message)
+        ("M-p" "Previous message" harness-chat-previous-message)
+        ("M-N" "Next message you wrote" harness-chat-next-user-message)
+        ("M-P" "Previous message you wrote" harness-chat-previous-user-message)
+        ("C-M-n" "Next tool call or thinking" harness-chat-next-action)
+        ("C-M-p" "Previous tool call or thinking" harness-chat-previous-action)
         ("C-c C-s" "Search" harness-chat-search)
         ("C-c C-w" "Copy last reply" harness-chat-copy-last-response)
         ("C-c C-e" "Jump to bottom" harness-chat-scroll-to-bottom)

@@ -13,7 +13,7 @@ module needs something more, add it here first.
  ------------------------------- ACP (JSON-RPC over loopback TCP; in-process lisp objects
                                  when `harness-process' is nil)
  State          session, agent, config, project, store, usage, insights, fallback,
-                naming, compaction, handoff, worktree, merge, tasks, tasks-notify,
+                retry, naming, compaction, handoff, worktree, merge, tasks, tasks-notify,
                 supervisor, seed, skills, perms, sandbox, notifications
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
@@ -871,6 +871,16 @@ its sender, and the hint says so (`harness-session--requeue`).
 - `session/set-head ID NODE-ID` — time travel: the next message
   continues from NODE-ID, with a provider conversation cut to match (see
   "Node").  Refused while ID runs a turn.  Event `session/head-moved ID NODE-ID`.
+- `session/discard-nodes ID NODE-IDS` → the ids actually removed.
+  Removes the named nodes wherever they are; a kept node whose parent
+  went is re-parented to the last kept ancestor before it, so the
+  transcript stays one chain, in memory and loaded again (the removal is
+  written to the node log and the re-parenting with it).  The head moves
+  to the newest node kept.  Events `session/nodes-removed ID NODE-IDS`,
+  and `session/head-moved ID NODE-ID` when the head moved.  The agent
+  uses this to drop the partial answer of a step it is about to try
+  again (see agent, retry); a UI shows what went by reloading the head's
+  path.
 - `session/set-provider-state ID STATE`.  Event
   `session/provider-state-changed ID STATE` when STATE differs from the
   one held, so a provider whose live process holds the old conversation
@@ -2366,8 +2376,14 @@ non-interactive session it stays a denial.
   :resets FLOAT :model MODEL-ID :step N)`, the `done` event's keys plus
   the model the step ran on) — a handler that returns `(:retry t)`
   has the step run again, on the session's model as it is then: the
-  fallback module switches the model and retries.  A turn retries at
-  most `harness-agent--max-error-retries` (8) times; otherwise, and
+  fallback module switches the model and retries, and the retry module
+  tries the same model again after a transient failure.  Before the
+  step runs again, the partial answer it had streamed is dropped
+  (`harness-agent--rewind-step`, `session/discard-nodes'): neither the
+  transcript nor the model is sent the same tokens twice.  Nothing is
+  dropped for a hosted-loop provider, whose own conversation cannot be
+  rewound.  A turn retries at most
+  `harness-agent--max-error-retries` (8) times; otherwise, and
   without a handler, the turn ends with `error` as before.
 - Events `agent/turn-started SID`, `agent/turn-ended SID REASON`,
   `agent/cancelling SID`,
@@ -2739,6 +2755,56 @@ switching off; running out is still noticed, shown and hinted.
   forgets its models' marks too); → non-nil when one went.
   `fallback/mark KEY &rest (:kind :until :reason)` marks by hand.
   Event `fallback/changed` after any mark or session record changes.
+
+### retry
+
+A step that failed because the network hiccuped -- a connection reset,
+an empty reply, a timeout, a gateway's 502 -- or because the provider
+asked the caller to slow down, is tried again on the same provider.
+The HTTP layer already retries a request whose failure nothing reached
+the caller from (`harness-http--retry-delay' below), so what this module
+sees is a failure that got further: a stream cut in the middle of the
+answer, or a transport failure that outlived those tries.
+
+- What counts: a failed step whose FAILURE (see `agent/step-error`) has
+  `:error-kind` `transport` (`harness-provider-openai' names a 5xx, a
+  connection-level failure curl reported, and a stream that ended
+  without headers that way) or `rate-limit` (HTTP 429), or, without a
+  kind, whose error text reads as one of those
+  (`harness-retry--transient-text-p`: "connection reset", "empty
+  reply", "could not resolve", "timed out", "rate limit"...).  Quota
+  and billing failures are the fallback module's and are never answered
+  here; neither is a failure another handler already answered.
+- Bounded: at most `harness-retry-max-attempts` (3) times per turn; the
+  count resets when a turn starts.  The wait before each try doubles
+  (`harness-retry-delay`, 1s, doubled, spread by
+  `harness-retry-jitter`), capped at `harness-retry-max-delay` (30s)
+  and never shorter than the `:retry-after` a rate limit asked for.
+  Each wait, and the giving up, is a hint on the session
+  ("network error: the connection was reset by the peer (curl 56: ...);
+  trying again in 2 s (1 of 3)").
+- `agent/step-error` filter at priority 60, after the fallback (50), so
+  a provider that ran out is moved before this module is asked.
+- A step tried again runs with the partial answer the failed one
+  streamed already dropped by the agent (`session/discard-nodes'), so
+  a retry cannot duplicate content.  A turn cancelled while it waits
+  tries nothing (`harness-retry--wait').
+
+The HTTP layer's own retries (`harness-http'): a request that failed
+transiently -- curl exits 6, 7, 28 before the response began, 35, 52,
+55, 56 -- and of which no body byte reached the caller is tried again
+`harness-http-max-retries' (3) times, waiting `harness-http-retry-delay'
+doubled, capped at `harness-http-retry-max-delay' (15s) and spread by
+`harness-http-retry-jitter'; the delay a retryable response (408, 429,
+500, 502, 503, 504) asked for in Retry-After is a minimum.  A request
+streams when it has an `:on-chunk' function: a retryable response is
+then not retried by the HTTP layer (the step layer does it), and a
+request whose body already reached the caller is never retried at all.
+`harness-http-request' takes `:retry' (`t' for any method, a number, 0
+for none; nil retries a GET or a HEAD only), and a download is started
+over, partial file deleted, when a transfer is cut
+(`harness-http-max-retries' times by default).  A cancelled request and
+a request whose own timeout fired are never retried.
 
 ### compaction
 
@@ -5370,7 +5436,11 @@ while it is about the revision running now and at most MAX-AGE seconds
 old; otherwise a check runs, or the one running is joined (replaced
 after five minutes).  Checks also run 30 s after the start, 3 s after
 `harness/reloaded` and every half hour; each report is announced as
-`version/checked REPORT`, forwarded to UIs.  Git always runs
+`version/checked REPORT`, forwarded to UIs.  `version/report` → the
+last report while it is about the revision running now, else nil, and
+never checks: a UI connecting asks for it, so its nag icon shows what
+the last check found without making a harness just started check
+early.  Git always runs
 asynchronously, without optional locks, with a timeout and never
 prompting (`harness-revision-git-environment`: no terminal, an empty
 GIT_ASKPASS, ssh in BatchMode, no credential helper for ls-remote).  A
@@ -6222,7 +6292,25 @@ checkout has them.
 Opening it shows the last report at once and asks `version/check` with
 a max-age of a minute; `g` asks with 0; `version/checked` redraws it,
 and the menu's Version entry says "not the latest" after a report that
-found the harness behind.
+found the harness behind.  So does a nag icon (`harness-icon-update`,
+an arrow up in a circle, in `harness-caution-face`;
+`harness-ui-version-nag`) in the places `harness-ui-version-nag-places`
+names: the mode line notifier after its "harness"
+(`harness-ui-notify-segment-functions`, which keeps the notifier
+showing with no session active), a chat's header line before [menu]
+(`harness-chat-header-end-functions`) and the board's
+(`harness-ui-tasks-header-functions`), both after the pet's face and
+at priority 65, so in a narrow window it goes after a chat's model,
+and before a chat's name and the board's spend.  Its `help-echo` names the origins with commits the harness
+lacks; a click runs `harness-version`; it has no `mouse-face`, which
+would box the image.  `harness/reloaded` hides it until the next
+`version/checked` (`harness-ui-version-behind-p`: the report is about
+the commit that ran before), and connecting to a harness forgets the
+last one's report and asks `version/report` when no page shows (a page
+asks `version/check`); an answer arriving after an announced report is
+dropped.  The places redraw when the icon comes or goes
+(`harness-ui-version--nag-changed`); a reload of the file adds its
+hooks again, as the module is not initialised again.
 
 Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in six
 sections -- requires your input, ready for review, merging, in progress,
@@ -6599,7 +6687,11 @@ all again, RET a session or task line's session; a redraw keeps every
 window's start and point lines), worktrees (`harness-ui-worktree`),
 notifier
 (`harness-ui-notify`: global mode-line segment with blocked and running
-counts, idle ones too with `harness-ui-notify-show-idle`, clickable), BTW side window (`harness-ui-btw`: a new, empty
+counts, idle ones too with `harness-ui-notify-show-idle`, clickable;
+`harness-ui-notify-segment-functions` add segments of other modules
+after its "harness", such as the version page's nag icon, and keep it
+showing with no session active), BTW side window (`harness-ui-btw`: a
+new, empty
 session listed under the session it is opened over but sharing nothing
 with it or with other BTWs (`session/btw`), or, over a view that sets
 `harness-ui-btw-start-function`, a new conversation the view starts, shown
