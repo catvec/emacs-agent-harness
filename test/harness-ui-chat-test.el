@@ -781,6 +781,79 @@ cost the UI as much for chats nobody looked at as for the one it showed."
         (should-not harness-chat--stale)
         (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "more")) 'italic))))))
 
+;;;; Very long messages
+
+(ert-deftest harness-ui-chat-long-message-shows-a-page ()
+  "A message of hundreds of KB shows one page, the rest behind a button.
+In the buffer whole, redisplay wraps the enormous text and lays it out
+on every redisplay, and `recenter' and `harness-ui-text-height' walk
+all of it: opening or scrolling such a chat froze Emacs for seconds
+(2026-10-09).  The tool output and the report view already capped what
+they show; a message that long does too now."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Long message"))
+           (buf (harness-ui-chat-test-open sid))
+           ;; One enormous line, as the harness's own long messages are.
+           (content (make-string 800000 ?x))
+           (limit harness-chat--message-limit))
+      (with-current-buffer buf
+        (harness-chat--apply-update (list :sessionUpdate "_harness/node"
+                                          :node (list :id "n-long" :kind "assistant" :content content)))
+        (let ((block (gethash "n-long" harness-chat--blocks)))
+          ;; The whole message is kept ...
+          (should (equal content (harness-chat-block-content block)))
+          ;; ... while the buffer holds one page of it, and the button.
+          (should (< (buffer-size) (+ limit 2000)))
+          (should (harness-ui-chat-test-find buf (format "show more (%d more chars)" (- 800000 limit))))
+          ;; Pressing the button shows another page, not the whole message.
+          (goto-char (harness-ui-chat-test-find buf "show more"))
+          (harness-chat-push)
+          (should (= (* 2 limit) (harness-chat-block-shown block)))
+          (should (< (buffer-size) (+ (* 2 limit) 2000)))
+          (should (harness-ui-chat-test-find buf (format "show more (%d more chars)" (- 800000 (* 2 limit))))))
+        ;; A message one page and a bit long shows the rest, not more pages.
+        (harness-chat--apply-update (list :sessionUpdate "_harness/node"
+                                          :node (list :id "n-rest" :kind "assistant"
+                                                      :content (make-string (+ limit 5000) ?y))))
+        (should (harness-ui-chat-test-find buf (format "show the rest (%d more chars)" 5000)))))))
+
+(ert-deftest harness-ui-chat-long-system-message-shows-a-page ()
+  "The same for the enormous message the harness sends a worker itself.
+A supervisor's step prompt, the plan and a report are user messages
+with a sender (see `harness-node-sender'); one of them was the message
+the user's Emacs froze on."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Long system message"))
+           (buf (harness-ui-chat-test-open sid))
+           (content (make-string 800000 ?s))
+           (limit harness-chat--message-limit))
+      (with-current-buffer buf
+        (harness-chat--apply-update
+         (list :sessionUpdate "_harness/node"
+               :node (list :id "n-prompt" :kind "user" :content content
+                           :meta (list :from (harness-sender-system "supervisor")))))
+        (should (harness-ui-chat-test-find buf "System · supervisor"))
+        (should (< (buffer-size) (+ limit 2000)))
+        (should (harness-ui-chat-test-find buf (format "show more (%d more chars)" (- 800000 limit))))))))
+
+(ert-deftest harness-ui-chat-streaming-a-long-message-stays-a-page ()
+  "A long message streaming in is drawn a page at a time, not whole.
+The chunks are appended to the buffer as they come and rendered
+shortly after; appended whole, a message of hundreds of KB would be in
+the buffer -- and laid out on every redisplay -- until then."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Streaming long message"))
+           (buf (harness-ui-chat-test-open sid))
+           (limit harness-chat--message-limit)
+           (chunk (make-string 5000 ?z)))
+      (with-current-buffer buf
+        (harness-chat--apply-update (list :sessionUpdate "_harness/node"
+                                          :node (list :id "n-stream" :kind "assistant" :content "")))
+        (dotimes (_ 10)
+          (harness-chat--apply-update (harness-ui-chat-test-chunk "n-stream" chunk)))
+        (should (= (* 10 5000) (length (harness-chat-block-content (gethash "n-stream" harness-chat--blocks)))))
+        (should (< (buffer-size) (+ limit 2000)))))))
+
 ;;;; The activity line
 
 (defun harness-ui-chat-test-activity-line (buf)

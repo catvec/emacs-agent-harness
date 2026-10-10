@@ -4862,7 +4862,13 @@ Chat buffer (`harness-ui-chat`): transcript region (read-only) + queue
 list + attachments row + compose region at the bottom.  Rendering is
 incremental (append and in-place update by node id using markers);
 older history renders in chunks on demand so a million-token session
-stays snappy.  A checkout (`session/head-moved`) makes the transcript
+stays snappy.  A message longer than `harness-chat--message-limit`
+characters is drawn a page at a time as well, the rest behind a "show
+more" button that adds a page a press: in the buffer whole -- the plan
+or a step prompt a supervisor sends a worker, or a model's long answer
+-- every redisplay of the chat wraps and lays out all of it, and
+`recenter' and `harness-ui-text-height' walk it, so opening or
+scrolling the chat froze Emacs for seconds.  A checkout (`session/head-moved`) makes the transcript
 another path, so the buffer loads it again rather than leave the
 branch behind on screen.  Markdown is rendered by the built-in renderer in
 `harness-ui-markdown` (headings, emphasis, code spans, fenced code with
