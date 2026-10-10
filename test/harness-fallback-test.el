@@ -62,9 +62,10 @@ the events to send, `start' aside."
 
 (defmacro harness-fallback-test-with (&rest body)
   "Run BODY with the state layer, the fallback and the scripted providers.
-`alpha' lists a-tiny, a-mid, a-top (its frontier) and a-super (dearer,
-named by no tier); `beta' lists b-mini, b-flash and b-pro; `hosted'
-runs its own loop.  Each answers \"ok\" until a test scripts it."
+`alpha' lists a-tiny, a-mid, a-top (its hard and frontier model) and
+a-super (dearer, named by no tier); `beta' lists b-mini (at low
+thinking), b-flash and b-pro, and has no frontier model; `hosted' runs
+its own loop.  Each answers \"ok\" until a test scripts it."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
@@ -89,12 +90,13 @@ runs its own loop.  Each answers \"ok\" until a test scripts it."
                  (:name "a-mid" :pricing (:input 3.0 :output 6.0))
                  (:name "a-top" :label "Alpha Top" :pricing (:input 5.0 :output 10.0))
                  (:name "a-super" :label "Alpha Super" :pricing (:input 10.0 :output 50.0)))
-        :tiers '(:balanced "a-mid" :frontier "a-top"))
+        :tiers '(:medium "a-mid" :hard "a-top" :frontier "a-top"))
        (harness-fallback-test-provider
         'beta '((:name "b-mini" :pricing (:input 0.1 :output 0.2))
                 (:name "b-flash" :label "Beta Flash" :pricing (:input 0.2 :output 0.4))
                 (:name "b-pro" :label "Beta Pro" :pricing (:input 0.6 :output 1.2)))
-        :tiers '(:cheap "b-mini" :balanced "b-flash" :frontier "b-pro"))
+        :tiers '(:simple (:model "b-mini" :thinking "low") :medium "b-flash" :hard "b-pro"
+                 :frontier nil))
        (harness-fallback-test-provider
         'hosted '((:name "h-one" :label "Hosted One" :pricing (:input 1.0 :output 2.0)))
         :capabilities '(:hosted-loop t))
@@ -154,23 +156,41 @@ runs its own loop.  Each answers \"ok\" until a test scripts it."
 ;;;; Models of similar ability
 
 (ert-deftest harness-fallback-tiers-map-models-across-providers ()
-  "A model's tier is the one its provider names it for, else its price's."
+  "A model's tier is the one its provider names it for, else its price's.
+A provider with no model for the tier stands for the nearest it has."
   (harness-fallback-test-with
-    (should (eq :frontier (harness-provider-model-tier "alpha:a-top")))
-    (should (eq :balanced (harness-provider-model-tier "alpha:a-mid")))
-    ;; Named by no tier: the dearest third is frontier, the cheapest cheap.
+    ;; Named for hard and frontier: hard comes first.
+    (should (eq :hard (harness-provider-model-tier "alpha:a-top")))
+    (should (eq :medium (harness-provider-model-tier "alpha:a-mid")))
+    ;; Named by no tier: the dearest is frontier, the cheapest simple.
     (should (eq :frontier (harness-provider-model-tier "alpha:a-super")))
-    (should (eq :cheap (harness-provider-model-tier "alpha:a-tiny")))
-    (should (eq :balanced (harness-provider-model-tier "nowhere:model")))
+    (should (eq :simple (harness-provider-model-tier "alpha:a-tiny")))
+    (should (eq :medium (harness-provider-model-tier "nowhere:model")))
     (should (eq 'frontier (harness-call 'provider/model-tier "alpha:a-super")))
     ;; A provider id stands for the provider.
-    (should (equal "beta:b-pro" (harness-call 'provider/tier-model "beta" 'frontier)))
+    (should (equal "beta:b-pro" (harness-call 'provider/tier-model "beta" 'hard)))
+    (should-not (harness-call 'provider/tier-model "beta" 'frontier))
     (should (equal "beta:b-mini" (harness-provider-tier-model 'beta)))
+    ;; Beta has no frontier model: alpha's frontier carries on on its hard one.
     (should (equal "beta:b-pro" (harness-fallback--entry-model "beta" "alpha:a-super")))
+    (should (equal "beta:b-pro" (harness-fallback--entry-model "beta" "alpha:a-top")))
     (should (equal "beta:b-flash" (harness-fallback--entry-model "beta" "alpha:a-mid")))
     (should (equal "beta:b-mini" (harness-fallback--entry-model "beta" "alpha:a-tiny")))
+    ;; And back: alpha names no simple model, so its prices decide.
+    (should (equal "alpha:a-tiny" (harness-fallback--entry-model "alpha" "beta:b-mini")))
+    (should (equal "alpha:a-top" (harness-fallback--entry-model "alpha" "beta:b-pro")))
     ;; A model id is itself.
     (should (equal "beta:b-mini" (harness-fallback--entry-model "beta:b-mini" "alpha:a-super")))))
+
+(ert-deftest harness-fallback-tier-order-looks-below-first ()
+  "A provider without a model of the tier stands for its next best: the
+tiers below first, the strongest of them first, then those above."
+  (should (equal '(frontier hard medium simple) (harness-fallback--tier-order 'frontier)))
+  (should (equal '(hard medium simple frontier) (harness-fallback--tier-order 'hard)))
+  (should (equal '(medium simple hard frontier) (harness-fallback--tier-order 'medium)))
+  (should (equal '(simple medium hard frontier) (harness-fallback--tier-order 'simple)))
+  ;; A tier it does not know is medium.
+  (should (equal '(medium simple hard frontier) (harness-fallback--tier-order 'cheap))))
 
 (ert-deftest harness-fallback-claude-maps-to-deepseek ()
   "The real catalogues: Claude's models land on DeepSeek's of the same tier."
@@ -182,14 +202,19 @@ runs its own loop.  Each answers \"ok\" until a test scripts it."
         (harness-test-load-module m))
       (unwind-protect
           (progn
+            ;; Fable alone is frontier: Opus 5.5 is hard, the strongest
+            ;; model the harness picks on its own.
             (should (eq :frontier (harness-provider-model-tier "claude:claude-fable-5-1")))
-            (should (eq :frontier (harness-provider-model-tier "claude:claude-opus-5-5")))
-            (should (eq :balanced (harness-provider-model-tier "claude:claude-sonnet-5")))
-            (should (eq :cheap (harness-provider-model-tier "claude:claude-haiku-4-5-20251001")))
-            (should (eq :balanced (harness-provider-model-tier "deepseek:deepseek-flash")))
-            (should (equal "deepseek:deepseek-v4-pro" (harness-fallback--entry-model "deepseek" "claude:claude-fable-5-1")))
+            (should (eq :hard (harness-provider-model-tier "claude:claude-opus-5-5")))
+            (should (eq :medium (harness-provider-model-tier "claude:claude-sonnet-5")))
+            (should (eq :simple (harness-provider-model-tier "claude:claude-haiku-4-5-20251001")))
+            (should (eq :medium (harness-provider-model-tier "deepseek:deepseek-flash")))
+            ;; DeepSeek has no frontier model: Flash, its hard one, stands for Fable.
+            (should (equal "deepseek:deepseek-flash" (harness-fallback--entry-model "deepseek" "claude:claude-fable-5-1")))
+            (should (equal "deepseek:deepseek-flash" (harness-fallback--entry-model "deepseek" "claude:claude-opus-5-5")))
             (should (equal "deepseek:deepseek-flash" (harness-fallback--entry-model "deepseek" "claude:claude-sonnet-5")))
-            (should (equal "claude:claude-sonnet-5" (harness-fallback--entry-model "claude" "deepseek:deepseek-flash"))))
+            (should (equal "claude:claude-sonnet-5" (harness-fallback--entry-model "claude" "deepseek:deepseek-flash")))
+            (should (equal "claude:claude-opus-5-5" (harness-fallback--entry-model "claude" "deepseek:deepseek-v4-pro"))))
         (harness-provider-unregister 'deepseek)
         (harness-fallback--shutdown)))))
 
@@ -212,7 +237,8 @@ the session remembers its own model."
            (switched nil))
       (harness-on 'fallback/switched (lambda (&rest args) (push args switched)))
       (should (eq 'end-turn (plist-get (harness-fallback-test-prompt sid "look around") :stop-reason)))
-      ;; Two steps on alpha, then its frontier's match at beta.
+      ;; Two steps on alpha, then the nearest match at beta: it has no
+      ;; frontier model, so its hard one.
       (should (equal '("alpha:a-super" "alpha:a-super" "beta:b-pro") (harness-fallback-test-models-asked)))
       (should (equal "beta:b-pro" (plist-get (harness-call 'session/get sid) :model)))
       (should (equal (list (list sid "alpha:a-super" "beta:b-pro" 'out)) switched))
@@ -524,9 +550,12 @@ scoping the used-up window to one model narrows a whole-provider mark."
       (should (equal "Beta" (plist-get beta :label)))
       (should (null (plist-get beta :model)))
       (should (eq 'billing (plist-get (plist-get beta :mark) :kind)))
-      (should (equal '("cheap" "balanced" "frontier")
+      ;; Beta has no frontier model, so no frontier line.
+      (should (equal '("simple" "medium" "hard")
                      (mapcar (lambda (tier) (plist-get tier :tier)) (plist-get beta :tiers))))
       (should (equal "beta:b-pro" (plist-get (nth 2 (plist-get beta :tiers)) :model)))
+      (should (equal '("low" nil nil)
+                     (mapcar (lambda (tier) (plist-get tier :thinking)) (plist-get beta :tiers))))
       (should (equal "Alpha Top" (plist-get top :label)))
       (should (eq t (plist-get top :registered)))
       (should-not (plist-get top :mark))

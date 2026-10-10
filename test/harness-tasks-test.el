@@ -3622,6 +3622,70 @@ that started none carries no key."
       (harness-call 'session/append sid (list :kind 'tool-result :call-id "b2" :output "ok"))
       (should-not (plist-get (harness-tools-handin--call sid "b2" 1) :child-id)))))
 
+(ert-deftest harness-tasks-hand-in-quotes-a-call-by-name-or-handle ()
+  "Evidence may name a call by its tool, or by the `#N' handle a miss lists.
+The newest call of a tool is the one quoted; `#N' counts every
+non-hand_in call, newest first, and a hand_in call appended by a failed
+attempt does not shift it."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-handin)
+    (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "bash" :call-id "b1"
+                                              :title "Bash: one" :input '(:command "one")))
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "bash" :call-id "b2"
+                                              :title "Bash: two" :input '(:command "two")))
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "read_file" :call-id "r1"
+                                              :title "Read file: x" :input '(:path "x")))
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "bash" :call-id "b3"
+                                              :title "Bash: three" :input '(:command "three")))
+      ;; Newest first: b3, r1, b2, b1.
+      (should (equal "b3" (plist-get (harness-tools-handin--call sid "bash" 1) :call-id)))
+      (should (equal "b3" (plist-get (harness-tools-handin--call sid "last" 1) :call-id)))
+      (should (equal "r1" (plist-get (harness-tools-handin--call sid "read_file" 1) :call-id)))
+      (should (equal "r1" (plist-get (harness-tools-handin--call sid "#2" 1) :call-id)))
+      (should (equal "b2" (plist-get (harness-tools-handin--call sid "bash#2" 1) :call-id)))
+      ;; A failed hand_in appends its own call; it is not named by the
+      ;; tool-name or handle forms and is not counted, so the handles
+      ;; above still mean the same thing.  An exact id names it, as it
+      ;; always did: the review fixture hands in quoting its own call.
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "hand_in" :call-id "h1"
+                                              :title "Hand in the finished work" :input nil))
+      (should (equal "b3" (plist-get (harness-tools-handin--call sid "#1" 1) :call-id)))
+      (should (equal "r1" (plist-get (harness-tools-handin--call sid "#2" 1) :call-id)))
+      (should (equal "h1" (plist-get (harness-tools-handin--call sid "h1" 1) :call-id)))
+      (should (string-match-p "\\`Evidence 1: no tool call hand_in"
+                              (harness-tools-handin--call sid "hand_in" 1))))))
+
+(ert-deftest harness-tasks-hand-in-quotes-a-call-by-node-id ()
+  "A call's node id, and its tool-result node's id, both name the call."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-handin)
+    (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "bash" :call-id "b1"
+                                              :id "n-call" :title "Bash: x" :input '(:command "x")))
+      (harness-call 'session/append sid (list :kind 'tool-result :call-id "b1" :id "n-result" :output "ok"))
+      (should (equal "b1" (plist-get (harness-tools-handin--call sid "n-call" 1) :call-id)))
+      (should (equal "b1" (plist-get (harness-tools-handin--call sid "n-result" 1) :call-id)))
+      (should (equal "ok" (plist-get (harness-tools-handin--call sid "n-result" 1) :output))))))
+
+(ert-deftest harness-tasks-hand-in-miss-lists-handles ()
+  "A wrong reference lists the calls a retry may quote, newest first.
+Each entry carries its `#N', node id, call id and a distinguishing
+snippet."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-handin)
+    (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "bash" :call-id "b1"
+                                              :title "Bash" :input '(:command "cd /x && scripts/test.sh")))
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "bash" :call-id "b2"
+                                              :title "Bash" :input '(:command "scripts/lint.sh")))
+      (let ((msg (harness-tools-handin--call sid "nope" 3)))
+        (should (stringp msg))
+        (should (string-match-p "\\`Evidence 3: no tool call nope in this session" msg))
+        ;; Newest first: the lint call is #1, the test run #2.
+        (should (string-match-p "#1 .+ b2 (bash: scripts/lint.sh)" msg))
+        (should (string-match-p "#2 .+ b1 (bash: cd /x && scripts/test.sh)" msg))))))
+
 (ert-deftest harness-tasks-hand-in-offered-to-task-sessions-only ()
   "Only a task's session is offered hand_in; the catalogue keeps every tool."
   (harness-tasks-test-with

@@ -19,7 +19,7 @@
 ;;   summary of the whole conversation.  It reads all of it again, from
 ;;   the prompt cache while that lasts and uncached once it lapsed.
 ;; - `brief': a cheap model (`harness-compaction-brief-model', by
-;;   default the cheap tier of the session's provider) summarises only
+;;   default the simple tier of the session's provider) summarises only
 ;;   the first and last messages, as a handoff's new model does
 ;;   (`compact-new'): cheap and bounded however long the conversation,
 ;;   but most of its middle is not in it, which the summary's caveat says.
@@ -126,11 +126,11 @@ kind, with what each costs."
   "Model that writes a brief summary, as PROVIDER:NAME, or `auto'.
 A brief summary is made from only the first and last messages of a
 conversation, a job a cheap model does about as well as any.  `auto'
-\(the default) asks the session's provider for its `cheap' tier (see
+\(the default) asks the session's provider for its `simple' tier (see
 `harness-provider-tier-model'), falling back to the session's own model
 when the provider names none.  A PROVIDER:NAME forces that model, and
 nil uses the session's own model."
-  :type '(choice (const :tag "The session provider's cheap model" auto)
+  :type '(choice (const :tag "The session provider's simple model" auto)
                  (const :tag "The session's own model" nil)
                  (string :tag "Model" :names model))
   :safe (lambda (v) (or (memq v '(auto nil)) (stringp v)))
@@ -211,7 +211,7 @@ See `harness-compaction-brief-model'."
         (choice harness-compaction-brief-model))
     (cond ((or (eq choice 'auto) (equal choice "auto"))
            (or (and model (harness-method-exists-p 'provider/tier-model)
-                    (ignore-errors (harness-call 'provider/tier-model model 'cheap)))
+                    (ignore-errors (harness-call 'provider/tier-model model 'simple)))
                model))
           ((and (stringp choice) (not (string-empty-p choice))) choice)
           (t model))))
@@ -838,7 +838,7 @@ messages with a note of what was left out, never the whole
 conversation: a bound on what a summariser that has to be sent the
 conversation as text costs.  A summary of a sample is a `brief' one,
 and a `brief' one is always of a sample, written by OPTS `:model' or
-else `harness-compaction-brief-model' (the cheap tier of the session's
+else `harness-compaction-brief-model' (the simple tier of the session's
 provider by default), and ends in a note saying what it lacks.  OPTS
 `:caveat' replaces that note, nil for none; a handoff ends its summary
 with its own.  A summariser that keeps the conversation itself (a hosted
