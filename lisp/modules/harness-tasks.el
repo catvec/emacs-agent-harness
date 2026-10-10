@@ -18,7 +18,10 @@
 ;; session's context window, so the harness compacts a task sooner and
 ;; hands it a smaller transcript to carry on from.  Set it to nil to
 ;; give task sessions the whole window, like any other session, or to
-;; another number of tokens to choose how often they compact.
+;; another number of tokens to choose how often they compact.  A task
+;; session created with the cap is told about it in a hint naming the
+;; setting (`harness-tasks--context-limit-hint'), so the cap is never
+;; silent.
 ;;
 ;; In a git project a task owns the whole life of its change: it starts
 ;; in a fresh worktree on a branch of its own (the `worktree' module),
@@ -391,9 +394,9 @@ Whichever comes first of this, `harness-tasks-recap-turns' and
 
 (defcustom harness-tasks-recap-model 'auto
   "Model that writes task recaps.
-`auto' asks the session's provider for its cheap tier, falling back
+`auto' asks the session's provider for its simple tier, falling back
 to the session's own model; nil uses the session's own model."
-  :type '(choice (const :tag "Provider's cheap tier" auto)
+  :type '(choice (const :tag "Provider's simple tier" auto)
                  (const :tag "The task's model" nil)
                  (string :tag "Model" :names model))
   :group 'harness)
@@ -1245,7 +1248,7 @@ is not merged yet.  Return a promise, or nil when there is nothing to do."
 ;;;; The task prompts
 
 (defconst harness-tasks-hand-in-prompt
-  "Finish with the hand_in tool rather than a plain reply: it hands your summary and your evidence to the user and ends the turn, so the task waits for their review.  The evidence is required, and shows the work rather than describing it -- an image or a video of what you built whenever there is anything to see (take the screenshot first), and the tool call that proves a claim about a command (the tests pass, the command's output) quoted by its call id.  A file, a code block or a note is evidence for what cannot be shown.  Then stop; do not start more work."
+  "Finish with the hand_in tool rather than a plain reply: it hands your summary and your evidence to the user and ends the turn, so the task waits for their review.  The evidence is required, and shows the work rather than describing it -- an image or a video of what you built whenever there is anything to see (take the screenshot first), and the tool call that proves a claim about a command (the tests pass, the command's output) quoted by its call id, by the tool's name (its newest call) or by the `#N` a previous hand_in error listed, so a run whose log you kept can be quoted without running it again.  A file, a code block or a note is evidence for what cannot be shown.  Then stop; do not start more work."
   "What a task's session is told about handing its finished work in.")
 
 (defun harness-tasks--system-prompt (prompt session)
@@ -1270,7 +1273,7 @@ worktree, how it reaches the main branch -- or, in the main tree
                 (format "You are working on one task, unattended, directly in the project's main working tree %s.  There is no worktree and no branch, and nothing merges your work: what you change, commit or delete takes effect right there.  Do not create a branch or a worktree, and commit only if the task asks for it. "
                         (abbreviate-file-name (or (plist-get task :project) (plist-get task :cwd)))))
                (t "You are working on one task of a board, unattended. "))
-              "Do the whole task there. "
+              "Do the whole task there. Run the checks that cover what you changed while you work, and the project's own full check once before handing in, rather than the whole suite after every edit. "
               (if (plist-get task :worktree)
                   (concat "When you are done, commit all of your changes on that branch "
                           "(git add -A, then git commit with a message saying what the change does). "
@@ -1950,6 +1953,28 @@ so has it compact sooner."
             (and harness-tasks-context-limit
                  (list :context-window-limit harness-tasks-context-limit)))))
 
+(defun harness-tasks--context-limit-hint (limit)
+  "Return the hint saying a task session's context window is capped at LIMIT.
+Nil when LIMIT is nil or is not `harness-tasks-context-limit': nothing
+is said without the cap that setting makes.  The hint names the
+setting, so that a task session's shorter window is never silent, as a
+sub-agent's is not (see `harness-tools-agent-context-limit-hint')."
+  (when (and (numberp limit)
+             (numberp harness-tasks-context-limit)
+             (equal limit harness-tasks-context-limit))
+    (format "Context window capped at %s tokens, as a task session's is (harness-tasks-context-limit)"
+            (harness-format-tokens-compact limit))))
+
+(defun harness-tasks--say-context-limit (sid limit)
+  "Say in session SID's transcript that a task's cap holds it at LIMIT.
+Nothing is said when LIMIT is not the task setting's own cap, and a
+hint that cannot be added fails nothing: the task goes on without it."
+  (when-let* ((hint (harness-tasks--context-limit-hint limit)))
+    (condition-case err
+        (harness-call 'session/hint sid hint)
+      (error (harness-log 'warn "tasks: no context cap hint for %s: %s" sid
+                          (harness-error-short-message err))))))
+
 (defconst harness-tasks-bulk-columns '(active pending backlog needs-input)
   "Task columns a bulk update reaches by default.
 They are the current work: running, pending, backlog and blocked
@@ -2043,17 +2068,23 @@ is what the submitter gave, or nil to take what the task has (a record
 from before priorities lived on sessions says it in its own record).
 The session is named with the task's title when it has one by now, so
 it is not named again; else the title still on its way names it
-\(`harness-tasks--named')."
-  (let ((session (apply #'harness-call 'session/create
-                        :cwd (or cwd (plist-get task :cwd))
-                        (append (and worktree (list :worktree worktree))
-                                (list :ext (harness-priority-ext
-                                            (or priority (harness-priority-of-task task))))
-                                (harness-tasks--name-option task)
-                                (if (harness-tasks--backlog-p task)
-                                    (harness-tasks--refine-settings task)
-                                  (harness-tasks--work-settings task))))))
+\(`harness-tasks--named').  A context limit the settings carry is the
+task setting's cap, and the session's transcript says so
+\(`harness-tasks--say-context-limit')."
+  (let* ((settings (if (harness-tasks--backlog-p task)
+                       (harness-tasks--refine-settings task)
+                     (harness-tasks--work-settings task)))
+         (session (apply #'harness-call 'session/create
+                         :cwd (or cwd (plist-get task :cwd))
+                         (append (and worktree (list :worktree worktree))
+                                 (list :ext (harness-priority-ext
+                                             (or priority (harness-priority-of-task task))))
+                                 (harness-tasks--name-option task)
+                                 settings))))
     (harness-tasks--set (plist-get task :id) :session (plist-get session :id))
+    ;; The task's context limit applies from the start, and says so.
+    (harness-tasks--say-context-limit (plist-get session :id)
+                                      (plist-get settings :context-window-limit))
     session))
 
 (defun harness-tasks--apply-supervisor (task settings)
@@ -2338,6 +2369,11 @@ session that has no name yet takes the task's title."
                        ((harness-tasks--main-tree-p task)
                         (format "Task started in the main tree %s" (abbreviate-file-name cwd)))
                        (t "Task started")))
+        ;; A session that did not carry the task's cap already is told
+        ;; about it now; one that did said so when it was made.
+        (unless (equal (plist-get settings :context-window-limit)
+                       (plist-get session :context-window-limit))
+          (harness-tasks--say-context-limit sid (plist-get settings :context-window-limit)))
         (harness-catch (harness-call-async 'agent/prompt sid
                                            (if (harness-tasks--written-up-p task)
                                                (harness-tasks--blocks
@@ -3121,7 +3157,8 @@ are not tasks yet, newest first."
 Its first message becomes the task's prompt; a session in a git worktree
 keeps it and is merged through the merge queue like any task.  A running
 or blocked session is in progress; an idle one waits for the user.  The
-task context limit applies from now on when there is one."
+task context limit applies from now on when there is one, and the
+session's transcript says so."
   (harness-tasks--load)
   (let ((session (harness-call 'session/get session-id)))
     (unless (harness-tasks--adoptable-p session)
@@ -3146,6 +3183,8 @@ task context limit applies from now on when there is one."
       ;; and nil (turned off) clears a limit the session carried.
       (harness-call 'session/update session-id
                     :context-window-limit harness-tasks-context-limit :silent t)
+      (unless (equal harness-tasks-context-limit (plist-get session :context-window-limit))
+        (harness-tasks--say-context-limit session-id harness-tasks-context-limit))
       (when (and worktree (harness-method-exists-p 'worktree/branch))
         (let ((id (plist-get task :id)))
           (harness-then (harness-call-async 'worktree/branch worktree)

@@ -39,6 +39,7 @@
 (require 'harness-acp)                  ; `harness-acp-permission-answers'
 (require 'harness-ui)
 (require 'harness-ui-compose)
+(require 'harness-ui-markdown)
 
 (defgroup harness-ui-pending nil
   "Requests a session waits on: permissions and questions." :group 'harness-ui)
@@ -1126,6 +1127,20 @@ the diagram redraws it alone (`harness-ui-pending--redraw-question')."
              (if shown (concat "\n" (harness-ui-pending--diagram-area session-id r shown)) ""))
      'harness-ui-pending-question-body pid)))
 
+(defun harness-ui-pending--question-text (question)
+  "Return QUESTION rendered as Markdown, indented under the panel's label.
+The panel is narrow and a question may say a lot: its paragraphs, its
+lists and its code render as they do in a transcript, every line
+indented so it stays under \"Question\".  The plain text is bold; the
+Markdown's own faces, such as a heading's or a code span's, win over
+that."
+  (let ((text (harness-ui-markdown-render (or question ""))))
+    ;; The panel adds the line's newline itself.
+    (setq text (string-remove-suffix "\n" text))
+    (add-face-text-property 0 (length text) 'bold t text)
+    (add-text-properties 0 (length text) (list 'line-prefix "   " 'wrap-prefix "   ") text)
+    text))
+
 (defun harness-ui-pending--insert-question (r)
   "Insert the panel for question record R.
 The question and each option get a line of their own, wrapped under
@@ -1136,7 +1151,7 @@ Options with diagrams get the area showing one of them under them."
         (start (point)))
     (insert (propertize (concat " " (harness-ui-icon 'harness-icon-question) " Question") 'face 'harness-label-face)
             "\n"
-            (propertize (concat "   " (or (plist-get r :question) "")) 'face 'bold 'wrap-prefix "   ")
+            (harness-ui-pending--question-text (plist-get r :question))
             "\n")
     (when (plist-get r :options)
       (insert "\n" (harness-ui-pending-question-body session-id r)))

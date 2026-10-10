@@ -110,6 +110,63 @@ of the harness, and a repository out of reach is none."
   "Return a promise rejected with a `harness-error' saying MESSAGE."
   (harness-rejected (list 'harness-error message)))
 
+;;;; The remote a checkout follows
+
+(defun harness-revision-remote-urls (output)
+  "Parse OUTPUT of git config --get-regexp for remote URLs into (NAME . URL)."
+  (let ((urls nil))
+    (dolist (line (split-string output "\n" t))
+      (when (string-match "\\`remote\\.\\(.+\\)\\.url \\(.+\\)\\'" line)
+        (let ((name (match-string 1 line)))
+          (unless (assoc name urls)
+            (push (cons name (match-string 2 line)) urls)))))
+    (nreverse urls)))
+
+(defun harness-revision-remote (dir &optional branch)
+  "Return a promise of the remote DIR's BRANCH follows, or of nil.
+
+DIR is a git checkout, BRANCH the branch of DIR to resolve, or nil for
+a detached HEAD, which follows none.  The promise is never rejected: a
+checkout git cannot read, or one without a remote, has none to follow.
+The plist is:
+
+  :remote   the name of the remote BRANCH tracks, else \"origin\",
+            else the only remote DIR has
+  :url      that remote's URL, as configured
+  :branch   the branch to fetch or compare with: the one BRANCH tracks
+            on that remote, else BRANCH itself
+  :tracked  non-nil when BRANCH tracks that remote there
+
+The remote a checkout's branch tracks is the one straight.el and other
+package managers configure, and the branch it tracks is the one they
+pull; a checkout that tracks none is read from the same-named branch of
+its origin.  This is what the version module names as an origin and what
+`harness--update-checkout' fetches."
+  (harness-then
+   (harness-all
+    (list (if branch
+              (harness-revision-git dir (list "for-each-ref"
+                                             "--format=%(upstream:remotename)%09%(upstream:remoteref)"
+                                             (concat "refs/heads/" branch)))
+            (harness-resolved ""))
+          (harness-revision-git dir '("config" "--get-regexp" "^remote\\..*\\.url$"))))
+   (lambda (outputs)
+     (let* ((fields (split-string (car (split-string (car outputs) "\n")) "\t"))
+            (remote (nth 0 fields))
+            (ref (nth 1 fields))
+            (urls (harness-revision-remote-urls (cadr outputs)))
+            (tracked (and remote (not (member remote '("" "."))) (assoc remote urls)))
+            (pick (or tracked (assoc "origin" urls)
+                      (and (= 1 (length urls)) (car urls)))))
+       (when pick
+         (let* ((url (cdr pick))
+                (tracked-branch (and tracked ref (string-prefix-p "refs/heads/" ref)
+                                     (string-remove-prefix "refs/heads/" ref))))
+           (list :remote (car pick) :url url
+                 :branch (or tracked-branch branch)
+                 :tracked (and tracked t))))))
+   (lambda (_err) nil)))
+
 ;;;; Checkouts
 
 (defun harness-revision-parse-status (output)
@@ -197,6 +254,30 @@ revision on the first call."
 
 (add-hook 'harness-start-hook #'harness-revision-note-loaded)
 (add-hook 'harness-reload-hook #'harness-revision-note-loaded)
+
+;;;; Reading commits
+
+(defconst harness-revision-commit-format "%H%x1f%ct%x1f%s%x1f%b"
+  "git log format of a commit read as a changelog entry.
+Fields, separated by the ASCII unit separator: the full commit hash,
+the commit time in seconds, the subject and the message body.  Read
+with `-z', so a body of several lines stays one record.  No diff or
+file statistics: a commit is its message.")
+
+(defun harness-revision-parse-commits (output)
+  "Parse OUTPUT of a git log in `harness-revision-commit-format' into plists.
+Each commit is (:commit HASH :date SECONDS :subject TEXT :body TEXT),
+the body empty when the commit has none, in the order git printed
+them.  Output of a log without `-z' reads as one commit."
+  (delq nil
+        (mapcar (lambda (record)
+                  (let ((fields (split-string record "\x1f")))
+                    (when (>= (length fields) 3)
+                      (list :commit (nth 0 fields)
+                            :date (string-to-number (nth 1 fields))
+                            :subject (nth 2 fields)
+                            :body (string-trim (string-join (nthcdr 3 fields) "\x1f"))))))
+                (split-string output "\0" t))))
 
 (provide 'harness-revision)
 ;;; harness-revision.el ends here

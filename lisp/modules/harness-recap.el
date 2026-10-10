@@ -18,7 +18,7 @@
 ;; Unlike naming (`harness-naming'), the request is self-contained: the
 ;; task, its plan and todos, and the tail of its transcript, not the
 ;; whole conversation.  That keeps it short, and it lets the request go
-;; to the provider's cheap tier (`harness-tasks-recap-model' `auto'),
+;; to the provider's simple tier (`harness-tasks-recap-model' `auto'),
 ;; which a fork of the session's own provider state could not.
 ;;
 ;; Checks run when a turn ends, after a tool result, and every
@@ -126,7 +126,7 @@ since the task's last recap, or since it started when it has none."
         (model (plist-get session :model)))
     (cond ((eq choice 'auto)
            (or (and model (harness-method-exists-p 'provider/tier-model)
-                    (ignore-errors (harness-call 'provider/tier-model model 'cheap)))
+                    (ignore-errors (harness-call 'provider/tier-model model 'simple)))
                model))
           ((stringp choice) choice)
           (t model))))
@@ -204,7 +204,7 @@ signal when it could not be stored."
   "Ask the model for a recap of SESSION about TASK; call ON-DONE at its end.
 The request is the one a card's recap is: `harness-recap--system-prompt'
 and what `harness-recap--prompt' makes of TASK and SESSION, at most
-`harness-tasks-recap-max-tokens' tokens, on the cheap tier of
+`harness-tasks-recap-max-tokens' tokens, on the simple tier of
 `harness-tasks-recap-model', with the thinking level of
 `harness-tasks-recap-thinking'.  A recap is one short line, so a nil
 level asks for no thinking (`:no-thinking'): a model whose thinking is
@@ -371,7 +371,7 @@ started, or nil."
 The value is a plist (:text TEXT :at FLOAT): the recap and when it was
 made.  A session that is a task's gives its card's recap; another's
 gives the recap kept for it, written here with the same short model
-call a card's is (the cheap tier, at most
+call a card's is (the simple tier, at most
 `harness-tasks-recap-max-tokens' tokens) and refreshed when
 `harness-tasks-recap-turns', `harness-tasks-recap-seconds' or
 `harness-tasks-recap-tool-calls' say it is stale, or when FORCE is

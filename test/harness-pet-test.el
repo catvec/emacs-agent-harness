@@ -568,14 +568,14 @@ cooldown), and no UI shows it until BODY says one does."
       (should-not (equal seed (plist-get (harness-pet-test-hatch) :seed))))))
 
 (ert-deftest harness-pet-model-follows-the-session ()
-  "`auto' asks the provider of the session for its cheap model."
+  "`auto' asks the provider of the session for its simple model."
   (harness-pet-test-with
     (let ((harness-pet-model 'auto)
           (asked nil))
       (cl-letf (((symbol-function 'harness-method/provider/tier-model)
                  (lambda (model &optional tier) (push (list model tier) asked) "demo:cheap")))
         (should (equal "demo:cheap" (plist-get (harness-call 'pet/get) :model)))
-        (should (equal '(("demo:scripted" cheap)) asked)))
+        (should (equal '(("demo:scripted" simple)) asked)))
       (cl-letf (((symbol-function 'harness-method/provider/tier-model) (lambda (&rest _) nil)))
         (should (equal "demo:scripted" (plist-get (harness-call 'pet/get) :model)))))
     (let ((harness-pet-model nil))
