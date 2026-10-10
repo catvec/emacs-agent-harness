@@ -321,11 +321,11 @@ a pause of SECONDS after each."
 (defconst harness-provider-demo--stream-texts
   '(:first "## Counting as it streams
 
-The header counts this reply while it arrives: the context in use and \
-the output tokens grow with every chunk, a token for every four \
-characters, marked `~` while they are estimates.  When the provider \
-reports its usage, the real numbers replace the estimate, so nothing \
-counts twice.
+The header counts this reply while it arrives: the context in use \
+grows with every chunk, a token for every four characters, marked `~` \
+while it is an estimate, and the session list's Output column grows \
+with it.  When the provider reports its usage, the real numbers \
+replace the estimate, so nothing counts twice.
 
 Thinking that streams no text, as Claude Code's does, counts by the \
 clock at the session's output rate, and a tool call's input counts as \
@@ -339,8 +339,8 @@ context starts from there and grows again as I write."
 came before, the todo list included, and the figures grew from there \
 as this text streamed in:
 
-- the chat header shows the context in use and the output
-- the session list has them in its Context and Output columns
+- the chat header shows the context in use
+- the session list has it and the output in its Context and Output columns
 - a running task's card shows them too
 
 All of it is counted in the harness process, and the views redraw a \

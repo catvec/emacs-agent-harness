@@ -874,10 +874,18 @@ logged."
 
 (defun harness-error-message (err)
   "Return a readable message for ERR (an error data list or string).
-An ACP error, (acp-error CODE MESSAGE DATA), reads as its MESSAGE."
+An ACP error, (acp-error CODE MESSAGE DATA), reads as its MESSAGE.  A
+list whose first element is no defined error type and whose second is a
+string, (curl MESSAGE :code 56), reads as that string: the details would
+otherwise print as \"peculiar error: \\\"...\\\", :code, 56\".  A defined
+error type keeps its own message, (harness-no-such-method NAME) reading
+as \"No such harness method: NAME\"."
   (cond ((stringp err) err)
         ((and (eq (car-safe err) 'acp-error) (stringp (nth 2 err)) (not (string-empty-p (nth 2 err))))
          (nth 2 err))
+        ((and (consp err) (symbolp (car err)) (stringp (cadr err))
+              (not (get (car err) 'error-conditions)))
+         (cadr err))
         ((and (consp err) (symbolp (car err)))
          (condition-case nil (error-message-string err)
            (error (format "%S" err))))

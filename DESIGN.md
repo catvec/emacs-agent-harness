@@ -75,6 +75,7 @@ Functional requirements:
 
 - All messages in session are visible in chat UI
 - Older messages can be viewed by scrolling up, you can return to newer messages by scrolling down
+- The transcript is navigable from the keyboard, without a mouse or a search: point jumps to the next or previous real text message (the user's and the agent's, plans included) past thinking and tool calls, to the next or previous message of the user's alone — the prompt a long session started with included — and to the next or previous tool call or thinking block; a run of tool calls folded under one summary line is a single stop
 - Text from all messages is aligned in the user's language direction (english is left to right)
 - The sender (agent or user) and type () of a message 
 - The sender of a message is identifiable at a glance: user messages open with a "You" name line and a colored bar down their left edge on a slightly lighter background; each agent turn opens with an "Agent" name line on the default background

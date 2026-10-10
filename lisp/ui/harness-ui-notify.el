@@ -3,15 +3,21 @@
 ;;; Commentary:
 
 ;; A small segment in every mode line (through `global-mode-string')
-;; showing how many sessions need the user, are working, or are idle.
-;; It is visible from any buffer as long as one session is active
-;; anywhere in this Emacs, so a user hopping between projects sees
-;; when they are needed.  Clicking it while sessions wait for you opens
+;; showing how many sessions need the user and how many are working;
+;; `harness-ui-notify-show-idle' adds how many are idle.  It is visible
+;; from any buffer while a session waits or works anywhere in this
+;; Emacs, so a user hopping between projects sees when they are needed,
+;; and it is gone when none does.  Clicking it while sessions wait for you opens
 ;; the session list on them, from every project (`harness-sessions-waiting'):
 ;; each with buttons answering what it waits on, the task board's, and
 ;; RET or a click on one switches to its project and opens it there,
 ;; unless it shows there already.  With none waiting the click opens
 ;; the session list.
+;;
+;; Other modules add segments of their own after its "harness"
+;; (`harness-ui-notify-segment-functions'), which show with no session
+;; active too: the version page's icon nags there while the harness is
+;; not the latest.
 
 ;;; Code:
 
@@ -25,8 +31,11 @@
 (defgroup harness-ui-notify nil
   "Mode line notifier for sessions." :group 'harness-ui)
 
-(defcustom harness-ui-notify-show-idle t
-  "Whether idle sessions are counted in the notifier."
+(defcustom harness-ui-notify-show-idle nil
+  "Whether idle sessions are counted in the notifier.
+Off, the notifier counts only the sessions that wait for you and the
+ones at work, and shows nothing while every session is idle: an idle
+session needs nothing, and the session list has them all."
   :type 'boolean :group 'harness-ui-notify)
 
 (defface harness-notify-blocked-face '((t :inherit (harness-status-blocked-face mode-line-emphasis)))
@@ -44,6 +53,28 @@
 (defvar harness-ui-notify--flashing nil)
 
 (defconst harness-ui-notify--construct '(:eval harness-ui-notify--string))
+
+(defvar harness-ui-notify-segment-functions nil
+  "Functions adding segments of their own to the mode line notifier.
+Each is called without arguments whenever the notifier works its text
+out again (`harness-ui-notify-refresh') and returns a string, with its
+separator in front, or nil for nothing.  The strings show after the
+notifier's \"harness\", before the session counts, in order, and keep
+the notifier showing while no session is active.  The text is worked
+out when sessions change, so a module calls `harness-ui-notify-refresh'
+when its segment changes.  Add to it with a symbol, so a reload
+redefines it.  The version page's nag icon shows this way.")
+
+(defun harness-ui-notify--extra ()
+  "Return the segments of `harness-ui-notify-segment-functions', joined."
+  (let ((segments nil))
+    (run-hook-wrapped 'harness-ui-notify-segment-functions
+                      (lambda (fn)
+                        (let ((segment (ignore-errors (funcall fn))))
+                          (when (and (stringp segment) (not (string-empty-p segment)))
+                            (push segment segments)))
+                        nil))
+    (apply #'concat (nreverse segments))))
 
 (defun harness-ui-notify--counts ()
   "Return (BLOCKED RUNNING IDLE) over active sessions."
@@ -81,12 +112,14 @@ in `harness-notify-flash-face' while it flashes."
 
 (defun harness-ui-notify-refresh ()
   "Recompute the notifier text and redraw mode lines."
-  (pcase-let ((`(,blocked ,running ,idle) (harness-ui-notify--counts)))
+  (pcase-let ((`(,blocked ,running ,idle) (harness-ui-notify--counts))
+              (extra (harness-ui-notify--extra)))
     (when (> blocked harness-ui-notify--last-blocked)
       (harness-ui-notify--flash))
     (setq harness-ui-notify--last-blocked blocked)
     (setq harness-ui-notify--string
-          (if (and (zerop blocked) (zerop running) (or (zerop idle) (not harness-ui-notify-show-idle)))
+          (if (and (zerop blocked) (zerop running) (or (zerop idle) (not harness-ui-notify-show-idle))
+                   (string-empty-p extra))
               ""
             (concat
              (propertize " harness" 'face 'harness-dim-face
@@ -95,6 +128,7 @@ in `harness-notify-flash-face' while it flashes."
                                       "Agent harness sessions: click for the list")
                          'mouse-face 'mode-line-highlight
                          'local-map (harness-ui-mouse-keymap #'harness-ui-notify-show-waiting))
+             extra
              (harness-ui-notify--segment blocked 'harness-icon-blocked 'harness-notify-blocked-face
                                          "Sessions waiting for you (mouse-1: list them, to answer them)")
              (harness-ui-notify--segment running 'harness-icon-running 'harness-notify-running-face
@@ -120,7 +154,8 @@ in `harness-notify-flash-face' while it flashes."
 
 ;;;###autoload
 (define-minor-mode harness-notify-mode
-  "Show blocked, running and idle session counts in every mode line."
+  "Show how many sessions wait for you and how many work, in every mode line.
+`harness-ui-notify-show-idle' adds how many are idle."
   :global t :group 'harness-ui-notify
   (if harness-notify-mode
       (progn

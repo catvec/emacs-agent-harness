@@ -636,6 +636,23 @@ and the repository exists.
           (harness-test-await promise 60)
           (should-not harness-version--checking))))))
 
+(ert-deftest harness-version-gives-the-last-report-without-checking ()
+  ;; What a UI asks for as it connects, for its nag icon: a harness just
+  ;; started still checks only when it means to.
+  (skip-unless (executable-find "git"))
+  (harness-version-test-with
+    (let ((w (harness-version-test--world base)))
+      (setq harness-directory (plist-get w :installed))
+      (should-not (harness-call 'version/report))
+      (should-not harness-version--checking)
+      (let ((report (harness-version-test--check)))
+        (should (equal "behind" (plist-get report :verdict)))
+        (should (eq report (harness-call 'version/report))))
+      ;; After a reload the report is about the revision that ran before.
+      (harness-revision-note-loaded)
+      (should-not (harness-call 'version/report))
+      (should-not harness-version--checking))))
+
 (ert-deftest harness-version-checks-by-itself ()
   (harness-version-test-with
     (let ((timer harness-version--timer))
@@ -658,11 +675,13 @@ and the repository exists.
         (should-not harness-version--timer)))))
 
 (ert-deftest harness-version-goes-over-acp ()
-  ;; The UI asks with _harness/version/check and hears version/checked.
+  ;; The UI asks with _harness/version/check and _harness/version/report,
+  ;; and hears version/checked.
   (let ((harness-acp--server-enabled nil))
     (harness-test-reset-bus)
     (harness-test-load-module 'acp))
   (should (harness-acp--extension-allowed-p "version/check"))
+  (should (harness-acp--extension-allowed-p "version/report"))
   (should (memq 'version/checked harness-acp--forwarded-events)))
 
 (ert-deftest harness-version-origins-option-is-documented ()

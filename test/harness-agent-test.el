@@ -1389,5 +1389,63 @@ request brings no state at all: the provider starts anew."
                        (plist-get (harness-call 'session/get id) :provider-node))))
       (harness-off watch))))
 
+
+(defun harness-agent-test-define-scripted ()
+  "Define `scripted', a plain provider whose second step answers.
+Its first step streams a thinking and a text node and then fails, so a
+test can see what a retry does with the partial answer."
+  (let ((calls 0))
+    (harness-define-provider
+     'scripted
+     :label "Scripted"
+     :complete
+     (lambda (request)
+       (let ((on-event (or (plist-get request :on-event) #'ignore))
+             (step (cl-incf calls))
+             (cancelled nil))
+         (harness-run-soon
+          (lambda ()
+            (unless cancelled
+              (funcall on-event '(:type start))
+              (dolist (ev (if (= step 1)
+                              '((:type thinking :delta "thinking it over")
+                                (:type text :delta "half an answer")
+                                (:type done :stop-reason error :error "the line dropped"))
+                            '((:type text :delta "the whole answer")
+                              (:type done :stop-reason end-turn))))
+                (funcall on-event ev)))))
+         (list :cancel (lambda () (setq cancelled t))))))
+    (lambda () calls)))
+
+(ert-deftest harness-agent-retrying-a-step-drops-what-it-streamed ()
+  "A step run again does not repeat the partial answer it had streamed.
+The agent drops the text and thinking nodes the failed step wrote, so
+neither the transcript nor the model holds the half answer twice.  This
+is what lets a handler answer `(:retry t)' for a connection that was
+cut, as the retry module and the fallback do."
+  (harness-agent-test-with
+    (let* ((calls (harness-agent-test-define-scripted)))
+      (harness-add-filter 'agent/step-error
+                          (lambda (value next &rest _)
+                            (funcall next (if (plist-get value :retry)
+                                              value
+                                            (list :retry (= (funcall calls) 1)))))
+                          60)
+      (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                         :model "scripted:m")
+                           :id)))
+        (should (eq 'end-turn
+                    (plist-get (harness-await (harness-call 'agent/prompt id "go")) :stop-reason)))
+        (should (= 2 (funcall calls)))
+        (let ((nodes (harness-call 'session/nodes id)))
+          (should (equal '("the whole answer")
+                         (mapcar (lambda (n) (plist-get n :content))
+                                 (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'assistant))
+                                                   nodes))))
+          (should-not (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'thinking)) nodes))
+          ;; What the failure wrote stays, so the user can see what happened.
+          (should (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'hint)) nodes)))))))
+
+(provide 'harness-agent-test)
 (provide 'harness-agent-test)
 ;;; harness-agent-test.el ends here

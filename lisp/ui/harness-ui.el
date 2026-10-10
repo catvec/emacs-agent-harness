@@ -1959,7 +1959,7 @@ capitalized id."
               provider))))
 
 (defun harness-ui-button (label action &rest props)
-  "Insert a clickable LABEL running ACTION (a command or a function of the button).
+  "Insert a clickable LABEL; ACTION is a command or a function of no arguments.
 PROPS are extra text properties; `:help' sets the tooltip."
   (let ((help (plist-get props :help))
         (face (or (plist-get props :face) 'button)))
@@ -3893,8 +3893,9 @@ only directories are still yours to grant.  See
   "Toggle non-interactive mode for SESSION-ID.
 A non-interactive session never waits for the user: the auto-mode
 judge decides what would ask for permission, and after a denial the
-agent is told to find another way.  The session's header line shows
-which it is; clicking there toggles too."
+agent is told to find another way.  The session's header line says so
+while it is non-interactive, and a click there makes it interactive
+again."
   (interactive)
   (let* ((target (harness-ui--setting-target session-id))
          (now (harness-json-true-p (harness-ui--setting-get target :non-interactive))))

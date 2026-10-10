@@ -24,7 +24,7 @@
 ;; and the chat both pass the record they already have, and a popout
 ;; follows `task/changed' so what it shows is current.  Once the task
 ;; is verified or sent back its popout closes, wherever that was done --
-;; the board, the session's banner, the Review switch, an agent: the
+;; the board, the session's banner, turning review off, an agent: the
 ;; review the report was opened for is over.  The report of a task
 ;; decided before it opened, a done one, stays open.  A referenced tool
 ;; call is the link it is, drawn as the chat draws calls: its title and

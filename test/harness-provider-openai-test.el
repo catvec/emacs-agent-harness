@@ -39,7 +39,7 @@ RESPONSE is (:status N :chunks (STRING…)) for streamed replies or
          (unless (harness-http-handle-cancelled handle)
            (let ((status (or (plist-get response :status) 200)))
              (when (plist-get args :on-headers)
-               (funcall (plist-get args :on-headers) status nil))
+               (funcall (plist-get args :on-headers) status (plist-get response :headers)))
              (if (plist-get args :on-chunk)
                  (progn
                    (dolist (chunk (or (plist-get response :chunks)
@@ -627,6 +627,45 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
       (harness-test-wait (lambda () (cl-find 'done events :key (lambda (e) (plist-get e :type)))) 5)
       (should (equal '(start done) (harness-openai-test--types (reverse events))))
       (should (string-match-p "connection refused" (plist-get (car events) :error))))))
+
+(ert-deftest harness-provider-openai-transient-failures-say-so ()
+  "A connection failure and a 5xx carry `:error-kind transport'; a 429 its wait.
+The streamed request asks the HTTP layer to retry a lost connection, and
+the step layer can then retry one that had already streamed something."
+  ;; A 5xx answer the HTTP layer could not retry (the body is streamed).
+  (harness-openai-test-with-fake
+      '(("chat/completions" . (:status 503 :body "{\"error\":{\"message\":\"busy\"}}")))
+    (let ((events (car (harness-openai-test--complete
+                        harness-openai-test-endpoint
+                        '(:model "testrouter:m" :messages ((:role user :content ((:type "text" :text "hi")))))))))
+      (should (eq 'transport (plist-get (car (last events)) :error-kind)))
+      ;; The request opted in to the HTTP layer's own retries.
+      (should (eq t (plist-get (plist-get (car harness-openai-test--requests) :args) :retry)))))
+  ;; A transport failure the HTTP layer reports, after its retries.
+  (let ((events nil))
+    (cl-letf (((symbol-function 'harness-http-request)
+               (lambda (_url &rest args)
+                 (harness-run-soon
+                  (plist-get args :callback) nil nil ""
+                  '(curl "the connection was reset by the peer (curl 56: Recv failure: Connection reset by peer)"
+                         :code 56 :kind transport :transient t))
+                 (make-harness-http-handle :url "x"))))
+      (harness-openai--complete harness-openai-test-endpoint
+                                (list :model "testrouter:m"
+                                      :messages '((:role user :content ((:type "text" :text "hi"))))
+                                      :on-event (lambda (e) (push e events))))
+      (harness-test-wait (lambda () (cl-find 'done events :key (lambda (e) (plist-get e :type)))) 5)
+      (should (eq 'transport (plist-get (car events) :error-kind)))
+      (should (string-match-p "reset by the peer" (plist-get (car events) :error)))))
+  ;; A rate limit says how long it asked the caller to wait.
+  (harness-openai-test-with-fake
+      '(("chat/completions" . (:status 429 :headers (("Retry-After" . "7"))
+                               :body "{\"error\":{\"message\":\"Rate limit exceeded\"}}")))
+    (let ((events (car (harness-openai-test--complete
+                        harness-openai-test-endpoint
+                        '(:model "testrouter:m" :messages ((:role user :content ((:type "text" :text "hi")))))))))
+      (should (eq 'rate-limit (plist-get (car (last events)) :error-kind)))
+      (should (equal 7 (plist-get (car (last events)) :retry-after))))))
 
 (ert-deftest harness-provider-openai-cancel-emits-done-once ()
   (harness-openai-test-with-fake '(("chat/completions" . (:hang t)))

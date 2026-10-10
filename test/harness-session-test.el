@@ -2017,5 +2017,48 @@ policy came, one running when it came.  Another value is refused."
           (should (string-match-p "set by policy" (cadr err))))
         (should (equal "claude:sonnet" (plist-get (harness-call 'session/get id) :model)))))))
 
+
+(ert-deftest harness-session-discards-nodes-and-keeps-the-chain-whole ()
+  "Nodes dropped from the transcript leave it a chain, in memory and after a reload.
+The step a turn is about to try again wrote an assistant node; a hint
+was written after it, and a checkpoint may sit on it.  Dropping the
+step's node must not cut the transcript at the hint, and must not come
+back when the session is loaded again."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (u (plist-get (harness-call 'session/append id '(:kind user :content "q")) :id))
+           (half (plist-get (harness-call 'session/append id '(:kind assistant :content "half")) :id))
+           (hint (plist-get (harness-call 'session/append id '(:kind hint :content "Error: reset")) :id))
+           (again (plist-get (harness-call 'session/append id '(:kind assistant :content "again")) :id))
+           (removed nil) (moves nil))
+      (harness-on 'session/nodes-removed (lambda (_sid ids) (push ids removed)))
+      (harness-on 'session/head-moved (lambda (_sid node) (push node moves)))
+      ;; The partial node goes, the hint after it stays and is re-parented.
+      (should (equal (list half) (harness-call 'session/discard-nodes id (list half))))
+      (should-not (harness-call 'session/node id half))
+      (should (equal u (plist-get (harness-call 'session/node id hint) :parent)))
+      (should (equal (list u hint again)
+                     (mapcar (lambda (n) (plist-get n :id)) (harness-call 'session/nodes id))))
+      (should (equal (list (list half)) removed))
+      (should-not moves)                    ; the head was not one of them
+      ;; The newest node goes too: the head moves to the one kept.
+      (should (equal (list again) (harness-call 'session/discard-nodes id (list again))))
+      (should (equal hint (plist-get (harness-call 'session/get id) :head)))
+      (should (equal (list hint) moves))
+      ;; Ids that name nothing change nothing.
+      (should-not (harness-call 'session/discard-nodes id '("n-nope")))
+      (should (equal (list u hint)
+                     (mapcar (lambda (n) (plist-get n :id)) (harness-call 'session/nodes id))))
+      ;; Loaded again, the dropped nodes are still gone and the chain whole.
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should-not (harness-call 'session/node id half))
+      (should-not (harness-call 'session/node id again))
+      (should (equal u (plist-get (harness-call 'session/node id hint) :parent)))
+      (should (equal (list u hint)
+                     (mapcar (lambda (n) (plist-get n :id)) (harness-call 'session/nodes id)))))))
+
+(provide 'harness-session-test)
 (provide 'harness-session-test)
 ;;; harness-session-test.el ends here
