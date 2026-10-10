@@ -64,6 +64,18 @@
 (defvar harness-recap--failed (make-hash-table :test 'equal)
   "Session id -> time a failed recap may be tried again.")
 
+(defvar harness-recap--sessions (make-hash-table :test 'equal)
+  "Session id -> the recap kept for a session that is no task's.
+The value is (:recap TEXT :recap-at FLOAT :recap-turns N :recap-tools N
+:started FLOAT), as a task's card keeps its own; see
+`harness-recap-session'.")
+
+(defvar harness-recap--session-running (make-hash-table :test 'equal)
+  "Session id -> promise of the session recap request in flight.")
+
+(defvar harness-recap--session-failed (make-hash-table :test 'equal)
+  "Session id -> time a failed session recap may be tried again.")
+
 (defvar harness-recap--timer nil "Timer that checks recaps due on time.")
 
 ;;;; What the model is asked
@@ -169,35 +181,51 @@ Keeps the first non-blank line, strips markdown markers and a leading
 
 ;;;; Making one
 
-(defun harness-recap--finish (sid id promise counts good reason error)
+(defun harness-recap--finish (sid id counts good reason error)
   "Store the recap GOOD of task ID, or back off after a failure.
-SID names the session, PROMISE is settled either way; REASON and ERROR
-say why a failure failed.  COUNTS is the (TURNS TOOLS) the recap was
-made at."
+SID names the session, REASON and ERROR say why a failure failed.
+COUNTS is the (TURNS TOOLS) the recap was made at.  Return GOOD, or
+signal when it could not be stored."
   (remhash sid harness-recap--running)
   (if good
-      (condition-case err
-          (progn
-            (harness-call 'task/set-recap id
-                          :recap good :recap-at (float-time)
-                          :recap-turns (car counts) :recap-tools (cadr counts))
-            (harness-emit 'recap/done sid good)
-            (harness-resolve promise good))
-        (error (harness-log 'warn "recap of %s could not be stored: %S" id err)
-               (harness-reject promise err)))
+      (progn
+        (harness-call 'task/set-recap id
+                      :recap good :recap-at (float-time)
+                      :recap-turns (car counts) :recap-tools (cadr counts))
+        (harness-emit 'recap/done sid good)
+        good)
     (when (numberp harness-tasks-recap-retry)
       (puthash sid (+ (float-time) harness-tasks-recap-retry) harness-recap--failed))
     (harness-log 'warn "recap of %s failed: %s" id (or error reason))
     (harness-emit 'recap/failed sid (or error reason))
-    (harness-reject promise (or error reason))))
+    nil))
 
-(defun harness-recap--start (task session)
-  "Ask the model for a recap of TASK's session SESSION; return the promise."
-  (let* ((sid (plist-get session :id))
-         (id (plist-get task :id))
-         (counts (harness-recap--counts session))
-         (text "")
+(defun harness-recap--ask (session task on-done)
+  "Ask the model for a recap of SESSION about TASK; call ON-DONE at its end.
+The request is the one a card's recap is: `harness-recap--system-prompt'
+and what `harness-recap--prompt' makes of TASK and SESSION, at most
+`harness-tasks-recap-max-tokens' tokens, on the cheap tier of
+`harness-tasks-recap-model', with the thinking level of
+`harness-tasks-recap-thinking'.  ON-DONE is called once, with RECAP (the
+text the model wrote and `harness-recap-sanitise' accepted, nil when it
+wrote none or failed), the provider's REASON for stopping and its ERROR
+when it failed.  Return the promise of the call, which resolves to
+RECAP, or rejects with why there is none."
+  (let* ((text "")
+         (settled nil)
          (promise (harness-make-promise))
+         (finish (lambda (reason error)
+                   (unless settled
+                     (setq settled t)
+                     (let ((recap (and (not (memq reason '(error cancelled)))
+                                       (harness-recap-sanitise text))))
+                       (if recap
+                           (harness-resolve promise recap)
+                         (harness-reject promise (or error (format "the model stopped: %s" reason))))
+                       (condition-case err
+                           (funcall on-done recap reason error)
+                         (error (harness-log 'warn "recap of session %s could not be stored: %S"
+                                             (plist-get session :id) err)))))))
          (request (append
                    (list :model (harness-recap--model session)
                          :session session
@@ -211,18 +239,24 @@ made at."
                          (lambda (ev)
                            (pcase (plist-get ev :type)
                              ('text (setq text (concat text (plist-get ev :delta))))
-                             ('done
-                              (let* ((reason (plist-get ev :stop-reason))
-                                     (recap (and (not (memq reason '(error cancelled)))
-                                                 (harness-recap-sanitise text))))
-                                (harness-recap--finish sid id promise counts recap reason
-                                                       (plist-get ev :error)))))))
+                             ('done (funcall finish (plist-get ev :stop-reason) (plist-get ev :error))))))
                    (and harness-tasks-recap-thinking
                         (list :thinking harness-tasks-recap-thinking)))))
-    (puthash sid promise harness-recap--running)
     (condition-case err
         (harness-call 'provider/complete request)
-      (error (harness-recap--finish sid id promise counts nil nil (harness-error-message err))))
+      (error (funcall finish nil (harness-error-message err))))
+    promise))
+
+(defun harness-recap--start (task session)
+  "Ask the model for a recap of TASK's session SESSION; return the promise."
+  (let* ((sid (plist-get session :id))
+         (id (plist-get task :id))
+         (counts (harness-recap--counts session))
+         (promise (harness-recap--ask
+                   session task
+                   (lambda (recap reason error)
+                     (harness-recap--finish sid id counts recap reason error)))))
+    (puthash sid promise harness-recap--running)
     promise))
 
 (defun harness-recap--maybe (session-id &optional force)
@@ -240,6 +274,115 @@ Return the promise of a recap request just started, or nil."
                     ((or force
                          (harness-recap--due-p task (car counts) (cadr counts) (float-time)))))
           (harness-recap--start task session))))))
+
+;;;; Recaps of a session that is no task's
+
+;; A call that shows a session -- a sub-agent's, or one a session_wait
+;; waits on -- shows a recap of it, as a card does.  A session that is a
+;; task's gives its card's recap; a sub-agent's has no card, so one is
+;; written here with the same short model call and kept per session,
+;; refreshed when the thresholds say it is stale.  Nothing polls: the
+;; tools that show a session ask again when an event about it arrives
+;; (`harness-tools-watch-session'), and a request just made announces
+;; `recap/session-done'.
+
+(defun harness-recap--session-own-p (session)
+  "Non-nil when a recap of SESSION may be written here.
+Only a sub-agent's: another session's recap is shown when a task card
+or an earlier request keeps one, but writing it is the task module's
+business."
+  (eq (plist-get session :kind) 'subagent))
+
+(defun harness-recap--session-prompt (session-id)
+  "Return the prompt-like text of SESSION-ID's work, for a recap request.
+That is the newest user message another session sent it, which is what
+a sub-agent's prompt is, else its first user message."
+  (let* ((nodes (ignore-errors (harness-call 'session/nodes session-id (list :limit 50))))
+         (sent (cl-find-if (lambda (node) (and (eq (plist-get node :kind) 'user)
+                                               (harness-node-sender node)))
+                           (reverse nodes)))
+         (text (plist-get sent :content)))
+    (if (and (stringp text) (not (harness-string-blank-p text)))
+        text
+      (let ((first (cl-find 'user nodes :key (lambda (node) (plist-get node :kind)))))
+        (or (plist-get first :content) "")))))
+
+(defun harness-recap--finish-session (sid counts good reason error)
+  "Keep the session recap GOOD of SID, or back off after a failure.
+COUNTS is the (TURNS TOOLS) it was made at; REASON and ERROR say why a
+failure failed.  Return GOOD, or nil."
+  (remhash sid harness-recap--session-running)
+  (if good
+      (let ((old (gethash sid harness-recap--sessions)))
+        (puthash sid (list :recap good :recap-at (float-time)
+                           :recap-turns (car counts) :recap-tools (cadr counts)
+                           :started (or (plist-get old :started) (float-time)))
+                 harness-recap--sessions)
+        (harness-emit 'recap/session-done sid good)
+        good)
+    (when (numberp harness-tasks-recap-retry)
+      (puthash sid (+ (float-time) harness-tasks-recap-retry) harness-recap--session-failed))
+    (harness-log 'warn "recap of session %s failed: %s" sid (or error reason))
+    (harness-emit 'recap/session-failed sid (or error reason))
+    nil))
+
+(defun harness-recap--start-session (session)
+  "Ask the model for a recap of SESSION and keep it per session.
+Return the promise (see `harness-recap-session')."
+  (let* ((sid (plist-get session :id))
+         (counts (harness-recap--counts session))
+         (promise (harness-recap--ask
+                   session (list :prompt (harness-recap--session-prompt sid))
+                   (lambda (recap reason error)
+                     (harness-recap--finish-session sid counts recap reason error)))))
+    (puthash sid promise harness-recap--session-running)
+    promise))
+
+(defun harness-recap--session-due-p (session-id session now)
+  "Non-nil when a session recap of SESSION-ID is due.
+The task thresholds apply as they do to a card, from the recap in hand
+or from when the session started."
+  (let* ((record (or (gethash session-id harness-recap--sessions)
+                     (list :started (or (plist-get session :created) now))))
+         (counts (harness-recap--counts session)))
+    (harness-recap--due-p record (car counts) (cadr counts) now)))
+
+(defun harness-recap--session-maybe (session-id session force)
+  "Start a recap request for SESSION-ID when one is due and it may get one.
+FORCE skips the thresholds.  Return the promise of a request just
+started, or nil."
+  (when (and (not (gethash session-id harness-recap--session-running))
+             (or force (harness-recap--session-own-p session)))
+    (let ((retry (gethash session-id harness-recap--session-failed)))
+      (when (and (or (null retry) (>= (float-time) retry))
+                 (or force (harness-recap--session-due-p session-id session (float-time))))
+        (harness-recap--start-session session)))))
+
+(defun harness-recap-session (session-id &optional force)
+  "Return a recap of SESSION-ID to show, making one when it is due.
+The value is a plist (:text TEXT :at FLOAT): the recap and when it was
+made.  A session that is a task's gives its card's recap; another's
+gives the recap kept for it, written here with the same short model
+call a card's is (the cheap tier, at most
+`harness-tasks-recap-max-tokens' tokens) and refreshed when
+`harness-tasks-recap-turns', `harness-tasks-recap-seconds' or
+`harness-tasks-recap-tool-calls' say it is stale, or when FORCE is
+non-nil.  Only a sub-agent's session is recapped here: one that is a
+task's is its card's business, and a recap is not written for any
+other session, though one already kept for it is shown.  The recap in
+hand, if any, is returned while a new one is made, and nil while there
+is nothing to show yet."
+  (when (and harness-tasks-recap (harness-call 'session/exists-p session-id))
+    (let* ((session (harness-call 'session/get session-id))
+           (task (harness-recap--task session-id))
+           (task-recap (and task (plist-get task :recap))))
+      (if (and (stringp task-recap) (not (harness-string-blank-p task-recap)))
+          (list :text task-recap :at (plist-get task :recap-at))
+        (harness-recap--session-maybe session-id session force)
+        (let* ((record (gethash session-id harness-recap--sessions))
+               (text (plist-get record :recap)))
+          (and (stringp text) (not (harness-string-blank-p text))
+               (list :text text :at (plist-get record :recap-at))))))))
 
 ;;;; Checks
 
@@ -295,6 +438,10 @@ the task itself goes straight to done."
 
 (harness-declare-event 'recap/done "(SESSION-ID RECAP) after a task card's recap was stored.")
 (harness-declare-event 'recap/failed "(SESSION-ID MESSAGE) when a recap could not be made.")
+(harness-declare-event 'recap/session-done
+  "(SESSION-ID RECAP) after the recap of a session that is no task's was kept (see `harness-recap-session').")
+(harness-declare-event 'recap/session-failed
+  "(SESSION-ID MESSAGE) when the recap of a session that is no task's could not be made.")
 
 (harness-define-module 'recap
   :doc "Write the recaps task cards show, with a short model call."

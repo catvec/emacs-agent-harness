@@ -1037,6 +1037,35 @@ CTX is the tool context, which names the calling session."
 CHECK returns non-nil once the wait's condition holds; FINISH settles
 the wait with a reason symbol (met, timeout or cancelled).")
 
+(defun harness-tools-sessions--wait-title (sid)
+  "Return how a wait's note names session SID."
+  (let* ((short (harness-tools-short-id sid))
+         (session (ignore-errors (harness-call 'session/get sid)))
+         (name (plist-get session :name)))
+    (if (and (stringp name) (not (harness-string-blank-p name)))
+        (format "%s (%s): " name short)
+      (format "%s: " short))))
+
+(defun harness-tools-sessions--note-watch (ctx ids)
+  "Show what the sessions IDS are doing, under the call CTX runs.
+Each session's note is made when an event about it arrives, and the
+call's note carries all of them (see `harness-tools-session-note').
+Return a function that stops the watching; nothing happens, and it is
+a no-op, when the call can show no note."
+  (if (not (plist-get ctx :note))
+      #'ignore
+    (let* ((notes (make-hash-table :test 'equal))
+           (push (lambda ()
+                   (harness-tools-note
+                    ctx (string-join (delq nil (mapcar (lambda (sid) (gethash sid notes)) ids)) "\n"))))
+           (stops (mapcar (lambda (sid)
+                            (harness-tools-watch-session
+                             sid
+                             (lambda (text) (puthash sid text notes) (funcall push))
+                             (list :title (harness-tools-sessions--wait-title sid) :recap t)))
+                          ids)))
+      (lambda () (mapc #'funcall stops)))))
+
 (defun harness-tools-sessions--poke (&rest _)
   "Re-check every running wait (subscribed to session and task events)."
   (maphash (lambda (_ w)
@@ -1107,20 +1136,22 @@ INPUT is the tool call's input plist and CTX its context."
          (timeout (harness-tools-sessions--timeout input))
          (started (float-time)))
     (unless ids (signal 'harness-error (list "session_wait needs session_id or session_ids")))
-    (harness-tools-sessions--wait
-     ctx timeout
-     (lambda ()
-       (funcall (if any #'cl-some #'cl-every)
-                (lambda (pair) (harness-tools-sessions--reached-p (car pair) until (cdr pair)))
-                (cl-mapcar #'cons ids baselines)))
-     (lambda (why)
-       (harness-tool-ok
-        (concat (pcase why
-                  ('met (format "Done waiting after %s (until %s)." (harness-format-duration (- (float-time) started)) until))
-                  ('timeout (format "Still waiting after %ss; the condition (until %s) did not hold. Call session_wait again to keep waiting." timeout until))
-                  (_ "The wait was interrupted."))
-                "\n\n"
-                (mapconcat (lambda (sid) (harness-tools-sessions--describe sid)) ids "\n\n")))))))
+    (let ((unwatch (harness-tools-sessions--note-watch ctx ids)))
+      (harness-tools-sessions--wait
+       ctx timeout
+       (lambda ()
+         (funcall (if any #'cl-some #'cl-every)
+                  (lambda (pair) (harness-tools-sessions--reached-p (car pair) until (cdr pair)))
+                  (cl-mapcar #'cons ids baselines)))
+       (lambda (why)
+         (funcall unwatch)
+         (harness-tool-ok
+          (concat (pcase why
+                    ('met (format "Done waiting after %s (until %s)." (harness-format-duration (- (float-time) started)) until))
+                    ('timeout (format "Still waiting after %ss; the condition (until %s) did not hold. Call session_wait again to keep waiting." timeout until))
+                    (_ "The wait was interrupted."))
+                  "\n\n"
+                  (mapconcat (lambda (sid) (harness-tools-sessions--describe sid)) ids "\n\n"))))))))
 
 (harness-define-tool "session_wait"
   :label "Wait for sessions"
@@ -1358,8 +1389,10 @@ sends work back."
   "Handler of task_wait.
 INPUT is the tool call's input plist and CTX its context."
   (harness-tools-sessions--tasks-p)
-  (let* ((ids (mapcar (lambda (r) (plist-get (harness-tools-sessions--task r) :id))
-                      (harness-tools-sessions--refs input :task_id :task_ids)))
+  (let* ((refs (harness-tools-sessions--refs input :task_id :task_ids))
+         (tasks (mapcar #'harness-tools-sessions--task refs))
+         (ids (mapcar (lambda (task) (plist-get task :id)) tasks))
+         (sessions (delq nil (mapcar (lambda (task) (plist-get task :session)) tasks)))
          (until (or (plist-get input :until) "settled"))
          (any (equal (plist-get input :mode) "any"))
          (baselines (mapcar (lambda (id) (let ((task (harness-call 'task/get id)))
@@ -1368,30 +1401,32 @@ INPUT is the tool call's input plist and CTX its context."
          (timeout (harness-tools-sessions--timeout input))
          (started (float-time)))
     (unless ids (signal 'harness-error (list "task_wait needs task_id or task_ids")))
-    (harness-tools-sessions--wait
-     ctx timeout
-     (lambda ()
-       (funcall (if any #'cl-some #'cl-every)
-                (lambda (pair) (harness-tools-sessions--task-reached-p (car pair) until (cdr pair)))
-                (cl-mapcar #'cons ids baselines)))
-     (lambda (why)
-       (harness-tool-ok
-        (concat (pcase why
-                  ('met (format "Done waiting after %s (until %s)." (harness-format-duration (- (float-time) started)) until))
-                  ('timeout (format "Still waiting after %ss; the condition (until %s) did not hold. Call task_wait again to keep waiting." timeout until))
-                  (_ "The wait was interrupted."))
-                "\n\n"
-                (mapconcat
-                 (lambda (id)
-                   (let ((task (ignore-errors (harness-call 'task/get id))))
-                     (if (not task)
-                         (format "%s: deleted" id)
-                       (let* ((sid (plist-get task :session))
-                              (reply (and sid (harness-call 'session/exists-p sid)
-                                          (harness-tools-sessions--last-reply sid))))
-                         (concat (harness-tools-sessions--task-line task)
-                                 (if reply (format "\n    last reply:\n%s" (harness-truncate-end reply 2000)) ""))))))
-                 ids "\n\n")))))))
+    (let ((unwatch (harness-tools-sessions--note-watch ctx sessions)))
+      (harness-tools-sessions--wait
+       ctx timeout
+       (lambda ()
+         (funcall (if any #'cl-some #'cl-every)
+                  (lambda (pair) (harness-tools-sessions--task-reached-p (car pair) until (cdr pair)))
+                  (cl-mapcar #'cons ids baselines)))
+       (lambda (why)
+         (funcall unwatch)
+         (harness-tool-ok
+          (concat (pcase why
+                    ('met (format "Done waiting after %s (until %s)." (harness-format-duration (- (float-time) started)) until))
+                    ('timeout (format "Still waiting after %ss; the condition (until %s) did not hold. Call task_wait again to keep waiting." timeout until))
+                    (_ "The wait was interrupted."))
+                  "\n\n"
+                  (mapconcat
+                   (lambda (id)
+                     (let ((task (ignore-errors (harness-call 'task/get id))))
+                       (if (not task)
+                           (format "%s: deleted" id)
+                         (let* ((sid (plist-get task :session))
+                                (reply (and sid (harness-call 'session/exists-p sid)
+                                            (harness-tools-sessions--last-reply sid))))
+                           (concat (harness-tools-sessions--task-line task)
+                                   (if reply (format "\n    last reply:\n%s" (harness-truncate-end reply 2000)) ""))))))
+                   ids "\n\n"))))))))
 
 (harness-define-tool "task_wait"
   :label "Wait for tasks"

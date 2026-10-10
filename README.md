@@ -449,6 +449,17 @@ panel above the compose box lists every item with its state. `C-c C-t`,
 a click on the header segment, or `TAB` on the panel folds the items
 away and brings them back; the list disappears when the agent clears it.
 
+A tool call that runs for a while says what it is doing under its own
+header, in dim lines that go when the call ends. `spawn_agent` shows
+what its child is doing now -- and a recap of the child, made again
+when it goes stale -- with the child's context against the window it
+compacts at, and its turns, steps and tool calls; `session_wait` and
+`task_wait` show the same for every session they wait on, a section
+each; a `bash` command still running says how many lines it has
+written and shows the latest one.
+
+![A session's chat whose spawn_agent call runs, and the sub-agent's own chat beside it: the note under the spawn call says what the child does, with a recap and its context, steps and tool calls, and the note under the child's bash call says it is still running with the latest line](docs/media/notes.png)
+
 A session may use its working directory, its worktree, the directories
 in `harness-allowed-directories` and the ones you grant it. It also has
 a temporary directory of its own, `/tmp/harness-UID/ID/` (under

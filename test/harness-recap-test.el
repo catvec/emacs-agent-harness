@@ -20,6 +20,9 @@
 (defvar harness-tasks--loaded)
 (defvar harness-recap--running)
 (defvar harness-recap--failed)
+(defvar harness-recap--sessions)
+(defvar harness-recap--session-running)
+(defvar harness-recap--session-failed)
 (defvar harness-tasks-recap)
 (defvar harness-tasks-recap-turns)
 (defvar harness-tasks-recap-seconds)
@@ -50,6 +53,9 @@ recaps: each test asks for one itself."
      (clrhash harness-tasks--starting)
      (clrhash harness-recap--running)
      (clrhash harness-recap--failed)
+     (clrhash harness-recap--sessions)
+     (clrhash harness-recap--session-running)
+     (clrhash harness-recap--session-failed)
      (setq harness-tasks--loaded t)
      (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override nil)
@@ -254,3 +260,108 @@ and the tasks module would prompt the session while a test runs."
       (harness-tasks--set id :state 'pending :backlog t)
       (should-not (harness-recap--maybe sid))
       (should-not (harness-recap-test-recap id)))))
+
+;;;; Recaps of a session that is no task's
+
+(defun harness-recap-test-child ()
+  "Create a sub-agent session of a fresh parent; return its id."
+  (let ((parent (harness-recap-test-session)))
+    (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted"
+                             :kind 'subagent :parent-id parent)
+               :id)))
+
+(ert-deftest harness-recap-session-made-and-kept ()
+  "A sub-agent's session gets a recap of its own, prompt and all."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-child))
+           (harness-provider-demo-script-override harness-recap-test-script)
+           (requests nil))
+      (harness-call 'session/append sid '(:kind user :content "do the widget"))
+      ;; Nothing asks, nothing is made.
+      (should-not (harness-recap-session sid))
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (push req requests) (funcall orig req))))
+        (should-not (harness-recap-session sid t)) ; the request is in flight
+        (harness-test-wait (lambda () (gethash sid harness-recap--sessions)) 5 "the session recap"))
+      ;; It is kept, and shown while it is not stale.
+      (should (equal "Implemented the widget, tests pass"
+                     (plist-get (harness-recap-session sid) :text)))
+      (should (numberp (plist-get (harness-recap-session sid) :at)))
+      (let* ((req (car requests))
+             (message (car (last (plist-get req :messages))))
+             (text (plist-get (car (plist-get message :content)) :text)))
+        (should (equal "demo:scripted" (plist-get req :model)))
+        (should (string-match-p "Do the widget" text))
+        (should (string-match-p "Progress: 0 turns, 0 tool calls" text))))
+    ;; Another session's recap is not written here: only a sub-agent's.
+    (let* ((sid (harness-recap-test-session))
+           (harness-provider-demo-script-override harness-recap-test-script))
+      (harness-call 'session/append sid '(:kind user :content "do the widget"))
+      (should-not (harness-recap--session-maybe sid (harness-call 'session/get sid) nil))
+      (should (harness-recap--session-maybe sid (harness-call 'session/get sid) t))
+      (should (gethash sid harness-recap--session-running)))))
+
+(ert-deftest harness-recap-session-of-a-task-is-its-cards ()
+  "A session that is a task's shows the card's recap, made by the task."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-session))
+           (id (harness-recap-test-task sid)))
+      (harness-call 'task/set-recap id :recap "The card's own line" :recap-at (float-time))
+      (should (equal "The card's own line" (plist-get (harness-recap-session sid) :text))))))
+
+(ert-deftest harness-recap-session-refreshed-when-stale ()
+  "A session recap is made again when the thresholds say it is stale."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-child))
+           (harness-provider-demo-script-override harness-recap-test-script)
+           (harness-tasks-recap-tool-calls 2))
+      (harness-call 'session/append sid '(:kind user :content "do the widget"))
+      (harness-recap-test-add-tool-calls sid 2)
+      ;; The first ask is due and makes one...
+      (let ((p (harness-recap--session-maybe sid (harness-call 'session/get sid) nil)))
+        (should p)
+        (should (equal "Implemented the widget, tests pass" (harness-test-await p))))
+      ;; ...and nothing is asked again while nothing moved.
+      (should-not (harness-recap--session-maybe sid (harness-call 'session/get sid) nil))
+      (harness-recap-test-add-tool-calls sid 2)
+      (should (harness-recap--session-maybe sid (harness-call 'session/get sid) nil)))))
+
+(ert-deftest harness-recap-session-note-carries-it ()
+  "The note under a call that shows a session carries its recap."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-child))
+           (harness-provider-demo-script-override harness-recap-test-script))
+      (harness-call 'session/append sid '(:kind user :content "do the widget"))
+      (harness-test-await (harness-recap--session-maybe sid (harness-call 'session/get sid) t))
+      (puthash sid (list :phase 'thinking :since (float-time)) harness-agent--activities)
+      (should (equal "thinking\nrecap: Implemented the widget, tests pass"
+                     (harness-tools-session-note sid '(:recap t))))
+      ;; Without asking for a recap, the note has none.
+      (should (equal "thinking" (harness-tools-session-note sid))))))
+
+(ert-deftest harness-recap-spawn-note-shows-the-childs ()
+  "A spawn_agent call's note carries the recap of the child it runs."
+  (harness-recap-test-with
+    (harness-test-load-module 'tools-agent)
+    (let* ((sid (harness-recap-test-session))
+           (notes nil)
+           (harness-provider-demo--delay 0.05)
+           (harness-tasks-recap-tool-calls 1)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (if (string-match-p "\\`You write the progress recaps" (or (plist-get request :system) ""))
+                  harness-recap-test-script
+                (append (list '(:type text :delta "The child works.\n")
+                              '(:type tool-call :id "c1" :name "list_dir" :input (:path "/tmp")))
+                        (mapcar (lambda (i) (list :type 'text :delta (format "chunk %d\n" i)))
+                                (number-sequence 1 8))
+                        '((:type done :stop-reason end-turn)))))))
+      (harness-on 'tools/note (lambda (_s _c text) (push text notes)))
+      (let ((r (harness-test-await
+                (harness-call 'tools/execute sid (list :id "s1" :name "spawn_agent"
+                                                       :input '(:prompt "child work" :name "helper")))
+                10)))
+        (should-not (plist-get r :is-error)))
+      ;; The child's recap reached the note of the call that shows it.
+      (should (cl-some (lambda (n) (string-match-p "recap: Implemented the widget, tests pass" n)) notes)))))

@@ -421,6 +421,20 @@ Replace the todos of the session in CTX with those in INPUT."
                    (format "sub-agent %s: %s" (harness-tools-agent--short-id session-id)
                            (or (plist-get node :title) (plist-get node :tool)))))))))
 
+(defun harness-tools-agent--watch-child (cid note)
+  "Have the note of child CID show under its spawn_agent call.
+NOTE is the call's note function.  Return the function that stops the
+watching, or nil when the call has no note function."
+  (when (and note (harness-method-exists-p 'session/exists-p))
+    (harness-tools-watch-session cid (lambda (text) (funcall note text)) (list :recap t))))
+
+(defun harness-tools-agent--forget-child (cid)
+  "Stop watching child CID and forget what its call knew of it."
+  (when-let* ((entry (gethash cid harness-tools-agent--children)))
+    (when-let* ((stop (plist-get entry :unwatch)))
+      (funcall stop))
+    (remhash cid harness-tools-agent--children)))
+
 (defun harness-tools-agent--child-summary (child-id)
   "Return the final text of CHILD-ID plus a footer with its tool calls and cost."
   (let* ((child (harness-call 'session/get child-id))
@@ -592,7 +606,9 @@ Run INPUT's prompt in a child of the session in CTX."
                                            (plist-get ctx :call-id))
         (lambda (child)
           (let ((cid (plist-get child :id)))
-            (puthash cid (list :report (plist-get ctx :report) :calls 0) harness-tools-agent--children)
+            (puthash cid (list :report (plist-get ctx :report) :calls 0
+                               :unwatch (harness-tools-agent--watch-child cid (plist-get ctx :note)))
+                     harness-tools-agent--children)
             (harness-emit 'agent/spawned sid cid)
             (when (plist-get ctx :report)
               (funcall (plist-get ctx :report)
@@ -602,7 +618,7 @@ Run INPUT's prompt in a child of the session in CTX."
              ;; The parent's agent wrote the prompt, not the user.
              (harness-call-async 'agent/prompt cid prompt (list :from (harness-sender-session parent)))
              (lambda (result)
-               (remhash cid harness-tools-agent--children)
+               (harness-tools-agent--forget-child cid)
                (let ((text (harness-tools-agent--child-summary cid)))
                  (if (memq (plist-get result :stop-reason) '(end-turn max-tokens))
                      (harness-tool-ok text :meta (list :child-id cid))
@@ -611,7 +627,7 @@ Run INPUT's prompt in a child of the session in CTX."
                             (if (plist-get result :error) (format ", %s" (plist-get result :error)) ""))
                     :meta (list :child-id cid)))))
              (lambda (err)
-               (remhash cid harness-tools-agent--children)
+               (harness-tools-agent--forget-child cid)
                (signal 'harness-error (list (harness-error-message err))))))))))))
 
 (harness-define-tool "spawn_agent"

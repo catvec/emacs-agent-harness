@@ -6,6 +6,9 @@
 (defvar harness-provider-demo--delay)
 (defvar harness-tools-agent--questions)
 (defvar harness-tools-agent-planning-section)
+(defvar harness-tools-agent--children)
+(defvar harness-tools--watchers)
+(declare-function harness-provider-demo--last-user-text "harness-provider-demo")
 
 (defmacro harness-tools-agent-test-with (&rest body)
   "Load the state layer with the demo provider and the meta tools, run BODY."
@@ -421,6 +424,47 @@ and the caller hears the answer, or that it was dismissed."
       (should (string-match-p "^Non-interactive: on (the user is away"
                               (plist-get (harness-test-await (harness-tools-agent-test-run sid "session_info" nil))
                                          :content))))))
+
+(ert-deftest harness-tools-agent-spawn-note-shows-the-child ()
+  "Under a running spawn_agent call, the note says what the child is doing.
+The child's turn is long enough to be seen running: its tool call, the
+tokens it holds against its window, and what it has done."
+  (harness-tools-agent-test-with
+    (harness-test-load-module 'tools-shell)
+    (let* ((sid (harness-tools-agent-test-session))
+           (notes nil))
+      (harness-on 'tools/note (lambda (_s _c text) (push text notes)))
+      (let ((harness-provider-demo-script-override
+             (lambda (_request)
+               `((:type text :delta "The child works.\n")
+                 (:type tool-call :id "c1" :name "bash"
+                        :input (:command "sleep 0.3; echo child done"))
+                 (:type usage :input 900 :output 60 :context 12300)
+                 (:type done :stop-reason end-turn)))))
+        (let* ((result (harness-test-await
+                        (harness-tools-agent-test-run sid "spawn_agent"
+                                                      '(:prompt "child work" :name "helper"))))
+               (cid (plist-get (plist-get result :meta) :child-id)))
+          (should-not (plist-get result :is-error))
+          ;; The child's session is the one the note is about: its
+          ;; command ran there.
+          (should (cl-some (lambda (node) (string-match-p "child done" (or (plist-get node :output) "")))
+                           (harness-call 'session/nodes cid)))
+          ;; It starts with the child starting...
+          (should (cl-some (lambda (n) (string-prefix-p "starting" n)) notes))
+          ;; ... shows the call it runs...
+          (should (cl-some (lambda (n) (string-match-p "running Bash: sleep 0.3" n)) notes))
+          ;; ... counts its tool call and its tokens against the window
+          ;; it compacts at.
+          (should (cl-some (lambda (n) (string-match-p "1 tool call" n)) notes))
+          (should (cl-some (lambda (n) (string-match-p "before compact" n)) notes))
+          ;; Nothing is watched once the call is over: the note does not
+          ;; keep a session alive, and no more of it is made.
+          (should (zerop (hash-table-count harness-tools-agent--children)))
+          (should-not (gethash cid harness-tools--watchers))
+          (let ((before (length notes)))
+            (harness-emit 'agent/activity-changed cid nil)
+            (should (= before (length notes)))))))))
 
 (ert-deftest harness-tools-agent-spawn-cwd-is-jailed ()
   "A sub-agent works where it starts, so the jail checks its cwd as it

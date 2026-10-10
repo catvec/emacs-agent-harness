@@ -874,6 +874,42 @@ cost the UI as much for chats nobody looked at as for the one it showed."
         (should-not (line))
         (with-current-buffer buf (should-not harness-chat--activity))))))
 
+(ert-deftest harness-ui-chat-note-under-a-running-call ()
+  "A running call shows the note the activity carries for it.
+The note goes under the call's own block -- a sub-agent's work, the
+sessions a wait waits on, a long command's output -- and goes when the
+call does."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (cl-flet ((update (plist)
+                  (with-current-buffer buf (harness-chat--apply-update plist)))
+                (shows (regexp) (harness-ui-chat-test-find buf regexp)))
+        (update (list :sessionUpdate "_harness/node"
+                      :node (list :id "n-call" :kind "tool-call" :tool "bash" :call-id "c1"
+                                  :input (list :command "sleep 30") :title "Bash: sleep 30")))
+        (should (shows "sleep 30"))
+        (should-not (shows "still running"))
+        ;; The activity names the call and carries its note.
+        (update (list :sessionUpdate "_harness/activity"
+                      :activity
+                      (list :phase "tool" :tool "bash" :title "Bash: sleep 30" :since (float-time)
+                            :calls (list (list :call-id "c1" :tool "bash" :title "Bash: sleep 30"
+                                               :note "still running · 12 lines so far\nnpm test ... 42 passing")))))
+        (should (shows "still running · 12 lines so far"))
+        (should (shows "npm test ... 42 passing"))
+        ;; The note is dim, like the other line under a call.
+        (with-current-buffer buf
+          (let ((pos (harness-ui-chat-test-find buf "still running")))
+            (should (harness-ui-chat-test-face-at pos 'harness-dim-face))))
+        ;; The call ends: the note goes with it, and the result shows.
+        (update (list :sessionUpdate "_harness/activity" :activity nil))
+        (should-not (shows "still running"))
+        (update (list :sessionUpdate "_harness/node"
+                      :node (list :id "n-res" :kind "tool-result" :call-id "c1" :output "done\n")))
+        (should (shows "sleep 30"))
+        (should (shows "done"))))))
+
 (ert-deftest harness-ui-chat-fake-cli-shows-every-gap ()
   "A turn through the real provider, against the fake CLI, never looks stalled.
 The fake stops in each gap a real turn has: before the model answers,
