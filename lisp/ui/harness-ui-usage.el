@@ -791,17 +791,17 @@ absent."
                               'face (if (plist-get entry :mark) 'warning 'harness-dim-face)
                               'help-echo (or (cdr state) nil)))
           (insert "  ")
-          (harness-ui-usage--fallback-button "[up]" entry #'harness-ui-usage--fallback-move-one -1
+          (harness-ui-usage--fallback-button "[up]" entry #'harness-ui-usage--fallback-move-one '(-1)
                                              :help "Use this entry earlier in the list (M-<up>)")
           (insert " ")
-          (harness-ui-usage--fallback-button "[down]" entry #'harness-ui-usage--fallback-move-one 1
+          (harness-ui-usage--fallback-button "[down]" entry #'harness-ui-usage--fallback-move-one '(1)
                                              :help "Use this entry later in the list (M-<down>)")
           (insert " ")
           (when (plist-get entry :mark)
-            (harness-ui-usage--fallback-button "[try now]" entry #'harness-ui-usage--fallback-try-entry
+            (harness-ui-usage--fallback-button "[try now]" entry #'harness-ui-usage--fallback-try-entry nil
                                                :help "Forget that it ran out and try it again (c)")
             (insert " "))
-          (harness-ui-usage--fallback-button "[remove]" entry #'harness-ui-usage--fallback-remove-entry
+          (harness-ui-usage--fallback-button "[remove]" entry #'harness-ui-usage--fallback-remove-entry nil
                                              :help "Remove this entry (d)")
           (insert "\n")
           (add-text-properties start (point) (list 'harness-ui-usage-fallback entry)))))
@@ -1128,9 +1128,11 @@ On the line of a project with worktrees, show or hide them."
 ;; shows), so every edit goes through `config/set' at the global scope
 ;; and the dashboard redraws from `fallback/status' afterwards.
 
-(defun harness-ui-usage--fallback-button (label entry function &rest props)
-  "Insert a button LABEL that calls FUNCTION on fallback ENTRY."
-  (apply #'harness-ui-button label (lambda (_button) (funcall function entry)) props))
+(defun harness-ui-usage--fallback-button (label entry function args &rest props)
+  "Insert a button LABEL that calls FUNCTION on fallback ENTRY with ARGS.
+PROPS are `harness-ui-button' properties.  The action is a function of
+no arguments, as `harness-ui-button' runs it with none."
+  (apply #'harness-ui-button label (lambda () (apply function entry args)) props))
 
 (defun harness-ui-usage--fallback-at-point ()
   "Return the fallback entry plist on the current line, or nil."

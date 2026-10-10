@@ -58,6 +58,15 @@
   (with-current-buffer harness-ui-usage--buffer-name
     (buffer-substring-no-properties (point-min) (point-max))))
 
+(defun harness-ui-usage-test-click-button (line label)
+  "Click the button LABEL on the dashboard line that contains LINE."
+  (with-current-buffer harness-ui-usage--buffer-name
+    (goto-char (point-min))
+    (search-forward line)
+    (search-forward label)
+    (goto-char (match-beginning 0))
+    (push-button)))
+
 (defun harness-ui-usage-test-has-svg-p ()
   "Non-nil when the buffer holds an SVG display property."
   (with-current-buffer harness-ui-usage--buffer-name
@@ -795,6 +804,29 @@ Two lines would grow the echo area and move the chart under the mouse."
     (let ((text (harness-ui-usage-test-text)))
       (should (string-match-p "available" text))
       (should-not (string-match-p "out of quota" text)))))
+
+(ert-deftest harness-ui-usage-fallback-buttons-do-their-work ()
+  "The buttons on a fallback line act where the keys do.
+[up] moves the entry earlier, [try now] clears its mark and [remove]
+takes it out of the list; `harness-ui-button' runs its action with no
+arguments, so a button must not pass it one."
+  (harness-ui-usage-test-with
+    (setq harness-fallback-models '("demo:scripted" "demo"))
+    (harness-ui-usage-test-open)
+    (harness-ui-usage-test-click-button "2. Demo" "[up]")
+    (harness-test-wait (lambda () (equal '("demo" "demo:scripted") harness-fallback-models))
+                       5 "moved up")
+    (harness-call 'fallback/mark "demo" :kind 'quota :reason "hit the limit")
+    (harness-ui-usage-refresh)
+    (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5 "reloaded")
+    (harness-ui-usage-test-click-button "1. Demo" "[try now]")
+    (harness-test-wait (lambda () (null (plist-get (harness-call 'fallback/status) :marks)))
+                       5 "mark cleared")
+    (harness-ui-usage-refresh)
+    (harness-test-wait (lambda () (not harness-ui-usage--loading)) 5 "reloaded")
+    (harness-ui-usage-test-click-button "1. Demo" "[remove]")
+    (harness-test-wait (lambda () (equal '("demo:scripted") harness-fallback-models))
+                       5 "removed")))
 
 (ert-deftest harness-ui-usage-fallback-add-move-and-remove ()
   "Adding, moving and removing entries saves the option through config/set."
