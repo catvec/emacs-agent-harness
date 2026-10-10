@@ -341,6 +341,7 @@ number of options, and a permission's `y`, `s`, `a`, `n` and `N`, and
 | `C-c C-p` | Edit the pattern the newest request about a path outside the session's directories is answered for |
 | `C-c C-f` / `C-c C-b` | Show the next or previous diagram of a question's options |
 | `C-c C-k` | Cancel the running turn |
+| `C-c C-u` | Go to the parent session: the session this one was forked from or started by (also on the `↑` in the header line, when there is one) |
 | `TAB` | Complete in the compose box; on a permission request cut short, show its whole input; elsewhere, fold or unfold the block at point |
 | `C-c C-s` | Search the transcript |
 | `C-c C-t` | Show or hide the session's todo list |
@@ -808,6 +809,14 @@ conversation so far and continues independently. A session can be
 forked while it works: the tool calls still running finish in the
 original session only, so the fork records that they have no result
 there.
+
+A session started from another names it in its own header line, right
+after its own name: `↑ fork of Planner`, `↑ sub-agent of Planner`, or,
+for a BTW opened over a session, `↑ opened over Planner`. Clicking that
+name, or `C-c C-u`, goes up to the parent: the window that shows it
+already is selected when there is one, else the parent takes the
+child's place; the child stays in the session list and the conversation
+tree. A session with no parent says so instead.
 
 `C-c h t` shows the conversation tree: every message of the session, its
 forks and its BTWs as a git-like graph. On a message, `f` forks the
