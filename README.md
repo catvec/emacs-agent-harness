@@ -442,7 +442,9 @@ like any other call.
   there, at that message with the words highlighted, as `RET` on a match
   does in `C-c h g`; the passage found shows under the session.
   `[All matches]`, on the Sessions heading, opens the session search's
-  own view of your line (`C-c h g`), with every match.
+  own view (`C-c h g`) of every session that matches the words the
+  search looked for -- the same "write API guide", or what the model
+  asked the transcripts for -- with every match.
 - **Tasks** are the project's, as the board's search reads them.
   `[Board]` shows one on its board, with the others the search found. An
   order about tasks ("stop the docs task") is only proposed in the
@@ -1031,7 +1033,7 @@ text as you typed it, and the results say so. Agents search the same
 index with the `session_search` tool, and so does the quick search (the
 task board's too) when it looks in the sessions' transcripts: it hands
 your words, in the search's syntax, to this search, and `[All matches]`
-in its popout opens the results here.
+in its popout opens the results here, for the words it looked for.
 
 Searching by meaning needs an embedding model. Set
 `harness-session-search-embedding-model` to one, such as

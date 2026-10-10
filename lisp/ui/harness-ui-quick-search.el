@@ -36,9 +36,11 @@
 ;; at the message where the search found its words, highlighted, when
 ;; it found them in a transcript -- and [Board] shows a task on its
 ;; board.  The Sessions heading has [All matches], which shows every
-;; match of the line in the sessions, with their snippets, as C-c h g
-;; does (`harness-search-sessions').  An order to manage tasks ("stop
-;; the docs task") is only proposed here: [Do it] does it.
+;; session that matches the words the search looked for in them (the
+;; plan's `:session-query': the line's words that say something, not
+;; "where did I"), with their snippets, as C-c h g does
+;; (`harness-search-sessions').  An order to manage tasks ("stop the
+;; docs task") is only proposed here: [Do it] does it.
 ;;
 ;; On a task board, C-c h / is the board's own search
 ;; (`harness-tasks-search'), which filters the board.  The lines of
@@ -793,8 +795,9 @@ opened from, as it would from there (`harness-ui-visit-session')."
 (defun harness-quick-search-all-matches (query)
   "Show every match of QUERY in the sessions, as `harness-search-sessions' does.
 That is the session search's own view: each session that matches, with
-its snippets.  The quick search closes, and the view opens from the
-window it was opened from."
+its snippets.  QUERY is the words the search looked for in them, a
+plan's `:session-query'.  The quick search closes, and the view opens
+from the window it was opened from."
   (harness-quick-search--leave)
   (harness-search-sessions query))
 
@@ -968,21 +971,27 @@ shows those tasks the way its own search would, where it can
   (not (or (plist-get plan :commands) (plist-get plan :sessions) (plist-get plan :tasks)
            (plist-get plan :ids) (plist-get plan :actions))))
 
-(defun harness-quick-search--heading (kind query)
-  "Return the heading of the things of KIND a search for QUERY found.
+(defun harness-quick-search--heading (kind words)
+  "Return the heading of the things of KIND a search found.
 The sessions' heading has [All matches], which shows every match of
-QUERY in the sessions (`harness-quick-search-all-matches')."
+WORDS, the words the search looked for in the sessions, in them
+\(`harness-quick-search-all-matches')."
   (concat "\n" (propertize (capitalize kind) 'face 'harness-quick-search-heading-face)
           (if (equal kind "sessions")
               (concat "  " (harness-quick-search--button
-                            "[All matches]" (lambda () (harness-quick-search-all-matches query))
-                            "Show every match of this search in the sessions, with its snippets"))
+                            "[All matches]" (lambda () (harness-quick-search-all-matches words))
+                            (format "Show every session that matches %s, with its snippets"
+                                    (harness-quick-search--quote words))))
             "")
           "\n"))
 
 (defun harness-quick-search--insert-found (state)
-  "Insert what STATE, a search that is done, found: its note, then each kind."
-  (let ((plan (plist-get state :plan)))
+  "Insert what STATE, a search that is done, found: its note, then each kind.
+[All matches] on the sessions' heading searches the words the search
+looked for in them, the plan's `:session-query', else the line asked."
+  (let* ((plan (plist-get state :plan))
+         (words (or (harness-quick-search--text (plist-get plan :session-query))
+                    (plist-get state :query))))
     (if (harness-quick-search--empty-p plan)
         (insert (harness-quick-search--line
                  (propertize (format "Nothing found for %s: no task, session or command, even searching wider."
@@ -996,7 +1005,7 @@ QUERY in the sessions (`harness-quick-search-all-matches')."
                          (propertize note 'face 'harness-dim-face)))))
       (dolist (kind (harness-quick-search--order (plist-get state :bias)))
         (when-let* ((found (harness-quick-search--found plan kind)))
-          (insert (harness-quick-search--heading kind (plist-get state :query)))
+          (insert (harness-quick-search--heading kind words))
           (dolist (thing found)
             (insert (pcase kind
                       ("commands" (harness-quick-search-command-line thing))
@@ -1230,9 +1239,9 @@ was typed and the harness's commands, to a quick, cheap model
 sessions and tasks it found, with buttons: [Run] runs a command in the
 buffer the search was opened from, [Open] opens a session (at the
 message where the search found its words, when it did), [All matches]
-shows every match of the line in the sessions, with snippets, and
-[Board] shows a task on its board.  The line stays in the box, to be
-refined; \\`M-p' and \\`M-n' bring back earlier searches.
+shows every session that matches the words the search looked for, with
+snippets, and [Board] shows a task on its board.  The line stays in the
+box, to be refined; \\`M-p' and \\`M-n' bring back earlier searches.
 
 What the search favours depends on where it was opened: commands, then
 sessions, in most buffers; sessions in the session list and a

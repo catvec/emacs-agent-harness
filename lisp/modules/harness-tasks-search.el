@@ -35,7 +35,9 @@
 ;; commands anywhere else.  Favoured, not alone: the model reads the rest
 ;; too.  A search favouring sessions searches their transcripts for the
 ;; query's words before the model reads anything, so the model gets the
-;; sessions that mention them as well as those whose names match.
+;; sessions that mention them as well as those whose names match.  The
+;; plan says which words the transcripts were searched for
+;; (`:session-query'), so a view that shows every match searches the same.
 ;;
 ;; The model reads what it is given, as a rule.  When that does not say
 ;; enough it may ask once to look further, instead of answering: the
@@ -428,13 +430,12 @@ the engineer is in, ID, is to stay out of the answer."
               (_ " Favour commands, then sessions; tasks count too."))
             (if id8 (format " Leave session %s out of \"sessions\": the engineer is in it." id8) ""))))
 
-(defun harness-tasks-search--text (root tasks query shown &optional context blocks no-board)
+(defun harness-tasks-search--text (root tasks query shown &optional context blocks)
   "The first message of a search: the project of ROOT, its TASKS, BLOCKS and QUERY.
 TASKS come newest first; SHOWN lists the ids the board shows now, when
 it shows only some.  CONTEXT is the line saying where the query was
 typed (`harness-tasks-search--context-line'); BLOCKS are more data,
-the sessions and the commands, each left out when nil.  NO-BOARD says
-there is no task board at all: task mode is off."
+the sessions and the commands, each left out when nil."
   (string-join
    (delq nil
          (append
@@ -442,11 +443,10 @@ there is no task board at all: task mode is off."
                  (format "Project: %s. Now: %s.\n" (harness-tasks-search--project-name root)
                          (format-time-string "%A %Y-%m-%d %H:%M"))
                  (if context (concat context "\n") "")
-                 (cond (tasks
-                        (format "%d task%s, newest first. Archived ones are off the board but still count."
-                                (length tasks) (if (= 1 (length tasks)) "" "s")))
-                       (no-board "There is no task board: task mode is off.")
-                       (t "The board has no tasks."))
+                 (if tasks
+                     (format "%d task%s, newest first. Archived ones are off the board but still count."
+                             (length tasks) (if (= 1 (length tasks)) "" "s"))
+                   "The board has no tasks.")
                  (if shown (format "\nShown on the board now: %s." (string-join shown ", ")) ""))
                 (and tasks (mapconcat #'harness-tasks-search--entry tasks "\n")))
           blocks
@@ -1386,9 +1386,8 @@ only once that is known."
              (model (or (harness-tasks-search--model cwd) (error "No model to search with")))
              (context (let ((context (plist-get opts :context))) (and (keywordp (car-safe context)) context)))
              (bias (harness-tasks-search--bias (plist-get opts :bias) context))
-             (no-board (not (harness-method-exists-p 'task/list)))
              ;; Oldest first.
-             (board (and (not no-board) (harness-call 'task/list cwd)))
+             (board (harness-call 'task/list cwd))
              (tasks (reverse (last board (if (equal bias "tasks")
                                              harness-tasks-search--max-tasks
                                            harness-tasks-search--max-tasks-elsewhere))))
@@ -1414,12 +1413,13 @@ only once that is known."
                                  ;; the transcripts' text lists.
                                  (list upfront
                                        (harness-tasks-search--sessions-block state)
-                                       (harness-tasks-search--commands-block state))
-                                 no-board))))
+                                       (harness-tasks-search--commands-block state))))))
                   ;; Taken last, so that nothing fails between taking the
                   ;; process and the search's closing it.
                   (search (append (list :session (harness-tasks-search--take-session root model)) state))
                   (looked nil)
+                  ;; What the model asked the transcripts for, when it did.
+                  (sought nil)
                   (finish
                    (lambda (answer)
                      (let ((plan (harness-tasks-search--plan answer tasks search)))
@@ -1438,7 +1438,9 @@ only once that is known."
                                        (harness-tasks-search--count (length (plist-get plan :actions)) "action")
                                        (if (eq t (plist-get plan :widened)) ", widened" "")
                                        model (- (float-time) start))
-                          (append (list :query query :model model :bias bias :looked looked) plan))))))
+                          (append (list :query query :model model :bias bias :looked looked
+                                        :session-query (or sought (harness-tasks-search--content query)))
+                                  plan))))))
                   (promise
                    (harness-then
                     (harness-tasks-search--ask search first)
@@ -1449,7 +1451,8 @@ only once that is known."
                          ((null answer) (harness-tasks-search--no-answer reply))
                          ((not wants) (funcall finish answer))
                          (t
-                          (setq looked (harness-tasks-search--looked wants))
+                          (setq looked (harness-tasks-search--looked wants)
+                                sought (or (plist-get wants :sessions) (plist-get wants :grep)))
                           (harness-then
                            (harness-tasks-search--look wants tasks search)
                            (lambda (found)
@@ -1480,9 +1483,9 @@ only once that is known."
 (harness-defmethod search/ask (cwd query &optional opts)
   "Ask the search model about QUERY, typed anywhere in the harness at CWD.
 Return a promise of the plan: (:query QUERY :model MODEL :bias BIAS
-:looked LOOKED :note NOTE :widened WIDENED :ids IDS :actions ACTIONS
-:tasks TASKS :sessions SESSIONS :commands COMMANDS).  Nothing changes
-yet.
+:looked LOOKED :session-query SESSION-QUERY :note NOTE :widened WIDENED
+:ids IDS :actions ACTIONS :tasks TASKS :sessions SESSIONS :commands
+COMMANDS).  Nothing changes yet.
 
 IDS are the tasks of CWD's board QUERY is about, best match first,
 archived ones included: a board shows only those.  ACTIONS are what
@@ -1506,11 +1509,15 @@ the session, and `:ranges' where the matches are in the snippet, each
 entries of OPTS `:commands' that do what QUERY asks, best first.
 
 BIAS is what the search favoured.  LOOKED says what the model looked
-at besides what it was given, when it did.  NOTE is the model's word on
-its answer (\"No task matched; these sessions mention it.\"), else nil.
-WIDENED is t when the model answered with nothing and the search added
-the sessions and commands that come nearest QUERY itself, NOTE saying
-so; else false.
+at besides what it was given, when it did.  SESSION-QUERY is the text
+the sessions' transcripts were searched with, or would be, which a view
+that shows every match in them searches for: what the model asked the
+transcripts for when it looked, else the words of QUERY that say
+something (`harness-tasks-search--content'), nil when it has none.
+NOTE is the model's word on its answer (\"No task matched; these
+sessions mention it.\"), else nil.  WIDENED is t when the model answered
+with nothing and the search added the sessions and commands that come
+nearest QUERY itself, NOTE saying so; else false.
 
 The model is `harness-tasks-search-model'.  It reads the board's
 tasks, the other sessions and the commands, and answers in JSON, at

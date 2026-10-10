@@ -683,6 +683,40 @@ found, says nothing of the kind."
         (should-not (plist-get named :snippet))
         (should-not (plist-get named :ranges))))))
 
+(ert-deftest harness-tasks-search-ask-says-what-the-sessions-were-searched-for ()
+  "The plan carries the text the transcripts were searched with, or would
+be, which a view that shows every match in them searches for: what the
+model asked the transcripts for when it looked, else the words of the
+query that say something, and none when the query has none."
+  (harness-tasks-search-test-with
+    (harness-tasks-search-test--session "Debug the merge queue")
+    (cl-flet ((sought (query view &rest replies)
+                (plist-get (apply #'harness-tasks-search-test--ask
+                                  query (list :context (list :view view)) replies)
+                           :session-query)))
+      ;; No look: the words that say something, not "where did I" --
+      ;; the ones an up-front search and widening search for.
+      (should (equal "debug merge queue"
+                     (sought "where did I debug the merge queue?" "chat" "{\"show\":[]}")))
+      (should (equal "debug merge queue"
+                     (sought "where did I debug the merge queue?" "sessions" "{\"show\":[]}")))
+      (should (equal "debug merge queue"
+                     (sought "where did I debug the merge queue?" "board" "{\"show\":[]}")))
+      ;; A look at the sessions' transcripts, or the tasks': what the model asked for.
+      (should (equal "merge queue"
+                     (sought "that queue thing" "chat" "{\"sessions\":\"merge queue\"}" "{\"show\":[]}")))
+      (should (equal "queue merge"
+                     (sought "that queue thing" "board" "{\"grep\":\"queue merge\"}" "{\"show\":[]}")))
+      ;; Both: every session's.
+      (should (equal "merge queue"
+                     (sought "that queue thing" "chat"
+                             "{\"grep\":\"queue\",\"sessions\":\"merge queue\"}" "{\"show\":[]}")))
+      ;; A look at something else says nothing of the transcripts.
+      (should (equal "queue thing"
+                     (sought "that queue thing" "chat" "{\"commands\":\"queue\"}" "{\"show\":[]}")))
+      ;; Nothing in the query says anything to look for.
+      (should-not (sought "open the session please" "chat" "{\"show\":[]}")))))
+
 (ert-deftest harness-tasks-search-ask-searches-the-transcripts-first-for-sessions ()
   "Favouring sessions, the search searches every transcript for the
 query's words before the model reads anything: a session whose
@@ -705,6 +739,9 @@ searches no transcript, and no other bias does."
         (should (equal (list merge) (harness-tasks-search-test--ids (plist-get plan :sessions))))
         (should (plist-get (car (plist-get plan :sessions)) :node))
         (should-not (plist-get plan :looked))
+        ;; The words the transcripts were searched for, which a view that
+        ;; shows every match searches too.
+        (should (equal "merge queue drop commit" (plist-get plan :session-query)))
         (should (= 1 (length harness-tasks-search-test--requests)))
         (should (string-match-p "^Context: the session list\\. Favour sessions, then commands; tasks count too\\.$"
                                 first))

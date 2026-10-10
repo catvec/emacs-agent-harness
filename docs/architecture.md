@@ -3916,9 +3916,10 @@ transcripts are searched by `session/search` (see session-search), full
 text, and by nothing else.
 
 - `search/ask CWD QUERY &optional OPTS` → promise of the plan
-  `(:query QUERY :model MODEL :bias BIAS :looked LOOKED :note NOTE
-  :widened WIDENED :ids IDS :actions ACTIONS :tasks TASKS :sessions
-  SESSIONS :commands COMMANDS)`.  Nothing changes yet.  CWD is the
+  `(:query QUERY :model MODEL :bias BIAS :looked LOOKED :session-query
+  SESSION-QUERY :note NOTE :widened WIDENED :ids IDS :actions ACTIONS
+  :tasks TASKS :sessions SESSIONS :commands COMMANDS)`.  Nothing changes
+  yet.  CWD is the
   project the query was typed in, and OPTS a plist:
   - `:bias` what to favour: `"tasks"`, `"sessions"` or `"commands"`
     (singular too).  By default it is what the view of `:context`
@@ -3953,8 +3954,16 @@ text, and by nothing else.
   opens the session at `:node`, the words found highlighted (the quick
   search's [Open], below).  COMMANDS are the entries of the catalogue it
   is about, best first.  BIAS is what the search favoured, LOOKED says
-  what the model looked at besides what it was given, and NOTE is its
-  word on the answer ("No task matched; these sessions mention it.") or
+  what the model looked at besides what it was given, and SESSION-QUERY
+  is the text the sessions' transcripts were searched with, or would be:
+  what the model asked them for when it looked (`{"sessions":TEXT}`,
+  else `{"grep":TEXT}`), else the words of QUERY that say something
+  (`harness-tasks-search--content`, those the transcripts up front and
+  widening search for), nil when QUERY has none.  A view that shows
+  every match in the sessions searches for it (the quick search's
+  [All matches], below), not for the line as typed, whose "where did I"
+  would only dilute a full-text search.  NOTE is the model's word on the
+  answer ("No task matched; these sessions mention it.") or
   nil.  WIDENED is t when the model answered with nothing and the search
   added what comes nearest itself (Widening, below), NOTE saying so, else
   false.  ACTIONS are what QUERY orders, in order, each `(:task ID
@@ -6832,7 +6841,9 @@ that matched, point on the words found, highlighted; one found by its
 name opens as the session list opens it.  The module requires ui-search
 for this.  [All matches] is `harness-quick-search-all-matches`: it
 closes the popout and runs `harness-search-sessions` (C-c h g) for the
-line, the session search's own view of every match, with its snippets.
+words the search looked for in the sessions, the plan's `:session-query`
+(the line as typed when it has none), the session search's own view of
+every session that matches, with its snippets.
 [Board] opens the task board with the found tasks shown, and the actions
 of the answer are proposed with [Do it] and [Skip]: nothing is done
 unasked.  A search that found nothing even widened says "Nothing found".

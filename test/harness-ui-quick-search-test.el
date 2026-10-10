@@ -687,21 +687,46 @@ at the match too."
 
 (ert-deftest harness-ui-quick-search-all-matches-shows-every-match ()
   "The Sessions heading has [All matches] when sessions were found: it
-closes the popout and has the session search show every match of the line,
-from where the quick search was opened.  With no session found there is none."
+closes the popout and has the session search show every session that
+matches the words the search looked for in them, from where the quick
+search was opened.  Those are the plan's `:session-query': the words of
+the line that say something, or what the model asked the transcripts for;
+a line of words that say nothing is searched as typed.  With no session
+found there is no button."
   (harness-ui-quick-search-test-with
     (let* ((session (plist-get (harness-call 'session/create :cwd default-directory
                                              :name "Debug the merge queue")
                                :id))
            (origin (harness-ui-quick-search-test--origin))
-           (searched nil))
-      (harness-ui-quick-search-test--ask origin "the merge queue" (format "{\"sessions\":[\"%s\"]}" session))
-      (should (string-match-p "Sessions  \\[All matches\\]\n" (harness-ui-quick-search-test--text)))
-      (cl-letf (((symbol-function 'harness-search-sessions)
-                 (lambda (query &optional mode) (push (list query mode (current-buffer)) searched) nil)))
-        (harness-ui-quick-search-test--push "[All matches]"))
-      (should (equal (list (list "the merge queue" nil origin)) searched))
-      (should-not (harness-ui-quick-search-test--popout))
+           (named (format "{\"sessions\":[\"%s\"]}" session)))
+      (cl-flet ((all-matches (query &rest replies)
+                  ;; Ask QUERY, then push [All matches]: what the session
+                  ;; search was asked, as (QUERY MODE BUFFER) entries.
+                  (let ((searched nil))
+                    (apply #'harness-ui-quick-search-test--ask origin query replies)
+                    (should (string-match-p "Sessions  \\[All matches\\]\n" (harness-ui-quick-search-test--text)))
+                    (cl-letf (((symbol-function 'harness-search-sessions)
+                               (lambda (query &optional mode)
+                                 (push (list query mode (current-buffer)) searched) nil)))
+                      (harness-ui-quick-search-test--push "[All matches]"))
+                    (should-not (harness-ui-quick-search-test--popout))
+                    searched)))
+        ;; The words of the line that say something, not "where did I".
+        (should (equal (list (list "debug merge queue" nil origin))
+                       (all-matches "where did I debug the merge queue?" named)))
+        ;; What the model asked the transcripts for.
+        (should (equal (list (list "queue merge" nil origin))
+                       (all-matches "that queue thing" "{\"sessions\":\"queue merge\"}" named)))
+        ;; No word that says anything: the line as typed.
+        (should (equal (list (list "open the session please" nil origin))
+                       (all-matches "open the session please" named))))
+      ;; The button says what it searches for.
+      (harness-ui-quick-search-test--ask origin "where did I debug the merge queue?" named)
+      (with-current-buffer (harness-ui-quick-search-test--popout)
+        (goto-char (point-min))
+        (should (search-forward "[All matches]" nil t))
+        (should (equal "Show every session that matches “debug merge queue”, with its snippets"
+                       (get-text-property (match-beginning 0) 'help-echo))))
       ;; Nothing found among the sessions: no button.
       (harness-ui-quick-search-test--ask origin "run the test command"
                                          "{\"commands\":[\"harness-quick-search-test-run\"]}")
