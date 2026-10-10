@@ -2411,7 +2411,8 @@ non-interactive session it stays a denial.
   hold) pauses it at a boundary.  Automatic compaction runs between
   turns (`agent/before-turn'), not inside one, so a native-provider
   turn that outgrows the window reaches the provider's own error;
-  budgets refuse new turns.
+  a hard budget spent mid-turn ends the turn at the next step boundary
+  (see "usage" below), and one already spent refuses a new turn.
 - Each step reads the session's model afresh: a model switch reaches a
   running turn at its next step, never mid-step.  The step sends only
   the provider state its model can continue and drops one of another
@@ -2485,7 +2486,10 @@ non-interactive session it stays a denial.
   session), `usage/project-budgets ROOT` (the project budgets of ROOT
   and the period budgets of everything or of ROOT, as statuses; what
   the task board shows), `usage/plan-budget AMOUNT PERIOD DAYS`,
-  `usage/totals`, `usage/series (:bucket day|hour …)`, `usage/record ROW`.
+  `usage/totals`, `usage/series (:bucket day|hour …)`, `usage/record ROW`,
+  `usage/cost-compare (&rest usage/totals filters, :models :reference-model
+  :at)` (what the recorded tokens would cost at other models' prices; see
+  "Cost comparison").
   BUDGET = `(:id :scope session|project|period :target ID-OR-ROOT
   :amount F :hard BOOL :period day|week|month :days business|all
   :baseline F :baseline-period-start "YYYY-MM-DD")`.
@@ -2538,7 +2542,10 @@ non-interactive session it stays a denial.
   auth-source host api.anthropic.com user admin); without one nothing
   is fetched and it gives `(:available nil :reason)`.  Pro and Max
   subscriptions have no cost report.
-- Hard budgets block via `agent/before-turn`; soft ones emit
+- Hard budgets stop a turn: `agent/before-turn` refuses a new one, and
+  `agent/step` refuses the next step of a running one, which then ends
+  `blocked` with the reason as a hint (the step in flight finishes, so a
+  hosted loop's call in progress is not cut off).  Soft ones emit
   `usage/budget-warning` and a session hint at 80% and 100%.  Budgets
   count billed cost, so calls a subscription covers spend none; what
   providers report and a baseline count toward both.
@@ -5722,14 +5729,16 @@ option as on any question; answers go through
 text typed in the box answers it too.  Without a `:cowboy` the ordinary
 question panel shows.
 Prompt cache warning (`harness-ui-cache`, module `ui-cache`): once the
-session's `:cache :expires` has passed while it is idle, closed or
-blocked, a panel above the box says so ("Prompt cache expired at
+session's `:cache :expires` has passed while it is idle or closed, a
+panel above the box says so ("Prompt cache expired at
 14:07, 5 minutes after its last use") and what the next message costs:
 it re-sends ~N tokens (`:usage :context`) uncached, about the
 cache-write (else input) price of those tokens instead of their
 cache-read price, at the model's list prices, when the catalogue
-prices both.  A running session shows none: its request is using the
-cache again.  A session switched away from the model whose cache its
+prices both.  A session whose turn is still running shows none, a
+session blocked on an answer included: the next request is that turn's
+own, not the user's next message, and a running session's requests use
+the cache again.  A session switched away from the model whose cache its
 requests last used (`:cache :model`) shows the panel at once,
 whatever the time ("Prompt cache cold  cached for Opus 4.6, not
 DeepSeek V4"), with the same cost: the new model reads nothing of
@@ -5760,8 +5769,9 @@ Pressing one runs `compaction/compact` (`harness-ui-compact-run`); the
 line says so while it runs (`harness-ui-compact-doing`), and the panel
 goes once the compaction resets the cache.  A session the cowboy
 module compacts before a message shows as running with the activity
-`compacting` meanwhile, so the panel offers nothing then either.  A session blocked on an answer is in the middle of a
-turn: its panel offers nothing.
+`compacting` meanwhile, so the panel offers nothing then either.  A
+session blocked on an answer is in the middle of a turn, so it shows
+no panel at all.
 Tools go by their labels everywhere: a tool block's header shows the
 label in `harness-tool-title-face` and what the call is about after it
 in `harness-tool-subject-face` (the faces stand in for the colon of the
@@ -6684,6 +6694,23 @@ similar ability") and each model.  `M-<up>`/`M-<down>` move the entry
 at point, `d` removes it (or the budget at point), `c` clears its mark.
 It follows `fallback/changed` and `config/changed`.
 
+Cost comparison (`harness-ui-cost-compare`, module `ui-cost-compare`):
+the dashboard's `C` or `[compare]` (`harness-cost-compare`) opens
+`*harness cost comparison*`, which asks `usage/cost-compare` (module
+`cost-compare`) what the tokens the dashboard recorded -- its period's,
+or one session's -- would have cost at each priced model of the
+catalogue.  The answer re-prices the recorded token counts with the
+rates the catalogue carries (a model's `:pricing', or the plist its
+`:pricing-fn' answers for the clock, as DeepSeek does) through
+`usage/price', and compares each result with the recorded `:list-cost',
+the tokens' value at API prices, since a call a plan covered was billed
+nothing.  Tokens a model prices no cache read for, or prices a cache
+write below its input for, are reported and priced as input, which is
+what that model would have billed them; a model the catalogue does not
+price reads unknown, never zero.  The rows are cheapest first, marked
+where they are the model the usage ran on.  It is read-only: no row,
+cost or budget changes.
+
 The Budgets section lists the harness's budgets, the Budget setting's
 and the sessions' own (`usage/budget-status` on "settings" and
 "session:SID").  A budget's line has [delete]
@@ -6724,7 +6751,12 @@ worktrees, its tasks' and sub-agents', fold by their `:main` into one
 line with their sum and count, folded until TAB, RET or a click unfolds
 it, `w` or `[show worktrees]` every project, the main checkout's own
 usage first, then each worktree's; a redraw keeps every window's start
-and point lines), Insights report (`harness-ui-insights`:
+and point lines), cost comparison (`harness-ui-cost-compare`:
+`*harness cost comparison*`, the tokens the dashboard recorded
+re-priced at every priced model of the catalogue, cheapest first, each
+with the difference from their value at API prices, opened from the
+dashboard's `C' or `[compare]', `g' refresh and `t' the period;
+read-only), Insights report (`harness-ui-insights`:
 `*harness insights*`, a read-only view with a placeholder until
 `_harness/insights/compute` answers, then the totals, the written
 summary (`_harness/insights/narrative`, asked for once the figures

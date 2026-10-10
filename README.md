@@ -340,6 +340,7 @@ default), or nil for nowhere.
 | `C-c h W` | `harness-move-session` | Move a session to another working directory, and with it to that directory's project (see [Moving a session](#moving-a-session-to-another-directory)) |
 | `m` | `harness-ui-sessions-move` | In the session list, move the session at point to another directory |
 | `C-c h u` | `harness-usage` | Show the usage and cost dashboard |
+| `C` | `harness-cost-compare` | In the usage dashboard, compare what the recorded usage would have cost at other models' prices |
 | `C-c h A` | `harness-insights` | Show the Insights report: how a period of work with the agents went |
 | `C-c h B` | `harness-delete-budget` | Delete a budget, chosen by name |
 | `C-c h w` | `harness-worktrees` | List the git worktrees of the project |
@@ -828,7 +829,10 @@ minutes or an hour for Claude, hours for DeepSeek (see
 `harness-cache-ttl`). Once it expires, the next message re-sends the
 whole conversation uncached, at the full input price. A panel above
 the message box says when the cache expired and what the next message
-will cost instead of what it would have cost cached. Its last line offers
+will cost instead of what it would have cost cached. It never shows
+while the session's turn is running — a session waiting on a tool
+approval included, whose next request is that turn's own — only once
+the session is waiting for you. Its last line offers
 to compact the conversation first, a button and a key per kind with
 what each costs:
 
@@ -2097,6 +2101,16 @@ provider the list does not name keeps its own model first, the list
 behind it.  There `f` adds an entry, `c` forgets that one ran out so it
 is tried again, `M-<up>` and `M-<down>` move the entry at point, and `d`
 removes it.
+
+`C` (or the header's `[compare]`, `M-x harness-cost-compare`) answers
+"how much would this have cost using a different provider?": it
+re-prices the tokens the dashboard recorded at every priced model of
+the catalogue and lists them cheapest first, each with how much more or
+less it is than those tokens at API prices — the value the comparison
+is about, since a plan-covered call was billed nothing.  `g` refreshes
+it, `t` changes the period, and a prefix argument asks which period, or
+which session (`C-u C-u`).  Nothing is recorded or changed: the
+recorded cost, the rows and the budgets stay as they are.
 
 Grouped by project, every task's git worktree is folded under the
 project it belongs to: one line per project, with the total and how many

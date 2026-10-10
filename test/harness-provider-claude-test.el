@@ -2032,6 +2032,31 @@ is back and the CLI searches no more."
       (should (= 1790847600.0 (plist-get (car merged) :resets)))
       (should (equal "Current session (5 hours)" (plist-get (car merged) :label))))))
 
+(ert-deftest harness-provider-claude-windows-never-tick-down ()
+  "A quota window's usage only accrues: a later, lower snapshot of the
+same window is stale and the higher figure stands.  Once the reset time
+moved later the window is a new one, which may start lower."
+  (harness-provider-claude-test--setup)
+  (let* ((old (list (list :name "5h" :label "Current session (5 hours)"
+                          :used 0.9 :resets 1790847600.0)
+                    (list :name "7d" :label "This week, all models"
+                          :used 0.57 :resets 1791039600.0)))
+         (same (harness-provider-claude--merge-windows
+                old
+                (harness-provider-claude--windows
+                 '(:unifiedWindows (:five_hour (:utilization 0.1 :resetsAt 1790847601)
+                                    :seven_day_opus (:utilization 0.05 :resetsAt 1791039600))))))
+         (reset (harness-provider-claude--merge-windows
+                 old
+                 (harness-provider-claude--windows
+                  '(:unifiedWindows (:five_hour (:utilization 0.1 :resetsAt 1791027600)))))))
+    ;; Same window (a second of rounding between the report and the event):
+    ;; the stale lower 5h figure does not lower what the window shows.
+    (should (= 0.9 (plist-get (car same) :used)))
+    ;; A later reset is a new window: the lower figure stands.
+    (should (= 0.1 (plist-get (car reset) :used)))
+    (should (= 1791027600.0 (plist-get (car reset) :resets)))))
+
 (ert-deftest harness-provider-claude-subscription-turns-cost-nothing ()
   "A Claude subscription pays: turns cost 0, with their API price as list cost."
   (harness-provider-claude-test--setup)
