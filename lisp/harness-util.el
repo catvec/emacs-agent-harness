@@ -360,6 +360,24 @@ The harness reads \"the harness (SOURCE)\", another session's agent
     ('nil "the user")
     (kind (format "the %s" kind))))
 
+;;;; Thinking levels
+
+(defconst harness-thinking-level-order
+  '("none" "minimal" "low" "medium" "high" "xhigh" "max")
+  "Every thinking level the harness knows, weakest first.
+A model offers some of these (its `:thinking-levels'), and whatever has
+to order levels or tell which of two is stronger -- the thinking menu,
+the level a BTW is given -- goes by this one list, so there is a single
+idea of what is stronger.  A level that is not in it ranks after all
+that are (see `harness-thinking-level-rank').")
+
+(defun harness-thinking-level-rank (level)
+  "Return how strong thinking LEVEL is, as a number: a higher one thinks harder.
+That is its place in `harness-thinking-level-order'.  A level that is
+not there ranks after every one that is."
+  (or (cl-position level harness-thinking-level-order :test #'equal)
+      most-positive-fixnum))
+
 ;;;; Models and provider state
 ;;
 ;; A model id is "PROVIDER:NAME".  A session's provider state (the CLI

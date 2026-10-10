@@ -35,6 +35,12 @@
 ;; at once: a limit meant for the long commands should not make every
 ;; short one wait.  The slots belong to the harness process that loads
 ;; this module; a second harness on the same machine has its own.
+;;
+;; The slots of a machine are a pool of the harness-slots library
+;; (lisp/harness-slots.el), which counts the calls holding a slot,
+;; keeps the line of those waiting and hands the slots out.  This module
+;; says how many slots a machine has (`harness-tool-slots--slots') and
+;; how a waiting call ranks in the line: the priority of its session.
 
 ;;; Code:
 
@@ -42,6 +48,7 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-slots)
 (require 'harness-tools)
 (require 'harness-priority)
 
@@ -85,12 +92,12 @@ machine's slots, or bind it in a test.")
 ;;;; Slots
 
 (defvar harness-tool-slots--machines (make-hash-table :test 'equal)
-  "Machine key -> its slots, as (RUNNING . WAITERS).
-WAITERS holds the plist of each call waiting for a slot (`:promise' and
-the `:session' it serves), oldest first; the priority decides among
-them which is served next (`harness-tool-slots--next').  A machine
-keeps its key once its last call is done: it holds a count and a
-list.")
+  "Machine key -> its slots, a pool of the harness-slots library.
+The pool allows `harness-tool-slots--slots' calls at once.  Each call
+waiting for a slot comes with the session it serves, and the priority
+of that session decides among them which is served next
+\(`harness-tool-slots--rank-of').  A machine keeps its pool once its
+last call is done.")
 
 (defun harness-tool-slots--baseline ()
   "Return how many calls may run at once on one machine.
@@ -118,81 +125,53 @@ keeps the baseline."
   (ignore machine)
   (harness-tool-slots--baseline))
 
-(defun harness-tool-slots--state (machine)
-  "Return the slots of MACHINE, making them when it has none yet."
-  (or (gethash machine harness-tool-slots--machines)
-      (puthash machine (cons 0 nil) harness-tool-slots--machines)))
-
-(defun harness-tool-slots--ticket (machine)
-  "Return the function that gives one slot of MACHINE back, once."
-  (let ((given nil))
-    (lambda ()
-      (unless given
-        (setq given t)
-        (harness-tool-slots--give machine)))))
-
 (defun harness-tool-slots--priority (session)
   "Return the priority of SESSION, a session id or nil, as a level.
 A call that has no session at all -- the harness itself asked -- waits
 as `harness-priority-default' does."
   (if session (harness-priority-of session) harness-priority-default))
 
-(defun harness-tool-slots--rank-of (waiter)
-  "Return the rank of WAITER, a call waiting for a slot.
-That is its session's priority as it is now, so raising a session's
-priority moves the calls it already has waiting."
-  (harness-priority-rank (harness-tool-slots--priority (plist-get waiter :session))))
+(defun harness-tool-slots--rank-of (session)
+  "Return the rank of a call waiting for a slot on behalf of SESSION.
+That is SESSION's priority as it is now, so raising a session's
+priority moves the calls it already has waiting.  It is the pool's rank
+function (`harness-slots-create'), and SESSION the data a call asks
+with; among calls of one rank the oldest goes first."
+  (harness-priority-rank (harness-tool-slots--priority session)))
 
-(defun harness-tool-slots--next (waiters)
-  "Return the call of WAITERS that takes the next free slot.
-That is the highest priority session's call, the oldest of those first
-\(`harness-priority-above-p'): WAITERS is in the order the calls
-arrived, so the first of the highest rank is the oldest."
-  (let ((best (car waiters))
-        (best-rank (harness-tool-slots--rank-of (car waiters))))
-    (dolist (waiter (cdr waiters))
-      (let ((rank (harness-tool-slots--rank-of waiter)))
-        (when (> rank best-rank)
-          (setq best waiter best-rank rank))))
-    best))
+(defun harness-tool-slots--pool (machine)
+  "Return the pool of slots of MACHINE, making it when it has none yet.
+A reload keeps `harness-tool-slots--machines', so it may still hold a
+machine's slots from before they were pools: a (RUNNING . WAITERS)
+cons.  The pool that replaces it starts with no call running, and the
+calls that waited start in it, in the order they came, rather than
+wait for slots whose holders can no longer give them back."
+  (let ((pool (gethash machine harness-tool-slots--machines)))
+    (if (and pool (not (consp pool)))
+        pool
+      (let ((fresh (harness-slots-create
+                    :limit (lambda () (harness-tool-slots--slots machine))
+                    :rank #'harness-tool-slots--rank-of)))
+        (puthash machine fresh harness-tool-slots--machines)
+        (dolist (waiter (cdr pool))
+          (harness-resolve (plist-get waiter :promise)
+                           (harness-slots-acquire fresh (plist-get waiter :session))))
+        fresh))))
 
 (defun harness-tool-slots--admit (machine)
   "Start the calls waiting for MACHINE while it has free slots.
 The calls waiting go by priority, the oldest first among equals
-\(`harness-tool-slots--next').  A module that raises a machine's limit
-while calls wait calls this, so they start without waiting for another
-call to finish."
-  (let* ((state (harness-tool-slots--state machine))
-         (slots (harness-tool-slots--slots machine)))
-    (while (and (cdr state) (< (car state) slots))
-      (let ((waiter (harness-tool-slots--next (cdr state))))
-        (setcdr state (delq waiter (cdr state)))
-        (setcar state (1+ (car state)))
-        (harness-resolve (plist-get waiter :promise)
-                         (harness-tool-slots--ticket machine))))))
-
-(defun harness-tool-slots--give (machine)
-  "Give one slot of MACHINE back and start its next waiting call, if one waits.
-The calls waiting go by priority, the oldest first among equals
-\(`harness-tool-slots--next')."
-  (let* ((state (harness-tool-slots--state machine)))
-    (setcar state (max 0 (1- (car state))))
-    (harness-tool-slots--admit machine)))
+\(`harness-slots-admit').  A module that raises a machine's limit while
+calls wait calls this, so they start without waiting for another call
+to finish."
+  (harness-slots-admit (harness-tool-slots--pool machine)))
 
 (defun harness-tool-slots--acquire (machine session)
   "Return a promise of a ticket for a slot of MACHINE for a call of SESSION.
 It resolves at once when MACHINE has a free slot, and otherwise when
 one is given back to it, by SESSION's priority then, oldest first among
-equals (`harness-tool-slots--give')."
-  (let ((state (harness-tool-slots--state machine)))
-    (if (< (car state) (harness-tool-slots--slots machine))
-        (progn
-          (setcar state (1+ (car state)))
-          (harness-resolved (harness-tool-slots--ticket machine)))
-      (let ((promise (harness-make-promise)))
-        (setcdr state (nconc (cdr state)
-                             (list (list :promise promise :session session))))
-        promise))))
+equals (`harness-slots-acquire')."
+  (harness-slots-acquire (harness-tool-slots--pool machine) session))
 
 ;;;; Which machine a call runs on
 
@@ -304,12 +283,7 @@ handler starts; a call of any other tool runs as it always did."
   "Stop holding slots, letting every call that waits run at once."
   (advice-remove 'harness-tools--run-handler #'harness-tool-slots--run-handler)
   (dolist (machine (hash-table-keys harness-tool-slots--machines))
-    (let* ((state (gethash machine harness-tool-slots--machines))
-           (waiters (prog1 (cdr state) (setcdr state nil))))
-      (setcar state 0)
-      (dolist (waiter waiters)
-        (harness-resolve (plist-get waiter :promise)
-                         (harness-tool-slots--ticket machine))))))
+    (harness-slots-flush (harness-tool-slots--pool machine))))
 
 (harness-define-module 'tool-slots
   :doc "A few slots per machine for the tools that start processes."

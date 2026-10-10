@@ -249,8 +249,13 @@ plane's regional host (us-east-1) by the request's path."
 (defun harness-bedrock-mock--respond (proc response)
   "Send RESPONSE, a plist, on connection PROC.
 Keys: `:status', `:headers', `:body' (sent whole), `:chunks' (sent one
-at a time, `:delay' seconds apart), or `:hang' to never answer."
-  (unless (plist-get response :hang)
+at a time, `:delay' seconds apart), `:hang' to never answer, or `:reset'
+to drop the connection with a reset, answering nothing, as a proxy that
+lost it does."
+  (when (plist-get response :reset)
+    (ignore-errors (set-network-process-option proc :linger (cons 1 0)))
+    (delete-process proc))
+  (unless (or (plist-get response :hang) (plist-get response :reset))
     (let* ((status (or (plist-get response :status) 200))
            (headers (append (list (cons "Content-Type" (or (plist-get response :content-type)
                                                             (if (plist-get response :chunks)

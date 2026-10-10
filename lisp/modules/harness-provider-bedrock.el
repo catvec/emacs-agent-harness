@@ -2412,6 +2412,15 @@ at all (`:no-tools')."
                 (harness-http-request
                  url :method "POST" :headers headers :body payload :binary t
                  :timeout harness-bedrock--request-timeout
+                 ;; A completion is worth repeating: a connection lost
+                 ;; before any of the answer reached `:on-chunk' is tried
+                 ;; again by the HTTP layer, with the request as it was
+                 ;; signed (seconds old, well within the minutes AWS
+                 ;; accepts a signature for), as it is for the
+                 ;; OpenAI-compatible providers.  That covers a turn and
+                 ;; the harness's own calls alike.  A throttled or failed
+                 ;; response is `harness-bedrock--maybe-retry''s.
+                 :retry t
                  :on-headers (lambda (status response-headers)
                                (setf (harness-bedrock--stream-status stream) status
                                      (harness-bedrock--stream-content-type stream)

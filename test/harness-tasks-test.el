@@ -12,9 +12,8 @@
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
 (defvar harness-tasks--naming)
-(defvar harness-tasks--naming-queue)
-(defvar harness-tasks--naming-retries)
-(defvar harness-tasks--naming-retry-delays)
+(defvar harness-tasks--naming-pool)
+(defvar harness-tasks--naming-concurrency)
 (defvar harness-tasks--loaded)
 (defvar harness-tasks--dirty)
 (defvar harness-tasks-max-running)
@@ -32,7 +31,7 @@
 (defvar harness-tasks--sent-back-message)
 (declare-function harness-tasks--save "harness-tasks")
 (declare-function harness-tasks--forget-stores "harness-tasks")
-(declare-function harness-tasks--naming-forget-all "harness-tasks")
+(declare-function harness-tasks--naming-pool-new "harness-tasks")
 (declare-function harness-acp-connect "harness-acp")
 (declare-function harness-acp-set-handler "harness-acp")
 (declare-function harness-acp-request "harness-acp")
@@ -58,12 +57,13 @@ turn `harness-tasks-require-verification' on themselves."
      (clrhash harness-tasks--table)
      (clrhash harness-tasks--starting)
      (clrhash harness-tasks--naming)
-     (harness-tasks--naming-forget-all)
      (harness-tasks--forget-stores)
-     ;; Nothing of an earlier test waits to be written over this one's files.
+     ;; Nothing of an earlier test waits to be written over this one's files,
+     ;; nor for a slot of the title throttle: a request of an earlier test
+     ;; that is answered late gives its slot back to the pool it took it from.
      (setq harness-tasks--loaded t
            harness-tasks--dirty nil
-           harness-tasks--naming-queue nil
+           harness-tasks--naming-pool (harness-tasks--naming-pool-new)
            harness-acp--clients nil)
      (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override harness-tasks-test-script)
@@ -2200,11 +2200,12 @@ tasks with a title are left alone."
       (should-not harness-tasks-test--titles)
       (harness-tasks--name-untitled)
       (should (= 2 (length harness-tasks-test--titles)))
-      (should (= 1 (length harness-tasks--naming-queue)))
+      (should (equal '(2 . 1) (harness-tasks-test--throttle)))
       (harness-test-wait (lambda () (cl-every #'harness-tasks-test-name (seq-take ids 3))) 5 "the names")
       (should (equal '("Fix The Parser" "Export The Orders" "Page The Orders" "Log slow requests" nil)
                      (mapcar #'harness-tasks-test-name ids)))
       (should (= 3 (length harness-tasks-test--titles)))
+      (should (equal '(0 . 0) (harness-tasks-test--throttle)))
       (harness-tasks--name-untitled)
       (should (= 3 (length harness-tasks-test--titles))))))
 
@@ -2218,7 +2219,6 @@ tasks with a title are left alone."
 ;; no slot to spare, and watch the free slots and the sessions.
 
 (declare-function harness-tasks--project "harness-tasks")
-(declare-function harness-tasks--naming-retry "harness-tasks")
 
 (defun harness-tasks-test--session-ids ()
   "The ids of every session there is, sorted."
@@ -2248,9 +2248,9 @@ Return the task's id."
     (should request)
     (should (eq 'pending (harness-tasks-test-state id)))
     (should (equal project (plist-get (harness-tasks-test-task id) :project)))
-    ;; Out at once: it waited for nothing, the throttle's queue is empty.
+    ;; Out at once: it waited for nothing, and holds a slot of the throttle.
     (should (gethash id harness-tasks--naming))
-    (should-not harness-tasks--naming-queue)
+    (should (equal '(1 . 0) (harness-tasks-test--throttle)))
     ;; An id of its own, which is no session.
     (should (string-prefix-p "naming-" job))
     (should-not (equal own job))
@@ -2265,6 +2265,7 @@ Return the task's id."
     (should (equal "Export orders as CSV" (harness-tasks-test-name id)))
     (should (eq 'pending (harness-tasks-test-state id)))
     (should-not (gethash id harness-tasks--naming))
+    (should (equal '(0 . 0) (harness-tasks-test--throttle)))
     (should (= free (harness-tasks--free-slots project)))
     (should-not (harness-call 'session/exists-p job))
     (should (equal expected (harness-tasks-test--session-ids)))
@@ -2387,165 +2388,180 @@ sessions are as they were."
       (should (= free (harness-tasks--free-slots project)))
       (should (eq 'pending (harness-tasks-test-state id))))))
 
-(defmacro harness-tasks-test-with-retries (delays &rest body)
-  "Run BODY as `harness-tasks-test-with-titles' does, on a board that starts nothing.
-The limit is 0, so every task waits, and a title that failed is asked for
-again after DELAYS (`harness-tasks--naming-retry-delays').  The timers
-due at start-up run first: one of them names the tasks found untitled,
-which would ask again for a title that failed by chance."
-  (declare (indent 1))
-  `(harness-tasks-test-with-titles nil
-     (harness-tasks-test--settle)
-     (let ((harness-tasks-max-running 0)
-           (harness-tasks--naming-retry-delays ,delays))
-       ,@body)))
+;;;; The title throttle
+;;
+;; At most `harness-tasks--naming-concurrency' title requests are out at
+;; once: a pool of the slots library (`harness-tasks--naming-pool').  The
+;; others wait for a slot, by their task's priority, and one that fails
+;; is left to the layers below -- task mode asks for no title again on a
+;; timer of its own.
 
-(ert-deftest harness-tasks-failed-title-is-asked-for-again-while-the-task-waits ()
-  "A title request that failed is made again while its task waits for a slot.
-With a limit of 0 no turn ever starts to name the session, so the task
-would stay nameless: the request comes again after a delay, and the
-title it brings is the task's, and its pending session's."
-  (harness-tasks-test-with-retries '(0.05 0.05)
-    (let* ((id (harness-tasks-test-submit "export the orders as CSV for finance"))
-           (sid (harness-tasks-test-session-id id)))
-      (should (= 1 (length harness-tasks-test--titles)))
-      (harness-tasks-test-answer (car harness-tasks-test--titles) '(error "overloaded"))
-      ;; Asked again, the task in the queue all along and nameless meanwhile.
-      (harness-test-wait (lambda () (= 2 (length harness-tasks-test--titles))) 5 "the second request")
-      (should (eq 'pending (harness-tasks-test-state id)))
-      (should-not (harness-tasks-test-name id))
-      (let ((request (car harness-tasks-test--titles)))
-        (should (equal "export the orders as CSV for finance" (harness-tasks-test--quoted request)))
-        (should (string-prefix-p "naming-" (plist-get (plist-get request :session) :id)))
-        (harness-tasks-test-answer request "Export orders as CSV"))
-      (harness-test-wait (lambda () (harness-tasks-test-name id)) 5 "the title")
-      (should (eq 'pending (harness-tasks-test-state id)))
-      (should (equal "Export orders as CSV" (harness-tasks-test-session-name sid)))
-      ;; The title ends the asking.
-      (should-not (gethash id harness-tasks--naming-retries))
-      (harness-tasks-test--quiet 0.2)
-      (should (= 2 (length harness-tasks-test--titles))))))
+(defun harness-tasks-test--throttle ()
+  "The throttle's state: (OUT . WAITING), the requests out and those waiting."
+  (cons (harness-slots-running harness-tasks--naming-pool)
+        (harness-slots-waiting harness-tasks--naming-pool)))
 
-(ert-deftest harness-tasks-failed-title-is-asked-for-no-more-once-the-delays-are-used ()
-  "The delays are all the asking again there is.
-The first request and one retry for each delay fail; after that the
-task is asked for no more and waits on, nameless, with nothing queued
-to ask."
-  (harness-tasks-test-with-retries '(0.05 0.05)
-    (let ((id (harness-tasks-test-submit "export the orders as CSV for finance")))
-      (dotimes (n 3)
-        (harness-test-wait (lambda () (= (1+ n) (length harness-tasks-test--titles))) 5
-                           (format "request %d" (1+ n)))
-        (harness-tasks-test-answer (car harness-tasks-test--titles) '(error "overloaded")))
-      (harness-tasks-test--quiet 0.4)
-      (should (= 3 (length harness-tasks-test--titles)))
-      (should (eq 'pending (harness-tasks-test-state id)))
-      (should-not (harness-tasks-test-name id))
-      (should-not (cdr (gethash id harness-tasks--naming-retries)))
-      (should-not (gethash id harness-tasks--naming))
-      (should-not harness-tasks--naming-queue))
-    ;; No delays, no asking again: the behaviour before there were retries.
-    (let* ((harness-tasks--naming-retry-delays nil)
-           (before (length harness-tasks-test--titles))
-           (other (harness-tasks-test-submit "page the orders")))
-      (harness-tasks-test-answer (harness-tasks-test-title-request "page the orders") '(error "overloaded"))
-      (harness-tasks-test--quiet 0.2)
-      (should (= (1+ before) (length harness-tasks-test--titles)))
-      (should-not (harness-tasks-test-name other)))))
+(defun harness-tasks-test--title-requests ()
+  "The texts the title requests asked for so far, oldest first."
+  (nreverse (mapcar #'harness-tasks-test--quoted harness-tasks-test--titles)))
 
-(ert-deftest harness-tasks-edited-prompt-starts-the-asking-again ()
-  "A prompt edited after failed requests is asked for afresh, delays and all.
-With one delay, the request and its retry fail and that is the end of
-it, until the prompt is edited: the new prompt is asked for at once, and
-its first failure is retried as the old one's was."
-  (harness-tasks-test-with-retries '(0.05)
-    (let ((id (harness-tasks-test-submit "fix the parser")))
-      (harness-tasks-test-answer (car harness-tasks-test--titles) '(error "overloaded"))
-      (harness-test-wait (lambda () (= 2 (length harness-tasks-test--titles))) 5 "the retry")
-      (harness-tasks-test-answer (car harness-tasks-test--titles) '(error "overloaded"))
-      (harness-tasks-test--quiet 0.3)
-      (should (= 2 (length harness-tasks-test--titles)))
-      (should (= 2 (car (gethash id harness-tasks--naming-retries))))
-      ;; Edited: asked for at once, and counted from zero again.
-      (harness-call 'task/update id "export the orders as CSV")
-      (should-not (gethash id harness-tasks--naming-retries))
-      (should (= 3 (length harness-tasks-test--titles)))
-      (should (equal "export the orders as CSV" (harness-tasks-test--quoted (car harness-tasks-test--titles))))
-      (harness-tasks-test-answer (car harness-tasks-test--titles) '(error "overloaded"))
-      (harness-test-wait (lambda () (= 4 (length harness-tasks-test--titles))) 5 "the new prompt's retry")
-      (should (equal "export the orders as CSV" (harness-tasks-test--quoted (car harness-tasks-test--titles))))
-      (harness-tasks-test-answer (car harness-tasks-test--titles) "Export orders as CSV")
-      (harness-test-wait (lambda () (harness-tasks-test-name id)) 5 "the title")
-      (should (equal "Export orders as CSV" (harness-tasks-test-name id)))
-      (should-not (gethash id harness-tasks--naming-retries)))))
+(ert-deftest harness-tasks-titles-wait-for-the-throttle-by-priority ()
+  "When more titles wait than the throttle lets out, the highest priority goes first.
+Two requests are out at a time and the others wait for one to settle.
+The next to go is the highest priority task's, ahead of older medium
+ones, a priority given while the request waited counts, and among
+equals the oldest task's goes first."
+  (harness-tasks-test-with-titles nil
+    (let ((harness-tasks-max-running 0))
+      (let* ((ids (mapcar #'harness-tasks-test-submit
+                          '("fix the parser" "export the orders" "page the orders"
+                            "log slow requests" "audit the logins" "trim the cache")))
+             (page (nth 2 ids)) (slow (nth 3 ids)) (audit (nth 4 ids)) (trim (nth 5 ids))
+             (out '("fix the parser" "export the orders"))
+             (went nil))
+        ;; The first two went out at once; the rest wait, oldest first.
+        (should (equal out (harness-tasks-test--title-requests)))
+        (should (equal '(2 . 4) (harness-tasks-test--throttle)))
+        (should (equal (list page slow audit trim) (harness-slots-waiters harness-tasks--naming-pool)))
+        ;; Asked for again, a task whose request waits is not queued twice.
+        (harness-tasks--name page)
+        (should (equal '(2 . 4) (harness-tasks-test--throttle)))
+        ;; Priorities given while the requests wait: the audit high, the slow log low.
+        (harness-call 'priority/set (harness-tasks-test-session-id audit) "high")
+        (harness-call 'priority/set (harness-tasks-test-session-id slow) "low")
+        ;; Each answer frees a slot, and the waiting request that ranks first takes it.
+        (dotimes (_ 4)
+          (let ((before (length harness-tasks-test--titles)))
+            (harness-tasks-test-answer (harness-tasks-test-title-request (pop out)) "A title")
+            (harness-test-wait (lambda () (> (length harness-tasks-test--titles) before)) 5
+                               "the next request")
+            (let ((text (harness-tasks-test--quoted (car harness-tasks-test--titles))))
+              (push text went)
+              (setq out (append out (list text))))))
+        (should (equal '("audit the logins" "page the orders" "trim the cache" "log slow requests")
+                       (nreverse went)))
+        ;; All out; the last two settle and the throttle is empty.
+        (should (equal '(2 . 0) (harness-tasks-test--throttle)))
+        (dolist (text out)
+          (harness-tasks-test-answer (harness-tasks-test-title-request text) "A title"))
+        (harness-test-wait (lambda () (equal '(0 . 0) (harness-tasks-test--throttle))) 5
+                           "the throttle to empty")
+        (should (= 6 (length harness-tasks-test--titles)))))))
 
-(ert-deftest harness-tasks-edited-prompt-cancels-the-retry-that-waits ()
-  "A retry waiting for its time does not ask for the old prompt's title.
-The edit asks for the new prompt at once, and the old timer goes."
-  (harness-tasks-test-with-retries '(60)
-    (let ((id (harness-tasks-test-submit "fix the parser")))
-      (harness-tasks-test-answer (car harness-tasks-test--titles) '(error "overloaded"))
-      (let ((timer (harness-test-wait (lambda () (cdr (gethash id harness-tasks--naming-retries))) 5
-                                      "a retry to wait")))
-        (should (memq timer timer-list))
-        (harness-call 'task/update id "export the orders as CSV")
-        (should-not (memq timer timer-list)))
-      (should-not (gethash id harness-tasks--naming-retries))
-      (should (= 2 (length harness-tasks-test--titles)))
-      (should (equal "export the orders as CSV" (harness-tasks-test--quoted (car harness-tasks-test--titles)))))))
-
-(ert-deftest harness-tasks-title-retry-ends-with-the-task ()
-  "A task dropped, archived or shut down while its retry waits is not asked for.
-The retry's timer goes, and the count of the task's failed requests."
-  (harness-tasks-test-with-retries '(60)
-    (let ((waiting nil))
-      (dolist (prompt '("fix the parser" "export the orders" "page the orders"))
-        (let ((id (harness-tasks-test-submit prompt)))
-          (harness-tasks-test-answer (harness-tasks-test-title-request prompt) '(error "overloaded"))
-          (let ((timer (harness-test-wait (lambda () (cdr (gethash id harness-tasks--naming-retries))) 5
-                                          "a retry to wait")))
-            (should (memq timer timer-list))
-            (push (cons id timer) waiting))))
-      (setq waiting (nreverse waiting))
-      (cl-flet ((waits-p (n)
-                  (let ((entry (nth n waiting)))
-                    (or (gethash (car entry) harness-tasks--naming-retries)
-                        (memq (cdr entry) timer-list)))))
-        (harness-call 'task/cancel (car (nth 0 waiting)))
-        (should-not (waits-p 0))
-        (should (waits-p 1))
-        (harness-call 'task/archive (car (nth 1 waiting)))
-        (should-not (waits-p 1))
-        (should (waits-p 2))
-        (harness-tasks--shutdown)
-        (should-not (waits-p 2)))
-      (should (zerop (hash-table-count harness-tasks--naming-retries)))
-      (should (= 3 (length harness-tasks-test--titles))))))
-
-(ert-deftest harness-tasks-title-retry-leaves-a-task-that-started-to-its-turn ()
-  "A task that starts while its retry waits is named by its turn, as before.
-The retry finds the task at work when its time comes and asks for
-nothing, and the count of failed requests goes."
-  (harness-tasks-test-with-retries '(60)
-    (let* ((id (harness-tasks-test-submit "fix the parser"))
-           (sid (harness-tasks-test-session-id id)))
-      (harness-tasks-test-answer (car harness-tasks-test--titles) '(error "overloaded"))
-      (harness-test-wait (lambda () (cdr (gethash id harness-tasks--naming-retries))) 5
-                         "a retry to wait")
-      ;; Started by hand, whatever the limit: its turn names its session.
-      (harness-call 'task/start id)
-      (harness-tasks-test-turn sid)
-      (should (= 2 (length harness-tasks-test--titles)))
-      (should (equal sid (plist-get (plist-get (car harness-tasks-test--titles) :session) :id)))
-      ;; The retry's time comes, finds the task at work and asks for nothing.
-      (harness-tasks--naming-retry id)
-      (harness-tasks-test--quiet 0.2)
-      (should (= 2 (length harness-tasks-test--titles)))
-      (should-not (gethash id harness-tasks--naming-retries))
+(ert-deftest harness-tasks-throttle-lets-out-as-many-as-its-limit ()
+  "The throttle allows `harness-tasks--naming-concurrency' requests, whatever that is now."
+  (harness-tasks-test-with-titles nil
+    (let ((harness-tasks-max-running 0)
+          (harness-tasks--naming-concurrency 1))
+      (harness-tasks-test-submit "fix the parser")
+      (harness-tasks-test-submit "export the orders")
+      (should (equal '(1 . 1) (harness-tasks-test--throttle)))
+      (should (equal '("fix the parser") (harness-tasks-test--title-requests)))
       (harness-tasks-test-answer (car harness-tasks-test--titles) "Fix the parser")
-      (harness-test-wait (lambda () (harness-tasks-test-session-name sid)) 5 "the session's name")
-      (harness-tasks-test-release sid)
-      (harness-tasks-test-wait-state id 'done))))
+      (harness-test-wait (lambda () (= 2 (length harness-tasks-test--titles))) 5 "the second request")
+      (should (equal '(1 . 0) (harness-tasks-test--throttle))))))
+
+(ert-deftest harness-tasks-title-of-a-task-that-started-meanwhile-is-not-asked-for ()
+  "A request that waits for the throttle is dropped when its task starts first.
+The start of the task's turn names its session, so when the request's
+turn comes its slot goes back at once and nothing is sent for it."
+  (harness-tasks-test-with-titles nil
+    (let ((harness-tasks-max-running 0)
+          (harness-tasks--naming-concurrency 1))
+      (let* ((first (harness-tasks-test-submit "fix the parser"))
+             (second (harness-tasks-test-submit "export the orders"))
+             (sid (harness-tasks-test-session-id second)))
+        (ignore first)
+        (should (equal '(1 . 1) (harness-tasks-test--throttle)))
+        (should (equal (list second) (harness-slots-waiters harness-tasks--naming-pool)))
+        ;; Started by hand, whatever the limit: its turn names its session,
+        ;; for its title is not on its way, only waiting to be.
+        (harness-call 'task/start second)
+        (harness-tasks-test-turn sid)
+        (harness-test-wait (lambda () (= 2 (length harness-tasks-test--titles))) 5
+                           "the session's own request")
+        (should (equal sid (plist-get (plist-get (car harness-tasks-test--titles) :session) :id)))
+        ;; The first request settles; the second task's turn comes and finds it at work.
+        (harness-tasks-test-answer (harness-tasks-test-title-request "fix the parser") "Fix the parser")
+        (harness-test-wait (lambda () (equal '(0 . 0) (harness-tasks-test--throttle))) 5
+                           "the throttle to empty")
+        (harness-tasks-test--quiet 0.1)
+        (should (= 2 (length harness-tasks-test--titles)))
+        (should-not (gethash second harness-tasks--naming))
+        (harness-tasks-test-answer (car harness-tasks-test--titles) "Export orders")
+        (harness-test-wait (lambda () (harness-tasks-test-session-name sid)) 5 "the session's name")
+        (harness-tasks-test-release sid)
+        (harness-tasks-test-wait-state second 'done)))))
+
+(ert-deftest harness-tasks-failed-title-is-not-asked-for-again ()
+  "A title request that fails is not made again by task mode.
+It is an ordinary provider request, which the HTTP layer or the CLI
+retries as they do any; one that still fails leaves a task that waits
+for a slot untitled, and no timer of the tasks module asks for it
+again.  Its slot of the throttle goes back, and a harness that starts or
+reloads names the task (`harness-tasks--name-untitled')."
+  (harness-tasks-test-with-titles nil
+    ;; The timers due at start-up run first: one of them names the tasks found
+    ;; untitled, which would ask again for a title that failed by chance.
+    (harness-tasks-test--settle)
+    (let ((harness-tasks-max-running 0))
+      (let ((id (harness-tasks-test-submit "export the orders as CSV for finance")))
+        (should (equal '(1 . 0) (harness-tasks-test--throttle)))
+        (harness-tasks-test-answer (car harness-tasks-test--titles) '(error "overloaded"))
+        (should (equal '(0 . 0) (harness-tasks-test--throttle)))
+        (should-not (gethash id harness-tasks--naming))
+        (harness-tasks-test--quiet 0.3)
+        (should (= 1 (length harness-tasks-test--titles)))
+        (should (eq 'pending (harness-tasks-test-state id)))
+        (should-not (harness-tasks-test-name id))
+        ;; The harness starts or reloads: the task is found untitled and asked for.
+        (harness-tasks--name-untitled)
+        (should (= 2 (length harness-tasks-test--titles)))
+        (harness-tasks-test-answer (car harness-tasks-test--titles) "Export orders as CSV")
+        (harness-test-wait (lambda () (harness-tasks-test-name id)) 5 "the title")
+        (should (equal '(0 . 0) (harness-tasks-test--throttle)))))))
+
+(ert-deftest harness-tasks-failed-title-leaves-the-task-to-its-turn ()
+  "A task whose title failed while it waited is named by its turn once it starts.
+Started by hand, whatever the limit, its turn names its session from its
+first message, as it always did; nothing else asks for the title."
+  (harness-tasks-test-with-titles nil
+    (harness-tasks-test--settle)
+    (let ((harness-tasks-max-running 0))
+      (let* ((id (harness-tasks-test-submit "fix the parser"))
+             (sid (harness-tasks-test-session-id id)))
+        (harness-tasks-test-answer (car harness-tasks-test--titles) '(error "overloaded"))
+        (harness-tasks-test--quiet 0.2)
+        (should (= 1 (length harness-tasks-test--titles)))
+        (harness-call 'task/start id)
+        (harness-tasks-test-turn sid)
+        (should (= 2 (length harness-tasks-test--titles)))
+        (should (equal sid (plist-get (plist-get (car harness-tasks-test--titles) :session) :id)))
+        (harness-tasks-test-answer (car harness-tasks-test--titles) "Fix the parser")
+        (harness-test-wait (lambda () (harness-tasks-test-session-name sid)) 5 "the session's name")
+        (should (equal "Fix the parser" (harness-tasks-test-session-name sid)))
+        (harness-tasks-test--quiet 0.2)
+        (should (= 2 (length harness-tasks-test--titles)))
+        (harness-tasks-test-release sid)
+        (harness-tasks-test-wait-state id 'done)))))
+
+(ert-deftest harness-tasks-edited-prompt-is-named-again-after-a-failed-title ()
+  "A prompt edited after its title failed is asked for at once.
+The edit names the task afresh, from the new text, as it always did."
+  (harness-tasks-test-with-titles nil
+    (harness-tasks-test--settle)
+    (let ((harness-tasks-max-running 0))
+      (let ((id (harness-tasks-test-submit "fix the parser")))
+        (harness-tasks-test-answer (car harness-tasks-test--titles) '(error "overloaded"))
+        (harness-tasks-test--quiet 0.2)
+        (should (= 1 (length harness-tasks-test--titles)))
+        (harness-call 'task/update id "export the orders as CSV")
+        (should (= 2 (length harness-tasks-test--titles)))
+        (should (equal "export the orders as CSV" (harness-tasks-test--quoted (car harness-tasks-test--titles))))
+        (harness-tasks-test-answer (car harness-tasks-test--titles) "Export orders as CSV")
+        (harness-test-wait (lambda () (harness-tasks-test-name id)) 5 "the title")
+        (should (equal "Export orders as CSV" (harness-tasks-test-name id)))
+        (should (equal '(0 . 0) (harness-tasks-test--throttle)))))))
 
 ;;;; Git: worktree, merge queue, done only when merged
 
@@ -3119,12 +3135,19 @@ Each is a new session, never an earlier one."
 
 (ert-deftest harness-tasks-btw-thinks-at-the-btw-level ()
   "A conversation about the board starts at the BTW level, like every BTW.
-With nil it starts at the level the project configures instead."
+The level is fitted to what the model offers (`harness-session--btw-thinking'):
+the demo model has low and high, so medium becomes low, the nearest
+below it, and max becomes high.  With nil it starts at the level the
+project configures instead."
   (harness-tasks-test-with
     ;; Not a task: the project's usual model, whose levels the demo
     ;; catalogue lists (low and high).
     (let ((harness-model "demo:scripted") (harness-thinking "high") (harness-btw-thinking "low"))
       (should (equal "low" (plist-get (harness-call 'task/btw default-directory) :thinking)))
+      (let ((harness-btw-thinking "medium"))
+        (should (equal "low" (plist-get (harness-call 'task/btw default-directory) :thinking))))
+      (let ((harness-btw-thinking "max"))
+        (should (equal "high" (plist-get (harness-call 'task/btw default-directory) :thinking))))
       (let ((harness-btw-thinking nil))
         (should (equal "high" (plist-get (harness-call 'task/btw default-directory) :thinking)))))))
 

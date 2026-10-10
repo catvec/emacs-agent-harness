@@ -275,8 +275,9 @@ policy sets the option (see harness-policy.el), the copy of every
 session -- new, forked, a sub-agent's, a task's, one saved before the
 policy came -- is the policy's value instead, and `session/update'
 refuses to change it.  A BTW session's thinking starts from
-`harness-btw-thinking' when its model offers that level, so it is left
-to `session/create', which reads both options as the policy has them.
+`harness-btw-thinking', fitted to the levels its model offers, so it is
+left to `session/create', which reads both options as the policy has
+them.
 Its model is not left: a policy on `harness-model' fixes a BTW's model
 too, and `harness-btw-model' then changes nothing.")
 
@@ -708,16 +709,43 @@ old one."
          (error (harness-log 'debug "session: no thinking levels for %s: %S" model err)
                 nil))))
 
+(defun harness-session--fit-thinking (level levels)
+  "Return the one of thinking LEVELS that stands for LEVEL, or nil.
+LEVELS are what a model offers (its `:thinking-levels').  That is LEVEL
+itself when LEVELS has it; else the strongest of LEVELS weaker than
+LEVEL, the nearest the model comes to it without thinking harder; else,
+every one of LEVELS being stronger, the weakest of them.  Strength is
+that of `harness-thinking-level-order': a level that is not in it ranks
+after every one that is.  nil when LEVEL is not a string or LEVELS has
+no level."
+  (let ((levels (cl-remove-if-not #'stringp levels)))
+    (when (and (stringp level) levels)
+      (if (member level levels)
+          level
+        (let* ((rank (harness-thinking-level-rank level))
+               ;; Weakest first, the order of LEVELS kept among equals.
+               (sorted (sort (copy-sequence levels)
+                             (lambda (a b) (< (harness-thinking-level-rank a)
+                                              (harness-thinking-level-rank b)))))
+               (weaker (cl-remove-if-not (lambda (l) (< (harness-thinking-level-rank l) rank))
+                                         sorted)))
+          (if weaker (car (last weaker)) (car sorted)))))))
+
 (defun harness-session--btw-thinking (model cwd)
   "Return the thinking level a BTW with MODEL at CWD starts at, or nil.
-That is `harness-btw-thinking' as configured at CWD, provided the
-provider catalogue lists it among MODEL's thinking levels: a model
-without levels may refuse a request that asks for one.  nil leaves the
-BTW the level it would have otherwise."
-  (let ((level (harness-session--config 'harness-btw-thinking cwd)))
-    (and (stringp level)
-         (member level (harness-session--model-levels model))
-         level)))
+That is `harness-btw-thinking' as configured at CWD, fitted to the
+thinking levels the provider catalogue gives MODEL
+\(`harness-session--fit-thinking'): the level itself when MODEL offers
+it, else the strongest it offers below it, else its weakest.  So a BTW
+thinks as little as asked for, or as little as its model allows,
+whatever level the session it is opened over thinks at and whether it
+runs on that session's model or on another: a model with no `medium'
+is not left to the session's `max'.  nil when no level is configured,
+and for a model whose catalogue lists no levels, which may refuse a
+request that asks for one: the BTW then has the level it would have
+otherwise."
+  (harness-session--fit-thinking (harness-session--config 'harness-btw-thinking cwd)
+                                 (harness-session--model-levels model)))
 
 (defun harness-session--btw-model (model cwd)
   "Return the model a BTW at CWD runs on; MODEL is the one it would otherwise use.
@@ -844,11 +872,13 @@ deleted; symbolic links inside it are removed, never followed."
 A `btw' session without `:model' runs on `harness-btw-model', by
 default the cheap tier of the provider of `harness-model', both as
 configured at `:cwd'; without `:thinking' it thinks at
-`harness-btw-thinking' when its model offers that level, else at
-`harness-thinking'.  A setting the policy fixes (see
-`harness-session--policy-options') has the policy's value, whatever
-PLIST asks for: a BTW's model is the policy's `harness-model', its
-thinking is not.  `:ext' gives it settings of the modules that keep
+`harness-btw-thinking' fitted to the levels its model offers (that
+level, else the nearest it offers below it, else its weakest:
+`harness-session--btw-thinking'), else at `harness-thinking' when no
+level is configured or the model lists none.  A setting the policy
+fixes (see `harness-session--policy-options') has the policy's value,
+whatever PLIST asks for: a BTW's model is the policy's `harness-model',
+its thinking is not.  `:ext' gives it settings of the modules that keep
 some for a session (see `session/set-ext'), a plist."
   (let* ((plist (harness-session--without-pinned plist (or (plist-get plist :kind) 'main)))
          (cwd (or (plist-get plist :cwd) (error "The session/create method needs :cwd")))
@@ -1600,11 +1630,15 @@ A model the policy does not allow signals an error
 `harness-model' fixes a BTW's too, whatever the setting or MODEL say.
 
 It thinks at `harness-btw-thinking' as configured there, a low level
-for quick questions, when its model offers that level, else at ID's
-level, kept only if its own model offers it (it is ID's, or the
-catalogue lists the level for it), else at `harness-thinking'.  Its
-`:parent-id' is ID only so that the session list and the tree show it
-under ID."
+for quick questions, fitted to the levels its model offers: that level,
+else the nearest it offers below it, else the model's weakest
+\(`harness-session--btw-thinking').  So on ID's own model, as on a
+cheaper one, it thinks no harder than the model has to, whatever ID's
+level is.  It starts at ID's level only where nothing is fitted: with
+no level configured (nil), or a model whose catalogue lists none.  That
+level is kept only if its own model is ID's or lists it, else the BTW
+thinks at `harness-thinking'.  Its `:parent-id' is ID only so that the
+session list and the tree show it under ID."
   (let* ((parent (harness-session--get id))
          (cwd (harness-session-cwd parent))
          (asked (and (stringp model) (not (string-blank-p model)) (string-trim model))))

@@ -1671,7 +1671,10 @@ a budget given to a session after that stays."
 (defmacro harness-session-test-with-thinker (&rest body)
   "Run BODY in `harness-session-test-with' with provider `test-think' defined.
 Its model thinker has the thinking levels low, medium and high; its
-model plain has none."
+model plain has none.  Its model deep has low, high and max, as
+DeepSeek's do (no medium), and its model steep only high and max.  The
+provider names no cheap tier and prices no model, so a BTW over any of
+them stays on it."
   (declare (indent 0))
   `(harness-session-test-with
      (unwind-protect
@@ -1680,6 +1683,8 @@ model plain has none."
              :complete #'ignore
              :models (lambda ()
                        (harness-resolved (list (list :name "thinker" :thinking-levels '("low" "medium" "high"))
+                                               (list :name "deep" :thinking-levels '("low" "high" "max"))
+                                               (list :name "steep" :thinking-levels '("high" "max"))
                                                (list :name "plain")))))
            ,@body)
        (remhash 'test-think harness-providers)
@@ -1692,10 +1697,11 @@ model plain has none."
 (ert-deftest harness-session-btw-thinks-at-the-btw-level ()
   "A BTW starts at `harness-btw-thinking', low unless configured otherwise.
 It does whatever the level of the session it is opened over, which
-keeps its own.  A model the catalogue lists no such level for keeps the
-parent's level, as nil does.  The setting layers: a .dir-locals.el sets
-it for its directory.  The BTW can be changed afterwards like any
-session."
+keeps its own.  A model the catalogue lists the level for gets it; one
+that lacks it gets the nearest level it lists below it, never the
+parent's.  A model the catalogue lists no levels for keeps the parent's
+level, as nil does.  The setting layers: a .dir-locals.el sets it for
+its directory.  The BTW can be changed afterwards like any session."
   (harness-session-test-with-thinker
     (should (equal "low" (eval (car (get 'harness-btw-thinking 'standard-value)) t)))
     (let* ((harness-btw-thinking "low")
@@ -1712,16 +1718,22 @@ session."
       (should (equal "high" (plist-get (harness-call 'session/get high) :thinking)))
       ;; A model without levels gets no level it did not have.
       (should (equal "high" (harness-session-test-btw-level plain)))
-      ;; Another level, when the model offers it; else the parent's.
+      ;; Another level, when the model offers it; else the strongest it
+      ;; offers below it: here the top level, whatever the parent's.
       (let ((harness-btw-thinking "medium"))
         (should (equal "medium" (harness-session-test-btw-level high))))
       (let ((harness-btw-thinking "max"))
         (should (equal "high" (harness-session-test-btw-level high)))
-        (should-not (harness-session-test-btw-level default)))
+        (should (equal "high" (harness-session-test-btw-level default))))
       ;; nil: the parent's level, as before BTWs had one of their own.
       (let ((harness-btw-thinking nil))
         (should (equal "high" (harness-session-test-btw-level high)))
         (should-not (harness-session-test-btw-level default)))
+      ;; A model without levels: nothing to fit to, so the parent's level
+      ;; stays, the setting asking for another or not.
+      (dolist (setting '("low" "max" nil))
+        (let ((harness-btw-thinking setting))
+          (should (equal "high" (harness-session-test-btw-level plain)))))
       ;; Changed in the BTW, like in any session.
       (let ((btw (plist-get (harness-call 'session/btw high) :id)))
         (harness-call 'session/update btw :thinking "high" :silent t)
@@ -1736,7 +1748,8 @@ session."
 
 (ert-deftest harness-session-btw-created-without-a-level ()
   "A `btw' session created without a level, as a task board's is, starts at
-the BTW level when its model offers it, else at `harness-thinking'.  A
+the BTW level fitted to the levels its model offers, else at
+`harness-thinking' (no level configured, or a model that lists none).  A
 level given to it wins, and other kinds of session are left alone."
   (harness-session-test-with-thinker
     (let ((harness-btw-thinking "low")
@@ -1749,8 +1762,95 @@ level given to it wins, and other kinds of session are left alone."
         (should (equal "medium" (level :kind 'btw :model "test-think:thinker" :thinking "medium")))
         (should (equal "high" (level :model "test-think:thinker")))
         (should (equal "high" (level :kind 'fork :model "test-think:thinker")))
+        ;; A level its model lacks is the nearest below it, else the model's
+        ;; weakest -- not `harness-thinking', which a BTW falls back on
+        ;; only where nothing can be fitted (the plain model has no levels).
+        (let ((harness-btw-thinking "medium")
+              (harness-thinking "max"))
+          (should (equal "medium" (level :kind 'btw :model "test-think:thinker")))
+          (should (equal "low" (level :kind 'btw :model "test-think:deep")))
+          (should (equal "high" (level :kind 'btw :model "test-think:steep")))
+          (should (equal "max" (level :kind 'btw :model "test-think:plain")))
+          (should (equal "max" (level :model "test-think:deep"))))
         (let ((harness-btw-thinking nil))
           (should (equal "high" (level :kind 'btw :model "test-think:thinker"))))))))
+
+(ert-deftest harness-session-btw-thinks-lower-on-its-sessions-own-model ()
+  "A BTW that stays on its session's model still thinks lower, whatever the session's level.
+The provider has no cheaper tier here.  A model that lacks the level (a
+DeepSeek-like one has low, high and max, no medium) gives the nearest it
+has below it, never the session's own; one whose levels are all
+stronger than the one asked for gives its weakest."
+  (harness-session-test-with-thinker
+    (let* ((harness-btw-thinking "low")
+           (harness-thinking nil)
+           (cwd (harness-test-temp-dir))
+           (deep (plist-get (harness-call 'session/create :cwd cwd :model "test-think:deep" :thinking "max")
+                            :id))
+           (steep (plist-get (harness-call 'session/create :cwd cwd :model "test-think:steep" :thinking "max")
+                             :id)))
+      (cl-flet ((on (id) (let ((btw (harness-call 'session/btw id)))
+                           (cons (plist-get btw :model) (plist-get btw :thinking)))))
+        ;; The default: the model has it.
+        (should (equal '("test-think:deep" . "low") (on deep)))
+        ;; Medium: it has none, and gets low, not the session's max.
+        (let ((harness-btw-thinking "medium"))
+          (should (equal '("test-think:deep" . "low") (on deep))))
+        ;; The nearest it has below, whichever level is asked for.
+        (let ((harness-btw-thinking "high"))
+          (should (equal '("test-think:deep" . "high") (on deep))))
+        (let ((harness-btw-thinking "xhigh"))
+          (should (equal '("test-think:deep" . "high") (on deep))))
+        ;; Every level it has is stronger than the one asked for: its weakest.
+        (should (equal '("test-think:steep" . "high") (on steep)))
+        (let ((harness-btw-thinking "medium"))
+          (should (equal '("test-think:steep" . "high") (on steep))))
+        ;; Nothing configured: the session's own level, which its model has.
+        (let ((harness-btw-thinking nil))
+          (should (equal '("test-think:deep" . "max") (on deep))))
+        ;; The sessions keep theirs.
+        (should (equal "max" (plist-get (harness-call 'session/get deep) :thinking)))
+        (should (equal "max" (plist-get (harness-call 'session/get steep) :thinking)))))))
+
+(ert-deftest harness-session-fit-thinking ()
+  "A thinking level is fitted to the levels a model offers, by their order.
+The level itself when the model has it; else the strongest it has below
+it; else, every one being stronger, its weakest.  A level the order
+does not know ranks after every one it does.  Nothing to fit is nil."
+  (let ((ladder '("low" "medium" "high" "xhigh" "max"))
+        (deep '("low" "high" "max")))
+    ;; The order is weakest first, and the rank follows it.
+    (should (equal '("none" "minimal" "low" "medium" "high" "xhigh" "max") harness-thinking-level-order))
+    (should (equal '(0 1 2 3 4 5 6) (mapcar #'harness-thinking-level-rank harness-thinking-level-order)))
+    (should (> (harness-thinking-level-rank "ultra") (harness-thinking-level-rank "max")))
+    ;; The level itself, wherever it stands among the others.
+    (dolist (level ladder)
+      (should (equal level (harness-session--fit-thinking level ladder))))
+    (should (equal "medium" (harness-session--fit-thinking "medium" '("max" "medium" "low"))))
+    ;; Else the strongest below it, the order of the list no matter.
+    (should (equal "low" (harness-session--fit-thinking "medium" deep)))
+    (should (equal "low" (harness-session--fit-thinking "medium" (reverse deep))))
+    (should (equal "high" (harness-session--fit-thinking "xhigh" deep)))
+    (should (equal "medium" (harness-session--fit-thinking "xhigh" '("max" "low" "medium"))))
+    (should (equal "minimal" (harness-session--fit-thinking "low" '("high" "minimal" "none"))))
+    (should (equal "none" (harness-session--fit-thinking "minimal" '("none" "high"))))
+    ;; Else the weakest, everything it has being stronger.
+    (should (equal "high" (harness-session--fit-thinking "low" '("high" "max"))))
+    (should (equal "high" (harness-session--fit-thinking "medium" '("max" "high"))))
+    (should (equal "max" (harness-session--fit-thinking "low" '("max"))))
+    ;; A level the order does not know ranks after all it does: it is the
+    ;; strongest asked for, and the strongest a model can offer.
+    (should (equal "max" (harness-session--fit-thinking "ultra" ladder)))
+    (should (equal "ultra" (harness-session--fit-thinking "ultra" '("low" "ultra"))))
+    (should (equal "low" (harness-session--fit-thinking "max" '("low" "ultra"))))
+    (should (equal "ultra" (harness-session--fit-thinking "low" '("ultra" "turbo"))))
+    ;; Nothing to fit: no string, or no level to fit to.
+    (should-not (harness-session--fit-thinking nil ladder))
+    (should-not (harness-session--fit-thinking 'low ladder))
+    (should-not (harness-session--fit-thinking :false ladder))
+    (should-not (harness-session--fit-thinking "low" nil))
+    (should-not (harness-session--fit-thinking "low" '(nil low)))
+    (should (equal "low" (harness-session--fit-thinking "medium" '(nil "low" high))))))
 
 ;;;; The model of a BTW
 
@@ -1888,7 +1988,8 @@ keeps its own."
   "The BTW level is checked against the model the BTW runs on, not its session's.
 `harness-btw-thinking' lowers the effort on the cheap model as on any
 other; a level that model lacks is not carried over from a session that
-had it, but falls back to the usual one."
+had it, nor is the usual one used: the BTW gets the nearest level the
+model has below it."
   (harness-session-test-with-tiers
     (let* ((harness-thinking nil)
            (max (harness-session-test-parent "test-tier:big" :thinking "max"))
@@ -1901,10 +2002,13 @@ had it, but falls back to the usual one."
           (should (equal '("test-tier:small" . "low") (on high))))
         (let ((harness-btw-thinking "medium"))
           (should (equal '("test-tier:small" . "medium") (on max))))
-        ;; A level the cheap model lacks is no level of it.
+        ;; A level the cheap model lacks is the nearest it has below it.
         (let ((harness-btw-thinking "max"))
-          (should (equal '("test-tier:small" . nil) (on max)))
+          (should (equal '("test-tier:small" . "high") (on max)))
           (should (equal '("test-tier:small" . "high") (on high))))
+        (let ((harness-btw-thinking "xhigh")
+              (harness-thinking "low"))
+          (should (equal '("test-tier:small" . "high") (on max))))
         ;; The session's level, when the cheap model has it; else the usual one.
         (let ((harness-btw-thinking nil))
           (should (equal '("test-tier:small" . nil) (on max)))
@@ -1928,8 +2032,10 @@ had it, but falls back to the usual one."
 
 (ert-deftest harness-session-btw-keeps-the-model-without-a-cheap-tier ()
   "A provider that names no cheap model and prices none leaves a BTW on its session's.
-So does a model whose provider nobody registered; its level is the session's
-when the model offers no BTW level."
+So does a model whose provider nobody registered.  The level is fitted
+to the levels of the model it stays on; a model the catalogue lists no
+levels for has none to fit to, so its level is the session's, whatever
+`harness-btw-thinking' says."
   (harness-session-test-with-tiers
     (let ((harness-btw-thinking "low")
           (think (harness-session-test-parent "test-think:thinker" :thinking "high"))
@@ -1940,7 +2046,11 @@ when the model offers no BTW level."
       (should (equal "test-think:plain" (plist-get (harness-session-test-btw plain) :model)))
       (should (equal "high" (plist-get (harness-session-test-btw plain) :thinking)))
       (should (equal "nobody:model" (plist-get (harness-session-test-btw nobody) :model)))
-      (should (equal "high" (plist-get (harness-session-test-btw nobody) :thinking))))))
+      (should (equal "high" (plist-get (harness-session-test-btw nobody) :thinking)))
+      ;; Nothing configured either: the session's level, as before.
+      (let ((harness-btw-thinking nil))
+        (should (equal "high" (plist-get (harness-session-test-btw plain) :thinking)))
+        (should (equal "high" (plist-get (harness-session-test-btw nobody) :thinking)))))))
 
 (ert-deftest harness-session-btw-created-without-a-model ()
   "A `btw' session created without a model, as a task board's is, runs on `harness-btw-model'.

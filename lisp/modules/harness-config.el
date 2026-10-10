@@ -85,9 +85,13 @@
 (defcustom harness-btw-thinking "low"
   "Thinking level BTW side conversations start at, or nil for the usual one.
 A BTW is for quick questions on the side, so by default it thinks
-little.  It starts at this level only when its model offers it.
-Otherwise, and always with nil, it starts at the level of the session
-it is opened over; a BTW about a task board starts at
+little.  A model that lacks this level gets the nearest one it offers
+below it, or its weakest when it has none below: DeepSeek, which has
+low, high and max, thinks at low for medium.  So a BTW thinks no harder
+than its model has to, on the session's own model as on a cheaper one
+\(`harness-btw-model'), whatever level the session thinks at.  With nil,
+and with a model that lists no levels, it starts at the level of the
+session it is opened over; a BTW about a task board starts at
 `harness-thinking'.  The level can be changed in the BTW like in any
 session."
   :type '(choice (const :tag "Same as the session" nil) (const :tag "Low" "low")

@@ -941,9 +941,15 @@ session's model and level are. Two settings, independent of each other:
   its provider names no cheap one. Set it to a model (`PROVIDER:MODEL`)
   to run every BTW on that one, or to nil to keep the session's model.
 - `harness-btw-thinking` is the level. Set it to choose another one, or
-  to nil to start from the session's level. A BTW whose model does not
-  offer the level starts at the session's level when its model offers
-  that too, else at the usual one (`harness-thinking`).
+  to nil to start from the session's level. A model that does not offer
+  the level gets the nearest one it offers below it (DeepSeek, which has
+  `low`, `high` and `max`, thinks at `low` for `medium`), or its weakest
+  when it has none below. So a BTW thinks no harder than its model has
+  to, on the session's own model (when its provider has no cheaper one)
+  as on a cheap one, whatever the session's level is. Only a model that
+  lists no levels leaves it to the session: the BTW then starts at the
+  session's level when its model is the session's or offers that too,
+  else at the usual one (`harness-thinking`).
 
 A project can set both for itself (see [Configuration](#configuration)),
 and the BTW's model and level can be changed in the BTW like in any
@@ -1318,9 +1324,11 @@ your checkout itself can be submitted to the **main tree** instead (the
   The harness's own model calls -- a task's title, the recaps, the
   permission judges and the like -- are neither tasks nor turns: they
   never take a slot or wait for one, so a title or a verdict comes even
-  with the board full or the limit at `0`. A title that fails is asked
-  for again while its task waits (after 30 seconds, then 2 minutes, then
-  10), rather than only once the task starts.
+  with the board full or the limit at `0`. Being ordinary requests to
+  the model, they are tried again below the board when the connection is
+  lost, as any request is; a title that still fails is not asked for
+  again while its task waits, and its session is named from its first
+  message once the task starts.
 - Each card is one line, with a subtitle that recaps the task: what it is
   doing or has done so far, written by a short model call and refreshed
   at the first of so many turns, seconds or tool calls since the last
@@ -1546,8 +1554,11 @@ your checkout itself can be submitted to the **main tree** instead (the
   title rather than being named again, and shows in the session list
   (`C-c h l`) under it, of kind task. Nothing waits for the title: a
   task whose naming fails starts all the same, and its session is named
-  from its first message. One that is still waiting for a slot when the
-  naming fails is asked for its title again a little later, a few times.
+  from its first message; one still waiting for a slot stays untitled
+  until it starts. At most two titles are asked for at once, and when
+  more wait (a burst of new tasks, or a board of untitled ones found at
+  start-up), the highest priority task's goes first, the oldest first
+  among equals.
 
 Press `?` on the board, or `C-c h ?` in its compose box, to see all of
 the board's commands.
