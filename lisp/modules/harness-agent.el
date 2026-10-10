@@ -1056,9 +1056,12 @@ tool asked it to (`:end-turn'), or decides what follows."
                                                       ;; What the tool recorded on its
                                                       ;; result -- the child session a
                                                       ;; spawn_agent call ran, the report a
-                                                      ;; hand_in handed in -- rides the
-                                                      ;; node, so the transcript can draw it
-                                                      ;; later.  Its `:child-id' is among it.
+                                                      ;; hand_in handed in, the denied call a
+                                                      ;; rerun_approved call ran again and
+                                                      ;; the tool it was -- rides the node,
+                                                      ;; so the transcript can draw it later.
+                                                      ;; Its `:child-id', `:rerun-of' and
+                                                      ;; `:rerun-tool' are among it.
                                                       (plist-get result :meta)))))
                     (content (harness-agent--with-steering turn (plist-get result :content))))
                (harness-emit 'agent/tool-result sid rnode)
@@ -1534,6 +1537,28 @@ mode keeps the task of a session whose turn ended working while this
 says something (`harness-tasks--on-turn-ended').  A value that is not a
 text with words in it counts as nothing outstanding."
   (let ((text (harness-run-filter 'agent/outstanding nil session-id)))
+    (and (stringp text) (not (harness-string-blank-p text)) text)))
+
+(harness-defmethod agent/stop-outstanding (session-id &optional reason)
+  "Stop what runs for SESSION-ID outside its own turn; return what it stopped.
+The counterpart of `agent/outstanding': a module that started work for
+the session which goes on without its turn -- a supervisor plan's
+workers, a background sub-agent -- stops it when asked through the sync
+filter `agent/stop-outstanding', whose value starts at nil and whose
+arguments are SESSION-ID and REASON.  REASON is a short text saying
+why, such as \"its task was returned to the queue\", or nil; a handler
+records it where the owner of the work reads it, as a supervisor step's
+error.  A handler with nothing to stop for the session returns the value
+unchanged; one that stopped something returns a text saying what, or
+appends it to the text the handlers before it returned, separated by
+\"; \".  Cheap registrations, the waits of `session_wait' say, are left
+alone.  The result is that text, or nil when it is not a text with
+words in it: nothing was stopped.
+
+Task mode calls this when a task is pre-empted or returned to the
+queue, once no turn of the session runs, so that the reports the
+stopped work sends reach an idle session."
+  (let ((text (harness-run-filter 'agent/stop-outstanding nil session-id reason)))
     (and (stringp text) (not (harness-string-blank-p text)) text)))
 
 (dolist (ev '((agent/turn-started . "(SESSION-ID)") (agent/turn-ended . "(SESSION-ID REASON)")

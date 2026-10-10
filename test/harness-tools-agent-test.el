@@ -4,6 +4,8 @@
 (require 'harness-test-helpers)
 
 (defvar harness-provider-demo--delay)
+(defvar harness-provider-demo-script-override)
+(defvar harness-agent--cancel-grace)
 (defvar harness-tools-agent--questions)
 (defvar harness-tools-agent-planning-section)
 (defvar harness-tools-agent--children)
@@ -1501,6 +1503,281 @@ ends."
         (should (string-match-p "all done"
                                 (plist-get (car (harness-tools-agent-test-reports sid)) :content)))
         (should-not (harness-call 'agent/outstanding sid))))))
+
+;;;; Stopping what a session runs outside its turn
+
+(defun harness-tools-agent-test--stop-script (request)
+  "Return the demo script of the stop-outstanding tests for REQUEST.
+A \"long job\" runs on until its turn is cancelled; \"delegate the long
+job\" starts one in a sub-agent of its own, named grandkid, and ends its
+turn, while \"delegate and carry on\" starts it and runs on; \"ask me\"
+blocks the turn on a question; anything else, a sub-agent's report say,
+is answered at once."
+  (let ((text (downcase (harness-provider-demo--last-user-text request))))
+    (cond
+     ((string-match-p "delegate the long job" text)
+      '((:type tool-call :id "demo-spawn" :name "spawn_agent"
+               :input (:prompt "long job" :name "grandkid"))
+        (:type text :delta "delegated")
+        (:type done :stop-reason end-turn)))
+     ((string-match-p "delegate and carry on" text)
+      '((:type tool-call :id "demo-spawn" :name "spawn_agent"
+               :input (:prompt "long job" :name "grandkid"))
+        (:type wait :seconds 30)
+        (:type text :delta "all done")
+        (:type done :stop-reason end-turn)))
+     ((string-match-p "long job" text)
+      '((:type wait :seconds 30)))
+     ((string-match-p "ask me" text)
+      '((:type tool-call :id "demo-ask" :name "ask_user"
+               :input (:question "Which colour?" :options ("red" "green")))
+        (:type text :delta "thanks")
+        (:type done :stop-reason end-turn)))
+     (t '((:type text :delta "ok") (:type done :stop-reason end-turn))))))
+
+(ert-deftest harness-tools-agent-stop-outstanding-cancels-a-running-sub-agent ()
+  "Stopping what a session runs outside its turn cancels its running sub-agent.
+The session is told as for any cancelled sub-agent, with the reason it
+was stopped for, and counts nothing outstanding once the child's turn
+has ended.  With nothing running there is nothing to stop."
+  (harness-tools-agent-test-with
+    (let* ((harness-agent--cancel-grace 0.05)
+           (harness-provider-demo-script-override #'harness-tools-agent-test--stop-script)
+           (why "its task was returned to the queue")
+           (sid (harness-tools-agent-test-session))
+           (cid (harness-tools-agent-test-spawn sid '(:prompt "long job" :name "kid"))))
+      (harness-test-wait (lambda () (eq 'running (plist-get (harness-call 'session/get cid) :status)))
+                         5 "the child to run")
+      (should (string-match-p "Sub-agent kid running" (harness-call 'agent/outstanding sid)))
+      (should (equal "Sub-agent kid stopped" (harness-call 'agent/stop-outstanding sid why)))
+      ;; Its turn is cancelled, and its session hears of that as of any
+      ;; cancelled sub-agent, with why.
+      (harness-test-wait (lambda () (harness-tools-agent-test-reports sid)) 5 "the report")
+      (should-not (harness-call 'agent/running cid))
+      (let ((reports (harness-tools-agent-test-reports sid)))
+        (should (= 1 (length reports)))
+        (should (string-match-p
+                 (format "\\`Sub-agent report: kid (session %s) stopped: its turn was cancelled (%s)\\."
+                         (regexp-quote cid) (regexp-quote why))
+                 (plist-get (car reports) :content))))
+      ;; Nothing is outstanding any more, and nothing is left to stop.
+      (should-not (harness-call 'agent/outstanding sid))
+      (should-not (gethash cid harness-tools-agent--children))
+      (should-not (harness-call 'agent/stop-outstanding sid why))
+      (should-not (harness-call 'agent/stop-outstanding (harness-tools-agent-test-session) why)))))
+
+(ert-deftest harness-tools-agent-stop-outstanding-stops-only-the-sessions-own-sub-agents ()
+  "Every sub-agent of the session that still runs is stopped, and no one else's.
+They are named in the order they were spawned; without a reason the
+reports say none, and stopping again finds nothing."
+  (harness-tools-agent-test-with
+    (let* ((harness-agent--cancel-grace 0.05)
+           (harness-provider-demo-script-override #'harness-tools-agent-test--stop-script)
+           (sid (harness-tools-agent-test-session))
+           (other (harness-tools-agent-test-session))
+           (first (harness-tools-agent-test-spawn sid '(:prompt "long job" :name "first")))
+           (second (harness-tools-agent-test-spawn sid '(:prompt "long job" :name "second")))
+           (bystander (harness-tools-agent-test-spawn other '(:prompt "long job" :name "bystander"))))
+      (harness-test-wait (lambda () (cl-every (lambda (id) (harness-call 'agent/running id))
+                                              (list first second bystander)))
+                         5 "the sub-agents to run")
+      (should (equal "Sub-agents first, second stopped" (harness-call 'agent/stop-outstanding sid)))
+      (harness-test-wait (lambda () (= 2 (length (harness-tools-agent-test-reports sid))))
+                         5 "both reports")
+      (dolist (report (harness-tools-agent-test-reports sid))
+        (should (string-match-p "stopped: its turn was cancelled\\.\n" (plist-get report :content))))
+      (should-not (harness-call 'agent/outstanding sid))
+      (should-not (harness-call 'agent/stop-outstanding sid))
+      ;; The other session's sub-agent was left alone.
+      (should (harness-call 'agent/running bystander))
+      (should (string-match-p "Sub-agent bystander running" (harness-call 'agent/outstanding other)))
+      (harness-call 'agent/cancel bystander)
+      (harness-test-wait (lambda () (harness-tools-agent-test-reports other)) 5 "the bystander's report"))))
+
+(ert-deftest harness-tools-agent-stop-outstanding-does-not-stop-a-sub-agent-twice ()
+  "A sub-agent whose cancelled turn is still ending is not stopped again.
+One blocked on a question takes a moment to end its turn.  Meanwhile its
+session still counts it, a second stop finds it stopped already and
+says nothing, and it is reported once, when its turn has ended."
+  (harness-tools-agent-test-with
+    (let* ((harness-agent--cancel-grace 0.5)
+           (harness-provider-demo-script-override #'harness-tools-agent-test--stop-script)
+           (why "its task was returned to the queue")
+           (sid (harness-tools-agent-test-session))
+           (cid (harness-tools-agent-test-spawn sid '(:prompt "ask me" :name "kid"))))
+      (harness-test-wait (lambda () (harness-call 'question/pending cid)) 5 "the question")
+      (should (equal "Sub-agent kid stopped" (harness-call 'agent/stop-outstanding sid why)))
+      (should (harness-call 'agent/running cid))
+      (should (string-match-p "Sub-agent kid running" (harness-call 'agent/outstanding sid)))
+      (should-not (harness-call 'agent/stop-outstanding sid why))
+      ;; Once its turn has ended, it is reported, once.
+      (harness-test-wait (lambda () (harness-tools-agent-test-reports sid)) 5 "the report")
+      (should-not (harness-call 'agent/running cid))
+      (should (= 1 (length (harness-tools-agent-test-reports sid))))
+      (should-not (harness-call 'agent/outstanding sid))
+      (should-not (harness-call 'agent/stop-outstanding sid why)))))
+
+(ert-deftest harness-tools-agent-stop-outstanding-stops-the-work-of-an-idle-sub-agent ()
+  "A sub-agent whose turn ended with a sub-agent of its own at work is stopped with it.
+It stays outstanding for its session while that one runs, though its
+own turn is over.  The stop goes down to what it started, which is
+cancelled; the sub-agent that started it hears so, with the reason, as
+any session does.  The report wakes it, and that turn is cancelled as
+the stop's own: once it has ended, its session hears it was stopped."
+  (harness-tools-agent-test-with
+    (let* ((harness-agent--cancel-grace 0.05)
+           (harness-provider-demo-script-override #'harness-tools-agent-test--stop-script)
+           (why "its task was returned to the queue")
+           (sid (harness-tools-agent-test-session))
+           (cid (harness-tools-agent-test-spawn sid '(:prompt "delegate the long job" :name "kid")))
+           (gid nil))
+      ;; The child ends its turn with its own sub-agent at work.
+      (harness-test-wait (lambda ()
+                           (and (not (harness-call 'agent/running cid))
+                                (setq gid (plist-get (car (harness-call 'session/list (list :parent-id cid))) :id))
+                                (harness-call 'agent/running gid)))
+                         10 "the grandchild to run")
+      (should (string-match-p "Sub-agent grandkid running" (harness-call 'agent/outstanding cid)))
+      (should (string-match-p "Sub-agent kid running" (harness-call 'agent/outstanding sid)))
+      (should-not (harness-tools-agent-test-reports sid))
+      (should (equal "Sub-agent kid stopped" (harness-call 'agent/stop-outstanding sid why)))
+      ;; What it started was cancelled, and it heard so, with the reason.
+      (should-not (harness-call 'agent/running gid))
+      (harness-test-wait (lambda () (harness-tools-agent-test-reports cid)) 5 "the grandchild's report")
+      (should (string-match-p
+               (format "Sub-agent report: grandkid (session %s) stopped: its turn was cancelled (%s)\\."
+                       (regexp-quote gid) (regexp-quote why))
+               (plist-get (car (harness-tools-agent-test-reports cid)) :content)))
+      ;; Its own session hears it was stopped, as of a cancelled sub-agent.
+      (harness-test-wait (lambda () (harness-tools-agent-test-reports sid)) 5 "the report")
+      (should (string-match-p
+               (format "Sub-agent report: kid (session %s) stopped: its turn was cancelled (%s)\\."
+                       (regexp-quote cid) (regexp-quote why))
+               (plist-get (car (harness-tools-agent-test-reports sid)) :content)))
+      (should-not (harness-call 'agent/running cid))
+      (should-not (harness-call 'agent/outstanding sid))
+      (should-not (harness-call 'agent/outstanding cid))
+      (should-not (gethash cid harness-tools-agent--children))
+      (should-not (gethash gid harness-tools-agent--children)))))
+
+(ert-deftest harness-tools-agent-stop-outstanding-stops-the-work-of-a-running-sub-agent ()
+  "A sub-agent that runs a turn with a sub-agent of its own at work is stopped with it.
+Cancelling its turn alone would leave what it started running on, and it
+outstanding for its session: the stop goes down to that sub-agent too.
+Both are cancelled, and its session hears it was stopped, once."
+  (harness-tools-agent-test-with
+    (let* ((harness-agent--cancel-grace 0.05)
+           (harness-provider-demo-script-override #'harness-tools-agent-test--stop-script)
+           (why "its task was returned to the queue")
+           (sid (harness-tools-agent-test-session))
+           (cid (harness-tools-agent-test-spawn sid '(:prompt "delegate and carry on" :name "kid")))
+           (gid nil))
+      (harness-test-wait (lambda ()
+                           (and (harness-call 'agent/running cid)
+                                (setq gid (plist-get (car (harness-call 'session/list (list :parent-id cid))) :id))
+                                (harness-call 'agent/running gid)))
+                         10 "both to run")
+      (should (equal "Sub-agent kid stopped" (harness-call 'agent/stop-outstanding sid why)))
+      (harness-test-wait (lambda () (harness-tools-agent-test-reports sid)) 5 "the report")
+      (should-not (harness-call 'agent/running cid))
+      (should-not (harness-call 'agent/running gid))
+      (should (= 1 (length (harness-tools-agent-test-reports sid))))
+      (should (string-match-p
+               (format "Sub-agent report: kid (session %s) stopped: its turn was cancelled (%s)\\."
+                       (regexp-quote cid) (regexp-quote why))
+               (plist-get (car (harness-tools-agent-test-reports sid)) :content)))
+      (should-not (harness-call 'agent/outstanding sid))
+      (should-not (harness-call 'agent/outstanding cid))
+      (should-not (gethash cid harness-tools-agent--children))
+      (should-not (gethash gid harness-tools-agent--children)))))
+
+(ert-deftest harness-tools-agent-marking-a-reported-sub-agent-makes-no-entry ()
+  "A sub-agent reported meanwhile has no entry, and being marked as stopped makes none.
+It would count as outstanding for its session, and be reported again,
+from then on."
+  (harness-tools-agent-test-with
+    (puthash "child" (list :parent "parent" :name "kid" :result nil :stopped nil)
+             harness-tools-agent--children)
+    (should (string-match-p "Sub-agent kid running" (harness-call 'agent/outstanding "parent")))
+    (harness-tools-agent--forget-child "child")
+    (harness-tools-agent--mark-stopped "child" "its task was returned to the queue")
+    (should-not (gethash "child" harness-tools-agent--children))
+    (should-not (harness-call 'agent/outstanding "parent"))))
+
+(ert-deftest harness-tools-agent-stop-outstanding-leaves-a-waiting-sub-agent-alone ()
+  "A sub-agent that only waits for something is not stopped.
+Its wait (`session_wait') is a cheap registration a stop leaves alone:
+nothing is said to be stopped, the sub-agent stays outstanding, and its
+report comes once the wait wakes it, as it does without a stop."
+  (harness-tools-agent-test-with
+    (harness-test-load-module 'tools-sessions)
+    (let* ((harness-provider-demo-script-override #'harness-tools-agent-test--waiting-script)
+           (target (harness-tools-agent-test-session)))
+      (setq harness-tools-agent-test--target target)
+      (setq harness-provider-demo--delay 0.5)
+      (harness-call 'agent/prompt target "long job")
+      (let* ((sid (harness-tools-agent-test-session))
+             (turn (harness-test-await (harness-call 'agent/prompt sid "delegate the waiting") 30))
+             (cid (plist-get (car (harness-call 'session/list (list :parent-id sid))) :id)))
+        (should (eq 'end-turn (plist-get turn :stop-reason)))
+        (harness-test-wait (lambda () (and (not (harness-call 'agent/running cid))
+                                           (eq 'idle (plist-get (harness-call 'session/get cid) :status))))
+                           10 "the waiting sub-agent")
+        (should-not (harness-call 'agent/stop-outstanding sid "its task was returned to the queue"))
+        ;; It goes on waiting, outstanding, and is not marked as stopped.
+        (should (string-match-p "Sub-agent waiter running" (harness-call 'agent/outstanding sid)))
+        (should (string-match-p "Waiting on" (harness-call 'agent/outstanding cid)))
+        (should-not (plist-get (gethash cid harness-tools-agent--children) :stopped))
+        (should-not (harness-tools-agent-test-reports sid))
+        ;; The wait wakes it, and it is reported as having finished.
+        (harness-test-wait (lambda () (harness-tools-agent-test-reports sid)) 20 "the report")
+        (let ((content (plist-get (car (harness-tools-agent-test-reports sid)) :content)))
+          (should (string-match-p "\\`Sub-agent report: waiter (session [^)]+) finished\\." content))
+          (should (string-match-p "all done" content)))
+        (should-not (harness-call 'agent/outstanding sid))))))
+
+(ert-deftest harness-tools-agent-stop-outstanding-does-not-merge-a-worktree-sub-agent ()
+  "A stopped sub-agent in its own worktree is not merged back as finished work.
+It is reported as any cancelled sub-agent is, which says where it
+worked; the merge queue is not asked for its branch, which stays, with
+its worktree, for the session or the user to merge."
+  (harness-tools-agent-test-with
+    (harness-test-load-module 'worktree)
+    (harness-test-load-module 'merge)
+    (let* ((base (harness-test-temp-dir))
+           (root (file-name-as-directory (expand-file-name "repo" base))))
+      (unwind-protect
+          (progn
+            (make-directory root t)
+            (harness-tools-agent-test--git root "init" "-q" "-b" "main")
+            (harness-tools-agent-test--git root "config" "user.name" "Harness Test")
+            (harness-tools-agent-test--git root "config" "user.email" "test@example.invalid")
+            (harness-tools-agent-test--git root "config" "commit.gpgsign" "false")
+            (with-temp-file (expand-file-name "README" root) (insert "hello\n"))
+            (harness-tools-agent-test--git root "add" "README")
+            (harness-tools-agent-test--git root "commit" "-q" "-m" "initial")
+            (let* ((harness-agent--cancel-grace 0.05)
+                   (harness-provider-demo-script-override #'harness-tools-agent-test--stop-script)
+                   (sid (plist-get (harness-call 'session/create :cwd root :model "demo:scripted") :id))
+                   (cid (harness-tools-agent-test-spawn
+                         sid '(:prompt "long job" :name "kid" :worktree t)))
+                   (worktree (plist-get (harness-call 'session/get cid) :worktree)))
+              (should (file-directory-p worktree))
+              (harness-test-wait (lambda () (harness-call 'agent/running cid)) 5 "the child to run")
+              (should (equal "Sub-agent kid stopped"
+                             (harness-call 'agent/stop-outstanding sid "its task was returned to the queue")))
+              (harness-test-wait (lambda () (harness-tools-agent-test-reports sid)) 10 "the report")
+              (let ((report (plist-get (car (harness-tools-agent-test-reports sid)) :content)))
+                (should (string-match-p "stopped: its turn was cancelled" report))
+                (should (string-match-p "It worked in worktree" report))
+                (should (string-match-p "on branch harness/" report)))
+              ;; Nothing was queued for a merge; the branch and worktree are still there.
+              (should-not (harness-call 'merge/status cid))
+              (should-not (harness-call 'merge/queue sid))
+              (should (file-directory-p worktree))
+              (should (string-match-p "harness/"
+                                      (harness-tools-agent-test--git root "branch" "--list" "harness/*")))))
+        (ignore-errors (delete-directory base t))))))
 
 (provide 'harness-tools-agent-test)
 ;;; harness-tools-agent-test.el ends here

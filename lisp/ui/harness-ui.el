@@ -4845,6 +4845,8 @@ leaves the buffer's commands out, never the whole menu."
     ("n" "New session" harness-new-session)
     ("s" "Switch session" harness-switch-session)
     ("l" "Session list" harness-sessions :if (lambda () (harness-ui--command-available-p 'harness-sessions)))
+    ("g" "Search sessions" harness-search-sessions
+     :if (lambda () (harness-ui--command-available-p 'harness-search-sessions)))
     ("a" "Task mode" harness-tasks :if (lambda () (harness-ui--command-available-p 'harness-tasks)))
     ("t" "Conversation tree" harness-tree :if (lambda () (harness-ui--command-available-p 'harness-tree)))
     ("b" "BTW side conversation" harness-btw :if (lambda () (harness-ui--command-available-p 'harness-btw)))

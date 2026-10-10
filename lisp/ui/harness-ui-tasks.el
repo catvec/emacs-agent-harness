@@ -3573,14 +3573,16 @@ review, merging, refining or done cannot be paused."
 
 (defun harness-ui-tasks-return-to-pending ()
   "Stop the turn of the task at point and put it back in the pending queue.
-The card calls this Pause.  The task keeps its session, branch and
-worktree, so when it starts again it carries on where it stopped
-\(\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-start], or the queue starting it).  It goes to
-the front of its priority's queue, ahead of the tasks that never
-started, behind only tasks of a higher priority.  Returning it frees
-its slot for the other waiting tasks and starts nothing itself: with
-the queue suspended (\\[harness-ui-tasks-toggle-queue]) nothing starts
-at all until you resume it."
+The card calls this Pause.  The work its session left running outside
+its turn -- a supervisor's workers, sub-agents -- stops too, and is
+reported to it for when it carries on.  The task keeps its session,
+branch and worktree, so when it starts again it carries on where it
+stopped (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-start], or the queue starting it).
+It goes to the front of its priority's queue, ahead of the tasks that
+never started, behind only tasks of a higher priority.  Returning it
+frees its slot for the other waiting tasks and starts nothing itself:
+with the queue suspended (\\[harness-ui-tasks-toggle-queue]) nothing
+starts at all until you resume it."
   (interactive)
   (let ((task (harness-ui-tasks--task)))
     (unless (harness-ui-tasks--pausable-p task)

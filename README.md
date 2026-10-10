@@ -73,6 +73,11 @@ OpenAI-compatible APIs and AWS Bedrock.
   BTW conversations, browse the conversation tree, and compact long
   conversations, automatically or by hand: into a summary, a cheap
   brief one, or a transcript file the model reads from.
+- **Session search.** Find any session by what was said in it: words
+  in any form, ranked by a full-text index the harness keeps in SQLite,
+  the exact text, a regular expression, or, with an embedding model,
+  meaning. A match opens its session right where it was said. Agents
+  search the same way.
 - **Cost tracking.** Cost per turn, subscription quotas, budgets and a
   usage dashboard.
 - **Insights.** A report on how a day, a week or a month of work with
@@ -96,6 +101,8 @@ OpenAI-compatible APIs and AWS Bedrock.
 |---|---|
 | ![A chat waiting for permission to run pip install, with the allow and deny buttons](docs/media/chat-permission.png) | ![A chat waiting for the answer to a question, with three options](docs/media/chat-question.png) |
 | A permission request, answered in the chat | A question from the agent, answered with a digit |
+| ![A call the harness denied, with an [Approve] button under it and the handle the denial named](docs/media/chat-denied.png) | ![That call after the user approved it: marked user-approved, the agent's rerun under it with what the command printed](docs/media/chat-denied-approved.png) |
+| A denied call: the harness blocked it, [Approve] lets it run anyway | Approved: the agent reruns the call exactly as it was denied |
 | ![The task board with tasks needing input, in review, merging, in progress, pending and completed](docs/media/tasks.png) | ![The conversation tree of a session, its fork and a BTW](docs/media/tree.png) |
 | The task board: each task has a session and a worktree | The conversation tree of a session, a fork and a BTW |
 | ![A task's report popped out of the board: its chart large, the test run it quotes, and the banner and box to verify it or send it back](docs/media/report.png) | ![The chart of that report shown larger, in a popout of its own](docs/media/report-image.png) |
@@ -331,6 +338,7 @@ default), or nil for nowhere.
 | `+` / `-` | `harness-ui-sessions-raise-priority` / `harness-ui-sessions-lower-priority` | In the session list, raise or lower the priority of the session at point (with `C-u`, ask for the level) |
 | `p` | `harness-ui-sessions-set-priority` | In the session list, set the priority of the session at point |
 | `y` / `n` | `harness-ui-sessions-allow` / `harness-ui-sessions-deny` | On the lines of a listed session waiting on a permission request, answer it with Allow or Deny, as the request's own `y` and `n` do |
+| `C-c h g` | `harness-search-sessions` | Search what was said in every session: words, the exact text, a regexp or meaning (see [Searching sessions](#searching-sessions)) |
 | `C-c h a` | `harness-tasks` | Show the task board |
 | `C-c h /` | `harness-tasks-search` | Find tasks, or act on them, by saying so in words |
 | `C-c h F` | `harness-fullscreen` | Start or end the fullscreen layout: the task board, session list or a main session on one side, a session beside it |
@@ -618,6 +626,20 @@ shows a definition, the file it names may then be read without a grant
 for the rest of the session, by the tools that only read, so the agent
 can read the code around it: only that file, not its directory, and not
 for writing.
+
+The harness decides a call as it happens, so a session never waits on a
+prompt nobody can answer, but it is never the last word: every call it
+refuses is kept under a handle, and the refusal the agent reads names
+it. A refused call in the transcript offers `[Approve]` (or
+`M-x harness-chat-approve-denied-call` on the call at point). Clicking
+it says yes on your behalf, in the transcript and once only: the agent
+is told, and runs the call exactly as it was refused, with its own tool
+and arguments, through the `rerun_approved` tool. The call shows as
+user-approved, and the rerun links to the call it was refused as. A
+handle you have not approved, one another session was refused, and one
+already rerun are refused, so nothing but the very call you approved
+ever runs. What the harness recorded stays in the session, so an
+approval outlives a reload.
 
 A shell command is about what its command line names, not only the
 directory it runs in. The prompt for `ls -la ~/.claude/projects/x`,
@@ -939,6 +961,66 @@ way to the transcript file, and that to carrying on: the message always
 goes, unless you hold it. `harness-cowboy-min-context` leaves smaller
 conversations to go uncached without asking.
 
+### Searching sessions
+
+`C-c h g` (`M-x harness-search-sessions`) asks what to look for and
+lists the sessions that said it, best match first, each with its best
+matches and what was found in them highlighted. `RET` on a match opens
+its session there, with point on the words found, however far back
+they are. On a session's line it opens at its best match.
+
+```
+ 2 sessions match “sqlite cost”  ·  full-text index
+
+ ● Usage dashboard  emacs-agent-harness · 3d ago
+     you          …record the cost of each turn in sqlite, one row per…
+     agent        …usage.db now keeps the cost per model…
+```
+
+There are four ways to search. `m` goes from one to the next, and the
+header line shows them all:
+
+- **Words** (the default): every word must be there, in any form, so
+  "crash" finds "crashes" too. The best matches come first. `"a
+  phrase"` matches as a phrase, `pars*` matches a prefix, `OR` between
+  two words takes either, and `-word` leaves out the sessions that have
+  it. When no session has every word, the ones with some of them are
+  listed, and the line above them says so.
+- **Literal**: the text exactly as you typed it, symbols and all.
+- **Regexp**: an extended regular expression, as `grep -E` reads it.
+- **Meaning**: what is near in meaning, even in other words. This needs
+  an embedding model (below).
+
+`a` switches between every project and the project you searched from
+(`harness-ui-search-default-scope` sets where a search starts), `s`
+searches for something else, `g` searches again, `+` lists more
+sessions, and `n` and `p` go from match to match. With `C-u`, `C-c h g`
+asks how to search first.
+
+The search reads a full-text index of the transcripts, which the
+harness keeps in `search.db` beside `usage.db` in its state directory.
+It is built in the background from the transcripts and kept up to date
+as sessions go on. It is only a cache: deleting it loses nothing, and
+it is built again. Until it is built, or with
+`harness-session-search-index` set to nil, a word search matches the
+text as you typed it, and the results say so. Agents search the same
+index with the `session_search` tool, and so does the task board's
+search when it looks in the tasks' transcripts.
+
+Searching by meaning needs an embedding model. Set
+`harness-session-search-embedding-model` to one, such as
+`"openai:text-embedding-3-small"`, or a local server's: with an entry
+`(:id local :base-url "http://localhost:11434/v1" :api-key "ollama")`
+in `harness-openai-endpoints` for Ollama, `"local:nomic-embed-text"`.
+Then the text of your messages, the replies, plans and summaries is
+embedded in the background, and word searches rank their matches by
+meaning too. When no session has the words, they list the sessions
+nearest in meaning instead. That text goes to the model's provider,
+which is why this is off until you set it. In corporate mode only a
+server on this machine embeds.
+`harness-session-search-embedding-dimensions` asks a model that can
+shorten its vectors for fewer dimensions.
+
 ### Forks and side conversations
 
 `C-c h f` forks the current session. The fork starts from the
@@ -1024,7 +1106,10 @@ once, and calls made one after another overlap just the same. While
 sub-agents run the session has work outstanding, so a task does not go
 to review until they are back; a child that itself has work going on (a
 wait it registered, a sub-agent it started) is reported when that is
-over, not when its turn merely ends.
+over, not when its turn merely ends. A task that is pre-empted, or
+returned to *Pending*, stops its sub-agents with it: each one's turn is
+cancelled, with the sub-agents it started, and the session hears of it
+as it hears of any cancelled sub-agent, adding why in parentheses.
 
 `fork=true` forks the session, so the child shares the conversation and
 its cached prefix; a fresh child starts with the prompt alone.
@@ -1279,9 +1364,22 @@ call to one anyway, in every permission mode.
   supervisor has checked the result, it calls `hand_in`; feedback from
   your review leads to a new plan that fixes the work. While workers run,
   the task stays active, with a line of what it waits for, instead of
-  going to review when the turn that submitted the plan ends. The session
+  going to review when the turn that submitted the plan ends, and it
+  keeps its slot meanwhile (see the limit under [Task board](#task-board)),
+  so work you send back from review can pre-empt it. The session
   that writes a backlog task up only reads, and takes the setting when
   the task starts.
+- **When a task goes back to the queue.** A task pre-empted by work you
+  sent back from review, or returned to *Pending* with `u`, stops its
+  plan's workers with it. Each running step is marked interrupted, with
+  why, and its worker's turn is cancelled together with the sub-agents
+  the worker started; a worker still being made never gets its step. The
+  supervisor is told once, in one message of the harness's own for all the
+  steps, which waits in its session while the task waits in the queue:
+  nothing runs or starts again by itself, and the steps held behind an
+  interrupted one wait for the supervisor. When the task carries on, the
+  supervisor reads the report and runs the steps again with `retry_step`,
+  or plans again.
 - **Merging back.** The merge queue takes a target rather than a
   parent: the session a branch merges into, or the main checkout
   itself. A sub-agent started in a worktree (`spawn_agent` with
@@ -1387,7 +1485,9 @@ your checkout itself can be submitted to the **main tree** instead (the
   taken waits in *Pending* and starts, by priority and then oldest
   first, when one frees up, or at once with `s`. Only top-level
   sessions are limited: a task takes a slot while its own session
-  works on it, running or waiting for your answer mid-turn. The
+  works on it, running or waiting for your answer mid-turn, and while
+  its turn is over but the workers of its supervisor plan or its
+  sub-agents are still running. The
   sessions working for it -- its sub-agents and forks, and the sessions
   resolving its merge conflicts -- never take one, and neither does a
   task in *Merging*, so the merge queue never holds up the next task.
@@ -1491,8 +1591,14 @@ your checkout itself can be submitted to the **main tree** instead (the
   priority, or one of its own priority that is not itself work sent
   back from review, so a task that just started gives way to your
   feedback -- taking the lowest-ranked such task's slot, the one that
-  started last among equals. The task pre-empted goes back to
-  *Pending*, its turn stopped, and carries on where it stopped when a
+  started last among equals. A task whose turn is over but whose
+  supervisor plan's workers or sub-agents still run counts as at work
+  too. The task pre-empted goes back to
+  *Pending*, its turn stopped and the work its session left running
+  stopped with it: the workers of its plan and its sub-agents are
+  cancelled, and what they were on is reported to the task, to read
+  when it carries on (nothing restarts by itself: it retries or plans
+  again). It carries on where it stopped when a
   slot frees, its session told why, as a session is after a restart.
   When every task at work outranks it (a higher priority, or other
   feedback of its priority), the task sent back waits at the front of
@@ -1507,6 +1613,16 @@ your checkout itself can be submitted to the **main tree** instead (the
   it as that session's, not as your feedback. The task deals with it
   and waits for review again, its report standing unless it hands in a
   new one; an agent sends work back only with `task_control` reject.
+- `u` returns a task at work to *Pending*, one that only waits on its
+  supervisor's workers too. Its turn stops and it keeps its session,
+  branch and worktree. It goes to the front of its priority's queue and
+  carries on where it stopped when a slot frees, or at once with `s`;
+  returning it starts nothing itself. `P` suspends the project's queue,
+  so that no waiting task starts by itself until you resume it.
+  Whatever its session left running outside its turn stops with it, as
+  it does for a task that is pre-empted: the workers of its supervisor
+  plan and its sub-agents are cancelled, and what they were on is
+  reported to the task, to read when it carries on.
 - When the project is the harness itself, a card in *Ready for review*
   whose worktree is a checkout of the harness also has **Open harness**
   in its menu (right-click the card): it opens an Emacs running that
@@ -2385,6 +2501,10 @@ It turns off:
   call is denied and the model is told why.
 - The `ssh` tool, which runs commands on other machines. Sessions do
   not get it, and a call to it is denied.
+- Embedding session text on another machine. Searching sessions by
+  meaning embeds their text only with a server on this machine (see
+  [Searching sessions](#searching-sessions)); the full-text index never
+  leaves it.
 
 It leaves alone:
 

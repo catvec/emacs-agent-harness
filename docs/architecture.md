@@ -686,8 +686,12 @@ See docs/configuration-audit.md for the rule and the audit behind it.
 Persistence under `harness-state-directory`:
 - `store/save NAME OBJ`, `store/load NAME` (JSON files, atomic write).
 - `store/append NAME OBJ`, `store/read-all NAME` (JSONL).
-- `store/sqlite` → open built-in sqlite handle for `usage.db` (nil when
-  Emacs lacks sqlite; callers fall back to JSONL).
+- `store/sqlite &optional NAME` → open built-in sqlite handle for
+  `NAME.db`, `usage.db` by default (nil when Emacs lacks sqlite; callers
+  fall back to JSONL).  One handle per database, kept open; a handle of
+  another state directory is closed first.  `store/sqlite-close
+  &optional NAME` closes one.  The session search keeps its index in
+  `search.db` this way (see session-search).
 - `store/list PREFIX` → names.
 
 ### session
@@ -996,9 +1000,23 @@ its sender, and the hint says so (`harness-session--requeue`).
   :close FN             ; (SESSION-ID) → BOOL: free what it keeps for one   [optional]
   :resolve FN           ; (NAME &optional MODELS) → MODEL plist or nil: a name
                         ; its listing lacks (an alias, a variant)          [optional]
+  :embed FN             ; (NAME TEXTS OPTS) → promise of (:vectors :usage) [optional]
   :capabilities PLIST   ; static defaults, merged with per-model ones
   :tiers PLIST)         ; a model per tier, see below
 ```
+
+Embeddings: `provider/embed MODEL-ID TEXTS &optional OPTS` → promise of
+`(:vectors VECTORS :usage (:input N))`, one vector of floats per string
+of TEXTS, in their order.  OPTS `:dimensions` asks for shorter vectors.
+It rejects a model the policy refuses (`harness-allowed-models`), one
+of no provider, and one whose provider has no `:embed`.  The model
+need not be in the provider's catalogue, which lists chat models: an
+embedding model is named only by settings, such as
+`harness-session-search-embedding-model`.  `provider/embeds-p MODEL-ID`
+says whether its provider embeds.  The OpenAI-compatible endpoints embed
+(`POST /embeddings`; in corporate mode only an endpoint on this machine
+does); the demo provider embeds offline, words of a few related groups
+near each other, for the tests and the dev daemon.
 
 MODEL = `(:id "ID:NAME" :provider ID :name "NAME" :label "…"
 :context-window N :context-window-estimated BOOL :context-window-basis "…"
@@ -1741,6 +1759,15 @@ below).  RESULT = `(:content "…" :is-error BOOL :attachments (…)
   nothing runs.  Emits `permission/decided`.  The `:behavior` is allow
   or deny; a denial carries `:message`, the text `tools/execute` would
   have returned.
+- `tools/execute-approved SESSION-ID CALL` runs CALL with no permission
+  check at all, for a call the user approved by hand after the chain
+  denied it (`rerun_approved` in harness-perms.el): their approval is
+  what the chain would have asked for, and the input CALL carries is the
+  very input it was denied with.  The result is truncated and given to
+  the `tools/result` filter as `tools/execute` gives one, but nothing is
+  announced as `tools/started` or `tools/finished`: the call is no call
+  of the session's own turn, the `rerun_approved` call that runs it is,
+  and its progress and notes show under that call.
 - Corporate mode (`harness-corporate-mode`) turns off the tools of kind
   `net` other than web search (`harness-tools--corporate-net-tools`:
   web_search), and ssh, of kind `exec` but run on another machine
@@ -1774,9 +1801,15 @@ below).  RESULT = `(:content "…" :is-error BOOL :attachments (…)
   connection TRAMP refused because another call was using it is
   reported as busy, to be made again (`:meta` `(:host PREFIX :busy t)`).
 - Denied calls return `(:is-error t :denied t :content "Denied: REASON. HINT")`.
+  Every denial is kept per session under the handle of the call's id,
+  and the reason names the handle and says the user can approve the call
+  in the chat (see the perms section, "Denied calls the user can
+  approve"): the agent can then run it unchanged with `rerun_approved`.
   The agent keeps `:denied t` in the `:meta` of the call's tool-result
   node, so a view can tell a call the permission system refused, which
-  never ran, from one that ran and failed (`harness-ui-tool-outcome`).
+  never ran, from one that ran and failed (`harness-ui-tool-outcome`);
+  the user's approval and the rerun are written there too, where the
+  views show them and a reload keeps them.
 
 ### perms
 
@@ -2107,6 +2140,34 @@ non-interactive session it stays a denial.
   (`permission/dir-revoked`); an entry that still covers it, a parent
   put in its place say, is `changed` and stays; else `gone`.  The
   message says what happened and why.
+- Denied calls the user can approve: every denial is kept, per session,
+  under the handle of the call's id (`harness-perms--remember-denied`, a
+  `permission/decided` subscriber, so a denial is kept whoever made it,
+  the jail, a gate, the judge or an answer), with the tool, the input
+  exactly as it was denied, and the reason and hint the agent was given
+  (`harness-perms--denied-record`).  `permission/approve-denied SESSION-ID
+  HANDLE` → `(:handle :tool :approved :used :message)` is the user's
+  approval of that one call, and only the user gives it: the chat's
+  [Approve] button (`harness-chat-approve-denied-call` approves the call
+  at point), a popout, or the ACP method.  It marks the record and the
+  denied result node's `:meta` (`:approved`, `:approved-at`), which the
+  chat draws and a session reloaded later reads, and prompts the
+  session's agent with a system message: the user approved the call,
+  rerun it unchanged with `rerun_approved`.  `rerun_approved HANDLE`, a
+  tool in `harness-perms--auto-allow-tools` since its own handler is the
+  check, takes the handle alone: the tool and its arguments cannot
+  change.  It refuses a handle this session has no denied call for, one
+  the user has not approved, and one already used (a handle is used
+  once), and else runs the stored call through `tools/execute-approved`,
+  which asks the chain nothing, marks the handle used and the rerun call
+  (`:used`, `:rerun-call-id` under the call), and returns the call's own
+  result with `:meta` `(:user-approved t :rerun-of HANDLE :rerun-tool
+  NAME)`, so the transcript links the rerun to the call it was denied
+  as and the chat marks it user-approved
+  (`harness-chat--rerun-line`).  The record lives in memory for the run
+  and in the session's transcript, where it outlives a reload: the
+  call's node holds the tool and the input, its denied result the
+  approval.
 - Saving `harness-perms-rules` or `harness-allowed-directories` (an
   answer, `permission/allow-dir` with `always`, a revoke, an undo)
   emits `config/changed KEY VALUE global nil`, as the config module
@@ -2459,6 +2520,25 @@ non-interactive session it stays a denial.
   not a text with words in it counts as nothing outstanding.  The tasks
   module keeps the task of a session whose turn ended active while this
   says something (see tasks).
+- `agent/stop-outstanding SESSION-ID &optional REASON` → a short text, or
+  nil: stops what runs for the session outside its own turn, the
+  counterpart of `agent/outstanding`, and says what it stopped.  A module
+  that started that work stops it when asked through the sync filter
+  `agent/stop-outstanding`, whose value starts at nil and whose arguments
+  are SESSION-ID and REASON: a short text saying why ("its task was
+  returned to the queue"), or nil.  A handler records REASON where the
+  owner of the work reads it, such as a supervisor step's `:error`, and
+  has nothing to do (returns the value unchanged) when it started
+  nothing for the session; one that stopped something returns a text
+  saying what, or appends it to the text before it, separated by "; ".
+  Registrations that only wait, those of `session_wait`, are left alone.
+  A value that is not a text with words in it counts as nothing stopped.
+  The tasks module calls it when a task is pre-empted or returned to
+  pending, once no turn of the task's session runs, so that the reports
+  of the stopped work reach a session with no turn to steer (see tasks).
+  The handlers are the supervisor module's, which interrupts the running
+  steps of the session's plans, and tools-agent's, which cancels the
+  sub-agents the session spawned (see supervisor and tools).
 - Sync filter `agent/system-prompt` (value string, args session); sync
   filter `agent/tools`; sync filter `agent/builtin-tools` (see
   `tools/builtin`); async filter `agent/before-turn` (value
@@ -3575,7 +3655,9 @@ priority).
   (`harness-tasks--holds-slot-p`): a task holds one while it starts,
   and while it is `active` with its own session -- one without a
   `:parent-id` -- running or blocked mid-turn, or idle with work it
-  left running (`:waiting`, a supervisor's workers say).  The sessions working for
+  left running (`:waiting`, a supervisor's workers say), which it holds
+  through that work: such a task can be pre-empted (below), and its work
+  stops with it.  The sessions working for
   a task never take one of their own: its sub-agents and forks, and the
   merge queue's conflict resolvers (`subagent` children of its session).
   Nor does the merge queue, which the limit never holds up: a task in it
@@ -3793,6 +3875,9 @@ priority).
   `:waiting` unless the same change sets it), and the turn the session
   takes when that work reports back, or any turn that ends with nothing
   outstanding, ends the task as above.  Only a clean `end-turn` is asked.
+  A task waiting on such work still holds its slot (`harness-tasks--holds-slot-p`),
+  so it counts as at work: work sent back from review can pre-empt it, and
+  a return to pending frees its slot.  Both stop that work, below.
 - Review (`harness-tasks-require-verification`, default t): finished
   work is not done until the user has looked at it.  A turn ending
   `end-turn` puts the task in `review` instead, and emits `task/review
@@ -3844,19 +3929,25 @@ priority).
   (`harness-tasks--outranks-p`: a lower priority, or its own priority
   when that task is not work sent back itself, `:sent-back` being when
   it was).  Of those, `harness-tasks--victim` takes the lowest priority,
-  then work that is not feedback, then the one at work since last; a
-  task waiting on work its session left running (`:waiting`), another
-  project's task, and any task while the limit is 0 give none up.  The
+  then work that is not feedback, then the one at work since last;
+  another project's task, and any task while the limit is 0, give none
+  up.  A task waiting on work its session left running (`:waiting`, a
+  supervisor's workers say) holds its slot through that work, so it is a
+  candidate like any other (`harness-tasks--preemptible-p` is
+  `harness-tasks--holds-slot-p`).  The
   victim is pre-empted (`harness-tasks--preempt`): returned to pending
   with `:return-reason` `preempted` and `:preempted-by` the task sent
   back, its turn stopped, and a hint in its session once the turn has
-  ended ("Task pre-empted: ...").  A task still starting (its worktree
-  being made) is pre-empted the same way: its start launches nothing
-  (`harness-tasks--start-current-p`), and its next start reuses the
-  worktree being made (`harness-tasks--worktree-promise`).  When a slot
-  frees, it carries on in its session, prompted with
+  ended ("Task pre-empted: ...").  The work its session left running
+  outside its turn stops too (next bullet).  A task still starting (its
+  worktree being made) is pre-empted the same way: its start launches
+  nothing (`harness-tasks--start-current-p`), and its next start reuses
+  the worktree being made (`harness-tasks--worktree-promise`).  When a
+  slot frees, it carries on in its session, prompted with
   `harness-tasks--preempted-message`, as a task returned to pending is
-  with `harness-tasks--paused-message`.  With no task it outranks, or
+  with `harness-tasks--paused-message`; both say that workers and
+  sub-agents still running were stopped, and that what they were on is
+  reported above.  With no task it outranks, or
   its queue suspended, the task sent back waits instead
   (`harness-tasks--hold-back`): pending, `:return-reason` `sent-back`,
   its round kept in `:feedback` and the reject text queued (`:queued`)
@@ -3877,6 +3968,38 @@ priority).
   pending, pre-empted or sent back while it waits; the user's own
   message to a returned or pre-empted task starts it, as `task/start`
   would.  A task that never started is left alone.
+- Stopping the work left running.  A task that goes back to the queue
+  after its work began -- pre-empted (`harness-tasks--preempt`), or
+  returned to pending by hand (`task/return-to-pending`) -- has nothing
+  at work, so what its session started that goes on without its turn
+  stops with it (`harness-tasks--stop-outstanding`): the tasks module
+  asks `agent/stop-outstanding SESSION-ID REASON` (see agent), REASON
+  being "its task was pre-empted: task T, sent back from review, took
+  its slot" or "its task was returned to the queue".  It asks once no
+  turn of the session runs: at once when none did, which is the case of
+  a task that only waited on its workers (`:waiting`), else when the
+  turn the pre-emption or the return stopped has ended
+  (`harness-tasks--returning` says it is being stopped;
+  `harness-tasks--on-turn-ended`).  What the stopped work reports then
+  reaches a session with no turn to steer, rather than steering the turn
+  being cancelled and getting lost.  A task started again before that
+  turn ended keeps its work, and nothing is stopped.  What was stopped is
+  a hint in the session ("Stopped while the task waits in the queue:
+  Supervisor plan: 2 steps interrupted"); a handler that fails is logged
+  and stops nothing else.  The reports of the stopped work -- one message
+  for all the interrupted steps of a supervisor's plans, one for each
+  sub-agent cancelled, from the harness's `supervisor` and `sub-agent`
+  senders -- reach the session while its task waits: the tasks module's
+  `agent/before-turn` filter refuses the turn each would start, so they
+  stay in the transcript, and the scheduling pass the end of a refused
+  turn asks for leaves the task out, as the return itself does, so
+  nothing starts it again but a free slot reaching it in line,
+  `task/resume-queue` or an explicit `task/start`.  The turn that
+  starts it reads them before the opening message, and nothing of the
+  stopped work restarts by itself: its session retries the step
+  (`retry_step`) or plans again.  A task returned by hand that only
+  waited on its workers has them stopped at once, as one pre-empted
+  does.
 - A turn starting in a task's session makes the task active again, so a
   message sent from a done task's chat buffer reopens it; an archived task
   comes back to the board.
@@ -3890,6 +4013,17 @@ priority).
   `task/start ID` (ignores the limit; not while a write-up runs),
   `task/queue ID` (a backlog task back in the pending queue, where the
   scheduler starts it as slots free; the suspended queue holds it there),
+  `task/return-to-pending ID` (a task at work, not one still starting:
+  its turn is stopped as `task/cancel` stops one, and the task goes back
+  to `pending` at the front of its priority's queue -- ahead of the tasks
+  that never started, the first returned first -- with its session,
+  branch and worktree kept and `:return-reason` `returned`; the work its
+  session left running outside its turn stops with it, once no turn of
+  the session runs, see "Stopping the work left running" above.  Its slot
+  is free for the others, and the return starts nothing itself, the
+  queue suspended or not: it waits for the next task the queue starts,
+  `task/resume-queue` or an explicit `task/start`, and carries on in its
+  session, prompted with `harness-tasks--paused-message`),
   `task/update ID PROMPT` (not started only; writes a stopped write-up by
   hand; a task named from its prompt is named again), `task/set-all SETTINGS &optional FILTER` (apply `:model',
   `:thinking', `:permission-mode', `:non-interactive' and `:supervisor',
@@ -4001,6 +4135,97 @@ priority).
   nil: `:outcome interrupted`).  Merges in flight are queued again, and
   tasks in review wait on for the user.
 
+### session-search
+
+One search over the transcripts of every session
+(lisp/modules/harness-session-search.el), for the `session_search` tool,
+the task board's search and the UI's `harness-search-sessions` (C-c h g;
+lisp/ui/harness-ui-search.el).
+
+- The transcripts stay in their node logs.  The index is a cache of
+  them in SQLite, `search.db` beside `usage.db` (`store/sqlite
+  "search"`): a row per node with its readable text
+  (`harness-session-search-node-text`: a message's text, a call's tool
+  and input, a result's output, a plan's entries…), an FTS5 table over
+  the rows (`porter unicode61 remove_diacritics 2`, kept in step by
+  triggers), and per log the byte offset read up to.  It is a database
+  of its own because it grows about as large as the logs, while
+  `usage.db` is small and holds what nothing rebuilds.  Deleting it
+  loses nothing.
+- Keeping it current: only the complete lines a log gained since its
+  offset are read.  An update line (a streamed reply's final text, a
+  changed `:meta`) is merged into its node's row, so a reply is
+  searchable in full; grep over the logs saw only what one line holds.
+  `session/node-added`, `session/node-updated` (not the transient ones)
+  and `session/forked` schedule a catch-up a second later; a search
+  catches up first with the logs it covers when little is left (else it
+  falls back, below); logs never read are read in the background, newest
+  session first, in slices of `harness-session-search--slice` seconds
+  `harness-session-search--gap` apart (`run-at-time`, starting
+  `harness-session-search--start-delay` after the module), and
+  `session/deleted` drops a session's rows there too.
+- `session/search QUERY &optional OPTS` → promise of `(:query :mode
+  :engine :note :loose :total :sessions)`.  OPTS: `:mode` (`text`, the
+  default, `literal`, `regexp`, `semantic`; a symbol or its name),
+  `:sessions` (ids, all by default), `:exclude` (ids), `:project` (a
+  directory: that project's sessions, its worktrees included), `:kinds`
+  (node kinds), `:max-sessions` (20), `:max-matches` (3).  `:engine` says
+  what searched: `fts`, `vectors`, `hybrid` (both), `grep`, or `none`
+  when no session was to be searched; `:note` why a text search fell
+  back; `:loose` that no session has every word and these have some;
+  `:total` how many sessions match.  Each session is `(:id :name
+  :updated :status :kind :cwd :project :name-match :matches :score
+  :hits)`, each hit `(:node :kind :tool :ts :from :from-text :snippet
+  :ranges :score)`, `:ranges` the matches in the snippet as `(START
+  END)`.
+  - `text`: every word must match, in any form (porter stemming; case
+    and accents ignored); `"a phrase"`, `prefix*`, `OR` and `-word`
+    work, and each term goes to FTS5 quoted, so nothing else in a query
+    is read as FTS5 syntax.
+    Sessions rank by their best node (BM25), fused by reciprocal rank
+    fusion with the sessions whose name has the words and, with
+    vectors, with how near they are in meaning.  When no session has
+    every word, those with some come back (`:loose`); when none has
+    any and there are vectors, the sessions nearly as near in meaning
+    as the nearest (`harness-session-search--near-share`), with a note.
+  - `literal` and `regexp`: grep
+    (`harness-session-search--grep-program`) over the logs,
+    case-insensitively, newest session first; an extended regexp is
+    translated for Emacs to check the node's final text, so a node
+    matches on the text it ends with, update lines and all.
+  - `semantic`: the nearest in meaning, by the vectors.
+  - Without SQLite or FTS5, with `harness-session-search-index` nil, or
+    with more of the logs it covers still to index than a search reads
+    first (`harness-session-search--catch-up-bytes`, 4 MB), text search
+    greps for the text as typed, and `:note` says why.
+- Embeddings, off unless `harness-session-search-embedding-model` names
+  a model whose provider embeds (`provider/embed`), with
+  `harness-session-search-embedding-dimensions` for shorter vectors.
+  User messages, replies, plans and compaction summaries are cut into
+  chunks, embedded in batches in the background, newest first, and
+  stored as int8 vectors with a scale, keyed by the SHA-1 of the chunk,
+  so text met twice is embedded once.  A query's vector is compared
+  with every vector in memory, in integer arithmetic.  A failing
+  provider is retried later with smaller batches, then shorter chunks;
+  changing the model or the dimensions drops the vectors and embeds
+  everything again.  Its cost is recorded with `usage/record` under no
+  session.
+- `session/search-status` → `(:index BOOL :file :size :sessions :nodes
+  :pending :progress :embedding (:model :chunks :pending :error))`, or
+  `(:index nil :reason …)`; `session/search-rebuild` drops the index
+  and builds it again from the logs.
+- The UI's results buffer (`harness-ui-search-mode`) lists the sessions
+  found, each with its best matches, what was found highlighted.  `m`
+  cycles the mode, `a` narrows to the project the search started from
+  or widens to every project, `s` asks another query, `g` searches
+  again and `+` shows more sessions.  RET opens a session at a match:
+  `harness-ui-chat-goto-node NODE SESSION REGEXP` loads the transcript
+  and its older pages until the node shows, opens a group or fold that
+  hides it (and a long output's hidden part), and puts point on the
+  first match of REGEXP in it, the text the snippet marked; a node off
+  the session's current branch is reported.  The conversation tree
+  opens a node the same way.
+
 ### tasks-search
 
 The task board's search: a query in words ("did I have a task about the
@@ -4033,11 +4258,16 @@ on them, answered by a cheap model that returns JSON only.
   answer one line of JSON `{"show":[ID…],"do":[{"task":ID,"action":…}]}`.
   Unknown ids are dropped and acted-on tasks are always shown.  When the
   model asks to look further instead of answering -- `{"grep":TEXT}` over
-  the sessions' transcript logs (`sessions/*.nodes.jsonl` under the state
-  directory, searched in a subprocess) or `{"read":[ID…]}` for the latest
-  transcript, at most `harness-tasks-search--read-limit` tasks -- it gets
-  one more round (`harness-tasks-search--final-text` closes it) and must
-  answer then.
+  the transcripts of the tasks' sessions or `{"read":[ID…]}` for the
+  latest transcript, at most `harness-tasks-search--read-limit` tasks --
+  it gets one more round (`harness-tasks-search--final-text` closes it)
+  and must answer then.  TEXT is searched by `session/search` in text
+  mode (see session-search): its words in any form, the best two matches
+  of each task session that has them; when none has every word the
+  answer says these have some of them, and when none has any, with an
+  embedding model set, that they are the nearest in meaning.  Without
+  the session-search module the logs (`sessions/*.nodes.jsonl` under the
+  state directory) are grepped in a subprocess for TEXT as typed.
 - The model is `harness-tasks-search-model`: `auto` (the default) takes
   the provider of the task model's `simple` tier (`provider/tier-model`),
   nil uses the task model itself, a string forces one.
@@ -4514,7 +4744,8 @@ and a message for the echo area.  Only the user calls it.
   summary, adds a `plan` node and the hint "Plan submitted: N steps",
   starts the ready steps and ends the turn (`:end-turn t`).
   `retry_step step reason &optional plan tier prompt` runs a failed,
-  interrupted or cancelled step again on a new worker (`plan` defaults
+  interrupted (by a restart, or as its task went back to the queue) or
+  cancelled step again on a new worker (`plan` defaults
   to the latest that has the step, `tier` moves it to that tier's model
   and level, simple, medium or hard, the only way a step reaches hard;
   `prompt` adds notes to its prompt) and does not end the turn.  Both
@@ -4590,7 +4821,9 @@ and a message for the echo area.  Only the user calls it.
   interrupted or was cancelled (its worker session deleted) is a message
   of its own: the step, tier, model and attempt, why, the worker's last
   reply, the steps held on it and those running, and the ways on
-  (`retry_step`, a new plan, `ask_user`).  When no step is left but done
+  (`retry_step`, a new plan, `ask_user`); the steps interrupted together
+  because their task went back to the queue share one message (below).
+  When no step is left but done
   or superseded ones, a message lists each step's result and asks to
   check the work and decide (`hand_in` in a task).  A report that comes
   while the turn that submitted the plan is ending would be lost with
@@ -4601,6 +4834,33 @@ and a message for the echo area.  Only the user calls it.
   still start or a report is held; a step held behind one that did not
   get done is not counted, the supervisor having been told.  The tasks
   module keeps the task of the session active, waiting, meanwhile.
+- Filter `agent/stop-outstanding` (see agent) stops that work when the
+  tasks module sends the session's task back to the queue, pre-empted or
+  returned (`harness-supervisor--stop-outstanding`).  Every step stored
+  `running` becomes `interrupted`, with REASON as its `:error` ("its task
+  was returned to the queue" without one), and `retry_step` runs it
+  again.  Each step's entry in `harness-supervisor--live` goes first, so
+  that nothing its worker does later changes the step: its turn ending,
+  being cancelled, or the worker being made at last
+  (`harness-supervisor--making-p`: a worker is made for one attempt, so
+  one made after its step was interrupted, perhaps started again since,
+  is given up and never gets the step).  Every step is stored before any
+  call is closed, so that no report names another as still running; each
+  step's `spawn_agent` call gets its result, and the worker is stopped
+  (`harness-supervisor--stop-worker`): `agent/stop-outstanding` for the
+  worker first, which stops the sub-agents it started, then
+  `agent/cancel`.  A step stored running that no worker runs in this
+  process, one a restart left, is interrupted too, so that nothing is
+  outstanding afterwards.  The steps are reported in one message of the
+  harness's `supervisor` -- that the plan's workers were stopped, why,
+  that nothing runs or starts again on its own, then each step as a
+  failure is reported, ending "Decide: retry_step ID to run it again" --
+  so that a task's session, which refuses the turn it would start while
+  its task waits in the queue, keeps one message and not one for each
+  step; the session of anything else gets it queued, for the user's next
+  message.  Nothing starts: the steps held behind an interrupted one wait
+  for the supervisor.  The value of the filter gains "Supervisor plan: N
+  steps interrupted", and is left as it was when no step ran.
 - Restarts and deletion.  Workers die with the harness: once every
   module is up (`harness-run-soon`), the steps stored as running that
   this process has no worker for are `interrupted` and reported as a
@@ -4718,13 +4978,14 @@ TRAMP prefixes come from the session host):
 | `emacs_messages` | Emacs messages | count | read (needs no approval: `harness-perms--inspection-tools`) |
 | `ask_user` | Question | question, options (strings, or `{label, diagram}` / `{label, image}` objects: every option has a diagram or none does), allow_free_text | meta (answered with `question/answer SID PID ANSWER`; event `question/asked`; the harness asks its own questions the same way, with no tool call, through `question/ask`) |
 | `request_directory_access` | Request access | path, reason | meta (perms module; decided only by the user's answer to a directory prompt, in every mode) |
+| `rerun_approved` | Rerun approved call | handle | meta (perms module; runs the denied call the user approved by hand with `permission/approve-denied`, exactly as it was denied and with no permission check (`tools/execute-approved`); a handle the user has not approved, one this session does not know, and one already rerun are refused) |
 | `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`) |
 | `plan` | Plan | plan | meta |
 | `todo_write` | Todo list | todos | meta |
 | `spawn_agent` | Sub-agent | prompt, fork, model, thinking, name, cwd, worktree, priority (of the child's session: low/medium/high; default: what it inherits) | meta (runs the child in the background and returns at once; the jail checks `cwd`, as it checks bash's) |
 | `skill_search` / `skill_load` | Search skills / Load skill | query / name, file (one of the skill's supporting files) | read (needs no approval: `harness-perms--auto-allow-tools`) |
 | `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit (a session's priority is shown in its line when it is not medium) | read (needs no approval: `harness-perms--inspection-tools`) |
-| `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read (needs no approval: `harness-perms--inspection-tools`) |
+| `session_search` | Search sessions | query, mode (text/literal/regexp/semantic), regexp, all_projects, max_sessions, max_matches | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_read` | Read session | session_id, limit, before, kinds, max_chars | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_history` | Session history | query, regexp, node_id, before, limit, max_chars, kinds, all | read (this session's own conversation from before its last compaction or handoff; needs no approval: `harness-perms--inspection-tools`) |
 | `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
@@ -4935,10 +5196,34 @@ counts as work outstanding for its parent:
 `agent/outstanding`, reports every entry of
 `harness-tools-agent--children` whose `:parent` is the session, as
 "Sub-agent NAME running" or "Sub-agents A, B running" (an entry says
-`:parent`, `:name`, `:worktree`, `:branch` and `:result`, kept until the
-child is done), so a task whose session's turn ended stays active
-(`harness-tasks--on-turn-ended`) instead of going to review while its
-sub-agents run.
+`:parent`, `:name`, `:worktree`, `:branch`, `:result` and `:stopped`,
+kept until the child is done), so a task whose session's turn ended
+stays active (`harness-tasks--on-turn-ended`) instead of going to review
+while its sub-agents run.
+
+The sub-agents of a session stop with the rest of its outstanding work
+(`agent/stop-outstanding SESSION-ID REASON`, see agent), which the tasks
+module asks when the session's task is pre-empted or returned to the
+queue.  `harness-tools-agent--stop-outstanding`, a handler of that sync
+filter, stops each entry of `harness-tools-agent--children` whose
+`:parent` is the session (`harness-tools-agent--stop-child`), in the
+order they were spawned.  The work a child has of its own goes first:
+`agent/stop-outstanding` for the child stops its sub-agents, at any
+depth, so that nothing a stopped child started is left running.  Then
+the turn the child runs is cancelled, the one the reports of that stopped
+work just woke included, and a child with no turn running is reported at
+once, unless work of its own is still stopping and reports back first.
+The child's entry is marked stopped (`:stopped`, REASON or t) before its
+turn can end, so its report says what happened, whatever the child's last
+turn said: a cancelled sub-agent, "stopped: its turn was cancelled",
+with REASON in parentheses after it, and where it worked when it had a
+worktree.  The report is the usual message of the harness's `sub-agent`
+to the session, one for each child.  Nothing is merged: a child in a
+worktree keeps its branch and worktree, as any cancelled sub-agent does.
+A child with nothing running and nothing to stop is left as it is: one
+done with everything, or one that only waits, as `session_wait` makes it,
+which a stop leaves alone.  The filter's value gains "Sub-agent A stopped"
+or "Sub-agents A, B stopped", and stays as it was when none was stopped.
 
 `spawn_agent` (tools-agent) runs its child on a deliberately shorter
 context window: `harness-subagent-context-limit` (256000 tokens; nil for
@@ -5163,15 +5448,14 @@ at a time, paging back with `before`; `node_id` shows one node whole
 nodes before the compaction, oldest first.  `kinds` filters (default:
 all but hints).  Every compaction points the model at it (see
 compaction), whatever its kind.
-`session_search` greps the `sessions/*.nodes.jsonl` logs in a subprocess,
-so transcripts are not loaded into memory to be searched.  A node is one
-line of its log and can be megabytes long, so a hit is split from its
-file name by a plain search (`harness-grep-hit`, which the task board's
-search uses too), never a backtracking regexp that would overflow the
-matcher.  Its snippet, a few hundred characters at most, is cut from a
-window around the match.  In regexp mode grep decides the hits; a
-pattern that overflows the matcher over a whole node is run over pieces
-of it just to place the snippet.  `session_send`
+`session_search` is `session/search` (see session-search), in the mode
+the agent asks for: `text` (the default; words in any form, ranked),
+`literal`, `regexp` (an extended regexp; `regexp: true` still asks for
+it) or `semantic`.  Each session found lists its best matches, each
+tagged with its kind, node id and who sent it, a snippet a few hundred
+characters long at most, then how many more match; a note says when the
+search fell back to grep, and when no session has every word, that
+these have some of them.  `session_send`
 prefixes the message with `[Message from session ID "NAME"]` and goes
 through `agent/prompt` (a turn, steering, or the queue) with
 `:from` naming the calling session, so that session's chat shows the
@@ -5197,7 +5481,10 @@ session starts a turn on it, a running one is steered) when
 outlives the turn that made it, and counts for `agent/outstanding` as
 "Waiting on IDS" (`harness-tools-sessions--outstanding`) until it
 settles -- except after a turn the user cancelled, which drops it
-(`harness-tools-sessions--on-turn-ended`); its optional
+(`harness-tools-sessions--on-turn-ended`).  Stopping the session's
+outstanding work (`agent/stop-outstanding`, see agent) leaves it alone: it
+holds no work, and the message that wakes the session waits in its
+transcript if the session takes no turn then.  A registration's optional
 `timeout_seconds` wakes the session with a "still waiting" report
 instead.  The subscriber is not the only look at a wait: while any
 runs, the safety re-check (`harness-tools-sessions-wait-recheck`) walks

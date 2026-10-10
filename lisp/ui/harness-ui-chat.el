@@ -165,6 +165,10 @@ under it." :group 'harness-ui-chat)
 The rule or directory grant it tells of is gone, so it is struck
 through." :group 'harness-ui-chat)
 
+(defface harness-chat-found-face '((t :inherit match))
+  "What a search found, where its session opens at it.
+See `harness-ui-chat-goto-node'." :group 'harness-ui-chat)
+
 (harness-ui-define-icon harness-chat-icon-plan "plan" "≡" "plan" "A plan.")
 (harness-ui-define-icon harness-chat-icon-compaction "compaction" "⟲" "compact" "A compaction.")
 (harness-ui-define-icon harness-chat-icon-question "question" "?" "?" "A question.")
@@ -230,6 +234,12 @@ Rendered once one does (`harness-chat--catch-up').")
 (defvar-local harness-chat--redraw-pending nil
   "Non-nil when the buffer is to be rebuilt once a window shows it.
 `harness-chat--redraw-all' leaves a hidden buffer so.")
+(defvar-local harness-chat--goto nil
+  "The node the buffer is to show once it is rendered, or nil.
+A plist: `:id' the node's id, `:regexp' what to find in it.  See
+`harness-ui-chat-goto-node'.")
+(defvar-local harness-chat--found nil
+  "Overlays on what `harness-ui-chat-goto-node' found, until the next command.")
 (defvar-local harness-chat--generation 0 "Bumped on every reload to drop stale responses.")
 (defvar-local harness-chat--session nil "Last session plist seen, for after deletion.")
 (defvar-local harness-chat--unfinished nil "Ids of tool-call blocks without a result yet.")
@@ -1405,6 +1415,95 @@ running call, each with its `:note' when it has one (see
           (harness-chat--rerender block)
           (harness-chat--refresh-group-of block))))))
 
+(defconst harness-chat--rerun-tool "rerun_approved"
+  "Name of the tool that runs a denied call the user approved.
+See `rerun_approved' in harness-perms.el.")
+
+(defun harness-chat--denied-state (result)
+  "Return what a refused call's RESULT node says of the user's approval, or nil.
+RESULT is a tool result the permission system refused (`:meta'
+`:denied').  Return (:approved BOOL :used BOOL), the flags the harness
+wrote into its `:meta' when the user approved the call
+\(`permission/approve-denied') and when the agent reran it
+\(`rerun_approved').  nil for a call that ran, and one no harness
+recorded."
+  (let ((meta (and result (plist-get result :meta))))
+    (when (harness-json-true-p (and meta (plist-get meta :denied)))
+      (list :approved (harness-json-true-p (plist-get meta :approved))
+            :used (harness-json-true-p (plist-get meta :used))))))
+
+(defun harness-chat--approval-line (handle result)
+  "Return the line of the user's approval of the denied call HANDLE, or \"\".
+A refused call still waiting offers [Approve], which lets the agent run
+it exactly as it was denied (`rerun_approved'); one the user approved
+says so, and one already rerun says that."
+  (when-let* ((state (harness-chat--denied-state result))
+              (handle (and (stringp handle) (not (string-empty-p handle)) handle)))
+    (concat
+     "  "
+     (cond
+      ((plist-get state :used)
+       (propertize "user-approved · rerun" 'face 'harness-dim-face))
+      ((plist-get state :approved)
+       (propertize "user-approved · the agent can rerun it" 'face 'harness-dim-face))
+      (t (concat (harness-chat--button
+                  "[Approve]"
+                  (lambda () (harness-chat--approve-denied harness-ui-session-id handle))
+                  :help "Let the agent run this call exactly as it was denied (rerun_approved)")
+                 (propertize "  run this call exactly as it was denied" 'face 'harness-dim-face))))
+     "\n")))
+
+(defun harness-chat--approve-denied (session-id handle)
+  "Approve the denied call HANDLE of SESSION-ID, for the user.
+The harness marks the call approved and tells the session's agent to
+rerun it unchanged with `rerun_approved'; the node the call is shown
+from is updated, so the chat redraws it, and the echo area says how it
+went."
+  (harness-ui-call "_harness/permission/approve-denied"
+                   (list :session-id session-id :handle handle)
+                   (lambda (result) (message "%s" (or (plist-get result :message) "Approved")))))
+
+(defun harness-chat--show-call (call-id)
+  "Move point to the block of tool call CALL-ID, when the buffer shows it.
+A run of calls the block was folded into opens, so the block is
+visible.  Return non-nil when point moved."
+  (let* ((node-id (gethash call-id harness-chat--calls))
+         (block (and node-id (gethash node-id harness-chat--blocks))))
+    (cond
+     ((null block) (message "The call %s is not shown in this buffer" call-id) nil)
+     (t (let ((gid (harness-chat-block-group block)))
+          (when-let* ((group (and gid (gethash gid harness-chat--groups))))
+            (unless (harness-chat-group-expanded group)
+              (harness-chat-toggle-group gid))))
+        (when-let* ((start (marker-position (harness-chat-block-start block))))
+          (goto-char start)
+          (ignore-errors (recenter))
+          t)))))
+
+(defun harness-chat--rerun-line (call result)
+  "Return the line linking a rerun-approved CALL to the call it reran, or \"\".
+CALL is the call's node, RESULT its result.  That is the call of
+`rerun_approved' the harness ran in the user's stead: the line names the
+tool the user approved and the handle, from the result's `:meta'
+\(`:rerun-of', `:rerun-tool') or, for a result from before them, from
+the call's own input.  The tool's name is a button that shows the
+denied call's block where the buffer still has it."
+  (let* ((meta (and result (plist-get result :meta)))
+         (tool-name (or (plist-get call :tool) (and result (plist-get result :tool))))
+         (handle (and (equal tool-name harness-chat--rerun-tool)
+                      (or (plist-get meta :rerun-of)
+                          (plist-get (plist-get call :input) :handle))))
+         (denied (and (stringp handle)
+                      (let* ((block (gethash (gethash handle harness-chat--calls) harness-chat--blocks)))
+                        (plist-get (and block (harness-chat-block-node block)) :tool)))))
+    (when (and (stringp handle) (not (string-empty-p handle)))
+      (concat "  " (propertize "user-approved rerun of " 'face 'harness-dim-face)
+              (harness-chat--button (or (plist-get meta :rerun-tool) denied "the denied call")
+                                    (lambda () (harness-chat--show-call handle))
+                                    :help (format "The user approved call %s; show it" handle))
+              (propertize (format " · handle %s" handle) 'face 'harness-dim-face)
+              "\n"))))
+
 (defun harness-chat--render-tool (block)
   "Return the body of tool-call BLOCK (its result rendered with it)."
   (let* ((id (harness-chat-block-id block))
@@ -1479,6 +1578,8 @@ running call, each with its `:note' when it has one (see
                                         "\n")
                               ""))
                           (harness-chat--child-line node result)
+                          (harness-chat--rerun-line node result)
+                          (harness-chat--approval-line (plist-get result :call-id) result)
                           (harness-chat--note-lines node)))
          ;; What the user is shown of the result -- an image, a video
          ;; poster, an audio player -- stays above the fold: a folded
@@ -2460,6 +2561,28 @@ edits the same request the same way."
   (interactive)
   (harness-ui-pending-edit-pattern pid))
 
+(defun harness-chat-approve-denied-call ()
+  "Approve the denied call whose block point is on.
+The user's approval lets the session's agent run that call exactly as
+it was denied, with `rerun_approved', which the harness tells it; the
+call's block offers the same as its [Approve] button.  A block that is
+no call the permission system refused, or one the user already
+approved, is not something to approve."
+  (interactive)
+  (let* ((id (get-text-property (point) 'harness-chat-node))
+         (block (and id (gethash id harness-chat--blocks)))
+         (node (and block (harness-chat-block-node block)))
+         (result (and block (if (equal (harness-chat-block-kind block) "tool-call")
+                                (harness-chat-block-result block)
+                              node)))
+         (handle (or (plist-get result :call-id) (plist-get node :call-id)))
+         (state (and result (harness-chat--denied-state result))))
+    (unless (and handle state)
+      (user-error "No call the permission system refused is here"))
+    (when (plist-get state :approved)
+      (user-error "The user already approved that call"))
+    (harness-chat--approve-denied harness-ui-session-id handle)))
+
 (defun harness-chat-next-diagram (&optional n)
   "Show the diagram of the next option of the question waiting with diagrams.
 With prefix argument N, move N options on; a negative N moves back."
@@ -2843,10 +2966,16 @@ own.  The BTW module says what a side conversation is for with it.")
                              (setq harness-chat--has-more (>= (length nodes) harness-chat--history-page))
                              (harness-chat--render-top)
                              ;; A page shorter than the window leaves it near the top still.
-                             (harness-chat--schedule-history)))))
-                     (lambda (_err)
+                             (harness-chat--schedule-history))
+                           ;; The node to show may be on this page, or an older one.
+                           (harness-chat--goto-pending))))
+                     (lambda (err)
                        (when (buffer-live-p buf)
-                         (with-current-buffer buf (setq harness-chat--fetching nil)))))))
+                         (with-current-buffer buf
+                           (setq harness-chat--fetching nil)
+                           (when harness-chat--goto
+                             (setq harness-chat--goto nil)
+                             (message "Could not load the earlier messages: %s" (harness-error-message err)))))))))
 
 (defun harness-chat--prepend-keeping-view (nodes)
   "Render NODES above the transcript without moving what the windows show.
@@ -2958,6 +3087,110 @@ calls around them.  Groups must be cleared first."
         (harness-chat--remove-block orphan)
         (harness-chat--attach-result call (harness-chat-block-node orphan))))))
 
+;;;; Going to a node
+;;
+;; A search's hit, or a row of the conversation tree, opens its session
+;; at a node.  The buffer may still be loading, and it renders only the
+;; newest nodes: the node waits in `harness-chat--goto' until the
+;; transcript has loaded, then older pages load until it is rendered.
+;; A node off the session's current branch is on none of them: the
+;; search ends there, and says so.
+
+(defun harness-ui-chat-goto-node (node-id &optional session-id regexp)
+  "Show node NODE-ID in the chat buffer of session SESSION-ID.
+SESSION-ID defaults to the current buffer's session.  Point goes to the
+node once it is rendered, which may take a load and pages of older
+history; a group or a fold that hides it opens.  With REGEXP, an Emacs
+regexp, point goes to its first match in the node instead, and its
+matches there are highlighted until the next command.  Return the chat
+buffer, or nil when the session has none open."
+  (when-let* ((buf (if session-id
+                       (harness-chat--buffer-for session-id)
+                     (and (derived-mode-p 'harness-chat-mode) (current-buffer)))))
+    (with-current-buffer buf
+      (setq harness-chat--goto (list :id node-id :regexp regexp))
+      (harness-chat--goto-pending))
+    buf))
+
+(defun harness-chat--goto-pending ()
+  "Show the node `harness-chat--goto' waits for, once it is rendered.
+Load the page of history before the oldest rendered node until it is;
+with none left, give up and say so.  A load or a page on its way calls
+this again once it is rendered."
+  (when-let* ((goto harness-chat--goto))
+    (let ((id (plist-get goto :id)))
+      (cond
+       ((or harness-chat--loading harness-chat--fetching))
+       ((and harness-chat--blocks (gethash id harness-chat--blocks))
+        (setq harness-chat--goto nil)
+        (harness-chat--show-node id (plist-get goto :regexp)))
+       ((and harness-chat--has-more harness-chat--order) (harness-chat--load-earlier))
+       (t (setq harness-chat--goto nil)
+          (message "%s" (substitute-command-keys
+                         "That message is not on this session's current branch: \
+the tree (\\[harness-tree]) shows every branch")))))))
+
+(defun harness-chat--show-node (id &optional regexp)
+  "Put point on the block of node ID, opening what hides it, in sight.
+With REGEXP, point goes to its first match in the block, and the
+matches are highlighted until the next command."
+  (let* ((block (gethash id harness-chat--blocks))
+         (group (and (harness-chat-block-group block)
+                     (gethash (harness-chat-block-group block) harness-chat--groups))))
+    (when (and group (not (harness-chat-group-expanded group)))
+      (harness-chat-toggle-group (harness-chat-group-id group)))
+    (when (and (harness-chat-block-fold block) (harness-chat-block-collapsed block))
+      (harness-chat-toggle-block (harness-chat-block-id block)))
+    (let* ((found (lambda () (harness-chat--highlight-found
+                              regexp (harness-chat-block-start block) (harness-chat-block-end block))))
+           (pos (or (and regexp
+                         (or (funcall found)
+                             ;; It may be in the part of a long output not shown.
+                             (and (equal (harness-chat-block-kind block) "tool-call")
+                                  (not (harness-chat-block-show-all block))
+                                  (progn (harness-chat--show-all (harness-chat-block-id block))
+                                         (funcall found)))))
+                    (marker-position (harness-chat-block-start block))))
+           (start (marker-position (harness-chat-block-start block)))
+           (window (or (get-buffer-window (current-buffer)) (car (harness-chat--windows)))))
+      (goto-char pos)
+      (when (window-live-p window)
+        (set-window-point window pos)
+        (with-selected-window window
+          ;; The block's top in sight, unless that leaves the match out of it.
+          (if (< (count-screen-lines start pos) (- (window-body-height) 2))
+              (set-window-start window (save-excursion (goto-char start) (line-beginning-position)))
+            (recenter (min 4 (/ (window-body-height) 3))))))
+      (harness-chat--schedule-history))))
+
+(defun harness-chat--highlight-found (regexp start end)
+  "Highlight the visible matches of REGEXP between START and END.
+Return where the first begins, or nil.  The highlights go at the next
+command in this buffer."
+  (harness-chat--clear-found)
+  (let ((case-fold-search t) first)
+    (save-excursion
+      (goto-char start)
+      (while (and (< (point) end) (ignore-errors (re-search-forward regexp end t)))
+        (let ((from (match-beginning 0)) (to (match-end 0)))
+          (if (= from to)
+              (forward-char 1)
+            (unless (invisible-p from)
+              (let ((ov (make-overlay from to)))
+                (overlay-put ov 'face 'harness-chat-found-face)
+                (overlay-put ov 'priority 100)
+                (push ov harness-chat--found))
+              (setq first (or first from)))))))
+    (when harness-chat--found
+      (add-hook 'pre-command-hook #'harness-chat--clear-found nil t))
+    first))
+
+(defun harness-chat--clear-found ()
+  "Remove the highlights of what `harness-ui-chat-goto-node' found."
+  (mapc #'delete-overlay harness-chat--found)
+  (setq harness-chat--found nil)
+  (remove-hook 'pre-command-hook #'harness-chat--clear-found t))
+
 ;;;; Loading
 
 (defun harness-chat--load (&optional keep-bottom)
@@ -3005,12 +3238,14 @@ end afterwards."
                (harness-chat--restore-anchors anchors)
                (harness-chat--replay-deferred t)
                (when keep-bottom (harness-chat-scroll-to-bottom))
-               (harness-chat--schedule-history))))))
+               (harness-chat--schedule-history)
+               (harness-chat--goto-pending))))))
      (lambda (err)
        (when (buffer-live-p buf)
          (with-current-buffer buf
            (when (= gen harness-chat--generation)
-             (setq harness-chat--loading nil)
+             (setq harness-chat--loading nil
+                   harness-chat--goto nil)
              ;; Not a failure when the UI connected elsewhere meanwhile:
              ;; it redraws every buffer once it has.
              (unless (harness-ui-connection-replaced-p err)

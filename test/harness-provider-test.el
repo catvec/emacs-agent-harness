@@ -5,6 +5,7 @@
 
 (defvar harness-providers)
 (defvar harness-provider-fallback-context-window)
+(defvar harness-allowed-models)
 (declare-function harness-define-provider "harness-provider")
 (declare-function harness-provider--forget "harness-provider")
 (declare-function harness-provider-relist "harness-provider")
@@ -612,6 +613,39 @@ make no difference to the caller."
       (harness-define-provider 'test-warm :complete #'ignore)
       (should-not (harness-call 'provider/warm '(:model "test-warm:m"))))))
 
+(ert-deftest harness-provider-embed-reaches-a-provider-that-embeds ()
+  "`provider/embed' calls the embed hook of the model's provider with the
+model's name, the texts and the options; it rejects a provider without
+one, an unknown provider, a model the policy does not allow and a hook
+that fails, and `provider/embeds-p' says which embed."
+  (harness-provider-test-with (test-embed test-plain)
+    (let (asked)
+      (harness-define-provider 'test-embed
+        :complete #'ignore
+        :embed (lambda (name texts opts)
+                 (push (list name texts opts) asked)
+                 (if (equal name "broken")
+                     (error "No such model")
+                   (harness-resolved (list :vectors (mapcar (lambda (text) (list (float (length text)) 1.0)) texts)
+                                           :usage '(:input 3))))))
+      (harness-define-provider 'test-plain :complete #'ignore)
+      (should (harness-call 'provider/embeds-p "test-embed:small"))
+      (should-not (harness-call 'provider/embeds-p "test-plain:small"))
+      (should-not (harness-call 'provider/embeds-p "nobody:small"))
+      (should (equal '(:vectors ((2.0 1.0) (5.0 1.0)) :usage (:input 3))
+                     (harness-test-await (harness-call 'provider/embed "test-embed:small" '("ab" "cdefg")
+                                                       '(:dimensions 2)))))
+      (should (equal '(("small" ("ab" "cdefg") (:dimensions 2))) asked))
+      (cl-flet ((refused (model)
+                  (cadr (should-error (harness-test-await (harness-call 'provider/embed model '("x")))))))
+        (should (string-match-p "cannot embed text" (refused "test-plain:small")))
+        (should (string-match-p "No provider for model nobody:small" (refused "nobody:small")))
+        (should (string-match-p "No such model" (refused "test-embed:broken")))
+        (let ((harness-allowed-models '("test-plain")))
+          (setq asked nil)
+          (should (string-match-p "test-embed:small is not allowed" (refused "test-embed:small")))
+          (should-not asked))))))
+
 ;;;; Prompt cache lifetime
 
 (defvar harness-cache-ttl)
@@ -715,7 +749,6 @@ tool output is cut."
 
 ;;;; Models allowed
 
-(defvar harness-allowed-models)
 (declare-function harness-provider-model-allowed-p "harness-provider")
 
 (ert-deftest harness-provider-allowed-models-are-globs-of-model-ids ()

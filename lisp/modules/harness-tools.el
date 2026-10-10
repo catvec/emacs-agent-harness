@@ -867,13 +867,21 @@ and the agent asks the provider to turn them on with the request's
   (let ((session (harness-tools--session session-id)))
     (harness-tools--builtin session (harness-tools--names session))))
 
-(defun harness-tools-denial-message (decision)
-  "Return what the model is told when permission DECISION refuses a call."
-  (format "Denied: %s%s"
+(defun harness-tools-denial-message (decision &optional session-id request)
+  "Return what the model is told when permission DECISION refuses a call.
+With SESSION-ID and REQUEST, the permission module names the handle the
+call is kept under and says the user can approve the call
+\(`permission/denied-note'): the agent can then tell them, and rerun the
+call unchanged with `rerun_approved' once they have, instead of working
+around the denial in the dark."
+  (format "Denied: %s%s%s"
           (or (plist-get decision :reason)
               (if (eq (plist-get decision :behavior) 'ask) "no permission handler answered"
                 "not permitted"))
-          (if (plist-get decision :hint) (concat " " (plist-get decision :hint)) "")))
+          (if (plist-get decision :hint) (concat " " (plist-get decision :hint)) "")
+          (let ((note (and session-id request (harness-method-exists-p 'permission/denied-note)
+                           (harness-call 'permission/denied-note session-id request))))
+            (if (and (stringp note) (not (string-empty-p note))) (concat " " note) ""))))
 
 (harness-defmethod tools/authorize (session-id call)
   "Decide whether CALL (:id :name :input :kind) of SESSION-ID may run.
@@ -910,7 +918,8 @@ model is told."
        (harness-emit 'permission/decided session-id request decision)
        (if (eq (plist-get decision :behavior) 'allow)
            decision
-         (append (list :behavior 'deny :message (harness-tools-denial-message decision))
+         (append (list :behavior 'deny
+                       :message (harness-tools-denial-message decision session-id request))
                  (harness-plist-remove decision :behavior :message)))))))
 
 (harness-defmethod tools/get (name)
@@ -944,6 +953,16 @@ call with a result that says why (`harness-tools--failure')."
                 (harness-then value finish fail)
               (funcall finish value)))
         (error (funcall fail err))))))
+
+(defun harness-tools--finish-call (session-id call call-id result)
+  "Truncate RESULT of CALL (id CALL-ID) of SESSION-ID and filter it; return it.
+An oversized result is truncated and the `tools/result' filter gets it,
+so a call ends the same way however it was decided.  `tools/execute'
+announces the result as `tools/finished' after this;
+`tools/execute-approved' does not, that call being another's."
+  (let* ((result (harness-tools--guard-size result call-id))
+         (result (harness-run-filter 'tools/result result session-id call)))
+    result))
 
 (harness-defmethod tools/execute (session-id call)
   "Execute CALL (:id :name :input) for SESSION-ID; return a promise of a RESULT.
@@ -984,12 +1003,44 @@ search, and so is a call of ssh (`harness-tools--corporate-refusal')."
               (if (eq behavior 'allow)
                   (harness-tools--run-handler tool (or (plist-get decision :input) input) ctx)
                 (harness-resolved
-                 (harness-tool-error (harness-tools-denial-message decision) :denied t)))
+                 (harness-tool-error (harness-tools-denial-message decision session-id request)
+                                     :denied t)))
               (lambda (result)
-                (let* ((result (harness-tools--guard-size result call-id))
-                       (result (harness-run-filter 'tools/result result session-id call)))
+                (let ((result (harness-tools--finish-call session-id call call-id result)))
                   (harness-emit 'tools/finished session-id call result)
                   result)))))))))))
+
+(harness-defmethod tools/execute-approved (session-id call)
+  "Run CALL (:id :name :input) for SESSION-ID with no permission check.
+For a call the user approved by hand after the `permission/decide' chain
+denied it (see `rerun_approved' in harness-perms.el): their approval is
+what the chain would have asked for, so nothing decides the call again,
+and the input it carries is the very input it was denied with.  The
+result is truncated and given to the `tools/result' filter as
+`tools/execute' gives one, but nothing is announced as `tools/started'
+or `tools/finished': the call is no call of the session's own turn, the
+`rerun_approved' call that runs it is, and CALL-ID is that call's id,
+which its progress and notes (`tools/progress', `tools/note') show
+under.  Return a promise of the result."
+  (let* ((name (plist-get call :name))
+         (call-id (or (plist-get call :id) (harness-short-id)))
+         (input (plist-get call :input))
+         (tool (harness-tool-get name))
+         (session (harness-tools--session session-id))
+         (ctx (list :session-id session-id :cwd (plist-get session :cwd)
+                    :host (plist-get session :host) :call-id call-id
+                    :report (lambda (text)
+                              (harness-emit 'tools/progress session-id call-id text))
+                    :note (lambda (text)
+                            (harness-emit 'tools/note session-id call-id text)))))
+    (if (null tool)
+        (harness-resolved
+         (harness-tool-error (format "Unknown tool %s: the call was denied when it was there, and is not now"
+                                     name)))
+      (harness-then
+       (harness-tools--run-handler tool input ctx)
+       (lambda (result)
+         (harness-tools--finish-call session-id call call-id result))))))
 
 (harness-declare-event 'tools/started "(SESSION-ID CALL) before permission and execution.")
 (harness-declare-event 'tools/progress "(SESSION-ID CALL-ID TEXT) progress from a running tool.")

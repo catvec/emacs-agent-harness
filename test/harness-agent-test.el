@@ -1320,6 +1320,88 @@ that did not let go."
       (harness-add-filter 'agent/outstanding (lambda (_value sid) (and (equal sid other) "  ")) 5)
       (should-not (harness-call 'agent/outstanding other)))))
 
+(ert-deftest harness-agent-stop-outstanding-joins-what-modules-stopped ()
+  "Each handler gets the session and why, and the texts they return are joined.
+The handlers run in priority order, each appending its own text to the
+one before after \"; \"; a session they have nothing to stop for gets nil."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (other (harness-agent-test-session))
+           (why "its task was returned to the queue")
+           (seen nil)
+           (workers (lambda (value sid reason)
+                      (push (list 'workers sid reason) seen)
+                      (if (equal sid id) "stopped 2 workers" value)))
+           (children (lambda (value sid reason)
+                       (push (list 'children sid reason) seen)
+                       (if (equal sid id)
+                           (concat (and value (concat value "; ")) "stopped a sub-agent")
+                         value))))
+      (should (harness-method-exists-p 'agent/stop-outstanding))
+      (harness-add-filter 'agent/stop-outstanding workers 10)
+      (harness-add-filter 'agent/stop-outstanding children 20)
+      (unwind-protect
+          (progn
+            (should (equal "stopped 2 workers; stopped a sub-agent"
+                           (harness-call 'agent/stop-outstanding id why)))
+            ;; Both were given the session and why, the first handler first.
+            (should (equal (list (list 'workers id why) (list 'children id why))
+                           (reverse seen)))
+            ;; Without a reason they are given nil.
+            (setq seen nil)
+            (should (equal "stopped 2 workers; stopped a sub-agent"
+                           (harness-call 'agent/stop-outstanding id)))
+            (should (equal (list (list 'workers id nil) (list 'children id nil))
+                           (reverse seen)))
+            ;; A session they have nothing to stop for stops nothing.
+            (should-not (harness-call 'agent/stop-outstanding other why)))
+        (harness-remove-filter 'agent/stop-outstanding workers)
+        (harness-remove-filter 'agent/stop-outstanding children)))))
+
+(ert-deftest harness-agent-stop-outstanding-is-nil-when-nothing-is-stopped ()
+  "Without a handler, or with one that has nothing to stop, nothing was stopped."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session))
+          (why "its task was returned to the queue")
+          (idle (lambda (value _sid _reason) value)))
+      (should-not (harness-call 'agent/stop-outstanding id))
+      (should-not (harness-call 'agent/stop-outstanding id why))
+      (harness-add-filter 'agent/stop-outstanding idle)
+      (unwind-protect
+          (progn
+            (should-not (harness-call 'agent/stop-outstanding id))
+            (should-not (harness-call 'agent/stop-outstanding id why)))
+        (harness-remove-filter 'agent/stop-outstanding idle))
+      ;; Removed, it is as if it was never there.
+      (should-not (harness-call 'agent/stop-outstanding id why)))))
+
+(ert-deftest harness-agent-stop-outstanding-blank-text-is-nothing-stopped ()
+  "A handler's blank text, or an answer that is no text, counts as nothing stopped.
+A handler that fails is skipped, and the others still report what they stopped."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (why "its task was returned to the queue")
+           (blank (lambda (_value _sid _reason) "  \n"))
+           (no-text (lambda (_value _sid _reason) t))
+           (stopped (lambda (value _sid _reason)
+                      (concat (and (stringp value) (concat value "; ")) "stopped a worker")))
+           (boom (lambda (&rest _) (error "stop-outstanding-boom"))))
+      (harness-add-filter 'agent/stop-outstanding blank)
+      (unwind-protect
+          (should-not (harness-call 'agent/stop-outstanding id why))
+        (harness-remove-filter 'agent/stop-outstanding blank))
+      (harness-add-filter 'agent/stop-outstanding no-text)
+      (unwind-protect
+          (should-not (harness-call 'agent/stop-outstanding id why))
+        (harness-remove-filter 'agent/stop-outstanding no-text))
+      ;; A failing handler is skipped: the text before it stands.
+      (harness-add-filter 'agent/stop-outstanding stopped 10)
+      (harness-add-filter 'agent/stop-outstanding boom 20)
+      (unwind-protect
+          (should (equal "stopped a worker" (harness-call 'agent/stop-outstanding id why)))
+        (harness-remove-filter 'agent/stop-outstanding stopped)
+        (harness-remove-filter 'agent/stop-outstanding boom)))))
+
 ;;;; Provider checkpoints and the head
 
 (ert-deftest harness-agent-records-provider-checkpoints ()
