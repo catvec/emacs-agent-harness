@@ -69,12 +69,14 @@
 ;; up first -- briefly, read-only, at the project's root, told so by
 ;; `harness-tasks--refine-prompt' -- and its final reply becomes the
 ;; task's prompt; the original words stay in `:note'.  The task then
-;; waits in pending as a backlog task (`:backlog'): the scheduler never
-;; starts it, only `task/start' does, so the backlog survives restarts
-;; until someone picks a task.  Its session is the one that refined it:
-;; starting moves that session into the task's worktree and tells it to
-;; do the work.  A message to a backlog task's session is feedback on
-;; the write-up, which the agent rewrites.
+;; waits in the backlog -- its own column, apart from the queued
+;; pending tasks the scheduler starts -- as a backlog task
+;; (`:backlog'): the scheduler never starts it, only `task/start' does,
+;; so the backlog survives restarts until someone picks a task.  Its
+;; session is the one that refined it: starting moves that session into
+;; the task's worktree and tells it to do the work.  A message to a
+;; backlog task's session is feedback on the write-up, which the agent
+;; rewrites.
 ;;
 ;; Main tree: a task submitted with `:main-tree' (the `task_submit'
 ;; tool's `main_tree', or the board's worktree switch) gets no worktree
@@ -155,7 +157,11 @@
 ;; Every task a method returns or an event carries also has a derived
 ;; `:column', the kanban column it belongs in:
 ;;
-;;   pending       waiting for a slot, being refined, or in the backlog
+;;   pending       waiting for a slot, which the queue starts on its own
+;;                 while the project has one free
+;;   backlog       a backlog task, or its write-up; only the user starts
+;;                 one (`task/start'), so its column says it is not
+;;                 queued: `:state' stays pending with `:backlog' t
 ;;   needs-input   requires user input: its session is blocked on a
 ;;                 permission or a question, or it (or its refinement)
 ;;                 stopped part way
@@ -973,21 +979,22 @@ repository stores."
 
 (defun harness-tasks--column (task)
   "Return the kanban column of TASK, a symbol.
-That is pending, needs-input, review, merging, active or done.
-A task being refined shows in pending, where it ends up, unless the
-refinement needs the user.  A task whose branch holds a place in the
-merge queue shows in merging however it holds it: queued, merging, or
-its session resolving the conflicts; unless that session waits on the
-user, whose answer the queue then waits for too."
+That is pending, backlog, needs-input, review, merging, active or done.
+A backlog task (`harness-tasks--backlog-p'), and the write-up an agent
+does for it, show in the backlog: only the user starts one, so it is no
+queued pending task (`harness-tasks--queued-p').  A task whose branch
+holds a place in the merge queue shows in merging however it holds it:
+queued, merging, or its session resolving the conflicts; unless that
+session waits on the user, whose answer the queue then waits for too."
   (pcase (plist-get task :state)
-    ('pending 'pending)
+    ('pending (if (harness-tasks--backlog-p task) 'backlog 'pending))
     ('done 'done)
     ('review 'review)
     ('refining (let ((session (harness-tasks--session task)))
                  (cond ((plist-get session :pending) 'needs-input)
-                       ((harness-tasks--turn-p task) 'pending)
+                       ((harness-tasks--turn-p task) 'backlog)
                        ((plist-get task :outcome) 'needs-input)
-                       (t 'pending))))
+                       (t 'backlog))))
     (_ (let ((session (harness-tasks--session task)))
          (cond ((gethash (plist-get task :id) harness-tasks--starting) 'active)
                ((plist-get session :pending) 'needs-input)
@@ -1634,10 +1641,11 @@ so has it compact sooner."
             (and harness-tasks-context-limit
                  (list :context-window-limit harness-tasks-context-limit)))))
 
-(defconst harness-tasks-bulk-columns '(active pending needs-input)
+(defconst harness-tasks-bulk-columns '(active pending backlog needs-input)
   "Task columns a bulk update reaches by default.
-They are the current work: running, pending and blocked tasks.  Review,
-done and archived tasks are history and are left alone.")
+They are the current work: running, pending, backlog and blocked
+tasks.  Review, done and archived tasks are history and are left
+alone.")
 
 (defconst harness-tasks-pref-keys '(:model :thinking :permission-mode :non-interactive :supervisor)
   "Session settings a task carries until its next start.
@@ -2594,7 +2602,7 @@ cleaning up uncommitted changes); missing ones come from the
 task is interactive unless `harness-tasks-non-interactive' or the
 directory's `harness-non-interactive' is on.  With `:refine'
 the task goes to the backlog instead: an agent writes it up (state
-refining), then it waits in pending until `task/start' -- unless the
+refining), then it waits in the backlog until `task/start' -- unless the
 agent finds the board has it already, and refuses it as a duplicate.
 A refined task keeps `:main-tree' for when it finally starts.
 Either way the task is named from PROMPT at once, beside everything
@@ -2647,7 +2655,7 @@ A task waiting for a slot becomes a backlog task.  One written up
 already, or whose write-up stopped, is written up again by the same
 session, TEXT being feedback for it; without TEXT one the agent
 refused as a duplicate is written up all the same.  Either way it then
-waits in pending until `task/start'."
+waits in the backlog until `task/start'."
   (let ((task (harness-tasks--get id)))
     (unless (memq (plist-get task :state) '(pending refining))
       (error "Task %s has started; only a task that has not can be refined" id))
@@ -2787,8 +2795,8 @@ a backlog write-up keeps them until the task starts.  A priority is
 given to the task's session (`harness-priority-set-session'), where the
 board's queue and the queues the task's work waits in read it
 \(`harness-priority-of-task'), and starts nothing.  FILTER:
-`:columns' (default `harness-tasks-bulk-columns', the running, pending
-and blocked tasks), `:ids' to name tasks outright, `:except' ids to
+`:columns' (default `harness-tasks-bulk-columns', the running, pending,
+backlog and blocked tasks), `:ids' to name tasks outright, `:except' ids to
 leave alone, and `:cwd' to stay inside one project; without it the
 tasks of every project are selected.  Review, done and archived tasks
 are history and are never touched.  A task already set so is left
@@ -2817,8 +2825,8 @@ no second hint.  Return the ids that changed, oldest first."
 
 (harness-defmethod task/session-ids (&optional filter)
   "Return the ids of the sessions of the current tasks FILTER selects.
-FILTER is the one of `task/set-all'; by default the running, pending
-and blocked tasks of every project.  A task without a session yet adds
+FILTER is the one of `task/set-all'; by default the running, pending,
+backlog and blocked tasks of every project.  A task without a session yet adds
 nothing.  Bulk changes use it to reach these sessions whatever their
 status: a task's session can be inactive, after a restart or once
 closed, and still be the one the task goes on in."

@@ -3289,14 +3289,16 @@ harness keys.
 Task mode: one session per task.  TASK =
 `(:id "t-…" :project ROOT :cwd DIR :prompt "…" :attachments (…) :name "title or nil"
 :state pending|refining|active|merging|review|done
-:column pending|needs-input|active|review|merging|done
+:column pending|backlog|needs-input|active|review|merging|done
 :backlog BOOL :note "the words a backlog task was written up from" :refined F
 :session SID :outcome nil|end-turn|error|cancelled|duplicate|merge-failed|merged|…
 :waiting nil|"what the session started runs outside its turn"
 :error "…" :duplicate-of ID :main-tree BOOL :worktree DIR :branch NAME :base NAME :merge-status nil|queued|merging|conflict
 :merge-queued F :conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
 :verified BOOL :verified-at F :feedback ((:text "..." :at F) ...))`.
-`:column` is derived on every read: `needs-input` when the session is
+`:column` is derived on every read: `backlog` for a backlog task or
+its write-up -- one the scheduler never starts, for the user's
+`task/start` -- `needs-input` when the session is
 blocked on a request or the task stopped part way, `merging` while its
 branch holds a place in the merge queue (`:merge-status` is queued,
 merging or conflict; `:merge-queued` is when it joined, which orders the
@@ -3423,7 +3425,8 @@ priority).
   stand, message their sessions, cherry-pick their commits (see also
   `harness-tasks--start-message`).  Otherwise its final reply becomes
   `:prompt` (the original stays in `:note`) and the task waits in
-  `pending` with `:backlog t`: the scheduler never starts it, only
+  `pending` with `:backlog t`, whose column is the backlog, apart from
+  the queued pending tasks: the scheduler never starts it, only
   `task/start`, so the backlog survives restarts.  A turn of a backlog
   task's session before it starts is feedback (`task/prompt`) and
   rewrites the write-up; a write-up that stops needs input (restarts:
@@ -3575,7 +3578,8 @@ priority).
   alone, and the priority is read and refused before any task changes;
   only the settings given change, so without `:priority' (or
   with null) every task keeps its own; FILTER is `:columns'
-  (default `harness-tasks-bulk-columns': running, pending and blocked),
+  (default `harness-tasks-bulk-columns': running, pending, backlog and
+  blocked),
   `:ids', `:except' and `:cwd' (without it, every project), and review,
   done and archived tasks are never touched; a task already set so is
   skipped, non-interactive counting as what the task would start with
@@ -4383,7 +4387,7 @@ TRAMP prefixes come from the session host):
 | `set_non_interactive` | Non-interactive mode | enabled, session_id (default: this session) or all (every current session and task of every project), reason | meta (perms module's away-request stage: turning it on is decided only by the user's answer, in every mode, and denied at once in a non-interactive session; turning it off is allowed at once) |
 | `set_priority` | Set priority | priority (low/medium/high), session_id (default: this session) or all (every current session and task of every project) | meta (a priority is the session's, and every input here is a session id; a task's priority is set through its session) |
 | `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds (optional: wake anyway after this long) | read (registers a wake-up prompt and returns at once; needs no approval: `harness-perms--inspection-tools`) |
-| `task_list` | List tasks | column (pending/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read (needs no approval: `harness-perms--inspection-tools`) |
+| `task_list` | List tasks | column (pending/backlog/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: given to the session the task is submitted with, and the order waiting tasks start in) | meta |
 | `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete/priority), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -6217,9 +6221,9 @@ a max-age of a minute; `g` asks with 0; `version/checked` redraws it,
 and the menu's Version entry says "not the latest" after a report that
 found the harness behind.
 
-Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in six
+Task board (`harness-ui-tasks`, `C-c h a`): the project's tasks in seven
 sections -- requires your input, ready for review, merging, in progress,
-pending, completed -- with each card's current todo, progress, elapsed
+pending, backlog, completed -- with each card's current todo, progress, elapsed
 time, token figures (a working task's context in use and output, growing
 as its model streams; a card short of room leaves them out first),
 output rate (while its session is open), cost and merge state, one-click answers to a blocked task's
@@ -6295,7 +6299,8 @@ without it there is no button.  A
 Submit / Refine toggle beside that label, showing only the current mode
 (a click or `C-c C-t` switches it), picks what a new task does: start,
 or go to the backlog, written up by an agent and
-waiting in pending until you start it (`s`); `r` refines a queued task,
+waiting in the backlog -- its own section, which the queue never
+starts -- until you start it (`s`); `r` refines a queued task,
 retries a stopped write-up, writes one up all the same when it refused
 the task as a duplicate, or sends feedback on a backlog task's.  A task
 whose write-up refused it as a duplicate shows it in Requires your

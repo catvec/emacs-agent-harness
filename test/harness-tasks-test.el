@@ -1376,7 +1376,9 @@ sends it the task itself, not a \"carry on\"."
              (task (harness-tasks-test-task id))
              (sid (plist-get task :session)))
         (should (eq 'refining (plist-get task :state)))
-        (should (eq 'pending (plist-get task :column)))
+        ;; A write-up for the backlog is in the backlog column, not among
+        ;; the queued pending tasks the scheduler starts.
+        (should (eq 'backlog (plist-get task :column)))
         (should (plist-get task :backlog))
         (should (equal "the parser chokes on nested quotes" (plist-get task :note)))
         (let ((session (harness-call 'session/get sid)))
@@ -1394,7 +1396,8 @@ sends it the task itself, not a \"carry on\"."
         (setq task (harness-tasks-test-task id))
         (should (equal harness-tasks-test-write-up (plist-get task :prompt)))
         (should (plist-get task :refined))
-        (should (eq 'pending (plist-get task :column)))
+        (should (eq 'pending (plist-get task :state)))
+        (should (eq 'backlog (plist-get task :column)))
         ;; Free slots do not start a backlog task; only the user does.
         (harness-tasks--schedule)
         (should (eq 'pending (harness-tasks-test-state id)))
@@ -1434,6 +1437,30 @@ sends it the task itself, not a \"carry on\"."
         (harness-call 'task/start id)
         (should-not (plist-get (harness-tasks-test-session id) :non-interactive))
         (harness-tasks-test-wait-state id 'done)))))
+
+(ert-deftest harness-tasks-backlog-is-its-own-column ()
+  "A backlog task's column is the backlog, not the queued pending one.
+Its state stays pending and its `:backlog' set, so the scheduler still
+never starts it and `task/start' still does; a bulk change, which
+reaches the current tasks, still reaches it by its column."
+  (harness-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (harness-provider-demo-script-override
+           '((:type text :delta "Fix the lexer\n\nHandle nested quotes.") (:type done :stop-reason end-turn))))
+      (let ((queued (harness-tasks-test-submit "waits for a slot"))
+            (id (harness-tasks-test-refine "jot this down")))
+        (harness-tasks-test-wait-state id 'pending)
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'pending (plist-get task :state)))
+          (should (plist-get task :backlog))
+          (should (eq 'backlog (plist-get task :column))))
+        (should (eq 'pending (plist-get (harness-tasks-test-task queued) :column)))
+        ;; Free slots start the queued one -- and never the backlog.
+        (harness-tasks--schedule)
+        (should (eq 'pending (harness-tasks-test-state id)))
+        (should (member id (harness-call 'task/set-all (list :model "demo:other"))))
+        (should (member id (harness-call 'task/set-all (list :thinking "high")
+                                         (list :columns '(backlog) :cwd default-directory))))))))
 
 (ert-deftest harness-tasks-refine-failure-needs-input-then-retries ()
   (harness-tasks-test-with

@@ -1141,6 +1141,46 @@ the handler moves nothing the user did not confirm."
       (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "done"))
       (should (eq 'done (plist-get (harness-call 'task/get id) :state))))))
 
+(ert-deftest harness-tools-sessions-task-list-separates-the-backlog ()
+  "task_list tells a backlog task from a queued pending one.
+The backlog has its own column and says so on its state line; the
+column filter keeps the two apart, and until=settled still settles on a
+task that waits to be started."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (harness-provider-demo-script-override
+            '((:type text :delta "Fix the lexer\n\nIt drops the last token.") (:type done :stop-reason end-turn)))
+           (me (harness-tools-sessions-test-session))
+           (queued (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Waits for a slot"))
+                                        :meta)
+                              :task-id))
+           (backlog (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit"
+                                                                           '(:prompt "lexer eats a token" :refine t))
+                                          :meta)
+                               :task-id)))
+      ;; The write-up runs in the background; waiting on the task settles
+      ;; once it waits to be started.
+      (should (string-match-p "Done waiting"
+                              (harness-tools-sessions-test-ok me "task_wait" (list :task_id backlog))))
+      (should (equal "Fix the lexer\n\nIt drops the last token."
+                     (plist-get (harness-call 'task/get backlog) :prompt)))
+      (let ((listing (harness-tools-sessions-test-ok me "task_list" nil)))
+        (should (string-match-p (concat (regexp-quote queued) " +pending +Waits for a slot") listing))
+        (should (string-match-p (concat (regexp-quote backlog) " +backlog +Fix the lexer") listing))
+        (should (string-match-p (concat (regexp-quote backlog)
+                                        "[^\n]*\n    state pending, backlog, waits to be started")
+                                listing)))
+      ;; The column filter keeps them apart.
+      (let ((backlog-list (harness-tools-sessions-test-ok me "task_list" '(:column "backlog"))))
+        (should (string-match-p (regexp-quote backlog) backlog-list))
+        (should-not (string-match-p (regexp-quote queued) backlog-list)))
+      (let ((pending-list (harness-tools-sessions-test-ok me "task_list" '(:column "pending"))))
+        (should (string-match-p (regexp-quote queued) pending-list))
+        (should-not (string-match-p (regexp-quote backlog) pending-list)))
+      ;; The queued task is still waiting for a slot: the backlog task's
+      ;; settling is its own.
+      (should (eq 'pending (plist-get (harness-call 'task/get queued) :column))))))
+
 (ert-deftest harness-tools-sessions-task-submit-main-tree ()
   "task_submit passes main_tree through; the result and task_list say so."
   (harness-tools-sessions-test-with

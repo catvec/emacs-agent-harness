@@ -1241,8 +1241,9 @@ A write-up only reads, so it never supervises (see
            (sid (harness-supervisor-test-task-session id)))
       (harness-test-wait (lambda () (eq 'pending (plist-get (harness-supervisor-test-task id) :state))) 30
                          "the write-up to finish")
+      ;; A write-up waits in the backlog, its own column: the filter names it.
       (harness-call 'task/set-all (list :supervisor :false)
-                    (list :columns '(pending needs-input) :ids (list id) :cwd default-directory))
+                    (list :columns '(backlog needs-input) :ids (list id) :cwd default-directory))
       (let ((ext (harness-supervisor-test-ext sid)))
         (should-not (plist-member ext :supervisor))
         (should (eq t (plist-get ext :supervisor-write-up))))

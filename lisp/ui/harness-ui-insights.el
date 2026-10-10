@@ -672,6 +672,7 @@ Only for a report of every project."
     ("active" "at work")
     ("review" "in review")
     ("needs-input" "waiting for input")
+    ("backlog" "in the backlog")
     (name name)))
 
 (defun harness-ui-insights--task-detail (task)

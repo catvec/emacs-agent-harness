@@ -1465,21 +1465,30 @@ message of the harness's own."
   "Return the listing of TASK.
 Its title on the board, once it has one, comes before its prompt: the
 name of its session, else its own, which a task has from submission --
-it gets its session then, named with the title once it comes.  When
-SELF, a session id, is TASK's session, the line says \"(this task)\"."
+it gets its session then, named with the title once it comes.  A
+backlog task says on its state line that it waits in the backlog for
+someone to start it, so it does not read as a queued pending task.
+When SELF, a session id, is TASK's session, the line says \"(this
+task)\"."
   (let* ((sid (plist-get task :session))
          (session (and sid (harness-call 'session/exists-p sid) (harness-call 'session/get sid)))
          (title (if (harness-string-blank-p (plist-get session :name))
                     (plist-get task :name)
                   (plist-get session :name)))
+         (backlog (and (equal (format "%s" (plist-get task :column)) "backlog") t))
          (pending (and session (harness-tools-sessions--pending-text session))))
     (concat
      (format "%s  %-11s %s%s%s" (plist-get task :id) (plist-get task :column)
              (if (harness-string-blank-p title) "" (format "%S: " title))
              (harness-truncate-end (harness-first-line (or (plist-get task :prompt) "")) 100)
              (if (and self sid (equal sid self)) "  (this task)" ""))
-     (format "\n    state %s%s%s%s%s%s%s%s%s%s%s"
+     (format "\n    state %s%s%s%s%s%s%s%s%s%s%s%s"
              (plist-get task :state)
+             (if backlog
+                 (if (eq (plist-get task :state) 'pending)
+                     ", backlog, waits to be started"
+                   ", backlog, being written up")
+               "")
              (if (plist-get task :outcome) (format " (%s)" (plist-get task :outcome)) "")
              (let ((priority (plist-get task :priority)))
                (if (and priority (not (equal (format "%s" priority) "medium")))
@@ -1498,7 +1507,9 @@ SELF, a session id, is TASK's session, the line says \"(this task)\"."
              (let ((rounds (length (plist-get task :feedback))))
                (if (> rounds 0) (format ", sent back %d time%s" rounds (if (= rounds 1) "" "s")) "")))
      (if (plist-get task :archived) ", archived" "")
-     (if (and (eq (plist-get task :state) 'pending)
+     ;; A backlog task waits for a person, never for the queue: the
+     ;; suspension is not what holds it back, and it says so above.
+     (if (and (eq (plist-get task :state) 'pending) (not backlog)
               (harness-json-true-p (plist-get task :queue-suspended)))
          ", waiting while the queue is suspended" "")
      (if pending (format "\n    waiting on the user: %s" pending) ""))))
@@ -1547,9 +1558,9 @@ INPUT is the tool call's input plist and CTX its context."
 
 (harness-define-tool "task_list"
   :label "List tasks"
-  :description "List the task board: tasks (one session each, usually in its own worktree, or in the project's main tree when submitted with main_tree, done once the user verified the work and it merged) with their title (their session's name, else the one a task is given as soon as it is submitted), prompt, column (pending, needs-input, active, review, merging, done), state, priority (shown when it is low or high rather than medium; waiting tasks start highest priority first), when they were created and finished, session, branch, merge status and review status. A task in review has finished and waits for the user to verify it or send it back; one in merging holds a place in the merge queue (queued, merging, or its session resolving conflicts). A suspended queue (task_control suspend-queue) is named before the tasks, and its waiting tasks say so: they start only by hand (task_control start) or when the queue is resumed. Defaults to this project's unarchived tasks, oldest first; limit keeps the most recent ones. The task this session works on says (this task). Inspect a task's work with session_read on its session."
+  :description "List the task board: tasks (one session each, usually in its own worktree, or in the project's main tree when submitted with main_tree, done once the user verified the work and it merged) with their title (their session's name, else the one a task is given as soon as it is submitted), prompt, column (pending, backlog, needs-input, active, review, merging, done), state, priority (shown when it is low or high rather than medium; waiting tasks start highest priority first), when they were created and finished, session, branch, merge status and review status. Pending holds only tasks waiting for a slot: they start on their own as slots free, by priority. A task in the backlog (task_submit with refine) waits for a person to start it (task_control start) and says so, \"backlog, waits to be started\"; the queue never starts it. A task in review has finished and waits for the user to verify it or send it back; one in merging holds a place in the merge queue (queued, merging, or its session resolving conflicts). A suspended queue (task_control suspend-queue) is named before the tasks, and its queued pending tasks say so: they start only by hand (task_control start) or when the queue is resumed. Defaults to this project's unarchived tasks, oldest first; limit keeps the most recent ones. The task this session works on says (this task). Inspect a task's work with session_read on its session."
   :schema '(:type "object"
-            :properties (:column (:type "string" :enum ("pending" "needs-input" "active" "review" "merging" "done"))
+            :properties (:column (:type "string" :enum ("pending" "backlog" "needs-input" "active" "review" "merging" "done"))
                          :include_archived (:type "boolean" :description "Include archived tasks (default false).")
                          :all_projects (:type "boolean" :description "Every project (default false).")
                          :limit (:type "integer" :description "Show only this many tasks, the most recently created (default all).")))
