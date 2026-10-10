@@ -3701,9 +3701,12 @@ killed with TERM, then KILL.  The record is forgotten and
 `harness-dev/stopped` (SOCKET PATH REASON) is emitted.  The
 `worktree/before-remove` filter stops the instance of a worktree before
 git removes it.  As a backstop, `scripts/dev.sh start` runs with
-`HARNESS_DEV_OWNER` set to the harness process (`emacs-pid`), and
-`scripts/harness-dev.el` checks every ten seconds that it still runs
-(same pid and start time), calling `kill-emacs` once it is gone.
+`HARNESS_DEV_OWNER` set to the Emacs the user runs
+(`harness-tools-dev--owner`: the harness process's parent, named by
+HARNESS_SERVER_PARENT, else this Emacs), and `scripts/harness-dev.el`
+checks every ten seconds that it still runs (same pid and start time),
+calling `kill-emacs` once it is gone.  A restart of the harness process
+alone leaves the instances running; the new process reads the record.
 A daemon started by hand has no owner, so this backstop leaves it
 running.  Methods:
 

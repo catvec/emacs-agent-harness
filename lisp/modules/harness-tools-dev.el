@@ -59,10 +59,11 @@
 ;;
 ;; Stopping asks the daemon to exit over emacsclient.  A daemon still
 ;; alive after that has its process tree killed.  As a last resort, an
-;; instance exits by itself once the harness process that opened it is
-;; gone: HARNESS_DEV_OWNER names that process, and harness-dev.el
-;; watches it.  So a harness that quits or crashes leaves no instance
-;; behind.
+;; instance exits by itself once the Emacs the user runs the harness in
+;; is gone: HARNESS_DEV_OWNER names that Emacs, and harness-dev.el
+;; watches it.  So an Emacs that quits or crashes leaves no instance
+;; behind.  A restart of the harness process alone leaves them running:
+;; the harness started again reads the record and looks after them.
 
 ;;; Code:
 
@@ -193,18 +194,35 @@ reaches the same instance and two worktrees never share one."
 That is the directory scripts/dev.sh defaults to, beside the checkout."
   (file-name-as-directory (expand-file-name (concat "scripts/.dev/state-" socket) dir)))
 
+(defun harness-tools-dev--owner ()
+  "Return the pid of the Emacs the instances this harness opens belong to.
+That is the Emacs the user runs: the parent of this harness process
+when the harness runs in a process of its own (HARNESS_SERVER_PARENT,
+see harness-server.el), else this Emacs.  An instance exits once its
+owner is gone.  A restart of the harness process alone leaves the
+instances running, for the harness started again to look after."
+  (let* ((default-directory "/")
+         (parent (getenv "HARNESS_SERVER_PARENT"))
+         (ppid (alist-get 'ppid (ignore-errors (process-attributes (emacs-pid))))))
+    (if (and parent ppid
+             (string-match-p "\\`[0-9]+\\'" parent)
+             (= (string-to-number parent) ppid))
+        ppid
+      (emacs-pid))))
+
 (defun harness-tools-dev--run (dir args &optional timeout)
   "Run DIR's scripts/dev.sh with ARGS; return a promise of the result.
 TIMEOUT bounds the run, in seconds (default `harness-tools-dev-timeout').
 HARNESS_DEV_SOCKET names the checkout's instance, so every call of a
-checkout drives the same Emacs.  HARNESS_DEV_OWNER names this process,
-which the instance watches: it exits once this process is gone."
+checkout drives the same Emacs.  HARNESS_DEV_OWNER names the Emacs the
+instance belongs to (`harness-tools-dev--owner'), which the instance
+watches: it exits once that Emacs is gone."
   (harness-run-command (cons (expand-file-name harness-tools-dev--script dir) args)
                        :cwd dir
                        :timeout (or timeout harness-tools-dev-timeout)
                        :name "harness-dev"
                        :env `(("HARNESS_DEV_SOCKET" . ,(harness-tools-dev-socket dir))
-                              ("HARNESS_DEV_OWNER" . ,(number-to-string (emacs-pid))))))
+                              ("HARNESS_DEV_OWNER" . ,(number-to-string (harness-tools-dev--owner))))))
 
 (defun harness-tools-dev--describe (info &optional lifetime)
   "Return what the model is told about the instance INFO.
@@ -932,8 +950,9 @@ The catalogue (SESSION nil) keeps every tool."
 
 (defun harness-tools-dev--shutdown ()
   "Stop checking on the instances.
-The instances themselves run on: each stops once the harness process
-that opened it is gone, and a harness started again looks after them."
+The instances themselves run on: each stops once the Emacs it belongs
+to is gone (`harness-tools-dev--owner'), and a harness started again
+looks after them."
   (dolist (timer (list harness-tools-dev--check-timer harness-tools-dev--sweep-timer))
     (when (timerp timer) (cancel-timer timer)))
   (setq harness-tools-dev--check-timer nil

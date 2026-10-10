@@ -162,8 +162,24 @@ collects the sockets that are."
         (should (file-equal-p dir (cdr (assoc "cwd" (car calls)))))
         (should (equal "start" (cdr (assoc "args" (car calls)))))
         (should (equal (harness-tools-dev-socket dir) (cdr (assoc "socket" (car calls)))))
-        ;; The instance knows which process to outlive no longer.
-        (should (equal (number-to-string (emacs-pid)) (cdr (assoc "owner" (car calls)))))))))
+        ;; The instance knows the Emacs it belongs to: here, this one.
+        (should (equal (number-to-string (harness-tools-dev--owner))
+                       (cdr (assoc "owner" (car calls)))))))))
+
+(ert-deftest harness-tools-dev-instances-belong-to-the-users-emacs ()
+  "An instance belongs to the Emacs the harness process serves, else this one.
+A restart of the harness process alone must not stop the instances."
+  (harness-tools-dev-test-with
+    (let ((ppid (alist-get 'ppid (process-attributes (emacs-pid)))))
+      (skip-unless ppid)
+      ;; A harness process: its parent is the Emacs the user runs.
+      (let ((process-environment (cons (format "HARNESS_SERVER_PARENT=%d" ppid) process-environment)))
+        (should (= ppid (harness-tools-dev--owner))))
+      ;; The variable inherited from further up names no parent of ours.
+      (let ((process-environment (cons (format "HARNESS_SERVER_PARENT=%d" (1+ ppid)) process-environment)))
+        (should (= (emacs-pid) (harness-tools-dev--owner))))
+      (let ((process-environment (cons "HARNESS_SERVER_PARENT" process-environment)))
+        (should (= (emacs-pid) (harness-tools-dev--owner)))))))
 
 (ert-deftest harness-tools-dev-tool-refuses-other-directories ()
   "A path that is not a harness checkout is an error, before anything runs."

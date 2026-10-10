@@ -951,9 +951,9 @@ your checkout itself can be submitted to the **main tree** instead (the
   work stops: when the task goes to review, is done, or stops on an
   error or a cancel; when a sub-agent finishes; when a conversation is
   closed or has been idle for an hour. Removing a worktree stops its
-  instance first, and an instance exits once the harness that opened
-  it quits. A sweep every ten minutes also stops the instances of
-  finished tasks that an older harness left running.
+  instance first, and every instance exits once the Emacs you run the
+  harness in quits. A sweep every ten minutes also stops the instances
+  of finished tasks that an older harness left running.
 - To skip review, press `V` or click `[Review: on]` in the board's
   header line. Finished tasks then merge and complete without waiting
   for you, and if tasks are already waiting for review, the board offers

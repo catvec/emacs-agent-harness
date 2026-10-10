@@ -9,10 +9,10 @@
 ;; exporting screenshots, and collecting errors.
 ;;
 ;; A daemon the harness opened (the `open_harness' tool, the board's
-;; Open harness) has HARNESS_DEV_OWNER set to the harness process that
-;; opened it.  The daemon exits once that process is gone, so a harness
-;; that quits or crashes leaves no Emacs behind.  One started by hand
-;; has no owner and runs until it is stopped.
+;; Open harness) has HARNESS_DEV_OWNER set to the Emacs that harness
+;; runs for.  The daemon exits once that Emacs is gone, so an Emacs that
+;; quits or crashes leaves no daemon behind.  One started by hand has no
+;; owner and runs until it is stopped.
 
 ;;; Code:
 
@@ -31,7 +31,7 @@
 (defvar harness-dev-frame nil)
 
 (defvar harness-dev-owner nil
-  "The harness process that opened this daemon, as (PID . START), or nil.
+  "The Emacs this daemon belongs to, as (PID . START), or nil.
 From HARNESS_DEV_OWNER.  START is when that process started, in
 seconds, so that a process that gets the same PID later does not pass
 for it.")
@@ -48,7 +48,7 @@ for it.")
     (and start (float-time start))))
 
 (defun harness-dev-owner-alive-p ()
-  "Non-nil while the harness process that opened this daemon runs."
+  "Non-nil while the Emacs this daemon belongs to runs."
   (let ((pid (car harness-dev-owner))
         (start (cdr harness-dev-owner)))
     (and (condition-case nil (eq 0 (signal-process pid 0)) (error nil))
@@ -58,8 +58,8 @@ for it.")
            (or (null start) (null now) (< (abs (- now start)) 2))))))
 
 (defun harness-dev-watch-owner ()
-  "Exit once the harness process named by HARNESS_DEV_OWNER is gone.
-Nothing else would stop a daemon whose harness quit or crashed.
+  "Exit once the Emacs named by HARNESS_DEV_OWNER is gone.
+Nothing else would stop a daemon whose Emacs quit or crashed.
 Without HARNESS_DEV_OWNER, as when started by hand, do nothing."
   (let ((owner (getenv "HARNESS_DEV_OWNER")))
     (when (and owner (string-match-p "\\`[0-9]+\\'" owner))
