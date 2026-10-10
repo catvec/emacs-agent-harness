@@ -4088,7 +4088,7 @@ TRAMP prefixes come from the session host):
 | `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`) |
 | `plan` | Plan | plan | meta |
 | `todo_write` | Todo list | todos | meta |
-| `spawn_agent` | Sub-agent | prompt, fork, model, name, cwd, worktree | meta (the jail checks `cwd`, as it checks bash's) |
+| `spawn_agent` | Sub-agent | prompt, fork, model, name, cwd, worktree, background | meta (the jail checks `cwd`, as it checks bash's) |
 | `skill_search` / `skill_load` | Search skills / Load skill | query / name, file (one of the skill's supporting files) | read (needs no approval: `harness-perms--auto-allow-tools`) |
 | `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -4165,6 +4165,31 @@ policy, or a remote directory) fails with an error instead of running
 unconfined.  With no handler the command runs as it always did.  The
 supervisor module makes the commands of a supervising session read-only
 and offline this way.
+
+A `spawn_agent` call runs its child in the background when
+`background` is true: the tool call returns as soon as the child's turn
+starts, with a result naming the child session (its `:meta` carries
+`:child-id`, which the chat links), instead of waiting for its answer.
+When a background child's turn ends, tools-agent sends the parent a
+message of the harness's (`harness-sender-system "sub-agent"`) built
+from `harness-tools-agent--child-summary`: the child's last reply and
+its footer of tool calls and cost, the reason when its turn ended any
+other way than `end-turn`, its worktree and branch when it worked in
+one, and, past `harness-tools-max-output-chars`, cut in the middle with
+a note to read the child's session.  An idle parent starts a turn on
+it, a running one is steered, as a supervisor step's report is.  With
+several `spawn_agent` calls made in one step each tool call runs
+without blocking the others, so the children work at once.  A running
+child counts as work outstanding for its parent:
+`harness-tools-agent--outstanding`, a handler of the sync filter
+`agent/outstanding`, reports every entry of
+`harness-tools-agent--children` whose `:parent` is the session, as
+"Sub-agent NAME running" or "Sub-agents A, B running" (an entry says
+`:parent`, `:name`, `:worktree`, `:branch`, `:calls`, `:report` and
+`:background`), so a task whose session's turn ended stays active
+(`harness-tasks--on-turn-ended`) instead of going to review while its
+sub-agents run.  Without `background` the call and its result are what
+they were.
 
 `spawn_agent` (tools-agent) runs its child on a deliberately shorter
 context window: `harness-subagent-context-limit` (128000 tokens; nil for
