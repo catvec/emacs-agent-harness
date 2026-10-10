@@ -85,15 +85,38 @@
 (defcustom harness-btw-thinking "low"
   "Thinking level BTW side conversations start at, or nil for the usual one.
 A BTW is for quick questions on the side, so by default it thinks
-little.  It starts at this level only when its model offers it.
-Otherwise, and always with nil, it starts at the level of the session
-it is opened over; a BTW about a task board starts at
+little.  A model that lacks this level gets the nearest one it offers
+below it, or its weakest when it has none below: DeepSeek, which has
+low, high and max, thinks at low for medium.  So a BTW thinks no harder
+than its model has to, on the session's own model as on a cheaper one
+\(`harness-btw-model'), whatever level the session thinks at.  With nil,
+and with a model that lists no levels, it starts at the level of the
+session it is opened over; a BTW about a task board starts at
 `harness-thinking'.  The level can be changed in the BTW like in any
 session."
   :type '(choice (const :tag "Same as the session" nil) (const :tag "Low" "low")
                  (const :tag "Medium" "medium") (const :tag "High" "high")
                  (const :tag "Extra high" "xhigh") (const :tag "Max" "max"))
   :safe (lambda (v) (or (null v) (member v '("low" "medium" "high" "xhigh" "max"))))
+  :group 'harness)
+
+(defcustom harness-btw-model 'auto
+  "Model BTW side conversations run on, as PROVIDER:NAME, or `auto'.
+A BTW is for quick questions on the side, so by default (`auto') it
+runs on the simple tier of the provider of the model it would
+otherwise use (see `harness-provider-tier-model'): the model of the
+session it is opened over, or `harness-model' as configured for a BTW
+about a task board.  It keeps that model when the provider names no
+simple one.  A PROVIDER:NAME forces that model, and nil keeps the
+model of the session.  How hard it thinks is `harness-btw-thinking',
+a setting of its own.  Either can be changed in the BTW like in any
+session, and one BTW can start on another model: a prefix argument to
+`harness-btw' asks for it.  A policy that fixes `harness-model' fixes
+a BTW's model too, and this setting then changes nothing."
+  :type '(choice (const :tag "The session provider's cheap model" auto)
+                 (const :tag "The session's own model" nil)
+                 (string :tag "Model" :names model))
+  :safe (lambda (v) (or (null v) (eq v 'auto) (stringp v)))
   :group 'harness)
 
 (defcustom harness-allowed-directories nil
@@ -108,14 +131,14 @@ directories."
 (defcustom harness-budget nil
   "One budget for all sessions together, as (:amount USD :hard BOOL), or nil.
 It counts everything the harness recorded, every session of every
-project, and applies to every session: a hard one stops the next turn
-of each once it is spent, a soft one only warns.  It has a global
-value only.  Budgets for one project, one session or a calendar period
-are made in the usage dashboard (`harness-usage')."
+project, and applies to every session: a hard one stops the turn of each
+once it is spent, mid-turn included, a soft one only warns.  It has a
+global value only.  Budgets for one project, one session or a calendar
+period are made in the usage dashboard (`harness-usage')."
   :type '(choice (const :tag "No budget" nil)
                  (plist :tag "Budget" :key-type symbol :value-type sexp
                         :options ((:amount (number :tag "Amount (USD)"))
-                                  (:hard (boolean :tag "Hard (stop the next turn once spent)")))))
+                                  (:hard (boolean :tag "Hard (stop the turn once spent)")))))
   :safe (lambda (v) (or (null v) (and (listp v) (numberp (plist-get v :amount)))))
   :group 'harness)
 
@@ -143,6 +166,7 @@ non-interactive anyway."
 
 (defconst harness-config-keys
   '(harness-model harness-permission-mode harness-thinking harness-btw-thinking
+    harness-btw-model
     harness-allowed-directories harness-sandbox-policy harness-non-interactive
     harness-supervisor harness-supervisor-tasks)
   "Settings that take part in layering.
@@ -154,8 +178,8 @@ reader of the layers skips it (see `harness-config--layered-keys').")
   '((sessions
      :title "New sessions"
      :doc "What a new session starts with.  A project can override these in its .dir-locals.el."
-     :keys (harness-model harness-thinking harness-btw-thinking harness-permission-mode
-            harness-non-interactive harness-supervisor))
+     :keys (harness-model harness-thinking harness-btw-thinking harness-btw-model
+            harness-permission-mode harness-non-interactive harness-supervisor))
     (supervisor
      :title "Supervisor mode"
      :doc "Top-level sessions plan and delegate: the session's model investigates and writes a plan, and worker sub-agents on cheaper models carry it out. The supervisor cannot change files itself."

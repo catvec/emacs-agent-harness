@@ -769,9 +769,10 @@ There were three tiers once, cheap, balanced and frontier, whose
 frontier was the strongest model the harness picked: `hard' now, which
 `harness-provider-normalize-tiers' reads it as in a plist of old.")
 
-(defconst harness-thinking-level-order '("minimal" "low" "medium" "high" "xhigh" "max")
+(defconst harness-provider--thinking-ladder (remove "none" harness-thinking-level-order)
   "Thinking levels from weakest to strongest, as the harness names them.
-\"none\", thinking off, is not on the ladder.")
+That is `harness-thinking-level-order' without \"none\": thinking off is
+not on the ladder, so `harness-provider-fit-thinking' leaves it as it is.")
 
 (defun harness-provider--cached-models (id)
   "Return the models cached for provider ID, or nil.
@@ -1008,10 +1009,11 @@ A level stronger than the strongest the catalogue gives MODEL-ID is
 that strongest, and one weaker than its weakest that weakest: a Haiku
 worker of a supervisor at max thinks at high.  LEVEL comes back as it
 is when the model offers it, when the catalogue gives the model no
-levels, when the harness does not know LEVEL (\"none\", say) and when
-LEVEL lies between two levels the model offers, which its provider maps
-as it does (DeepSeek thinks at high for medium).  Nil is nil."
-  (let* ((rank (lambda (l) (cl-position l harness-thinking-level-order :test #'equal)))
+levels, when LEVEL is not on the ladder (\"none\", say: see
+`harness-provider--thinking-ladder') and when LEVEL lies between two
+levels the model offers, which its provider maps as it does (DeepSeek
+thinks at high for medium).  Nil is nil."
+  (let* ((rank (lambda (l) (cl-position l harness-provider--thinking-ladder :test #'equal)))
          (r (and (stringp level) (funcall rank level)))
          (levels (and r (stringp model-id) (harness-method-exists-p 'provider/model)
                       (ignore-errors (plist-get (harness-call 'provider/model model-id)

@@ -1587,8 +1587,9 @@ A summary made to hand the conversation over to a model of another
 provider says which (see `harness-node-handoff').  Otherwise the header
 says what kind of compaction it was (`harness-node-compaction-kind'): a
 brief summary names the model that wrote it, a transcript file offers
-to open the file, and a fresh start says so.  One made because a
-message met a cold prompt cache (harness-cowboy.el) says that too."
+to open the file, a fresh start says so, and a cut old context says the
+oldest of it went.  One made because a message met a cold prompt cache
+\(harness-cowboy.el) says that too."
   (let* ((id (harness-chat-block-id block))
          (node (harness-chat-block-node block))
          (content (or (plist-get node :content) ""))
@@ -1610,6 +1611,7 @@ message met a cold prompt cache (harness-cowboy.el) says that too."
                                                        (harness-ui-model-label (plist-get meta :model))))
                                               ((equal kind "transcript") " into a transcript file")
                                               ((equal kind "fresh") " to start afresh")
+                                              ((equal kind "truncate") " by cutting its oldest context away")
                                               (t ""))
                                              (if (consp (plist-get meta :cowboy))
                                                  ", the prompt cache being cold"

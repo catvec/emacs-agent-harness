@@ -192,18 +192,29 @@ Then add it to your init file:
 and reloads it in place, keeping running sessions. It updates the git
 checkout the harness runs from: the clone of a manual installation, or
 the clone that straight.el keeps for a Doom Emacs or straight.el
-installation. It fetches the checkout's upstream branch and, when there
-are new commits, first checks the newest one in a separate Emacs,
-outside the checkout: `harness.el` must load, and every file must
-compile with no merge conflict marker in its code. Only then does it
-fast-forward the checkout and run `harness-reload`, which loads the
-update in your Emacs and in the harness process. A commit that fails
-the check is never installed, and a fast-forward cannot conflict, so
-the harness keeps running what it ran until a fixed commit arrives.
-The update also changes nothing when the checkout has local changes or
-commits of its own. Git and the checking Emacs run in the background,
-so Emacs stays responsive. The harness log (`C-c h L`) lists the
-commits an update brought in.
+installation. A checkout straight.el installed is updated with
+straight's own pull (`straight-pull-package`), the way its package
+manager updates it, in an Emacs that loaded straight.el. Any other
+checkout is fast-forwarded to the branch it tracks, or else to the
+same-named branch of `origin` (or of its only remote); a detached
+HEAD, or a checkout with no remote, is refused with a message that
+says so. A checkout with local changes is refused either way, and a
+fast-forward changes nothing when the branch has commits of its own.
+
+When the update brings commits, the newest is checked in a separate
+Emacs, outside the checkout: `harness.el` must load, and every file
+must compile with no merge conflict marker in its code. Only then does
+`harness-reload` load the update in your Emacs and in the harness
+process. A commit that fails the check is never installed -- a
+fast-forward cannot conflict, and a straight.el pull that landed on a
+broken commit is put back where it was -- so the harness keeps running
+what it ran until a fixed commit arrives. Git and the checking Emacs
+run in the background, so Emacs stays responsive.
+
+The commits an update brought are its changelog: each one's subject and
+message body, newest first, never diff or file statistics. The version
+page (`C-c h v`) shows it with what the last update did, and the
+harness log (`C-c h L`) lists the commits by hash and subject.
 
 The harness has no numbered releases: it follows its `main` branch, so
 the commit is the version. `harness-update` names it: the commits it
@@ -213,8 +224,8 @@ Package managers can update the harness too, with `doom sync -u` or
 `M-x straight-pull-package`. The harness loads its files from the
 package manager's git clone rather than from its build directory, so
 an update takes effect at the next `harness-reload` or restart, with no
-rebuild. A Doom package pinned with `:pin` follows no branch:
-`harness-update` refuses it, and you update it by changing the pin.
+rebuild. A Doom package pinned with `:pin` does not follow a branch:
+you update it by changing the pin.
 
 ## Getting started
 
@@ -262,32 +273,37 @@ named by `harness-server-init-file`.
 
 ### Running the latest version
 
-`C-c h v` (`M-x harness-version`) shows the commit the harness runs and
-compares it with the places newer commits come from:
+`C-c h v` (`M-x harness-version`) shows the commit the harness runs,
+compares it with the places newer commits come from, and can update it
+from there:
 
 - the checkout it was loaded from, as that checkout is now: what a pull
   or a merge brought there runs only after a reload (`C-c h R`) or a
   restart;
-- the repository that checkout pulls from, which is the remote its
-  branch tracks. straight.el sets it to the recipe's repository, so an
-  install from GitHub is compared with GitHub and one from sourcehut
-  with sourcehut. Nothing needs configuring where one of them cannot be
-  reached;
+- the repository that checkout pulls from: the remote its branch
+  tracks, else `origin`, else its only remote, and the branch it tracks
+  there, else the same-named one. straight.el sets it to the recipe's
+  repository, so an install from GitHub is compared with GitHub and one
+  from sourcehut with sourcehut. Nothing needs configuring where one of
+  them cannot be reached;
 - the local checkouts of the harness that your sessions work in, such
   as a development checkout;
 - `harness-version-origins`: any others you list, such as a mirror the
   install does not pull from. It is empty by default.
 
 Each origin says whether it has commits the harness lacks, and lists
-them. Nothing is fetched, so the commits are counted only when a local
-repository has them, such as a development checkout. Otherwise the
-page says that the origin has commits the harness lacks, without
-counting them. The page then says what to do: reload, pull into the
-checkout the harness runs from (`M-x straight-pull-package` for a
-straight.el install), or push first. The harness checks by itself, in
-its own process, shortly after it starts or reloads and then every half
-hour. Git never prompts there. The page shows the last result at once,
-and `g` checks again. After a check finds that the harness is behind,
+them as changelog entries: the subject of each and its message body,
+never a diff or file statistics. Nothing is fetched, so the commits are
+counted only when a local repository has them, such as a development
+checkout. Otherwise the page says that the origin has commits the
+harness lacks, without counting them. The page then says what to do:
+reload, update with the `[Update harness]` button (`u`), which runs
+`harness-update` and reloads, or push first. After an update the page
+says what came in, with the same changelog, and, when the reload was
+refused, how to restart Emacs or go back. The harness checks by itself,
+in its own process, shortly after it starts or reloads and then every
+half hour. Git never prompts there. The page shows the last result at
+once, and `g` checks again. After a check finds that the harness is behind,
 the menu's Version entry says so, and a small icon nags until it is not:
 an arrow up in a circle, in the mode line indicator (after its
 "harness", even with no session active), in each chat's header line
@@ -320,9 +336,9 @@ default), or nil for nowhere.
 | `C-c h F` | `harness-fullscreen` | Start or end the fullscreen layout: the task board or session list on the left, a session beside it |
 | `C-c h t` | `harness-tree` | Show the conversation tree |
 | `C-c h f` | `harness-fork-session` | Fork the current session |
-| `C-c h b` | `harness-btw` | Open a BTW side conversation |
+| `C-c h b` | `harness-btw` | Open a BTW side conversation (`C-u`: on a model of your choice) |
 | `C-c h k` | `harness-cancel-turn` | Cancel the running turn |
-| `C-c h C` | `harness-compact` | Compact the conversation: choose a summary, a brief summary, a transcript file or a fresh start, each with what it costs |
+| `C-c h C` | `harness-compact` | Compact the conversation: choose a summary, a brief summary, a transcript file, a fresh start or a cut of its older context, each with what it costs; a session running a turn is asked to interrupt it or queue the compaction |
 | `C-c h D` | `harness-delete-session` | Delete the current session |
 | `C-c h m` | `harness-set-model` | Choose the model |
 | `C-c h M` | `harness-set-model-all` | Choose a model and switch every current session and task of every project to it |
@@ -340,6 +356,7 @@ default), or nil for nowhere.
 | `C-c h W` | `harness-move-session` | Move a session to another working directory, and with it to that directory's project (see [Moving a session](#moving-a-session-to-another-directory)) |
 | `m` | `harness-ui-sessions-move` | In the session list, move the session at point to another directory |
 | `C-c h u` | `harness-usage` | Show the usage and cost dashboard |
+| `C` | `harness-cost-compare` | In the usage dashboard, compare what the recorded usage would have cost at other models' prices |
 | `C-c h A` | `harness-insights` | Show the Insights report: how a period of work with the agents went |
 | `C-c h B` | `harness-delete-budget` | Delete a budget, chosen by name |
 | `C-c h w` | `harness-worktrees` | List the git worktrees of the project |
@@ -348,7 +365,7 @@ default), or nil for nowhere.
 | `C-c h r` | `harness-record-audio` | Start or stop recording from the microphone |
 | `C-c h c` | `harness-connect-remote` | Connect the UI to a remote harness |
 | `C-c h P` | `harness-remote-control` | Pair phones and other devices, and serve them ACP |
-| `C-c h v` | `harness-version` | Show whether the harness runs the latest commit |
+| `C-c h v` | `harness-version` | Show whether the harness runs the latest commit, and update it |
 | `C-c h R` | `harness-reload` | Reload the harness in place |
 | `C-c h L` | `harness-show-log` | Show the harness log |
 | `C-c h ?` | `harness-menu` | Open the menu of every command |
@@ -780,7 +797,7 @@ its answer where it wanted to move.
 A conversation that nears its model's context window is compacted
 before the next turn, unless its provider compacts on its own side, as
 Claude Code does: something much smaller stands in for it from then on,
-and the earlier messages stay in the conversation tree. There are four
+and the earlier messages stay in the conversation tree. There are five
 kinds:
 
 - **Summary**: the session's model summarises the whole conversation.
@@ -797,6 +814,12 @@ kinds:
 - **Fresh start**: nothing is carried over, not even a summary. The
   model starts with a short note saying so, and looks back at what it
   needs with `session_history` (below). It costs nothing.
+- **Cut old context**: the oldest messages are dropped and the most
+  recent ones are kept as they were. A short note says what went, so
+  the model knows to look the rest up with `session_history` rather
+  than assume the conversation it has is all of it. It costs nothing,
+  and it is the one to reach for when the conversation is too big to
+  summarise: nothing has to be read to make it.
 
 Whichever kind it is, the conversation it replaced stays on record.
 The compaction ends in a line pointing the model at the
@@ -818,22 +841,37 @@ compacts the current session by hand, between turns: it asks which kind,
 naming what each costs, beside a table of who writes each, what it
 costs and what it does, and of what carrying on without compacting
 costs. Typing `/compact` in the message box asks the same;
-`/compact brief`, `/compact summary`, `/compact transcript` or
-`/compact fresh` (or just `b`, `s`, `t` or `f`) compacts that way at once. The chat then shows the
+`/compact brief`, `/compact summary`, `/compact transcript`,
+`/compact fresh` or `/compact truncate` (or just `b`, `s`, `t`, `f` or
+`c`) compacts that way at once. The chat then shows the
 compaction where the conversation now starts, with `[open the
 transcript]` for a transcript file.
+
+Asking mid-turn does not have to wait: when the session is running a
+turn, the question first offers to interrupt the step and compact now,
+or to queue the compaction for the turn's next boundary (its next step,
+or its end), and `/compact` offers the same. Interrupting ends the
+turn: the step in flight, and anything it had not recorded yet, are
+lost, so queueing is the one to pick when the turn has work to finish.
+The agent itself can do this with the `compact` tool: it names a kind
+and asks to `queue` the compaction (the default) or to `interrupt` the
+turn first, which is what an agent does when it sees the context
+filling up mid-task.
 
 A provider's prompt cache lasts only a while after its last use: five
 minutes or an hour for Claude, hours for DeepSeek (see
 `harness-cache-ttl`). Once it expires, the next message re-sends the
 whole conversation uncached, at the full input price. A panel above
 the message box says when the cache expired and what the next message
-will cost instead of what it would have cost cached. Its last line offers
+will cost instead of what it would have cost cached. It never shows
+while the session's turn is running — a session waiting on a tool
+approval included, whose next request is that turn's own — only once
+the session is waiting for you. Its last line offers
 to compact the conversation first, a button and a key per kind with
 what each costs:
 
 ```
-Compact it first   b  Brief summary (~$0.011)   s  Summary (~$0.463)   t  Transcript file (free)   f  Fresh start (free)
+Compact it first   b  Brief summary (~$0.011)   s  Summary (~$0.463)   t  Transcript file (free)   f  Fresh start (free)   c  Cut old context (free)
 ```
 
 Press the key with point on that line, or click a button, and the
@@ -919,8 +957,9 @@ this), the new conversation gets the transcript up to the message.
 below the session. A BTW is a new, empty session that shares nothing
 with the session or with other BTWs, which makes it a good place for
 quick questions. It has the full chat interface, including the header
-line with the model and permission mode, which start from the
-session's, the thinking level and whether it is non-interactive. Two
+line with its model, permission mode, thinking level and whether it is
+non-interactive. The permission mode starts from the session's; the
+model and the thinking level are those of a quick question, below. Two
 extra controls appear at the front of its header line:
 
 - `[close]` (`C-c C-k`) closes the BTW. A BTW in which nothing was
@@ -930,11 +969,35 @@ extra controls appear at the front of its header line:
 The rest of its keys are the chat's: `C-c >`, for one, quotes its
 answer, or the part of it you select, in the box to follow up on it.
 
-So that quick questions get quick answers, a BTW starts at the `low`
-thinking level, whatever the session's level is. Set
-`harness-btw-thinking` to choose another level, or to nil to start
-from the session's level. A BTW whose model does not offer that level
-starts at the session's.
+So that quick questions get quick answers and cost little, a BTW runs on
+a cheap model and starts at the `low` thinking level, whatever the
+session's model and level are. Two settings, independent of each other:
+
+- `harness-btw-model` is the model. By default (`auto`) it is the
+  simple tier of the provider of the session's model (Haiku for a Claude
+  Code session on Opus, say); the BTW keeps the session's own model when
+  its provider names no simple one. Set it to a model (`PROVIDER:MODEL`)
+  to run every BTW on that one, or to nil to keep the session's model.
+- `harness-btw-thinking` is the level. Set it to choose another one, or
+  to nil to start from the session's level. A model that does not offer
+  the level gets the nearest one it offers below it (DeepSeek, which has
+  `low`, `high` and `max`, thinks at `low` for `medium`), or its weakest
+  when it has none below. So a BTW thinks no harder than its model has
+  to, on the session's own model (when its provider has no cheaper one)
+  as on a cheap one, whatever the session's level is. Only a model that
+  lists no levels leaves it to the session: the BTW then starts at the
+  session's level when its model is the session's or offers that too,
+  else at the usual one (`harness-thinking`).
+
+A project can set both for itself (see [Configuration](#configuration)),
+and the BTW's model and level can be changed in the BTW like in any
+session. `C-u C-c h b` asks which model to run that one BTW on, from
+the models the providers list, instead of `harness-btw-model`; an empty
+answer opens nothing. The same goes for the BTW on the task board
+(`C-u b`) and on a node of the conversation tree. A policy that fixes
+`harness-model` ([docs/policy.md](docs/policy.md)) fixes a BTW's model
+too: it runs on that model, `harness-btw-model` changes nothing, and a
+model asked for must be the policy's.
 
 ### Sub-agents
 
@@ -1057,7 +1120,9 @@ call to one anyway, in every permission mode.
   documentation, skills and the web. It coordinates: it asks you
   (`ask_user`), keeps its todo list, notifies you, hands work to other
   sessions and tasks (`session_send`, `task_submit`, `task_control` and
-  the like), asks for a directory and hands a task's work in. It plans
+  the like), and reads or changes what one of them runs with
+  (`session_settings`: a worker's window, model, thinking or budget),
+  asks for a directory and hands a task's work in. It plans
   (`submit_plan`, `retry_step`, `no_plan_needed`). And it runs shell
   commands that are read-only and offline: every directory is mounted
   read-only and the network is cut, so `git log` and `grep` work and
@@ -1075,7 +1140,10 @@ call to one anyway, in every permission mode.
   answered a question, there is nothing to do or a plan is still
   running; `retry_step`; `hand_in` in a task; or handing the work to
   another session or task (`task_submit`, `task_control`,
-  `session_send`, `session_control`). A model that stops without one is
+  `session_send`, `session_control`, and `session_settings` when it
+  changes a setting — giving a worker a larger window or a stronger
+  model is coordination, and a read decides nothing). A model that stops
+  without one is
   sent back with a reminder, twice at most in a turn; after that the
   turn ends, and the transcript says it ended without a decision.
   `no_plan_needed` does not end the turn: the answer follows it.
@@ -1327,6 +1395,14 @@ your checkout itself can be submitted to the **main tree** instead (the
   sessions working for it -- its sub-agents and forks, and the sessions
   resolving its merge conflicts -- never take one, and neither does a
   task in *Merging*, so the merge queue never holds up the next task.
+  The harness's own model calls -- a task's title, the recaps, the
+  permission judges and the like -- are neither tasks nor turns: they
+  never take a slot or wait for one, so a title or a verdict comes even
+  with the board full or the limit at `0`. Being ordinary requests to
+  the model, they are tried again below the board when the connection is
+  lost, as any request is; a title that still fails is not asked for
+  again while its task waits, and its session is named from its first
+  message once the task starts.
 - Each card is one line, with a subtitle that recaps the task: what it is
   doing or has done so far, written by a short model call and refreshed
   at the first of so many turns, seconds or tool calls since the last
@@ -1381,7 +1457,9 @@ your checkout itself can be submitted to the **main tree** instead (the
   (`harness-tasks-context-limit`): they compact sooner than interactive
   sessions, so a long task works from a smaller transcript between
   turns. Set it to another number of tokens to tune that, or to nil to
-  give task sessions the whole window like any other session. A
+  give task sessions the whole window like any other session. The
+  session's transcript says so in a hint when it is created, so the cap
+  is never silent. A
   provider that compacts on its own side keeps its own threshold,
   except Claude Code, which the harness tells to compact at the same
   point.
@@ -1568,7 +1646,11 @@ your checkout itself can be submitted to the **main tree** instead (the
   title rather than being named again, and shows in the session list
   (`C-c h l`) under it, of kind task. Nothing waits for the title: a
   task whose naming fails starts all the same, and its session is named
-  from its first message.
+  from its first message; one still waiting for a slot stays untitled
+  until it starts. At most two titles are asked for at once, and when
+  more wait (a burst of new tasks, or a board of untitled ones found at
+  start-up), the highest priority task's goes first, the oldest first
+  among equals.
 
 Press `?` on the board, or `C-c h ?` in its compose box, to see all of
 the board's commands.
@@ -1872,6 +1954,7 @@ project's, and a project's over the global value.
 - `harness-model`
 - `harness-thinking`
 - `harness-btw-thinking`
+- `harness-btw-model`
 - `harness-permission-mode`
 - `harness-allowed-directories`
 - `harness-sandbox-policy`
@@ -2161,6 +2244,44 @@ priorities unless you click that one. A conspicuous `EDITING N
 CURRENT TASKS` banner shows while it is on, and review, done and
 archived tasks are history and are left alone.
 
+### Session settings, from an agent
+
+`session_settings` reads and changes what a session runs with: its
+model, thinking level, context window limit and budget. It works on the
+calling session by default and on another one by id, a unique id prefix
+or a name. `action=read` shows the model, the thinking, the context
+window and the limit that caps it — with what set the limit: the
+sub-agent cap (`harness-subagent-context-limit`), the task cap
+(`harness-tasks-context-limit`), or a limit set for the session — the
+budget, and the permission mode and non-interactive state. It cannot
+change those last two, nor allowed directories, the working directory or
+the host: a call naming one of them is refused, and the refusal names
+the tool that has it (`set_non_interactive`, `request_directory_access`
+or `session_move`).
+
+`action=set` changes the model, the thinking level (`default` for the
+model's own), the context window limit (a token count such as `200000`
+or `200k`, or `model` for the model's own window) and the session's own
+budget (in US dollars, with `budget_hard` for one that stops the
+session's next turn once it is spent, or `none` to remove it). Every
+change goes through the same `session/update` the UI uses, so the chat,
+the header line and remote clients refresh, and it leaves a hint in the
+affected session's transcript naming who made it, the setting, the old
+value and the new one — `Context window limit 128k → 200k, set by
+session «planner»`, or "set by the session itself" for its own — and,
+for a running session, that it takes effect from its next request. A
+change to another session shows in the caller's result too. A setting
+your administrator's policy fixes is refused before anything changes
+(see [Policy](#policy)).
+
+The permission chain decides every call. A read changes nothing, so it
+is a read: ask mode allows it, as it allows reading a transcript. A set
+changes harness state, so in ask mode the harness asks you about it, or
+lets a standing rule decide; in auto mode, and in a session with nobody
+there, the auto-mode judge weighs it; yolo allows it. Raising its own
+budget or model is no special case — the same chain decides it, and the
+budget is money, not a permission.
+
 ### Usage and budgets
 
 The usage dashboard (`C-c h u`) lists every quota window with its reset
@@ -2177,6 +2298,16 @@ provider the list does not name keeps its own model first, the list
 behind it.  There `f` adds an entry, `c` forgets that one ran out so it
 is tried again, `M-<up>` and `M-<down>` move the entry at point, and `d`
 removes it.
+
+`C` (or the header's `[compare]`, `M-x harness-cost-compare`) answers
+"how much would this have cost using a different provider?": it
+re-prices the tokens the dashboard recorded at every priced model of
+the catalogue and lists them cheapest first, each with how much more or
+less it is than those tokens at API prices — the value the comparison
+is about, since a plan-covered call was billed nothing.  `g` refreshes
+it, `t` changes the period, and a prefix argument asks which period, or
+which session (`C-u C-u`).  Nothing is recorded or changed: the
+recorded cost, the rows and the budgets stay as they are.
 
 Grouped by project, every task's git worktree is folded under the
 project it belongs to: one line per project, with the total and how many

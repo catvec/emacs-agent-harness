@@ -742,7 +742,7 @@ supervisor's workers pass the result to `session/create' or
 
 (defun harness-tools-agent--tokens (n)
   "Format N tokens as `harness-format-tokens' does, but \"90k\" for \"90.0k\"."
-  (replace-regexp-in-string "\\.0+\\([kM]\\)\\'" "\\1" (harness-format-tokens n)))
+  (harness-format-tokens-compact n))
 
 (defun harness-tools-agent-context-limit-hint (limit fork &optional inherited)
   "Return the text of a hint saying a sub-agent's window is capped at LIMIT.

@@ -33,6 +33,14 @@
   (harness-update-test--git dir "add" file)
   (harness-update-test--git dir "commit" "-q" "-m" message))
 
+(defun harness-update-test--commit-with-body (dir file content subject body)
+  "Write CONTENT to FILE in the repository DIR and commit it with SUBJECT and BODY."
+  (let ((path (expand-file-name file dir)))
+    (make-directory (file-name-directory path) t)
+    (with-temp-file path (insert content)))
+  (harness-update-test--git dir "add" file)
+  (harness-update-test--git dir "commit" "-q" "-m" subject "-m" body))
+
 (defun harness-update-test--read (file)
   "Return the contents of FILE."
   (with-temp-buffer (insert-file-contents file) (buffer-string)))
@@ -165,12 +173,88 @@ The build is straight's kind, links into a clone; the clone moved on."
                        (harness-update-test--git clone "rev-parse" "HEAD")))
         (should (equal (harness-update-test--git clone "rev-parse" "--short" "HEAD")
                        (plist-get result :to)))
-        ;; The commits that came in, oldest first, each with its subject.
-        (should (equal '("Second" "Add a module")
-                       (mapcar (lambda (line) (substring line (1+ (string-search " " line))))
+        ;; The commits that came in, newest first, each with its subject.
+        (should (equal '("Add a module" "Second")
+                       (mapcar (lambda (c) (plist-get c :subject))
                                (plist-get result :commits))))
         (should (equal ";; two\n" (harness-update-test--read (expand-file-name "harness.el" clone))))
         (should (file-exists-p (expand-file-name "lisp/modules/harness-new.el" clone)))))))
+
+
+(ert-deftest harness-update-fast-forwards-with-no-upstream-configured ()
+  "A checkout whose branch tracks nothing follows origin's branch of the same name."
+  (harness-update-test-with-clone
+    (harness-update-test--git clone "config" "--unset" "branch.main.remote")
+    (harness-update-test--git clone "config" "--unset" "branch.main.merge")
+    (harness-update-test--commit upstream "harness.el" ";; two\n" "Second")
+    (let ((result (harness-test-await (harness--update-checkout clone) 30)))
+      (should (equal (harness-update-test--git upstream "rev-parse" "HEAD")
+                     (harness-update-test--git clone "rev-parse" "HEAD")))
+      (should (equal '("Second") (mapcar (lambda (c) (plist-get c :subject))
+                                         (plist-get result :commits)))))))
+
+(ert-deftest harness-update-refuses-an-untracked-branch-the-remote-lacks ()
+  "A branch with no upstream, and no such branch on origin, is refused by name."
+  (harness-update-test-with-clone
+    (harness-update-test--git clone "config" "--unset" "branch.main.remote")
+    (harness-update-test--git clone "config" "--unset" "branch.main.merge")
+    (harness-update-test--git clone "checkout" "-q" "-b" "topic")
+    (let ((head (harness-update-test--git clone "rev-parse" "HEAD")))
+      (should (string-match-p "follows no upstream branch and origin has no branch topic to fetch"
+                              (harness-update-test--failure (harness--update-checkout clone))))
+      (should (equal head (harness-update-test--git clone "rev-parse" "HEAD"))))))
+
+(ert-deftest harness-update-refuses-a-checkout-without-a-remote ()
+  "A checkout with no remote at all has nothing to update from."
+  (harness-update-test-with-clone
+    (harness-update-test--git clone "remote" "remove" "origin")
+    (let ((head (harness-update-test--git clone "rev-parse" "HEAD")))
+      (should (string-match-p "has no remote to update from"
+                              (harness-update-test--failure (harness--update-checkout clone))))
+      (should (equal head (harness-update-test--git clone "rev-parse" "HEAD"))))))
+
+(ert-deftest harness-update-lists-a-commit-body ()
+  "The commits an update brought are read as changelog entries, body included."
+  (harness-update-test-with-clone
+    (harness-update-test--commit-with-body upstream "harness.el" ";; two\n"
+                                           "Second" "A body line.\nAnother body line.")
+    (let* ((result (harness-test-await (harness--update-checkout clone) 30))
+           (commit (car (plist-get result :commits))))
+      (should (equal "Second" (plist-get commit :subject)))
+      (should (string-match-p "A body line\\.\nAnother body line\\." (plist-get commit :body)))
+      (should (= 1 (plist-get result :count))))))
+
+(ert-deftest harness-update-straight-pulls-the-package ()
+  "A checkout straight.el manages is updated with its own pull, not a git fetch."
+  (harness-update-test-with-clone
+    (let ((before (harness-update-test--git clone "rev-parse" "HEAD"))
+          (pulled nil))
+      (cl-letf (((symbol-function 'harness--straight-package) (lambda () "harness"))
+                ((symbol-function 'straight-pull-package)
+                 (lambda (package)
+                   (setq pulled package)
+                   (harness-update-test--commit clone "harness.el" ";; straight\n" "Straight")
+                   t)))
+        (let ((result (harness-test-await (harness--update-package clone) 30)))
+          (should (equal "harness" pulled))
+          (should (equal "Straight" (plist-get (car (plist-get result :commits)) :subject)))
+          (should (not (equal before (harness-update-test--git clone "rev-parse" "HEAD")))))))))
+
+(ert-deftest harness-update-straight-resets-a-broken-pull ()
+  "straight's pull that lands on a commit that does not compile is put back."
+  (harness-update-test-with-clone
+    (let ((head (harness-update-test--git clone "rev-parse" "HEAD")))
+      (cl-letf (((symbol-function 'harness--straight-package) (lambda () "harness"))
+                ((symbol-function 'straight-pull-package)
+                 (lambda (_package)
+                   (harness-update-test--commit clone "lisp/ui/harness-ui-broken.el"
+                                                ";;; -*- lexical-binding: t -*-\n(defun harness-ui-broken ()\n  (list 1\n"
+                                                "Break the build")
+                   t)))
+        (should (string-match-p "is broken, so it was not installed"
+                                (harness-update-test--failure (harness--update-package clone))))
+        (should (equal head (harness-update-test--git clone "rev-parse" "HEAD")))
+        (should-not (file-exists-p (expand-file-name "lisp/ui/harness-ui-broken.el" clone)))))))
 
 (ert-deftest harness-update-refuses-a-version-that-does-not-compile ()
   "An upstream commit with a file that does not compile is never installed.
@@ -226,8 +310,8 @@ It is checked out of the clone and compiled elsewhere, then thrown away."
       (harness-update-test--commit upstream "lisp/ui/harness-ui-new.el" ";; new\n" "Third")
       (harness-update-test--commit upstream "harness.el" ";; four\n" "Fourth")
       (let ((result (harness-test-await (harness--update-checkout shallow) 60)))
-        (should (equal '("Third" "Fourth")
-                       (mapcar (lambda (line) (substring line (1+ (string-search " " line))))
+        (should (equal '("Fourth" "Third")
+                       (mapcar (lambda (c) (plist-get c :subject))
                                (plist-get result :commits))))
         (should (equal (harness-update-test--git upstream "rev-parse" "HEAD")
                        (harness-update-test--git shallow "rev-parse" "HEAD")))
@@ -277,7 +361,7 @@ It is checked out of the clone and compiled elsewhere, then thrown away."
     (harness-update-test--commit upstream "harness.el" ";; two\n" "Second")
     (harness-update-test--git clone "checkout" "-q" "--detach" "HEAD")
     (let ((head (harness-update-test--git clone "rev-parse" "HEAD")))
-      (should (string-match-p "follows no upstream branch"
+      (should (string-match-p "follows no branch to update from: its HEAD is detached"
                               (harness-update-test--failure (harness--update-checkout clone))))
       (should (equal head (harness-update-test--git clone "rev-parse" "HEAD"))))))
 

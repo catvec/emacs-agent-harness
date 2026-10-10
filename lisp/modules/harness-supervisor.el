@@ -355,12 +355,19 @@ plan engine defines the others, and an extension adds its own here.")
 
 (defvar harness-supervisor-decision-tools
   '("no_plan_needed" "submit_plan" "retry_step" "hand_in" "task_submit" "task_control"
-    "session_send" "session_control")
+    "session_send" "session_control" "session_settings")
   "Names of the tools whose call is a decision that ends a supervising turn.
 A turn in which the model stops without having called one is sent back
 \(see `harness-supervisor--stop').  They are the plan itself or the
 reason none is needed, handing a task in, and handing the work to
-another session or task.")
+another session or task.  `session_settings' is here because giving a
+worker a larger context window or a stronger model is coordination,
+like handing work to another session with `session_send', rather than
+hands-on work; only its set action counts
+\(`harness-supervisor--decision-call-p'), since a read decides
+nothing.  The permission chain still decides every call, and the tool
+refuses to change the permission mode, non-interactive mode or a
+directory.")
 
 ;;;; The allowlist
 
@@ -376,8 +383,13 @@ another session or task.")
 
 (defconst harness-supervisor--coordination-tools
   '("ask_user" "todo_write" "hand_in" "notify" "session_control" "session_send" "session_move"
-    "set_non_interactive" "set_priority" "task_control" "task_submit")
-  "Tools a supervising session uses to coordinate with the user and other sessions.")
+    "set_non_interactive" "set_priority" "task_control" "task_submit" "session_settings")
+  "Tools a supervising session uses to coordinate with the user and other sessions.
+`session_settings' is one: giving a worker a larger context window or a
+stronger model is coordination, not hands-on work, and the permission
+chain decides each call.  It cannot widen a session's permissions
+anyway: the tool refuses the permission mode, non-interactive mode,
+allowed directories, the working directory and the host.")
 
 (defun harness-supervisor--allowed-tools ()
   "Return the names of the tools a supervising session may use besides bash.
@@ -1348,6 +1360,18 @@ budget after it."
   "Return the message that tells a turn which made N tool calls to wrap up."
   (format "%d tool calls so far. Stop investigating and submit the plan with what you know, putting open questions in the steps." n))
 
+(defun harness-supervisor--decision-call-p (node)
+  "Non-nil when the tool call NODE is a decision of a supervising turn.
+Every tool of `harness-supervisor-decision-tools' is one, except that a
+`session_settings' call counts only when it changes a setting: a read
+decides nothing, so a turn that only looked at a session's settings is
+still owed a decision."
+  (let ((tool (plist-get node :tool)))
+    (if (equal tool "session_settings")
+        (not (equal "read" (downcase (format "%s"
+                                             (plist-get (plist-get node :input) :action)))))
+      (and (member tool harness-supervisor-decision-tools) t))))
+
 (defun harness-supervisor--on-tool-call (session-id node)
   "Count the tool call NODE of SESSION-ID; note a decision; nudge a long turn.
 A subscriber of `agent/tool-call', for a supervising session.  The nudge
@@ -1355,7 +1379,7 @@ is a steering message the running turn takes at its next step."
   (when (harness-supervisor--active-id-p session-id)
     (let ((n (1+ (gethash session-id harness-supervisor--calls 0))))
       (puthash session-id n harness-supervisor--calls)
-      (when (member (plist-get node :tool) harness-supervisor-decision-tools)
+      (when (harness-supervisor--decision-call-p node)
         (harness-supervisor--note-decision session-id (plist-get node :call-id)))
       (when (harness-supervisor--budget-point-p n)
         (harness-catch (harness-call-async 'agent/prompt session-id (harness-supervisor--budget-text n)
