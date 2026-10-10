@@ -25,8 +25,10 @@
 ;;
 ;; The model reads the board only, as a rule.  When the board does not
 ;; say enough it may ask once to look further, instead of answering: the
-;; sessions whose transcripts mention a text (grep over their logs), or
-;; the latest transcript of up to three tasks; then it must answer.
+;; sessions whose transcripts mention a text (by `session/search', its
+;; words in any form, best match first; by grep over the logs, for the
+;; text as typed, without that module), or the latest transcript of up
+;; to three tasks; then it must answer.
 ;;
 ;; Every search runs under a session id of its own, so a provider that
 ;; keeps a process per session (the Claude CLI) gives each search a
@@ -461,10 +463,49 @@ nothing; IDS name tasks of TASKS, at most
             (to (min (length text) (+ pos (length needle) 90))))
         (concat (if (> from 0) "…" "") (substring text from to) (if (< to (length text)) "…" ""))))))
 
+(defun harness-tasks-search--find (needle tasks)
+  "Return a promise of the text saying which of TASKS' transcripts mention NEEDLE.
+They are searched by `session/search', for NEEDLE's words in any form,
+best match first.  When no transcript has every word, the text says the
+ones listed have some of them; when none has any, and an embedding
+model is set, that they are the nearest in meaning."
+  (let ((by-session (make-hash-table :test 'equal)))
+    (dolist (task tasks)
+      (when (stringp (plist-get task :session))
+        (puthash (plist-get task :session) task by-session)))
+    (if (zerop (hash-table-count by-session))
+        (harness-resolved (format "No task session mentions %S." needle))
+      (harness-then
+       (harness-call 'session/search needle
+                     (list :mode 'text :sessions (hash-table-keys by-session)
+                           :max-sessions (hash-table-count by-session) :max-matches 2))
+       (lambda (result)
+         (let ((found (cl-remove-if-not (lambda (s) (plist-get s :hits)) (plist-get result :sessions))))
+           (if (null found)
+               (format "No task session mentions %S." needle)
+             (concat (format (cond ((equal (plist-get result :engine) "vectors")
+                                    "No task session mentions %S; these are the nearest in meaning:")
+                                   ((plist-get result :loose)
+                                    "No task session mentions all of %S; these mention some of it:")
+                                   (t "Task sessions that mention %S:"))
+                             needle)
+                     (mapconcat (lambda (s)
+                                  (format "\n%s: %s" (plist-get (gethash (plist-get s :id) by-session) :id)
+                                          (mapconcat (lambda (h) (plist-get h :snippet)) (plist-get s :hits) " | ")))
+                                found "")))))))))
+
 (defun harness-tasks-search--grep (needle tasks)
   "Return a promise of the text saying which of TASKS' transcripts mention NEEDLE.
-The node logs are searched by `harness-tasks-search--grep-program', in a
-process: transcripts are never loaded just to be searched."
+With the session search (harness-session-search.el) that is
+`harness-tasks-search--find'.  Without it, the node logs are searched by
+`harness-tasks-search--grep-program', in a process: transcripts are
+never loaded just to be searched."
+  (if (harness-method-exists-p 'session/search)
+      (harness-tasks-search--find needle tasks)
+    (harness-tasks-search--grep-logs needle tasks)))
+
+(defun harness-tasks-search--grep-logs (needle tasks)
+  "Return a promise of the text saying which of TASKS' logs hold NEEDLE, by grep."
   (let* ((dir (expand-file-name "sessions" harness-state-directory))
          (by-session (make-hash-table :test 'equal))
          (files (cl-loop for task in tasks

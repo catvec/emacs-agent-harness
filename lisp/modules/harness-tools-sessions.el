@@ -8,9 +8,11 @@
 ;; Sessions:
 ;; - `session_list' lists sessions (this project by default) with
 ;;   status, model, usage and whether they wait on the user.
-;; - `session_search' finds sessions whose transcript contains a string.
-;;   It greps the node logs on disk in a subprocess, so transcripts are
-;;   never loaded into memory just to be searched.
+;; - `session_search' finds sessions by their transcripts and names:
+;;   full-text search by words, best match first, by default; the exact
+;;   text, a regexp, or what is nearest in meaning on request.  The
+;;   search is `session/search' (harness-session-search.el), over an
+;;   SQLite index of the node logs, and grep over the logs themselves.
 ;; - `session_read' shows the recent transcript of one session.
 ;; - `session_send' sends a message: it starts a turn on an idle
 ;;   session, steers a running one, or queues for the next turn; it can
@@ -65,14 +67,6 @@
 
 (defconst harness-tools-sessions--wait-max 3600
   "Longest wait, in seconds, a `session_wait' or `task_wait' call may ask for.")
-
-(defconst harness-tools-sessions--grep-program "grep"
-  "Program `session_search' runs over the transcript logs.")
-
-(defconst harness-tools-sessions--piece 50000
-  "Length of the pieces of a long text a regexp is run over one at a time.
-A regexp like `a.*b' overflows the matcher over a line of a megabyte,
-but not over a piece this long; see `harness-tools-sessions--locate'.")
 
 ;;;; Formatting
 
@@ -267,160 +261,73 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
 
 ;;;; session_search
 
-(defun harness-tools-sessions--json-fragment (text)
-  "Return TEXT as it appears inside a JSON string."
-  (let ((s (json-serialize text)))
-    (substring s 1 -1)))
+(defun harness-tools-sessions--hit-tag (hit)
+  "Return the tag that opens the line of search HIT: its node's kind and id.
+A user message the user did not write says who sent it."
+  (format "[%s %s%s]" (plist-get hit :kind) (plist-get hit :node)
+          (if (and (eq (plist-get hit :kind) 'user) (plist-get hit :from-text))
+              (concat ", from " (plist-get hit :from-text))
+            "")))
 
-(defun harness-tools-sessions--locate (text query regexp)
-  "Return (START . END) of the first match of QUERY in TEXT, or nil.
-QUERY is literal text, or a regexp when REGEXP is non-nil; case is
-ignored.  Literal text is found by one linear scan, however long TEXT
-is.  A regexp that overflows the matcher over the whole of TEXT, as
-`a.*b' does over a line of a megabyte, runs over overlapping pieces of
-`harness-tools-sessions--piece' characters instead; a regexp Emacs
-cannot read finds nothing."
-  (let ((re (if regexp query (regexp-quote query)))
-        (case-fold-search t))
-    (condition-case nil
-        (and (string-match re text) (cons (match-beginning 0) (match-end 0)))
-      (invalid-regexp nil)
-      (error
-       (let ((len (length text))
-             (piece harness-tools-sessions--piece))
-         ;; Each piece overlaps the next by half, so a match up to half a
-         ;; piece long lies whole in one of them.
-         (cl-loop for at from 0 below len by (/ piece 2)
-                  for part = (substring text at (min len (+ at piece)))
-                  when (ignore-errors (string-match re part))
-                  return (cons (+ at (match-beginning 0)) (+ at (match-end 0)))))))))
+(defun harness-tools-sessions--search-mode (input)
+  "Return the search mode INPUT asks for, a string: its mode, else regexp or text."
+  (let ((mode (plist-get input :mode)))
+    (cond ((and (stringp mode) (not (string-empty-p mode))) mode)
+          ((harness-json-true-p (plist-get input :regexp)) "regexp")
+          (t "text"))))
 
-(defun harness-tools-sessions--squeeze (text)
-  "Return TEXT with each run of whitespace made one space."
-  (replace-regexp-in-string "[ \t\n\r]+" " " text t t))
-
-(defun harness-tools-sessions--snippet (text query regexp)
-  "Return the part of TEXT around the first match of QUERY (a REGEXP when non-nil).
-The snippet is one line, its whitespace squeezed: up to 70 characters
-before the match, the match and up to 90 after it, cut 300 characters
-after the start of a long match.  Only a window of TEXT around the
-match is read, so a node of megabytes costs no more than a short one."
-  (let ((len (length text))
-        (match (harness-tools-sessions--locate text query regexp)))
-    (if (not match)
-        (let ((head (harness-tools-sessions--squeeze (substring text 0 (min len 2000)))))
-          (harness-truncate-end (if (> len 2000) (concat head "…") head) 160))
-      (let* ((start (car match))
-             (end (cdr match))
-             ;; Squeezing shortens whitespace, so read more than is shown.
-             (from (max 0 (- start 400)))
-             (to (min len (+ end 400) (+ start 2000)))
-             (upto (lambda (pos) (harness-tools-sessions--squeeze (substring text from pos))))
-             (window (funcall upto to))
-             (s (length (funcall upto start)))
-             (e (length (funcall upto (min end to))))
-             (b (max 0 (- s 70)))
-             (a (min (length window) (+ e 90) (+ s 300))))
-        (concat (if (or (> from 0) (> b 0)) "…" "")
-                (substring window b a)
-                (if (or (< to len) (< a (length window))) "…" ""))))))
-
-(defun harness-tools-sessions--parse-hits (stdout)
-  "Return ((SESSION-ID . NODE) …) from grep STDOUT, in output order.
-A line of STDOUT holds a whole node, which can be megabytes long:
-`harness-grep-hit' splits it without a regexp."
-  (let (hits)
-    (dolist (line (split-string stdout "\n" t))
-      (when-let* ((hit (harness-grep-hit line ".nodes.jsonl")))
-        (let ((node (ignore-errors (harness-json-parse (cdr hit)))))
-          (when (stringp (plist-get node :kind))
-            (setq node (plist-put node :kind (intern (plist-get node :kind)))))
-          (when node (push (cons (car hit) node) hits)))))
-    (nreverse hits)))
+(defun harness-tools-sessions--search-text (result query)
+  "Return the text of `session/search' RESULT for QUERY."
+  (let* ((sessions (plist-get result :sessions))
+         (total (or (plist-get result :total) (length sessions)))
+         (note (plist-get result :note)))
+    (if (null sessions)
+        (concat (format "No session mentions %S." query) (if note (format " (%s.)" note) ""))
+      (concat
+       (if note (format "(%s.)\n" note) "")
+       (if (plist-get result :loose) "No session has every word; these have some of them.\n" "")
+       (mapconcat
+        (lambda (s)
+          (let ((hits (plist-get s :hits))
+                (session (or (ignore-errors (harness-call 'session/get (plist-get s :id))) s)))
+            (concat (harness-tools-sessions--line session)
+                    (mapconcat (lambda (h)
+                                 (format "\n    %s %s" (harness-tools-sessions--hit-tag h) (plist-get h :snippet)))
+                               hits "")
+                    (let ((more (- (or (plist-get s :matches) 0) (length hits))))
+                      (if (and hits (> more 0)) (format "\n    … %d more matches" more) "")))))
+        sessions "\n")
+       (if (> total (length sessions))
+           (format "\n… %d more sessions match" (- total (length sessions)))
+         "")))))
 
 (defun harness-tools-sessions--search (input ctx)
   "Handler of session_search."
   (let* ((query (or (plist-get input :query) ""))
-         (regexp (harness-json-true-p (plist-get input :regexp)))
-         (scope (harness-tools-sessions--scope input ctx))
-         (self (plist-get ctx :session-id))
-         (max-sessions (or (plist-get input :max_sessions) 20))
          (per-session (or (plist-get input :max_matches) 3))
-         (dir (expand-file-name "sessions" harness-state-directory))
-         (candidates (cl-remove-if-not
-                      (lambda (s) (and (funcall scope s) (not (equal (plist-get s :id) self))))
-                      (harness-call 'session/list)))
-         (by-id (let ((h (make-hash-table :test 'equal)))
-                  (dolist (s candidates h) (puthash (plist-get s :id) s h))))
-         (files (cl-loop for s in candidates
-                         for f = (expand-file-name (format "%s.nodes.jsonl" (plist-get s :id)) dir)
-                         when (file-exists-p f) collect f)))
+         (self (plist-get ctx :session-id))
+         (me (ignore-errors (harness-call 'session/get self))))
     (when (harness-string-blank-p query) (signal 'harness-error (list "session_search needs a query")))
-    ;; Names match too, without reading any log.
-    (let ((name-hits (cl-remove-if-not
-                      (lambda (s) (let ((case-fold-search t))
-                                    (ignore-errors (string-match-p (if regexp query (regexp-quote query))
-                                                                   (or (plist-get s :name) "")))))
-                      candidates)))
-      (harness-then
-       (if (null files)
-           (harness-resolved (list :exit 1 :stdout ""))
-         (harness-run-command
-          (append (list harness-tools-sessions--grep-program "-i" "-H" (format "--max-count=%d" (* 4 per-session))
-                        (if regexp "-E" "-F") "-e"
-                        ;; In the log, text sits inside JSON strings.
-                        (if regexp query (harness-tools-sessions--json-fragment query))
-                        "--")
-                  files)
-          :cwd dir :timeout 60 :name "harness-session-search"))
-       (lambda (r)
-         (unless (memq (plist-get r :exit) '(0 1))
-           (signal 'harness-error (list (format "search failed: %s" (string-trim (or (plist-get r :stderr) (format "%s" (plist-get r :exit))))))))
-         (let ((grouped (make-hash-table :test 'equal)) order)
-           (dolist (hit (harness-tools-sessions--parse-hits (plist-get r :stdout)))
-             (let ((sid (car hit)) (node (cdr hit)))
-               (when (and (gethash sid by-id)
-                          (memq (plist-get node :kind) '(user assistant thinking tool-call tool-result plan compaction))
-                          ;; A literal can match the JSON escapes of a line but not its text.
-                          (or regexp
-                              (harness-tools-sessions--locate (harness-tools-sessions--node-text node) query nil)))
-                 (unless (gethash sid grouped) (push sid order))
-                 (puthash sid (append (gethash sid grouped) (list node)) grouped))))
-           (dolist (s name-hits)
-             (unless (gethash (plist-get s :id) grouped)
-               (push (plist-get s :id) order)
-               (puthash (plist-get s :id) nil grouped)))
-           (let* ((ids (sort (nreverse order)
-                             (lambda (a b) (> (or (plist-get (gethash a by-id) :updated) 0)
-                                              (or (plist-get (gethash b by-id) :updated) 0)))))
-                  (shown (seq-take ids max-sessions)))
-             (harness-tool-ok
-              (if (null ids)
-                  (format "No session mentions %S." query)
-                (concat
-                 (mapconcat
-                  (lambda (sid)
-                    (let ((nodes (gethash sid grouped)))
-                      (concat (harness-tools-sessions--line (gethash sid by-id))
-                              (mapconcat (lambda (n)
-                                           (format "\n    %s %s" (harness-tools-sessions--tag n)
-                                                   (harness-tools-sessions--snippet
-                                                    (harness-tools-sessions--node-text n) query regexp)))
-                                         (seq-take nodes per-session) "")
-                              (if (> (length nodes) per-session)
-                                  (format "\n    … %d more matches" (- (length nodes) per-session))
-                                ""))))
-                  shown "\n")
-                 (if (> (length ids) (length shown))
-                     (format "\n… %d more sessions match" (- (length ids) (length shown)))
-                   "")))))))))))
+    (unless (harness-method-exists-p 'session/search)
+      (signal 'harness-error (list "session_search needs the session-search module, which is not loaded")))
+    (harness-then
+     (harness-call 'session/search query
+                   (list :mode (harness-tools-sessions--search-mode input)
+                         :exclude (and self (list self))
+                         :project (unless (harness-json-true-p (plist-get input :all_projects))
+                                    (or (plist-get me :project) (plist-get ctx :cwd) default-directory))
+                         :max-sessions (or (plist-get input :max_sessions) 20)
+                         :max-matches per-session))
+     (lambda (result) (harness-tool-ok (harness-tools-sessions--search-text result query))))))
 
 (harness-define-tool "session_search"
   :label "Search sessions"
-  :description "Search the transcripts of other sessions (messages, thinking, tool calls and results) and their names for a string, case-insensitively. Returns the matching sessions, newest first, with snippets and node ids; read one with session_read. Searches this project unless all_projects is set; closed sessions are included."
+  :description "Search the transcripts of other sessions (messages, thinking, tool calls and results) and their names. Mode text (the default) is full-text search: words match in any form (\"parse\" finds \"parsing\"), case and accents aside; every word must match; \"quoted words\" match as a phrase, word* as a prefix, a OR b either, and -word excludes; best matches first, and when no session has every word, those with some. Mode literal finds the exact text and regexp an extended regular expression (as grep -E), both case-insensitively, newest sessions first. Mode semantic finds what is nearest in meaning, when the user set an embedding model. Returns the matching sessions with snippets and node ids; read one with session_read. Searches this project unless all_projects is set; closed sessions are included."
   :schema '(:type "object"
-            :properties (:query (:type "string" :description "Text to find.")
-                         :regexp (:type "boolean" :description "Treat query as an extended regular expression (default false).")
+            :properties (:query (:type "string" :description "What to find.")
+                         :mode (:type "string" :enum ("text" "literal" "regexp" "semantic")
+                                :description "text (default), literal, regexp or semantic.")
+                         :regexp (:type "boolean" :description "The same as mode regexp (default false).")
                          :all_projects (:type "boolean" :description "Search every project (default false).")
                          :max_sessions (:type "integer" :description "Most sessions to return (default 20).")
                          :max_matches (:type "integer" :description "Snippets per session (default 3)."))

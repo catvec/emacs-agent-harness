@@ -859,6 +859,64 @@ Without a status, the error's text is read the same way."
                         (harness-http-cancel h))
                       (harness-openai--stream-finish stream 'cancelled))))))
 
+;;;; Embeddings
+
+(defun harness-openai--local-p (endpoint)
+  "Non-nil when ENDPOINT's server runs on this machine: its host is a loopback one."
+  (let ((host (downcase (or (harness-openai--host endpoint) ""))))
+    (or (member host '("localhost" "::1" "[::1]"))
+        (string-prefix-p "127." host)
+        (string-suffix-p ".localhost" host))))
+
+(defun harness-openai--embed (endpoint name texts opts)
+  "Have model NAME of ENDPOINT embed TEXTS; return a promise.
+It resolves to (:vectors VECTORS :usage (:input N)), one vector per
+text in order, as `provider/embed' documents; OPTS `:dimensions' asks
+for vectors that long.  The request is POST /embeddings, which OpenAI,
+OpenRouter, Ollama, LM Studio, llama.cpp and vLLM answer.  In corporate
+mode only a server on this machine is asked: the text would leave it
+otherwise."
+  (let ((key (harness-openai--api-key endpoint))
+        (url (concat (harness-openai--base-url endpoint) "/embeddings"))
+        (dims (plist-get opts :dimensions)))
+    (cond
+     ((and (harness-corporate-p) (not (harness-openai--local-p endpoint)))
+      (harness-rejected
+       (list 'error (format "corporate mode embeds text only on this machine, and %s is at %s"
+                            (plist-get endpoint :id) (harness-openai--host endpoint)))))
+     ((and (null key) (plist-get endpoint :api-key-env))
+      (harness-rejected
+       (list 'error (format "no API key for %s: set %s or add an auth-source entry for %s"
+                            (plist-get endpoint :id) (plist-get endpoint :api-key-env)
+                            (harness-openai--host endpoint)))))
+     (t
+      (harness-then
+       (condition-case err
+           (harness-http-request-json url :method "POST" :headers (harness-openai--headers endpoint key)
+                                      :json (append (list :model name :input (vconcat texts))
+                                                    (and dims (list :dimensions dims)))
+                                      :timeout 120)
+         (error (harness-rejected err)))
+       (lambda (json)
+         (let* ((data (plist-get json :data))
+                (rows (and (listp data) (cl-every #'consp data)
+                           (sort (copy-sequence data)
+                                 (lambda (a b) (< (or (plist-get a :index) 0) (or (plist-get b :index) 0))))))
+                (vectors (mapcar (lambda (row) (plist-get row :embedding)) rows))
+                (usage (plist-get json :usage)))
+           (if (and (= (length vectors) (length texts))
+                    (cl-every (lambda (v) (and (consp v) (numberp (car v)))) vectors))
+               (list :vectors vectors
+                     :usage (list :input (or (and (consp usage)
+                                                  (or (plist-get usage :prompt_tokens) (plist-get usage :total_tokens)))
+                                             0)))
+             (harness-rejected
+              (list 'error (format "%s answered %d embeddings for %d texts"
+                                   (plist-get endpoint :id) (length vectors) (length texts)))))))
+       ;; Returned, not signalled: a server that is down fails every
+       ;; request the background makes, and each would log an error.
+       (lambda (err) (harness-rejected (list 'error (harness-openai--describe-error err)))))))))
+
 ;;;; Registration
 
 (defun harness-openai-register-endpoint (endpoint)
@@ -877,6 +935,7 @@ flag and returns a promise of model plists, as the models function of
       :models (or (plist-get endpoint :models-fn)
                   (lambda (&optional refresh) (harness-openai--models endpoint refresh)))
       :complete (lambda (request) (harness-openai--complete endpoint request))
+      :embed (lambda (name texts opts) (harness-openai--embed endpoint name texts opts))
       :capabilities (harness-openai--capabilities endpoint)
       :tiers (plist-get endpoint :tiers))
     id))

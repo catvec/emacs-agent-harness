@@ -76,13 +76,18 @@ A task asked to stay busy never ends its turn; one asked to fail fails."
 
 (declare-function harness-provider-demo--last-user-text "harness-provider-demo")
 
+(defvar harness-tasks-search-test--modules nil
+  "Modules a test loads besides those every test of the suite loads.")
+
 (defmacro harness-tasks-search-test-with (&rest body)
-  "Load the state layer, tasks and their search with the demo provider; run BODY."
+  "Load the state layer, tasks and their search with the demo provider; run BODY.
+The modules of `harness-tasks-search-test--modules' are loaded too."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
      (let ((harness-acp--server-enabled nil))
-       (dolist (m '(store project config provider provider-demo tools session agent tasks tasks-search acp))
+       (dolist (m (append '(store project config provider provider-demo tools session agent tasks tasks-search acp)
+                          harness-tasks-search-test--modules))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
      (clrhash harness-tools)
@@ -292,6 +297,33 @@ regexp matcher\" once a line passed some hundred thousand characters."
           (should (string-match-p (format "^%s: …x+ see README\\.md for details y+…$" (regexp-quote a)) text))
           (should-not (string-match-p (regexp-quote b) text))
           (should (< (length text) 1000)))))))
+
+(ert-deftest harness-tasks-search-looks-further-by-the-session-search ()
+  "With the session search, the transcripts are searched for the words in
+any form, best match first; when none has every word, the model is told
+the ones listed have some of them, and when none has any, that none does."
+  (let ((harness-tasks-search-test--modules '(session-search)))
+    (harness-tasks-search-test-with
+      (let ((a (harness-tasks-search-test--submit "The parser chokes on nested quotes"))
+            (b (harness-tasks-search-test--submit "Speed up the test suite")))
+        (harness-tasks-search-test--done a b)
+        (let ((plan (harness-tasks-search-test--search
+                     "which one was about quoting?" "{\"grep\":\"quoting parsers\"}"
+                     (format "{\"show\":[\"%s\"]}" a))))
+          (should (equal (list a) (plist-get plan :ids)))
+          (let ((text (harness-tasks-search-test--asked (car harness-tasks-search-test--requests))))
+            (should (string-match-p "^Task sessions that mention \"quoting parsers\":$" text))
+            (should (string-match-p (format "^%s: .*parser chokes on nested quotes" (regexp-quote a)) text))
+            (should-not (string-match-p (regexp-quote b) text))))
+        (harness-tasks-search-test--search "q" "{\"grep\":\"suite giraffe\"}" "{\"show\":[]}")
+        (let ((text (harness-tasks-search-test--asked (car harness-tasks-search-test--requests))))
+          (should (string-match-p "^No task session mentions all of \"suite giraffe\"; these mention some of it:$"
+                                  text))
+          (should (string-match-p (format "^%s: .*Speed up the test suite" (regexp-quote b)) text))
+          (should-not (string-match-p (regexp-quote a) text)))
+        (harness-tasks-search-test--search "q" "{\"grep\":\"giraffe\"}" "{\"show\":[]}")
+        (should (string-match-p "^No task session mentions \"giraffe\"\\.$"
+                                (harness-tasks-search-test--asked (car harness-tasks-search-test--requests))))))))
 
 ;;;; Failures
 

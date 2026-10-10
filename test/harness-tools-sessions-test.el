@@ -27,7 +27,7 @@
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (dolist (m '(store project config provider provider-demo tools session agent tools-agent tasks tools-sessions))
+     (dolist (m '(store project config provider provider-demo tools session agent tools-agent tasks session-search tools-sessions))
        (harness-test-load-module m))
      (clrhash harness-sessions)
      (clrhash harness-agent--turns)
@@ -161,24 +161,46 @@ regexp matcher\" once a line passed some hundred thousand characters."
             (should (string-search small text))
             (should (string-search "Update the README.md please" text))))))))
 
-(ert-deftest harness-tools-sessions-snippet-stays-short ()
-  "A snippet shows the match where it is, on one line, cut to a few hundred characters."
+(defvar harness-session-search-index)
+(defvar harness-session-search-embedding-model)
+
+(ert-deftest harness-tools-sessions-search-modes ()
+  "By default session_search looks for the words in any form, best match
+first, and says when the sessions it lists have only some of them;
+mode literal finds the text as given, regexp a regular expression, and
+semantic needs an embedding model.  A note says why a search matched
+the text as typed."
   (harness-tools-sessions-test-with
-    (let ((text (concat (make-string 1000000 ?x) " see\n\n   README.md   for\tdetails " (make-string 1000000 ?y))))
-      (should (equal (concat "…" (make-string 65 ?x) " see README.md for details " (make-string 77 ?y) "…")
-                     (harness-tools-sessions--snippet text "readme.md" nil)))
-      (should (equal (harness-tools-sessions--snippet text "readme.md" nil)
-                     (harness-tools-sessions--snippet text "R[a-z]+ME\\.md" t)))
-      ;; A long match, which overflows the matcher over the whole text, is
-      ;; cut 300 characters after its start.
-      (let ((snippet (harness-tools-sessions--snippet text "README.*y" t)))
-        (should (string-prefix-p (concat "…" (make-string 65 ?x) " see README.md for details yyy") snippet))
-        (should (= (+ 1 70 300 1) (length snippet))))
-      ;; Without a match, the start of the text.
-      (should (equal (concat (make-string 159 ?x) "…") (harness-tools-sessions--snippet text "zebra" nil)))
-      (should (equal (concat (make-string 159 ?x) "…") (harness-tools-sessions--snippet text "\\(" t)))
-      ;; A short text is shown whole.
-      (should (equal "line 3: ZEBRA stripes" (harness-tools-sessions--snippet "line 3:\nZEBRA  stripes" "zebra" nil))))))
+    (let ((me (harness-tools-sessions-test-session :name "Me"))
+          (a (harness-tools-sessions-test-session :name "Alpha"))
+          (b (harness-tools-sessions-test-session :name "Beta"))
+          (harness-session-search-embedding-model nil))
+      (harness-call 'session/append a '(:kind user :content "The lexer keeps parsing the same file"))
+      (harness-call 'session/append b '(:kind assistant :content "Parse errors are reported twice"))
+      (let ((text (harness-tools-sessions-test-ok me "session_search" '(:query "parse"))))
+        (should (string-search a text))
+        (should (string-search b text))
+        (should (string-match-p "\\[user n-[^]]+\\] The lexer keeps parsing the same file" text))
+        (should (string-match-p "\\[assistant n-[^]]+\\] Parse errors are reported twice" text)))
+      (let ((text (harness-tools-sessions-test-ok me "session_search" '(:query "parse" :mode "literal"))))
+        (should (string-search b text))
+        (should-not (string-search a text)))
+      (let ((text (harness-tools-sessions-test-ok me "session_search" '(:query "pars(e|ing) (the|errors)" :mode "regexp"))))
+        (should (string-search a text))
+        (should (string-search b text)))
+      (let ((text (harness-tools-sessions-test-ok me "session_search" '(:query "lexer twice"))))
+        (should (string-match-p "\\`No session has every word; these have some of them\\.\n" text))
+        (should (string-search a text))
+        (should (string-search b text)))
+      (let ((r (harness-tools-sessions-test-run me "session_search" '(:query "parse" :mode "semantic"))))
+        (should (plist-get r :is-error))
+        (should (string-match-p "needs an embedding model" (format "%s" (plist-get r :content)))))
+      (let ((harness-session-search-index nil))
+        (let ((text (harness-tools-sessions-test-ok me "session_search" '(:query "parsing"))))
+          (should (string-match-p "\\`(No full-text index (harness-session-search-index is off): the text was matched as typed\\.)\n"
+                                  text))
+          (should (string-search a text))
+          (should-not (string-search b text)))))))
 
 (ert-deftest harness-tools-sessions-non-ascii-tool-input ()
   ;; A tool call's input is shown as text: session_read gives it as it was

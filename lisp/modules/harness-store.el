@@ -68,25 +68,41 @@
       (mapcar (lambda (f) (concat (file-name-as-directory prefix) f))
               (directory-files dir nil (or regexp "\\`[^.]"))))))
 
-(defvar harness-store--sqlite nil "(DIRECTORY . DB) of the open database.")
+(defvar harness-store--sqlite nil
+  "Open databases, an alist of ((DIRECTORY . NAME) . DB).")
 
-(harness-defmethod store/sqlite ()
-  "Return the open SQLite handle for usage.db, or nil when unsupported."
+(harness-defmethod store/sqlite (&optional name)
+  "Return the open SQLite handle for NAME.db, or nil when unsupported.
+NAME defaults to \"usage\", the database of recorded usage; others
+such as \"search\" (the session search index) live beside it in
+the state directory.  Handles are opened once and reused."
   (when (and (fboundp 'sqlite-available-p) (sqlite-available-p))
-    (let ((dir (expand-file-name harness-state-directory)))
-      (unless (and harness-store--sqlite
-                   (equal (car harness-store--sqlite) dir)
-                   (sqlitep (cdr harness-store--sqlite)))
+    (let* ((dir (expand-file-name harness-state-directory))
+           (key (cons dir (or name "usage")))
+           (cell (assoc key harness-store--sqlite)))
+      (unless (and cell (sqlitep (cdr cell)))
         (harness-ensure-directory dir)
-        (setq harness-store--sqlite
-              (cons dir (sqlite-open (expand-file-name "usage.db" dir)))))
-      (cdr harness-store--sqlite))))
+        (let ((db (sqlite-open (expand-file-name (concat (cdr key) ".db") dir))))
+          ;; Handles of another state directory are stale: close them.
+          (setq harness-store--sqlite
+                (cons (cons key db)
+                      (cl-remove-if (lambda (c)
+                                      (when (or (equal (car c) key)
+                                                (not (equal (caar c) dir)))
+                                        (ignore-errors (sqlite-close (cdr c)))
+                                        t))
+                                    harness-store--sqlite)))
+          (setq cell (car harness-store--sqlite))))
+      (cdr cell))))
 
-(harness-defmethod store/sqlite-close ()
-  "Close the SQLite handle if open."
-  (when harness-store--sqlite
-    (ignore-errors (sqlite-close (cdr harness-store--sqlite)))
-    (setq harness-store--sqlite nil)))
+(harness-defmethod store/sqlite-close (&optional name)
+  "Close the SQLite handle of NAME.db, or every open one when NAME is nil."
+  (setq harness-store--sqlite
+        (cl-remove-if (lambda (cell)
+                        (when (or (null name) (equal (cdar cell) name))
+                          (ignore-errors (sqlite-close (cdr cell)))
+                          t))
+                      harness-store--sqlite)))
 
 (harness-define-module 'store
   :doc "JSON, JSONL and SQLite persistence under the state directory."

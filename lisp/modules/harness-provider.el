@@ -426,7 +426,7 @@ provider records rather than in them, so records made before a reload
 need no slots they lack.")
 
 (cl-defun harness-define-provider (id &key label doc models complete fork quota capabilities tiers
-                                      warm close resolve)
+                                      warm close resolve embed)
   "Register provider ID.
 LABEL and DOC describe it.  MODELS is a function returning a promise of
 model plists; one that takes an argument is passed non-nil when a
@@ -446,20 +446,25 @@ say, so it answers sooner (`provider/warm'); CLOSE takes a session id
 and frees what the provider keeps for it (`provider/close').  RESOLVE,
 when given, takes a model NAME its listing lacks (an alias, a variant,
 a model it knows another way) and the provider's listed models, and
-returns a model plist for it or nil (see `provider/model').  Defining ID
-again replaces it and forgets the models it listed, which it is asked
-for again when needed; other providers' models stay cached."
+returns a model plist for it or nil (see `provider/model').  EMBED, when
+given, takes a model NAME, a list of TEXTS and an OPTS plist
+\(`:dimensions'), and returns a promise of (:vectors VECTORS :usage
+\(:input N)), one vector, a list of numbers, per text in order: the
+provider's models embed text (`provider/embed').  Defining ID again
+replaces it and forgets the models it listed, which it is asked for
+again when needed; other providers' models stay cached."
   (puthash id (make-harness-provider :id id :label (or label (symbol-name id)) :doc doc
                                      :models-fn models :complete-fn complete
                                      :fork-fn fork :quota-fn quota
                                      :capabilities capabilities :tiers tiers)
            harness-providers)
-  (puthash id (list :warm warm :close close :resolve resolve) harness-provider--lifecycle)
+  (puthash id (list :warm warm :close close :resolve resolve :embed embed) harness-provider--lifecycle)
   (harness-provider--forget id)
   id)
 
 (defun harness-provider--hook (id key)
-  "Return provider ID's hook KEY (`:warm', `:close' or `:resolve'), or nil."
+  "Return provider ID's hook KEY, or nil.
+KEY is `:warm', `:close', `:resolve' or `:embed'."
   (plist-get (gethash id harness-provider--lifecycle) key))
 
 (defun harness-provider-get (id)
@@ -959,6 +964,31 @@ logged, never signalled: warming is only ever a head start.  A model
           (and (funcall warm request) t)
         (error (harness-log 'warn "provider %s: warming up failed: %s" pid (harness-error-message err))
                nil)))))
+
+(harness-defmethod provider/embeds-p (model-id)
+  "Non-nil when MODEL-ID's provider embeds text (see `provider/embed')."
+  (pcase-let ((`(,pid . ,_) (harness-provider-parse-model model-id)))
+    (and pid (harness-provider-get pid) (harness-provider--hook pid :embed) t)))
+
+(harness-defmethod provider/embed (model-id texts &optional opts)
+  "Return a promise of the embeddings of TEXTS, strings, by MODEL-ID.
+It resolves to (:vectors VECTORS :usage (:input N)): one vector per
+text, in order, each a list of numbers, and the tokens the request
+took when the provider says.  OPTS is a plist: `:dimensions' asks a
+model that can shorten its vectors for that many.  It rejects when
+`harness-allowed-models' does not allow MODEL-ID, which no provider is
+then asked for, and when MODEL-ID's provider does not embed text."
+  (pcase-let* ((`(,pid . ,name) (harness-provider-parse-model model-id))
+               (embed (and pid (harness-provider-get pid) (harness-provider--hook pid :embed)))
+               (refusal (harness-provider-model-refusal model-id)))
+    (cond
+     (refusal (harness-rejected (list 'harness-error refusal)))
+     ((null pid) (harness-rejected (list 'harness-error (format "No provider in model %s: give it as PROVIDER:NAME" model-id))))
+     ((null (harness-provider-get pid)) (harness-rejected (list 'harness-error (format "No provider for model %s" model-id))))
+     ((null embed) (harness-rejected (list 'harness-error (format "The provider of %s cannot embed text" model-id))))
+     (t (condition-case err
+            (harness-as-promise (funcall embed name texts opts))
+          (error (harness-rejected err)))))))
 
 (harness-defmethod provider/close (model-id session-id)
   "Have MODEL-ID's provider free what it keeps for SESSION-ID: a process, say.
