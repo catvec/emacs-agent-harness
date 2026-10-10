@@ -930,9 +930,13 @@ call to one anyway, in every permission mode.
   `standard` for ordinary work and `hard` for subtle design or
   debugging. They map to the cheap, balanced and frontier models of the
   supervisor's provider. `harness-supervisor-tiers` names a model for a
-  tier instead (a tier it leaves out keeps the default). A provider
-  with no model for a tier runs that step on the supervisor's own model,
-  and a hint says so.
+  tier instead (a tier it leaves out keeps the default). A provider is
+  given a few seconds to list its models before a plan decides, so one
+  that answers late still gives a step the model of its tier; a provider
+  that names no model for a tier (its `:tiers` none, and none of its
+  priced models ranking as that tier) runs that step on the supervisor's
+  own model, and the hint and the answer of `submit_plan` name the
+  provider and say why, so a worker is never silently the expensive one.
 - **Fork or fresh, and `after`.** A step's context is `fork` (the
   default) or `fresh`. A fork worker is a fork of the supervisor at the
   call that submitted the plan, so it sees everything the supervisor
