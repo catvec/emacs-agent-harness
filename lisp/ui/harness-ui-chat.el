@@ -609,13 +609,42 @@ scrolls forward."
   (put command 'scroll-command t)
   (put command 'isearch-scroll t))
 
+(defconst harness-chat--cursor-line-limit 10000
+  "Longest line `harness-chat--cursor-line-fully-visible' brings into view.
+A longer line is left as it is: it cannot fit whole, and asking
+redisplay to try would rescan all of it on every redisplay.")
+
+(defun harness-chat--line-at-most-p (position limit)
+  "Non-nil when the line at POSITION is at most LIMIT characters long.
+Looks at most LIMIT characters either side of POSITION, never the whole
+line."
+  (save-excursion
+    (goto-char position)
+    (let ((back (let ((found (search-backward "\n" (max (point-min) (- position limit)) t)))
+                  (if found (- position (1+ found)) (- position (point-min))))))
+      (and (<= back limit)
+           (let ((end (min (point-max) (+ position (max 0 (- limit back))))))
+             (or (search-forward "\n" end t)
+                 (= end (point-max))))))))
+
 (defun harness-chat--cursor-line-fully-visible (window)
   "The chat's `make-cursor-line-fully-visible', for WINDOW.
 Point's line is brought into full view, as by default, unless WINDOW
 is scrolled partway into a tall line: that would undo the scroll.
 `pixel-scroll-precision-mode' turns the option off everywhere for this
-\(bug#65214)."
-  (zerop (window-vscroll window t)))
+\(bug#65214).
+
+Redisplay asks this for every window it draws, so it must not look at
+the line at all: a chat can hold a line megabytes long (a model wrote a
+whole file, or a failure carried a request body), and measuring it
+\(`line-end-position', `pos-visible-in-window-p', `line-pixel-height')
+would rescan all of it on every redisplay.  Only `window-vscroll', which
+is O(1), and a look at most `harness-chat--cursor-line-limit'
+characters along the line are taken; a line longer than that is left as
+it is rather than asked to be shown whole."
+  (and (zerop (window-vscroll window t))
+       (with-current-buffer (window-buffer window)
+         (harness-chat--line-at-most-p (window-point window) harness-chat--cursor-line-limit))))
 
 ;;;; Auto-scroll
 
@@ -1390,7 +1419,8 @@ down with it: the transcript below it and the compose box still draw."
                                       (or (plist-get node :title) (format "[%s]" (harness-chat-block-kind block)))
                                     text))
              (harness-chat--more-line block)
-             (propertize (format "(shown unformatted: rendering failed with %s)\n" (error-message-string err))
+             (propertize (format "(shown unformatted: rendering failed with %s)\n"
+                                 (harness-error-short-message err))
                          'face 'harness-dim-face)))))
 
 (defun harness-chat--group-calls (group)
