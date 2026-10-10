@@ -1345,8 +1345,10 @@ your checkout itself can be submitted to the **main tree** instead (the
   board's search understands "do the docs
   task first".
 - The `own worktree` / `main tree` switch and the priority button above
-  the compose box apply to the next task only; a second click keeps the
-  setting on, and a coloured line above the box says which is armed.
+  the compose box apply to the next task only; the main-tree switch
+  keeps it on when clicked again, and the priority notice's `[keep on]`
+  keeps the priority for every task. A coloured line above the box says
+  which mode is armed.
   A task that stopped -- its session errored, was cancelled or was
   interrupted -- has [Retry] on its card, and one at work or stopped
   part way has [Pause], which puts it back in *Pending* to carry on

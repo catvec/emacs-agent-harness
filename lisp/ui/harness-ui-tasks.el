@@ -2545,12 +2545,12 @@ and a worktree otherwise."
 (defun harness-ui-tasks-cycle-new-priority (&optional priority)
   "Change the priority the next task is submitted with.
 Each call moves it on from medium to high, then low, then medium again,
-arming the choice for the next task only; a second click while a level
-is armed keeps it on until you click it off (see the notice above the
-compose box).  Called from Lisp, PRIORITY (\"low\", \"medium\" or
-\"high\") sets it.  While the project's slots are full, a waiting task
-of higher priority starts first, and Pending lists them so; the
-priority of a task on the board is changed on its card
+arming the choice for the next task only; the [keep on] button in the
+notice above the compose box keeps the level on, and while a level is
+kept on a click turns it off.  Called from Lisp, PRIORITY (\"low\",
+\"medium\" or \"high\") sets it.  While the project's slots are full, a
+waiting task of higher priority starts first, and Pending lists them
+so; the priority of a task on the board is changed on its card
 \(\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-raise-priority] and \\[harness-ui-tasks-lower-priority])."
   (interactive)
   (let* ((current (harness-ui-tasks--priority harness-ui-tasks--new))
