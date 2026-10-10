@@ -51,7 +51,7 @@
 ;;             changes), :status, :missing and :extra (how many commits
 ;;             the harness lacks and how many the origin lacks, merges
 ;;             counted), :missing-commits and :extra-commits (the newest
-;;             of them, merges left out, each (:commit :date :subject)),
+;;             of them, merges left out, each (:commit :date :subject :body)),
 ;;             :error
 ;;   :verdict  "latest", "behind" or "unknown"
 ;;
@@ -200,16 +200,6 @@ the worktrees of a checkout's tasks all lead to that checkout."
   (let ((host (harness-version--host url)))
     (or (cdr (assoc host harness-version--hosts)) host "upstream")))
 
-(defun harness-version--remote-urls (output)
-  "Parse OUTPUT of git config --get-regexp for remote URLs into (NAME . URL)."
-  (let ((urls nil))
-    (dolist (line (split-string output "\n" t))
-      (when (string-match "\\`remote\\.\\(.+\\)\\.url \\(.+\\)\\'" line)
-        (let ((name (match-string 1 line)))
-          (unless (assoc name urls)
-            (push (cons name (match-string 2 line)) urls)))))
-    (nreverse urls)))
-
 (defun harness-version--upstream (running)
   "Return a promise of the origin the checkout RUNNING was loaded from pulls from.
 That is the remote its branch tracks, on the branch it tracks there:
@@ -226,34 +216,23 @@ rejected."
     (if (not (and dir (plist-get running :commit)))
         (harness-resolved nil)
       (harness-then
-       (harness-all
-        (list (if branch
-                  (harness-revision-git dir (list "for-each-ref"
-                                                  "--format=%(upstream:remotename)%09%(upstream:remoteref)"
-                                                  (concat "refs/heads/" branch)))
-                (harness-resolved ""))
-              (harness-revision-git dir '("config" "--get-regexp" "^remote\\..*\\.url$"))))
-       (lambda (outputs)
-         (let* ((fields (split-string (car (split-string (car outputs) "\n")) "\t"))
-                (remote (nth 0 fields))
-                (ref (nth 1 fields))
-                (urls (harness-version--remote-urls (cadr outputs)))
-                (tracked (and remote (not (member remote '("" "."))) (assoc remote urls)))
-                (pick (or tracked (assoc "origin" urls))))
-           (when pick
-             (let* ((url (cdr pick))
-                    (path (not (harness-version--url-p url)))
-                    (branch (and tracked ref (string-prefix-p "refs/heads/" ref)
-                                 (string-remove-prefix "refs/heads/" ref))))
-               ;; A remote that is a directory, relative to the checkout
-               ;; as git reads it, is a local repository, read on its
-               ;; branch; without one, ls-remote reads the branch its
-               ;; HEAD names, as for a URL.
-               (list :name (harness-version--host-name url)
-                     :kind (if (and path branch) "local" "remote")
-                     :location (if path (file-name-as-directory (expand-file-name url dir)) url)
-                     :branch branch
-                     :upstream t)))))
+       (harness-revision-remote dir branch)
+       (lambda (target)
+         (when target
+           (let* ((url (plist-get target :url))
+                  (path (not (harness-version--url-p url)))
+                  ;; Without a tracked upstream the remote's own HEAD
+                  ;; branch counts, read with ls-remote below.
+                  (branch (and (plist-get target :tracked) (plist-get target :branch))))
+             ;; A remote that is a directory, relative to the checkout
+             ;; as git reads it, is a local repository, read on its
+             ;; branch; without one, ls-remote reads the branch its
+             ;; HEAD names, as for a URL.
+             (list :name (harness-version--host-name url)
+                   :kind (if (and path branch) "local" "remote")
+                   :location (if path (file-name-as-directory (expand-file-name url dir)) url)
+                   :branch branch
+                   :upstream t))))
        (lambda (_err) nil)))))
 
 (defun harness-version--origins (running &optional upstream)
@@ -346,32 +325,23 @@ That is :commit and :branch, with :dirty for a checkout; or :status
 
 ;;;; Relating an origin to the running commit
 
-(defun harness-version--parse-commits (output)
-  "Parse git log OUTPUT, in the format %H%x1f%ct%x1f%s, into commit plists.
-Each is (:commit HASH :date SECONDS :subject TEXT)."
-  (delq nil
-        (mapcar (lambda (line)
-                  (let ((fields (split-string line "\x1f")))
-                    (when (>= (length fields) 3)
-                      (list :commit (nth 0 fields)
-                            :date (string-to-number (nth 1 fields))
-                            :subject (string-join (nthcdr 2 fields) "\x1f")))))
-                (split-string output "\n" t))))
-
 (defun harness-version--describe-commit (repo commit)
-  "Return a promise of (:commit :date :subject) for COMMIT in REPO, or of nil."
-  (harness-then (harness-revision-git repo (list "log" "-1" "--format=%H%x1f%ct%x1f%s" commit "--"))
-                (lambda (output) (car (harness-version--parse-commits output)))
+  "Return a promise of COMMIT as (:commit :date :subject :body), or of nil."
+  (harness-then (harness-revision-git repo (list "log" "-1" "-z"
+                                                 (concat "--format=" harness-revision-commit-format)
+                                                 commit "--"))
+                (lambda (output) (car (harness-revision-parse-commits output)))
                 (lambda (_err) nil)))
 
 (defun harness-version--commits (repo from to)
   "Return a promise of the newest commits of TO that FROM lacks, in REPO.
 Merges are left out: a task's merge says less than its own commits.
-Of nil when git fails."
-  (harness-then (harness-revision-git repo (list "log" "--no-merges"
+Each is (:commit :date :subject :body).  Of nil when git fails."
+  (harness-then (harness-revision-git repo (list "log" "-z" "--no-merges"
                                                  (format "--max-count=%d" harness-version--listed)
-                                                 "--format=%H%x1f%ct%x1f%s" (concat from ".." to) "--"))
-                #'harness-version--parse-commits
+                                                 (concat "--format=" harness-revision-commit-format)
+                                                 (concat from ".." to) "--"))
+                #'harness-revision-parse-commits
                 (lambda (_err) nil)))
 
 (defun harness-version--count (repos running origin)
