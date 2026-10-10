@@ -537,10 +537,11 @@ starts supervised.  A setting its maker gave it in `:ext' stays."
 (defun harness-supervisor--write-up-p (task)
   "Non-nil when TASK, a task view, is being written up or waits in the backlog.
 The tasks module's session then only reads.  That is the state
-`refining', or `pending' with a session: a task that waits for a slot
-has none."
+`refining', or `pending' in the backlog: a task that waits for a slot
+is not one, session and all."
   (or (eq (plist-get task :state) 'refining)
-      (and (eq (plist-get task :state) 'pending) (plist-get task :session) t)))
+      (and (eq (plist-get task :state) 'pending)
+           (harness-json-true-p (plist-get task :backlog)) t)))
 
 (defun harness-supervisor--on-task-changed (task)
   "Set the supervisor setting of the session of TASK, a task view, when it is new.
