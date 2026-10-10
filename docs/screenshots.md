@@ -49,7 +49,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `attachments` | A compose box holding a picture and a video, their thumbnails in the chips, and a link still downloading with its progress | `harness-media-shot-attachments` |
 | `tasks` | The task board, every column filled, a task typed in its box | `harness-media-shot-tasks` |
 | `tasks-search` | The board searched in words, the query typed in its own compose box: one task matches, the archive it did and `[Undo]`, and the box, in its search colours, ready for the next search | `harness-media-shot-tasks-search` |
-| `quick-search` | The quick search opened from the rate-limit session's chat, `acme/ratelimit.py` beside it: its popout lists the command that attaches a file, with `[Run]` and `[Describe]`, and the session that wrote the API guide, with `[Open]` | `harness-media-shot-quick-search` |
+| `quick-search` | The quick search opened from the rate-limit session's chat, `acme/ratelimit.py` beside it: its popout lists the command that attaches a file, with `[Run]` and `[Describe]`, and, under a Sessions heading with `[All matches]`, the session that wrote the API guide, with `[Open]` and the passage the session search found in it | `harness-media-shot-quick-search` |
 | `tasks-long` | That board after weeks of merges, its completed list held back to keep the box in the window | `harness-media-shot-tasks-long` |
 | `tasks-message` | The task board writing a message to a task's session: the box in its message colours | `harness-media-shot-tasks-message` |
 | `report` | The board with a task's report popped out, at its end: the chart it handed in, the test run it quotes, the review banner and the feedback box | `harness-media-shot-report` |
@@ -193,10 +193,13 @@ auto-mode judge always allows, session titles come from
 write-ups from `harness-media--write-ups`, and the search's model --
 the task board's and the quick search's, whose system prompt starts
 "You are the search box" -- from `harness-media--search-answer`, which
-reads the query the message ends with and answers the JSON the search
+reads the query in the first message and answers the JSON the search
 asks for (the `tasks-search` picture archives the slow-request task
-that way, and the `quick-search` one names the command that attaches a
-file and the session that wrote the API guide).  The pictures type the
+that way; the `quick-search` one first asks to look in the sessions'
+transcripts for the guide, and, told what the session search found --
+the real one, over the sessions of the run -- names the command that
+attaches a file and the session that wrote the API guide, which the
+popout then shows with the passage found in it).  The pictures type the
 query in the search's compose box and send it with the box's own
 command, `harness-quick-search-box-submit`, as `RET` does.
 

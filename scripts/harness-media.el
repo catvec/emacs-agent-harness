@@ -1218,15 +1218,19 @@ a sentence; a field left out is empty."
                  :do (harness-json-array (plist-get fields :do)))
            (and (plist-get fields :note) (list :note (plist-get fields :note))))))
 
-(defun harness-media--search-answer (text)
+(defun harness-media--search-answer (text &optional looked)
   "The scripted search model's answer to TEXT, the message carrying the query.
 TEXT is what a search sends its model: where the query was typed, the
 board, the sessions and the commands, then the query, which alone picks
-the answer:
+the answer.  LOOKED is non-nil once the model has asked to look further
+and been told what it found (its second answer):
 - the slow-request warning, asked on the board, shows that task and
   archives it, so the picture has a filter, a toast and an [Undo];
-- attaching the API guide, asked in a chat, names the command that
-  attaches a file and the session that wrote the guide;
+- attaching the API guide, asked in a chat, asks to look in the
+  sessions' transcripts for the guide, as a model does when a name says
+  little, then names the command that attaches a file and the session
+  that wrote the guide, which the session search found by what was said
+  in it: the picture shows the passage, for [Open] to go to;
 - anything else finds nothing."
   (let ((query (harness-media--search-query text))
         (slow (plist-get (plist-get harness-media--world :tasks) :slow))
@@ -1236,8 +1240,10 @@ the answer:
       (harness-media--search-json :show (list slow)
                                   :do (list (list :task slow :action "archive"))))
      ((and guide (string-match-p "\\`how do i attach the api guide" (downcase query)))
-      (harness-media--search-json :sessions (list guide)
-                                  :commands (list "harness-compose-add-attachment" "harness-compose-yank")))
+      (if looked
+          (harness-media--search-json :sessions (list guide)
+                                      :commands (list "harness-compose-add-attachment" "harness-compose-yank"))
+        (harness-json-encode-text (list :sessions "API guide"))))
      (t (harness-media--search-json)))))
 
 (defun harness-media--script (request)
@@ -1253,9 +1259,11 @@ the answer:
       (list (harness-media--say (or (cdr (cl-find-if (lambda (e) (string-match-p (car e) first)) harness-media--titles))
                                     "Work on the API"))))
      ((string-match-p "^## Task refinement" system) (harness-media--write-up first))
-     ;; The task board's search: answer in JSON, as the prompt asks.
+     ;; The harness's search: answer in JSON, as the prompt asks.  The
+     ;; query is in the first message; a second one is what a look at
+     ;; the transcripts came back with.
      ((string-prefix-p "You are the search box" system)
-      (list (harness-media--say (harness-media--search-answer newest))))
+      (list (harness-media--say (harness-media--search-answer first (cdr texts)))))
      ;; The Insights report's summary, in JSON too.
      ((string-prefix-p "You write the Insights report" system)
       (list (harness-media--say (harness-json-encode-text harness-media--insights-summary))))
@@ -2186,11 +2194,13 @@ code beside it the rest.")
   "The quick search, opened from a chat: a command and a session found in words.
 C-c h / in the rate-limit session's chat, `acme/ratelimit.py' beside
 it, opens the search's popout at the bottom of the frame; the line is
-typed in its box and RET sends it.  The scripted model names the command
-that attaches a file and the session that wrote the API guide (see
+typed in its box and RET sends it.  The scripted model looks in the
+sessions' transcripts for the guide, then names the command that
+attaches a file and the session that wrote it (see
 `harness-media--search-answer'), so the popout lists a command with
-[Run] and [Describe] and a session with [Open].  The popout closes
-after the picture."
+[Run] and [Describe] and, under Sessions with its [All matches], a
+session with [Open] and the passage the session search found in it.
+The popout closes after the picture."
   (let ((buffer (harness-media--code-layout (plist-get harness-media--world :ratelimit))))
     (set-frame-size nil harness-media-columns harness-media--quick-search-lines)
     (harness-media--settle 0.5)
