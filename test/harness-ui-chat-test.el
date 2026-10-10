@@ -537,6 +537,53 @@ wrote.  The output goes after the context and before the rate."
           (should (equal "Context tokens in use: 170; output tokens: 70."
                          (get-text-property (+ 2 output) 'help-echo header))))))))
 
+(ert-deftest harness-ui-chat-header-context-figure-raises-the-limit ()
+  "The token figure in the chat header is a button.  It offers the
+session's context limit, up to the model's own window (8k for the demo
+model), and the header shows the new window at once.  The conversation
+is untouched: no node, compaction or turn is added by the change."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Capped"))
+           (buf (harness-ui-chat-test-open sid))
+           (nodes (length (harness-call 'session/nodes sid))))
+      ;; A cap like a sub-agent's: 4k of the 8k model.
+      (harness-call 'session/update sid :context-window-limit 4000 :silent t)
+      (harness-test-wait (lambda () (equal 4000 (plist-get (harness-ui-session sid) :context-window-limit)))
+                         5 "the cap to reach the UI")
+      (harness-test-wait (lambda () (with-current-buffer buf
+                                      (equal 4000 (plist-get harness-chat--session
+                                                             :context-window-limit))))
+                         5 "the cap to reach the chat")
+      (with-current-buffer buf
+        (let* ((header (harness-chat--header most-positive-fixnum))
+               (pos (string-search "0/4.0k" header)))
+          (should pos)
+          ;; A button as the header's other segments are.
+          (should (get-text-property pos 'local-map header))
+          (should (eq 'mode-line-highlight (get-text-property pos 'mouse-face header)))
+          (should (string-match-p "capped at 4.0k" (get-text-property pos 'help-echo header)))
+          (should (string-match-p "changes the limit" (get-text-property pos 'help-echo header)))
+          ;; Run what the button runs: no limit, the model's whole window.
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt table &rest _)
+                       (car (cl-find-if (lambda (o) (string-prefix-p "no limit" (car o))) table)))))
+            (call-interactively #'harness-set-context-limit))))
+      (harness-test-wait (lambda () (null (plist-get (harness-ui-session sid) :context-window-limit)))
+                         5 "the limit cleared")
+      (harness-test-wait (lambda () (with-current-buffer buf
+                                      (equal 8000 (plist-get harness-chat--session :context-window))))
+                         5 "the chat's new window")
+      (with-current-buffer buf
+        (should (string-search "0/8.0k" (harness-chat--header most-positive-fixnum))))
+      ;; The conversation is not touched: at most the hint that says the
+      ;; limit changed, and no restart (a user or assistant node), no
+      ;; compaction and no turn.
+      (let ((now (harness-call 'session/nodes sid)))
+        (should (<= (length now) (1+ nodes)))
+        (dolist (n now)
+          (should (equal "hint" (format "%s" (plist-get n :kind))))))
+      (should (equal "idle" (plist-get (harness-ui-session sid) :status))))))
+
 (ert-deftest harness-ui-chat-hover-help-is-one-line ()
   "Every tooltip of a rendered session fits one echo-area line.
 With tooltips off (`tooltip-mode' nil) the help shows in the echo area,
