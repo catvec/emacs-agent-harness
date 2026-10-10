@@ -4481,7 +4481,15 @@ the words of the queue, naming each child and its state -- the work the
 session's own branch is built on has to be in it first.  Evidence is required: an image or a video (a path inside the
 session's roots), a file, code, a note, or `tool_call' naming an
 earlier call of the session, which is copied into the report as a
-snapshot so the view can show it as the link it is.
+snapshot so the view can show it as the link it is.  A `tool_call'
+names the call by its call id or node id, by the name of its tool (its
+newest call), or by the `#N' or `<tool>#N' handle (1 = newest) a miss
+lists newest-first with node ids and a distinguishing snippet -- the
+model never sees its own call ids, so the name and the handle make
+quoting a call a one-shot rather than a round of probing.  `hand_in'
+calls are not counted and are not named by the tool-name or handle
+forms (an exact call id or node id still names one), so the handles a
+miss lists stay put between the miss and the retry.
 
 `open_harness` (`tools-dev`) opens a second Emacs running the harness
 from a checkout of this project -- a task's worktree, say -- so harness

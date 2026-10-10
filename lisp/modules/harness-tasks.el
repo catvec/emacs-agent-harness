@@ -1143,7 +1143,7 @@ is not merged yet.  Return a promise, or nil when there is nothing to do."
 ;;;; The task prompts
 
 (defconst harness-tasks-hand-in-prompt
-  "Finish with the hand_in tool rather than a plain reply: it hands your summary and your evidence to the user and ends the turn, so the task waits for their review.  The evidence is required, and shows the work rather than describing it -- an image or a video of what you built whenever there is anything to see (take the screenshot first), and the tool call that proves a claim about a command (the tests pass, the command's output) quoted by its call id.  A file, a code block or a note is evidence for what cannot be shown.  Then stop; do not start more work."
+  "Finish with the hand_in tool rather than a plain reply: it hands your summary and your evidence to the user and ends the turn, so the task waits for their review.  The evidence is required, and shows the work rather than describing it -- an image or a video of what you built whenever there is anything to see (take the screenshot first), and the tool call that proves a claim about a command (the tests pass, the command's output) quoted by its call id, by the tool's name (its newest call) or by the `#N` a previous hand_in error listed, so a run whose log you kept can be quoted without running it again.  A file, a code block or a note is evidence for what cannot be shown.  Then stop; do not start more work."
   "What a task's session is told about handing its finished work in.")
 
 (defun harness-tasks--system-prompt (prompt session)
@@ -1168,7 +1168,7 @@ worktree, how it reaches the main branch -- or, in the main tree
                 (format "You are working on one task, unattended, directly in the project's main working tree %s.  There is no worktree and no branch, and nothing merges your work: what you change, commit or delete takes effect right there.  Do not create a branch or a worktree, and commit only if the task asks for it. "
                         (abbreviate-file-name (or (plist-get task :project) (plist-get task :cwd)))))
                (t "You are working on one task of a board, unattended. "))
-              "Do the whole task there. "
+              "Do the whole task there. Run the checks that cover what you changed while you work, and the project's own full check once before handing in, rather than the whole suite after every edit. "
               (if (plist-get task :worktree)
                   (concat "When you are done, commit all of your changes on that branch "
                           "(git add -A, then git commit with a message saying what the change does). "
