@@ -119,9 +119,14 @@ first seconds of 1970."
   "A session is cold once the cache its requests last used lapsed, and it
 has a conversation to lose; one that never cached, or started over, is not."
   (let ((harness-cowboy-min-context 0)
-        (cold '(:head "n1" :cache (:at 1000.0 :ttl 300 :expires 1300.0 :model "m") :usage (:context 5000))))
+        (cold '(:head "n1" :model "m" :cache (:at 1000.0 :ttl 300 :expires 1300.0 :model "m")
+                :usage (:context 5000))))
     (should (harness-cowboy-cold-p cold 2000.0))
     (should-not (harness-cowboy-cold-p cold 1299.0))
+    ;; A cache held for a model the session no longer uses is cold however
+    ;; warm its clock is: it caches nothing for the session's own model.
+    (should (harness-cowboy-cold-p (plist-put (copy-sequence cold) :model "new") 1000.5))
+    (should-not (harness-cowboy-cold-p (plist-put (copy-sequence cold) :cache nil) 1000.5))
     (should-not (harness-cowboy-cold-p (plist-put (copy-sequence cold) :cache nil) 2000.0))
     (should-not (harness-cowboy-cold-p (plist-put (copy-sequence cold) :head nil) 2000.0))
     ;; A small conversation can be left to go uncached.
@@ -142,6 +147,30 @@ has a conversation to lose; one that never cached, or started over, is not."
       (should-not (harness-call 'question/pending sid))
       (should (string-match-p "please refactor the parser"
                               (harness-cowboy-test--request-text (car harness-cowboy-test--requests)))))))
+
+(ert-deftest harness-cowboy-asks-when-the-cache-is-another-models ()
+  "A switch to another model that reads the same conversation asks too.
+The cache is still warm by its clock, but it is held for the model the
+session used before and caches nothing for the one the message goes to:
+carrying on would send the whole conversation uncached with nobody asked."
+  (harness-cowboy-test-with
+    (let ((sid (harness-cowboy-test-session)))
+      (harness-call 'session/usage-add sid (list :input 10 :output 10 :cache-read 3000 :context 3020
+                                                 :cache-at (float-time) :model "demo:old"))
+      (should-not (eq (plist-get (harness-call 'session/get sid) :cache) nil))
+      (let ((p (harness-call 'agent/prompt sid "carry on from the new model")))
+        (let ((payload (plist-get (harness-cowboy-test--question sid) :payload)))
+          (should (eq 'blocked (plist-get (harness-call 'session/get sid) :status)))
+          (should (string-match-p (concat "\\`Your message waits: this session's prompt cache is cold\\.  "
+                                          "It is held for old, which this session no longer uses, "
+                                          "so Demo scripted has none of it\\.")
+                                  (plist-get payload :question)))
+          (should (equal "demo:old" (plist-get (plist-get payload :cowboy) :cache-model)))
+          (should (equal "old" (plist-get (plist-get payload :cowboy) :cache-model-label))))
+        (harness-cowboy-test--answer sid "carry on")
+        (should (eq 'end-turn (plist-get (harness-test-await p 10) :stop-reason)))
+        (should (cl-some (lambda (h) (string-match-p "\\`Prompt cache cold: held for old, not Demo scripted: carrying on with the whole conversation, ~3\\.0k tokens uncached, as you chose\\'" h))
+                         (harness-cowboy-test--hints sid)))))))
 
 ;;;; Asking
 

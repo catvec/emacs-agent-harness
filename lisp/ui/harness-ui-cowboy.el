@@ -6,8 +6,9 @@
 ;; harness asks what goes first (harness-cowboy.el): a brief summary, a
 ;; summary, a transcript file, a fresh start, the whole conversation as
 ;; it is, or not now.  The question is a pending question like any
-;; other; its payload's `:cowboy' says when the cache lapsed, what
-;; carrying on costs and what each choice costs.  This module draws it
+;; other; its payload's `:cowboy' says when the cache lapsed (or that it
+;; is held for a model the session no longer uses), what carrying on
+;; costs and what each choice costs.  This module draws it
 ;; as a panel of its own, in place of the ordinary question panel
 ;; (`harness-ui-pending-panel-functions'), in the chat and in a popout
 ;; of it: who sent the message that waits, what carrying on costs
@@ -156,6 +157,7 @@ session."
 Clock times only, never ages, so it stays true while it shows."
   (let* ((expires (plist-get info :expires))
          (context (plist-get info :context))
+         (stale (harness-ui-cowboy--text (plist-get info :cache-model-label)))
          (model (or (harness-ui-cowboy--text (plist-get info :model-label))
                     (and (plist-get info :model) (harness-ui-model-label (plist-get info :model))))))
     (concat
@@ -163,11 +165,13 @@ Clock times only, never ages, so it stays true while it shows."
                      'face 'harness-label-face)
      "  "
      (propertize (string-join
-                  (delq nil (list (and (numberp expires)
-                                       (format "since %s" (harness-ui-format-clock expires now)))
-                                  model
-                                  (and (numberp context) (> context 0)
-                                       (format "~%s tokens" (harness-format-tokens context)))))
+                  (delq nil (append
+                             (list (cond (stale (format "held for %s, not %s" stale model))
+                                         ((numberp expires)
+                                          (format "since %s" (harness-ui-format-clock expires now)))))
+                             (unless stale (list model))
+                             (list (and (numberp context) (> context 0)
+                                        (format "~%s tokens" (harness-format-tokens context))))))
                   " · ")
                  'face 'harness-dim-face)
      "\n")))
