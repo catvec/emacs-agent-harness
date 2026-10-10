@@ -58,6 +58,12 @@
 (defvar harness-acp--server-enabled)
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
+(defvar harness-agent--cancel-grace)
+(defvar harness-tasks--preempted-message)
+(defvar harness-tasks--paused-message)
+(declare-function harness-tasks--free-slots "harness-tasks")
+(declare-function harness-tasks--slot-project "harness-tasks")
+(declare-function harness-tasks--reject-text "harness-tasks")
 (declare-function harness-provider-demo--last-user-text "harness-provider-demo")
 (declare-function harness-provider-demo--complete "harness-provider-demo")
 (declare-function harness-define-provider "harness-provider")
@@ -73,6 +79,7 @@
 (declare-function harness-supervisor--shutdown "harness-supervisor")
 (declare-function harness-supervisor--recover "harness-supervisor")
 (declare-function harness-supervisor--outstanding "harness-supervisor")
+(declare-function harness-supervisor--stop-outstanding "harness-supervisor")
 (declare-function harness-supervisor--send "harness-supervisor")
 (declare-function harness-tools-agent-context-limit "harness-tools-agent")
 (declare-function harness-tasks--forget-stores "harness-tasks")
@@ -2510,10 +2517,17 @@ and the worker is told what the interrupted one ran on and how it ended."
       (harness-supervisor--shutdown)
       (should-not (harness-call 'agent/outstanding sid))
       (should-not (memq #'harness-supervisor--outstanding (mapcar #'cdr (gethash 'agent/outstanding harness--filters))))
+      (should-not (memq #'harness-supervisor--stop-outstanding
+                        (mapcar #'cdr (gethash 'agent/stop-outstanding harness--filters))))
+      ;; A stopped module stops nothing.
+      (should-not (harness-call 'agent/stop-outstanding sid "its task was returned to the queue"))
+      (should (equal "running" (harness-supervisor-plan-test-state sid "s1")))
       (harness-supervisor--init)
       (harness-supervisor--init)
       (should (equal "Supervisor plan: 1 step running, 2 waiting" (harness-call 'agent/outstanding sid)))
       (should (= 1 (cl-count #'harness-supervisor--outstanding (gethash 'agent/outstanding harness--filters)
+                             :key #'cdr)))
+      (should (= 1 (cl-count #'harness-supervisor--stop-outstanding (gethash 'agent/stop-outstanding harness--filters)
                              :key #'cdr)))
       (should (= 1 (cl-count #'harness-supervisor--on-turn-ended (gethash 'agent/turn-ended harness--subscribers)
                              :key #'cdr))))))
@@ -2586,6 +2600,378 @@ and the worker is told what the interrupted one ran on and how it ended."
       (harness-supervisor-plan-test-wait-state sid "s2" "done")
       (let ((reports (harness-supervisor-plan-test-wait-reports sid 1)))
         (should (string-match-p "finished" (car reports)))))))
+
+;;;; Stopping what runs outside the turn
+
+(defun harness-supervisor-plan-test-as-task (sid)
+  "Make session SID the session of a task, as far as the plan engine can tell."
+  (harness-register-method 'task/for-session
+                           (lambda (id) (and (equal id sid) (list :id "t-1" :session sid)))))
+
+(defun harness-supervisor-plan-test-requests-of (session-id)
+  "Return the requests that session SESSION-ID made, oldest first."
+  (nreverse (cl-remove-if-not (lambda (r) (equal session-id (plist-get r :session)))
+                              (copy-sequence harness-supervisor-plan-test--requests))))
+
+(defmacro harness-supervisor-plan-test-with-held-fork (settle &rest body)
+  "Run BODY with the first `session/fork' held until SETTLE is called.
+SETTLE is bound to a function of `resolve' or `reject'.  `resolve'
+forks now and settles the held promise with the fork, returning its
+id, so the worker is made late; `reject' rejects it and returns nil.
+Every fork after the first is made at once."
+  (declare (indent 1))
+  `(let* ((fork (harness-method-fn (gethash 'session/fork harness--methods)))
+          (held nil)
+          (,settle (lambda (how)
+                     (if (eq how 'reject)
+                         (progn (harness-reject (car held) '(error "The fork came too late")) nil)
+                       (let ((made (apply fork (cdr held))))
+                         (harness-resolve (car held) made)
+                         (plist-get (harness-test-await made 10) :id))))))
+     (harness-register-method
+      'session/fork
+      (lambda (&rest args)
+        (if held
+            (apply fork args)
+          (setq held (cons (harness-make-promise) args))
+          (car held))))
+     ,@body))
+
+(ert-deftest harness-supervisor-plan-stopping-interrupts-a-running-step-and-reports-it-once ()
+  "`agent/stop-outstanding' interrupts a running step, for its reason, and cancels its worker.
+The worker's late end changes nothing, the steps held on it never start,
+and the supervisor is told once: at once in a task's session, queued in
+any other.  Nothing is outstanding afterwards, and retry_step runs the
+step again."
+  (dolist (task '(nil t))
+    (ert-info ((if task "a task's session" "another session"))
+      (harness-supervisor-plan-test-with
+        (let* ((sid (harness-supervisor-plan-test-session))
+               (worker (harness-supervisor-plan-test-running-plan sid))
+               (ended nil))
+          (when task (harness-supervisor-plan-test-as-task sid))
+          (harness-on 'agent/turn-ended (lambda (id reason) (when (equal id worker) (push reason ended))))
+          (setq harness-supervisor-plan-test--requests nil)
+          (should (equal "Supervisor plan: 1 step interrupted"
+                         (harness-call 'agent/stop-outstanding sid "its task was returned to the queue")))
+          ;; At once: the step is interrupted, nothing runs it, and its call has its result.
+          (let ((s1 (harness-supervisor-plan-test-step sid "s1")))
+            (should (equal "interrupted" (plist-get s1 :state)))
+            (should (equal "its task was returned to the queue" (plist-get s1 :error)))
+            (should (equal worker (plist-get s1 :session))))
+          (should (zerop (hash-table-count harness-supervisor--live)))
+          (should (zerop (hash-table-count harness-supervisor--spawns)))
+          (let* ((call (harness-supervisor-plan-test-spawn-call-of sid worker))
+                 (results (harness-supervisor-plan-test-spawn-results sid call))
+                 (output (plist-get (car results) :output)))
+            (should (= 1 (length results)))
+            (should (plist-get (car results) :is-error))
+            (should (string-match-p "its task was returned to the queue" output))
+            (should (string-match-p (format "\\[step s1 (Title of s1) interrupted on demo:frontier, session %s]"
+                                            (regexp-quote worker))
+                                    output)))
+          ;; The worker's turn is cancelled, and its end changes nothing.
+          (harness-test-wait (lambda () ended) 10 "the worker's turn to end")
+          (should (equal '(cancelled) ended))
+          (accept-process-output nil 0.3)
+          (let ((s1 (harness-supervisor-plan-test-step sid "s1")))
+            (should (equal "interrupted" (plist-get s1 :state)))
+            (should (equal "its task was returned to the queue" (plist-get s1 :error)))
+            (should (= 1 (plist-get s1 :attempts))))
+          ;; The steps held on it are still pending and never started.
+          (dolist (id '("s2" "s3"))
+            (let ((step (harness-supervisor-plan-test-step sid id)))
+              (should (equal "pending" (plist-get step :state)))
+              (should (= 0 (plist-get step :attempts)))
+              (should-not (plist-get step :session))
+              (should-not (harness-supervisor-plan-test-step-request id))))
+          (should-not (harness-supervisor-plan-test-requests-of-kind 'subagent))
+          (should-not (cl-some (lambda (hint) (string-match-p "done on" hint))
+                               (harness-supervisor-plan-test-hints sid)))
+          ;; One report from the harness, naming the step and why.
+          (let ((texts (if task
+                           (progn (harness-supervisor-plan-test-wait-reports sid 1)
+                                  (harness-supervisor-plan-test-wait-idle sid)
+                                  (harness-supervisor-plan-test-reports sid))
+                         (let ((queue (plist-get (harness-call 'session/get sid) :queue)))
+                           (should (cl-every (lambda (item) (equal (harness-sender-system "supervisor")
+                                                                   (plist-get item :from)))
+                                             queue))
+                           (mapcar (lambda (item) (plist-get item :text)) queue)))))
+            (should (= 1 (length texts)))
+            (let ((text (car texts)))
+              (should (string-prefix-p
+                       (concat "Supervisor report: the plan's workers were stopped, interrupting 1 running step: s1.\n"
+                               "Why: its task was returned to the queue.\n"
+                               "Nothing runs or starts again on its own: decide for the step below.\n\n"
+                               "Supervisor report: step s1 (Title of s1) was interrupted.\n"
+                               "It ran on tier hard, model demo:frontier (attempt 1).\n"
+                               "Why: its task was returned to the queue.\n")
+                       text))
+              (should (string-match-p (format "Its worker is session %s" (regexp-quote worker)) text))
+              (should (string-match-p "Held on it, pending until it is done: s2 (Title of s2), s3 (Title of s3)\\." text))
+              (should-not (string-match-p "Still running" text))
+              (should (string-match-p "Decide: retry_step s1 to run it again" text))))
+          ;; In a session that is not a task's no turn was started for it.
+          (unless task
+            (should-not (harness-supervisor-plan-test-requests-of-kind 'main))
+            (should-not (harness-call 'agent/running sid)))
+          (should-not (harness-call 'agent/outstanding sid))
+          ;; Stopping again finds nothing.
+          (should-not (harness-call 'agent/stop-outstanding sid "its task was returned to the queue"))
+          ;; retry_step runs it again, and the steps held on it follow.
+          (should-not (plist-get (harness-supervisor-plan-test-run sid "retry_step" '(:step "s1" :reason "the task is back"))
+                                 :is-error))
+          (harness-supervisor-plan-test-wait-state sid "s3" "done")
+          (let ((s1 (harness-supervisor-plan-test-step sid "s1")))
+            (should (equal "done" (plist-get s1 :state)))
+            (should (= 2 (plist-get s1 :attempts)))
+            (should (equal (list :attempt 1 :session worker :model "demo:frontier"
+                                 :error "its task was returned to the queue")
+                           (plist-get s1 :previous))))
+          (harness-supervisor-plan-test-wait-idle sid))))))
+
+(ert-deftest harness-supervisor-plan-steps-stopped-together-are-one-report-and-one-refused-turn ()
+  "Every step interrupted at once goes in one message, so a session whose task
+waits in the queue refuses one turn for them, and keeps the message.  With no
+reason given, the steps were interrupted as their task went back to the queue."
+  (harness-supervisor-plan-test-with
+    (let ((sid (harness-supervisor-plan-test-session))
+          (refused 0))
+      (harness-supervisor-plan-test-behave "a" 'hold)
+      (harness-supervisor-plan-test-behave "b" 'hold)
+      (harness-supervisor-plan-test-submit sid
+                                           (harness-supervisor-plan-test-step-input "a")
+                                           (harness-supervisor-plan-test-step-input "b" :tier "hard")
+                                           (harness-supervisor-plan-test-step-input "c" :after '("a" "b")))
+      (let ((workers (list (harness-supervisor-plan-test-worker sid "a")
+                           (harness-supervisor-plan-test-worker sid "b"))))
+        (harness-supervisor-plan-test-wait-idle sid)
+        ;; The session of a task that waits in the queue: as the tasks
+        ;; module's gate does, it takes no turn a message of the harness's starts.
+        (harness-supervisor-plan-test-as-task sid)
+        (harness-add-filter 'agent/before-turn
+                            (lambda (value next session)
+                              (funcall next (if (equal (plist-get session :id) sid)
+                                                (progn (cl-incf refused)
+                                                       (list :proceed nil :reason "its task waits in the queue"))
+                                              value))
+                              nil)
+                            5)
+        (setq harness-supervisor-plan-test--requests nil)
+        ;; Added to what the handlers before it stopped.
+        (should (equal "a sub-agent; Supervisor plan: 2 steps interrupted"
+                       (harness-run-filter 'agent/stop-outstanding "a sub-agent" sid nil)))
+        (should (equal '("interrupted" "interrupted" "pending")
+                       (mapcar (lambda (id) (harness-supervisor-plan-test-state sid id)) '("a" "b" "c"))))
+        (dolist (id '("a" "b"))
+          (should (equal "its task was returned to the queue"
+                         (plist-get (harness-supervisor-plan-test-step sid id) :error))))
+        (harness-test-wait (lambda () (not (cl-some (lambda (w) (harness-call 'agent/running w)) workers)))
+                           10 "the workers to stop")
+        (accept-process-output nil 0.3)
+        (should (= 1 refused))
+        (let ((reports (harness-supervisor-plan-test-reports sid)))
+          (should (= 1 (length reports)))
+          (let ((text (car reports)))
+            (should (string-prefix-p
+                     (concat "Supervisor report: the plan's workers were stopped, interrupting 2 running steps: a, b.\n"
+                             "Why: its task was returned to the queue.\n"
+                             "Nothing runs or starts again on its own: decide for each step below.\n\n"
+                             "Supervisor report: step a (Title of a) was interrupted.\n")
+                     text))
+            (should (string-match-p "\n\nSupervisor report: step b (Title of b) was interrupted\\.\n" text))
+            (should (string-match-p "Decide: retry_step a to run it again" text))
+            (should (string-match-p "Decide: retry_step b to run it again" text))
+            ;; Neither is reported as running while the other is reported.
+            (should-not (string-match-p "Still running" text))))
+        ;; The model was asked nothing, the steps stay as they are, and nothing is outstanding.
+        (should-not (harness-supervisor-plan-test-requests-of-kind 'main))
+        (should-not (harness-supervisor-plan-test-requests-of-kind 'subagent))
+        (should (equal '("interrupted" "interrupted" "pending")
+                       (mapcar (lambda (id) (harness-supervisor-plan-test-state sid id)) '("a" "b" "c"))))
+        (should-not (harness-call 'agent/outstanding sid))))))
+
+(ert-deftest harness-supervisor-plan-stopping-with-nothing-running-changes-nothing ()
+  "A session with no plan, or none of whose steps runs, has nothing to stop."
+  (harness-supervisor-plan-test-with
+    (let ((none (harness-supervisor-plan-test-session))
+          (sid (harness-supervisor-plan-test-session)))
+      (should-not (harness-call 'agent/stop-outstanding none "its task was returned to the queue"))
+      (should-not (harness-call 'agent/stop-outstanding "no-such-session"))
+      (should (equal "a sub-agent" (harness-run-filter 'agent/stop-outstanding "a sub-agent" none nil)))
+      ;; A failed step, a step held on it, and a step done.
+      (harness-supervisor-plan-test-behave "s1" 'error)
+      (harness-supervisor-plan-test-submit sid
+                                           (harness-supervisor-plan-test-step-input "s1")
+                                           (harness-supervisor-plan-test-step-input "s2" :after '("s1"))
+                                           (harness-supervisor-plan-test-step-input "s3" :tier "hard"))
+      (harness-supervisor-plan-test-wait-state sid "s1" "failed")
+      (harness-supervisor-plan-test-wait-state sid "s3" "done")
+      (harness-supervisor-plan-test-wait-reports sid 1)
+      (harness-supervisor-plan-test-wait-idle sid)
+      (let ((plans (harness-supervisor-plan-test-plans sid))
+            (nodes (length (harness-call 'session/nodes sid))))
+        (setq harness-supervisor-plan-test--requests nil)
+        (should-not (harness-call 'agent/stop-outstanding sid "its task was returned to the queue"))
+        (should (equal "a sub-agent" (harness-run-filter 'agent/stop-outstanding "a sub-agent" sid nil)))
+        (accept-process-output nil 0.2)
+        (should (equal plans (harness-supervisor-plan-test-plans sid)))
+        (should (= nodes (length (harness-call 'session/nodes sid))))
+        (should-not (plist-get (harness-call 'session/get sid) :queue))
+        (should-not harness-supervisor-plan-test--requests)))))
+
+(ert-deftest harness-supervisor-plan-a-step-left-running-by-a-restart-is-stopped-too ()
+  "A step stored running that no worker runs any more counts as outstanding,
+so stopping interrupts it as well: nothing is outstanding afterwards, and
+the recovery finds nothing left to do."
+  (harness-supervisor-plan-test-with
+    (let* ((sid (harness-supervisor-plan-test-session))
+           (worker (harness-supervisor-plan-test-running-plan sid)))
+      (harness-supervisor-plan-test-restart sid)
+      (should (equal "Supervisor plan: 1 step running, 2 waiting" (harness-call 'agent/outstanding sid)))
+      (should (equal "Supervisor plan: 1 step interrupted"
+                     (harness-call 'agent/stop-outstanding sid "its task was returned to the queue")))
+      (should (equal "interrupted" (harness-supervisor-plan-test-state sid "s1")))
+      (should-not (harness-call 'agent/outstanding sid))
+      ;; Its call, found in the transcript, has its result.
+      (let ((results (harness-supervisor-plan-test-spawn-results
+                      sid (harness-supervisor-plan-test-spawn-call-of sid worker))))
+        (should (= 1 (length results)))
+        (should (string-match-p "interrupted" (plist-get (car results) :output))))
+      (should (= 1 (length (plist-get (harness-call 'session/get sid) :queue))))
+      (harness-supervisor--recover)
+      (should (= 1 (length (plist-get (harness-call 'session/get sid) :queue))))
+      (should (equal "its task was returned to the queue"
+                     (plist-get (harness-supervisor-plan-test-step sid "s1") :error))))))
+
+(ert-deftest harness-supervisor-plan-a-worker-made-after-its-step-was-interrupted-never-gets-it ()
+  "A step interrupted while its worker is made is reported at once; the worker,
+made later, is given up: it is never prompted, and nothing shows it."
+  (harness-supervisor-plan-test-with
+    (harness-supervisor-plan-test-with-held-fork settle
+      (let ((sid (harness-supervisor-plan-test-session)))
+        (harness-supervisor-plan-test-submit sid
+                                             (harness-supervisor-plan-test-step-input "s1" :tier "hard")
+                                             (harness-supervisor-plan-test-step-input "s2" :after '("s1")))
+        (should (equal "running" (harness-supervisor-plan-test-state sid "s1")))
+        (should (equal "Supervisor plan: 1 step running, 1 waiting" (harness-call 'agent/outstanding sid)))
+        (should (equal "Supervisor plan: 1 step interrupted"
+                       (harness-call 'agent/stop-outstanding sid "its task was pre-empted")))
+        (let ((s1 (harness-supervisor-plan-test-step sid "s1")))
+          (should (equal "interrupted" (plist-get s1 :state)))
+          (should (equal "its task was pre-empted" (plist-get s1 :error)))
+          (should-not (plist-get s1 :session)))
+        ;; Reported, with no worker to point at.
+        (let ((queue (plist-get (harness-call 'session/get sid) :queue)))
+          (should (= 1 (length queue)))
+          (should (string-match-p "step s1 (Title of s1) was interrupted\\.\n" (plist-get (car queue) :text)))
+          (should (string-match-p "Why: its task was pre-empted\\." (plist-get (car queue) :text)))
+          (should-not (string-match-p "Its worker is session" (plist-get (car queue) :text))))
+        ;; The worker is made now, too late.
+        (let ((late (funcall settle 'resolve)))
+          (should (harness-call 'session/exists-p late))
+          (accept-process-output nil 0.3)
+          (should-not (harness-call 'agent/running late))
+          (should-not (harness-supervisor-plan-test-requests-of late))
+          ;; It holds the transcript it was forked from, and no message of its own.
+          (should-not (cl-some (lambda (node) (equal late (plist-get node :session)))
+                               (harness-supervisor-plan-test-nodes late 'user)))
+          (should-not (cl-some (lambda (node) (string-match-p "^## Step s1:" (plist-get node :content)))
+                               (harness-supervisor-plan-test-nodes late 'user)))
+          (should-not (harness-supervisor-plan-test-spawn-call-of sid late)))
+        (should-not (harness-supervisor-plan-test-step-request "s1"))
+        (let ((s1 (harness-supervisor-plan-test-step sid "s1")))
+          (should (equal "interrupted" (plist-get s1 :state)))
+          (should-not (plist-get s1 :session)))
+        (should (equal "pending" (harness-supervisor-plan-test-state sid "s2")))
+        (should (zerop (hash-table-count harness-supervisor--live)))
+        (should-not (harness-supervisor-plan-test-spawn-calls sid))
+        (should (= 1 (length (plist-get (harness-call 'session/get sid) :queue))))
+        (should-not (harness-call 'agent/outstanding sid))))))
+
+(ert-deftest harness-supervisor-plan-a-late-worker-of-an-interrupted-attempt-leaves-the-next-alone ()
+  "The worker of an interrupted attempt that is made, or fails, after the step
+started again changes nothing: the new attempt runs on its own worker and is done."
+  (dolist (late '(resolve reject))
+    (ert-info ((format "the late worker: %s" late))
+      (harness-supervisor-plan-test-with
+        (harness-supervisor-plan-test-with-held-fork settle
+          (let ((sid (harness-supervisor-plan-test-session)))
+            (harness-supervisor-plan-test-behave "s1" '(reply "Second attempt." 0.6))
+            (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "s1" :tier "hard"))
+            (harness-call 'agent/stop-outstanding sid "its task was returned to the queue")
+            (should (equal "interrupted" (harness-supervisor-plan-test-state sid "s1")))
+            (should-not (plist-get (harness-supervisor-plan-test-run sid "retry_step" '(:step "s1" :reason "the task is back"))
+                                   :is-error))
+            (let* ((second (harness-supervisor-plan-test-worker sid "s1"))
+                   ;; The first attempt's worker comes now, while the second runs.
+                   (first (funcall settle late)))
+              (accept-process-output nil 0.1)
+              (let ((s1 (harness-supervisor-plan-test-step sid "s1")))
+                (should (equal "running" (plist-get s1 :state)))
+                (should (equal second (plist-get s1 :session)))
+                (should (= 2 (plist-get s1 :attempts))))
+              (harness-supervisor-plan-test-wait-state sid "s1" "done")
+              (let ((s1 (harness-supervisor-plan-test-step sid "s1")))
+                (should (equal second (plist-get s1 :session)))
+                (should (equal "Second attempt." (plist-get s1 :result))))
+              ;; Only the second worker was given the step.
+              (should (= 1 (cl-count "s1" harness-supervisor-plan-test--requests
+                                     :key (lambda (r) (plist-get r :step)) :test #'equal)))
+              (when first
+                (should-not (equal first second))
+                (should-not (harness-supervisor-plan-test-requests-of first))
+                (should-not (harness-supervisor-plan-test-spawn-call-of sid first)))
+              (should (= 1 (length (harness-supervisor-plan-test-spawn-calls sid)))))
+            (harness-supervisor-plan-test-wait-idle sid)
+            ;; Nothing said the step failed.
+            (should-not (cl-some (lambda (text) (string-match-p "step s1 (Title of s1) failed" text))
+                                 (harness-supervisor-plan-test-reports sid)))
+            (should (zerop (hash-table-count harness-supervisor--live)))))))))
+
+(ert-deftest harness-supervisor-plan-stopping-a-worker-stops-its-own-sub-agents ()
+  "What a worker started that runs on without its turn stops with it: its
+sub-agent is stopped and reports to it, and nothing the step started is
+left running."
+  (harness-supervisor-plan-test-with
+    (let ((sid (harness-supervisor-plan-test-session))
+          (step-requests (lambda (id) (cl-remove id harness-supervisor-plan-test--requests
+                                                 :key (lambda (r) (plist-get r :step)) :test-not #'equal))))
+      ;; The worker starts a sub-agent, then works on.
+      (harness-supervisor-plan-test-behave
+       "s1" '(events (:type tool-call :id "call-helper" :name "spawn_agent"
+                            :input (:prompt "## Step g1: Help.\n\nHelp with it." :name "helper")))
+       'hold)
+      (harness-supervisor-plan-test-behave "g1" 'hold)
+      (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "s1" :tier "hard"))
+      (let* ((worker (harness-supervisor-plan-test-worker sid "s1"))
+             (helper (harness-test-wait (lambda () (plist-get (car (funcall step-requests "g1")) :session))
+                                        10 "the worker's sub-agent to run")))
+        (harness-test-wait (lambda () (= 2 (length (funcall step-requests "s1")))) 10 "the worker to work on")
+        (should (harness-call 'agent/running helper))
+        (should (equal "Sub-agent helper running" (harness-call 'agent/outstanding worker)))
+        (should (equal "Supervisor plan: 1 step interrupted"
+                       (harness-call 'agent/stop-outstanding sid "its task was returned to the queue")))
+        ;; The sub-agent is cancelled, and its report reaches the worker.
+        (harness-test-wait (lambda ()
+                             (cl-some (lambda (node) (equal "sub-agent" (plist-get (harness-node-sender node) :source)))
+                                      (harness-supervisor-plan-test-nodes worker 'user)))
+                           10 "the sub-agent's report")
+        (harness-test-wait (lambda () (not (or (harness-call 'agent/running helper)
+                                               (harness-call 'agent/running worker))))
+                           10 "the worker and its sub-agent to stop")
+        (should (cl-some (lambda (node) (string-match-p "its task was returned to the queue" (plist-get node :content)))
+                         (harness-supervisor-plan-test-nodes worker 'user)))
+        (should-not (harness-call 'agent/outstanding worker))
+        (should-not (harness-call 'agent/outstanding sid))
+        ;; Whatever the worker does now changes no step.
+        (should (equal "interrupted" (harness-supervisor-plan-test-state sid "s1")))
+        (should (= 1 (length (harness-supervisor-plan-test-spawn-results
+                              sid (harness-supervisor-plan-test-spawn-call-of sid worker)))))
+        ;; The supervisor's report waits for its next message.
+        (should-not (harness-call 'agent/running sid))
+        (should (= 1 (length (plist-get (harness-call 'session/get sid) :queue))))))))
 
 ;;;; Approval
 
@@ -2865,6 +3251,240 @@ A task's session supervises, and a finished task waits for review."
         (should (string-match-p "step s1 .* failed" (car reports))))
       (should (equal "pending" (harness-supervisor-plan-test-state sid "s2")))
       (should-not (plist-get (harness-supervisor-plan-test-task id) :waiting)))))
+
+;;;; A task sent back to the queue while its workers run
+;;
+;; The supervising task of these tests submits a plan whose worker holds
+;; until it is cancelled, so its turn is over and it waits on the worker
+;; (`:waiting'), holding its slot.  Pre-empted by work sent back from
+;; review, or returned to pending by hand, the task has the worker stopped
+;; with it, and carries on, told why, once it starts again.
+
+(defun harness-supervisor-plan-test-said (sid text)
+  "Return the user messages of session SID that say exactly TEXT, oldest first."
+  (cl-remove-if-not (lambda (n) (equal text (plist-get n :content)))
+                    (harness-supervisor-plan-test-nodes sid 'user)))
+
+(defun harness-supervisor-plan-test-user-position (sid pred)
+  "Return where in session SID's transcript the first user message PRED accepts is.
+PRED takes the message's text."
+  (harness-supervisor-plan-test-node-position
+   sid (lambda (n) (and (eq 'user (plist-get n :kind)) (funcall pred (or (plist-get n :content) ""))))))
+
+(defun harness-supervisor-plan-test--retry-on (script text)
+  "Return a provider script that has a supervisor retry step s1 when TEXT is its message.
+The harness tells the session of a task that carries on again why it
+waited (TEXT); its supervisor, who has read the report of the steps that
+were interrupted, retries s1.  Any other request is answered as SCRIPT does."
+  (lambda (request)
+    (let ((events (funcall script request)))
+      (if (and (eq 'main (plist-get (plist-get request :session) :kind))
+               (not (harness-supervisor-plan-test--after-tool-p request))
+               (equal text (harness-provider-demo--last-user-text request)))
+          (harness-supervisor-plan-test-call "retry_step" '(:step "s1" :reason "the task is back"))
+        events))))
+
+(defun harness-supervisor-plan-test--submit-waiting-task ()
+  "Submit a supervising task whose plan's worker runs for good; return (TASK SESSION WORKER).
+The first attempt of step s1 holds until it is cancelled, the second replies.
+Returns once the task waits on the worker, its turn over, and the plan is
+cleared so that no later request submits it again."
+  (harness-supervisor-plan-test-behave "s1" 'hold '(reply "Fixed the parser." 0.4))
+  (setq harness-supervisor-plan-test--plan
+        (harness-supervisor-plan-test-plan-input
+         (harness-supervisor-plan-test-step-input "s1" :tier "hard")))
+  (let* ((task (plist-get (harness-call 'task/submit default-directory "Fix the parser") :id))
+         (sid (plist-get (harness-supervisor-plan-test-task task) :session))
+         (worker (harness-supervisor-plan-test-worker sid "s1")))
+    (setq harness-supervisor-plan-test--plan nil)
+    (harness-test-wait (lambda () (plist-get (harness-supervisor-plan-test-task task) :waiting)) 10
+                       "the task to wait for its worker")
+    ;; Its turn is over and its worker runs on: it holds a slot.
+    (should-not (harness-call 'agent/running sid))
+    (should (harness-call 'agent/running worker))
+    (should (string-match-p "\\`Supervisor plan: 1 step running" (harness-call 'agent/outstanding sid)))
+    (list task sid worker)))
+
+(defun harness-supervisor-plan-test--hand-in-on-report ()
+  "Have a supervisor hand its work in when it is told its plan is finished."
+  (setq harness-supervisor-plan-test--on-report
+        (lambda (_text)
+          (harness-supervisor-plan-test-call
+           "hand_in" '(:summary "The parser is fixed." :evidence ("Read the diff: it does what the plan said."))))))
+
+(defun harness-supervisor-plan-test--check-carried-on (task sid worker opening why)
+  "Check that TASK, which carried on in session SID after its worker was stopped, is done.
+OPENING is the harness's message that started it again, and WHY what the
+interrupted step says: the start of the reason it was stopped for.  The
+supervisor retried the step, which ran on a worker of its own, and handed in;
+its transcript holds the one report of the interruption, then OPENING, the
+retry, and the report that the plan is done."
+  (let ((task (harness-supervisor-plan-test-task task))
+        (s1 (harness-supervisor-plan-test-step sid "s1")))
+    (should (eq 'review (plist-get task :state)))
+    (should-not (plist-get task :waiting))
+    (should-not (plist-get task :return-reason))
+    (should-not (plist-get task :preempted-by))
+    (should (equal "The parser is fixed." (plist-get (plist-get task :report) :summary)))
+    (should-not (plist-get (plist-get task :report) :missing))
+    (should (equal "done" (plist-get s1 :state)))
+    (should (= 2 (plist-get s1 :attempts)))
+    (should (equal "Fixed the parser." (plist-get s1 :result)))
+    (should-not (equal worker (plist-get s1 :session)))
+    (should (equal worker (plist-get (plist-get s1 :previous) :session)))
+    (should (string-prefix-p why (plist-get (plist-get s1 :previous) :error))))
+  (let ((reports (harness-supervisor-plan-test-reports sid))
+        (said (harness-supervisor-plan-test-said sid opening)))
+    (should (= 2 (length reports)))
+    (should (string-prefix-p "Supervisor report: the plan's workers were stopped" (nth 0 reports)))
+    (should (string-match-p "finished\\. Its one step is done" (nth 1 reports)))
+    (should (= 1 (length said)))
+    (should (eq 'system (harness-sender-kind (harness-node-sender (car said))))))
+  (let ((interrupted (harness-supervisor-plan-test-user-position
+                      sid (lambda (text) (string-prefix-p "Supervisor report: the plan's workers were stopped" text))))
+        (carried-on (harness-supervisor-plan-test-user-position sid (lambda (text) (equal opening text))))
+        (retry (harness-supervisor-plan-test-node-position
+                sid (lambda (n) (and (eq 'tool-call (plist-get n :kind)) (equal "retry_step" (plist-get n :tool))))))
+        (finished (harness-supervisor-plan-test-user-position
+                   sid (lambda (text) (string-match-p "finished\\. Its one step is done" text)))))
+    (should (and interrupted carried-on retry finished))
+    (should (< interrupted carried-on retry finished))))
+
+(ert-deftest harness-supervisor-plan-a-task-waiting-on-its-workers-is-preempted-and-carries-on ()
+  "Work sent back from review pre-empts a supervising task that only waits on its worker.
+With one slot, the task whose supervisor submitted a plan holds it while the
+plan's worker runs on.  Sending a reviewed task back takes that slot: the
+worker's turn is cancelled, its step is interrupted for the pre-emption, and
+nothing starts on its own.  The task waits in the queue, and its supervisor is
+told once, in a message that waits in its session.  When the slot frees the
+task carries on in that session, told why by the harness; its supervisor, who
+has both messages, retries the step, and the work comes back to review."
+  (harness-supervisor-plan-test-with-tasks
+    (harness-supervisor-plan-test--hand-in-on-report)
+    (let* ((harness-tasks-max-running 1)
+           (harness-agent--cancel-grace 0.05)
+           ;; A hands-on task whose work is done, waiting for review.
+           (reviewed (plist-get (harness-call 'task/submit default-directory "Document the parser"
+                                              (list :supervisor :false))
+                                :id)))
+      (harness-test-wait (lambda () (eq 'review (plist-get (harness-supervisor-plan-test-task reviewed) :state)))
+                         15 "the hands-on task to be in review")
+      ;; A supervising one takes the slot, and its plan's worker runs for good.
+      (pcase-let* ((`(,busy ,bsid ,worker) (harness-supervisor-plan-test--submit-waiting-task))
+                   (harness-provider-demo-script-override
+                    (harness-supervisor-plan-test--retry-on harness-provider-demo-script-override
+                                                            harness-tasks--preempted-message))
+                   (ended nil))
+        (should (= 0 (harness-tasks--free-slots
+                      (harness-tasks--slot-project (harness-supervisor-plan-test-task busy)))))
+        (harness-on 'agent/turn-ended (lambda (id reason) (when (equal id worker) (push reason ended))))
+        (setq harness-supervisor-plan-test--requests nil)
+        ;; The reviewed task is sent back, with no slot free.
+        (harness-call 'task/reject reviewed "Handle tabs too.")
+        ;; At once: the task waits in the queue, pre-empted, with nothing at work for it.
+        (let ((task (harness-supervisor-plan-test-task busy)))
+          (should (eq 'pending (plist-get task :state)))
+          (should (eq 'preempted (plist-get task :return-reason)))
+          (should (equal reviewed (plist-get task :preempted-by)))
+          (should-not (plist-get task :waiting)))
+        (should (eq 'active (plist-get (harness-supervisor-plan-test-task reviewed) :state)))
+        (let ((s1 (harness-supervisor-plan-test-step bsid "s1")))
+          (should (equal "interrupted" (plist-get s1 :state)))
+          (should (equal worker (plist-get s1 :session)))
+          (should (string-prefix-p (format "its task was pre-empted: task %s" reviewed) (plist-get s1 :error)))
+          (should (string-suffix-p ", sent back from review, took its slot" (plist-get s1 :error))))
+        (should (zerop (hash-table-count harness-supervisor--live)))
+        (should-not (harness-call 'agent/outstanding bsid))
+        (should-not (harness-supervisor-plan-test-step-request "s1"))
+        ;; The worker's turn is cancelled.
+        (harness-test-wait (lambda () ended) 10 "the worker's turn to end")
+        (should (equal '(cancelled) ended))
+        (should-not (harness-call 'agent/running worker))
+        ;; The supervisor is told once, but its session takes no turn while its task waits.
+        (let ((reports (harness-supervisor-plan-test-wait-reports bsid 1)))
+          (should (= 1 (length reports)))
+          (should (string-prefix-p "Supervisor report: the plan's workers were stopped, interrupting 1 running step: s1."
+                                   (car reports)))
+          (should (string-match-p "Why: its task was pre-empted: task " (car reports)))
+          (should (string-match-p "Decide: retry_step s1 to run it again" (car reports))))
+        (harness-test-wait
+         (lambda () (cl-some (lambda (hint) (string-prefix-p "Turn not started: its task " hint))
+                             (harness-supervisor-plan-test-hints bsid)))
+         10 "the report's turn refused")
+        (let ((hints (harness-supervisor-plan-test-hints bsid)))
+          (should (cl-some (lambda (hint) (string-prefix-p "Task pre-empted: task " hint)) hints))
+          (should (member "Stopped while the task waits in the queue: Supervisor plan: 1 step interrupted" hints)))
+        ;; The slot frees when the task sent back is in review again: the
+        ;; pre-empted one carries on in its session, told why by the harness.
+        (harness-test-wait (lambda () (harness-supervisor-plan-test-said bsid harness-tasks--preempted-message)) 15
+                           "the pre-empted task to carry on")
+        (harness-test-wait (lambda () (eq 'review (plist-get (harness-supervisor-plan-test-task busy) :state))) 25
+                           "the supervising task to be in review again")
+        (should (eq 'review (plist-get (harness-supervisor-plan-test-task reviewed) :state)))
+        (should (harness-supervisor-plan-test-said
+                 (plist-get (harness-supervisor-plan-test-task reviewed) :session)
+                 (harness-tasks--reject-text "Handle tabs too.")))
+        (harness-supervisor-plan-test--check-carried-on
+         busy bsid worker harness-tasks--preempted-message
+         (format "its task was pre-empted: task %s" reviewed))
+        ;; Both tasks are in review, so no slot is taken.
+        (should (= 1 (harness-tasks--free-slots
+                      (harness-tasks--slot-project (harness-supervisor-plan-test-task busy)))))))))
+
+(ert-deftest harness-supervisor-plan-a-task-returned-to-pending-while-it-waits-on-its-workers-stops-them ()
+  "Returning a supervising task that only waits on its worker to pending stops the worker.
+The worker's turn is cancelled and its step interrupted, at once, for the
+return.  The report to the supervisor waits in its session, whose turn is
+refused, and the return starts nothing, though a slot is free: the task waits
+in the queue until it is started.  Then it carries on in its session, told
+why by the harness; its supervisor retries the step, and the work comes back
+to review."
+  (harness-supervisor-plan-test-with-tasks
+    (harness-supervisor-plan-test--hand-in-on-report)
+    (let ((harness-agent--cancel-grace 0.05))
+      (pcase-let* ((`(,busy ,bsid ,worker) (harness-supervisor-plan-test--submit-waiting-task))
+                   (harness-provider-demo-script-override
+                    (harness-supervisor-plan-test--retry-on harness-provider-demo-script-override
+                                                            harness-tasks--paused-message))
+                   (ended nil))
+        (harness-on 'agent/turn-ended (lambda (id reason) (when (equal id worker) (push reason ended))))
+        (setq harness-supervisor-plan-test--requests nil)
+        (harness-call 'task/return-to-pending busy)
+        ;; At once: the task waits in the queue, returned, and its step is interrupted.
+        (let ((task (harness-supervisor-plan-test-task busy)))
+          (should (eq 'pending (plist-get task :state)))
+          (should (eq 'returned (plist-get task :return-reason)))
+          (should-not (plist-get task :preempted-by))
+          (should-not (plist-get task :waiting)))
+        (let ((s1 (harness-supervisor-plan-test-step bsid "s1")))
+          (should (equal "interrupted" (plist-get s1 :state)))
+          (should (equal worker (plist-get s1 :session)))
+          (should (equal "its task was returned to the queue" (plist-get s1 :error))))
+        (should-not (harness-call 'agent/outstanding bsid))
+        (harness-test-wait (lambda () ended) 10 "the worker's turn to end")
+        (should (equal '(cancelled) ended))
+        (let ((reports (harness-supervisor-plan-test-wait-reports bsid 1)))
+          (should (= 1 (length reports)))
+          (should (string-match-p "Why: its task was returned to the queue\\." (car reports))))
+        (harness-test-wait
+         (lambda () (cl-some (lambda (hint) (string-prefix-p "Turn not started: its task " hint))
+                             (harness-supervisor-plan-test-hints bsid)))
+         10 "the report's turn refused")
+        (should (member "Stopped while the task waits in the queue: Supervisor plan: 1 step interrupted"
+                        (harness-supervisor-plan-test-hints bsid)))
+        ;; The refused turn started nothing: a slot is free, but the task waits.
+        (accept-process-output nil 0.5)
+        (should (= 3 (harness-tasks--free-slots
+                      (harness-tasks--slot-project (harness-supervisor-plan-test-task busy)))))
+        (should (eq 'pending (plist-get (harness-supervisor-plan-test-task busy) :state)))
+        (should-not (harness-supervisor-plan-test-said bsid harness-tasks--paused-message))
+        (should-not (harness-supervisor-plan-test-step-request "s1"))
+        ;; Started, it carries on in its session, told why by the harness.
+        (harness-call 'task/start busy)
+        (harness-test-wait (lambda () (eq 'review (plist-get (harness-supervisor-plan-test-task busy) :state))) 25
+                           "the supervising task to be in review again")
+        (harness-supervisor-plan-test--check-carried-on
+         busy bsid worker harness-tasks--paused-message "its task was returned to the queue")))))
 
 (provide 'harness-supervisor-plan-test)
 ;;; harness-supervisor-plan-test.el ends here
