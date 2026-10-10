@@ -749,6 +749,45 @@ Return the handle plist, whose `:cancel' stops the script."
     (and last (cl-some (lambda (b) (equal (plist-get b :type) "tool_result"))
                        (plist-get last :content)))))
 
+;;;; Embeddings
+
+(defconst harness-provider-demo--embedding-dimensions 64
+  "Length of the demo provider's vectors, unless a request asks for another.")
+
+(defconst harness-provider-demo--synonyms
+  '(("bug" "bugs" "crash" "crashes" "crashed" "error" "errors" "fail" "fails" "failed" "failure"
+     "broken" "exception")
+    ("test" "tests" "testing" "spec" "specs" "ert" "assert")
+    ("speed" "fast" "faster" "slow" "slower" "performance" "latency" "quick")
+    ("search" "searches" "find" "lookup" "query" "grep" "seek")
+    ("doc" "docs" "readme" "documentation" "manual")
+    ("database" "sqlite" "sql" "db" "table"))
+  "Words the demo embedder takes to mean the same, a group each.")
+
+(defun harness-provider-demo--embed-dimension (word dims)
+  "Return which of DIMS dimensions WORD adds to: its group's, else its own."
+  (let ((group (cl-position-if (lambda (g) (member word g)) harness-provider-demo--synonyms)))
+    (mod (string-to-number (substring (secure-hash 'md5 (if group (format "group %d" group) word)) 0 6) 16)
+         dims)))
+
+(defun harness-provider-demo--embed (_name texts opts)
+  "Embed TEXTS as the demo provider does: by their words, with no network.
+Each word adds one to a dimension its hash picks, and the words of a
+group of `harness-provider-demo--synonyms' share theirs, so a search by
+meaning finds \"crash\" where \"bug\" was written.  OPTS `:dimensions'
+sets the length (default `harness-provider-demo--embedding-dimensions')."
+  (let ((dims (or (plist-get opts :dimensions) harness-provider-demo--embedding-dimensions))
+        (tokens 0))
+    (harness-resolved
+     (list :vectors (mapcar (lambda (text)
+                              (let ((v (make-vector dims 0.0)))
+                                (dolist (w (split-string (downcase text) "[^[:alnum:]]+" t))
+                                  (cl-incf tokens)
+                                  (cl-incf (aref v (harness-provider-demo--embed-dimension w dims))))
+                                (append v nil)))
+                            texts)
+           :usage (list :input tokens)))))
+
 (harness-define-provider 'demo
   :label "Demo"
   :doc "Scripted provider that never calls a network."
@@ -759,6 +798,8 @@ Return the handle plist, whose `:cancel' stops the script."
                          :pricing '(:input 1.0 :output 2.0 :cache-read 0.1 :cache-write 1.25)
                          :thinking-levels '("low" "high")))))
   :complete #'harness-provider-demo--complete
+  ;; Any model name of the provider embeds, "demo:embed" say.
+  :embed #'harness-provider-demo--embed
   :capabilities '(:vision t :thinking t))
 
 (harness-define-module 'provider-demo
