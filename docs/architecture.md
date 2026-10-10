@@ -1763,6 +1763,20 @@ non-interactive session it stays a denial.
   steering message after it (see non-interactive below): there is no
   other way to reach that goal.
 
+- `session_settings` (tools-sessions) is weighed per call
+  (`harness-perms--call-kind`): `action=read` shows a session's settings
+  and changes nothing, so it is a read -- ask mode and accept-edits
+  allow it as any other read inside the roots, and no judge sees it --
+  while `action=set` changes harness state and keeps the `meta` its tool
+  declares, so ask mode asks the user about it (stage 90) and the judge
+  weighs it in auto mode and in a non-interactive session, the same guard
+  `session_send` and `session_control` get.  A standing rule comes first
+  and can allow or deny either (`harness-perms--rule-matches-p` weighs
+  the same kind).  The tool is declared `meta`, not `read`, so that a set
+  would ask even were the classification ever missing, and it refuses the
+  permission mode, non-interactive mode, allowed directories, the working
+  directory and the host, naming the tool that changes them.
+
 - The sandbox guard asks `sandbox/check-command` about every `exec` call
   whose input has a `:command` (the bash tool), passing the directory it
   runs in and the session's own worktree (`:worktree`, else `:cwd`).  A
@@ -4285,7 +4299,7 @@ and a message for the echo area.  Only the user calls it.
   emacs_messages emacs_open`), `web_fetch web_search`, the coordination
   tools (`ask_user todo_write hand_in notify session_control
   session_send session_move set_non_interactive set_priority
-  task_control task_submit`), the tool that asks for a directory
+  task_control task_submit session_settings`), the tool that asks for a directory
   (`harness-perms-dir-tool`) and `harness-supervisor-tools`
   (`no_plan_needed submit_plan retry_step`), plus `bash` when
   `sandbox/confined-p` says its directory is confined.  Any other
@@ -4324,9 +4338,14 @@ and a message for the echo area.  Only the user calls it.
   on unchanged; failing closed is stage 8's.
 - Turns.  The decision tools are `harness-supervisor-decision-tools`
   (`no_plan_needed submit_plan retry_step hand_in task_submit
-  task_control session_send session_control`); a call is noted from
-  `agent/tool-call`, and a result that is an error takes it back out
-  (`tools/finished`), since it decided nothing.  The async filter
+  task_control session_send session_control session_settings`); a call
+  is noted from `agent/tool-call` (`harness-supervisor--decision-call-p`:
+  a `session_settings` call counts only when it changes a setting, since
+  a read decides nothing), and a result that is an error takes it back
+  out (`tools/finished`), since it decided nothing.  `session_settings`
+  is a decision because giving a worker a larger window or a stronger
+  model is coordination, like `session_send`, not hands-on work.  The
+  async filter
   `agent/stop` (see agent) answers a supervising session's stop with no
   decision in its turn by `(:stop nil :message REMINDER :from
   (harness-sender-system "supervisor"))`, twice at most in a turn; after
@@ -4581,6 +4600,7 @@ TRAMP prefixes come from the session host):
 | `session_history` | Session history | query, regexp, node_id, before, limit, max_chars, kinds, all | read (this session's own conversation from before its last compaction or handoff; needs no approval: `harness-perms--inspection-tools`) |
 | `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta (answer refuses the harness's cold-cache question, left to the user) |
+| `session_settings` | Session settings | action (read/set), session_id (default: this session), model, thinking (a level, or default for the model's own), context_window_limit (tokens: a number or "200k", or model/none for the model's own window), budget (USD, or none to remove it), budget_hard (a hard budget stops the next turn once spent) | meta (weighed per call, `harness-perms--call-kind`: a read is a read, a set asks in ask mode and is judged, as `session_send` is; the read shows the permission mode and non-interactive state, and the tool refuses them, allowed directories, the working directory and the host, naming `set_non_interactive`, `request_directory_access` or `session_move`) |
 | `session_move` | Move session | directory, session_id (default: this session), keep_old_directory, reason | meta (the user confirms every call, in every mode; see perms, Confirmations, and `session/move`) |
 | `set_non_interactive` | Non-interactive mode | enabled, session_id (default: this session) or all (every current session and task of every project), reason | meta (perms module's away-request stage: turning it on is decided only by the user's answer, in every mode, and denied at once in a non-interactive session; turning it off is allowed at once) |
 | `set_priority` | Set priority | priority (low/medium/high), session_id (default: this session) or all (every current session and task of every project) | meta (a priority is the session's, and every input here is a session id; a task's priority is set through its session) |
@@ -5060,6 +5080,36 @@ permission requests and permission modes stay with the user, and
 defaults.  Nor does `session_control` answer the harness's question
 about a cold prompt cache (its payload's `:cowboy`): what to spend on
 another session's conversation is the user's call.  The task tools need the `tasks` module.
+
+`session_settings` reads and changes what a session runs with: the
+model, the thinking level, the context window limit and the budget.  It
+works on the calling session by default and on another one by id, a
+unique id prefix or a name.  A read shows the model, the thinking, the
+window in effect with the limit that caps it and, best effort, what set
+it (`harness-session-context-limit-source`: the session's kind says
+`harness-subagent-context-limit` for a sub-agent or a fork, the tasks
+module's own cap value says `harness-tasks-context-limit` for a task,
+and any other limit is one set for the session -- the same reading the
+UI's `harness-ui-context-cap-name` gives), the budget, and the
+permission mode and non-interactive state, which it does not change: a
+call naming the permission mode, non-interactive mode, allowed
+directories, the working directory or the host is refused, and the
+refusal names `set_non_interactive`, `request_directory_access` or
+`session_move`.  A set is applied through `session/update` with
+`:silent t` (its own hint would say less), and `harness-session-check-policy`
+runs first, so a setting the policy fixes is refused before anything
+changes.  Every change leaves one hint in the affected session's
+transcript (`harness-tools-sessions--settings-hint`), naming who made
+it -- the caller's name, or "the session itself" -- the setting, the old
+value and the new one: "Context window limit 128k → 200k, set by session
+«planner»", and, for a running session, that it takes effect from its
+next request; a change to another session shows in the caller's result
+too.  A set that asks for what the session already has changes nothing
+and says so, and the permissions are weighed per call: a read is the
+read it is, and only a set goes through the chain as a change to harness
+state (see perms).  It is a tool of its own rather than more actions of
+`session_control`, whose every action is about another session (it
+refuses the calling session itself) and is `meta`.
 
 `notify` (`tools-notify`) sends a notification through
 `notification/send` with `:source "agent"`, `:kind "agent"` and the

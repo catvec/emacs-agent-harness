@@ -3,6 +3,10 @@
 
 (require 'harness-test-helpers)
 
+(defvar harness-tasks-context-limit)
+;; The tasks module is not loaded here; declaring the option special lets
+;; a test bind it, as the tool that reads it binds it in reality.
+
 (defmacro harness-session-test-with (&rest body)
   "Load the state modules into a fresh bus and temp state dir, then run BODY."
   (declare (indent 0))
@@ -1581,6 +1585,35 @@ outright window wins over it, and nil gives the model's window back."
             (should (= 200000 (harness-session-test-window id)))
             (harness-call 'session/update id :model "test-win:big" :silent t)
             (should (= 1000000 (harness-session-test-window id)))))
+      (harness-session-test-drop-provider))))
+
+(ert-deftest harness-session-context-limit-source-names-the-cap ()
+  "The limit's source names the setting that made it, best effort: a
+sub-agent's kind says the sub-agent cap, the tasks module's own cap
+value says a task's, and another limit is one set for the session.  No
+limit, no source."
+  (harness-session-test-with
+    (unwind-protect
+        (progn
+          (harness-session-test-provider '(("big" . 1000000)))
+          (let ((plain (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                                :model "test-win:big") :id))
+                (sub (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                              :model "test-win:big" :kind 'subagent
+                                              :context-window-limit 96000) :id))
+                (other (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                                :model "test-win:big"
+                                                :context-window-limit 200000) :id)))
+            (should-not (harness-session-context-limit-source (harness-call 'session/get plain)))
+            (should (equal "a sub-agent cap (harness-subagent-context-limit)"
+                           (harness-session-context-limit-source (harness-call 'session/get sub))))
+            (should (equal "set for this session"
+                           (harness-session-context-limit-source (harness-call 'session/get other))))
+            ;; A limit equal to the tasks module's own cap is a task's.
+            (let ((harness-tasks-context-limit 200000))
+              (should (equal "a task cap (harness-tasks-context-limit)"
+                             (harness-session-context-limit-source
+                              (harness-call 'session/get other)))))))
       (harness-session-test-drop-provider))))
 
 (ert-deftest harness-session-record-window-copy-ignored-on-load ()

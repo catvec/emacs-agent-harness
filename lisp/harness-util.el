@@ -194,6 +194,12 @@ in a request.  Anything else compares with `equal'."
           ((< n 1000000) (format "%dk" (round (/ n 1000.0))))
           (t (format "%.2fM" (/ n 1000000.0))))))
 
+(defun harness-format-tokens-compact (n)
+  "Format token count N as `harness-format-tokens' does, but \"96k\" for \"96.0k\".
+Whole thousands read without the decimal part, which a hint about a
+window or a limit is easier to read as."
+  (replace-regexp-in-string "\\.0+\\([kM]\\)\\'" "\\1" (harness-format-tokens n)))
+
 (defun harness-format-cost (usd)
   "Format USD amount compactly."
   (let ((usd (or usd 0)))
