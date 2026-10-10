@@ -1707,7 +1707,7 @@ deny rule also stops it for a path it names inside them."
          (deny (eq (harness-perms--sym (plist-get rule :behavior)) 'deny))
          (pattern (harness-perms--rule-pattern rule (plist-get request :session))))
     (and (or (null tool) (equal tool (plist-get request :tool)))
-         (or (null kind) (eq kind (harness-perms--sym (plist-get request :kind))))
+         (or (null kind) (eq kind (harness-perms--call-kind request)))
          (or (null pattern)
              (let ((paths (if deny (harness-perms--every-path request) (harness-perms--subject-paths request))))
                (and paths
@@ -1805,12 +1805,37 @@ session, and the note says so.  Return RULE."
     (harness-perms--note-recorded session-id (list :scope scope :rule rule) new)
     rule))
 
+(defun harness-perms--settings-read-p (input)
+  "Non-nil when a `session_settings' call with INPUT only reads.
+A read shows a session's settings and changes nothing; a set changes
+harness state.  Anything but an explicit read action is no read: a call
+with no action, or one this module does not know, is left to the chain
+to refuse."
+  (let ((action (and (listp input) (plist-get input :action))))
+    (and (stringp action) (equal (downcase (string-trim action)) "read"))))
+
+(defun harness-perms--call-kind (request)
+  "Return the kind of REQUEST as the mode and the standing rules weigh it.
+A `session_settings' call that only reads is a read: it shows settings
+and changes nothing, so ask mode (and accept-edits) allows it as it
+allows any other read inside the roots, and no judge sees it.  A call
+that changes settings keeps the kind its tool declares (`meta'), so ask
+mode asks the user about it and the judge weighs it -- the same guard
+`session_send' and `session_control' get for another session.  The tool
+is declared `meta' and not `read' on purpose: were this classification
+ever missing, a set would ask rather than pass as a read."
+  (let ((kind (harness-perms--sym (plist-get request :kind))))
+    (if (and (equal (plist-get request :tool) "session_settings")
+             (harness-perms--settings-read-p (plist-get request :input)))
+        'read
+      kind)))
+
 (defun harness-perms--mode-decision (decision request)
   "Return the decision for REQUEST from the mode and the standing rules.
 DECISION is returned unchanged when the mode leaves the question open."
   (let* ((session (plist-get request :session))
          (tool (plist-get request :tool))
-         (kind (harness-perms--sym (plist-get request :kind)))
+         (kind (harness-perms--call-kind request))
          (mode (harness-perms--mode-of session))
          (rule (harness-perms--find-rule request)))
     (cond

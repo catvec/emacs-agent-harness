@@ -3873,5 +3873,49 @@ grants to the session, and none of them is revoked."
           (should (equal (list fixed) harness-allowed-directories))
           (should-not saved))))))
 
+;;;; session_settings
+
+(defun harness-perms-test--settings-request (input)
+  "Return a permission request for a session_settings call with INPUT."
+  (list :session harness-perms-test--session :tool "session_settings" :kind 'meta
+        :input input :paths nil :call-id (harness-short-id)))
+
+(ert-deftest harness-perms-session-settings-read-needs-no-approval ()
+  "A session_settings read is the read it is: ask mode and accept-edits
+allow it without the user, the judge never sees it, and no prompt is
+made.  A set changes harness state: ask mode asks about it, as it asks
+about session_send and session_control."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let ((read (harness-perms-test--settings-request '(:action "read"))))
+    (should (eq 'read (harness-perms--call-kind read)))
+    (should (eq 'allow (plist-get (harness-perms-test--decide read) :behavior)))
+    (should-not harness-perms-test--pending))
+  (let* ((set (harness-perms-test--settings-request '(:action "set" :model "demo:x")))
+         (p (harness-run-filter-async 'permission/decide (list :behavior 'ask) set)))
+    (should (eq 'meta (harness-perms--call-kind set)))
+    (harness-test-wait (lambda () harness-perms-test--pending) 2 "the prompt for the set")
+    (let ((pending (car harness-perms-test--pending)))
+      (should (equal "session_settings" (plist-get (plist-get pending :payload) :tool)))
+      (should (equal harness-perms-options (plist-get (plist-get pending :payload) :options)))
+      (harness-call 'permission/answer "s1" (plist-get pending :id) "allow-once"))
+    (should (eq 'allow (plist-get (harness-test-await p) :behavior)))))
+
+(ert-deftest harness-perms-session-settings-in-accept-edits-and-under-a-rule ()
+  "Accept-edits accepts a read and still asks about a set; a standing
+deny rule comes first and denies a read ask mode would allow; an action
+the module does not know is no read."
+  (harness-perms-test--setup :permission-mode 'accept-edits)
+  (let ((read (harness-perms-test--settings-request '(:action "read")))
+        (set (harness-perms-test--settings-request '(:action "set" :thinking "low"))))
+    (should (eq 'allow (plist-get (harness-perms--mode-decision nil read) :behavior)))
+    (should-not (plist-get (harness-perms--mode-decision nil set) :behavior)))
+  (setq harness-perms-rules (list (list :tool "session_settings" :behavior 'deny)))
+  (let ((d (harness-perms-test--decide (harness-perms-test--settings-request '(:action "read")))))
+    (should (eq 'deny (plist-get d :behavior)))
+    (should (string-match-p "standing rule" (plist-get d :reason))))
+  (should (eq 'meta (harness-perms--call-kind
+                     (harness-perms-test--settings-request '(:action "frob"))))))
+
 (provide 'harness-perms-test)
 ;;; harness-perms-test.el ends here

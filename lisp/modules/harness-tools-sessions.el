@@ -24,6 +24,11 @@
 ;;   session, or answers a question it asked with ask_user.  The
 ;;   harness's own question about a cold prompt cache (harness-cowboy.el)
 ;;   is left to the user, as permission requests are.
+;; - `session_settings' reads and changes what a session runs with: its
+;;   model, thinking level, context window limit and budget, on this
+;;   session by default or another one by name.  Every change goes
+;;   through `session/update' and leaves an attributed hint (who, the
+;;   old value and the new one) in the affected session's transcript.
 ;; - `session_move' moves a session, this one by default, to another
 ;;   working directory and that directory's project.  The user confirms
 ;;   every move, in every permission mode (see session_move below).
@@ -59,7 +64,11 @@
 ;; permission mode, and neither the judge nor a rule can allow it (see
 ;; `harness-perms--away-request'); a non-interactive session has nobody
 ;; to ask, so its request is denied.  Turning it off needs no one's
-;; leave.
+;; leave.  `session_settings' reads and changes what a session runs
+;; with; its read is weighed as the read it is and only its set goes
+;; through the chain as a change to harness state (see
+;; `harness-perms--call-kind'), and neither its read nor its set
+;; touches the permission mode, non-interactive mode or a directory.
 ;;
 ;; Waits run without blocking the harness: each is an entry in
 ;; `harness-tools-sessions--waiters' re-checked by one subscriber
@@ -89,6 +98,16 @@
 (require 'harness-files)
 (require 'harness-priority)
 (require 'harness-tools)
+
+;; The module requires `session' at runtime (see `harness-define-module'
+;; at the end of the file): the settings the session_settings tool reads
+;; and changes come from it.
+(declare-function harness-session-check-policy "harness-session" (settings &optional kind))
+(declare-function harness-session-context-limit-source "harness-session" (s))
+(declare-function harness-session--context-window-limit-value "harness-session" (v))
+(declare-function harness-session--model-levels "harness-session" (model))
+(declare-function harness-session--model-window "harness-session" (model))
+(declare-function harness-session--pinned "harness-session" (key kind))
 
 (defvar harness-state-directory)
 
@@ -825,6 +844,446 @@ INPUT is the tool call's input plist and CTX its context."
   :subject (lambda (input) (string-trim (format "%s %s" (or (plist-get input :action) "")
                                                 (harness-tools-sessions--short (plist-get input :session_id)))))
   :handler #'harness-tools-sessions--control)
+
+;;;; session_settings
+;;
+;; One tool reads and changes what a session runs with: its model, its
+;; thinking level, its context window limit and its budget.  It is a
+;; tool of its own rather than more actions of `session_control'
+;; because every action there is about another session -- it refuses
+;; the calling session itself ("A session cannot cancel itself") -- and
+;; because this tool reads the calling session by default, with `read'
+;; a read-only call: one tool with `action=read|set' keeps the surface
+;; one call for settings, while the permission chain tells the two
+;; apart per call (see `harness-perms--call-kind'), so a read never
+;; asks and a set asks, or is judged, like any other change to harness
+;; state.  The tool is declared `meta' so that a set would ask even
+;; were that classification ever missing.
+;;
+;; Every change goes through `session/update' with `:silent t' (its own
+;; hint would say less), so the UI, the header line and ACP clients
+;; refresh, and leaves one hint in the affected session's transcript
+;; naming who made the change, the setting, the old value and the new
+;; one: "Context window limit 128k → 200k, set by session «planner»".
+;; A change to a running session says it takes effect from its next
+;; request.  A setting the policy fixes is refused before anything
+;; changes (`harness-session-check-policy').
+;;
+;; It changes nothing else: the permission mode and non-interactive
+;; state are shown by a read but refused, naming the tool that does
+;; change them (`set_non_interactive', `request_directory_access' or
+;; `session_move'), as are allowed directories, the working directory
+;; and the host.
+
+(defconst harness-tools-sessions--settings-keys
+  '("model" "thinking" "context_window_limit" "budget" "budget_hard")
+  "Input keys `session_settings''s set action changes.
+`budget_hard' is no setting of its own: it says whether the budget is
+hard (the session's next turn stops once it is spent) rather than soft.")
+
+(defconst harness-tools-sessions--settings-refused
+  '(("permission_mode" . "the permission mode is the user's; change it in the chat, not here")
+    ("non_interactive" . "use the set_non_interactive tool to change non-interactive mode")
+    ("allowed_dirs" . "use the request_directory_access tool to ask the user for a directory")
+    ("allowed_directories" . "use the request_directory_access tool to ask the user for a directory")
+    ("cwd" . "use the session_move tool to move the session to another working directory")
+    ("directory" . "use the session_move tool to move the session to another working directory")
+    ("working_directory" . "use the session_move tool to move the session to another working directory")
+    ("host" . "use the session_move tool to move the session, which is what changes its host"))
+  "Input keys `session_settings' refuses, each with the tool that changes it.
+The refusal names the right tool, so an agent asked to widen what a
+session may do is pointed at that tool and its confirmation rather
+than at this one.")
+
+(defun harness-tools-sessions--settings-action (input)
+  "Return the action of a `session_settings' call with INPUT, read or set."
+  (let* ((value (plist-get input :action))
+         (action (and (stringp value) (downcase (string-trim value)))))
+    (cond ((equal action "read") "read")
+          ((equal action "set") "set")
+          ((null action)
+           (signal 'harness-error (list "session_settings needs action: read or set")))
+          (t (signal 'harness-error
+                     (list (format "Unknown session_settings action %S; it is read or set" value)))))))
+
+(defun harness-tools-sessions--settings-read-p (input)
+  "Non-nil when a `session_settings' call with INPUT reads and changes nothing."
+  (equal "read" (harness-tools-sessions--settings-action input)))
+
+(defun harness-tools-sessions--settings-target (input ctx)
+  "Return the id of the session a `session_settings' call names.
+That is INPUT's `session_id' -- an id, a unique id prefix or a unique
+name -- else CTX's own session."
+  (let ((ref (plist-get input :session_id)))
+    (if (or (null ref) (harness-string-blank-p (format "%s" ref)))
+        (plist-get ctx :session-id)
+      (harness-tools-sessions--resolve ref))))
+
+(defun harness-tools-sessions--settings-check-keys (input)
+  "Refuse the input keys of a `session_settings' call that are not its own.
+A refused setting names the tool that changes it; an unknown key names
+what this tool does change.  Signal for such a key, else return nil."
+  (cl-loop for (key _value) on input by #'cddr
+           for name = (substring (symbol-name key) 1)
+           for refused = (assoc name harness-tools-sessions--settings-refused)
+           unless (or (member name '("action" "session_id"))
+                      (member name harness-tools-sessions--settings-keys))
+           do (signal 'harness-error
+                      (list (if refused
+                                (format "session_settings does not change %s: %s"
+                                        (replace-regexp-in-string "_" " " name) (cdr refused))
+                              (format "session_settings does not know %s; it reads or sets %s"
+                                      name (string-join harness-tools-sessions--settings-keys ", ")))))))
+
+;;;; session_settings: reading
+
+(defconst harness-tools-sessions--settings-pinned-note " (set by policy, and cannot be changed)"
+  "What `session_settings''s read says of a setting the policy fixes.")
+
+(defun harness-tools-sessions--settings-pinned (key s)
+  "Return the note a read shows for setting KEY of session S, or nil.
+KEY is one the policy can fix; the note is its when it does."
+  (and (harness-session--pinned key (plist-get s :kind))
+       harness-tools-sessions--settings-pinned-note))
+
+(defun harness-tools-sessions--settings-budget-short (budget)
+  "Return the short form of the session BUDGET plist, or \"none\"."
+  (if (and (listp budget) (numberp (plist-get budget :amount)))
+      (format "%s%s" (harness-format-cost (plist-get budget :amount))
+              (if (harness-json-true-p (plist-get budget :hard)) " (hard)" ""))
+    "none"))
+
+(defun harness-tools-sessions--settings-budget-text (budget)
+  "Return the readable form of the session BUDGET plist, or \"none\"."
+  (if (and (listp budget) (numberp (plist-get budget :amount)))
+      (format "%s%s" (harness-format-cost (plist-get budget :amount))
+              (if (harness-json-true-p (plist-get budget :hard))
+                  " (hard: it stops the session's next turn once spent)"
+                " (soft: it warns at 80% and 100%)"))
+    "none"))
+
+(defun harness-tools-sessions--settings-window-text (s)
+  "Return the context window of session S and where its limit came from."
+  (let* ((window (plist-get s :context-window))
+         (override (plist-get s :context-window-override))
+         (limit (plist-get s :context-window-limit))
+         (model-window (harness-session--model-window (plist-get s :model)))
+         (source (harness-session-context-limit-source s))
+         (tokens #'harness-format-tokens-compact))
+    (cond
+     ((and (numberp window) override)
+      (format "%s tokens (set for the session itself; its model's own is %s)"
+              (funcall tokens window) (funcall tokens model-window)))
+     ((and (numberp window) (numberp limit) (< limit model-window))
+      (format "%s tokens (the model's own is %s; capped at %s by %s)"
+              (funcall tokens window) (funcall tokens model-window)
+              (funcall tokens limit) source))
+     ((and (numberp window) (numberp limit))
+      (format (concat "%s tokens (the model's own; a limit of %s is set, %s,"
+                      " and does not hold it lower)")
+              (funcall tokens window) (funcall tokens limit) source))
+     ((numberp window)
+      (format "%s tokens (the model's own; no limit is set)" (funcall tokens window)))
+     (t "unknown"))))
+
+(defun harness-tools-sessions--settings-text (s sid selfp)
+  "Return the settings of session S, whose id is SID, as text.
+SELFP non-nil when S is the calling session.  The permission mode and
+non-interactive state are shown, and the text says they are not changed
+here."
+  (concat
+   (format "Session %s «%s»%s: %s, kind %s\n"
+           sid (or (plist-get s :name) "(unnamed)") (if selfp " (this session)" "")
+           (harness-tools-sessions--status sid) (plist-get s :kind))
+   (format "  model: %s%s\n"
+           (plist-get s :model) (or (harness-tools-sessions--settings-pinned :model s) ""))
+   (format "  thinking: %s%s\n"
+           (or (plist-get s :thinking) "the model's default")
+           (or (harness-tools-sessions--settings-pinned :thinking s) ""))
+   (format "  context window: %s\n" (harness-tools-sessions--settings-window-text s))
+   (format "  budget: %s\n" (harness-tools-sessions--settings-budget-text (plist-get s :budget)))
+   (format "  permission mode: %s%s; non-interactive: %s%s\n"
+           (plist-get s :permission-mode)
+           (or (harness-tools-sessions--settings-pinned :permission-mode s) "")
+           (if (harness-json-true-p (plist-get s :non-interactive)) "on" "off")
+           (or (harness-tools-sessions--settings-pinned :non-interactive s) ""))
+   "  The permission mode, non-interactive mode, allowed directories, the working directory and the host are not changed here: non-interactive has the set_non_interactive tool, a directory request_directory_access, and a move session_move.\n"))
+
+;;;; session_settings: changing
+
+(defun harness-tools-sessions--settings-tokens (value)
+  "Return the number of tokens VALUE names, or nil.
+That is a number, a string of digits (thousands separators allowed), or
+one with a k or M suffix: 128000, \"128000\", \"128k\", \"1.2M\"."
+  (cond
+   ((numberp value) value)
+   ((and (stringp value)
+         (string-match
+          "\\`[ \t]*\\([0-9][0-9_,']*\\(?:\\.[0-9]+\\)?\\)[ \t]*\\([kKmM]\\)?[ \t]*\\'"
+          value))
+    (let ((n (string-to-number (replace-regexp-in-string "[_,']" "" (match-string 1 value)))))
+      (pcase (match-string 2 value)
+        ((or "k" "K") (* n 1000))
+        ((or "m" "M") (* n 1000000))
+        (_ n))))
+   (t nil)))
+
+(defun harness-tools-sessions--settings-limit (value)
+  "Return the context window limit VALUE names.
+A number of tokens sets it; nil (JSON null) or \"model\", \"none\",
+\"unset\", \"off\" or \"default\" removes it, so the model's own window
+applies again.  A string may be a count, \"200000\", or one with a
+suffix, \"200k\" or \"1.2M\".  Another value is refused."
+  (cond
+   ((null value) nil)
+   ((and (stringp value)
+         (member (downcase (string-trim value))
+                 '("model" "none" "unset" "clear" "off" "default")))
+    nil)
+   (t
+    (let ((n (harness-tools-sessions--settings-tokens value)))
+      (or (and (numberp n) (harness-session--context-window-limit-value n))
+          (signal 'harness-error
+                  (list (format (concat "Context window limit %S is not a positive number of tokens,"
+                                        " nor model for the model's own window")
+                                value))))))))
+
+(defun harness-tools-sessions--settings-usd (value)
+  "Return the dollar amount VALUE names, or nil.
+That is a number, or a string of digits with an optional decimal part,
+a leading $ and thousands separators allowed: 5, \"5.00\", \"$1,200\"."
+  (cond
+   ((numberp value) value)
+   ((and (stringp value)
+         (string-match
+          "\\`[ \t]*\\$?[ \t]*\\([0-9][0-9_,']*\\(?:\\.[0-9]+\\)?\\)[ \t]*\\'" value))
+    (string-to-number (replace-regexp-in-string "[_,']" "" (match-string 1 value))))
+   (t nil)))
+
+(defun harness-tools-sessions--settings-budget (value hard)
+  "Return the session budget VALUE names, with hardness HARD, or nil to remove it.
+VALUE is a dollar amount, or nil (JSON null) or \"none\", \"off\",
+\"unset\", \"clear\" or \"remove\" to remove the budget.  HARD non-nil
+makes it a hard budget.  Another value, or a negative one, is refused."
+  (cond
+   ((null value) nil)
+   ((and (stringp value)
+         (member (downcase (string-trim value)) '("none" "off" "unset" "clear" "remove")))
+    nil)
+   (t
+    (let ((amount (harness-tools-sessions--settings-usd value)))
+      (cond ((null amount)
+             (signal 'harness-error
+                     (list (format (concat "Budget %S is not a dollar amount, nor none to remove the budget")
+                                   value))))
+            ((< amount 0)
+             (signal 'harness-error (list (format "Budget %S is negative" value))))
+            (t (list :amount (float amount) :hard hard)))))))
+
+(defun harness-tools-sessions--settings-thinking (value model)
+  "Return the thinking level VALUE names, or nil for the model's default.
+VALUE is a level, or nil (JSON null) or \"default\" for the model's own.
+A level MODEL does not offer is refused, naming the levels it has; a
+model whose levels the catalogue does not list takes any level."
+  (cond
+   ((null value) nil)
+   ((and (stringp value) (member (downcase (string-trim value)) '("default" "unset" "clear")))
+    nil)
+   ((and (stringp value) (not (harness-string-blank-p value)))
+    (let ((level (string-trim value))
+          (levels (harness-session--model-levels model)))
+      (when (and levels (not (member level levels)))
+        (signal 'harness-error
+                (list (format "Model %s does not offer the thinking level %s; it offers %s"
+                              (or model "?") level (string-join levels ", ")))))
+      level))
+   (t (signal 'harness-error (list (format "Thinking %S is not a level" value))))))
+
+(defun harness-tools-sessions--settings-wanted (input s)
+  "Return the settings INPUT asks of session S, as `session/update' keys.
+The plist holds only the settings the call names, each validated; a nil
+value is an explicit unset, which `session/update' reads as such."
+  (let ((settings nil)
+        (old (plist-get s :budget)))
+    (when (plist-member input :model)
+      (let ((model (plist-get input :model)))
+        (unless (and (stringp model) (not (harness-string-blank-p model)))
+          (signal 'harness-error
+                  (list (format "Model %S is not a model id, as PROVIDER:MODEL" model))))
+        (setq settings (plist-put settings :model model))))
+    (when (plist-member input :thinking)
+      (setq settings
+            (plist-put settings :thinking
+                       (harness-tools-sessions--settings-thinking
+                        (plist-get input :thinking)
+                        (or (plist-get input :model) (plist-get s :model))))))
+    (when (plist-member input :context_window_limit)
+      (setq settings
+            (plist-put settings :context-window-limit
+                       (harness-tools-sessions--settings-limit
+                        (plist-get input :context_window_limit)))))
+    (let* ((budget-given (plist-member input :budget))
+           (hard-given (plist-member input :budget_hard))
+           (hard (if hard-given
+                     (and (harness-json-true-p (plist-get input :budget_hard)) t)
+                   (and (listp old) (harness-json-true-p (plist-get old :hard)) t))))
+      (cond
+       (budget-given
+        (setq settings (plist-put settings :budget
+                                  (harness-tools-sessions--settings-budget
+                                   (plist-get input :budget) hard))))
+       (hard-given
+        (unless (and (listp old) (numberp (plist-get old :amount)))
+          (signal 'harness-error
+                  (list "There is no budget to make hard or soft; set one with budget first")))
+        (setq settings (plist-put settings :budget (list :amount (plist-get old :amount) :hard hard))))))
+    settings))
+
+(defun harness-tools-sessions--settings-budget-equal-p (a b)
+  "Non-nil when A and B are the same session budget, or both none."
+  (cond
+   ((and (null a) (null b)) t)
+   ((and (listp a) (listp b))
+    (and (numberp (plist-get a :amount)) (numberp (plist-get b :amount))
+         (= (float (plist-get a :amount)) (float (plist-get b :amount)))
+         (eq (and (harness-json-true-p (plist-get a :hard)) t)
+             (and (harness-json-true-p (plist-get b :hard)) t))))
+   (t nil)))
+
+(defun harness-tools-sessions--settings-diff (settings s)
+  "Return the changes SETTINGS makes to session S, as a plist of KEY VALUE.
+A setting whose value S already holds is left out."
+  (cl-loop for (key value) on settings by #'cddr
+           for old = (plist-get s key)
+           unless (if (eq key :budget)
+                      (harness-tools-sessions--settings-budget-equal-p old value)
+                    (harness-setting-equal-p key old value))
+           append (list key value)))
+
+(defun harness-tools-sessions--settings-author (ctx sid)
+  "Return who a `session_settings' change of SID was made by, for the hint.
+That is \"the session itself\" when CTX's session changed itself, and
+\"session «NAME»\" (its short id when it has no name) when it changed
+another one."
+  (if (equal sid (plist-get ctx :session-id))
+      "the session itself"
+    (let* ((caller (ignore-errors (harness-call 'session/get (plist-get ctx :session-id))))
+           (name (and caller (plist-get caller :name))))
+      (if (and name (not (harness-string-blank-p name)))
+          (format "session «%s»" name)
+        (format "session %s" (harness-tools-sessions--short (plist-get ctx :session-id)))))))
+
+(defun harness-tools-sessions--settings-change-text (key old new)
+  "Return \"Model X → Y\" for setting KEY changing from OLD to NEW."
+  (pcase key
+    (:model (format "Model %s → %s" (or old "(none)") new))
+    (:thinking (format "Thinking %s → %s"
+                       (or old "the model's default") (or new "the model's default")))
+    (:context-window-limit
+     (format "Context window limit %s → %s"
+             (if (numberp old) (harness-format-tokens-compact old)
+               "none (the model's own window)")
+             (if (numberp new) (harness-format-tokens-compact new)
+               "none (the model's own window)")))
+    (:budget (format "Budget %s → %s"
+                     (harness-tools-sessions--settings-budget-short old)
+                     (harness-tools-sessions--settings-budget-short new)))
+    (_ (format "%s → %s" key new))))
+
+(defun harness-tools-sessions--settings-hint (key old new author running)
+  "Return the hint a change of setting KEY from OLD to NEW leaves.
+AUTHOR says who made the change (see `session_settings'), and RUNNING
+non-nil says the session is running, so it takes effect from its next
+request."
+  (format "%s, set by %s%s"
+          (harness-tools-sessions--settings-change-text key old new) author
+          (if running "; the session is running, so it takes effect from its next request" "")))
+
+(defun harness-tools-sessions--settings-name (sid s selfp)
+  "Return how a `session_settings' result names session S, whose id is SID.
+SELFP non-nil names it as the calling session."
+  (if selfp
+      "This session"
+    (format "Session %s «%s»" sid (or (plist-get s :name) "(unnamed)"))))
+
+(defun harness-tools-sessions--settings-set (input ctx s sid selfp)
+  "Change the settings INPUT asks of session S (SID); return a tool result.
+CTX is the call's context and SELFP non-nil when S is the calling
+session.  Every change goes through `session/update' and leaves a hint
+in S's transcript naming who made it, the old value and the new one."
+  (let* ((settings (harness-tools-sessions--settings-wanted input s))
+         (changes (harness-tools-sessions--settings-diff settings s))
+         (who (harness-tools-sessions--settings-author ctx sid))
+         (running (eq (harness-tools-sessions--status sid) 'running)))
+    (if (null changes)
+        (harness-tool-ok
+         (format "Nothing to change: %s already has the settings asked for."
+                 (if selfp "this session"
+                   (format "session %s «%s»" sid (or (plist-get s :name) "(unnamed)")))))
+      ;; A setting the policy fixes is refused before anything changes.
+      (harness-session-check-policy changes (plist-get s :kind))
+      (apply #'harness-call 'session/update sid :silent t changes)
+      (cl-loop for (key value) on changes by #'cddr
+               do (condition-case err
+                      (harness-call 'session/hint sid
+                                    (harness-tools-sessions--settings-hint
+                                     key (plist-get s key) value who running))
+                    ;; The change is made; a hint that cannot be added
+                    ;; must not report the whole call as failed.
+                    (error (harness-log 'warn "tools-sessions: no settings hint for %s: %s"
+                                        sid (harness-error-short-message err)))))
+      (harness-tool-ok
+       (format "%s%s\n%s"
+               (harness-tools-sessions--settings-name sid s selfp)
+               (if running " is running; the changes take effect from its next request:"
+                 ":")
+               (mapconcat (lambda (key)
+                            (concat "  " (harness-tools-sessions--settings-change-text
+                                          key (plist-get s key) (plist-get changes key))))
+                          (harness-plist-keys changes)
+                          "\n"))))))
+
+(defun harness-tools-sessions--settings (input ctx)
+  "Handler of session_settings.
+INPUT is the tool call's input plist and CTX its context."
+  (harness-tools-sessions--settings-check-keys input)
+  (let* ((read (harness-tools-sessions--settings-read-p input))
+         (sid (harness-tools-sessions--settings-target input ctx))
+         (s (harness-call 'session/get sid))
+         (selfp (equal sid (plist-get ctx :session-id))))
+    (if read
+        (harness-tool-ok (harness-tools-sessions--settings-text s sid selfp))
+      (harness-tools-sessions--settings-set input ctx s sid selfp))))
+
+(harness-define-tool "session_settings"
+  :label "Session settings"
+  :description "Read or change a session's model, thinking level, context window limit and budget: this session's by default, or another one by id, unique id prefix or name. action=read shows the model, thinking, the context window and what set its limit, and the budget, plus the permission mode and non-interactive state, which this tool does not change. action=set changes model, thinking, context_window_limit (a token count, or model for the model's own window) and budget (a dollar amount; budget_hard makes it stop the session's next turn once spent). A set goes through the permission chain and every change is left in the affected session's transcript as a hint naming who made it and the old and new value. It refuses permission_mode, non_interactive, allowed_dirs, directory and host, naming the tool that changes them: set_non_interactive, request_directory_access or session_move."
+  :schema '(:type "object"
+            :properties (:action (:type "string" :enum ("read" "set")
+                                  :description "read shows the settings; set changes them.")
+                         :session_id (:type "string" :description "Session id, unique id prefix or unique name. Default: this session.")
+                         :model (:type "string" :description "New model, as PROVIDER:MODEL, for set.")
+                         :thinking (:type "string" :description "New thinking level, or default for the model's own, for set.")
+                         :context_window_limit (:type "string" :description "New context window limit in tokens, as a number (\"200000\" or \"200k\"), or model/none to remove the limit, for set.")
+                         :budget (:type "string" :description "New budget in US dollars, as a number (\"5\" or \"5.00\"), or none to remove it, for set.")
+                         :budget_hard (:type "boolean" :description "true for a hard budget (the session's next turn stops once it is spent), false for soft (it warns), for set.")
+                         :permission_mode (:type "string" :description "Refused: only the user changes the permission mode.")
+                         :non_interactive (:type "boolean" :description "Refused: use set_non_interactive.")
+                         :allowed_dirs (:type "array" :items (:type "string") :description "Refused: use request_directory_access.")
+                         :directory (:type "string" :description "Refused: use session_move.")
+                         :host (:type "string" :description "Refused: use session_move."))
+            :required ("action"))
+  :kind 'meta
+  :subject (lambda (input)
+             (let ((keys (cl-loop for k in '(:model :thinking :context_window_limit :budget :budget_hard)
+                                  when (plist-member input k)
+                                  collect (replace-regexp-in-string "_" " " (substring (symbol-name k) 1)))))
+               (string-trim (format "%s%s of %s"
+                                    (or (plist-get input :action) "read")
+                                    (if keys (concat " " (string-join keys ", ")) "")
+                                    (harness-tools-sessions--short
+                                     (or (plist-get input :session_id) "this session"))))))
+  :handler #'harness-tools-sessions--settings)
 
 ;;;; set_non_interactive
 

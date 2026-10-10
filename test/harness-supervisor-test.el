@@ -1317,7 +1317,7 @@ selected by `:active' alone; the active sessions change as ever."
     "request_directory_access"
     "web_fetch" "web_search"
     "ask_user" "todo_write" "hand_in" "notify" "session_control" "session_send" "session_move"
-    "set_non_interactive" "set_priority" "task_control" "task_submit"
+    "set_non_interactive" "set_priority" "task_control" "task_submit" "session_settings"
     "no_plan_needed" "submit_plan" "retry_step")
   "The tools a supervising session is offered, bash apart: the contract.")
 
@@ -1852,17 +1852,22 @@ selected by `:active' alone; the active sessions change as ever."
     (harness-supervisor-test-allow-all)
     (let ((sid (harness-supervisor-test-session)))
       (should (equal '("no_plan_needed" "submit_plan" "retry_step" "hand_in" "task_submit" "task_control"
-                       "session_send" "session_control")
+                       "session_send" "session_control" "session_settings")
                      harness-supervisor-decision-tools))
       (dolist (name harness-supervisor-decision-tools)
-        ;; The plan engine's own tools want a real plan: stand in for them,
-        ;; this test is about the decision being a decision.
-        (unless (and (harness-tool-get name) (not (member name '("submit_plan" "retry_step"))))
+        ;; The plan engine's own tools want a real plan, and session_settings
+        ;; a real setting: stand in for them, this test is about the decision
+        ;; being a decision.
+        (unless (and (harness-tool-get name)
+                     (not (member name '("submit_plan" "retry_step" "session_settings"))))
           (harness-define-tool name :label name :description "A decision." :kind 'meta
                                :handler (lambda (&rest _) (harness-tool-ok "ok"))))
         (ert-info (name)
           (setq harness-supervisor-test--script
-                (list (harness-supervisor-test-calls name '(:reason "because"))
+                (list (harness-supervisor-test-calls
+                       name (if (equal name "session_settings")
+                                '(:action "set" :thinking "low")
+                              '(:reason "because")))
                       '((:type text :delta "Done.") (:type done :stop-reason end-turn))))
           (should (eq 'end-turn (harness-supervisor-test-prompt sid (format "Turn with %s" name))))
           (should-not (harness-supervisor-test-reminders sid))))
@@ -1873,6 +1878,21 @@ selected by `:active' alone; the active sessions change as ever."
       (harness-supervisor-test-prompt sid "Turn with todo_write")
       ;; The model keeps stopping, so it is sent back as often as it may be.
       (should (= 2 (length (harness-supervisor-test-reminders sid)))))))
+
+(ert-deftest harness-supervisor-a-settings-read-decides-nothing ()
+  "A session_settings call is a decision only when it changes a setting.
+A read decides nothing, so a supervising turn that only looked at a
+session's settings is still owed a decision; raising a worker's window
+or model is coordination, like session_send, and is one."
+  (harness-supervisor-test-with
+    (should (harness-supervisor--decision-call-p
+             '(:tool "session_settings" :input (:action "set" :model "x"))))
+    (should-not (harness-supervisor--decision-call-p
+                 '(:tool "session_settings" :input (:action "read" :session_id "w"))))
+    (should-not (harness-supervisor--decision-call-p
+                 '(:tool "todo_write" :input (:todos ("a")))))
+    (should (harness-supervisor--decision-call-p
+             '(:tool "no_plan_needed" :input (:reason "x"))))))
 
 (ert-deftest harness-supervisor-a-decision-that-failed-decided-nothing ()
   "A call that was refused, or failed, does not let the turn stop."

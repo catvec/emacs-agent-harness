@@ -590,6 +590,30 @@ outright (`:context-window') wins over the limit."
                     (harness-session-context-window-limit s))))
         (if limit (min window limit) window))))
 
+(defun harness-session-context-limit-source (session)
+  "Return a short name of what capped SESSION's context window, or nil.
+SESSION is a session plist, as `session/get' returns it, and nil is
+returned when it carries no limit.  A sub-agent's cap is
+`harness-subagent-context-limit', a task's `harness-tasks-context-limit',
+and anything else is a limit set for the session itself.  Best effort,
+as the UI's `harness-ui-context-cap-name': the session's kind says it is
+a sub-agent's (the supervisor's workers and spawn_agent's children are
+sub-agents, and a fork inherits its parent's limit), the tasks module's
+own cap value says a task's, and any other limit is taken for one set
+for the session, by the user or through `session/update'."
+  (let ((limit (harness-session--context-window-limit-value
+                (plist-get session :context-window-limit))))
+    (when limit
+      (cond
+       ((member (format "%s" (plist-get session :kind)) '("subagent" "fork"))
+        "a sub-agent cap (harness-subagent-context-limit)")
+       ((and (boundp 'harness-tasks-context-limit)
+             (numberp (symbol-value 'harness-tasks-context-limit))
+             (equal limit (harness-session--context-window-limit-value
+                           (symbol-value 'harness-tasks-context-limit))))
+        "a task cap (harness-tasks-context-limit)")
+       (t "set for this session")))))
+
 ;;;; The prompt cache
 ;;
 ;; A provider keeps the start of a conversation cached for a while

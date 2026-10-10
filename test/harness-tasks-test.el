@@ -612,8 +612,10 @@ rather than reach a task at work."
              (sid (harness-tasks-test-session-id id)))
         (should sid)
         (should-error (harness-call 'task/prompt id "are you there?"))
-        ;; Nothing was said to the session, and it still waits.
-        (should-not (harness-call 'session/nodes sid))
+        ;; Nothing was said to the session, and it still waits.  What its
+        ;; transcript holds is the task cap's hint, not a message.
+        (should-not (cl-find 'user (harness-call 'session/nodes sid)
+                             :key (lambda (n) (plist-get n :kind))))
         (should (eq 'pending (harness-tasks-test-state id)))
         (should-not (plist-get (harness-tasks-test-task id) :started))))))
 
@@ -4304,6 +4306,25 @@ task afresh: its work never began."
             (should (equal (file-name-as-directory (plist-get task :worktree))
                            (file-name-as-directory (plist-get (harness-call 'session/get fsid) :cwd)))))
           (should (equal '("write the docs") (harness-tasks-test-user-texts fsid))))))))
+
+(ert-deftest harness-tasks-session-says-its-context-is-capped ()
+  "A task session created with the task cap says so in a hint naming
+the setting that capped it, so the cap is never silent; without a cap
+nothing is said."
+  (harness-tasks-test-with
+    (let* ((id (harness-tasks-test-submit "fix the parser"))
+           (sid (harness-tasks-test-session-id id)))
+      (should (member "Context window capped at 384k tokens, as a task session's is (harness-tasks-context-limit)"
+                      (harness-tasks-test-hints sid))))
+    (let ((harness-tasks-context-limit 4000))
+      (let* ((id (harness-tasks-test-submit "keep it small"))
+             (sid (harness-tasks-test-session-id id)))
+        (should (member "Context window capped at 4k tokens, as a task session's is (harness-tasks-context-limit)"
+                        (harness-tasks-test-hints sid)))))
+    (let ((harness-tasks-context-limit nil))
+      (let* ((id (harness-tasks-test-submit "and another one"))
+             (sid (harness-tasks-test-session-id id)))
+        (should-not (harness-tasks-test--hint-p sid "Context window capped"))))))
 
 (provide 'harness-tasks-test)
 ;;; harness-tasks-test.el ends here
