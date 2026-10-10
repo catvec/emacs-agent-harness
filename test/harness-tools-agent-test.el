@@ -299,6 +299,8 @@ and the caller hears the answer, or that it was dismissed."
       (should (string-match-p "worktree" prompt))
       (should (string-match-p "merge queue" prompt))
       (should (string-match-p "spawn_agent" prompt))
+      (should (string-match-p "background=true" prompt))
+      (should (string-match-p "same step run at once" prompt))
       (should (string-match-p "`plan` tool" prompt)))
     ;; The same section reaches the provider through the agent.
     (let ((sid (harness-tools-agent-test-session)) (seen nil))
@@ -847,6 +849,230 @@ sub-agent the call started."
       (let ((result (harness-test-await (harness-tools-agent-test-run sid "spawn_agent" '(:prompt "hi")))))
         (should-not (plist-get result :is-error))
         (should (string-match-p "sub-agent session" (plist-get result :content)))))))
+
+;;;; Running several sub-agents at once
+
+(defun harness-tools-agent-test-reports (sid)
+  "Return the background sub-agent report nodes of SID, oldest first."
+  (cl-remove-if-not
+   (lambda (node)
+     (and (eq (plist-get node :kind) 'user)
+          (equal '(:kind system :source "sub-agent") (harness-node-sender node))))
+   (harness-call 'session/nodes sid)))
+
+(ert-deftest harness-tools-agent-spawn-background-returns-at-once ()
+  "A background spawn returns while the child runs.
+The child's answer is reported to the parent later, in a message of the
+harness's own."
+  (harness-tools-agent-test-with
+    (let* ((sid (harness-tools-agent-test-session))
+           (harness-provider-demo--delay 0.1)
+           (result (harness-test-await
+                    (harness-tools-agent-test-run
+                     sid "spawn_agent"
+                     '(:prompt "give me the tour" :name "explorer" :background t))))
+           (cid (plist-get (plist-get result :meta) :child-id)))
+      (should-not (plist-get result :is-error))
+      (should cid)
+      (should (string-match-p "started in the background" (plist-get result :content)))
+      (should (string-match-p "explorer" (plist-get result :content)))
+      (should (string-match-p (regexp-quote cid) (plist-get result :content)))
+      (should (eq 'subagent (plist-get (harness-call 'session/get cid) :kind)))
+      (should (equal sid (plist-get (harness-call 'session/get cid) :parent-id)))
+      ;; The call is over while the child still works, and the parent
+      ;; counts it as work it has outstanding.
+      (harness-test-wait (lambda () (eq 'running (plist-get (harness-call 'session/get cid) :status)))
+                         5 "the background child to run")
+      (should (string-match-p "Sub-agent explorer running"
+                              (harness-call 'agent/outstanding sid)))
+      ;; Its answer comes later, as one message of the harness's own.
+      (harness-test-wait (lambda () (harness-tools-agent-test-reports sid)) 15 "the sub-agent report")
+      (let ((reports (harness-tools-agent-test-reports sid)))
+        (should (= 1 (length reports)))
+        (should (string-match-p (format "Sub-agent report: explorer (session %s) finished\\."
+                                        (regexp-quote cid))
+                                (plist-get (car reports) :content)))
+        (should (string-match-p "# Tour" (plist-get (car reports) :content)))
+        (should (string-match-p ", cost \\$" (plist-get (car reports) :content))))
+      (should-not (harness-call 'agent/outstanding sid)))))
+
+(ert-deftest harness-tools-agent-spawn-background-two-at-once ()
+  "Two background sub-agents run at the same time, and each one reports."
+  (harness-tools-agent-test-with
+    (let* ((sid (harness-tools-agent-test-session))
+           (harness-provider-demo--delay 0.15)
+           (a (harness-test-await
+               (harness-tools-agent-test-run sid "spawn_agent"
+                                             '(:prompt "first job" :name "first" :background t))))
+           (aid (plist-get (plist-get a :meta) :child-id)))
+      (should-not (plist-get a :is-error))
+      (should aid)
+      (harness-test-wait (lambda () (eq 'running (plist-get (harness-call 'session/get aid) :status)))
+                         5 "the first child to run")
+      (let* ((b (harness-test-await
+                 (harness-tools-agent-test-run sid "spawn_agent"
+                                               '(:prompt "second job" :name "second" :background t))))
+             (bid (plist-get (plist-get b :meta) :child-id)))
+        (should-not (plist-get b :is-error))
+        (should bid)
+        (harness-test-wait (lambda () (and (harness-call 'agent/running aid)
+                                           (harness-call 'agent/running bid)))
+                           5 "both children to run at once")
+        (let ((out (harness-call 'agent/outstanding sid)))
+          (should (string-match-p "\\`Sub-agents " out))
+          (should (string-match-p "first" out))
+          (should (string-match-p "second" out)))
+        (harness-test-wait (lambda () (= 2 (length (harness-tools-agent-test-reports sid))))
+                           15 "both reports")
+        (let ((reports (harness-tools-agent-test-reports sid)))
+          (should (cl-some (lambda (n) (and (string-match-p (regexp-quote aid) (plist-get n :content))
+                                            (string-match-p "first job" (plist-get n :content))))
+                           reports))
+          (should (cl-some (lambda (n) (and (string-match-p (regexp-quote bid) (plist-get n :content))
+                                            (string-match-p "second job" (plist-get n :content))))
+                           reports))
+          (dolist (n reports)
+            (should (string-match-p ", cost \\$" (plist-get n :content)))))
+        (should-not (harness-call 'agent/outstanding sid))))))
+
+(ert-deftest harness-tools-agent-spawn-background-failure-is-reported ()
+  "A background child that fails is reported as stopped, not as an answer."
+  (harness-tools-agent-test-with
+    (let* ((sid (harness-tools-agent-test-session))
+           (harness-provider-demo--delay 0.02)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (if (eq 'subagent (plist-get (plist-get request :session) :kind))
+                  '((:type text :delta "starting") (:type done :stop-reason error :error "boom"))
+                (let ((harness-provider-demo-script-override nil))
+                  (harness-provider-demo--script request)))))
+           (result (harness-test-await
+                    (harness-tools-agent-test-run sid "spawn_agent"
+                                                  '(:prompt "doomed" :name "doomed" :background t))))
+           (cid (plist-get (plist-get result :meta) :child-id)))
+      (should-not (plist-get result :is-error))
+      (should cid)
+      (harness-test-wait (lambda () (harness-tools-agent-test-reports sid)) 10 "the failure report")
+      (let ((content (plist-get (car (harness-tools-agent-test-reports sid)) :content)))
+        (should (string-match-p "stopped" content))
+        (should (string-match-p "boom" content))
+        (should (string-match-p (regexp-quote cid) content))))))
+
+(ert-deftest harness-tools-agent-child-report-text-names-worktree-and-cuts ()
+  "The report of a child that stopped names where it worked.
+A long answer is cut in the middle, pointing at the child's session."
+  (harness-tools-agent-test-with
+    (let* ((sid (harness-tools-agent-test-session))
+           (result (harness-test-await (harness-tools-agent-test-run sid "spawn_agent" '(:prompt "hi"))))
+           (cid (plist-get (plist-get result :meta) :child-id))
+           (entry (list :parent sid :name "kid" :worktree "/tmp/kid" :branch "harness/kid")))
+      (let ((text (harness-tools-agent--child-report-text cid entry '(:stop-reason cancelled))))
+        (should (string-match-p (format "Sub-agent report: kid (session %s) stopped: its turn was cancelled\\."
+                                        (regexp-quote cid))
+                                text))
+        (should (string-match-p "It worked in worktree /tmp/kid on branch harness/kid" text)))
+      (let ((harness-tools-max-output-chars 40))
+        (should (string-match-p "session_read on .* shows the rest"
+                                (harness-tools-agent--child-report-text cid entry '(:stop-reason end-turn))))))))
+
+;;;; Two spawn_agent calls in one step, against a strict server
+
+(defvar harness-tools-agent-test--parallel-bodies nil
+  "The chat completion bodies the parallel-spawn strict server got, newest first.")
+
+(defun harness-tools-agent-test--parallel-reply (body)
+  "Return (STATUS . BODY-TEXT), this strict server's answer for BODY.
+The first request gets two spawn_agent calls in one assistant message;
+the request that carries their results gets a closing answer."
+  (let* ((messages (plist-get body :messages))
+         (last (car (last messages)))
+         (text (lambda (s)
+                 (harness-tools-agent-test--sse
+                  (list :choices (list (list :index 0 :delta (list :content s) :finish_reason "stop")))
+                  "[DONE]")))
+         (err (harness-tools-agent-test--strict-error messages)))
+    (cond
+     (err (cons 400 (harness-json-encode (list :error (list :message err :type "invalid_request_error")))))
+     ((equal (plist-get last :role) "tool")
+      (cons 200 (funcall text "Both sub-agents reported back.")))
+     (t (cons 200 (harness-tools-agent-test--sse
+                   (list :choices
+                         (list (list :index 0
+                                     :delta (list :tool_calls
+                                                  (list (list :index 0 :id "call_a" :type "function"
+                                                              :function (list :name "spawn_agent"
+                                                                              :arguments "{\"prompt\":\"first job\",\"name\":\"first\",\"model\":\"demo:scripted\"}"))
+                                                        (list :index 1 :id "call_b" :type "function"
+                                                              :function (list :name "spawn_agent"
+                                                                              :arguments "{\"prompt\":\"second job\",\"name\":\"second\",\"model\":\"demo:scripted\"}"))))
+                                           :finish_reason "tool_calls")))
+                   "[DONE]"))))))
+
+(defun harness-tools-agent-test--parallel-request (url &rest args)
+  "Answer the request to URL with ARGS as the parallel-spawn server would, soon.
+Chat completion bodies are recorded in `harness-tools-agent-test--parallel-bodies'."
+  (let ((handle (make-harness-http-handle :url url :callback (plist-get args :callback)
+                                          :on-chunk (plist-get args :on-chunk) :started (float-time))))
+    (harness-run-soon
+     (lambda ()
+       (unless (harness-http-handle-cancelled handle)
+         (pcase-let ((`(,status . ,text)
+                      (if (string-match-p "/models\\'" url)
+                          (cons 200 "{\"data\":[]}")
+                        (push (plist-get args :json) harness-tools-agent-test--parallel-bodies)
+                        (harness-tools-agent-test--parallel-reply (plist-get args :json)))))
+           (when (plist-get args :on-headers) (funcall (plist-get args :on-headers) status nil))
+           (if (plist-get args :on-chunk)
+               (progn (funcall (plist-get args :on-chunk) text)
+                      (funcall (plist-get args :callback) status nil "" nil))
+             (funcall (plist-get args :callback) status nil text nil))))))
+    handle))
+
+(ert-deftest harness-tools-agent-spawn-two-blocking-calls-in-one-step ()
+  "Two spawn_agent calls made in one step run their children at once."
+  (harness-tools-agent-test-with
+    (let ((harness-tools-agent-test--parallel-bodies nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'harness-http-request) #'harness-tools-agent-test--parallel-request))
+            (harness-openai-register-endpoint harness-tools-agent-test--strict-endpoint)
+            (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                                 :model "teststrict:deepseek-flash")
+                                   :id))
+                   (harness-provider-demo--delay 0.15)
+                   (running (make-hash-table :test 'equal))
+                   (both nil)
+                   (watch (harness-on
+                           'session/status
+                           (lambda (id status)
+                             (let ((child (ignore-errors
+                                           (plist-get (harness-call 'session/get id) :parent-id))))
+                               (when (equal sid child)
+                                 (if (eq status 'running)
+                                     (progn
+                                       (puthash id t running)
+                                       (when (>= (hash-table-count running) 2)
+                                         (setq both t)))
+                                   (remhash id running))))))))
+              (unwind-protect
+                  (let ((turn (harness-test-await (harness-call 'agent/prompt sid "delegate two things") 30)))
+                    (should (eq 'end-turn (plist-get turn :stop-reason)))
+                    ;; Both children ran before either had finished.
+                    (should both)
+                    (should (= 2 (length (harness-call 'session/list (list :parent-id sid)))))
+                    (let ((results (cl-remove-if-not
+                                    (lambda (n) (eq (plist-get n :kind) 'tool-result))
+                                    (harness-call 'session/nodes sid))))
+                      (should (equal '("call_a" "call_b")
+                                     (sort (mapcar (lambda (n) (plist-get n :call-id)) results) #'string<)))
+                      (dolist (r results)
+                        (should-not (plist-get r :is-error))
+                        (should (plist-get (plist-get r :meta) :child-id))))
+                    ;; The two requests the strict server saw were both valid.
+                    (should (= 2 (length harness-tools-agent-test--parallel-bodies)))
+                    (dolist (body harness-tools-agent-test--parallel-bodies)
+                      (should-not (harness-tools-agent-test--strict-error (plist-get body :messages)))))
+                (harness-off watch))))
+        (harness-provider-unregister 'teststrict)))))
 
 (provide 'harness-tools-agent-test)
 ;;; harness-tools-agent-test.el ends here
