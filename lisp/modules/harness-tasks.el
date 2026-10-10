@@ -14,7 +14,7 @@
 ;; for a ticket title (see Titles).
 ;;
 ;; A task's session also runs on a shorter context than an interactive
-;; one by default: `harness-tasks-context-limit' (256k tokens) caps the
+;; one by default: `harness-tasks-context-limit' (384k tokens) caps the
 ;; session's context window, so the harness compacts a task sooner and
 ;; hands it a smaller transcript to carry on from.  Set it to nil to
 ;; give task sessions the whole window, like any other session, or to
@@ -243,7 +243,7 @@ own setting, from the board or `task/submit', wins over both."
   :type `(choice (const :tag "Configured default" nil) ,@harness-tasks--thinking-levels)
   :group 'harness)
 
-(defcustom harness-tasks-context-limit 256000
+(defcustom harness-tasks-context-limit 384000
   "Most tokens of context a task session uses, or nil for its whole window.
 A task session compacts when its context comes within the usual reserve
 of this limit, so unattended tasks compact earlier than interactive
