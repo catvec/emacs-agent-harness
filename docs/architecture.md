@@ -4249,7 +4249,7 @@ TRAMP prefixes come from the session host):
 | `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`) |
 | `plan` | Plan | plan | meta |
 | `todo_write` | Todo list | todos | meta |
-| `spawn_agent` | Sub-agent | prompt, fork, model, name, cwd, worktree | meta (runs the child in the background and returns at once; the jail checks `cwd`, as it checks bash's) |
+| `spawn_agent` | Sub-agent | prompt, fork, model, thinking, name, cwd, worktree | meta (runs the child in the background and returns at once; the jail checks `cwd`, as it checks bash's) |
 | `skill_search` / `skill_load` | Search skills / Load skill | query / name, file (one of the skill's supporting files) | read (needs no approval: `harness-perms--auto-allow-tools`) |
 | `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -4465,6 +4465,21 @@ less than the supervisor holds, so its limit is fitted first: the cap
 plus the context `compaction/estimate` gives the compacted fork
 (`harness-tools-agent-context-limit SUPERVISOR t CONTEXT`), set with
 `session/update` `:silent t`, as the hint that follows says it.
+
+A sub-agent's thinking level starts from its parent's: `spawn_agent`
+passes it to `session/create`, and `session/fork` inherits it, so a
+child thinks as the session it is a child of.  `spawn_agent`'s
+`:thinking` names one of its own, checked against the model the child
+will run on -- the parent's model, or the `:model` the call gives it --
+with `harness-session--model-levels`.  A level the provider catalogue
+does not give that model fails the call (`harness-tool-error`;
+`harness-tools-agent--child-thinking` names the model, the level and the
+levels it does offer) rather than starting a child at a level its model
+cannot act on, as `harness-session--btw-thinking` and the session UI
+keep to the levels a model offers.  Only a level the call asked for is
+checked: without `:thinking` a child keeps the parent's level, a fresh
+one through `session/create` and a fork through its own default, even
+when a `:model` override does not list it.
 
 The note under a running call (module `tools`): a call that runs for a
 while says more than the one line of progress the activity line shows,
