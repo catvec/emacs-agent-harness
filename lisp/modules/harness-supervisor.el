@@ -83,6 +83,16 @@
 ;; ends -- recorded by the harness (`harness-outside-node-p'), so the
 ;; supervisor's model never sees it and nothing waits for it.
 ;;
+;; Thinking is a role thing.  A session whose provider names a level in
+;; `harness-supervisor-thinking' (DeepSeek: max) has its thinking raised
+;; to it while it supervises, and back to what it was when the mode is
+;; turned off; its workers think at the level their own model's provider
+;; names in `harness-supervisor-worker-thinking' (DeepSeek: medium, the
+;; middle of its ladder), so the many small steps cost less thinking than
+;; the plan.  A provider neither setting names keeps the old behavior:
+;; sessions think as they were configured, and workers as their
+;; supervisor does.
+;;
 ;; A step that starts again -- `retry_step', perhaps on a higher tier, or an
 ;; interrupted step after a restart -- decides its context by the cache.  A
 ;; fork never shares its parent's cache (its system prompt names its own
@@ -210,6 +220,46 @@ that.  It is on the settings page, under Supervisor mode."
                                                        (memq (car cell) '(mundane standard hard))
                                                        (stringp (cdr cell))))
                                    v)))
+  :group 'harness)
+
+(defcustom harness-supervisor-thinking '((deepseek . "max"))
+  "Thinking level a session runs at while it supervises, by provider.
+An alist from a provider id -- the `deepseek' of
+\"deepseek:deepseek-flash\" -- to a thinking level, as
+`harness-thinking' names one.  A provider it leaves out, and nil,
+leaves its sessions' thinking as it is.  DeepSeek sessions supervise at
+max by default: planning is what its top effort is for, while the many
+workers that carry a plan out think less (see
+`harness-supervisor-worker-thinking').  The level is raised when a
+session starts supervising and put back as it was when it stops, so
+turning the mode off returns a session to its own level and turning it
+on raises it again.  A level chosen while a session supervises stands
+until the mode changes.  A harness that restarts does not remember the
+level a raised session had, so the raised one then stands.  It is on
+the settings page, under Supervisor mode."
+  :type '(alist :key-type (symbol :tag "Provider") :value-type (string :tag "Level"))
+  :safe (lambda (v)
+          (and (listp v)
+               (cl-every (lambda (cell) (and (consp cell) (symbolp (car cell)) (stringp (cdr cell))))
+                         v)))
+  :group 'harness)
+
+(defcustom harness-supervisor-worker-thinking '((deepseek . "medium"))
+  "Thinking level the workers of a supervisor's plan run at, by provider.
+An alist from a provider id -- the `deepseek' of
+\"deepseek:deepseek-flash\" -- to a thinking level.  The provider
+looked up is the one of the worker's own model, so DeepSeek workers
+think at medium: DeepSeek acts on that as the middle of its ladder,
+one step below the max its supervisor plans at, and a step is small
+enough that less thinking is plenty.  A provider the alist does
+not name, and nil, leaves its workers at the level of the supervisor
+they work for, as they always were.  It is on the settings page, under
+Supervisor mode."
+  :type '(alist :key-type (symbol :tag "Provider") :value-type (string :tag "Level"))
+  :safe (lambda (v)
+          (and (listp v)
+               (cl-every (lambda (cell) (and (consp cell) (symbolp (car cell)) (stringp (cdr cell))))
+                         v)))
   :group 'harness)
 
 (defcustom harness-supervisor-step-budget 80
@@ -492,6 +542,76 @@ with `:sessionId' and `:on'; the agent has no tool for it."
 (harness-declare-event 'supervisor/changed
                        "(SESSION-ID ON) when the user turned supervisor mode on (ON t) or off (ON :false) for a session")
 
+;;;; Thinking levels
+
+(defvar harness-supervisor--raised (make-hash-table :test 'equal)
+  "Session id -> (:before LEVEL :level LEVEL) while the mode raised its thinking.
+BEFORE is the thinking the session had, nil for the model's own, and
+LEVEL the one it was raised to; the entry is what
+`harness-supervisor--lower-thinking' puts back.")
+
+(defun harness-supervisor--provider-thinking (model alist)
+  "Return the thinking level ALIST names for the provider of MODEL, or nil.
+ALIST is `harness-supervisor-thinking' or
+`harness-supervisor-worker-thinking'.  A model whose provider the alist
+does not name gives nil: leave the thinking as it is."
+  (when-let* ((provider (harness-model-provider model)))
+    (cdr (assq provider alist))))
+
+(defun harness-supervisor--raise-thinking (session-id)
+  "Raise the thinking of SESSION-ID to its provider's supervisor level.
+That is `harness-supervisor-thinking' for the model the session runs
+on.  Nothing changes for a provider it does not name, or when the
+session thinks at that level already; the level it had is remembered
+for `harness-supervisor--lower-thinking'.  A session whose thinking the
+policy fixes, or that is gone, is left alone."
+  (when (and (harness-call 'session/exists-p session-id)
+             (harness-method-exists-p 'session/update))
+    (let* ((session (harness-call 'session/get session-id))
+           (before (plist-get session :thinking))
+           (level (harness-supervisor--provider-thinking (plist-get session :model)
+                                                         harness-supervisor-thinking)))
+      (when (and (stringp level) (not (equal level before)))
+        (condition-case err
+            (progn
+              ;; The first raise remembers what the session had; a later
+              ;; one, after the level moved, does not overwrite it.
+              (unless (gethash session-id harness-supervisor--raised)
+                (puthash session-id (list :before before :level level) harness-supervisor--raised))
+              (harness-call 'session/update session-id :thinking level :silent t))
+          (error
+           (remhash session-id harness-supervisor--raised)
+           (harness-log 'warn "supervisor: raising the thinking of %s failed: %S" session-id err)))))))
+
+(defun harness-supervisor--lower-thinking (session-id)
+  "Put the thinking SESSION-ID had before the mode raised it back.
+A level the session was changed to meanwhile -- one the user chose
+while it supervised -- stands.  Nothing is put back for a session whose
+level was not remembered, as after a restart of the harness, or one
+that is gone; the memory of it is dropped either way."
+  (let* ((raised (gethash session-id harness-supervisor--raised))
+         (session (and (harness-call 'session/exists-p session-id)
+                       (harness-call 'session/get session-id))))
+    (remhash session-id harness-supervisor--raised)
+    (when (and raised session (harness-method-exists-p 'session/update)
+               ;; Only the level it was raised to: one chosen meanwhile stands.
+               (equal (plist-get raised :level) (plist-get session :thinking)))
+      (condition-case err
+          (harness-call 'session/update session-id :thinking (plist-get raised :before) :silent t)
+        (error (harness-log 'warn "supervisor: putting back the thinking of %s failed: %S"
+                            session-id err))))))
+
+(defun harness-supervisor--on-ext-changed (session-id key value)
+  "Raise or lower the thinking of SESSION-ID as its supervisor setting changed.
+A subscriber of `session/ext-changed' (ID KEY VALUE); only the
+`:supervisor' setting is this module's.  A session that starts
+supervising takes the level `harness-supervisor-thinking' names for its
+provider, and one that stops gets the level it had before back."
+  (when (eq key :supervisor)
+    (if (harness-json-true-p value)
+        (harness-supervisor--raise-thinking session-id)
+      (harness-supervisor--lower-thinking session-id))))
+
 ;;;; New sessions
 
 (defconst harness-supervisor--write-up-key :supervisor-write-up
@@ -635,6 +755,7 @@ A supervisor's running workers are cancelled, and the step of a deleted
 worker is cancelled (see `harness-supervisor--forget-plans')."
   (harness-supervisor--on-turn-started session-id)
   (remhash session-id harness-supervisor--configured)
+  (remhash session-id harness-supervisor--raised)
   (condition-case err
       (progn (harness-supervisor--forget-plans session-id)
              (harness-supervisor--worker-deleted session-id))
@@ -1348,15 +1469,19 @@ the limit fitted to the compacted conversation for a fork compacted."
          (fresh (equal (plist-get step :context) "fresh"))
          (inherited (harness-supervisor--inherited session-id (not fresh)))
          (limit (harness-supervisor--context-limit session-id (not fresh) inherited))
+         ;; Workers of a provider a level is configured for think at it,
+         ;; rather than at the supervisor's own (see the setting).
+         (level (harness-supervisor--provider-thinking model harness-supervisor-worker-thinking))
          (options (and limit (list :context-window-limit limit)))
+         (forks (append (and level (list :thinking level)) options))
          (seed-fork (lambda ()
                       (apply #'harness-call-async 'seed/fork session-id model
                              :node (plist-get plan :node) :call-id (plist-get plan :call-id)
-                             :name name options)))
+                             :name name forks)))
          (plain-fork (lambda ()
                        (apply #'harness-call-async 'session/fork session-id
                               :node (plist-get plan :node) :call-id (plist-get plan :call-id)
-                              :kind 'subagent :model model :name name options))))
+                              :kind 'subagent :model model :name name forks))))
     (harness-then
      (cond
       (fresh
@@ -1365,7 +1490,7 @@ the limit fitted to the compacted conversation for a fork compacted."
               :kind 'subagent :parent-id session-id :name name :model model
               :host (plist-get session :host)
               :permission-mode (plist-get session :permission-mode)
-              :thinking (plist-get session :thinking)
+              :thinking (or level (plist-get session :thinking))
               ;; Off too, not left to the setting.
               :non-interactive (if (harness-json-true-p (plist-get session :non-interactive)) t :false)
               :allowed-dirs (plist-get session :allowed-dirs)
@@ -2303,6 +2428,7 @@ appended.  Other sessions keep PROMPT."
   ;; After the sections the other modules add, before the seed freezes the prompt.
   (harness-add-filter 'agent/system-prompt #'harness-supervisor--system-prompt 900)
   (harness-on 'session/created #'harness-supervisor--on-created)
+  (harness-on 'session/ext-changed #'harness-supervisor--on-ext-changed)
   (harness-on 'task/changed #'harness-supervisor--on-task-changed)
   (harness-on 'agent/turn-started #'harness-supervisor--on-turn-started)
   (harness-on 'agent/tool-call #'harness-supervisor--on-tool-call)
@@ -2330,6 +2456,7 @@ left once they are (`harness-tasks--pick-up').  A reload hooks in again
   (harness-remove-filter 'agent/stop #'harness-supervisor--stop)
   (harness-remove-filter 'agent/system-prompt #'harness-supervisor--system-prompt)
   (harness-off (cons 'session/created #'harness-supervisor--on-created))
+  (harness-off (cons 'session/ext-changed #'harness-supervisor--on-ext-changed))
   (harness-off (cons 'task/changed #'harness-supervisor--on-task-changed))
   (harness-off (cons 'agent/turn-started #'harness-supervisor--on-turn-started))
   (harness-off (cons 'agent/tool-call #'harness-supervisor--on-tool-call))
