@@ -449,6 +449,14 @@ panel above the compose box lists every item with its state. `C-c C-t`,
 a click on the header segment, or `TAB` on the panel folds the items
 away and brings them back; the list disappears when the agent clears it.
 
+A session that other sessions merge their work into -- the sub-agents it
+started, in worktrees of their own -- shows that queue in the same place,
+a panel of its own above the compose box: one line per child, marked
+queued, merging, in conflict, merged or failed, with the reason the
+queue gave, the live merges first and the last few finished under them.
+It follows the merges as they happen, and disappears when the queue is
+empty and nothing was merged recently.
+
 A session may use its working directory, its worktree, the directories
 in `harness-allowed-directories` and the ones you grant it. It also has
 a temporary directory of its own, `/tmp/harness-UID/ID/` (under
@@ -1030,6 +1038,20 @@ call to one anyway, in every permission mode.
   it waits for, instead of going to review when the turn that submitted
   the plan ends. The session that writes a backlog task up only reads,
   and takes the setting when the task starts.
+- **Merging back.** The merge queue takes a target rather than a
+  parent: the session a branch merges into, or the main checkout
+  itself. A sub-agent started in a worktree (`spawn_agent` with
+  `worktree`) merges into the session that started it, beside whatever
+  else merges there. A session that is itself a worktree -- a task's --
+  merges into the main checkout, and may be the target of the sessions
+  it starts in between, at any depth: one queue, one conflict
+  resolution, one set of events.
+  Order follows the work: a branch may be queued upward while the
+  merges into its own worktree are still to come, but it waits for
+  them, and the session may not hand in (`hand_in`) until they are
+  through, so what reaches main is built on what it was built on. A
+  merge that failed is the child's to fix and does not hold the
+  session back; the queue says so and the panel shows it.
 - **After a restart.** Workers die with the harness. Once it is up
   again, the steps that were running are marked interrupted and
   reported as a failure is: to the session of a task as a message, so
@@ -2034,7 +2056,7 @@ ACP, so it works the same with a local or a remote harness.
 | Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `cowboy` `handoff` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `supervisor` `seed` `acp` `acp-remote` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-ssh` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` `ui-supervisor` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-merge` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` `ui-supervisor` |
 
 ### Modules of your own
 

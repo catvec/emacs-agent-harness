@@ -3103,18 +3103,35 @@ so switching to either loses nothing.
 
 ### merge
 
-- `merge/enqueue CHILD-SID PARENT-SID` → position; `merge/queue PARENT-SID`;
-  `merge/cancel CHILD-SID`.  When the parent reaches a step boundary
-  (`agent/step` filter) or is idle, the head of the queue gets the lock:
-  each merge is a transaction that never leaves the parent's checkout
-  mid-merge.  `git merge-tree --write-tree` merges the child's branch
-  into the parent's HEAD off to the side; a clean result becomes a merge
+One queue serves every merge: a sub-agent's branch into the session
+that started it (its working directory, a worktree), a task's branch
+into the main checkout, nested at any depth.  What a merge names is a
+*target*, not a parent: the session the branch merges into, or -- for a
+branch with no session to merge into, a task's -- the main checkout
+itself, given as its directory.  Both are keyed, locked, scheduled and
+resolved the same way, and both emit the same events, so a task's
+session may itself be a target with a queue of its own.
+
+- `merge/enqueue CHILD-SID TARGET &optional :message` → position;
+  `merge/queue TARGET`; `merge/view TARGET` (`merge/queue` items then
+  the merges TARGET finished recently, newest first, each with `:name`,
+  `:reason` and `:finished` -- what the session's chat panel shows);
+  `merge/pending SESSION-SID` (the merges into a session that are not
+  through yet: queued, merging or in conflict; what it may not hand in
+  past, see tools); `merge/status CHILD-SID`; `merge/cancel CHILD-SID`.
+  TARGET is a session id or a directory.  When the target is a session
+  and it reaches a step boundary (`agent/step` filter) or is idle, the
+  head of its queue gets the lock; a main checkout has no session to
+  wait for and starts as soon as the lock is free.  Each merge is a
+  transaction that never leaves the target's checkout mid-merge.
+  `git merge-tree --write-tree` merges the child's branch
+  into the target's HEAD off to the side; a clean result becomes a merge
   commit (`git commit-tree`, message as `git merge --no-ff` writes it)
   and the checkout moves onto it with `git merge --ff-only`, which git
   refuses, changing nothing, when it would overwrite uncommitted or
   untracked work there or a merge is already in progress (the merge
   fails; a HEAD that moved meanwhile is merged again).  On conflict the
-  parent is untouched and the lock passes on at once, and the parent's
+  target is untouched and the lock passes on at once, and the target's
   commit is to be `git merge`d into the child's branch, in its own
   worktree.  By default (`harness-merge-conflict-resolver` `fresh`) the
   harness starts a fresh `subagent` session for it -- a child of the
@@ -3139,22 +3156,34 @@ so switching to either loses nothing.
   answers the call (see session).  With
   `child`, the child session itself gets that as a steering message.  A merged child's worktree loses
   the harness's lock (`worktree/unlock`; see worktree).
-- `merge/status CHILD-SID`; the `merge_done` tool (called by the child
-  or its resolver) checks the child's
-  worktree contains the parent's commit, merged and committed, and
+- `merge_done` (called by the child or its resolver) checks the child's
+  worktree contains the target's commit, merged and committed, and
   queues the branch again.
-- Events `merge/queued CHILD PARENT POSITION`, `merge/started`,
-  `merge/conflict CHILD PARENT FILES`, `merge/finished CHILD PARENT STATUS`
-  (merged|failed|aborted|cancelled).
-- Moves (`session/move`): a merge goes into the parent's cwd as it is
+- Events `merge/queued CHILD TARGET POSITION`, `merge/started`,
+  `merge/conflict CHILD TARGET FILES`, `merge/resolver CHILD TARGET
+  RESOLVER`, `merge/finished CHILD TARGET STATUS`
+  (merged|failed|aborted|cancelled).  TARGET is the target's session id,
+  or the main checkout's directory for a root target.
+- Nesting: a session's own branch may be queued upward (`merge/enqueue`
+  with the child being a session that is itself a target) while the
+  merges into it are still to come, but it does not start: the pump
+  takes an entry whose child has nothing of its own pending, and when
+  that child's queue drains the queue it is itself queued in is pumped
+  again (`harness-merge--startable-p`, `harness-merge--finish`), so a
+  branch merges on top of the work it was built on.  A session may not
+  hand in while `merge/pending` says anything (see tools): the work it
+  builds on has to be in its branch first.  A merge that failed does not
+  wait there -- the child's work is the child's to fix, and the queue
+  told the session with a hint -- and the queue view shows it.
+- Moves (`session/move`): a merge goes into the target's cwd as it is
   when the merge starts, so the `session/before-move` filter
-  (`harness-merge--before-move`) keeps a parent with branches queued to
+  (`harness-merge--before-move`) keeps a session with branches queued to
   merge into it where it is, and a session resolving a merge's
   conflicts, until those merges are through.  A child (in a worktree)
-  never moves.  A parent that moves before a child queued its branch
+  never moves.  A target that moves before a child queued its branch
   gets that branch merged into its new cwd, which only works when the
   new cwd is a checkout of the same repository: `merge/enqueue` refuses
-  a parent outside any git repository, and git cannot merge a branch
+  a target outside any git repository, and git cannot merge a branch
   another repository does not have.
 
 ### tasks
@@ -3314,9 +3343,10 @@ record from before priorities reads `medium` without being rewritten.
   found without a title (from before, or whose naming failed) are named
   at start-up (`harness-tasks--pick-up`) and on reload.
 - With nothing to review (below), a turn ending `end-turn` queues
-  `merge/enqueue SID TARGET`, TARGET being the project's root session
-  named `harness-tasks--merge-session-name`
-  (created on demand); `merge/finished … merged` makes the task `done`.
+  `merge/enqueue SID TARGET`, TARGET being the project root itself: the
+  main checkout, which the merge queue takes as a target with no session
+  behind it (`merge/enqueue` accepts a directory); `merge/finished …
+  merged` makes the task `done`.
   While its branch holds a place in the queue the task is in the
   `merging` column (`:merge-queued` says when it joined).
   Failures the agent can fix (uncommitted work) are steered by the merge
@@ -3786,8 +3816,7 @@ than the module).  It is set when the session is created
 (`session/created`), so the header shows it from the start: a `main`
 session with no parent takes `harness-supervisor` as `config/get` has it
 at its directory, a fork its parent's value, and a setting its maker gave
-in `:ext` stays; the merge session of the tasks module is never
-governed.  The session of a task takes `harness-supervisor-tasks`
+in `:ext` stays.  The session of a task takes `harness-supervisor-tasks`
 (`task/changed`, once, while it has no message and the task was not
 adopted); the session that writes a backlog task up only reads, so it
 has no setting and `:ext` `:supervisor-write-up` t until the task
@@ -4124,7 +4153,11 @@ the turn to end via the result's `:end-turn' -- `harness-agent--finish-turn'
 cancels the provider and ends the turn with `end-turn', as if the model
 had stopped itself -- so the review step puts the task in front of the
 user.  The filter `agent/tools' drops it where `task/for-session' finds
-no task.  Evidence is required: an image or a video (a path inside the
+no task.  A session whose sub-agents' branches are still merging into it
+cannot hand in: `merge/pending SESSION-SID' is consulted first (when the
+module is loaded), and while it says anything the call is refused, in
+the words of the queue, naming each child and its state -- the work the
+session's own branch is built on has to be in it first.  Evidence is required: an image or a video (a path inside the
 session's roots), a file, code, a note, or `tool_call' naming an
 earlier call of the session, which is copied into the report as a
 snapshot so the view can show it as the link it is.
@@ -5924,7 +5957,15 @@ review -- its heading, the handed-in report in full and always
 expanded, then [Verify] (`C-c C-v`), [Send back] (`C-c C-x`) and
 [Review] -- shown above the compose box of the task's session, a chat
 panel (`harness-chat-panel-functions`), and at the end of its report
-popout (`harness-ui-report-panel-functions`); the session's box sends
+popout (`harness-ui-report-panel-functions`); the merge queue of a
+session whose sub-agents merge into it (`harness-ui-merge`, module
+`ui-merge`: beside the todo list above the compose box, a line per
+child marked queued, merging, in conflict, merged or failed with the
+reason the queue gave, the live ones first and the last few finished
+after them, drawn from `merge/view` over ACP -- fetched once per
+session and again on every `merge/*` event of that queue, so the panel
+follows the merges as they happen; a session with nothing merging and
+nothing merged recently shows no panel); the session's box sends
 as always and the harness takes any message the user sends the task's
 session for the feedback that sends it back (`harness-tasks--on-message'), so
 [Send back] only points at the box, while
