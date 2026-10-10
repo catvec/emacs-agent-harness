@@ -4680,7 +4680,12 @@ names its own working and temporary directories.
   and readable, deleted with `session/delete`; nothing deletes one.  Its
   forks are children of the seed, not of SOURCE-ID, so whatever is keyed
   on `:parent-id` (the merge queue, say) sees the seed as their parent.
-  The supervisor module forks its workers this way.
+  Its record carries `:seed t` in its `:ext` (set with `session/set-ext`
+  when the seed is made), which goes to every client with the record:
+  the UI reads it with `harness-ui-seed-session-p` and
+  `harness-ui-navigable-session-p`, and leaves seeds out of navigation
+  (the header's link to the parent, `harness-open-latest-session`, the
+  session pickers).  The supervisor module forks its workers this way.
 
 ### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval, tools-web, tools-agent, tools-sessions, tools-notify, tools-handin, tools-compact
 
@@ -6165,11 +6170,33 @@ whose title already counts its items, has no such line.
 A call naming a session in `:meta` `:child-id` (a `spawn_agent` call
 once its result names the sub-agent, or the merge queue's call for its
 conflict resolver from the start) gets a `session:` line, also above
-the fold, whose button opens that session.  A call the harness recorded
-(`harness-outside-node-p`) opens a turn of its own under its sender's
-line, as that sender's message does, rather than joining the agent's
-turn or a run of calls, and shows as running until its result comes,
-whatever its session is doing.
+the fold, whose button opens that session; the call's whole block opens
+it too, from its title, input or output.  A call naming sessions in its
+input (`session_id`, `session_ids`: what `session_read`,
+`session_send`, `session_wait`, `set_priority` and the other session
+tools are given) gets the same line, `sessions:` when it names several.
+Its references are resolved against the session cache the way the
+session tools resolve them (`harness-ui-resolve-session`: an id, then a
+unique id prefix, then a unique name, compared without regard to case),
+so one that names no session, or several, shows no link, and the chat's
+own session is left out.  Full session ids printed in a call's input
+and output -- a `session_list` listing, a `session_wait` report -- are
+session links too (`harness-ui-link-session-ids`), both in the chat and
+in the report popout: only a whole id the cache knows counts, never a
+short one, which is as likely a git hash, and a call's block-wide keys
+stay under such a link, so the id opens its own session and the rest of
+the block the call's.  Every clickable session name
+in the UI is drawn by `harness-ui-session-link` (this line, the sender
+of a message from another session, the panels of the merge queue and
+of the running sub-agents...): face `harness-ui-session-link-face`, a
+click or RET opening the session through `harness-ui-visit-session`,
+which switches to the session's project first, as a row of the session
+list does.  `harness-ui-session-action` is that same action for text
+wider than a name, the call's whole block for one.  A call the harness
+recorded (`harness-outside-node-p`) opens a turn of its own under its
+sender's line, as that sender's message does, rather than joining the
+agent's turn or a run of calls, and shows as running until its result
+comes, whatever its session is doing.
 Auto-scroll follows unless the user scrolled up.  While a window on the
 chat is away from the end, scrolled up by any command or moved there
 with the jump keys, the header line shows "↓ newer messages", which
@@ -6722,8 +6749,13 @@ shows or an error when it cannot.  One about a session or a task can be
 clicked; the click, out of the process filter or D-Bus handler, brings
 a graphical frame of this Emacs to the front and runs
 `harness-ui-notification-functions` (the wire plist; the first that
-returns non-nil has shown what it is about), else opens its session.
-The task board's function opens the board of the notification's
+returns non-nil has shown what it is about), else opens its session in
+its project (`harness-ui-visit-session`, which switches to the project
+first, as a row of the session list does).  The task board's function
+switches to the task's project first (`harness-ui-switch-to-project`
+with the main checkout of the notification's session, else of its
+`:project`; a switch that fails, or none being configured, does not keep
+the board from opening), then opens the board of the notification's
 `:project` with point on the task's card, once the board shows it
 (within 10 s).  A click on a terminal-notifier notification this Emacs
 no longer knows (`harness-notifications-desktop-unknown-click-function`,
@@ -7270,7 +7302,21 @@ reason the queue gave, the live ones first and the last few finished
 after them, drawn from `merge/view` over ACP -- fetched once per
 session and again on every `merge/*` event of that queue, so the panel
 follows the merges as they happen; a session with nothing merging and
-nothing merged recently shows no panel); the session's box sends
+nothing merged recently shows no panel); the running sub-agents of a
+session (`harness-ui-children`, module `ui-children`: beside the merge
+queue above the compose box, a line per sub-agent still running -- its
+session link, how long its turn has gone on, and the text of the
+activity line or, before its first activity arrives, its current todo
+item, cut to the room the chat's narrowest window leaves so the line
+never wraps and moves the box below it -- drawn from the session
+cache, the `_harness/activity` updates that
+`harness-ui-update-functions` bring for every session, which it keeps
+per session, and the `agent/turn-started` and `agent/turn-ended`
+events, so nothing asks a child anything; a seed conversation is left
+out by its `:seed` marker, and a chat draws the panel at most once a
+second, one timer per chat taking the updates of all its children, and
+only when the panel's text differs from the one it drew last); the
+session's box sends
 as always and the harness takes any message the user sends the task's
 session for the feedback that sends it back (`harness-tasks--on-message'), so
 [Send back] only points at the box, while

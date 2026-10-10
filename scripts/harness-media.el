@@ -1910,13 +1910,15 @@ the picture's recap is hand written, as the tasks' are."
     buffer))
 
 (defun harness-media-shot-notes ()
-  "The note under a running call, in a chat and in its sub-agent's.
+  "The sub-agents panel of a chat, and the note under its child's call.
 A session sends a sub-agent to run the check suite in a loop, still at
-it when the picture is taken.  The session's chat shows the note under
-its `spawn_agent' call -- what the child does, a recap of it and its
-context, steps and tool calls -- and the child's chat beside it shows
-the note under its own `bash' call: still running, the lines it has
-written and the latest of them."
+it when the picture is taken.  The session's chat lists the child in
+the panel above its compose box -- its name as a link, how long its
+turn has gone on and what it does now -- and the child's chat beside it
+shows the note under its own `bash' call: still running, the lines it
+has written and the latest of them.  The note of the `spawn_agent' call
+itself is not in the picture: that call returned as soon as the child
+started, and a note goes with its call."
   (harness-media--reset-layout)
   (let* ((parent (harness-media--new-session :name "Check the orders suite"
                                              :model "claude:claude-opus-5-5"
@@ -1931,9 +1933,15 @@ written and the latest of them."
       (harness-media--wait
        (lambda ()
          (and (string-match-p "recap:" (or (harness-tools-session-note child (list :recap t)) ""))
-              (string-match-p "lines so far" (or (harness-media--notes-call child) ""))))
-       60 "the notes under the calls")
-      (harness-media--fit 34 24 40)
+              (string-match-p "lines so far" (or (harness-media--notes-call child) ""))
+              ;; The panel the session's chat pins above its compose box.
+              (with-current-buffer pbuf
+                (string-match-p "Sub-agents  1 running" (buffer-string)))))
+       60 "the notes under the calls and the sub-agents panel")
+      ;; Fitted to what the two chats show, the panel drawn.
+      (harness-media--fit (max (harness-media--text-lines (get-buffer-window pbuf))
+                               (harness-media--text-lines (get-buffer-window cbuf)))
+                          nil 40)
       (harness-media--to-bottom pbuf)
       (harness-media--to-bottom cbuf)
       (harness-media--settle 1)

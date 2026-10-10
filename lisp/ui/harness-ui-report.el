@@ -322,10 +322,13 @@ The call's title, status, input and output are shown as the chat shows
 them; [Open in the session] goes to the call.  A call that started a
 sub-agent (`:child-id') names it in a session line, and the text of the
 call opens that session, as the chat's call block does; the buttons
-keep their own keys.  The output is capped, with a button for the rest,
-unless the report is drawn in full.  A call reference without the
-snapshot the harness copies -- a report rebuilt from a hand_in call's
-input -- names the call and links to it, nothing else."
+keep their own keys.  A session id in the input or the output is a
+session link too (`harness-ui-link-session-ids'), as it is in the
+chat, and it keeps its own keys under the call's.  The output is capped,
+with a button for the rest, unless the report is drawn in full.  A call
+reference without the snapshot the harness copies -- a report rebuilt
+from a hand_in call's input -- names the call and links to it, nothing
+else."
   (let* ((call-id (plist-get item :call-id))
          (child (let ((c (plist-get item :child-id)))
                   (and (stringp c) (not (string-empty-p c)) c)))
@@ -354,26 +357,28 @@ input -- names the call and links to it, nothing else."
         (insert (propertize "  (the call itself is in the session)\n" 'face 'harness-dim-face))
       (when-let* ((input (plist-get item :input)))
         (insert (propertize "  input: " 'face 'harness-label-face)
-                (propertize (harness-truncate-end (string-replace "\n" " " input) 400) 'face 'harness-dim-face)
+                (harness-ui-link-session-ids
+                 (propertize (harness-truncate-end (string-replace "\n" " " input) 400)
+                             'face 'harness-dim-face))
                 "\n"))
       ;; The sub-agent the call started, as the chat's session line links it.
       (when child
         (insert "  " (propertize "session: " 'face 'harness-dim-face))
-        (harness-ui-button (harness-ui-session-name child)
-                           (lambda () (harness-ui-display-session child))
-                           :help (format "Open the session %s" (harness-ui-session-name child)))
+        (insert (harness-ui-session-link child))
         (insert "\n"))
       (insert (propertize (if failed "  error\n" "  output\n") 'face 'harness-label-face))
       (cond
        ((string-empty-p output) (insert (propertize "  (no output)\n" 'face 'harness-dim-face)))
        (t
-        (insert (propertize (if (string-suffix-p "\n" shown) shown (concat shown "\n"))
-                            'face 'harness-md-code-block 'line-prefix indent 'wrap-prefix indent))))
-      ;; The call's text opens the session it started; the buttons under it
+        (insert (harness-ui-link-session-ids
+                 (propertize (if (string-suffix-p "\n" shown) shown (concat shown "\n"))
+                             'face 'harness-md-code-block 'line-prefix indent 'wrap-prefix indent)))))
+      ;; The call's text opens the session it started, as the chat's call
+      ;; block does, with the session link's action; the buttons under it
       ;; are inserted after, so each keeps its own action and keys.
       (when child
         (harness-ui-add-session-keys (current-buffer) child (harness-ui-session-name child)
-                                     start (point)))
+                                     start (point) (harness-ui-session-action child)))
       (when long
         ;; `harness-ui-button' inserts the button itself, at point.
         (insert "  ")

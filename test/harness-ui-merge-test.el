@@ -183,7 +183,63 @@ session at ROOT) and `worker' (a session in WT, of PARENT)."
         (should-not (string-match-p "older-worker" panel))
         (should (string-match-p "1 more" panel))
         ;; The panel's own face names are all real.
-        (should-not (harness-ui-merge-test--undefined-faces panel)))
+        (should-not (harness-ui-merge-test--undefined-faces panel))
+        ;; A queued or merging child's name is a link to that session: a
+        ;; hover face, a hand, a tooltip and RET or a click opening it.
+        (dolist (case '(("queued-worker" . "c1") ("merging-worker" . "c3")))
+          (let* ((pos (string-match (car case) panel))
+                 (map (get-text-property pos 'keymap panel)))
+            (should map)
+            ;; It wears the session link's face like every session link, with
+            ;; the bold of a live merge under it.
+            (should (equal '(harness-ui-session-link-face bold)
+                           (ensure-list (get-text-property pos 'face panel))))
+            (should (eq 'highlight (get-text-property pos 'mouse-face panel)))
+            (should (eq 'hand (get-text-property pos 'pointer panel)))
+            (should (stringp (get-text-property pos 'help-echo panel)))
+            (when map
+              (let ((command (lookup-key map (kbd "RET")))
+                    (visited nil))
+                (should (commandp command))
+                (cl-letf (((symbol-function 'harness-ui-visit-session)
+                           (lambda (id &optional _position) (push id visited) nil)))
+                  (call-interactively command))
+                (should (equal (list (cdr case)) visited))))))
+        ;; A finished merge's name is a link too, with the dim face of a
+        ;; finished merge under the link's.
+        (dolist (case '(("merged-worker" . "c5") ("failed-worker" . "c6")))
+          (let* ((pos (string-match (car case) panel))
+                 (map (get-text-property pos 'keymap panel)))
+            (should map)
+            (should (equal '(harness-ui-session-link-face harness-dim-face)
+                           (ensure-list (get-text-property pos 'face panel))))
+            (should (eq 'highlight (get-text-property pos 'mouse-face panel)))
+            (should (equal "   " (get-text-property pos 'wrap-prefix panel)))))
+        ;; A merge view item naming no child session shows plain text,
+        ;; with no keys of its own: bold while it is live, dim once through.
+        (let ((plain (harness-ui-merge--name (list :name "orphan" :status "queued" :position 9)))
+              (done (harness-ui-merge--name (list :name "orphan" :status "merged"))))
+          (should (equal "orphan" plain))
+          (should-not (get-text-property 0 'keymap plain))
+          (should-not (get-text-property 0 'mouse-face plain))
+          (should (equal 'bold (get-text-property 0 'face plain)))
+          (should (equal "   " (get-text-property 0 'wrap-prefix plain)))
+          (should (equal "orphan" done))
+          (should (equal 'harness-dim-face (get-text-property 0 'face done)))
+          (should-not (get-text-property 0 'keymap done)))
+        ;; The name is built fresh each time: the item's own string is not marked.
+        (let* ((name (copy-sequence "short-name"))
+               (item (list :child "c1" :name name :status "queued" :position 1)))
+          (harness-ui-merge--name item)
+          (harness-ui-merge--name (list :name name :status "queued" :position 1))
+          (should-not (text-properties-at 0 name)))
+        ;; A merge with a child but no name shows the start of the child's
+        ;; id: eight characters of a long one, all of a short one.
+        (dolist (case '(("abcdefghijkl" . "abcdefgh") ("c9" . "c9") ("abcdefgh" . "abcdefgh")))
+          (should (equal (cdr case)
+                         (substring-no-properties
+                          (harness-ui-merge--name
+                           (list :child (car case) :status "queued" :position 9)))))))
       ;; Nothing merging and nothing finished: no panel at all.
       (remhash parent harness-ui-merge--views)
       (puthash parent t harness-ui-merge--asked)
