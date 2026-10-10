@@ -727,7 +727,7 @@ its sender, and the hint says so (`harness-session--requeue`).
   `btw` session without `:thinking` takes `harness-btw-thinking` fitted
   to the thinking levels the catalogue lists for its (final) model in
   `:thinking-levels` (`harness-session--btw-thinking`, by
-  `harness-session--fit-thinking`): that level when the model offers
+  `harness-thinking-level-fit`): that level when the model offers
   it, else the strongest level it offers below it, else its weakest;
   only with no level configured (nil), or a model whose catalogue lists
   none, does it take `harness-thinking`.  → session.  Event
@@ -889,7 +889,8 @@ its sender, and the hint says so (`harness-session--requeue`).
   `harness-model` fixes the BTW's model too.  It thinks at
   `harness-btw-thinking` as configured at ID's cwd ("low" by default, so
   quick questions get quick answers), fitted to the levels the catalogue
-  lists for its own model (`harness-session--fit-thinking`): that level
+  lists for its own model (`harness-thinking-level-fit`, the rule
+  Copilot's and Bedrock's efforts are fitted by too): that level
   when the model offers it, else the strongest level it offers below it
   (a DeepSeek model, which lists low, high and max, thinks at low for
   medium), else its weakest.  So a BTW that stays on ID's own model
@@ -1476,9 +1477,13 @@ the defaults by its `:resolve`.  Usage events carry tokens and
 `:billing api` but no cost, so `session/usage-add` prices them from the
 catalogue.  Claude and Nova requests carry prompt cache points; Claude
 reasoning returned with tool calls is kept and sent back with them while
-the tool loop lasts.  A request is repeated, up to three times, when the
-connection was lost before any of the answer arrived (`:retry t`, the
-HTTP layer's, see retry: the request goes again as it was signed), and
+the tool loop lasts.  An adaptive model is asked for the effort the
+thinking level names, fitted to the levels it offers by the shared rule
+(`harness-thinking-level-fit`); a model that thinks within a budget gets
+the budget of the level (`harness-bedrock--thinking-budgets`).  A
+request is repeated, up to three times, when the connection was lost
+before any of the answer arrived (`:retry t`, the HTTP layer's, see
+retry: the request goes again as it was signed), and
 a throttled or failed response (429, 5xx, a throttling exception) while
 nothing has been streamed yet, with a hint for each wait
 (`harness-bedrock--maybe-retry`).  `harness-http-request` takes
@@ -1570,6 +1575,9 @@ version 3 or newer.  Per harness session one CLI process:
   tools are the harness's (external tools, `availableTools` set to their
   names) and whose system prompt is the harness's (`systemMessage` mode
   replace); resuming an open session again applies changed settings.
+  The request's thinking level is the session's `reasoningEffort`,
+  fitted to the efforts the catalogue lists for the model by the shared
+  rule (`harness-thinking-level-fit`); a model that lists none gets none.
 - The exception is Copilot's own web_search, which stands in for the
   harness's (`harness-provider-copilot-builtin-tools`; capability
   `:builtin-tools`).  A request whose `:builtin-tools` names it lists
@@ -5250,7 +5258,15 @@ the limit", under tasks).
 It is around advice on `harness-tools--run-handler`, added once by the
 module's `:init` and removed by its `:shutdown`, which also lets every
 waiting call run at once (`harness-slots-flush`); a reload therefore
-never holds a slot twice.
+never holds a slot twice.  A machine's slots left from before they were
+pools are taken over by a pool on first use (the calls that waited ask it
+in the order they came), and a call that held a slot across such a
+reload gives it back through `harness-tool-slots--give`, which counts
+nothing down -- the pool never counted that call -- so the call neither
+hangs nor takes a slot from another; the calls waiting that then fit
+start.  A call's result goes through even if giving its slot back fails
+\(`harness-tool-slots--finish`), so a turn never waits for ever on a
+ticket.
 The slots belong to the harness process that loads the module, so a
 second harness on the same machine has slots of its own (the limit is
 about one harness's own work, not about the machine's load).

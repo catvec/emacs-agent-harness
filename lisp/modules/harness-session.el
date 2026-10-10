@@ -709,33 +709,11 @@ old one."
          (error (harness-log 'debug "session: no thinking levels for %s: %S" model err)
                 nil))))
 
-(defun harness-session--fit-thinking (level levels)
-  "Return the one of thinking LEVELS that stands for LEVEL, or nil.
-LEVELS are what a model offers (its `:thinking-levels').  That is LEVEL
-itself when LEVELS has it; else the strongest of LEVELS weaker than
-LEVEL, the nearest the model comes to it without thinking harder; else,
-every one of LEVELS being stronger, the weakest of them.  Strength is
-that of `harness-thinking-level-order': a level that is not in it ranks
-after every one that is.  nil when LEVEL is not a string or LEVELS has
-no level."
-  (let ((levels (cl-remove-if-not #'stringp levels)))
-    (when (and (stringp level) levels)
-      (if (member level levels)
-          level
-        (let* ((rank (harness-thinking-level-rank level))
-               ;; Weakest first, the order of LEVELS kept among equals.
-               (sorted (sort (copy-sequence levels)
-                             (lambda (a b) (< (harness-thinking-level-rank a)
-                                              (harness-thinking-level-rank b)))))
-               (weaker (cl-remove-if-not (lambda (l) (< (harness-thinking-level-rank l) rank))
-                                         sorted)))
-          (if weaker (car (last weaker)) (car sorted)))))))
-
 (defun harness-session--btw-thinking (model cwd)
   "Return the thinking level a BTW with MODEL at CWD starts at, or nil.
 That is `harness-btw-thinking' as configured at CWD, fitted to the
 thinking levels the provider catalogue gives MODEL
-\(`harness-session--fit-thinking'): the level itself when MODEL offers
+\(`harness-thinking-level-fit'): the level itself when MODEL offers
 it, else the strongest it offers below it, else its weakest.  So a BTW
 thinks as little as asked for, or as little as its model allows,
 whatever level the session it is opened over thinks at and whether it
@@ -744,8 +722,8 @@ is not left to the session's `max'.  nil when no level is configured,
 and for a model whose catalogue lists no levels, which may refuse a
 request that asks for one: the BTW then has the level it would have
 otherwise."
-  (harness-session--fit-thinking (harness-session--config 'harness-btw-thinking cwd)
-                                 (harness-session--model-levels model)))
+  (harness-thinking-level-fit (harness-session--config 'harness-btw-thinking cwd)
+                              (harness-session--model-levels model)))
 
 (defun harness-session--btw-model (model cwd)
   "Return the model a BTW at CWD runs on; MODEL is the one it would otherwise use.

@@ -497,6 +497,28 @@ Folded header lines continue the header above them."
                                                      (harness-bedrock--model-info '(:id x) "acme.mystery-v1")
                                                      '(:system "s" :messages ((:role user :content "q"))))))))))
 
+(ert-deftest harness-provider-bedrock-clamps-an-effort-to-what-a-model-offers ()
+  "An adaptive model is asked for an effort it offers, by the shared rule.
+That is the level itself, else the strongest it offers below it, else its
+weakest (`harness-thinking-level-fit'); a model that lists none is asked
+for the level as it is."
+  (let ((levels '("low" "medium" "high")))
+    ;; Offered: asked for as it is.
+    (dolist (level levels)
+      (should (equal level (harness-bedrock--clamp-level level levels))))
+    ;; Not offered: the strongest it has below.
+    (should (equal "high" (harness-bedrock--clamp-level "xhigh" levels)))
+    (should (equal "high" (harness-bedrock--clamp-level "max" levels)))
+    (should (equal "high" (harness-bedrock--clamp-level "xhigh" '("low" "medium" "high" "max"))))
+    ;; None below: its weakest.
+    (should (equal "low" (harness-bedrock--clamp-level "minimal" levels)))
+    (should (equal "high" (harness-bedrock--clamp-level "low" '("max" "high"))))
+    ;; The order of the model's list is no matter.
+    (should (equal "high" (harness-bedrock--clamp-level "max" (reverse levels))))
+    ;; No levels to go by: the level as it is.
+    (should (equal "max" (harness-bedrock--clamp-level "max" nil)))
+    (should (equal "max" (harness-bedrock--clamp-level "max" '(nil))))))
+
 ;;;; Streams to events
 
 (defun harness-bedrock-test--reasoning-tool-stream ()

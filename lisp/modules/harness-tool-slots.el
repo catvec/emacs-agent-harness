@@ -144,8 +144,12 @@ with; among calls of one rank the oldest goes first."
 A reload keeps `harness-tool-slots--machines', so it may still hold a
 machine's slots from before they were pools: a (RUNNING . WAITERS)
 cons.  The pool that replaces it starts with no call running, and the
-calls that waited start in it, in the order they came, rather than
-wait for slots whose holders can no longer give them back."
+calls that waited ask it for their slots, in the order they came,
+instead of waiting for slots whose holders no longer count.  Those
+holders, the calls that held a slot before the reload, give theirs
+back through `harness-tool-slots--give', which counts nothing down; so
+for a while after such a reload a machine may run a few more calls than
+its limit, the old ones and the new."
   (let ((pool (gethash machine harness-tool-slots--machines)))
     (if (and pool (not (consp pool)))
         pool
@@ -172,6 +176,20 @@ It resolves at once when MACHINE has a free slot, and otherwise when
 one is given back to it, by SESSION's priority then, oldest first among
 equals (`harness-slots-acquire')."
   (harness-slots-acquire (harness-tool-slots--pool machine) session))
+
+(defun harness-tool-slots--give (machine)
+  "Give back a slot of MACHINE that a call took before slots were pools.
+Only a ticket made before the reload that brought the pools calls this.
+A reload keeps the closures of the calls running through it, and those
+were made when a machine's slots were a (RUNNING . WAITERS) cons: each
+gives its slot back by this name.  The pool that took over counted no
+such call -- it started at 0 running and counts the calls it admitted
+itself -- so nothing is counted down here, or a call it did count would
+lose its place.  The calls waiting that now fit start
+\(`harness-tool-slots--admit').  So such a ticket neither signals nor
+miscounts.  A ticket the pool made gives its slot back by itself
+\(`harness-slots-acquire')."
+  (harness-tool-slots--admit machine))
 
 ;;;; Which machine a call runs on
 
@@ -242,9 +260,23 @@ keeps it for the user."
       (harness-log 'debug "tool-slots: %s" text)
       (harness-tool-slots--say ctx text))))
 
+(defun harness-tool-slots--finish (ticket settle value)
+  "Give back the slot TICKET holds, then settle a call with VALUE.
+SETTLE is the `resolve' or `reject' function of the call's promise.  The
+slot goes first, so a call waiting for it starts while this one is
+worded.  SETTLE is called whatever the ticket does: a ticket that
+signals -- one made before a reload, say -- must not leave the promise
+pending, for the turn that waits for the call would never go on.  The
+error is not hidden: it goes on to the promise library, which logs it.
+Return nil."
+  (unwind-protect (funcall ticket)
+    (funcall settle value))
+  nil)
+
 (defun harness-tool-slots--hold (orig tool input ctx)
   "Run ORIG for TOOL with INPUT under CTX, holding a slot of its machine.
-Return a promise of ORIG's result, settled once the slot is given back."
+Return a promise of ORIG's result, settled once the slot is given back,
+and settled even when giving it back fails (`harness-tool-slots--finish')."
   (harness-with-promise (resolve reject)
     (let* ((name (harness-tool-name tool))
            (machine (harness-tool-slots--machine tool input ctx))
@@ -257,10 +289,13 @@ Return a promise of ORIG's result, settled once the slot is given back."
                (harness-tool-slots--waited ctx name machine (- (float-time) asked))
                ;; The slot goes back before the result is handled, so a
                ;; call waiting for it starts while this one is worded.
+               ;; The call settles even if giving the slot back signals.
                (harness-then (funcall orig tool input ctx)
-                             (lambda (value) (funcall ticket) (funcall resolve value))
-                             (lambda (err) (funcall ticket) (funcall reject err))))
-           (error (funcall ticket) (funcall reject err))))
+                             (lambda (value)
+                               (harness-tool-slots--finish ticket resolve value))
+                             (lambda (err)
+                               (harness-tool-slots--finish ticket reject err))))
+           (error (harness-tool-slots--finish ticket reject err))))
        (lambda (err) (funcall reject err))))))
 
 (defun harness-tool-slots--run-handler (orig tool input ctx)

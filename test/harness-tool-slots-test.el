@@ -347,6 +347,153 @@ the old slots start in the new pool, in the order they came."
       (should (equal "slots-probe" (harness-tool-slots-test--content call)))
       (should (harness-tool-slots-test--idle-p "test-machine")))))
 
+;;;; Tickets from before pools
+;;
+;; A reload keeps the calls that run through it, and with them the
+;; tickets they made when a machine's slots were a (RUNNING . WAITERS)
+;; cons.  Such a ticket gives its slot back by the name
+;; `harness-tool-slots--give', which a pool no longer answers to by
+;; counting: the pool that took over counted none of those calls.
+
+(ert-deftest harness-tool-slots-a-give-from-before-pools-counts-nothing-down ()
+  "A slot given back by a call from before pools takes no count from the pool.
+The pool that took over counted the calls it admitted itself, so a call
+that held a slot before it was never counted there: giving that slot
+back must neither signal nor let a call start into a slot a call of the
+pool still holds."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-tools '("slots-probe"))
+        (harness-tool-slots-count 1)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-machine-function #'harness-tool-slots-test--machine))
+    (harness-tool-slots-test--probe "slots-probe")
+    ;; (RUNNING . WAITERS): one call held the only slot, none waited.
+    (puthash "test-machine" (cons 1 nil) harness-tool-slots--machines)
+    (let ((first (harness-tool-slots-test--call "slots-probe"))
+          (second (harness-tool-slots-test--call "slots-probe")))
+      ;; The pool counts the calls it admitted: the first holds the
+      ;; only slot, and the second waits for it.
+      (should (equal '("slots-probe") harness-tool-slots-test--started))
+      (should (= 1 (harness-tool-slots-test--running "test-machine")))
+      (should (= 1 (harness-tool-slots-test--waiting "test-machine")))
+      ;; The call from before ends, and its ticket gives its slot back
+      ;; by name, as it was made to.  That signals nothing and counts
+      ;; nothing down: the second still waits for the first's slot.
+      (harness-tool-slots--give "test-machine")
+      (should (= 1 (harness-tool-slots-test--running "test-machine")))
+      (should (= 1 (harness-tool-slots-test--waiting "test-machine")))
+      (should (equal '("slots-probe") harness-tool-slots-test--started))
+      ;; The first call's own ticket does, and the second starts.
+      (harness-tool-slots-test--settle-oldest)
+      (should (equal '("slots-probe" "slots-probe") harness-tool-slots-test--started))
+      (should (= 1 (harness-tool-slots-test--running "test-machine")))
+      (should (= 0 (harness-tool-slots-test--waiting "test-machine")))
+      (harness-tool-slots-test--settle-all)
+      (should (equal "slots-probe" (harness-tool-slots-test--content first)))
+      (should (equal "slots-probe" (harness-tool-slots-test--content second)))
+      (should (harness-tool-slots-test--idle-p "test-machine")))))
+
+(ert-deftest harness-tool-slots-a-give-from-before-pools-takes-the-old-slots-over ()
+  "A slot given back from before pools may be the first to ask the machine.
+No new call has made a pool then: the machine's slots are still a
+\(RUNNING . WAITERS) cons.  The give signals nothing, the machine has a
+pool afterwards, and the call that waited is served by it."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-count 1)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-machine-function #'harness-tool-slots-test--machine)
+        (waiter (harness-make-promise)))
+    ;; One call held the only slot, and one waited for it.
+    (puthash "test-machine"
+             (cons 1 (list (list :promise waiter :session nil)))
+             harness-tool-slots--machines)
+    (harness-tool-slots--give "test-machine")
+    (should (harness-slots--pool-p (harness-tool-slots-test--pool "test-machine")))
+    ;; The waiter has a slot of the pool, and the ticket that gives it back.
+    (should (functionp (harness-promise-value waiter)))
+    (should (= 1 (harness-tool-slots-test--running "test-machine")))
+    (should (= 0 (harness-tool-slots-test--waiting "test-machine")))
+    (funcall (harness-promise-value waiter))
+    (should (harness-tool-slots-test--idle-p "test-machine"))))
+
+;;;; A call settles whatever happens to its slot
+;;
+;; `harness-tools--run-handler' turns every failure of a handler into a
+;; result, so the ways the plugin itself rejects a call -- the promise
+;; of a handler that rejects, a handler that signals before it has a
+;; promise to give -- are driven here through `harness-tool-slots--hold'
+;; with a handler of their own.
+
+(ert-deftest harness-tool-slots-a-hold-that-fails-gives-its-slot-back ()
+  "A hold whose handler fails rejects its call and frees the slot.
+That is a handler whose promise rejects, and one that signals before it
+has a promise to give."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-tools '("slots-probe"))
+        (harness-tool-slots-count 1)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-machine-function #'harness-tool-slots-test--machine))
+    (harness-tool-slots-test--probe "slots-probe")
+    (let ((tool (harness-tool-get "slots-probe")))
+      ;; The handler's promise rejects.
+      (let ((call (harness-tool-slots--hold
+                   (lambda (&rest _) (harness-rejected "Handler failed"))
+                   tool nil nil)))
+        (should (eq 'rejected (harness-promise-state call)))
+        (should (equal "Handler failed" (harness-promise-value call)))
+        (should (harness-tool-slots-test--idle-p "test-machine")))
+      ;; The handler signals before it has a promise to give.
+      (let ((call (harness-tool-slots--hold
+                   (lambda (&rest _) (error "Handler signalled"))
+                   tool nil nil)))
+        (should (eq 'rejected (harness-promise-state call)))
+        (should (equal '(error "Handler signalled") (harness-promise-value call)))
+        (should (harness-tool-slots-test--idle-p "test-machine")))
+      ;; The machine's only slot is free for the next call.
+      (let ((next (harness-tool-slots-test--call "slots-probe")))
+        (should (equal '("slots-probe") harness-tool-slots-test--started))
+        (harness-tool-slots-test--settle-all)
+        (should (equal "slots-probe" (harness-tool-slots-test--content next)))
+        (should (harness-tool-slots-test--idle-p "test-machine"))))))
+
+(ert-deftest harness-tool-slots-a-ticket-that-signals-leaves-no-call-hanging ()
+  "A call settles even when giving its slot back signals.
+Such a ticket would otherwise stop the settling that follows it, and
+the turn waiting for the call would wait for ever.  The error is not
+hidden: it is logged, and a call that failed is failed with its own
+error, not the ticket's."
+  (harness-tool-slots-test--setup)
+  (let ((harness-tool-slots-tools '("slots-probe"))
+        (harness-tool-slots-count 1)
+        (harness-tool-slots-burst 0)
+        (harness-tool-slots-machine-function #'harness-tool-slots-test--machine)
+        (logged nil))
+    (harness-tool-slots-test--probe "slots-probe")
+    (cl-letf (((symbol-function 'harness-tool-slots--acquire)
+               (lambda (_machine _session)
+                 (harness-resolved (lambda () (error "Ticket boom")))))
+              (harness-log-hook
+               (list (lambda (level msg) (when (eq level 'error) (push msg logged))))))
+      (let ((tool (harness-tool-get "slots-probe")))
+        ;; The handler answers: the call has its result.
+        (let ((call (harness-tool-slots-test--call "slots-probe")))
+          (should (equal '("slots-probe") harness-tool-slots-test--started))
+          (harness-tool-slots-test--settle-all)
+          (should (equal "slots-probe" (harness-tool-slots-test--content call))))
+        (should (cl-some (lambda (msg) (string-match-p "Ticket boom" msg)) logged))
+        ;; The handler fails: the call is rejected with that failure.
+        (let ((call (harness-tool-slots--hold
+                     (lambda (&rest _) (harness-rejected "Handler failed"))
+                     tool nil nil)))
+          (should (eq 'rejected (harness-promise-state call)))
+          (should (equal "Handler failed" (harness-promise-value call))))
+        ;; The handler signals before it has a promise to give.
+        (let ((call (harness-tool-slots--hold
+                     (lambda (&rest _) (error "Handler signalled"))
+                     tool nil nil)))
+          (should (eq 'rejected (harness-promise-state call)))
+          (should (equal '(error "Handler signalled") (harness-promise-value call))))))))
+
 (ert-deftest harness-tool-slots-tools-execute-holds-a-slot ()
   "A call through `tools/execute' takes a slot like any other."
   (harness-tool-slots-test--setup)

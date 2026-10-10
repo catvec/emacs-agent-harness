@@ -367,9 +367,10 @@ The harness reads \"the harness (SOURCE)\", another session's agent
   "Every thinking level the harness knows, weakest first.
 A model offers some of these (its `:thinking-levels'), and whatever has
 to order levels or tell which of two is stronger -- the thinking menu,
-the level a BTW is given -- goes by this one list, so there is a single
-idea of what is stronger.  A level that is not in it ranks after all
-that are (see `harness-thinking-level-rank').")
+the level a BTW is given, the effort a provider asks a model for --
+goes by this one list, so there is a single idea of what is stronger.
+A level that is not in it ranks after all that are (see
+`harness-thinking-level-rank').")
 
 (defun harness-thinking-level-rank (level)
   "Return how strong thinking LEVEL is, as a number: a higher one thinks harder.
@@ -377,6 +378,32 @@ That is its place in `harness-thinking-level-order'.  A level that is
 not there ranks after every one that is."
   (or (cl-position level harness-thinking-level-order :test #'equal)
       most-positive-fixnum))
+
+(defun harness-thinking-level-fit (level levels)
+  "Return the one of thinking LEVELS that stands for LEVEL, or nil.
+This is the one rule the harness fits a level to what a model offers
+by: a BTW's level, the reasoning effort Copilot is asked for and the
+effort Bedrock's adaptive models are asked for all go through it, so
+that nothing thinks harder than it was asked to.  LEVELS are what a
+model offers (its `:thinking-levels').  That is LEVEL itself when
+LEVELS has it; else the strongest of LEVELS weaker than LEVEL, the
+nearest the model comes to it without thinking harder; else, every one
+of LEVELS being stronger, the weakest of them.  Strength is that of
+`harness-thinking-level-order': a level that is not in it ranks after
+every one that is.  Entries of LEVELS that are not strings are ignored.
+nil when LEVEL is not a string or LEVELS has no string."
+  (let ((levels (cl-remove-if-not #'stringp levels)))
+    (when (and (stringp level) levels)
+      (if (member level levels)
+          level
+        (let* ((rank (harness-thinking-level-rank level))
+               ;; Weakest first, the order of LEVELS kept among equals.
+               (sorted (sort (copy-sequence levels)
+                             (lambda (a b) (< (harness-thinking-level-rank a)
+                                              (harness-thinking-level-rank b)))))
+               (weaker (cl-remove-if-not (lambda (l) (< (harness-thinking-level-rank l) rank))
+                                         sorted)))
+          (if weaker (car (last weaker)) (car sorted)))))))
 
 ;;;; Models and provider state
 ;;

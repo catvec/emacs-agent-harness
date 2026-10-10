@@ -163,10 +163,6 @@ the web on GitHub's side.  A request's `:builtin-tools' (see
 (defconst harness-provider-copilot--usd-per-premium-request 0.04
   "Dollars an additional premium request costs on the legacy billing.")
 
-(defconst harness-provider-copilot--efforts
-  '("none" "minimal" "low" "medium" "high" "xhigh" "max")
-  "Copilot's reasoning effort levels, weakest first.")
-
 (defconst harness-provider-copilot--client-name "emacs-agent-harness"
   "Name the CLI is told its sessions are opened by.")
 
@@ -1577,20 +1573,17 @@ fetched first when REFRESH is non-nil or the last one is stale (see
 
 (defun harness-provider-copilot--effort (model level)
   "Return the reasoning effort to ask MODEL for at thinking LEVEL, or nil.
-A level the model lacks becomes the strongest one it has below LEVEL
-\(else its weakest); a model without levels gets none.  Models the
-catalogue does not know get LEVEL as is."
+A level the model lacks becomes the one it has that stands for it, by
+the rule the harness fits every thinking level by
+\(`harness-thinking-level-fit'): the strongest it has below LEVEL, else
+its weakest.  A model without levels gets none.  Models the catalogue
+does not know get LEVEL as is."
   (when (and (stringp level) (not (string-empty-p level)))
     (let* ((known (gethash model harness-provider-copilot--catalogue))
-           (levels (plist-get known :thinking-levels))
-           (rank (lambda (l) (or (cl-position l harness-provider-copilot--efforts :test #'equal) -1))))
+           (levels (plist-get known :thinking-levels)))
       (cond ((null known) level)
             ((null levels) nil)
-            ((member level levels) level)
-            (t (let ((below (cl-remove-if (lambda (l) (> (funcall rank l) (funcall rank level))) levels)))
-                 (if below
-                     (car (sort (copy-sequence below) (lambda (a b) (> (funcall rank a) (funcall rank b)))))
-                   (car (sort (copy-sequence levels) (lambda (a b) (< (funcall rank a) (funcall rank b))))))))))))
+            (t (harness-thinking-level-fit level levels))))))
 
 (defun harness-provider-copilot--directory (session)
   "Return SESSION's directory, with its TRAMP host when it has one."

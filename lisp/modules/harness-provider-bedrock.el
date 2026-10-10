@@ -1835,20 +1835,15 @@ reasoning is left out.  Without TOOLS, calls and results become text."
               (list :toolSpec tool)))
           specs))
 
-(defconst harness-bedrock--levels '("low" "medium" "high" "xhigh" "max")
-  "Thinking levels from weakest to strongest.")
-
 (defun harness-bedrock--clamp-level (level levels)
-  "Return LEVEL when LEVELS offer it, else the strongest of LEVELS below it."
-  (if (or (null levels) (member level levels))
+  "Return LEVEL when LEVELS offer it, else the one of LEVELS that stands for it.
+That is the harness's rule for fitting a thinking level to what a model
+offers (`harness-thinking-level-fit'): the strongest of LEVELS below
+LEVEL, else the weakest of them.  A model that lists no levels, or
+none the rule can use, is asked for LEVEL as it is."
+  (if (null levels)
       level
-    (let ((rank (lambda (l) (or (cl-position l harness-bedrock--levels :test #'equal) -1)))
-          (best nil))
-      (dolist (l levels)
-        (when (and (<= (funcall rank l) (funcall rank level))
-                   (or (null best) (> (funcall rank l) (funcall rank best))))
-          (setq best l)))
-      (or best (car levels)))))
+    (or (harness-thinking-level-fit level levels) level)))
 
 (defun harness-bedrock--thinking (info level max-tokens)
   "Return (FIELDS . MAX-TOKENS) that ask model INFO to think at LEVEL.
