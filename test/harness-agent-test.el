@@ -778,21 +778,61 @@ user message after that answer: \"No user message to send\"."
       (should (null (car (last (car seen)))))
       (should-not (harness-call 'agent/activity id)))))
 
+(ert-deftest harness-agent-activity-carries-each-call-and-its-note ()
+  "Every running call shows in the activity, with the note it reported."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (finish nil)
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "s1" :name "slow" :input (:what "tests"))
+              (:type text :delta "ok")
+              (:type done :stop-reason end-turn))))
+      (harness-define-tool "slow" :label "Slow job" :description "slow" :kind 'exec
+                           :subject (lambda (input) (plist-get input :what))
+                           :handler (lambda (_input ctx)
+                                      (funcall (plist-get ctx :note)
+                                               "running Bash: npm test\n12.3k/256k before compact")
+                                      (harness-with-promise (resolve reject)
+                                        (ignore reject)
+                                        (setq finish (lambda () (funcall resolve "done"))))))
+      (let ((p (harness-call 'agent/prompt id "go")))
+        (harness-test-wait (lambda () finish) 5 "the tool to start")
+        (let* ((a (harness-call 'agent/activity id))
+               (calls (plist-get a :calls)))
+          ;; The oldest call is the activity itself, as before.
+          (should (eq 'tool (plist-get a :phase)))
+          (should (equal "Slow job: tests" (plist-get a :title)))
+          (should (= 1 (length calls)))
+          (should (equal "s1" (plist-get (car calls) :call-id)))
+          (should (equal "slow" (plist-get (car calls) :tool)))
+          (should (equal "running Bash: npm test\n12.3k/256k before compact"
+                         (plist-get (car calls) :note))))
+        (funcall finish)
+        (harness-await p))
+      (should-not (harness-call 'agent/activity id))
+      ;; The note went with the call: nothing is left to draw.
+      (should-not (gethash id harness-agent--calls)))))
+
 (ert-deftest harness-agent-reload-subscribes-new-handlers ()
   "A reload does not initialise a running module again, yet its new handlers run."
   (harness-agent-test-with
     (let ((subscribed (lambda (event fn) (cl-find fn (gethash event harness--subscribers) :key #'cdr))))
       (should (funcall subscribed 'tools/progress #'harness-agent--on-tool-progress))
+      (should (funcall subscribed 'tools/note #'harness-agent--on-tool-note))
       ;; As if the running harness predated them.
       (harness-off (cons 'tools/progress #'harness-agent--on-tool-progress))
+      (harness-off (cons 'tools/note #'harness-agent--on-tool-note))
       (harness-off (cons 'permission/decided #'harness-agent--on-permission-decided))
       (should-not (funcall subscribed 'tools/progress #'harness-agent--on-tool-progress))
       (let ((harness--defining-module 'agent))
         (harness-load-compiled (expand-file-name "lisp/modules/harness-agent.el" harness-test-root)))
       (should (funcall subscribed 'tools/progress #'harness-agent--on-tool-progress))
+      (should (funcall subscribed 'tools/note #'harness-agent--on-tool-note))
       (should (funcall subscribed 'permission/decided #'harness-agent--on-permission-decided))
       ;; Subscribing is idempotent: one handler, however often loaded.
       (should (= 1 (cl-count #'harness-agent--on-tool-progress (gethash 'tools/progress harness--subscribers)
+                             :key #'cdr)))
+      (should (= 1 (cl-count #'harness-agent--on-tool-note (gethash 'tools/note harness--subscribers)
                              :key #'cdr))))))
 
 (ert-deftest harness-agent-before-turn-gate ()

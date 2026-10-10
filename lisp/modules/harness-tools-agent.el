@@ -46,6 +46,10 @@
 (require 'harness-priority)
 (require 'harness-tools)
 
+;; The module requires `session' at runtime (see `harness-define-module'
+;; at the end of the file): the levels a model offers come from it.
+(declare-function harness-session--model-levels "harness-session" (model))
+
 ;;;; Questions
 
 (defvar harness-tools-agent--questions (make-hash-table :test 'equal)
@@ -416,12 +420,14 @@ Replace the todos of the session in CTX with those in INPUT."
 (defvar harness-tools-agent--children (make-hash-table :test 'equal)
   "Child session id -> what a spawn_agent call knows of a running child.
 A plist (:parent PARENT-ID :name NAME :worktree PATH :branch BRANCH
-:result RESULT).  A child's call has always returned, since it started;
-RESULT is what the child's first turn ended with, nil while it runs.
-The entry stays until the child is done with everything it has going
-on, so a parent counts it as work it still runs
+:result RESULT :unwatch STOP).  A child's call has always returned, since
+it started; RESULT is what the child's first turn ended with, nil while
+it runs.  The entry stays until the child is done with everything it has
+going on, so a parent counts it as work it still runs
 \(`harness-tools-agent--outstanding') and a child that registered a wait
-is not reported as finished when its turn merely ended.")
+is not reported as finished when its turn merely ended; STOP, when
+there is one, stops the note under the child's spawn_agent call
+\(`harness-tools-agent--watch-child').")
 
 (defun harness-tools-agent--short-id (id)
   "Return the first eight characters of session ID."
@@ -475,7 +481,7 @@ child that is still busy is left for the turn that ends its wait, or its
 sub-agent's report."
   (let ((entry (gethash cid harness-tools-agent--children)))
     (when (and entry (not (harness-tools-agent--child-busy-p cid)))
-      (remhash cid harness-tools-agent--children)
+      (harness-tools-agent--forget-child cid)
       (harness-tools-agent--report-child (plist-get entry :parent) cid entry
                                          (or (plist-get entry :result)
                                              (list :stop-reason reason))))))
@@ -498,6 +504,20 @@ such as the wake-up turn of a wait the child registered."
   (let ((entry (gethash session-id harness-tools-agent--children)))
     (when (and entry (plist-get entry :result))
       (harness-tools-agent--settle-child session-id reason))))
+
+(defun harness-tools-agent--watch-child (cid note)
+  "Have the note of child CID show under its spawn_agent call.
+NOTE is the call's note function.  Return the function that stops the
+watching, or nil when the call has no note function."
+  (when (and note (harness-method-exists-p 'session/exists-p))
+    (harness-tools-watch-session cid (lambda (text) (funcall note text)) (list :recap t))))
+
+(defun harness-tools-agent--forget-child (cid)
+  "Stop watching child CID and forget what its call knew of it."
+  (when-let* ((entry (gethash cid harness-tools-agent--children)))
+    (when-let* ((stop (plist-get entry :unwatch)))
+      (funcall stop))
+    (remhash cid harness-tools-agent--children)))
 
 (defun harness-tools-agent--child-summary (child-id)
   "Return the final text of CHILD-ID plus a footer with its tool calls and cost."
@@ -664,6 +684,27 @@ parent's priority, and the default when the chain up has none (see
     (and (not (harness-string-blank-p value))
          (harness-priority-read value))))
 
+(defun harness-tools-agent--child-thinking (model level)
+  "Return the thinking level a sub-agent on MODEL is asked to run at.
+LEVEL is what the spawn_agent call asked for, or nil: nil leaves the
+child the level it would have had otherwise, which comes back as nil.
+A LEVEL MODEL does not offer signals an error, rather than starting a
+child that thinks at a level its model cannot act on: the provider
+catalogue says which levels MODEL has (`harness-session--model-levels',
+as `harness-session--btw-thinking' and the session UI keep to), and the
+message names them, so the caller can ask for one of those or leave the
+level out."
+  (when level
+    (let ((levels (harness-session--model-levels model)))
+      (unless (and (stringp level) (member level levels))
+        (signal 'harness-error
+                (list (format (concat "Model %s does not offer the thinking level %s; it offers %s. "
+                                      "Leave :thinking out to use this session's level.")
+                              (or model "?")
+                              level
+                              (if levels (string-join levels ", ") "none"))))))
+    level))
+
 (defun harness-tools-agent--create-child (parent input child-id cwd worktree call-id priority)
   "Return a promise of the child session plist for PARENT from INPUT.
 CHILD-ID is the id to use, CWD its working directory and WORKTREE
@@ -676,10 +717,16 @@ child's work waits in, as the parent's does its own (see the priority
 plugin).  The child's context is capped as
 `harness-tools-agent-context-limit' says, and a hint in its transcript
 says so (`harness-tools-agent-context-limit-hint'), added once it
-exists."
+exists.  INPUT's `:thinking', when given, is checked against the
+child's model (`harness-tools-agent--child-thinking'); a fresh child
+without one starts at its parent's level, and a fork inherits it."
   (let* ((fork (harness-json-true-p (plist-get input :fork)))
          (name (plist-get input :name))
          (model (or (plist-get input :model) (plist-get parent :model)))
+         (thinking (harness-tools-agent--child-thinking model (plist-get input :thinking)))
+         ;; Only a level the call asked for goes to a fork: one it did not
+         ;; ask for is the fork's own default, its parent's level.
+         (thinking-option (and thinking (list :thinking thinking)))
          (limit (harness-tools-agent-context-limit (plist-get parent :id) fork))
          (hint (harness-tools-agent-context-limit-hint
                 limit fork (and fork (harness-tools-agent-inherited-context (plist-get parent :id)))))
@@ -691,14 +738,15 @@ exists."
                (apply #'harness-call 'session/fork (plist-get parent :id)
                       :id child-id :kind 'subagent :name name :model model
                       :cwd cwd :worktree worktree :call-id call-id
-                      limit-option))
+                      (append limit-option thinking-option)))
             (harness-as-promise
              (apply #'harness-call 'session/create
                     :id child-id :cwd cwd :worktree worktree :kind 'subagent
                     :parent-id (plist-get parent :id) :name name :model model
                     :host (plist-get parent :host)
                     :permission-mode (plist-get parent :permission-mode)
-                    :thinking (plist-get parent :thinking)
+                    ;; Its parent's level, unless the call asked for its own.
+                    :thinking (or thinking (plist-get parent :thinking))
                     ;; Off too, not left to the setting.
                     :non-interactive (if (harness-json-true-p (plist-get parent :non-interactive)) t :false)
                     limit-option)))))
@@ -719,6 +767,24 @@ exists."
                           (error (harness-log 'warn "tools-agent: giving %s priority %s failed: %S"
                                               (plist-get child :id) priority err))))
                       child)))))
+
+(defun harness-tools-agent--call-node (session-id call-id)
+  "Return the newest tool-call node of SESSION-ID whose call id is CALL-ID, or nil."
+  (cl-find-if (lambda (node) (and (eq (plist-get node :kind) 'tool-call)
+                                  (equal (plist-get node :call-id) call-id)))
+              (harness-call 'session/nodes session-id) :from-end t))
+
+(defun harness-tools-agent--name-child (session-id call-id child-id)
+  "Name CHILD-ID on the tool call CALL-ID of SESSION-ID, as its result will.
+The call is the spawn_agent call that started the sub-agent: the chat
+links it to the child's session from the moment the child exists,
+rather than only once the call returns and its result names the child.
+The call node's `:meta' keeps what it held, such as the model.  Nothing
+happens when no such call node is on the transcript: a call run without
+one (`tools/execute' from outside an agent turn) has none to name."
+  (when-let* ((node (harness-tools-agent--call-node session-id call-id)))
+    (harness-call 'session/update-node session-id (plist-get node :id)
+                  :meta (plist-put (copy-sequence (plist-get node :meta)) :child-id child-id))))
 
 (defun harness-tools-agent--spawn (input ctx)
   "Handler of the spawn_agent tool.
@@ -754,7 +820,15 @@ own once its turn ends and nothing of it is outstanding any more."
           (lambda (child)
             (let* ((cid (plist-get child :id))
                    (entry (list :parent sid :name (plist-get child :name)
-                                :worktree worktree :branch branch :result nil)))
+                                :worktree worktree :branch branch :result nil
+                                :unwatch (harness-tools-agent--watch-child cid (plist-get ctx :note)))))
+              ;; From here the call itself names its sub-agent, not only its
+              ;; result: the chat links it while the call still runs.  A call
+              ;; that could not be named still runs; only its link waits.
+              (condition-case err
+                  (harness-tools-agent--name-child sid (plist-get ctx :call-id) cid)
+                (error (harness-log 'warn "tools-agent: naming the sub-agent %s on its call failed: %S"
+                                    cid err)))
               (puthash cid entry harness-tools-agent--children)
               (harness-emit 'agent/spawned sid cid)
               ;; The parent hears of the child's end in a message of its
@@ -778,11 +852,12 @@ own once its turn ends and nothing of it is outstanding any more."
 
 (harness-define-tool "spawn_agent"
   :label "Sub-agent"
-  :description "Run a sub-agent on a prompt and return at once, naming the child session: it runs in the background and its answer arrives later in a message of its own when it is done, so the call never blocks this conversation -- never wait or poll for a sub-agent. Start several at once, in several calls in the same step or one after another, and carry on; each reports back on its own. fork=true forks this session (the child shares your context and its cached prefix; cheaper when the task needs what you already know); fork=false starts a fresh session with only the prompt. worktree=true gives the child its own git worktree and branch so it can change files in parallel; merge its branch back afterwards through the merge queue. priority is the child session's own priority (low, medium or high), which orders the queues its work waits in: without it the child works at what it inherits from this session."
+  :description "Run a sub-agent on a prompt and return at once, naming the child session: it runs in the background and its answer arrives later in a message of its own when it is done, so the call never blocks this conversation -- never wait or poll for a sub-agent. Start several at once, in several calls in the same step or one after another, and carry on; each reports back on its own. fork=true forks this session (the child shares your context and its cached prefix; cheaper when the task needs what you already know); fork=false starts a fresh session with only the prompt. worktree=true gives the child its own git worktree and branch so it can change files in parallel; merge its branch back afterwards through the merge queue. priority is the child session's own priority (low, medium or high), which orders the queues its work waits in: without it the child works at what it inherits from this session. thinking chooses the child's thinking level, one the child's model offers (after any model override); without it the child thinks at this session's level, and a level the model does not offer fails the call."
   :schema '(:type "object"
             :properties (:prompt (:type "string" :description "The task for the sub-agent.")
                          :fork (:type "boolean" :description "Fork this session instead of starting fresh (default false).")
                          :model (:type "string" :description "Model id for the child (default: this session's model).")
+                         :thinking (:type "string" :description "Thinking level for the child (default: this session's). One of the levels the child's model offers.")
                          :name (:type "string" :description "Display name for the child session.")
                          :cwd (:type "string" :description "Working directory for the child (default: this session's), inside this session's allowed directories.")
                          :worktree (:type "boolean" :description "Create a git worktree and branch for the child (default false).")

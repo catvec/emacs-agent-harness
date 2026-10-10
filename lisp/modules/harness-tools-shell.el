@@ -257,6 +257,24 @@ or CWD is remote."
           parts)
     (string-join (nreverse parts) "\n")))
 
+(defconst harness-tools-shell--note-interval 0.25
+  "Seconds between updates of the note under a running bash call.
+The command's output can arrive in many chunks a second; the note names
+the lines so far and the latest one, and nothing needs that per chunk.")
+
+(defun harness-tools-shell--bash-note (lines tail)
+  "Return the note under a running bash call.
+LINES is how many newlines its output has, TAIL the last of it: the
+note says it is still running and how many lines it has written, and
+opens the latest line under that."
+  (let* ((last (harness-tools-tail-line tail))
+         (open (and (stringp tail) (not (string-empty-p tail)) (not (string-suffix-p "\n" tail))))
+         (n (+ (or lines 0) (if open 1 0))))
+    (concat (if (> n 0)
+                (format "still running \N{U+00B7} %s so far" (harness-tools-count-phrase n "line"))
+              "still running \N{U+00B7} no output yet")
+            (if last (concat "\n" last) ""))))
+
 (defun harness-tools-shell--bash (input ctx)
   "Handler for the bash tool with INPUT under CTX; returns a promise."
   (let* ((command (plist-get input :command))
@@ -264,7 +282,11 @@ or CWD is remote."
                        (max 1 (harness-tools-shell--number (plist-get input :timeout)
                                                            harness-tools-shell--default-timeout))))
          (cwd (harness-tools-shell--bash-cwd input ctx))
-         (report (plist-get ctx :report)))
+         (report (plist-get ctx :report))
+         (note (plist-get ctx :note))
+         ;; The note's own counters: the command's output arrives in
+         ;; chunks, and its size is not ours to keep whole.
+         (lines 0) (tail "") (noted 0))
     (cond
      ((or (not (stringp command)) (string-blank-p command))
       (harness-tool-error "Missing command"))
@@ -293,10 +315,22 @@ or CWD is remote."
         (if (and (consp cmd) (eq (car cmd) :error))
             (harness-tool-error (format "Cannot run command: %s" (plist-get cmd :error)))
           (let ((started (float-time)))
+            (harness-tools-note ctx (harness-tools-shell--bash-note 0 ""))
             (harness-then
              (harness-run-command cmd :cwd cwd :timeout timeout :name "harness-bash"
                                   :merge-remote-stderr t
-                                  :on-output (and report (lambda (chunk) (funcall report chunk))))
+                                  :on-output
+                                  (lambda (chunk)
+                                    (when report (funcall report chunk))
+                                    (setq lines (+ lines (cl-count ?\n chunk))
+                                          tail (let ((text (concat tail chunk)))
+                                                 (if (> (length text) 4000)
+                                                     (substring text (- (length text) 4000))
+                                                   text)))
+                                    (let ((now (float-time)))
+                                      (when (and note (> (- now noted) harness-tools-shell--note-interval))
+                                        (setq noted now)
+                                        (harness-tools-note ctx (harness-tools-shell--bash-note lines tail))))))
              (lambda (r)
                (let ((exit (plist-get r :exit)))
                  (funcall (if (eql exit 0) #'harness-tool-ok #'harness-tool-error)

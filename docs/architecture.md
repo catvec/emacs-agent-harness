@@ -763,7 +763,10 @@ its sender, and the hint says so (`harness-session--requeue`).
 - `session/select &optional FILTER` → the session plists FILTER selects,
   newest first: `session/list`'s filter plus `:except` ids, and `:tasks`
   non-nil to add the sessions of the current tasks of every project
-  (`task/session-ids`), even an inactive one a task goes on in.  It is
+  (`task/session-ids`), even an inactive one a task goes on in, and to
+  leave out those of completed tasks, the board's done column
+  (`task/session-ids` with `:columns '("done")`), an active one
+  included: a bulk change must not reach a task that is over.  It is
   the selection of `session/set-all`, `handoff/check-all` and
   `handoff/switch-all`.
 - `session/set-all SETTINGS &optional FILTER` — the same change on every
@@ -1060,9 +1063,12 @@ continue it (`session/provider-state`), else nil.  A REQUEST may also carry
 `:builtin-tools`, a list of harness tool names (from `tools/builtin`):
 the provider turns on its own tools in their place for this request,
 and `:tools` lacks them.  `:no-thinking t` asks for no extended
-thinking (the auto-mode judge sends it); Claude Code, which takes no
-`:max-tokens`, then runs the CLI with `MAX_THINKING_TOKENS=0`, and
-other providers may ignore it.
+thinking, and wins over `:thinking` when both are sent.  Claude Code,
+which takes no `:max-tokens`, then runs the CLI with
+`MAX_THINKING_TOKENS=0`; a DeepSeek endpoint sends `reasoning_effort`
+"none", its off switch; an endpoint with no off switch sends nothing,
+so a model whose thinking is on by default may still think (see the
+auto-mode judge's retry below, which covers that).
 
 A REQUEST with `:ephemeral t` is a one-off question, such as the
 auto-mode judge's.  The provider answers it from the request alone, as
@@ -1598,9 +1604,13 @@ fails, the subject is the first line of the first string in INPUT.
 Tool-call nodes, permission prompts, the activity of a running turn and
 ACP `tool_call` titles all carry this title.
 
-CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
-`:report` accepts a string for progress.  RESULT = `(:content "…"
-:is-error BOOL :attachments (…) :meta PLIST)`.
+CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN
+:note FN)`.  `:report` accepts a string for progress, which the
+activity line shows (its last line, `tools/progress'); `:note` accepts
+a line or a few for people to read, which the chat shows under the
+call's own block (`tools/note', see "The note under a running call"
+below).  RESULT = `(:content "…" :is-error BOOL :attachments (…)
+:meta PLIST)`.
 
 - `tools/list &optional SESSION-ID` → TOOL-SPECs `(:name :label
   :description :schema :kind :coalescable)`, filtered through sync
@@ -1610,6 +1620,15 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
   RESULT.  Pipeline: lookup → `permission/decide` (async filter) →
   handler (with `harness-tools--timeout`) → context-bomb guard → sync
   filter `tools/result` → events `tools/started`, `tools/finished`.
+- `tools/note SESSION-ID CALL-ID TEXT` is what a running call says of
+  itself beyond its one progress line: a line, or a few, for people to
+  read, which the agent keeps on the call
+  (`harness-agent--calls` `:note') and the chat draws under the call's
+  block.  The handler emits it with `harness-tools-note' on CTX's
+  `:note'; `harness-tools-watch-session' composes the notes of the
+  calls that show a session (see "The note under a running call"
+  below).  The whole note travels -- it may hold newlines -- where
+  `tools/progress' keeps only its last line for the activity line.
 - `tools/builtin SESSION-ID` returns the names of the harness tools
   that the session's provider runs a tool of its own for, and
   `tools/list` leaves them out.  They must be in the provider's
@@ -2417,9 +2436,12 @@ non-interactive session it stays a denial.
   `:tool` with `:title`, `:checking` until its permission is decided
   (its time then starts again), `:detail` the last line of its
   `tools/progress` (at most every `harness-agent--progress-interval`,
-  0.5 s), and `:count` when several run.  Every change is announced as
-  `agent/activity-changed`, with nil when the turn ends.  The state
-  lives beside the turn records, so a reload keeps it.
+  0.5 s), and `:count` when several run.  A `tool` phase also carries
+  `:calls`, one plist per running call -- the same fields with its
+  `:call-id`, and `:note`, the text of its `tools/note` -- so the chat
+  puts each call's note under that call's own block.  Every change is
+  announced as `agent/activity-changed`, with nil when the turn ends.
+  The state lives beside the turn records, so a reload keeps it.
 
 ### usage
 
@@ -2805,7 +2827,7 @@ and hinted.
   (`:context-window' override, else its model's, capped by its
   `:context-window-limit'), so a session capped below its model's
   window compacts at the cap, which is how task sessions compact
-  earlier (`harness-tasks-context-limit', 256k tokens by default).
+  earlier (`harness-tasks-context-limit', 384k tokens by default).
   It judges the session as it is then, read again: the fallback,
   earlier in the chain, may have moved it to another model.
 
@@ -3075,7 +3097,10 @@ so switching to either loses nothing.
   - `worktree/remove` lifts a harness lock first, and puts it back when
     git still refuses (local changes).  FORCE is `git worktree remove -f
     -f`, past local changes and any lock.  Task archive and the worktree
-    list's `d` go through it.
+    list's `d` go through it.  Before git runs, the async filter
+    `worktree/before-remove` (value nil, args ROOT PATH) lets whatever
+    runs from the worktree let go of it: tools-dev stops the Emacs that
+    `open_harness` started there.
   - `worktree/prune` runs `git worktree prune -v` outside the sandbox,
     where git sees every worktree, so it prunes only worktrees really
     gone, and skips locked ones as git does.  It returns git's lines plus
@@ -3292,7 +3317,7 @@ work waits in -- the tool slots above all -- are served by it (see
 priority).
 
 - `task/submit CWD PROMPT &optional (:attachments :model :permission-mode
-  :thinking :non-interactive :refine :main-tree :priority)` → task; it
+  :thinking :non-interactive :supervisor :refine :main-tree :priority)` → task; it
   starts when one of its project's `harness-tasks-max-running` slots is
   free.  Its session is made now, at the task's directory, idle, with
   the task's priority and the settings of its first turn (a backlog
@@ -3309,7 +3334,12 @@ priority).
   queued tasks in start order (`harness-tasks--start-order`: highest
   `:priority` first, oldest first among equals) while that project has
   slots left (`harness-tasks--free-slots PROJECT`), so a project at its
-  limit holds up only its own tasks.  Only top-level sessions take slots
+  limit holds up only its own tasks.  The limit (a `natnum`, or nil for
+  none; 0 starts nothing by itself) can change while tasks wait: its
+  `config/changed` runs the scheduler (`harness-tasks--on-config-changed`),
+  so a limit raised from a board's `N at a time` button or the settings
+  page starts the waiting tasks it lets through at once, and a lower one
+  stops no task at work.  Only top-level sessions take slots
   (`harness-tasks--holds-slot-p`): a task holds one while it starts,
   and while it is `active` with its own session -- one without a
   `:parent-id` -- running or blocked mid-turn, or idle with work it
@@ -3328,9 +3358,14 @@ priority).
   `-non-interactive` (off), else from what the directory configures, so
   a task is interactive unless `harness-tasks-non-interactive` or the
   directory's `harness-non-interactive` is on; an explicit false turns
-  non-interactive off whatever they say.  `task/settings` reports the
-  values a new task would get, the configured ones included, and the
-  board submits them with each task.
+  non-interactive off whatever they say.  `:supervisor` is the task's
+  own switch of the supervisor module, `t` to plan and delegate or an
+  explicit false to work hands-on (`:false` in the record); without it
+  the task's session takes `harness-supervisor-tasks` when it starts,
+  and without that module it means nothing.  `task/settings` reports the
+  values a new task would get, the configured ones included --
+  `:supervisor' only while the module is loaded -- and the board submits
+  them with each task.
   With `:refine` the task goes to the backlog instead (below).
   With `:main-tree` it works in the project's main checkout: no worktree
   is made, it gets no branch, and nothing merges when its turn ends, so
@@ -3341,7 +3376,7 @@ priority).
   it starts: the session it was submitted with writes it up at the
   task's directory and then stays there rather than moving into a
   worktree.
-- A task's session also runs on `harness-tasks-context-limit' (256000)
+- A task's session also runs on `harness-tasks-context-limit' (384000)
   tokens of context at most, so it compacts earlier than an interactive
   session; nil gives it the whole window.  A refined task's write-up
   session, and a session adopted by `task/adopt', get it too.  A
@@ -3518,11 +3553,14 @@ priority).
   the `session/before-move` filter `harness-tasks--before-move` refuses,
   since the board files the task under its project and follows its work
   in its directory.  A task for the other directory is submitted there.
-- `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`,
+- `task/list &optional CWD`, `task/get ID`, `task/settings &optional CWD`
+  (what new tasks start with, and `:max-running`, the limit, nil for
+  none),
   `task/start ID` (ignores the limit; not while a write-up runs),
   `task/update ID PROMPT` (not started only; writes a stopped write-up by
   hand; a task named from its prompt is named again), `task/set-all SETTINGS &optional FILTER` (apply `:model',
-  `:thinking', `:permission-mode' and `:non-interactive' to every task
+  `:thinking', `:permission-mode', `:non-interactive' and `:supervisor',
+  with an explicit false for the last two meaning off, to every task
   FILTER selects and, when started, its session, and `:priority' to the
   session of each: a task has no priority of its own
   (`harness-priority-set-session'), so a task already at that level --
@@ -3538,10 +3576,17 @@ priority).
   `harness-tasks-non-interactive`, else its directory's
   `harness-non-interactive`), and its session is sent only the
   settings it lacks, so one `session/set-all` changed first gets no
-  second hint; this is the board's bulk edit, and the all-sessions
+  second hint; a `:supervisor' is the session's `:ext' switch rather
+  than a `session/update' setting, so it is applied with
+  `supervisor/set' when the module is loaded
+  (`harness-tasks--apply-supervisor'), and a backlog write-up's session
+  is skipped, its setting waiting for the work; this is the board's bulk
+  edit, and the all-sessions
   commands' and `set_non_interactive`'s reach into tasks),
   `task/session-ids &optional FILTER` (the sessions of the tasks FILTER
-  selects, whatever their status: `session/select`'s `:tasks`),
+  selects, whatever their status; `session/select`'s `:tasks` adds
+  those of the current tasks and subtracts those of the done column's
+  with `:columns '("done")`),
   `task/prompt ID TEXT &optional ATTACHMENTS OPTS` (follow-up or
   steering; reopens; OPTS `:from` is the sender, as `agent/prompt` takes it; in review the
   user's sends the task back and another session's does not, as above), `task/refine ID &optional TEXT`,
@@ -3715,14 +3760,34 @@ again brings it back as it was.
   floor+4, at least 1), the rest floor to floor+39.  A last draw seeds
   the inspiration words the model names it after.  `harness-pet-roll
   SEED` → `(:rarity :species :eye :hat :shiny :stats :inspiration)`.
+- `harness-pet-overrides`, a plist, forces attributes over the roll and
+  the record: `:name :personality :species :rarity :eye :hat :shiny` and
+  the stats `:debugging :patience :chaos :wisdom :snark`.
+  `harness-pet-overrides` (the function) reads it as a clean plist,
+  dropping what fits nothing (a species, rarity or hat not in the
+  tables, a stat that is not a number; a symbol may be a string, stats
+  clamp to 1..100, the eye is one character, the name one line of at
+  most `harness-pet--max-name` characters).  `harness-pet-roll SEED
+  RARITY` draws the hat and the stats as for RARITY, the rarity draw
+  still made and a hat for a pet drawn common taken from a generator of
+  its own, so nothing else shifts; `harness-pet-bones SEED` is that roll
+  with the rest laid over.  The view, the voice
+  (`harness-pet--say-system`), the name it answers to, the sanitiser
+  and the hatch prompt use the effective bones, name and personality
+  (`harness-pet--name`, `harness-pet--personality`); the record keeps
+  what the model gave, so dropping an override brings it back.  The VIEW
+  carries `:overrides`, the keys in effect as strings.  `pet/rename`
+  refuses while `:name` is overridden.  `config/changed` of the option
+  emits `pet/changed`.
 - The record, `pet.json` under the state directory: `(:seed :name
   :personality :hatched :xp :pets :muted :said)`, SAID its last
   `harness-pet--memory` sayings.  A change it makes while growing is
   saved `harness-pet--save-delay` seconds later (`harness-pet-flush` at
   shutdown and on `kill-emacs-hook`); other changes at once.
 - `pet/get` → the VIEW: `(:hatched :enabled :hatching :reactions
-  :watching :model)`, `:enabled` false while it is turned off, and once
-  hatched also `:seed :name :personality :hatched-at
+  :watching :model :overrides)`, `:enabled` false while it is turned
+  off, `:overrides` the attributes `harness-pet-overrides` sets as names
+  without the colon, and once hatched also `:seed :name :personality :hatched-at
   :rarity :stars :species :eye :hat :shiny :stats :level :xp :level-xp
   :next-xp :pets :muted :thinking :said`.  Booleans are t or `:false`;
   `:thinking` is t while it waits for a line; LEVEL is
@@ -3921,11 +3986,49 @@ than the module).  It is set when the session is created
 (`session/created`), so the header shows it from the start: a `main`
 session with no parent takes `harness-supervisor` as `config/get` has it
 at its directory, a fork its parent's value, and a setting its maker gave
-in `:ext` stays.  The session of a task takes `harness-supervisor-tasks`
-(`task/changed`, once, while it has no message and the task was not
-adopted); the session that writes a backlog task up only reads, so it
+in `:ext` stays.  The session of a task takes the task's own `:supervisor'
+setting (`task/submit', the board's button, `task/set-all'), else
+`harness-supervisor-tasks' (`task/changed`, once, while it has no
+message and the task was not adopted); the session that writes a backlog
+task up only reads, so it
 has no setting and `:ext` `:supervisor-write-up` t until the task
-starts.  Only the user changes it later.
+starts, when it takes the task's setting.  Only the user changes it later.
+
+`harness-supervisor` and `harness-supervisor-tasks` are each `auto` (the
+default), `t` or nil, both layered (`harness-config-keys`) so a project's
+.dir-locals.el can decide how its sessions and its tasks start.  `auto`
+starts the session supervising and sets `:ext` `:supervisor-judge` t,
+and a cheap model decides from the opening message: a subscriber of
+`agent/turn-started` sends an ephemeral request beside the session's
+first turn (no tools, no thinking, one word asked;
+`harness-supervisor-judge-model`, the provider's cheap tier by default)
+holding the message alone, so the turn never waits for it.  A verdict
+starts the session as `supervisor/set` would and writes the note that
+says so, with `supervisor/changed`; a provider error, an unusable word
+or `harness-supervisor--judge-timeout` takes `:supervisor-judge` away
+and leaves the mode it started with, with the note saying that too.  A setting that decides (`t`/nil) and `supervisor/set` both take
+`:supervisor-judge` away, so the user's switch is never judged and a
+verdict that arrives after it is dropped.  A `submit_plan` or
+`retry_step' call the model wrote while the judge was still reading (its
+tool list from before the flip) is refused by its handler
+(`harness-supervisor--hands-on-result'), so no plan starts behind the
+mode's back.  Deleting a session forgets its judgement.
+
+The note the judge leaves (`harness-supervisor--note') is a hint, which
+the model never gets, written in the harness's voice: what was decided,
+and what to do about it.  Its `:meta` `:supervisor' holds the record the
+chat draws its buttons from (`harness-node-supervisor',
+harness-util.el): the judgement, the mode, the setting that decides how
+sessions start here and where it is written, and the two actions, each
+with the state nil, `done' or `undone'.  `supervisor/act' (SESSION-ID
+NODE-ID ACTION) is what a button calls: `always' writes the setting with
+`config/set' -- `harness-supervisor' at the session's directory, or
+`harness-supervisor-tasks' at the project of the task whose session it
+is -- and takes it back out of that layer with `config/unset', `mode'
+switches the session as `supervisor/set' does.  Each call moves its
+action on, records the state in the note (`session/update-node', so the
+chat redraws it with its [undo], then [redo]) and answers with the state
+and a message for the echo area.  Only the user calls it.
 
 - `supervisor/set SESSION-ID ON` → session plist: ON `t` for on, `:false`
   or nil for off, stored as `:false`, never removed.  Adds the hint
@@ -3936,11 +4039,46 @@ starts.  Only the user changes it later.
   supervises (nil for a session that is not there).  On takes effect at
   the next tool call, since the permission stage reads the live session,
   off at the next step, for the tool list.
-- Settings: `harness-supervisor` (t; layered like `harness-model`, see
-  config), `harness-supervisor-tasks` (t), `harness-supervisor-tiers`
-  (nil: an alist from `mundane`, `standard` or `hard` to a model id) and
-  `harness-supervisor-step-budget` (80), in the settings section
+- `supervisor/set-all ON &optional FILTER` → the ids changed, newest
+  first: `supervisor/set` for every governed session (`supervisor/get`
+  non-nil: a top-level session or a fork) FILTER of `session/select`
+  selects, the same filter as `session/set-all`, `(:active t :tasks t)`
+  from the UI, completed tasks' sessions left out by the selection.  A
+  sub-agent, a side conversation, a session from before the module and
+  one already at the asked value are left alone; each change is the
+  same `:ext` setting, hint and `supervisor/changed` event as
+  `supervisor/set`.  Only the user does this, over ACP as
+  `_harness/supervisor/set-all` with `:on` and `:filter` (the UI's
+  `harness-set-supervisor-all`, the menu's V); there is no tool.
+- Settings: `harness-supervisor` (`auto`: a cheap model judges the
+  session from its opening message; `t` always supervises and nil is
+  always hands-on; layered like `harness-model`, see config),
+  `harness-supervisor-tasks` (the same three, for the sessions of
+  tasks, also layered, so a project decides how its tasks start),
+  `harness-supervisor-judge-model`
+  (`auto`: the provider's cheap tier, else the session's own model),
+  `harness-supervisor-tiers`
+  (nil: an alist from `mundane`, `standard` or `hard` to a model id),
+  `harness-supervisor-thinking` (`((deepseek . "max"))`: an alist from a
+  provider id to the level its sessions run at while they supervise),
+  `harness-supervisor-worker-thinking` (`((deepseek . "medium"))`: an
+  alist from a provider id to the level workers on its models run at),
+  and `harness-supervisor-step-budget` (80), in the settings section
   "Supervisor mode".
+- Thinking levels.  A session whose provider
+  `harness-supervisor-thinking` names has its thinking raised to that
+  level while it supervises: `session/ext-changed` on `:supervisor` with
+  a true value calls `session/update` `:thinking LEVEL` `:silent t`,
+  remembering what it had in `harness-supervisor--raised` (and the level
+  it raised it to), and a false or nil value puts the remembered level
+  back only while the session still holds the raised one, so a level
+  chosen meanwhile stands.  A session whose level was not remembered
+  (after a restart) keeps the raised one; deleting a session forgets it.
+  This covers a top-level session, a fork that takes its parent's
+  setting, a task session (including one `harness-supervisor-tasks` turns
+  hands-on right after creation, whose level is put back), and the user
+  turning the mode on or off.  `harness-supervisor--provider-thinking`
+  reads the alist by `harness-model-provider`.
 - Enforcement, in order.  Filter `agent/tools` (90) offers a supervising
   session only an allowlist: the reading tools (`read_file grep glob
   list_dir file_info`, the `session_*` and `task_*` that only look,
@@ -4047,7 +4185,11 @@ starts.  Only the user changes it later.
   model's cache once.  A fresh step is a `session/create` in the
   supervisor's directory, worktree and host, with the supervisor as its
   parent and the supervisor's permission mode, thinking level,
-  non-interactive switch and allowed directories.  The worker gets one
+  non-interactive switch and allowed directories; the thinking level is
+  the one `harness-supervisor-worker-thinking` names for the provider of
+  the worker's own model, else the supervisor's own, and the same
+  `:thinking` is passed to a fork so that a raised supervisor level is
+  not inherited.  The worker gets one
   `agent/prompt`, from the supervisor session: the `:preamble` of
   `seed/fork`, an opening that tells a fork it is a worker now, the step,
   the attempt before it when the step starts again (below), what the
@@ -4222,7 +4364,7 @@ TRAMP prefixes come from the session host):
 | `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`) |
 | `plan` | Plan | plan | meta |
 | `todo_write` | Todo list | todos | meta |
-| `spawn_agent` | Sub-agent | prompt, fork, model, name, cwd, worktree, priority (of the child's session: low/medium/high; default: what it inherits) | meta (runs the child in the background and returns at once; the jail checks `cwd`, as it checks bash's) |
+| `spawn_agent` | Sub-agent | prompt, fork, model, thinking, name, cwd, worktree, priority (of the child's session: low/medium/high; default: what it inherits) | meta (runs the child in the background and returns at once; the jail checks `cwd`, as it checks bash's) |
 | `skill_search` / `skill_load` | Search skills / Load skill | query / name, file (one of the skill's supporting files) | read (needs no approval: `harness-perms--auto-allow-tools`) |
 | `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit (a session's priority is shown in its line when it is not medium) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -4239,7 +4381,7 @@ TRAMP prefixes come from the session host):
 | `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete/priority), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
-| `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus | exec (tools-dev; offered in a checkout of the harness only; needs no approval: `harness-perms--auto-allow-tools`) |
+| `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus (for the user: stays until the task is done) | exec (tools-dev; offered in a checkout of the harness only; the instance stops by itself once nothing needs it; needs no approval: `harness-perms--auto-allow-tools`) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
 | `notification_providers` | Notification providers | (none) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `merge_done` | Finish merge | none | meta (merge module) |
@@ -4275,7 +4417,9 @@ checkout's own live development loop (`scripts/dev.sh start`) with
 `HARNESS_DEV_SOCKET=harness-dev-HASH`, a socket derived from the
 checkout's true name, so the same worktree reuses its instance and two
 worktrees never share one; the instance's state and compiled files stay
-in that checkout's `scripts/.dev/state-SOCKET`.  The result lists the
+in that checkout's `scripts/.dev/state-SOCKET`, passed as
+`HARNESS_DEV_STATE` (dev.sh keeps one it inherits, so an instance
+opened by the harness of another would share that one's state).  The result lists the
 `scripts/dev.sh` commands that drive it (shot, keys, eval, errors,
 reload, stop) prefixed with that socket.  `path` defaults to the
 session's worktree, else its cwd; a directory that is not a checkout
@@ -4286,6 +4430,77 @@ FOCUS` does the same for the UI (focus raises the frame); Open harness
 in the menu of a task board's review card calls it, and the tool
 is in `harness-perms--auto-allow-tools', so the agent needs no approval
 to use it.
+
+Instances stop once nothing needs them, since nothing inside one ever
+stops it.  `tools-dev` records each instance it opens, and who for, in
+`dev-instances.json` in the state directory: `(:socket :path :sessions
+:user :task :opened)`, plus `:adopted` for one the sweep found.
+`:sessions` holds the sessions whose agents opened it.  `:user` marks
+one opened for the user to look at (the board's Open harness, or the
+tool with `focus`), and `:task` is the task it shows: the task of the
+session or of a session it descends from, else the task whose worktree
+it runs from.  An instance is needed while one of these holds:
+
+- one of its sessions is at work: its turn runs or waits on the user,
+  or `agent/outstanding` has something;
+- for a task's session, its task works: active with no `:outcome`, or
+  its session at work (as when merging).  For a sub-agent nothing
+  further counts.  Any other session needs it while it is open and
+  active within `harness-tools-dev--idle-timeout` (an hour);
+- it is the user's and its task is not done, archived or deleted.
+  Without a task, a session that opened it, or one it descends from,
+  is still open;
+- a working task, or a session at work, has its checkout as worktree
+  (or cwd).  The instance belongs to the worktree, whichever agent
+  opened it.
+
+An instance whose checkout is gone is never needed.  The check runs
+`harness-tools-dev--check-delay` seconds after `agent/turn-ended`,
+`session/deactivated`, `session/deleted`, `task/review`, `task/done`,
+`task/deleted` or `worktree/removed`, and only while something is
+recorded.  Instances being started or stopped are skipped, and a start
+waits for a stop of the same socket.  The tool's result tells the
+model when its instance stops (`harness-tools-dev--lifetime`).
+
+The sweep (`harness-tools-dev--sweep`) runs a minute after the module
+starts and every ten minutes after that.  It reads the process table
+(`harness-tools-dev-processes`: this user's Emacs processes whose
+command line is `--daemon=harness-dev-HASH -l
+CHECKOUT/scripts/harness-dev.el`) and forgets the records of
+instances that no longer run.  It adopts an unrecorded instance whose
+checkout is the worktree of one of this harness's tasks or sessions,
+or is gone, then checks everything.  Any other instance is someone
+else's and stays, and so does the one this harness runs in (its
+`daemonp`, or its parent's command line, see
+`harness-tools-dev--own-socket`).
+
+Stopping (`harness-tools-dev--stop`) runs `emacsclient -a false -s
+SOCKET --eval (kill-emacs)`, from Emacs's own `invocation-directory`,
+so nothing of the checkout has to exist.  A daemon still running
+`harness-tools-dev--kill-grace` seconds later has its process tree
+killed with TERM, then KILL.  The record is forgotten and
+`harness-dev/stopped` (SOCKET PATH REASON) is emitted.  The
+`worktree/before-remove` filter stops the instance of a worktree before
+git removes it.  As a backstop, `scripts/dev.sh start` runs with
+`HARNESS_DEV_OWNER` set to the Emacs the user runs
+(`harness-tools-dev--owner`: the harness process's parent, named by
+HARNESS_SERVER_PARENT, else this Emacs), and `scripts/harness-dev.el`
+checks every ten seconds that it still runs (same pid and start time),
+calling `kill-emacs` once it is gone.  A restart of the harness process
+alone leaves the instances running; the new process reads the record.
+A daemon started by hand has no owner, so this backstop leaves it
+running.  Methods:
+
+- `harness-dev/instances`: the records, each with `:needed` and
+  `:reason` (why nothing needs it).
+- `harness-dev/stop PATH`: stops the instance of PATH, recorded or
+  not.  It resolves to non-nil when one was stopped.
+- `harness-dev/sweep`: sweeps now, and resolves to the sockets
+  stopped.
+
+Tests set `harness-tools-dev--processes-function` to `ignore` and
+`harness-tools-dev--first-sweep` to nil (test helpers), so that no test
+finds or stops an Emacs it did not start.
 
 `bash` (tools-shell) lets a module confine a session's commands further
 through the sync filter `tools/sandbox-options`, run before each command
@@ -4366,6 +4581,92 @@ less than the supervisor holds, so its limit is fitted first: the cap
 plus the context `compaction/estimate` gives the compacted fork
 (`harness-tools-agent-context-limit SUPERVISOR t CONTEXT`), set with
 `session/update` `:silent t`, as the hint that follows says it.
+
+A sub-agent's thinking level starts from its parent's: `spawn_agent`
+passes it to `session/create`, and `session/fork` inherits it, so a
+child thinks as the session it is a child of.  `spawn_agent`'s
+`:thinking` names one of its own, checked against the model the child
+will run on -- the parent's model, or the `:model` the call gives it --
+with `harness-session--model-levels`.  A level the provider catalogue
+does not give that model fails the call (`harness-tool-error`;
+`harness-tools-agent--child-thinking` names the model, the level and the
+levels it does offer) rather than starting a child at a level its model
+cannot act on, as `harness-session--btw-thinking` and the session UI
+keep to the levels a model offers.  Only a level the call asked for is
+checked: without `:thinking` a child keeps the parent's level, a fresh
+one through `session/create` and a fork through its own default, even
+when a `:model` override does not list it.
+
+The note under a running call (module `tools`): a call that runs for a
+while says more than the one line of progress the activity line shows,
+under its own block in a chat.  A handler emits it with
+`harness-tools-note' on CTX's `:note', which becomes `tools/note
+SESSION-ID CALL-ID TEXT'; the agent keeps it on the call and announces
+it with the activity as `:calls' (held back as progress is, at most
+every `harness-agent--progress-interval'), and the chat draws it under
+the call's own block, where it goes when the call ends.
+`harness-tools-tail-line' (the last visible line of a chunk of output,
+colour codes and control characters gone, cut to 80 columns) is what
+the note under a bash call and the agent's activity line both use.
+
+The notes of the calls that show a session are made of the session.
+`harness-tools-session-note SESSION-ID &optional OPTIONS' returns up
+to three lines: what the session does now, or last did
+(`harness-tools-session-doing': its `agent/activity' as a phrase, or
+what it waits on when blocked, or the last thing in its transcript --
+"starting" for a prompt with no work after it yet); a recap of it
+("recap: …", `harness-recap-session'); and its facts
+(`harness-tools-session-facts': "12.3k/256k before compact · 2 turns ·
+7 steps · 9 tool calls" -- the tokens its conversation holds against
+the window it compacts at, from `session/usage'; its turns; the steps
+its running turn has made, counted here from `agent/step-started'
+since one model call is one step; and the tool calls counted in its
+transcript).  OPTIONS is `(:title TEXT :recap BOOL)': a wait opens
+each session's note with a title, and a call that shows a session asks
+for its recap.  A session that is gone says "gone".
+
+Nothing polls.  `harness-tools-watch-session SESSION-ID PUSH &optional
+OPTIONS' registers PUSH with `harness-tools--watchers', calls it with
+the session's note at once, and calls it again whenever an event about
+the session arrives -- its activity, steps, tool calls and results,
+its usage, status, pending requests, a recap of it, its end -- and
+only when the text changed; the value it returns stops the watching.
+`spawn_agent' watches its child this way, with `:recap t', so the note
+under its call says what the child does
+(`harness-tools-agent--watch-child'; the call returns as soon as the
+child starts, and `harness-tools-agent--forget-child' stops the
+watching when the child is reported).  `task_wait' watches every
+session it waits on, each note opened by its title
+(`NAME (shortid): ', or the first eight characters of the id alone,
+`harness-tools-sessions--wait-title') and joined into one note
+(`harness-tools-sessions--note-watch'); the watching stops when the
+wait settles.  `session_wait' registers a wake-up and returns at once
+(see below), so it has no call to show a note under.
+
+A recap of a session that is no task's is written here too, by
+`harness-recap-session SESSION-ID &optional FORCE' (harness-recap):
+`(:text TEXT :at FLOAT)', the task card's recap for a session that is
+a task's, since the card shows it and already keeps it fresh, else the
+one kept for the session in `harness-recap--sessions' with the same
+short call a card's is (the `harness-tasks-recap-model' cheap tier, at
+most `harness-tasks-recap-max-tokens' tokens, without thinking unless
+`harness-tasks-recap-thinking' names a level) and the same thresholds
+`harness-tasks-recap-turns', `harness-tasks-recap-seconds' and
+`harness-tasks-recap-tool-calls', measured from the session's start
+until the first recap and from the last one after that (FORCE skips
+them).  Only a sub-agent's session (`harness-recap--session-own-p')
+gets one written; another session's is its card's business, though a
+recap already kept for it is shown, and the one in hand is returned
+while a new one is made.  `recap/session-done' and
+`recap/session-failed' announce it, and a failure waits
+`harness-tasks-recap-retry' seconds before the next try.
+
+A `bash' command still running notes itself under the call from the
+start and then at most every `harness-tools-shell--note-interval'
+(0.25 s) as its output arrives: "still running · 12 lines so far", and
+the latest line under it (`harness-tools-shell--bash-note'; the
+counters come from the chunks, of which only the last 4000 characters
+are kept to find that line).
 
 Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an
@@ -4763,7 +5064,9 @@ layer maps positional bus signatures through a small table.
 `harness/modules` → `[{name, state, doc, file, error}]`, every module
 of the harness, as `harness-describe-modules` lists them.  The
 supervisor module's methods are `_harness/supervisor/set {sessionId, on}`
-(the UI's `harness-toggle-supervisor`), `.../get` and `.../active-p`,
+(the UI's `harness-toggle-supervisor`), `.../set-all {on, filter}` (the
+UI's `harness-set-supervisor-all`, the menu's V, for every governed
+session at once), `.../get` and `.../active-p`,
 and the seed module's `_harness/seed/fork` and `.../list`.
 
 The bus events of `harness-acp--forwarded-events` and
@@ -5141,6 +5444,14 @@ reason rather than as output.  The icons and their words take
 `harness-failure-face`, which inherit the theme's `success`, `warning`
 and `error`.  A summary block counts the failed and denied calls it
 folds, and the tree starts each tool result's row with the same icon.
+A running call's note (`tools/note', see "The note under a running
+call") shows under its block, dim and indented, in
+`harness-chat--note-lines': a line or a few the call says of itself --
+what a sub-agent does, what a wait waits on, how a bash command is
+going.  A chat buffer keeps them per call id (buffer-local
+`harness-chat--notes'), from the `:calls' of the turn's activity;
+`harness-chat--set-notes' redraws only the blocks whose note changed,
+and a call's note goes with its block when the call ends.
 The panel of a question whose options have diagrams shows one diagram
 at a time, in an area under the options; its tabs, `n` and `p` on the
 panel, `C-c C-f` and `C-c C-b`, and point moving onto an option switch
@@ -5342,7 +5653,8 @@ modules hook into a chat buffer without owning it:
 `harness-chat-send-functions` sees each message sent
 or queued from its box (the text as typed, and the attachments),
 `harness-chat-header-functions` (buffer-local) puts segments in front of
-its header line, leaving the session's own segments as they are,
+its header line, leaving the session's own segments as they are, each a
+string or `(TEXT PRIORITY MIN)` as `harness-ui-fit-header` takes it,
 `harness-chat-header-end-functions` adds segments after the session's
 own, before [menu], each a string or `(TEXT PRIORITY MIN)` as
 `harness-ui-fit-header` takes it (the companion pet's face, priority 2,
@@ -5355,20 +5667,41 @@ requires `ui` and `ui-chat`): a session the supervisor module governs
 says so in its `:ext` `:supervisor`, `t` while it supervises and
 `:false` once the user turned that off, and the chat's header line then
 starts with the state, before the status icon, through
-`harness-chat-header-functions`: "supervisor" in `harness-supervisor-face`,
-or "hands-on" in `harness-dim-face`.  A session with no `:supervisor`
+`harness-chat-header-functions`: " supervisor " in
+`harness-supervisor-face`, or " hands-on " in `harness-dim-face`, padded
+from the window's edge and separated from the status icon as the
+header's other segments are.  The segment is fitted at priority 3, below
+every segment of the session's own, so a window too narrow for the whole
+line drops the badge before it loses the model, the permission mode or
+the counts.  A session with no `:supervisor`
 (a sub-agent, a side conversation) shows nothing.  A click on the
 segment, and `V` in the harness keys (`C-c h V`,
 `harness-toggle-supervisor`), toggle the mode: they ask for the opposite
 with `_harness/supervisor/set {sessionId, on}` and say what changed
 ("Supervisor mode on", "Supervisor mode off (hands-on)"), and the header
 follows the session as the harness sends it.  The command takes the
-buffer's setting target like the other session settings, so it refuses
-the board's new-task settings (a task's before it starts), a session
-the harness has not sent, and one the plugin does not govern; a harness
-without the supervisor module does not know the method, which is said
-plainly ("Supervisor mode is not
+buffer's setting target like the other session settings: a session it
+refuses when the harness has not sent it or the plugin does not govern
+it, and the task board's non-session target -- the setting of the next
+task, or of every current task in bulk mode, offered only while the
+harness has the supervisor module -- it toggles through
+`harness-ui--setting-set' as the board's other setting buttons do; a
+harness without the supervisor module
+does not know the method, which is said plainly ("Supervisor mode is not
 available") rather than as a failure.
+
+`harness-set-supervisor-all` is the mode's "for all sessions" command
+(the menu's V, beside I), and is autoloaded like the others: it asks on
+or off, offering on first, and calls `_harness/supervisor/set-all
+{on, filter}` with `harness-ui--everything-filter`, so every governed
+session changes, a completed task's left alone, and a sub-agent or side
+conversation untouched.  Unless a prefix argument says otherwise it
+also sets `harness-supervisor` and `harness-supervisor-tasks` globally
+through `config/set`, so new top-level and task sessions follow, then
+reports how many sessions changed with `harness-ui--new-work-text` and
+`harness-ui--report-all` (what a project's `.dir-locals.el` still says
+otherwise).  Its failures go to `harness-ui-supervisor--failed`, the
+same plain message for a harness without the module.
 
 Session priority (`harness-ui-priority`, module `ui-priority`, which
 requires `ui` and `ui-chat`): a session whose `:ext' `:priority' is not
@@ -5680,15 +6013,21 @@ session.  The menu's `i` entry says whether that is non-interactive
 ask for a session.
 
 The all-sessions commands, `harness-set-model-all`,
-`harness-set-thinking-all` and `harness-set-non-interactive-all`
-(`C-c h M` `H` `A`, the menu's "Session settings" column), reach every
+`harness-set-thinking-all`, `harness-set-non-interactive-all` and
+`harness-set-supervisor-all`
+(`C-c h M` `H` `I`, the menu's "Session settings" column, where the
+supervisor one is V beside I; see also supervisor), reach every
 project.  They change the sessions first, every active one and those of
 the current tasks (`harness-ui--everything-filter`, `(:active t :tasks
 t)`, through `session/set-all`, or `handoff/switch-all` for a model so
 no lossy switch escapes the handoff), then the current tasks of every
 project (`task/set-all` without `:cwd`), whose sessions hold the value
 by then and so are not changed or told twice
-(`harness-ui--apply-everywhere`).  `harness-ui-set-all-functions` lets
+(`harness-ui--apply-everywhere`).  A session whose task is completed,
+in the board's done column, is left alone by all of them, even an
+active one: the selection subtracts the done tasks' sessions
+(`session/select`), and `task/set-all` never touches review, done or
+archived tasks.  `harness-ui-set-all-functions` lets
 what starts later follow, and returns the directories it changed
 something for: the task board's `harness-ui-tasks--set-all` sets the
 new-task settings of every open board -- for a model or a thinking
@@ -5696,13 +6035,16 @@ level only when the default changes, for non-interactive always.
 Unless a prefix argument says otherwise the value becomes the global
 default (`config/set` `:scope global`; for non-interactive only after
 the tasks changed, since a task without a setting of its own follows the
-default and is compared with how it would have started).  Then they say
+default and is compared with how it would have started; the supervisor
+one sets `harness-supervisor` and `harness-supervisor-tasks` and has no
+task records to change).  Then they say
 how many sessions and tasks changed and, from `config/overrides` (with
 the boards' directories), what keeps new work from following: the
 projects whose `.dir-locals.el` sets the key otherwise, at the project
 or the directory layer, and the task default that wins over it.  A
 model or a thinking level reports that when the default changed;
-non-interactive also whenever it is turned off.  None of them rewrites
+non-interactive and supervisor mode also whenever they are turned off.
+None of them rewrites
 a `.dir-locals.el`.
 
 `harness-set-priority-all` (`C-c h Y', "Priority for all sessions…" in
@@ -5835,7 +6177,17 @@ project.  The header's Review switch
 off, finished tasks merge and complete by themselves, and Ready for
 review shows only while tasks from before still wait there; turning it
 off while tasks of the board wait for review offers to verify them.
-`config/changed` brings every board the new value.  RET opens the session, and
+The settings line under the New task label ends, in Submit mode, with
+how many of a project's tasks work at once, a button: `N at a time`, or
+`all at once` without a limit, in `harness-task-held-face` at 0, when
+no task starts by itself.  A click reads another limit in the
+minibuffer (a number or `no limit`, the limit now the default; an
+answer that is neither changes nothing) and saves it the same way
+(`harness-ui-tasks-set-max-running`, `harness-tasks-max-running`); the
+harness starts the waiting tasks a higher limit lets through at once.
+On a narrow board the settings before the button shorten first, down to
+`harness-ui-tasks--min-settings-room` columns, so the button stays
+whole.  `config/changed` brings every board the new values.  RET opens the session, and
 `C-c h a` there leads back to the open board listing its task, whatever
 directory the session works in; elsewhere a task's worktree belongs to
 the main checkout's board (`harness-files-main-root`).  Redraws, after
@@ -5850,7 +6202,13 @@ buttons under the New task label), and so does the worktree switch
 beside them: `own worktree` (the default in a git project) or `main
 tree`, where the next task works in the project's own checkout, with
 nothing to merge (`harness-ui-tasks-toggle-main-tree`; new tasks only,
-never bulk).  A
+never bulk).  While the harness has the supervisor module the line also
+shows the supervisor switch (`supervisor`, or `hands-on' once turned
+off, `harness-toggle-supervisor'): the setting of the next task's
+session, turned for every current task in bulk mode, sent with the
+task and applied to its session when it starts.  The harness says
+whether it has the module by carrying `:supervisor' in `task/settings';
+without it there is no button.  A
 Submit / Refine toggle beside that label, showing only the current mode
 (a click or `C-c C-t` switches it), picks what a new task does: start,
 or go to the backlog, written up by an agent and
@@ -5892,7 +6250,8 @@ harness in its menu (`mouse-3`, `harness-ui-tasks-open-harness`; no
 button, the title's click opening the session as on every card): it
 starts the worktree's own live development loop in an Emacs of its
 own, frame raised, through `harness-dev/open`, so the work can be
-tried before it is verified.  `b` or [BTW] (or the
+tried before it is verified.  That instance stops once the task is
+done, archived or deleted (see tools-dev).  `b` or [BTW] (or the
 usual BTW command) opens a BTW side conversation over the board about
 its tasks (`task/btw`).  `SPC` over a card, or [Answer…] / [Request…]
 on it, pops out what the task at point needs -- the permission prompt or
@@ -5962,7 +6321,8 @@ when shiny) and personality, its level with an experience meter, and
 what it said last on a band of its own (`harness-pet-speech-face`,
 the action between asterisks in `harness-pet-action-face`), then the
 two before it and a footer saying whether and through which model it
-speaks.  Prose is filled to the window and drawn again when its width
+speaks and, when `harness-pet-overrides` sets any, which attributes are
+set by hand.  Prose is filled to the window and drawn again when its width
 changes.  The header line has [Pet] (`p`, `SPC`), [Rename] (`r`),
 [Mute]/[Unmute] (`m`), [Release] (`R`, asks first) and [Turn off]
 (`O`), or [Hatch] and [Turn off], and `g`, `q`.  Turned off (the VIEW's

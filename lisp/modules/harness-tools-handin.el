@@ -93,8 +93,10 @@ when it is none of that."
   "Return the evidence plist of tool call REF of session SID, the NUMBERth item.
 REF is the call id as the transcript shows it.  The newest call whose
 call id or node id is REF is copied: what the task view shows is a
-snapshot of the same call the session shows.  Return an error string
-when there is no such call, naming the recent ones."
+snapshot of the same call the session shows, its `:child-id' -- the
+sub-agent a spawn_agent call started -- included, so the report links
+the same session the chat does.  Return an error string when there is
+no such call, naming the recent ones."
   (let ((nodes (if (harness-method-exists-p 'session/nodes) (harness-call 'session/nodes sid) nil)))
     (if-let* ((node (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'tool-call)
                                                  (or (equal (plist-get n :call-id) ref)
@@ -102,19 +104,23 @@ when there is no such call, naming the recent ones."
                                 (reverse nodes))))
         (let* ((result (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'tool-result)
                                                     (equal (plist-get n :call-id) (plist-get node :call-id))))
-                                   (reverse nodes))))
-          (list :kind "tool-call"
-                :id (plist-get node :id)
-                :call-id (plist-get node :call-id)
-                :tool (format "%s" (or (plist-get node :tool) "tool"))
-                :title (or (plist-get node :title) (plist-get node :tool))
-                :input (harness-truncate-end
-                        (harness-json-encode-text (or (plist-get node :input) :empty))
-                        harness-tools-handin--max-input)
-                :output (and result (harness-truncate-end (or (plist-get result :output) "")
-                                                          harness-tools-handin--max-output))
-                :is-error (and result (harness-json-true-p (plist-get result :is-error)))
-                :at (plist-get node :ts)))
+                                   (reverse nodes)))
+               (child (or (plist-get (plist-get node :meta) :child-id)
+                          (and result (plist-get (plist-get result :meta) :child-id)))))
+          (append
+           (list :kind "tool-call"
+                 :id (plist-get node :id)
+                 :call-id (plist-get node :call-id)
+                 :tool (format "%s" (or (plist-get node :tool) "tool"))
+                 :title (or (plist-get node :title) (plist-get node :tool))
+                 :input (harness-truncate-end
+                         (harness-json-encode-text (or (plist-get node :input) :empty))
+                         harness-tools-handin--max-input)
+                 :output (and result (harness-truncate-end (or (plist-get result :output) "")
+                                                           harness-tools-handin--max-output))
+                 :is-error (and result (harness-json-true-p (plist-get result :is-error)))
+                 :at (plist-get node :ts))
+           (and (stringp child) (not (string-empty-p child)) (list :child-id child))))
       (let ((recent (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'tool-call)) nodes)))
         (format "Evidence %d: no tool call %s in this session. The recent calls are: %s"
                 number ref

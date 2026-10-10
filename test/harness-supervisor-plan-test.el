@@ -21,6 +21,8 @@
 (defvar harness-supervisor)
 (defvar harness-supervisor-tasks)
 (defvar harness-supervisor-tiers)
+(defvar harness-supervisor-thinking)
+(defvar harness-supervisor-worker-thinking)
 (defvar harness-supervisor-step-budget)
 (defvar harness-subagent-context-limit)
 (defvar harness-cowboy-default)
@@ -34,6 +36,7 @@
 (defvar harness-supervisor--ending)
 (defvar harness-supervisor--held)
 (defvar harness-supervisor--spawns)
+(defvar harness-supervisor--raised)
 (defvar harness-tools)
 (defvar harness-sessions)
 (defvar harness-agent--turns)
@@ -56,6 +59,9 @@
 (defvar harness-acp--clients)
 (defvar harness-acp-token)
 (declare-function harness-provider-demo--last-user-text "harness-provider-demo")
+(declare-function harness-provider-demo--complete "harness-provider-demo")
+(declare-function harness-define-provider "harness-provider")
+(declare-function harness-provider-unregister "harness-provider")
 (declare-function harness-supervisor--update-step "harness-supervisor")
 (declare-function harness-supervisor--on-turn-ended "harness-supervisor")
 (declare-function harness-session--ext-json-p "harness-session")
@@ -187,6 +193,33 @@ message that follows a result: providers join the two."
   (pcase tier
     ('cheap "demo:cheap") ('balanced "demo:balanced") ('frontier "demo:frontier")))
 
+(defun harness-supervisor-plan-test-stub-tier-model (fn)
+  "Make FN the tier mapping of the provider layer, whatever method it asks through.
+FN takes a model id and an optional tier and returns the model of that
+tier, or nil.  All three of `provider/tier-model',
+`provider/tier-model-info' and `provider/tier-model-async' are
+registered, so which one the plan engine prefers makes no difference to
+a test that only cares what a tier maps to."
+  (harness-register-method
+   'provider/tier-model (lambda (model &optional tier) (funcall fn model tier)))
+  (harness-register-method
+   'provider/tier-model-info
+   (lambda (model &optional tier)
+     (let ((id (funcall fn model tier)))
+       (cons id (and (null id) 'none)))))
+  (harness-register-method
+   'provider/tier-model-async
+   (lambda (model &optional tier)
+     (let ((id (funcall fn model tier)))
+       (harness-resolved (cons id (and (null id) 'none))))))
+  fn)
+
+(defun harness-supervisor-plan-test-real-tiers ()
+  "Put back the provider layer's own tier mapping, as the fixture's stub replaced it.
+A test of what the real catalogue gives a tier calls this inside
+`harness-supervisor-plan-test-with'."
+  (harness-test-load-module 'provider))
+
 (defun harness-supervisor-plan-test--allow (_decision next &rest _)
   "Allow every call that gets this far, as yolo mode would; continue with NEXT."
   (funcall next (list :behavior 'allow)))
@@ -210,9 +243,10 @@ and the tiers map to the demo models cheap, balanced and frontier."
      (dolist (table (list harness-supervisor--decisions harness-supervisor--reminders
                           harness-supervisor--calls harness-supervisor--configured
                           harness-supervisor--live harness-supervisor--ending
-                          harness-supervisor--held harness-supervisor--spawns))
+                          harness-supervisor--held harness-supervisor--spawns
+                          harness-supervisor--raised))
        (clrhash table))
-     (harness-register-method 'provider/tier-model #'harness-supervisor-plan-test--tier-model)
+     (harness-supervisor-plan-test-stub-tier-model #'harness-supervisor-plan-test--tier-model)
      (harness-add-filter 'permission/decide #'harness-supervisor-plan-test--allow 10)
      (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override #'harness-supervisor-plan-test--script)
@@ -508,8 +542,8 @@ promise that never settles, so the steps stay running."
   "With no model for a tier the step runs on the supervisor's, and a hint says so."
   (harness-supervisor-plan-test-with
     (harness-supervisor-plan-test-stub-starts
-      (harness-register-method 'provider/tier-model
-                               (lambda (_model &optional tier) (and (eq tier 'cheap) "demo:cheap")))
+      (harness-supervisor-plan-test-stub-tier-model
+       (lambda (_model &optional tier) (and (eq tier 'cheap) "demo:cheap")))
       (let ((sid (harness-supervisor-plan-test-session)))
         (harness-supervisor-plan-test-run
          sid "submit_plan"
@@ -527,12 +561,109 @@ promise that never settles, so the steps stay running."
   ;; A provider that fails to answer counts as having no model.
   (harness-supervisor-plan-test-with
     (harness-supervisor-plan-test-stub-starts
-      (harness-register-method 'provider/tier-model (lambda (&rest _) (error "No catalogue")))
+      (harness-supervisor-plan-test-stub-tier-model (lambda (&rest _) (error "No catalogue")))
       (let ((sid (harness-supervisor-plan-test-session)))
         (harness-supervisor-plan-test-run
          sid "submit_plan"
          (harness-supervisor-plan-test-plan-input (harness-supervisor-plan-test-step-input "m")))
         (should (equal "demo:scripted" (plist-get (harness-supervisor-plan-test-step sid "m") :model)))))))
+
+(defun harness-supervisor-plan-test-define-catalogue (id &optional delay)
+  "Register provider ID with a big, a mid and a small model, dearest first.
+No `:tiers' names them, so the provider layer ranks them by price, as it
+does for a provider that declares none.  DELAY non-nil makes its
+catalogue answer that many seconds later, which a plan has to wait for.
+Its completions are the demo's script, so the conversation stays
+scripted while the models are the provider's own."
+  (let ((models (lambda ()
+                  (list (list :name "big" :context-window 200000
+                              :pricing '(:input 10.0 :output 50.0))
+                        (list :name "mid" :context-window 200000
+                              :pricing '(:input 3.0 :output 15.0))
+                        (list :name "small" :context-window 200000
+                              :pricing '(:input 1.0 :output 5.0))))))
+    (harness-define-provider id
+      :complete #'harness-provider-demo--complete
+      :models (if delay
+                  (lambda ()
+                    (let ((answer (harness-make-promise)))
+                      (run-at-time delay nil
+                                   (lambda () (harness-resolve answer (funcall models))))
+                      answer))
+                (lambda () (harness-resolved (funcall models)))))))
+
+(defun harness-supervisor-plan-test-session-on (model &rest plist)
+  "Create a supervising session on MODEL, with PLIST's settings, and return its id."
+  (plist-get (apply #'harness-call 'session/create :cwd (harness-test-temp-dir)
+                    :model model plist)
+             :id))
+
+(ert-deftest harness-supervisor-plan-the-real-catalogue-decides-what-a-worker-runs-on ()
+  "The provider's own catalogue gives each tier its model, and the workers start on it.
+Two mundane steps share a seed -- one seeded fork between them -- and a
+hard step forks the supervisor directly; every worker's model is the one
+its tier ranks with, not the supervisor's."
+  (harness-supervisor-plan-test-with
+    (harness-supervisor-plan-test-stub-starts
+      (harness-supervisor-plan-test-real-tiers)
+      (harness-supervisor-plan-test-define-catalogue 'tiered)
+      (unwind-protect
+          (let ((sid (harness-supervisor-plan-test-session-on "tiered:big")))
+            (harness-call 'session/usage-add sid '(:input 10 :output 5 :context 7000))
+            (harness-supervisor-plan-test-submit
+             sid
+             (harness-supervisor-plan-test-step-input "m1" :tier "mundane")
+             (harness-supervisor-plan-test-step-input "m2" :tier "mundane")
+             (harness-supervisor-plan-test-step-input "h" :tier "hard"))
+            (should (equal "tiered:small" (plist-get (harness-supervisor-plan-test-step sid "m1") :model)))
+            (should (equal "tiered:small" (plist-get (harness-supervisor-plan-test-step sid "m2") :model)))
+            (should (equal "tiered:big" (plist-get (harness-supervisor-plan-test-step sid "h") :model)))
+            (should (equal '("tiered:small" "tiered:small")
+                           (mapcar (lambda (args) (nth 1 args))
+                                   (harness-supervisor-plan-test-calls 'seed/fork))))
+            ;; `session/fork' takes the session id first, then its plist.
+            (should (equal '("tiered:big")
+                           (mapcar (lambda (args) (plist-get (cdr args) :model))
+                                   (harness-supervisor-plan-test-calls 'session/fork))))
+            (should-not (cl-some (lambda (h) (string-match-p "own model" h))
+                                 (harness-supervisor-plan-test-hints sid))))
+        (harness-provider-unregister 'tiered)))))
+
+(ert-deftest harness-supervisor-plan-waits-for-a-catalogue-that-answers-late ()
+  "A provider not listed yet does not cost a step its model: the plan waits for the catalogue.
+The lookup once read the empty cache as a provider with no model for the
+tier, and ran the step on the supervisor's own, expensive model."
+  (harness-supervisor-plan-test-with
+    (harness-supervisor-plan-test-stub-starts
+      (harness-supervisor-plan-test-real-tiers)
+      (harness-supervisor-plan-test-define-catalogue 'slow 0.05)
+      (unwind-protect
+          (let ((sid (harness-supervisor-plan-test-session-on "slow:big")))
+            (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "m"))
+            (should (equal "slow:small" (plist-get (harness-supervisor-plan-test-step sid "m") :model)))
+            (should-not (cl-some (lambda (h) (string-match-p "own model" h))
+                                 (harness-supervisor-plan-test-hints sid))))
+        (harness-provider-unregister 'slow)))))
+
+(ert-deftest harness-supervisor-plan-names-the-provider-when-it-has-no-model-for-a-tier ()
+  "A catalogue with nothing for a tier runs the step on the supervisor's model, and says why."
+  (harness-supervisor-plan-test-with
+    (harness-supervisor-plan-test-stub-starts
+      (harness-supervisor-plan-test-real-tiers)
+      (harness-define-provider 'unpriced
+        :complete #'harness-provider-demo--complete
+        :models (lambda () (harness-resolved '((:name "only" :context-window 200000)))))
+      (unwind-protect
+          (let ((sid (harness-supervisor-plan-test-session-on "unpriced:only")))
+            (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "m"))
+            (should (equal "unpriced:only" (plist-get (harness-supervisor-plan-test-step sid "m") :model)))
+            (let ((hint (cl-find-if (lambda (h) (string-match-p "own model" h))
+                                    (harness-supervisor-plan-test-hints sid))))
+              (should hint)
+              (should (string-match-p "step m (mundane)" hint))
+              (should (string-match-p "unpriced names no cheap model" hint))
+              (should (string-match-p "unpriced:only" hint))))
+        (harness-provider-unregister 'unpriced)))))
 
 ;;;; Starting the steps
 
@@ -695,6 +826,75 @@ Return how the turn ended.  A turn the session still runs ends first."
           ;; Fresh: the cap, not the conversation it does not inherit.
           (should (eql harness-subagent-context-limit (plist-get args :context-window-limit)))
           (should (< (plist-get args :context-window-limit) (harness-tools-agent-context-limit sid t))))))))
+
+(ert-deftest harness-supervisor-plan-a-worker-thinks-at-the-level-of-its-own-provider ()
+  "`harness-supervisor-worker-thinking' sets the level every kind of worker starts at."
+  (harness-supervisor-plan-test-with
+    (harness-supervisor-plan-test-stub-starts
+      (let ((harness-supervisor-worker-thinking '((demo . "low"))))
+        (let ((sid (harness-supervisor-plan-test-session)))
+          (harness-supervisor-plan-test-submit
+           sid (harness-supervisor-plan-test-step-input "a")
+           ;; Same model, and forked too: both share a seed.
+           (harness-supervisor-plan-test-step-input "b")
+           ;; Alone on its model: forked directly.
+           (harness-supervisor-plan-test-step-input "c" :tier "hard")
+           (harness-supervisor-plan-test-step-input "f" :context "fresh"))
+          (should (= 2 (length (harness-supervisor-plan-test-calls 'seed/fork))))
+          ;; The calls carry positional arguments first (the session forked
+          ;; and, for a seed, its model), so the plist follows them.
+          (dolist (call (harness-supervisor-plan-test-calls 'seed/fork))
+            (should (equal "low" (plist-get (cddr call) :thinking))))
+          (dolist (call (harness-supervisor-plan-test-calls 'session/fork))
+            (should (equal "low" (plist-get (cdr call) :thinking))))
+          (should (equal "low" (plist-get (car (harness-supervisor-plan-test-calls 'session/create))
+                                          :thinking))))))))
+
+(ert-deftest harness-supervisor-plan-the-worker-level-is-the-worker-models-providers ()
+  "A worker takes the level of the provider of its own model, not of its supervisor's."
+  (harness-supervisor-plan-test-with
+    (harness-supervisor-plan-test-stub-starts
+      (let ((harness-supervisor-tiers '((mundane . "deepseek:deepseek-flash")))
+            ;; The supervisor is a demo session, which the alist does not name.
+            (harness-supervisor-worker-thinking '((deepseek . "medium"))))
+        (let ((sid (harness-supervisor-plan-test-session)))
+          (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "a"))
+          ;; A session/fork call leads with the session forked and its plist follows.
+          (let ((args (cdr (car (harness-supervisor-plan-test-calls 'session/fork)))))
+            (should (equal "deepseek:deepseek-flash" (plist-get args :model)))
+            (should (equal "medium" (plist-get args :thinking)))))))))
+
+(ert-deftest harness-supervisor-plan-no-worker-level-leaves-the-supervisors-own ()
+  "A provider the setting does not name leaves its workers at the supervisor's level."
+  (harness-supervisor-plan-test-with
+    (harness-supervisor-plan-test-stub-starts
+      (let ((harness-supervisor-worker-thinking nil))
+        (let ((sid (harness-supervisor-plan-test-session :thinking "high")))
+          (harness-supervisor-plan-test-submit
+           sid (harness-supervisor-plan-test-step-input "c" :tier "hard")
+           (harness-supervisor-plan-test-step-input "f" :context "fresh"))
+          ;; A fork inherits it (no `:thinking' passed), a fresh worker is told it.
+          (should-not (plist-member (cdr (car (harness-supervisor-plan-test-calls 'session/fork)))
+                                    :thinking))
+          (should (equal "high" (plist-get (car (harness-supervisor-plan-test-calls 'session/create))
+                                           :thinking))))))))
+
+(ert-deftest harness-supervisor-plan-a-seeded-worker-gets-the-level-itself ()
+  "A worker forked through a seed thinks at the worker level, not the seed's or the supervisor's."
+  (harness-supervisor-plan-test-with
+    (let ((harness-supervisor-worker-thinking '((demo . "low")))
+          (sid (harness-supervisor-plan-test-session :thinking "high")))
+      (harness-supervisor-plan-test-submit
+       sid (harness-supervisor-plan-test-step-input "a")
+       (harness-supervisor-plan-test-step-input "b"))
+      (harness-supervisor-plan-test-wait-state sid "a" "done")
+      (let* ((step (harness-supervisor-plan-test-step sid "a"))
+             (worker (plist-get step :session)))
+        (should (harness-call 'session/exists-p worker))
+        ;; The plan has two fork steps on one model, so the workers fork a
+        ;; seed, and it is the worker that takes the level, not the seed.
+        (should (harness-call 'seed/list sid))
+        (should (equal "low" (plist-get (harness-call 'session/get worker) :thinking)))))))
 
 (ert-deftest harness-supervisor-plan-a-fresh-step-is-hands-on-when-the-supervisor-is-interactive ()
   "A supervisor that is not non-interactive makes workers that are not, explicitly."

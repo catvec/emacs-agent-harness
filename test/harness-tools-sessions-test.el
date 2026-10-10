@@ -9,6 +9,7 @@
 (defvar harness-sessions)
 (defvar harness-agent--turns)
 (defvar harness-tools-agent--questions)
+(defvar harness-agent--cancel-grace)
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
 (defvar harness-tasks--loaded)
@@ -18,6 +19,7 @@
 (defvar harness-tasks-non-interactive)
 (defvar harness-tasks-model)
 (defvar harness-tools-sessions--waiters)
+(defvar harness-tools--watchers)
 
 (defconst harness-tools-sessions-test-script
   '((:type text :delta "Reply from ") (:type text :delta "the other session.") (:type done :stop-reason end-turn)))
@@ -387,6 +389,54 @@ tell it from the user's messages."
         (should (= 2 (cl-count-if (lambda (l) (string-match-p "Reply from the other session" l))
                                   (split-string text "\n")))))
       (should (zerop (hash-table-count harness-tools-sessions--waiters))))))
+
+(ert-deftest harness-tools-sessions-note-watch-shows-what-it-waits-on ()
+  "The note a call that waits on sessions shows says what each waited
+session is doing and what it has done: the status, the last thing seen
+and the counts.  `session_wait' registers a wake-up and returns at
+once, so the note is what `task_wait' shows of the sessions of the
+tasks it waits on (`harness-tools-sessions--note-watch')."
+  (harness-tools-sessions-test-with
+    (let* ((harness-provider-demo--delay 0.15)
+           (me (harness-tools-sessions-test-session))
+           (other (harness-tools-sessions-test-session))
+           (notes nil)
+           (ctx (list :session-id me
+                      :note (lambda (text) (push text notes)))))
+      ;; A tool call and a turn already behind it, so the counts mean
+      ;; something while the wait runs.
+      (harness-call 'session/append other '(:kind user :content "make the widget"))
+      (harness-call 'session/append other '(:kind tool-call :tool "bash" :call-id "c0" :title "Bash: make widget"))
+      (harness-call 'session/usage-add other '(:context 5000 :last-output 0 :turns 1))
+      (let ((unwatch (harness-tools-sessions--note-watch ctx (list other))))
+        ;; Idle: the note says the last thing it did, and its facts.
+        (let ((note (car (last notes))))
+          ;; Named by its id, since it has no name, then what it last did.
+          (should (string-prefix-p (concat (harness-tools-short-id other) ": ") note))
+          (should (string-match-p "last ran Bash: make widget" note)))
+        (should (cl-some (lambda (n) (string-match-p "5\\.0k/8\\.0k before compact" n)) notes))
+        (should (cl-some (lambda (n) (string-match-p "1 turn" n)) notes))
+        (should (cl-some (lambda (n) (string-match-p "1 tool call" n)) notes))
+        ;; Now it runs: the note says so, and keeps the facts.
+        (harness-tools-sessions-test-ok me "session_send" (list :session_id other :message "go"))
+        (harness-test-wait (lambda () (cl-some (lambda (n) (string-match-p "model\\|thinking\\|writing" n)) notes))
+                           5 "the running note")
+        (should (cl-some (lambda (n) (string-match-p "5\\.0k/8\\.0k before compact · 1 turn · 1 tool call" n))
+                         notes))
+        ;; The watching stops when the call it belongs to is over, and
+        ;; the note does not outlive it.
+        (funcall unwatch)
+        (should-not (cl-some (lambda (ws) (cl-some (lambda (e) (equal other (car e))) ws))
+                             (harness-tools-sessions-test-watchers)))
+        (let ((before (length notes)))
+          (harness-emit 'session/usage other (plist-get (harness-call 'session/get other) :usage))
+          (should (= before (length notes))))))))
+
+(defun harness-tools-sessions-test-watchers ()
+  "Return every watcher the notes keep, as (SESSION-ID . ENTRIES)."
+  (let (out)
+    (maphash (lambda (id ws) (push (cons id ws) out)) harness-tools--watchers)
+    out))
 
 (ert-deftest harness-tools-sessions-wait-already-met-and-timeout ()
   "A wait that already holds returns the report; a timeout wakes the session."
@@ -1253,6 +1303,52 @@ task_list filters on it and task_wait can wait for it."
       (should (string-match-p "No tasks match" (harness-tools-sessions-test-ok me "task_list" '(:column "active"))))
       (should (string-match-p "Done waiting"
                               (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "merging")))))))
+
+(ert-deftest harness-tools-sessions-task-queue-suspend-and-resume ()
+  "task_control suspends and resumes a project's queue; task_list says so.
+An explicit start still starts a task while the queue is suspended."
+  (harness-tools-sessions-test-with
+    (let* ((harness-tasks-max-running 0)
+           (me (harness-tools-sessions-test-session))
+           (id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Waits for the queue"))
+                                     :meta)
+                          :task-id)))
+      (should (string-match-p "Queue suspended"
+                              (harness-tools-sessions-test-ok me "task_control" '(:action "suspend-queue"))))
+      (let ((listing (harness-tools-sessions-test-ok me "task_list" nil)))
+        (should (string-match-p "Queue suspended for" listing))
+        (should (string-match-p "waiting while the queue is suspended" listing)))
+      (should (eq 'pending (plist-get (harness-call 'task/get id) :state)))
+      ;; The suspension holds back the scheduler, never an explicit start.
+      (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "start"))
+      (should (eq 'active (plist-get (harness-call 'task/get id) :state)))
+      (harness-tools-sessions-test-ok me "task_wait" (list :task_id id :until "done"))
+      (should (string-match-p "Queue resumed"
+                              (harness-tools-sessions-test-ok me "task_control" '(:action "resume-queue"))))
+      (should-not (string-match-p "Queue suspended" (harness-tools-sessions-test-ok me "task_list" nil))))))
+
+(ert-deftest harness-tools-sessions-task-return-to-pending ()
+  "task_control return-to-pending stops a working task's turn, keeping its session.
+The task waits in pending until the queue starts it again."
+  (harness-tools-sessions-test-with
+    (let* ((harness-agent--cancel-grace 0.05)
+           (harness-tasks-max-running 1)
+           (harness-provider-demo-script-override '((:type wait :seconds 30)))
+           (me (harness-tools-sessions-test-session))
+           (id (plist-get (plist-get (harness-tools-sessions-test-run me "task_submit" '(:prompt "Long work"))
+                                     :meta)
+                          :task-id)))
+      (harness-test-wait (lambda () (plist-get (harness-call 'task/get id) :session)) 5 "a session")
+      (let* ((sid (plist-get (harness-call 'task/get id) :session))
+             (text (harness-tools-sessions-test-ok me "task_control" (list :task_id id :action "return-to-pending"))))
+        (should (string-match-p "Returned to pending" text))
+        (should (string-match-p (regexp-quote sid) text))
+        (let ((task (harness-call 'task/get id)))
+          (should (eq 'pending (plist-get task :state)))
+          (should (plist-get task :returned))
+          (should (equal sid (plist-get task :session)))))
+      ;; Nothing takes the freed slot on its own: the return started nothing.
+      (should (eq 'pending (plist-get (harness-call 'task/get id) :state))))))
 
 (provide 'harness-tools-sessions-test)
 ;;; harness-tools-sessions-test.el ends here
