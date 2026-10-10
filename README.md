@@ -966,6 +966,22 @@ call to one anyway, in every permission mode.
   tier instead (a tier it leaves out keeps the default). A provider
   with no model for a tier runs that step on the supervisor's own model,
   and a hint says so.
+- **Thinking levels.** Thinking is a role thing: planning well is worth
+  the top effort, and the many small steps are not. A session that
+  starts supervising takes the level its provider names in
+  `harness-supervisor-thinking`, and each worker the level its own
+  model's provider names in `harness-supervisor-worker-thinking`. Both
+  are alists from a provider id to a level; by default DeepSeek
+  supervisors plan at `max`, and DeepSeek workers think at `medium`,
+  which DeepSeek's own mapping makes of its middle effort, one step
+  below max. A provider neither setting names, and a nil level, leaves
+  those sessions as they were: a worker thinks at its supervisor's
+  level. The supervisor's level is raised when the mode is turned on
+  and put back as it was when it is turned off; a level you choose while
+  the session supervises is left as it is when the mode goes off, and
+  after a restart of the harness the raised one stands. Workers keep the
+  level they started with. Both settings are on the settings page, under
+  **Supervisor mode**.
 - **Fork or fresh, and `after`.** A step's context is `fork` (the
   default) or `fresh`. A fork worker is a fork of the supervisor at the
   call that submitted the plan, so it sees everything the supervisor
@@ -1544,9 +1560,10 @@ shows where its effective value comes from.
 The page leads with the settings most people change, grouped by what
 they are for: **New sessions** (model, thinking, permission mode,
 non-interactive, supervisor mode), **Supervisor mode** (whether
-sessions and tasks supervise, the models of the tiers, the step
-budget), **Spending** (the budget, one for all sessions
-together), **Compaction** (what stands in for a conversation that grew
+sessions and tasks supervise, the models of the tiers, the thinking
+levels of supervisors and their workers, the step budget),
+**Spending** (the budget, one for all sessions together),
+**Compaction** (what stands in for a conversation that grew
 too long, and which model writes a brief summary), **Files and safety**
 (directory access,
 sandbox policy, standing permission rules), **Task board** (what task

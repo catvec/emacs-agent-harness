@@ -3833,9 +3833,27 @@ starts.  Only the user changes it later.
   off at the next step, for the tool list.
 - Settings: `harness-supervisor` (t; layered like `harness-model`, see
   config), `harness-supervisor-tasks` (t), `harness-supervisor-tiers`
-  (nil: an alist from `mundane`, `standard` or `hard` to a model id) and
-  `harness-supervisor-step-budget` (80), in the settings section
+  (nil: an alist from `mundane`, `standard` or `hard` to a model id),
+  `harness-supervisor-thinking` (`((deepseek . "max"))`: an alist from a
+  provider id to the level its sessions run at while they supervise) and
+  `harness-supervisor-worker-thinking` (`((deepseek . "medium"))`: an
+  alist from a provider id to the level workers on its models run at),
+  and `harness-supervisor-step-budget` (80), in the settings section
   "Supervisor mode".
+- Thinking levels.  A session whose provider
+  `harness-supervisor-thinking` names has its thinking raised to that
+  level while it supervises: `session/ext-changed` on `:supervisor` with
+  a true value calls `session/update` `:thinking LEVEL` `:silent t`,
+  remembering what it had in `harness-supervisor--raised` (and the level
+  it raised it to), and a false or nil value puts the remembered level
+  back only while the session still holds the raised one, so a level
+  chosen meanwhile stands.  A session whose level was not remembered
+  (after a restart) keeps the raised one; deleting a session forgets it.
+  This covers a top-level session, a fork that takes its parent's
+  setting, a task session (including one `harness-supervisor-tasks` turns
+  hands-on right after creation, whose level is put back), and the user
+  turning the mode on or off.  `harness-supervisor--provider-thinking`
+  reads the alist by `harness-model-provider`.
 - Enforcement, in order.  Filter `agent/tools` (90) offers a supervising
   session only an allowlist: the reading tools (`read_file grep glob
   list_dir file_info`, the `session_*` and `task_*` that only look,
@@ -3942,7 +3960,11 @@ starts.  Only the user changes it later.
   model's cache once.  A fresh step is a `session/create` in the
   supervisor's directory, worktree and host, with the supervisor as its
   parent and the supervisor's permission mode, thinking level,
-  non-interactive switch and allowed directories.  The worker gets one
+  non-interactive switch and allowed directories; the thinking level is
+  the one `harness-supervisor-worker-thinking` names for the provider of
+  the worker's own model, else the supervisor's own, and the same
+  `:thinking` is passed to a fork so that a raised supervisor level is
+  not inherited.  The worker gets one
   `agent/prompt`, from the supervisor session: the `:preamble` of
   `seed/fork`, an opening that tells a fork it is a worker now, the step,
   the attempt before it when the step starts again (below), what the

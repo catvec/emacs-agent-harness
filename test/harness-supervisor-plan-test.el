@@ -21,6 +21,8 @@
 (defvar harness-supervisor)
 (defvar harness-supervisor-tasks)
 (defvar harness-supervisor-tiers)
+(defvar harness-supervisor-thinking)
+(defvar harness-supervisor-worker-thinking)
 (defvar harness-supervisor-step-budget)
 (defvar harness-subagent-context-limit)
 (defvar harness-cowboy-default)
@@ -34,6 +36,7 @@
 (defvar harness-supervisor--ending)
 (defvar harness-supervisor--held)
 (defvar harness-supervisor--spawns)
+(defvar harness-supervisor--raised)
 (defvar harness-tools)
 (defvar harness-sessions)
 (defvar harness-agent--turns)
@@ -210,7 +213,8 @@ and the tiers map to the demo models cheap, balanced and frontier."
      (dolist (table (list harness-supervisor--decisions harness-supervisor--reminders
                           harness-supervisor--calls harness-supervisor--configured
                           harness-supervisor--live harness-supervisor--ending
-                          harness-supervisor--held harness-supervisor--spawns))
+                          harness-supervisor--held harness-supervisor--spawns
+                          harness-supervisor--raised))
        (clrhash table))
      (harness-register-method 'provider/tier-model #'harness-supervisor-plan-test--tier-model)
      (harness-add-filter 'permission/decide #'harness-supervisor-plan-test--allow 10)
@@ -695,6 +699,75 @@ Return how the turn ended.  A turn the session still runs ends first."
           ;; Fresh: the cap, not the conversation it does not inherit.
           (should (eql harness-subagent-context-limit (plist-get args :context-window-limit)))
           (should (< (plist-get args :context-window-limit) (harness-tools-agent-context-limit sid t))))))))
+
+(ert-deftest harness-supervisor-plan-a-worker-thinks-at-the-level-of-its-own-provider ()
+  "`harness-supervisor-worker-thinking' sets the level every kind of worker starts at."
+  (harness-supervisor-plan-test-with
+    (harness-supervisor-plan-test-stub-starts
+      (let ((harness-supervisor-worker-thinking '((demo . "low"))))
+        (let ((sid (harness-supervisor-plan-test-session)))
+          (harness-supervisor-plan-test-submit
+           sid (harness-supervisor-plan-test-step-input "a")
+           ;; Same model, and forked too: both share a seed.
+           (harness-supervisor-plan-test-step-input "b")
+           ;; Alone on its model: forked directly.
+           (harness-supervisor-plan-test-step-input "c" :tier "hard")
+           (harness-supervisor-plan-test-step-input "f" :context "fresh"))
+          (should (= 2 (length (harness-supervisor-plan-test-calls 'seed/fork))))
+          ;; The calls carry positional arguments first (the session forked
+          ;; and, for a seed, its model), so the plist follows them.
+          (dolist (call (harness-supervisor-plan-test-calls 'seed/fork))
+            (should (equal "low" (plist-get (cddr call) :thinking))))
+          (dolist (call (harness-supervisor-plan-test-calls 'session/fork))
+            (should (equal "low" (plist-get (cdr call) :thinking))))
+          (should (equal "low" (plist-get (car (harness-supervisor-plan-test-calls 'session/create))
+                                          :thinking))))))))
+
+(ert-deftest harness-supervisor-plan-the-worker-level-is-the-worker-models-providers ()
+  "A worker takes the level of the provider of its own model, not of its supervisor's."
+  (harness-supervisor-plan-test-with
+    (harness-supervisor-plan-test-stub-starts
+      (let ((harness-supervisor-tiers '((mundane . "deepseek:deepseek-flash")))
+            ;; The supervisor is a demo session, which the alist does not name.
+            (harness-supervisor-worker-thinking '((deepseek . "medium"))))
+        (let ((sid (harness-supervisor-plan-test-session)))
+          (harness-supervisor-plan-test-submit sid (harness-supervisor-plan-test-step-input "a"))
+          ;; A session/fork call leads with the session forked and its plist follows.
+          (let ((args (cdr (car (harness-supervisor-plan-test-calls 'session/fork)))))
+            (should (equal "deepseek:deepseek-flash" (plist-get args :model)))
+            (should (equal "medium" (plist-get args :thinking)))))))))
+
+(ert-deftest harness-supervisor-plan-no-worker-level-leaves-the-supervisors-own ()
+  "A provider the setting does not name leaves its workers at the supervisor's level."
+  (harness-supervisor-plan-test-with
+    (harness-supervisor-plan-test-stub-starts
+      (let ((harness-supervisor-worker-thinking nil))
+        (let ((sid (harness-supervisor-plan-test-session :thinking "high")))
+          (harness-supervisor-plan-test-submit
+           sid (harness-supervisor-plan-test-step-input "c" :tier "hard")
+           (harness-supervisor-plan-test-step-input "f" :context "fresh"))
+          ;; A fork inherits it (no `:thinking' passed), a fresh worker is told it.
+          (should-not (plist-member (cdr (car (harness-supervisor-plan-test-calls 'session/fork)))
+                                    :thinking))
+          (should (equal "high" (plist-get (car (harness-supervisor-plan-test-calls 'session/create))
+                                           :thinking))))))))
+
+(ert-deftest harness-supervisor-plan-a-seeded-worker-gets-the-level-itself ()
+  "A worker forked through a seed thinks at the worker level, not the seed's or the supervisor's."
+  (harness-supervisor-plan-test-with
+    (let ((harness-supervisor-worker-thinking '((demo . "low")))
+          (sid (harness-supervisor-plan-test-session :thinking "high")))
+      (harness-supervisor-plan-test-submit
+       sid (harness-supervisor-plan-test-step-input "a")
+       (harness-supervisor-plan-test-step-input "b"))
+      (harness-supervisor-plan-test-wait-state sid "a" "done")
+      (let* ((step (harness-supervisor-plan-test-step sid "a"))
+             (worker (plist-get step :session)))
+        (should (harness-call 'session/exists-p worker))
+        ;; The plan has two fork steps on one model, so the workers fork a
+        ;; seed, and it is the worker that takes the level, not the seed.
+        (should (harness-call 'seed/list sid))
+        (should (equal "low" (plist-get (harness-call 'session/get worker) :thinking)))))))
 
 (ert-deftest harness-supervisor-plan-a-fresh-step-is-hands-on-when-the-supervisor-is-interactive ()
   "A supervisor that is not non-interactive makes workers that are not, explicitly."
