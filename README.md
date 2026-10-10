@@ -2036,14 +2036,16 @@ archived tasks are history and are left alone.
 
 The usage dashboard (`C-c h u`) lists every quota window with its reset
 time, the plan's extra usage, and the value at API prices that the plan
-covered.  Its Fallback section says where sessions carry on when a
-provider runs out of quota or money: the list is tried in order, each
-entry a provider id (that provider's model of similar ability) or one
-model id, set by `harness-fallback-models`.  There `f` adds an entry,
-`c` forgets that one ran out so it is tried again, `M-<up>` and
-`M-<down>` move the entry at point, and `d` removes it.  A session's
-own model always comes first, and it goes back to it once it works
-again.
+covered.  Its Fallback section sets `harness-fallback-models`, the order
+of use when a provider runs out of quota or money, first entry first:
+each entry a provider id (that provider's model of similar ability) or
+one model id.  Sessions run on the first entry that has not run out and
+move back up to a higher one as soon as its quota comes back; a
+session's own model takes its provider's place in that order, and a
+provider the list does not name keeps its own model first, the list
+behind it.  There `f` adds an entry, `c` forgets that one ran out so it
+is tried again, `M-<up>` and `M-<down>` move the entry at point, and `d`
+removes it.
 
 Grouped by project, every task's git worktree is folded under the
 project it belongs to: one line per project, with the total and how many

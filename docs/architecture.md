@@ -2680,11 +2680,11 @@ decision log), so it is the same for every provider.  Methods are
 
 When a provider runs out of quota or money, its sessions carry on with
 another.  `harness-fallback-models` (global, *Models and services*) is
-the order of preference, first used to last: each entry a provider id,
-standing for that provider's model of similar ability (the tier of the
-session's model, see `provider/model-tier`), or a model id used as it
-is.  nil turns the switching off; running out is still noticed, shown
-and hinted.
+the order of preference, first used to last, its first entry the
+preferred provider: each entry a provider id, standing for that
+provider's model of similar ability (the tier of the session's model,
+see `provider/model-tier`), or a model id used as it is.  nil turns the
+switching off; running out is still noticed, shown and hinted.
 
 - Marks: a provider that ran out is marked, the whole provider (key
   `"deepseek"`) or one model (key `"claude:claude-fable-5-1"`, when only
@@ -2704,22 +2704,29 @@ and hinted.
   later), unless the plan's extra usage pays for calls, marks the
   provider until it resets (a window scoped to a model, that model);
   such marks follow the quota and go when it says calls work again.
-- Choosing: a session's own model comes first; a session moved by the
-  fallback remembers its own (`:original`).  When it is out, the first
-  entry of `harness-fallback-models` whose model is neither marked nor
-  that of an unregistered provider wins.  `harness-fallback-choose
-  SESSION` returns `(:model ID :entry ENTRY :reason …)`, or nil.
+- Choosing: the models to try are the entries of
+  `harness-fallback-models` in order, with the session's own model
+  taking its provider's place, just before that provider's first entry;
+  a provider the list does not name leaves the session's own model
+  first, the list behind it.  A session moved by the fallback remembers
+  its own (`:original`).  The first model of that order that is neither
+  marked nor that of an unregistered provider, and which the provider's
+  catalogue does not deny, wins; the session's own model is judged only
+  by whether it is marked.  `harness-fallback-choose SESSION` returns
+  `(:model ID :entry ENTRY :reason …)`, or nil.
 - Switching: `agent/before-turn` (priority 10, before compaction)
-  moves a session whose model is out to the chosen one, and back to its
-  own once that works again; `agent/step-error` marks what ran out,
-  moves the session and retries the step, so a turn, and a task, carry
-  on.  The model changes through `session/update` (`:silent`) with a
-  hint of its own ("Claude Code is out of quota until 19:00: carrying
-  on with DeepSeek-V4-Pro"), and `fallback/switched SID FROM TO WHY`
-  (WHY `out` or `back`).  A model changed by anyone else forgets the
-  session's own; a fork takes over its parent's.  With nothing left the
-  turn ends with its error and a hint naming every provider that is
-  out and when it resets.
+  moves a session whose model is out to the chosen one, back up to a
+  higher entry once that works again, and back to its own model once
+  that does; `agent/step-error` marks what ran out, moves the session
+  and retries the step, so a turn, and a task, carry on.  The model
+  changes through `session/update` (`:silent`) with a hint of its own
+  ("Claude Code is out of quota until 19:00: carrying on with
+  DeepSeek-V4-Pro"), and `fallback/switched SID FROM TO WHY`: WHY `out`
+  (the model left ran out, with its mark), `up` (a more preferred entry
+  works again) or `back` (its own model again).  A model changed by
+  anyone else forgets the session's own; a fork takes over its
+  parent's.  With nothing left the turn ends with its error and a hint
+  naming every provider that is out and when it resets.
 - Notifications (`notification/send`, source "fallback"): low urgency
   when a provider runs out and sessions move on, normal when nothing is
   left.
