@@ -64,6 +64,7 @@
 (declare-function harness-ui-media-render-attachment "harness-ui-media" (attachment))
 (defvar harness-state-directory)
 (defvar harness-ui-markdown-table-width)
+(defvar harness-ui-markdown-hard-breaks)
 
 (defgroup harness-ui-chat nil
   "The chat buffer." :group 'harness-ui :prefix "harness-chat-")
@@ -108,6 +109,13 @@ of Emacs's time at most.")
 The first call opens a collapsed run; every later call, and the
 thinking between the calls, is added to it.  Thinking does not break
 the run and is not counted.")
+
+(defconst harness-chat--dismissed-answer "The user dismissed the question"
+  "The text `question/cancel' (harness-tools-agent.el) gives an ask_user call.
+A dismissed question's call ends with it, as an ordinary result.  It is
+the harness's text, not the user's, so the call's block shows no answer
+of the user's for it.  It is matched here because the UI may run apart
+from the harness and does not load that module.")
 
 (defconst harness-chat--image-max-height 400
   "Maximum pixel height of inline images.")
@@ -1175,9 +1183,12 @@ transcript it points the new model at."
          (from (harness-node-sender node))
          (handoff (harness-node-handoff node))
          (face (if from 'harness-system-face 'harness-user-face))
+         ;; A line break typed in the box is one: a pasted log, or items
+         ;; without bullets, keep their lines.
          (text (harness-chat--mark-image-tokens
                 (harness-chat--ensure-newline
-                 (harness-chat--render-markdown (harness-chat--page block)))
+                 (let ((harness-ui-markdown-hard-breaks t))
+                   (harness-chat--render-markdown (harness-chat--page block))))
                 (plist-get node :blocks)))
          (body (concat (if from
                            (harness-chat--from-line from)
@@ -1391,15 +1402,28 @@ running call, each with its `:note' when it has one (see
                      (propertize (harness-chat--ensure-newline
                                   (harness-chat--render-markdown (plist-get input :question)))
                                  'line-prefix indent 'wrap-prefix indent)))
-         (answer (when (and ask result (not (string-blank-p output)))
+         ;; Only what the user gave is their answer.  A call that failed
+         ;; or was refused ends with an error or the permission system's
+         ;; reason, which stay under the fold, and a dismissed question
+         ;; with the harness's own words.
+         (dismissed (and ask (eq outcome 'ok)
+                         (equal (string-trim output) harness-chat--dismissed-answer)))
+         (answer (when (and ask (eq outcome 'ok) (not dismissed) (not (string-blank-p output)))
                    (harness-chat--margin
                     (harness-chat--face
                      (concat (harness-chat--sender harness-chat-user-label 'harness-user-label-face)
-                             (harness-chat--ensure-newline (harness-chat--render-markdown output)))
+                             ;; Typed, as a message in the box is: its
+                             ;; line breaks are the user's.
+                             (harness-chat--ensure-newline
+                              (let ((harness-ui-markdown-hard-breaks t))
+                                (harness-chat--render-markdown output))))
                      'harness-user-face)
                     'harness-user-face 'harness-user-bar-face)))
          (summary (concat (if ask
-                              (concat question (or answer ""))
+                              (concat question
+                                      (cond (answer)
+                                            (dismissed (propertize "  dismissed\n" 'face 'harness-dim-face))
+                                            (t "")))
                             (if line (concat (propertize (concat "  " line) 'face 'harness-dim-face) "\n") ""))
                           (harness-chat--child-line node result)
                           (harness-chat--note-lines node)))
@@ -1414,7 +1438,10 @@ running call, each with its `:note' when it has one (see
                              (propertize (harness-chat--input-listing input) 'line-prefix indent 'wrap-prefix indent))
              "")
            (cond
-            (ask "")
+            ;; A question's answer, or its dismissal, shows above the
+            ;; fold; the error of one that failed and the reason of one
+            ;; refused fold as any call's do.
+            ((and ask (not (memq outcome '(failed denied)))) "")
             ((null result) "")
             ((string-empty-p output) (propertize "  (no output)\n" 'face 'harness-dim-face))
             ;; A refused call never ran: its text is the permission
@@ -1634,10 +1661,13 @@ Empty when none failed or was denied; a collapsed group would hide them."
 
 (defun harness-chat--render-group (group)
   "Return the body of the summary block of GROUP.
-It counts the calls by label, then the thinking folded between them."
+It counts the calls by label, then the thinking folded between them.
+A run of one call names it as its header does, label and subject:
+\"1 tool call: Read file x.el\"."
   (let* ((gid (harness-chat-group-id group))
+         (calls (harness-chat--group-calls group))
          (names (mapcar (lambda (b) (harness-ui-tool-label (plist-get (harness-chat-block-node b) :tool)))
-                        (harness-chat--group-calls group)))
+                        calls))
          (thoughts (cl-count-if #'harness-chat--thinking-block-p (harness-chat-group-members group)))
          (counts nil))
     (dolist (n names)
@@ -1653,9 +1683,17 @@ It counts the calls by label, then the thinking folded between them."
                                         (lambda () (interactive) (harness-chat-toggle-group gid))
                                         "mouse-1, TAB: show or hide the individual tool calls")
              " "
-             (propertize (format "%s %d tool calls: %s%s" (harness-ui-icon 'harness-icon-tool) (length names)
-                                 (mapconcat (lambda (c) (if (> (cdr c) 1) (format "%s ×%d" (car c) (cdr c)) (car c)))
-                                            counts ", ")
+             (propertize (format "%s %d tool call%s: %s%s" (harness-ui-icon 'harness-icon-tool) (length names)
+                                 (if (= (length names) 1) "" "s")
+                                 (if (= (length calls) 1)
+                                     ;; What the lone call is about, as its
+                                     ;; own header would say it.
+                                     (let ((node (harness-chat-block-node (car calls))))
+                                       (substring-no-properties
+                                        (harness-ui-tool-title-string (plist-get node :tool)
+                                                                      (plist-get node :title) 100)))
+                                   (mapconcat (lambda (c) (if (> (cdr c) 1) (format "%s ×%d" (car c) (cdr c)) (car c)))
+                                              counts ", "))
                                  (pcase thoughts
                                    (0 "")
                                    (1 " · thinking")
@@ -2186,7 +2224,10 @@ the thinking before its first call and after its last stays out."
             (harness-chat-block-content block) (plist-get node :content)
             (harness-chat-block-streamed block) t)
       (harness-chat--cancel-render id)
-      (harness-chat--rerender block))
+      (harness-chat--rerender block)
+      ;; The summary of a run of one call shows the call's title.
+      (when (equal kind "tool-call")
+        (harness-chat--refresh-group-of block)))
      (t
       (let ((windows (harness-chat--bottom-windows)))
         (harness-chat--append-block (harness-chat--new-block node))

@@ -2879,10 +2879,19 @@ A call the run cannot take, one that is not coalescable, stays outside."
           (call "c1" "read_file" "a.el")
           (should (= 1 (hash-table-count harness-chat--groups)))
           (should (equal '("c1") (members-of "c1")))
+          ;; A run of one reads as one call, named as its header names it,
+          ;; in the summary's face alone.
+          (let ((pos (harness-ui-chat-test-find buf "1 tool call: Read file a.el")))
+            (should pos)
+            (should-not (invisible-p (1- pos)))
+            (should (harness-ui-chat-test-face-at (1- pos) 'harness-summary-face))
+            (should-not (harness-ui-chat-test-face-at (1- pos) 'harness-tool-subject-face)))
+          (should-not (harness-ui-chat-test-find buf "1 tool calls"))
           (call "c2" "read_file" "b.el")
           (should (= 1 (hash-table-count harness-chat--groups)))
           (should (equal '("c1" "c2") (members-of "c1")))
           (should (harness-ui-chat-test-find buf "2 tool calls: Read file ×2"))
+          (should-not (harness-ui-chat-test-find buf "1 tool call"))
           ;; A non-coalescable call does not join the run.
           (call "c3" "bash" "ls")
           (should (= 1 (hash-table-count harness-chat--groups)))
@@ -4448,6 +4457,29 @@ it can show."
           (should (memq 'harness-md-code (harness-ui-chat-test-faces-in block "code")))
           (should (memq 'harness-user-face (harness-ui-chat-test-faces-in block "bold and code"))))))))
 
+(ert-deftest harness-ui-chat-keeps-typed-line-breaks ()
+  "A message the user typed keeps its line breaks, and so does a typed answer.
+Markdown joins the lines of a paragraph with spaces, but a person
+typing in the box means a line break as one: a pasted log, items
+without bullets."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (cl-flet ((line-at (text)
+                    (save-excursion
+                      (goto-char (harness-ui-chat-test-find buf text))
+                      (buffer-substring-no-properties (line-beginning-position) (line-end-position)))))
+          (harness-chat--apply-update
+           (list :sessionUpdate "_harness/node"
+                 :node (list :id "u1" :kind "user" :content "first line\nsecond line")))
+          (should (equal "first line" (line-at "first line")))
+          (should (equal "second line" (line-at "second line")))
+          ;; The answer to a question was typed too.
+          (harness-ui-chat-test-ask '(:output "blue\nwith a hint of grey"))
+          (should (equal "blue" (line-at "blue")))
+          (should (equal "with a hint of grey" (line-at "with a hint of grey"))))))))
+
 (ert-deftest harness-ui-chat-renders-ask-user-question-and-answer ()
   "An ask_user call shows its question as Markdown and its answer user-styled.
 The answer stands in for the next message the user would send, so it
@@ -4482,7 +4514,103 @@ reads as a user message even while the tool block is still folded."
           ;; answer's own text is visible.
           (should-not (invisible-p (1- answer)))
           (should (memq 'harness-user-face (harness-ui-chat-test-faces-in block "red")))
-          (should (memq 'bold (harness-ui-chat-test-faces-in block "red"))))))))
+          (should (memq 'bold (harness-ui-chat-test-faces-in block "red")))
+          (should (harness-ui-chat-test-user-styled-p block)))))))
+
+(defun harness-ui-chat-test-ask (result)
+  "Show an ask_user call ended by RESULT, a tool-result plist; return its block.
+RESULT holds what a result node has besides its id, kind and call id."
+  (harness-chat--apply-update
+   (list :sessionUpdate "_harness/node"
+         :node (list :id "q1" :kind "tool-call" :tool "ask_user" :call-id "qc1"
+                     :input (list :question "Which **colour**?" :options '("red" "green")))))
+  (harness-chat--apply-update
+   (list :sessionUpdate "_harness/node"
+         :node (append (list :id "q1-out" :kind "tool-result" :call-id "qc1") result)))
+  (gethash "q1" harness-chat--blocks))
+
+(defun harness-ui-chat-test-user-styled-p (block)
+  "Non-nil when some of BLOCK is drawn as the user's.
+That is a character in `harness-user-face', or a margin, the bar of a
+message of the user's included, drawn in it or in `harness-user-bar-face'."
+  (cl-flet ((has (face-value face)
+              (or (eq face-value face) (and (listp face-value) (memq face face-value)))))
+    (cl-loop for pos from (harness-chat-block-start block) below (harness-chat-block-end block)
+             thereis (or (has (get-text-property pos 'face) 'harness-user-face)
+                         (let ((prefix (get-text-property pos 'line-prefix)))
+                           (and prefix
+                                (cl-loop for i below (length prefix)
+                                         for f = (get-text-property i 'face prefix)
+                                         thereis (or (has f 'harness-user-face)
+                                                     (has f 'harness-user-bar-face)))))))))
+
+(ert-deftest harness-ui-chat-ask-user-dismissed-has-no-answer ()
+  "A dismissed question says so, and shows no answer of the user's.
+Its call ends with the harness's text, \"The user dismissed the
+question\", as an ordinary result; that is not what the user wrote."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (let* ((block (harness-ui-chat-test-ask '(:output "The user dismissed the question")))
+               (text (harness-ui-chat-test-block-text block))
+               (pos (harness-ui-chat-test-find buf "dismissed" (harness-chat-block-start block))))
+          (should (eq 'ok (harness-ui-tool-outcome (harness-chat-block-result block))))
+          (should (string-search "dismissed" text))
+          (should-not (string-search "You" text))
+          (should-not (string-search "The user dismissed" text))
+          (should-not (harness-ui-chat-test-user-styled-p block))
+          ;; A dim line under the question, above the fold.
+          (should (harness-chat-block-collapsed block))
+          (should-not (invisible-p (1- pos)))
+          (should (memq 'harness-dim-face (harness-ui-chat-test-faces-in block "dismissed")))
+          (should (< (harness-ui-chat-test-find buf "Which colour?" (harness-chat-block-start block)) pos)))))))
+
+(ert-deftest harness-ui-chat-ask-user-failed-folds-its-error ()
+  "An ask_user call that failed shows no answer; its error folds as any call's.
+A malformed call (an option without a diagram, say) ends with a tool
+error, which is not the user's answer."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (err "Every option needs a diagram once one has: option 2 has none."))
+      (with-current-buffer buf
+        (let ((block (harness-ui-chat-test-ask (list :output err :is-error t))))
+          (should (eq 'failed (harness-ui-tool-outcome (harness-chat-block-result block))))
+          (should-not (string-search "You" (harness-ui-chat-test-block-text block)))
+          (should-not (harness-ui-chat-test-user-styled-p block))
+          ;; The question still shows; the error is under the fold.
+          (should-not (invisible-p (1- (harness-ui-chat-test-find buf "Which colour?"))))
+          (should (invisible-p (1- (harness-ui-chat-test-find buf err))))
+          (harness-chat-toggle-block "q1")
+          (let ((text (harness-ui-chat-test-block-text block))
+                (end (harness-ui-chat-test-find buf err)))
+            (should end)
+            (should-not (invisible-p (1- end)))
+            (should (string-match-p "^ *output ([0-9.k]+ chars)$" text))
+            (should-not (string-match-p "^ *reason$" text))
+            (should (memq 'harness-ui-output-face (harness-ui-chat-test-faces-in block err)))))))))
+
+(ert-deftest harness-ui-chat-ask-user-denied-folds-its-reason ()
+  "An ask_user call the permission system refused shows no answer.
+The refusal's reason folds under the label \"reason\", as any refused
+call's does."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (reason "Denied: the test refuses ask_user"))
+      (with-current-buffer buf
+        (let ((block (harness-ui-chat-test-ask (list :output reason :is-error t :meta '(:denied t)))))
+          (should (eq 'denied (harness-ui-tool-outcome (harness-chat-block-result block))))
+          (should-not (string-search "You" (harness-ui-chat-test-block-text block)))
+          (should-not (harness-ui-chat-test-user-styled-p block))
+          (should (invisible-p (1- (harness-ui-chat-test-find buf reason))))
+          (harness-chat-toggle-block "q1")
+          (let ((text (harness-ui-chat-test-block-text block)))
+            (should-not (invisible-p (1- (harness-ui-chat-test-find buf reason))))
+            (should (string-match-p "^ *reason$" text))
+            (should-not (string-search "output (" text))
+            (should (string-search reason text))))))))
 
 (ert-deftest harness-ui-chat-fits-wide-tables ()
   "A Markdown table wider than the window wraps inside its columns."
@@ -4501,6 +4629,75 @@ reads as a user message even while the tool block is still folded."
                             (delq "" (split-string (buffer-string) "\n"))))
           (should (harness-ui-chat-test-find buf "long "))
           (should (harness-ui-chat-test-find buf " end")))))))
+
+(ert-deftest harness-ui-chat-refits-tables-to-a-resized-window ()
+  "A window that gives the tables other room has them drawn again to fit it.
+Only the blocks holding a table are drawn again."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (window (selected-window))
+           (words '("alpha" "bravo" "charlie" "delta" "echo" "foxtrot" "golf" "hotel" "india"
+                    "juliet" "kilo" "lima" "mike" "november" "oscar" "papa" "quebec" "romeo"
+                    "sierra" "tango" "uniform" "victor" "whiskey" "xray" "yankee" "zulu")))
+      (set-window-buffer window buf)
+      (with-current-buffer buf
+        (harness-chat--append-local-block "assistant" "A plain answer, with no table in it.")
+        (harness-chat--append-local-block
+         "assistant" (concat "| key | value |\n|---|---|\n| x | " (string-join words " ") " |\n"))
+        (let* ((plain (gethash (nth 1 harness-chat--order) harness-chat--blocks))
+               (table (gethash (car harness-chat--order) harness-chat--blocks))
+               (rerender (symbol-function 'harness-chat--rerender))
+               (rerendered nil))
+          (should (harness-chat--block-has-table-p table))
+          (should-not (harness-chat--block-has-table-p plain))
+          ;; Drawn for the window's width at first, which is wider.
+          (should (> harness-chat--table-width 40))
+          (cl-letf (((symbol-function 'harness-chat--content-width) (lambda () 40))
+                    ((symbol-function 'harness-chat--rerender)
+                     (lambda (block)
+                       (push (harness-chat-block-id block) rerendered)
+                       (funcall rerender block))))
+            ;; Called as the debounce would call it, a moment after the resize.
+            (harness-chat--refresh-tables buf))
+          (let ((text (harness-ui-chat-test-block-text table)))
+            (should (cl-every (lambda (line) (<= (string-width line) 40)) (split-string text "\n")))
+            (should (string-search "│" text))
+            (dolist (word words)
+              (should (string-search word text))))
+          (should (equal 40 harness-chat--table-width))
+          (should (equal (list (harness-chat-block-id table)) rerendered))
+          (should (string-search "A plain answer" (harness-ui-chat-test-block-text plain)))
+          (harness-ui-chat-test-check-markers))))))
+
+(ert-deftest harness-ui-chat-resize-schedules-a-refit-only-when-the-room-changed ()
+  "A window's size change has the tables drawn again only for a new width.
+The redraw is debounced, once per buffer."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (window (selected-window))
+           (scheduled nil))
+      (set-window-buffer window buf)
+      (with-current-buffer buf
+        (cl-letf (((symbol-function 'harness-debounce)
+                   (lambda (key delay fn &rest args) (push (list key delay fn args) scheduled))))
+          ;; Nothing drawn at a width yet: nothing to draw again.
+          (setq harness-chat--table-width nil)
+          (harness-chat--on-window-size window)
+          (should-not scheduled)
+          ;; The width the tables were drawn at.
+          (setq harness-chat--table-width (harness-chat--content-width))
+          (harness-chat--on-window-size window)
+          (should-not scheduled)
+          ;; Another width.
+          (setq harness-chat--table-width (+ 10 (harness-chat--content-width)))
+          (harness-chat--on-window-size window)
+          (should (= 1 (length scheduled)))
+          (pcase-let ((`(,key ,_delay ,fn ,args) (car scheduled)))
+            (should (equal (list 'harness-chat-tables buf) key))
+            (should (eq #'harness-chat--refresh-tables fn))
+            (should (equal (list buf) args))))))))
 
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here

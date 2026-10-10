@@ -308,5 +308,25 @@ A file name is taken in `default-directory'; a file: URL is a file too."
     (let ((harness-ui-markdown-table-width 40))
       (should (equal natural (harness-ui-markdown-render md))))))
 
+(ert-deftest harness-md-hard-breaks-keep-a-paragraph-s-lines ()
+  "`harness-ui-markdown-hard-breaks' keeps the line breaks inside a paragraph.
+Markdown joins a paragraph's lines with spaces; bound, as for what a
+person typed, each line break stays one.  Paragraphs apart, lists and
+code blocks render the same either way."
+  (should (equal "one two" (substring-no-properties (harness-ui-markdown-render "one\ntwo"))))
+  (let ((harness-ui-markdown-hard-breaks t))
+    (should (equal "one\ntwo" (substring-no-properties (harness-ui-markdown-render "one\ntwo"))))
+    ;; Inline markup still renders on each line.
+    (let ((s (harness-ui-markdown-render "a **bold** line\nand `code`")))
+      (should (equal "a bold line\nand code" (substring-no-properties s)))
+      (should (memq 'bold (harness-md-test-face-at s 2)))
+      (should (memq 'harness-md-code (harness-md-test-face-at s 16)))))
+  (dolist (md '("one\n\ntwo"
+                "- item one\n  wrapped\n- item two"
+                "```\nline one\nline two\n```"))
+    (let ((soft (harness-ui-markdown-render md))
+          (hard (let ((harness-ui-markdown-hard-breaks t)) (harness-ui-markdown-render md))))
+      (should (equal-including-properties soft hard)))))
+
 (provide 'harness-ui-markdown-test)
 ;;; harness-ui-markdown-test.el ends here

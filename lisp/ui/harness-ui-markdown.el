@@ -271,6 +271,14 @@ aligned and it fits a window instead of wrapping mid-cell.  A caller
 that knows how much room its window gives binds this around
 `harness-ui-markdown-render'.")
 
+(defvar harness-ui-markdown-hard-breaks nil
+  "Non-nil keeps each line break inside a paragraph, as GitHub comments do.
+Markdown joins the lines of a paragraph with spaces, which suits what a
+model writes; a person typing means a line break as one.  A caller
+rendering what a person typed binds this around
+`harness-ui-markdown-render'.  Only paragraphs change, a quote's
+among them: lists, code blocks and tables render the same either way.")
+
 (defun harness-ui-markdown--cell-words (cell)
   "Return the words of CELL, a rendered cell, as propertized strings."
   (let ((words nil) (start 0) (len (length cell)))
@@ -420,7 +428,10 @@ the harness sends itself, would take the whole rendering down."
            ;; match data alone.
            (when para
              (save-match-data
-               (push (concat (harness-ui-markdown-inline (string-join (nreverse para) " ")) "\n") out))
+               (push (concat (harness-ui-markdown-inline
+                              (string-join (nreverse para) (if harness-ui-markdown-hard-breaks "\n" " ")))
+                             "\n")
+                     out))
              (setq para nil)))
          (emit (s) (push s out)))
       (while lines
