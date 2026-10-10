@@ -233,7 +233,7 @@ the panel started runs, the line says so."
           (funcall (get-text-property (string-match "Summary" line) 'harness-chat-action line)))
         (should (equal '(summary fresh transcript summary brief) chosen))
         ;; A button's tooltip says what it does.
-        (should (string-prefix-p "Brief summary (~$0.011): Small reads only the first and last messages"
+        (should (string-prefix-p "Brief summary (~$0.011): Small reads the conversation's narrative"
                                  (get-text-property (string-match "Brief summary" line) 'help-echo line)))
         ;; Last on the panel, which it is part of.
         (let ((banner (harness-ui-cache--banner state 2000.0 line)))

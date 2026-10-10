@@ -8,9 +8,10 @@
 ;; what each costs (`compaction/estimate'), at list prices:
 ;;
 ;; - a brief summary: a cheap model (by default the cheap tier of the
-;;   session's provider) summarises only the first and last messages,
-;;   for a few cents however long the conversation, but most of its
-;;   middle is left out, which the summary says;
+;;   session's provider) summarises the conversation's narrative --
+;;   every user and assistant message, each tool call and result in a
+;;   line -- for a few cents however long the conversation; what tools
+;;   read and wrote is left out, which the summary says;
 ;; - a summary: the session's model summarises the whole conversation,
 ;;   reading all of it again -- uncached once the prompt cache lapsed;
 ;; - a transcript file: the whole conversation goes to a file in the
@@ -49,7 +50,7 @@
 
 (defconst harness-ui-compact-kinds
   '((brief ?b "brief summary"
-           "a cheap model summarises the first and last messages; most of the middle is left out")
+           "a cheap model summarises the narrative; tool payloads are left out")
     (summary ?s "summary"
              "the session's model summarises the whole conversation, reading all of it again")
     (transcript ?t "transcript file"
@@ -102,8 +103,8 @@ goes beside it."
          (writer (harness-ui-compact--writer estimate kind)))
     (pcase kind
       ('brief
-       (format (concat "%s reads only the first and last messages, ~%s tokens in all."
-                       "  Most of the middle is left out, which the summary says.")
+       (format (concat "%s reads the conversation's narrative, ~%s tokens in all."
+                       "  Tool payloads are left out, which the summary says.")
                (or writer "A cheap model")
                (harness-format-tokens (or (plist-get k :input) 0))))
       ('summary

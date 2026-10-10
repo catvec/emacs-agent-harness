@@ -1381,10 +1381,12 @@ compacted as the cowboy would, the supervisor is told, and so is the worker."
                                   " into a brief summary first, the default for a session no warm cache holds"
                                   " (harness-cowboy-default)")
                           (harness-supervisor-plan-test-hints wid)))
-          ;; The worker reads the summary, not the supervisor's conversation.
+          ;; The worker reads the summary, with the conversation's first and
+          ;; last messages kept verbatim: the task it was given is there,
+          ;; while the middle is the summary.
           (let ((sent (harness-supervisor-plan-test-messages-text wid)))
             (should (string-match-p "Do s1\\." sent))
-            (should-not (string-match-p "Do the thing" sent)))
+            (should (string-match-p "Do the thing" sent)))
           ;; The supervisor is told, after the retry it made.
           (let ((retry (cl-position "Retrying step s1 on demo:frontier (attempt 2): once more" hints :test #'equal))
                 (told (cl-position (concat "Step s1 (attempt 2) on demo:frontier: no warm prompt cache holds the"

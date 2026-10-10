@@ -623,23 +623,33 @@ outright (`:context-window') wins over the limit."
   "Return USAGE with the prompt cache stamp of usage RECORD.
 MODEL is the session's model.  A record with `:cache-reset' drops the
 stamp: the conversation starts over, from a summary say, so nothing its
-next request sends is cached yet.  A record of a request, one that
-counts tokens, that read or wrote the cache stamps when that was (its
-`:cache-at', else now), the model it was sent to (its `:model', else
-MODEL), and the lifetime its provider reported (its `:cache-ttl', else
-none).  One that used no cache drops the stamp: nothing is cached to
-lose.  A record without tokens, a turn counted, leaves it."
+next request sends is cached yet -- and, when the conversation had a
+cache, remembers it (`:cache-pending'), so the first request that
+follows, which populates the new conversation's cache, stamps it even
+when the provider reports no cache tokens for it.  A record of a
+request, one that counts tokens, that read or wrote the cache stamps
+when that was (its `:cache-at', else now), the model it was sent to
+(its `:model', else MODEL), and the lifetime its provider reported (its
+`:cache-ttl', else none); one that was the first after a `:cache-reset'
+stamps the same way.  A record without tokens, a turn counted, leaves
+it.  A record of a request that used no cache and follows no reset
+drops the stamp: nothing is cached to lose."
   (cond
    ((harness-json-true-p (plist-get record :cache-reset))
-    (harness-plist-remove usage :cache-at :cache-ttl :cache-model))
+    (let ((u (harness-plist-remove usage :cache-at :cache-ttl :cache-model)))
+      (if (numberp (plist-get usage :cache-at))
+          (plist-put u :cache-pending t)
+        u)))
    ((not (or (numberp (plist-get record :input)) (numberp (plist-get record :output))))
     usage)
-   ((> (+ (harness-session--tokens (plist-get record :cache-read))
-          (harness-session--tokens (plist-get record :cache-write)))
-       0)
+   ((or (> (+ (harness-session--tokens (plist-get record :cache-read))
+              (harness-session--tokens (plist-get record :cache-write)))
+           0)
+        (harness-json-true-p (plist-get usage :cache-pending)))
     (let* ((at (plist-get record :cache-at))
            (ttl (plist-get record :cache-ttl))
-           (u (plist-put usage :cache-at (if (numberp at) (float at) (float-time))))
+           (u (harness-plist-remove usage :cache-pending))
+           (u (plist-put u :cache-at (if (numberp at) (float at) (float-time))))
            (u (plist-put u :cache-model (or (plist-get record :model) model))))
       (if (and (numberp ttl) (> ttl 0))
           (plist-put u :cache-ttl ttl)
@@ -685,10 +695,12 @@ it, when it lapses unless another request comes first, and the model it
 was sent to.  A cache serves its MODEL only: one of a model S no longer
 uses holds nothing S's next request reads back, which then sends the
 conversation uncached.  Nil while S has no context, before any of its
-requests used a cache, after one that did not, after a compaction, and
-while S's next request starts a conversation of its own on its new
-model (`harness-session--new-conversation-p'), which sends none of the
-old one."
+requests used a cache, after one that did not, after a compaction --
+which, when the conversation had a cache, leaves `:cache-pending'
+until the first request that follows stamps the new cache -- and while
+S's next request starts a conversation of its own on its new model
+(`harness-session--new-conversation-p'), which sends none of the old
+one."
   (let* ((u (harness-session-usage s))
          (at (plist-get u :cache-at))
          (model (or (plist-get u :cache-model) (harness-session-model s))))
@@ -1860,7 +1872,10 @@ RECORD keys: :input :output :cache-read :cache-write :cost :list-cost
 was paid, :model the model the request was sent to (the session's when
 unsaid), :cache-at and :cache-ttl, when the request used the prompt
 cache and how long its provider said it keeps it, and :cache-reset,
-which says the conversation starts over (a compaction).  Counters
+which says the conversation starts over (a compaction) and, when the
+conversation had a cache, leaves `:cache-pending' until the first
+request that follows stamps the new cache (see
+`harness-session--cache-stamp').  Counters
 accumulate; `:context' replaces, and so do `:billing' and `:plan' when
 RECORD has a billing.  With `:context', the size of the latest prompt,
 comes the totals' `:last-output': the output of that request, which the

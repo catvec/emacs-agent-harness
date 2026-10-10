@@ -77,8 +77,8 @@ what, the costs going beside them."
       (should-not (harness-ui-compact-cost-text unpriced 'brief)))
     (should (equal "Brief summary" (harness-ui-compact-label 'brief)))
     (should (equal "Transcript file" (harness-ui-compact-label 'transcript)))
-    (should (equal (concat "Small reads only the first and last messages, ~725 tokens in all."
-                           "  Most of the middle is left out, which the summary says.")
+    (should (equal (concat "Small reads the conversation's narrative, ~725 tokens in all."
+                           "  Tool payloads are left out, which the summary says.")
                    (harness-ui-compact-describe e 'brief)))
     (should (equal "Big reads the whole conversation again, ~84.5k tokens uncached."
                    (harness-ui-compact-describe e 'summary)))
@@ -113,7 +113,7 @@ much, and what carrying on costs."
       (should (string-match-p "Session +“Parser work”" help))
       (should (string-match-p "Model +Big" help))
       (should (string-match-p "Carry on +the next message sends ~84\\.5k tokens uncached, about \\$0\\.422" help))
-      (should (string-match-p "^  b +brief summary +Small +~\\$0\\.011 +Small reads only" help))
+      (should (string-match-p "^  b +brief summary +Small +~\\$0\\.011 +Small reads the conversation's narrative" help))
       (should (string-match-p "^  s +summary +Big +~\\$0\\.463 +Big reads the whole" help))
       (should (string-match-p "^  t +transcript file +- +free +The whole conversation" help))
       (should (string-match-p "^  f +fresh start +- +free +Nothing of the conversation" help)))

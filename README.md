@@ -787,9 +787,11 @@ kinds:
   It reads all of it again, from the prompt cache while that lasts.
 - **Brief summary**: a cheap model (the cheap tier of the session's
   provider, such as Claude Haiku or DeepSeek Flash; see
-  `harness-compaction-brief-model`) summarises only the first and last
-  messages. It costs cents however long the conversation, but most of
-  the middle is left out, and the summary says so.
+  `harness-compaction-brief-model`) summarises the conversation's
+  narrative: every user and assistant message, each tool call and
+  result named in a line, never a payload. It costs cents however long
+  the conversation, but what tools read and wrote is left out, and the
+  summary says so.
 - **Transcript file**: the whole conversation goes to a file in
   `.harness/transcripts/` in the session's directory (git ignores it),
   and the model is told to read what it needs of it. No model is asked
@@ -856,7 +858,7 @@ popout) shows it in place of the cache panel:
    A message from the harness (tasks) waits: “The tests fail on CI; …”
    Carrying on sends the whole conversation again, uncached: about $0.315 instead of the $0.025 it would cost cached.  What goes first?
 
-    b  Brief summary    ~$0.011           a cheap model summarises the first and last messages · the default
+    b  Brief summary    ~$0.011           a cheap model summarises the narrative, tool calls in brief · the default
     s  Summary          ~$0.463           the session's model summarises it all, reading it uncached
     t  Transcript file  free              the conversation goes to a file the model reads as it needs
     f  Start afresh     free              nothing is carried over; the model looks back when it needs to
@@ -2051,11 +2053,12 @@ has no chat buffer open. Then choose:
 - **`c` current model summarises**: it summarises the conversation,
   whose cache is warm, and the new one starts from that summary;
 - **`n` new model summarises** (advanced): the new model writes the
-  summary itself, from only the first and last messages of the session,
-  so the whole conversation never runs through it. Use this when the
+  summary itself, from the conversation's narrative — every user and
+  assistant message, each tool call and result in a line — so the whole
+  conversation's payloads never run through it. Use this when the
   current provider cannot answer at all — its plan ran out, it is down —
-  or to keep the job cheap. The middle of the conversation is left out,
-  so the summary is a lossy one;
+  or to keep the job cheap. What tools read and wrote is left out, so
+  the summary is a lossy one;
 - **`t` full transcript**: the whole transcript is written to
   `.harness/handoff/` in the session's directory (git ignores it), and
   the new model is told to read it before it answers; its prompt cache
