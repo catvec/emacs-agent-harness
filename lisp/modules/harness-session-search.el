@@ -40,8 +40,9 @@
 ;;   sessions whose name has the words and, when an embedding model is
 ;;   set, with how near in meaning they are.  When no session has every
 ;;   word, those with some of them come back, marked `:loose'; when
-;;   none has any, the nearest in meaning, when there are vectors, and
-;;   the result says so (`:note').
+;;   none has any, the nearest in meaning, when there are vectors --
+;;   those nearly as near as the nearest -- and the result says so
+;;   (`:note').
 ;; - `literal' and `regexp': the text as given, or an extended regular
 ;;   expression as grep -E reads it, matched case-insensitively by grep
 ;;   over the logs, newest session first.  Update lines count: a node
