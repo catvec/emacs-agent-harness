@@ -194,6 +194,12 @@ in a request.  Anything else compares with `equal'."
           ((< n 1000000) (format "%dk" (round (/ n 1000.0))))
           (t (format "%.2fM" (/ n 1000000.0))))))
 
+(defun harness-format-tokens-compact (n)
+  "Format token count N as `harness-format-tokens' does, but \"96k\" for \"96.0k\".
+Whole thousands read without the decimal part, which a hint about a
+window or a limit is easier to read as."
+  (replace-regexp-in-string "\\.0+\\([kM]\\)\\'" "\\1" (harness-format-tokens n)))
+
 (defun harness-format-cost (usd)
   "Format USD amount compactly."
   (let ((usd (or usd 0)))
@@ -407,8 +413,9 @@ model of another provider holds (:mode transcript|compact :file PATH
 That is its `:meta' `:compaction': \"summary\", \"brief\" (a summary of the
 conversation's narrative, tool calls in brief), \"transcript\" (a note
 pointing at
-the conversation written to the file of its `:meta' `:file') or
-\"fresh\" (a note saying nothing of the conversation was carried over).  A
+the conversation written to the file of its `:meta' `:file'),
+\"fresh\" (a note saying nothing of the conversation was carried over)
+or \"truncate\" (a note saying the oldest nodes were cut).  A
 compaction node from before there were kinds is a \"summary\"; so is
 one a handoff's old model wrote, while the new model's is \"brief\".
 NODE's kind may be the symbol or, as a client hears it, its name."
@@ -870,6 +877,20 @@ logged."
           (customize-save-variable symbol value)
         (error (harness-log 'warn "could not save %s: %S" symbol err)))))
   nil)
+
+(defun harness-renew-default (symbol &rest old)
+  "Give option SYMBOL its default again when it holds one of OLD.
+OLD are the defaults it had before.  A reload evaluates a `defcustom'
+again without changing the value it has, so a default that changed
+would stay as it was until Emacs restarts, and would look like a choice
+of the user's meanwhile, which the UI passes on to its harness process.
+A value the user saved through Customize is theirs and stays; so does
+any other value.  Return non-nil when the default was given again."
+  (when (and (default-boundp symbol)
+             (member (default-value symbol) old)
+             (get symbol 'standard-value))
+    (custom-reevaluate-setting symbol)
+    t))
 
 ;;;; Errors
 

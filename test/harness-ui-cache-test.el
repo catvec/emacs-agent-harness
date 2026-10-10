@@ -26,6 +26,7 @@
 (defvar harness-acp-token)
 (defvar harness-ui--sessions)
 (defvar harness-ui--models)
+(defvar harness-ui--live)
 (defvar harness-ui-default-position)
 (defvar harness-chat--loading)
 (defvar harness-chat--buffers)
@@ -59,17 +60,20 @@
 
 (ert-deftest harness-ui-cache-state-shows-once-the-cache-lapsed ()
   "The panel shows once the cache lapsed while the session waits for the
-user: idle, closed, or blocked on an answer.  Never before, never while
-it runs, never without a cache."
+user: idle or closed.  Never before, never while its turn runs (a
+session blocked on an answer is in the middle of one), never without a
+cache."
   (let ((s (harness-ui-cache-test--session)))
     (should-not (harness-ui-cache--state s 1299.9))
     (should (harness-ui-cache--state s 1300.0))
     (should (= 84000 (plist-get (harness-ui-cache--state s 2000.0) :context)))
     (should (harness-ui-cache--state (harness-ui-cache-test--session :status "inactive") 2000.0))
-    (should (plist-get (harness-ui-cache--state (harness-ui-cache-test--session :status "blocked") 2000.0)
-                       :blocked))
     ;; A status as the harness process has it, a symbol.
     (should (harness-ui-cache--state (harness-ui-cache-test--session :status 'idle) 2000.0))
+    ;; A blocked session waits on an answer, which is the middle of its
+    ;; turn: the next request is that turn's, not the user's next message.
+    (should-not (harness-ui-cache--state (harness-ui-cache-test--session :status "blocked") 2000.0))
+    (should-not (harness-ui-cache--state (harness-ui-cache-test--session :status 'blocked) 2000.0))
     ;; A running session's requests keep the cache.
     (should-not (harness-ui-cache--state (harness-ui-cache-test--session :status "running") 2000.0))
     ;; A new session, or one whose requests used no cache.
@@ -77,6 +81,36 @@ it runs, never without a cache."
     (should-not (harness-ui-cache--state nil 2000.0))
     ;; It reads the same however late it is asked, so nothing redraws it.
     (should (equal (harness-ui-cache--state s 1400.0) (harness-ui-cache--state s 90000.0)))))
+
+(ert-deftest harness-ui-cache-state-while-a-turn-runs ()
+  "A turn still running keeps the panel away, whatever status the cache
+reads: a stale `idle' and a `blocked' session waiting on a tool approval
+alike are mid-turn, and the panel speaks of the user's next message.
+The live token figures the UI keeps say the turn runs; once they go and
+the turn ended with the cache lapsed, the panel is back."
+  (let* ((idle (harness-ui-cache-test--session :id "s-run"))
+         (approval (harness-ui-cache-test--session
+                    :id "s-run" :status "blocked"
+                    :pending (list (list :id "p1" :kind "permission"
+                                         :payload '(:tool "Bash" :command "make test"))))))
+    (cl-letf (((symbol-function 'harness-ui-session-live)
+               (lambda (id) (and (equal id "s-run")
+                                 '(:context 84000 :output 10 :estimated 0)))))
+      (should-not (harness-ui-cache--state idle 2000.0))
+      (should-not (harness-ui-cache--state approval 2000.0))
+      (should-not (harness-ui-cache--current approval 2000.0)))
+    ;; The turn ended: the figures go and the panel comes back.
+    (should (harness-ui-cache--state idle 2000.0))))
+
+(ert-deftest harness-ui-cache-state-live-figures-kept-while-running ()
+  "The live figures the UI keeps are what say a turn runs, so the panel
+stays away while they are there and comes back once they go."
+  (let ((s (harness-ui-cache-test--session :id "s-live")))
+    (puthash "s-live" '(:context 84000 :output 10 :estimated 0) harness-ui--live)
+    (unwind-protect
+        (should-not (harness-ui-cache--state s 2000.0))
+      (remhash "s-live" harness-ui--live))
+    (should (harness-ui-cache--state s 2000.0))))
 
 (ert-deftest harness-ui-cache-banner-says-what-the-next-message-costs ()
   "The panel says when the cache lapsed, how long it lasts, how much
@@ -103,11 +137,6 @@ cached, at list prices: clock times, never an age that goes stale."
                               (harness-ui-cache-test--banner
                                (harness-ui-cache-test--session :cache (list :at (- expires 3600) :ttl 3600
                                                                             :expires expires))
-                               (+ expires 60))))
-      ;; Blocked on an answer, the request that answering sends.
-      (should (string-match-p "The next request re-sends ~84\\.0k"
-                              (harness-ui-cache-test--banner
-                               (harness-ui-cache-test--session :cache cache :status "blocked")
                                (+ expires 60))))
       ;; A model priced without cache writes sends it again at its input price.
       (should (string-match-p "about \\$0\\.168 instead of \\$0\\.042"
@@ -202,7 +231,9 @@ for them) charges the input for what is sent again uncached."
             (:kind "brief" :model "test:small" :model-label "Small" :input 725 :output 2000
                    :cached nil :cost 0.01090625 :after 2000)
             (:kind "transcript" :cost 0.0 :after 84)
-            (:kind "fresh" :cost 0.0 :after 90)))
+            (:kind "fresh" :cost 0.0 :after 90)
+            (:kind "truncate" :cost 0.0 :after 3000 :kept 3 :dropped 17
+                   :kept-tokens 2000 :dropped-tokens 84000)))
   "What compacting costs, as `compaction/estimate' answers over ACP.")
 
 (ert-deftest harness-ui-cache-offers-to-compact ()
@@ -210,8 +241,7 @@ for them) charges the input for what is sent again uncached."
 conversation first: a button for each kind, the cheap brief summary
 first, with what it costs as the harness estimates it, and its key on
 that line.  Before the estimate comes the buttons only name the kinds.
-A session blocked inside a turn is offered nothing; while a compaction
-the panel started runs, the line says so."
+While a compaction the panel started runs, the line says so."
   (require 'harness-ui-chat)
   (with-temp-buffer
     (let ((state (harness-ui-cache--state (harness-ui-cache-test--session) 2000.0))
@@ -219,19 +249,20 @@ the panel started runs, the line says so."
           (chosen nil))
       ;; Nobody to ask (no session here): the kinds, and the free one's cost.
       (should (equal (concat "   Compact it first   b  Brief summary   s  Summary   t  Transcript file (free)"
-                             "   f  Fresh start (free)\n")
+                             "   f  Fresh start (free)   c  Cut old context (free)\n")
                      (substring-no-properties (harness-ui-cache--offer state))))
       (setq harness-ui-cache--estimate (cons state harness-ui-cache-test--estimate))
       (let ((line (harness-ui-cache--offer state)))
         (should (equal (concat "   Compact it first   b  Brief summary (~$0.011)   s  Summary (~$0.463)"
-                               "   t  Transcript file (free)   f  Fresh start (free)\n")
+                               "   t  Transcript file (free)   f  Fresh start (free)"
+                               "   c  Cut old context (free)\n")
                        (substring-no-properties line)))
         ;; Each key on the line compacts as its kind, and so does a click.
         (cl-letf (((symbol-function 'harness-ui-cache--compact) (lambda (_buffer kind) (push kind chosen))))
-          (dolist (key '("b" "s" "t" "f"))
+          (dolist (key '("b" "s" "t" "f" "c"))
             (funcall (lookup-key (get-text-property 0 'keymap line) key)))
           (funcall (get-text-property (string-match "Summary" line) 'harness-chat-action line)))
-        (should (equal '(summary fresh transcript summary brief) chosen))
+        (should (equal '(summary truncate fresh transcript summary brief) chosen))
         ;; A button's tooltip says what it does.
         (should (string-prefix-p "Brief summary (~$0.011): Small reads the conversation's narrative"
                                  (get-text-property (string-match "Brief summary" line) 'help-echo line)))
@@ -242,8 +273,6 @@ the panel started runs, the line says so."
           (should (string-match-p "lapsed at" (get-text-property 0 'help-echo banner)))
           (should (string-prefix-p "Summary (~$0.463): Big reads"
                                    (get-text-property (string-match "Summary" banner) 'help-echo banner)))))
-      ;; Blocked on an answer: the turn is not over.
-      (should-not (harness-ui-cache--offer (plist-put (copy-sequence state) :blocked t)))
       (setq harness-ui-cache--compacting 'brief)
       (should (equal "   Compacting the conversation into a brief summary…\n"
                      (substring-no-properties (harness-ui-cache--offer state)))))))
@@ -293,6 +322,7 @@ the panel started runs, the line says so."
        (dolist (m '(ui ui-compose ui-markdown ui-chat ui-cache))
          (harness-test-load-module m))
        (clrhash harness-ui--sessions)
+       (clrhash harness-ui--live)
        (unwind-protect
            (progn ,@body)
          (maphash (lambda (_ b) (when (buffer-live-p b) (kill-buffer b))) harness-chat--buffers)
@@ -465,7 +495,8 @@ the conversation is compacted, as nothing of it is cached any more."
       (harness-test-wait (lambda () (string-match-p "Brief summary (~\\$" (harness-ui-cache-test--text buffer)))
                          5 "the costs")
       (should (string-match-p (concat "\n   Compact it first   b  Brief summary (~\\$[0-9.]+)   s  Summary (~\\$[0-9.]+)"
-                                      "   t  Transcript file (free)   f  Fresh start (free)\n")
+                                      "   t  Transcript file (free)   f  Fresh start (free)"
+                                      "   c  Cut old context (free)\n")
                               (harness-ui-cache-test--text buffer)))
       (with-current-buffer buffer
         (goto-char (point-min))
