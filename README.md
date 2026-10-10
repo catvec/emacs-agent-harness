@@ -2417,6 +2417,7 @@ Further documentation:
 
 ```sh
 scripts/test.sh                              # run every test suite, each in a clean Emacs
+scripts/test.sh --changed                    # only the suites the working tree's changes touch
 scripts/test.sh test/harness-core-test.el    # run one suite (optionally with an ERT selector)
 scripts/lint.sh [--checkdoc]                 # byte-compile every file out of tree
 scripts/dev.sh start                         # start a clean development Emacs
@@ -2425,6 +2426,18 @@ scripts/media.sh [NAME...]                   # take the screenshots in docs/medi
 
 Tests that talk to real models run only when `HARNESS_INTEGRATION=1` is
 set. See [docs/dev-loop.md](docs/dev-loop.md) for the full workflow.
+
+A test run is minutes and an edit is seconds, so a run is never worth
+repeating just to look at it. While you work, run only the suites your
+change touches (`scripts/test.sh --changed` picks them, or name the
+files yourself); the full run, with no arguments, is the one to make
+once before handing work in. Every suite's whole output is kept in
+`scripts/.dev/test-logs/<suite>.log` and the run's own lines and
+summary in `scripts/.dev/test-logs/last-run.txt` (`HARNESS_TEST_LOGS`
+moves them), so never pipe a run through `grep` or `tail`: a detail you
+did not see is still in the log, and reading it costs nothing where
+running the suite again costs minutes. A failing run prints each
+failing suite's log path.
 
 `scripts/test.sh` runs the suites at idle CPU and I/O priority
 (`nice -n 19`, `ionice -c 3`), so a run yields to whatever else you are
