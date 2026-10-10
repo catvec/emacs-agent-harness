@@ -88,9 +88,9 @@
                               :doc "Model for everyday work: capable, at a fair price."))
            (:frontier (string :tag "Frontier" :value "opus"
                               :doc "The most capable model, for the hardest work."))))
-  "Customize type of the models a provider names for the common tiers
-\(see `harness-provider-tier-model').  A model name or id regexp of
-the provider's catalogue, e.g. \"haiku\"; `:tiers' in
+  "Customize type of the models a provider names for the common tiers.
+See `harness-provider-tier-model'.  Each is a model name or id regexp
+of the provider's catalogue, e.g. \"haiku\"; `:tiers' in
 `harness-define-provider' and in a provider's endpoints takes the same.")
 
 (defun harness-provider-model-type (&rest options)
@@ -226,8 +226,9 @@ changes, so estimates follow what the other providers list.")
 Forgotten whenever the catalogue changes, as the estimate may change too.")
 
 (defvar harness-provider--estimate-index nil
-  "What estimates are drawn from, made once per catalogue: see
-`harness-provider--estimate-index'.  Nil until needed after a change.")
+  "What estimates are drawn from, made once per catalogue.
+See the function `harness-provider--estimate-index'.  Nil until needed
+after a change.")
 
 (defvar harness-provider--warned (make-hash-table :test 'equal)
   "Keys of the estimates the log has already told about.")
@@ -714,7 +715,10 @@ see `harness-provider-cache-ttl'."
 auto-mode permission judge; `balanced' and `frontier' are a middle and
 top model a user might pick for their own work.  A provider names a
 model per tier with `:tiers' in `harness-define-provider'; a tier it
-does not name is taken from its own models sorted by price.")
+does not name is taken from its own models sorted by price.  A
+provider may thus have no model for a tier: its `:tiers' names none
+and none of its models can be ranked by price (see
+`harness-provider-tier-model-info', whose REASON says so).")
 
 (defun harness-provider--cached-models (id)
   "Return the models cached for provider ID, or nil.
@@ -810,8 +814,8 @@ back, while one that answers later gives nil until it has.  Unlike
 `provider/models', no other provider holds the answer up."
   (harness-provider--listed-models (harness-provider--provider-id provider-id)))
 
-(defun harness-provider-tier-model (model-id &optional tier)
-  "Return the id of the TIER model of MODEL-ID's provider, or nil.
+(defun harness-provider-tier-model-info (model-id &optional tier)
+  "Return (MODEL . REASON), the TIER model of MODEL-ID's provider and why not.
 MODEL-ID may also be a provider id alone (a symbol, or a string
 without a colon).  TIER defaults to `cheap'.  The provider's `:tiers'
 names a model (a name, id or regexp) for it; a tier it does not name,
@@ -820,21 +824,74 @@ by price \(`cheap' the least expensive, `frontier' the most, `balanced'
 the middle).  Models whose cost is unknown are never chosen by price.  A
 provider not listed yet is asked for its models, which a static
 catalogue answers at once; nil comes back until one that answers later
-has."
+has.
+
+MODEL is a model id, and REASON nil, when one was found.  REASON says
+why not: `unknown' when no provider is registered for MODEL-ID's
+provider, `unlisted' when its models are not available (not listed
+yet, or a listing that answered nothing), and `none' when its
+catalogue holds no model for TIER and none can be ranked by price.
+`harness-provider-tier-model-async' waits for a provider that answers
+later."
   (let* ((tier (harness-provider--tier tier))
          (pid (harness-provider--provider-id model-id))
          (provider (and pid (harness-provider-get pid))))
-    (when provider
-      (let* ((models (harness-provider--allowed (harness-provider--listed-models pid)))
-             (model (and models
-                         (or (harness-provider--tier-match
-                              models (plist-get (harness-provider-tiers provider) tier))
-                             (harness-provider--by-price models tier)))))
-        (and model (plist-get model :id))))))
+    (cond
+     ((null provider) (cons nil 'unknown))
+     (t
+      (let ((models (harness-provider--allowed (harness-provider--listed-models pid))))
+        (if (null models)
+            (cons nil 'unlisted)
+          (let ((model (or (harness-provider--tier-match
+                            models (plist-get (harness-provider-tiers provider) tier))
+                           (harness-provider--by-price models tier))))
+            (if model (cons (plist-get model :id) nil) (cons nil 'none)))))))))
+
+(defun harness-provider-tier-model (model-id &optional tier)
+  "Return the id of the TIER model of MODEL-ID's provider, or nil.
+MODEL-ID may also be a provider id alone.  TIER defaults to `cheap'.
+Nil also comes back when the provider's catalogue holds no model for
+TIER and none can be ranked by price; `harness-provider-tier-model-info'
+says which of the two it is.  See that function for the rest, and
+`harness-provider-tier-model-async' to wait for a provider that has
+not listed its models yet."
+  (car (harness-provider-tier-model-info model-id tier)))
+
+(defun harness-provider-tier-model-async (model-id &optional tier)
+  "Return a promise of (MODEL . REASON), the TIER model, waiting if need be.
+Like `harness-provider-tier-model-info', but when the provider has not
+listed its models yet, it waits for the listing to answer before
+deciding, so a caller that can wait does not read a catalogue that
+answered late as a provider without models.  A provider that answers
+nothing settles with REASON `unlisted'; the promise never rejects.
+TIER defaults to `cheap'."
+  (let* ((pid (harness-provider--provider-id model-id))
+         (provider (and pid (harness-provider-get pid))))
+    (if (or (null provider)
+            (null (harness-provider-models-fn provider))
+            (harness-provider--listed-p pid))
+        (harness-resolved (harness-provider-tier-model-info model-id tier))
+      (harness-then (harness-provider--fetch provider t)
+                    (lambda (_) (harness-provider-tier-model-info model-id tier))
+                    (lambda (_) (harness-provider-tier-model-info model-id tier))))))
+
+(harness-defmethod provider/tier-model-info (model-id &optional tier)
+  "Return (MODEL . REASON) for the TIER model of MODEL-ID's provider.
+The reason is nil when a model was found; see
+`harness-provider-tier-model-info' for the others.  TIER defaults to
+`cheap'.  This reads the catalogue as it stands and never waits."
+  (harness-provider-tier-model-info model-id tier))
+
+(harness-defmethod provider/tier-model-async (model-id &optional tier)
+  "Return a promise of (MODEL . REASON) for the TIER model, waiting if need be.
+Unlike `provider/tier-model-info' it waits for a provider that has not
+listed its models yet; see `harness-provider-tier-model-async'.  TIER
+defaults to `cheap'."
+  (harness-provider-tier-model-async model-id tier))
 
 (harness-defmethod provider/tier-model (model-id &optional tier)
   "Return the id of the TIER model of MODEL-ID's provider, or nil.
-MODEL-ID may be a provider id alone.  TIER defaults to `cheap'; see
+MODEL-ID may also be a provider id alone.  TIER defaults to `cheap'; see
 `harness-provider-tier-model'."
   (harness-provider-tier-model model-id tier))
 

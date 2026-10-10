@@ -81,6 +81,9 @@ layout: half the frame keeps the board's cards whole.")
 (defvar harness-sessions)
 (defvar harness-ui-tasks--tasks)
 (defvar harness-cache-ttl)
+(defvar harness-supervisor)
+(defvar harness-supervisor-tasks)
+(defvar harness-recap--sessions)
 
 (declare-function harness-start "harness")
 (declare-function harness-call "harness-core")
@@ -96,6 +99,8 @@ layout: half the frame keeps the board's cards whole.")
 (declare-function harness-menu "harness-ui")
 (declare-function harness-chat-toggle-block "harness-ui-chat")
 (declare-function harness-chat-scroll-to-bottom "harness-ui-chat")
+(declare-function harness-tools-session-note "harness-tools" (session-id &optional options))
+(declare-function harness-tools-session-activity "harness-tools" (session-id))
 (declare-function harness-chat-block-node "harness-ui-chat")
 (declare-function harness-chat-block-collapsed "harness-ui-chat")
 (declare-function harness-compose-set "harness-ui-compose")
@@ -125,6 +130,8 @@ layout: half the frame keeps the board's cards whole.")
 (declare-function harness-worktrees "harness-ui-worktree")
 (declare-function harness-settings "harness-ui-config")
 (declare-function harness-tasks--set "harness-tasks")
+(declare-function harness-ui-cowboy-waiting-p "harness-ui-cowboy")
+(declare-function harness-sender-session "harness-util")
 (declare-function transient-quit-all "transient")
 
 ;;;; Small helpers
@@ -1156,6 +1163,8 @@ report] on the task's card (`harness-tasks--missing-report')."
     ("typed config" . harness-media--task-settings)
     ("OpenAPI" . harness-media--task-openapi)
     ("Hold this turn" . harness-media--hold-script)
+    ("Let a sub-agent run" . harness-media--notes-script)
+    ("Run the project's check suite" . harness-media--notes-child-script)
     ("/health" . harness-media--task-health))
   "Scripts as (REGEXP . FUNCTION), matched against the newest user message.")
 
@@ -1379,6 +1388,25 @@ Give up after TIMEOUT seconds (default 90)."
 (defun harness-media--hold-script (_request)
   "A turn that never ends: the merge queue's parent, kept busy for the board picture."
   (list (list :type 'hold)))
+
+(defconst harness-media--notes-command
+  "for i in $(seq 1 40); do printf 'run %s of 40: ' \"$i\"; python3 -m unittest 2>&1 | tail -n 1; sleep 0.7; done"
+  "What the notes picture's sub-agent runs: checks in a loop, long enough
+to still be running while the picture is taken, a line each round.")
+
+(defun harness-media--notes-script (_request)
+  "The session of the notes picture: it sends a sub-agent to run the checks."
+  (list (harness-media--say "The suite takes a while; I'll have a sub-agent run it and keep an eye on it.")
+        (harness-media--tool "spawn_agent"
+                             :prompt (concat "Run the project's check suite in a loop for a couple of minutes "
+                                             "and report anything that fails.")
+                             :name "check suite")
+        (harness-media--say "The sub-agent is running the checks.")))
+
+(defun harness-media--notes-child-script (_request)
+  "The sub-agent of the notes picture: the check run, and its word on it."
+  (list (harness-media--tool "bash" :command harness-media--notes-command)
+        (harness-media--say "Every run passed.")))
 
 (defun harness-media--hold-merge-session ()
   "Keep the task project's merge session busy, so a merged branch waits in the queue.
@@ -1784,6 +1812,110 @@ and the review banner."
   "A chat waiting for the answer to a question."
   (harness-media--chat-shot (plist-get harness-media--world :question) "acme/app.py")
   (harness-media--capture "chat-question"))
+
+(defun harness-media-shot-chat-cowboy ()
+  "A chat whose prompt cache went cold overnight, a message waiting on it.
+The session talked pagination yesterday; today another session's agent
+writes to it, and the message waits on what goes first.  The session is
+made here and deleted after, so no other picture shows it, and the
+picture is taken last, so its usage counts in none of theirs."
+  (let* ((id (harness-media--new-session :name "Paginate the orders list" :model "claude:claude-opus-5-5"
+                                         :permission-mode 'accept-edits))
+         (sender (harness-media--session (plist-get harness-media--world :ratelimit))))
+    (dolist (node `((:kind user :content "GET /orders sends every order in one response, and the mobile app times out on big accounts. How should we paginate it?")
+                    (:kind assistant :content ,(concat "Two ways fit `list_orders` in `acme/orders.py`:\n\n"
+                                                       "- **Page numbers** (`?page=2&per_page=50`): simple, and a client can jump to a page, but an order created while someone reads shifts every page after it.\n"
+                                                       "- **A cursor** (`?after=<id>&limit=50`): stable while orders arrive, since ids only grow, but no jumping.\n\n"
+                                                       "`ORDERS` only ever grows, with increasing ids, so a cursor costs one comparison. I'd take the cursor."))
+                    (:kind user :content "Let's sleep on it and pick it up tomorrow.")
+                    (:kind assistant :content "Sure. Nothing is changed yet: say which when you're back, and I'll implement it with tests.")))
+      (harness-call 'session/append id node))
+    (harness-call 'session/usage-add id (list :input 200 :output 900 :cache-read 36000 :cache-write 2000 :context 38200
+                                             :cache-at (harness-media--ago (* 60 27))))
+    (harness-media--set-times id (* 60 28) (* 60 27))
+    (harness-media--age-nodes id (* 60 27))
+    (harness-call 'agent/prompt id
+                  (format "[Message from session %s %S]\n\n%s" (plist-get sender :id) (plist-get sender :name)
+                          (concat "Go with the cursor: my limiter counts GET /orders per key, and ?after=<id> lets a"
+                                  " client walk every order without page drift. Can you implement it?"))
+                  (list :from (harness-sender-session sender)))
+    (harness-media--wait (lambda () (and (harness-call 'cowboy/asking id) (harness-ui-cowboy-waiting-p id)))
+                         15 "the cold-cache question")
+    (let ((buffer (harness-media--chat-shot id "acme/orders.py")))
+      (harness-media--wait (lambda () (with-current-buffer buffer
+                                        (text-property-not-all (point-min) (point-max) 'harness-ui-cowboy-panel nil)))
+                           15 "the cold-cache panel")
+      ;; Fitted again, the panel drawn.
+      (harness-media--chat-shot id "acme/orders.py"))
+    (harness-media--capture "chat-cowboy")
+    (harness-call 'agent/cancel id)
+    (harness-media--wait (lambda () (not (harness-call 'agent/running id))) 15 "the turn to end")
+    (harness-call 'session/delete id)))
+
+(defun harness-media--notes-child (parent)
+  "Return the sub-agent session PARENT sent to run the checks, once it exists."
+  (harness-media--wait
+   (lambda ()
+     (let ((session (car (harness-call 'session/list (list :parent-id parent)))))
+       (and session (plist-get session :id))))
+   30 "the sub-agent session"))
+
+(defun harness-media--notes-call (session-id)
+  "Return the note under the running call of SESSION-ID, or nil.
+That is what the call says of itself (`tools/note'), as the chat draws
+it under the call's block, rather than what a watcher of the session
+makes of it."
+  (let ((activity (harness-tools-session-activity session-id)))
+    (cl-some (lambda (call) (and (stringp (plist-get call :note)) (plist-get call :note)))
+             (plist-get activity :calls))))
+
+(defun harness-media--notes-recap (child recap)
+  "Give CHILD the recap RECAP its note shows, as the recap module would.
+The module is off for the run (see `harness-media--setup-harness'), so
+the picture's recap is hand written, as the tasks' are."
+  (require 'harness-recap)
+  (puthash child (list :recap recap :recap-at (float-time) :recap-turns 3 :recap-tools 6
+                       :started (float-time))
+           harness-recap--sessions))
+
+(defun harness-media--notes-open (id position what)
+  "Show session ID's chat in POSITION, waiting for it to load, as WHAT."
+  (let ((buffer (harness-ui-display-session id position)))
+    (harness-media--wait (lambda () (with-current-buffer buffer
+                                      (and (not harness-chat--loading) harness-chat--order)))
+                         20 (format "%s's chat to load" what))
+    (harness-media--settle 0.5)
+    buffer))
+
+(defun harness-media-shot-notes ()
+  "The note under a running call, in a chat and in its sub-agent's.
+A session sends a sub-agent to run the check suite in a loop, still at
+it when the picture is taken.  The session's chat shows the note under
+its `spawn_agent' call -- what the child does, a recap of it and its
+context, steps and tool calls -- and the child's chat beside it shows
+the note under its own `bash' call: still running, the lines it has
+written and the latest of them."
+  (harness-media--reset-layout)
+  (let* ((parent (harness-media--new-session :name "Check the orders suite"
+                                             :model "claude:claude-opus-5-5"
+                                             ;; The judge allows the sub-agent and
+                                             ;; the child's command; nothing waits.
+                                             :permission-mode 'auto)))
+    (harness-media--prompt parent "How are the checks looking? Let a sub-agent run them and tell me." '(running))
+    (let* ((child (harness-media--notes-child parent))
+           (pbuf (harness-media--notes-open parent 'full "the session"))
+           (cbuf (harness-media--notes-open child 'right "the sub-agent")))
+      (harness-media--notes-recap child "Running the check suite in a loop; every run has passed so far")
+      (harness-media--wait
+       (lambda ()
+         (and (string-match-p "recap:" (or (harness-tools-session-note child (list :recap t)) ""))
+              (string-match-p "lines so far" (or (harness-media--notes-call child) ""))))
+       60 "the notes under the calls")
+      (harness-media--fit 34 24 40)
+      (harness-media--to-bottom pbuf)
+      (harness-media--to-bottom cbuf)
+      (harness-media--settle 1)
+      (harness-media--capture "notes"))))
 
 (defun harness-media--text-lines (window)
   "Return how many lines the text of WINDOW's buffer takes in WINDOW.
@@ -2453,7 +2585,12 @@ afterwards."
     ("version" . harness-media-shot-version)
     ;; Last: they write a month of chats the other pictures must not show.
     ("insights" . harness-media-shot-insights)
-    ("insights-activity" . harness-media-shot-insights-activity))
+    ("insights-activity" . harness-media-shot-insights-activity)
+    ;; A live sub-agent and the long command it runs: after the usage
+    ;; pictures, whose numbers its session would join.
+    ("notes" . harness-media-shot-notes)
+    ;; After every picture of usage: its session's usage would count there.
+    ("chat-cowboy" . harness-media-shot-chat-cowboy))
   "Every picture, as (NAME . FUNCTION), in the order they are taken.")
 
 ;;;; Entry point
@@ -2503,6 +2640,13 @@ afterwards."
   (setq harness-cache-ttl 86400)
   ;; Chats take half the frame: the code beside them keeps 80 columns.
   (setf (alist-get 'right harness-ui-positions) '((side . right) (slot . 0) (window-width . 0.5)))
+  ;; The pictures show hands-on sessions -- the scripted turns write
+  ;; files and run commands themselves -- so nothing in this world
+  ;; supervises.  Without this a new session supervises by default and
+  ;; is offered no write tools, and every task and chat picture is taken
+  ;; over work no script could do.
+  (setq harness-supervisor nil
+        harness-supervisor-tasks nil)
   (harness-media--define-providers)
   (harness-media--settle 1))
 

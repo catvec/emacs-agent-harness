@@ -4,13 +4,21 @@
 (require 'harness-test-helpers)
 (require 'harness-ui)
 
+;; The tasks module's cap: declared here so that the context limit test
+;; can bind it, the way a task's session is capped.
+(defvar harness-tasks-context-limit 256000)
+
 (defmacro harness-ui-test-with-layout (&rest body)
   "Run BODY with \"other\" in the main window and a session in a right side window.
-The side window is selected and not dedicated, as Doom leaves it."
+The side window is selected and not dedicated, as Doom leaves it.  The
+echo area keeps its height while BODY runs: on a graphic frame, a long
+message from an earlier test can leave it two lines high, and emptied
+in BODY, it would give the windows above its second line."
   (declare (indent 0))
   `(let ((other (get-buffer-create "other"))
          (chat (get-buffer-create "*harness: test*"))
          (menu (get-buffer-create " *harness-test-menu*"))
+         (resize-mini-windows nil)
          (split-width-threshold 160)
          (split-height-threshold nil)
          (transient-display-buffer-action
@@ -71,7 +79,7 @@ menu closes; beside it, it would get its height only."
                    (window (harness-ui--display-menu menu '((inhibit-same-window . t)))))
               (should (eq 'bottom (window-parameter window 'window-side)))
               (should (eq window (window-in-direction 'below btw-window t)))
-              (should (= (frame-width) (window-total-width window)))
+              (should (= (window-total-width (frame-root-window)) (window-total-width window)))
               (should (= (nth 3 (window-pixel-edges (frame-root-window)))
                          (nth 3 (window-pixel-edges window))))
               (should (eq menu (window-buffer window)))
@@ -104,12 +112,21 @@ commands, it does too: `harness-ui-btw-has-the-full-chat-header'."
               (unwind-protect
                   (let ((window (get-buffer-window transient--buffer-name)))
                     (should (eq window (window-in-direction 'below btw-window t)))
-                    (should (= (frame-width) (window-total-width window)))
+                    (should (= (window-total-width (frame-root-window)) (window-total-width window)))
                     (should (= height (window-pixel-height btw-window)))
-                    ;; Tall enough for every line of the menu.
-                    (should (<= (with-current-buffer transient--buffer-name
-                                  (length (split-string (string-trim-right (buffer-string)) "\n")))
-                                (window-body-height window))))
+                    ;; Tall enough for all of the menu.  In pixels: on a
+                    ;; graphic frame transient draws the line under the
+                    ;; menu a pixel high, so the last line of the window
+                    ;; is a pixel high too.  On a text terminal a pixel is
+                    ;; a line, and the lines are the menu's own, as
+                    ;; `harness-ui--menu-height' counts them there: a batch
+                    ;; frame is 80 columns wide, and the menu's longest
+                    ;; lines wrap in it.
+                    (should (<= (if (display-graphic-p)
+                                    (cdr (window-text-pixel-size window))
+                                  (with-current-buffer transient--buffer-name
+                                    (count-lines (point-min) (point-max))))
+                                (window-body-height window t))))
                 (execute-kbd-macro (kbd "C-g")))
               (should-not (get-buffer-window transient--buffer-name))
               (should (equal before (harness-ui-test--layout)))
@@ -132,7 +149,7 @@ same, and leaves every window as it was."
                  (window (harness-ui--display-menu menu '((inhibit-same-window . t)))))
             (should (eq window (window-in-direction 'below popup t)))
             (should (eq 'bottom (window-parameter window 'window-side)))
-            (should (= (frame-width) (window-total-width window)))
+            (should (= (window-total-width (frame-root-window)) (window-total-width window)))
             (delete-window window)
             (should (equal before (harness-ui-test--layout))))
         (kill-buffer help)))))
@@ -150,7 +167,7 @@ top, whole, and leaves them as they were."
       (unwind-protect
           (let ((window (harness-ui--display-menu menu '((inhibit-same-window . t)))))
             (should (eq 'top (window-parameter window 'window-side)))
-            (should (= (frame-width) (window-total-width window)))
+            (should (= (window-total-width (frame-root-window)) (window-total-width window)))
             (should (eq menu (window-buffer window)))
             (should (equal (list bottom btw) (mapcar #'window-buffer windows)))
             (should (equal edges (mapcar #'window-edges windows)))
@@ -272,6 +289,21 @@ whose own group says d deletes the budget at point."
     (let ((text (harness-ui-test-menu)))
       (should (string-match-p "B +Delete budget" text))
       (should (string-match-p "\\. d +Delete budget (or fallback) at point" text)))))
+
+(ert-deftest harness-ui-menu-offers-the-supervisor-all-command-only-when-there ()
+  "The menu's V turns supervisor mode on or off for every session, beside
+the other for-all-sessions entries; a harness without the supervisor UI
+module leaves the entry out, so the menu is unharmed."
+  (harness-ui-test-with-menu-buffer #'fundamental-mode
+    ;; The UI here does not load ui-supervisor, so there is nothing to offer.
+    (should-not (fboundp 'harness-set-supervisor-all))
+    (should-not (string-match-p "Supervisor mode for all sessions" (harness-ui-test-menu)))
+    (unwind-protect
+        (progn
+          (require 'harness-ui-supervisor)
+          (should (string-match-p "V +Supervisor mode for all sessions" (harness-ui-test-menu))))
+      ;; Loaded only for this test: leave the UI as it was, unbound.
+      (fmakunbound 'harness-set-supervisor-all))))
 
 (ert-deftest harness-ui-menu-shows-the-chat-commands-in-a-chat ()
   (harness-ui-test-with-menu-buffer #'harness-chat-mode
@@ -1308,7 +1340,9 @@ project's .dir-locals.el and a directory's."
                        (aref column (1- (length column))))))
     (should (equal "Session settings" (plist-get (aref column (- (length column) 2)) :description)))
     (should (equal '("i" "I") (seq-take (member "i" keys) 2)))
-    (should (equal '("m" "M") (seq-take (member "m" keys) 2))))
+    (should (equal '("m" "M") (seq-take (member "m" keys) 2)))
+    ;; The supervisor's all-command sits with them, behind I.
+    (should (equal '("I" "V") (seq-take (member "I" keys) 2))))
   (harness-ui-test-with-all
       (list (cons "_harness/session/set-all" '("s1" "s2" "s3"))
             (cons "_harness/task/set-all" '("t1"))
@@ -1736,8 +1770,10 @@ marks the figures that are partly estimated."
     (should (equal "1.2k/200k" (substring-no-properties (harness-ui-format-context session))))
     (should (equal "300 out" (substring-no-properties (harness-ui-format-output session))))
     (should (equal "300" (substring-no-properties (harness-ui-format-output session t))))
-    (should (equal "Context tokens in use: 1.2k of a 200k window; output tokens: 300."
-                   (get-text-property 0 'help-echo (harness-ui-format-context session))))
+    (let ((help (get-text-property 0 'help-echo (harness-ui-format-context session))))
+      (should (string-prefix-p "Context tokens in use: 1.2k of a 200k window; output tokens: 300." help))
+      (should (string-match-p "changes the limit" help))
+      (should-not (string-match-p "\n" help)))
     ;; Nothing written: no output figure.  Totals recorded before the
     ;; output of the last request was count its prompt alone.
     (let ((old '(:id "s2" :status "idle" :context-window 200000 :usage (:context 500))))
@@ -1757,6 +1793,200 @@ marks the figures that are partly estimated."
     (puthash "s1" '(:context 1760 :output 860 :estimated 0) harness-ui--live)
     (should (equal "1.8k/200k" (substring-no-properties (harness-ui-format-context session))))
     (should (equal "860 out" (substring-no-properties (harness-ui-format-output session))))))
+
+(ert-deftest harness-ui-context-limit-state-names-the-cap ()
+  "How the token figure's window is limited, and by what.
+A sub-agent's kind says a sub-agent's cap, the tasks module's own cap
+value says a task's; the rest is a session limit.  A limit above the
+model's window is inert, and a window set for the session itself wins
+over any limit."
+  (let* ((sub (harness-ui-context-limit-state
+               '(:kind "subagent" :context-window 256000 :context-window-limit 256000)
+               1000000))
+         (task (harness-ui-context-limit-state
+                (let ((harness-tasks-context-limit 256000))
+                  '(:kind "main" :context-window 256000 :context-window-limit 256000))
+                nil))
+         (own (harness-ui-context-limit-state
+               '(:kind "main" :context-window 300000 :context-window-limit 300000)
+               1000000))
+         (full (harness-ui-context-limit-state '(:kind "main" :context-window 200000) 200000))
+         (above (harness-ui-context-limit-state
+                 '(:kind "main" :context-window 200000 :context-window-limit 500000) 200000))
+         (override (harness-ui-context-limit-state
+                    '(:kind "main" :context-window 100000 :context-window-override 100000
+                      :context-window-limit 50000)
+                    200000)))
+    (should (equal 1000000 (plist-get sub :model-window)))
+    (should (equal 256000 (plist-get sub :limit)))
+    (should (plist-get sub :limited))
+    (should (plist-get sub :capped))
+    (should (equal "a sub-agent's limit" (plist-get sub :cap)))
+    (should (equal "a task's limit" (plist-get task :cap)))
+    (should (equal "a limit set for this session" (plist-get own :cap)))
+    (should-not (plist-get full :limit))
+    (should-not (plist-get full :limited))
+    ;; Above the model's window the limit is set but does not hold it.
+    (should (equal 500000 (plist-get above :limit)))
+    (should-not (plist-get above :limited))
+    (should-not (plist-get above :capped))
+    (should-not (plist-get override :limited))
+    ;; The tooltip says what holds the window and how to change it.
+    (should (string-match-p
+             "The model's window is 1.00M, but this session is capped at 256k by a sub-agent's limit"
+             (harness-ui-context-limit-help
+              '(:kind "subagent" :context-window 256000 :context-window-limit 256000) 1000000)))
+    (should (string-match-p
+             "A limit of 500k is set, but the model's own window of 200k is what applies"
+             (harness-ui-context-limit-help
+              '(:context-window 200000 :context-window-limit 500000) 200000)))
+    (should (string-match-p
+             "Its window of 100k is set for the session itself and wins over any limit"
+             (harness-ui-context-limit-help
+              '(:context-window 100000 :context-window-override 100000
+                :context-window-limit 50000)
+              200000)))
+    (dolist (help (list (harness-ui-context-limit-help
+                         '(:kind "subagent" :context-window 256000 :context-window-limit 256000)
+                         1000000)))
+      (should-not (string-match-p "\n" help)))))
+
+(ert-deftest harness-ui-context-limit-options-stay-within-the-model-window ()
+  "The offer holds the current limit, round sizes under the model's
+window, and no limit for the whole of it: never a size above the
+model's own window."
+  (let ((options (harness-ui--context-limit-options 1000000 256000)))
+    (should (equal 256000 (cdr (assoc "256k (current)" options))))
+    (should (equal 128000 (cdr (assoc "128k" options))))
+    (should (equal 512000 (cdr (assoc "512k" options))))
+    (should (assoc "no limit: the whole 1.00M the model has" options))
+    (should-not (cl-some (lambda (o) (and (numberp (cdr o)) (> (cdr o) 1000000))) options)))
+  (let ((options (harness-ui--context-limit-options 200000 256000)))
+    ;; The limit is above the model's window: not offered again.
+    (should-not (assoc "256k (current)" options))
+    (should (equal 128000 (cdr (assoc "128k" options))))
+    (should-not (cl-some (lambda (o) (and (numberp (cdr o)) (> (cdr o) 200000))) options)))
+  (let ((options (harness-ui--context-limit-options nil nil)))
+    (should (equal 128000 (cdr (assoc "128k" options))))
+    (should (assoc "no limit: the model's whole window" options))))
+
+(ert-deftest harness-ui-token-count-reads-what-the-figure-shows ()
+  "A typed limit reads as the token figures do, or names none."
+  (should (equal 128000 (harness-ui--token-count "128k")))
+  (should (equal 1500000 (harness-ui--token-count "1.5M")))
+  (should (equal 200000 (harness-ui--token-count "200K")))
+  (should (equal 256000 (harness-ui--token-count "256,000")))
+  (should (equal 256000 (harness-ui--token-count " 256000 ")))
+  (should-not (harness-ui--token-count "0"))
+  (should-not (harness-ui--token-count "k"))
+  (should-not (harness-ui--token-count "twelve"))
+  (should-not (harness-ui--token-count "")))
+
+(ert-deftest harness-ui-context-figure-is-a-button ()
+  "The token figure carries the keymap, session id and hover face of a
+button, and a click on it changes the limit of the session it shows,
+not of point."
+  (let* ((session '(:id "s7" :kind "subagent" :model "demo:scripted"
+                    :context-window 4000 :context-window-limit 4000
+                    :usage (:context 1000)))
+         (figure (harness-ui-format-context session))
+         (got 'unset))
+    (should (eq harness-ui-context-limit-map (get-text-property 0 'keymap figure)))
+    (should (eq 'highlight (get-text-property 0 'mouse-face figure)))
+    (should (equal "s7" (get-text-property 0 'harness-context-session figure)))
+    (should (string-match-p "capped at 4.0k by a sub-agent's limit"
+                            (get-text-property 0 'help-echo figure)))
+    (cl-letf (((symbol-function 'harness-set-context-limit)
+               (lambda (&optional id) (setq got id))))
+      (with-temp-buffer
+        (insert figure)
+        (harness-ui-context-limit-click
+         (list 'mouse-1 (list (selected-window) (point-min) '(0 . 0) 0 nil (point-min))))))
+    (should (equal "s7" got))))
+
+(ert-deftest harness-ui-set-context-limit-sets-clears-and-clamps ()
+  "C-c h e sets the limit the offer names, clamps it to the model's own
+window, clears it for the whole window, and reads a number typed
+instead.  Only `session/update' is asked: the conversation is untouched."
+  (let* ((session-val '(:id "s1" :name "Capped" :kind "main" :model "demo:scripted"
+                        :context-window 256000 :context-window-limit 256000))
+         (calls nil) (said nil) (cached nil))
+    (cl-letf (((symbol-function 'harness-ui-session) (lambda (_) session-val))
+              ((symbol-function 'harness-ui-model-context-window) (lambda (_) 1000000))
+              ((symbol-function 'harness-ui-call)
+               (lambda (method params &optional callback _on-error)
+                 (push (cons method params) calls)
+                 (when callback (funcall callback (append session-val (list :updated 1))))))
+              ((symbol-function 'harness-ui-cache-session) (lambda (s) (push s cached)))
+              ((symbol-function 'message) (lambda (format-string &rest args)
+                                            (push (apply #'format format-string args) said))))
+      (cl-letf (((symbol-function 'completing-read) (lambda (_p table &rest _) (caar table))))
+        (harness-set-context-limit "s1"))
+      (should (equal '("_harness/session/update") (mapcar #'car calls)))
+      (should (equal 256000 (plist-get (cdr (car calls)) :context-window-limit)))
+      (should (equal '("Context limit for Capped → 256k") said))
+      (should (= 1 (length cached)))
+      ;; A chosen round size.
+      (setq calls nil said nil cached nil)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_p table &rest _)
+                   (car (cl-find "512k" table :key #'car :test #'equal)))))
+        (harness-set-context-limit "s1"))
+      (should (equal 512000 (plist-get (cdr (car calls)) :context-window-limit)))
+      (should (equal '("Context limit for Capped → 512k") said))
+      ;; A typed number, above the model's window: clamped to it.
+      (setq calls nil said nil)
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "2M")))
+        (harness-set-context-limit "s1"))
+      (should (equal 1000000 (plist-get (cdr (car calls)) :context-window-limit)))
+      (should (equal '("Context limit for Capped → 1.00M (the model's window)") said))
+      ;; A typed number below it.
+      (setq calls nil said nil)
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "300k")))
+        (harness-set-context-limit "s1"))
+      (should (equal 300000 (plist-get (cdr (car calls)) :context-window-limit)))
+      (should (equal '("Context limit for Capped → 300k") said))
+      ;; No limit: cleared, so the whole window is used.
+      (setq calls nil said nil)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_p table &rest _)
+                   (car (cl-find-if (lambda (o) (string-prefix-p "no limit" (car o))) table)))))
+        (harness-set-context-limit "s1"))
+      (should (plist-member (cdr (car calls)) :context-window-limit))
+      (should-not (plist-get (cdr (car calls)) :context-window-limit))
+      (should (equal '("Context limit removed for Capped: the whole 1.00M window") said))
+      ;; A window set for the session itself is cleared with the limit.
+      (setq calls nil said nil
+            session-val '(:id "s1" :name "Capped" :kind "main"
+                          :context-window 100000 :context-window-override 100000))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_p table &rest _)
+                   (car (cl-find-if (lambda (o) (string-prefix-p "no limit" (car o))) table)))))
+        (harness-set-context-limit "s1"))
+      (should-not (plist-get (cdr (car calls)) :context-window-limit))
+      (should (plist-member (cdr (car calls)) :context-window))
+      (should-not (plist-get (cdr (car calls)) :context-window))
+      (should (equal '("Context limit removed for Capped: the whole 1.00M window, its own window cleared")
+                     said))
+      ;; A number chosen also clears it, or it would win over the limit.
+      (setq calls nil said nil)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_p table &rest _)
+                   (car (cl-find "512k" table :key #'car :test #'equal)))))
+        (harness-set-context-limit "s1"))
+      (should (equal 512000 (plist-get (cdr (car calls)) :context-window-limit)))
+      (should (plist-member (cdr (car calls)) :context-window))
+      (should-not (plist-get (cdr (car calls)) :context-window))
+      (should (equal '("Context limit for Capped → 512k, its own window cleared") said))
+      ;; Nothing typed, nothing changed; junk is refused.
+      (setq calls nil said nil)
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "")))
+        (harness-set-context-limit "s1"))
+      (should-not calls)
+      (should (equal '("Context limit unchanged") said))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "wat")))
+        (should-error (harness-set-context-limit "s1") :type 'user-error))
+      (should-not calls))))
 
 (ert-deftest harness-ui-live-token-cache-follows-the-harness ()
   "Live figures come from `usage/live-updated' events and tell the views.
@@ -1844,29 +2074,31 @@ without a position, as it does on a click."
 Segments are given in display order; the lowest priority goes first,
 the rightmost among equals, and a segment with a shortened form shrinks
 to it once nothing is left to drop.  A segment whose priority is t
-always stays."
-  (let ((segments '(" One" (" Two" 5) (" Three" 5 " 3") (" Four" 100))))
-    (should (equal " One Two Three Four" (harness-ui-fit-header segments 200)))
-    ;; Room for the rightmost of two equal priorities only after it
-    ;; shortens: a shortened segment is worth keeping over dropping it.
-    (should (equal " One Two 3 Four" (harness-ui-fit-header segments 16)))
-    ;; Not even its shortened form fits: then it goes.
-    (should (equal " One Four" (harness-ui-fit-header segments 10)))
-    (should (equal " One" (harness-ui-fit-header segments 4)))
-    ;; What cannot be dropped stays, however little room there is.
-    (should (equal " One" (harness-ui-fit-header segments 0)))
-    ;; A flexible segment shrinks only when dropping cannot help: the
-    ;; name has priority t here, so it is never dropped, only shortened.
-    (should (equal " One Four Wide Name" (harness-ui-fit-header
-                                          '(" One" (" Four" 100) (" Wide Name" t " W…")) 40)))
-    ;; Room for the name whole once the droppable segment is gone.
-    (should (equal " One Wide Name" (harness-ui-fit-header
-                                     '(" One" (" Four" 100) (" Wide Name" t " W…")) 16)))
-    ;; Too narrow even then: the name shortens, which is all that is left.
-    (should (equal " One W…" (harness-ui-fit-header
-                              '(" One" (" Four" 100) (" Wide Name" t " W…")) 10)))
-    ;; nil segments are left out, not turned into "nil".
-    (should (equal " One" (harness-ui-fit-header (list " One" nil "" nil) 80)))))
+always stays.  The widths are columns, as on a text terminal, even
+in a graphic Emacs: measuring in pixels has a test of its own."
+  (cl-letf (((symbol-function 'display-graphic-p) #'ignore))
+    (let ((segments '(" One" (" Two" 5) (" Three" 5 " 3") (" Four" 100))))
+      (should (equal " One Two Three Four" (harness-ui-fit-header segments 200)))
+      ;; Room for the rightmost of two equal priorities only after it
+      ;; shortens: a shortened segment is worth keeping over dropping it.
+      (should (equal " One Two 3 Four" (harness-ui-fit-header segments 16)))
+      ;; Not even its shortened form fits: then it goes.
+      (should (equal " One Four" (harness-ui-fit-header segments 10)))
+      (should (equal " One" (harness-ui-fit-header segments 4)))
+      ;; What cannot be dropped stays, however little room there is.
+      (should (equal " One" (harness-ui-fit-header segments 0)))
+      ;; A flexible segment shrinks only when dropping cannot help: the
+      ;; name has priority t here, so it is never dropped, only shortened.
+      (should (equal " One Four Wide Name" (harness-ui-fit-header
+                                            '(" One" (" Four" 100) (" Wide Name" t " W…")) 40)))
+      ;; Room for the name whole once the droppable segment is gone.
+      (should (equal " One Wide Name" (harness-ui-fit-header
+                                       '(" One" (" Four" 100) (" Wide Name" t " W…")) 16)))
+      ;; Too narrow even then: the name shortens, which is all that is left.
+      (should (equal " One W…" (harness-ui-fit-header
+                                '(" One" (" Four" 100) (" Wide Name" t " W…")) 10)))
+      ;; nil segments are left out, not turned into "nil".
+      (should (equal " One" (harness-ui-fit-header (list " One" nil "" nil) 80))))))
 
 (ert-deftest harness-ui-fit-header-measures-in-the-header-face ()
   "On a graphic frame a header is measured in pixels, icons included."

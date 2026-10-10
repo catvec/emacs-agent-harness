@@ -218,7 +218,7 @@ ITEM is (:id :kind :payload) in the wire shape."
     (if (equal kind "question")
         (list :id (plist-get item :id) :kind "question" :created (float-time)
               :question (plist-get payload :question) :options (plist-get payload :options)
-              :diagrams (plist-get payload :diagrams))
+              :diagrams (plist-get payload :diagrams) :cowboy (plist-get payload :cowboy))
       (list :id (plist-get item :id) :kind "permission" :created (float-time)
             :title (or (plist-get payload :title) (plist-get payload :tool) "tool call")
             :call-id (plist-get payload :call-id)
@@ -441,8 +441,9 @@ narrowest first.  They are worked out from the names alone."
 
 (defun harness-ui-pending-set-pattern (session-id pid pattern)
   "Make PATTERN, or the request's own when nil, the one PID is answered for.
-The hosts drawing the request are redrawn; point goes to the request's
-pattern line when this buffer shows it."
+PID is a request of SESSION-ID.  The hosts drawing the request are
+redrawn; point goes to the request's pattern line when this buffer
+shows it."
   (harness-ui-pending--put
    session-id
    (mapcar (lambda (r)
@@ -1074,7 +1075,8 @@ on it as the area is redrawn.  HELP is its tooltip, FACE its face."
               'harness-ui-pending-diagram-nav nav))
 
 (defun harness-ui-pending--diagram-area (session-id r shown)
-  "Return the diagram area of question record R showing option SHOWN's diagram."
+  "Return the diagram area of question record R of SESSION-ID.
+It shows option SHOWN's diagram."
   (let ((pid (plist-get r :id))
         (options (plist-get r :options)))
     (concat
@@ -1095,7 +1097,8 @@ on it as the area is redrawn.  HELP is its tooltip, FACE its face."
      (harness-ui-pending--diagram-string session-id r shown))))
 
 (defun harness-ui-pending--option-line (session-id pid option i shown)
-  "Return the line of OPTION, the Ith of question PID; SHOWN: its diagram shows."
+  "Return the line of OPTION, the Ith of question PID of SESSION-ID.
+SHOWN is non-nil when its diagram shows."
   (propertize
    (concat (propertize "   " 'wrap-prefix "       ")
            (if (< i 9) (harness-ui-kbd (format " %d " (1+ i))) "   ")
@@ -1147,11 +1150,33 @@ Options with diagrams get the area showing one of them under them."
                   (t (propertize "\n   or type another answer below\n" 'face 'harness-dim-face))))
     (harness-ui-pending--decorate start (point) pid (harness-ui-pending--question-map r))))
 
+(defvar harness-ui-pending-panel-functions nil
+  "Functions drawing the panel of a request their own way.
+Each takes a request record and, when it draws that request, inserts
+its panel at point and returns non-nil; the first to do so wins, and a
+request none draws gets the ordinary panel.  A panel drawn so is the
+request's as the ordinary one is: decorate it with
+`harness-ui-pending-decorate', so that point on it finds the request.
+The cold-cache question draws itself this way (harness-ui-cowboy.el).")
+
+(defun harness-ui-pending-decorate (start end pid map)
+  "Make START..END the panel of request PID, with keymap MAP.
+For a panel `harness-ui-pending-panel-functions' draw."
+  (harness-ui-pending--decorate start end pid map))
+
+(defun harness-ui-pending-session ()
+  "Return the session whose requests this buffer draws, or nil.
+A chat's session, or a popout's."
+  (harness-ui-pending--session))
+
 (defun harness-ui-pending-insert-panel (r)
-  "Insert the panel for request record R at point."
-  (if (equal (plist-get r :kind) "question")
-      (harness-ui-pending--insert-question r)
-    (harness-ui-pending--insert-permission r)))
+  "Insert the panel for request record R at point.
+A function of `harness-ui-pending-panel-functions' may draw it instead."
+  (cond
+   ((run-hook-with-args-until-success 'harness-ui-pending-panel-functions r))
+   ((equal (plist-get r :kind) "question")
+    (harness-ui-pending--insert-question r))
+   (t (harness-ui-pending--insert-permission r))))
 
 (defun harness-ui-pending-insert-panels (&optional session-id)
   "Insert the panels of SESSION-ID's requests at point, oldest first."
@@ -1207,7 +1232,8 @@ buffer, as in a popout, which draws itself whole again instead."
         (harness-ui-pending--popout-changed session-id)))))
 
 (defun harness-ui-pending-step-diagram (session-id pid n)
-  "Show the diagram N options after the one question PID shows, counting round."
+  "Show the diagram N options after the one question PID of SESSION-ID shows.
+The count goes round the options."
   (harness-ui-pending-show-diagram session-id pid (+ (harness-ui-pending-shown-diagram session-id pid) n)))
 
 ;;;; Bringing the ACP requests in
@@ -1244,7 +1270,7 @@ clients, or the session's own pending list, answer it."
        (list :id (or (plist-get params :requestId) (harness-short-id 6)) :kind "question" :respond respond
              :connection harness-ui-connection :created (float-time)
              :question (plist-get params :question) :options (plist-get params :options)
-             :diagrams (plist-get params :diagrams)))
+             :diagrams (plist-get params :diagrams) :cowboy (plist-get params :cowboy)))
       t)))
 
 (defvar harness-ui-pending-drawn-predicates nil

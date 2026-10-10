@@ -165,6 +165,7 @@ title is its prompt's first line."
         (and sid (harness-method-exists-p 'agent/running) (harness-call 'agent/running sid) t))))
 
 (defun harness-tasks-search--archived-p (task)
+  "Non-nil when TASK is archived."
   (harness-json-true-p (plist-get task :archived)))
 
 (defconst harness-tasks-search--priorities '("low" "medium" "high")
@@ -814,7 +815,7 @@ seconds."
                                  (error (funcall reject err))))
                               ((> (float-time) deadline)
                                (cancel-timer timer)
-                               (funcall reject (list 'error "It did not stop in time"))))))))))) 
+                               (funcall reject (list 'error "It did not stop in time")))))))))))
 
 (defun harness-tasks-search--archive (id)
   "Archive task ID; one at work is stopped first, then archived once it stops.

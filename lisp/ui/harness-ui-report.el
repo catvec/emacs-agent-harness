@@ -46,6 +46,11 @@
 ;; own (`harness-ui-popout-image'), which q closes, back to the report.
 ;; Dragging one, from either, drops its file into another application,
 ;; a chat app or a browser, to pass the evidence on (harness-ui-drag.el).
+;; The popout opens before its images are drawn -- a line says each is
+;; loading -- because decoding a screenshot of a whole frame takes a
+;; moment (`harness-ui-image-load').  The report a session's banner
+;; shows is drawn into a string, where nothing can draw later: its
+;; images are drawn with it.
 ;;
 ;; Other modules add to the popout as they add to a chat:
 ;; `harness-ui-report-panel-functions' draws a panel at the end of the
@@ -101,11 +106,11 @@ the one its session shows, with [Verify] and [Send back].")
   "Functions giving a report popout a compose box.
 Each is called with the TASK the popout shows, in the popout buffer, on
 every draw, and returns nil, or (SUBMIT . PLACEHOLDER): SUBMIT, a
-function of TEXT and ATTACHMENTS, takes what the box holds when C-c C-c
-sends it, the popout buffer current; PLACEHOLDER is the empty box's
-hint.  The first function returning non-nil wins; with none, the popout
-has no box.  The review module takes the feedback that sends a task back
-this way.")
+function of TEXT and ATTACHMENTS, takes what the box holds when
+\\<harness-ui-popout-mode-map>\\[harness-ui-popout-submit] sends it, the popout buffer current;
+PLACEHOLDER is the empty box's hint.  The first function returning
+non-nil wins; with none, the popout has no box.  The review module
+takes the feedback that sends a task back this way.")
 
 (defvar harness-ui-report--reports (make-hash-table :test 'equal)
   "Popout key -> the task record its popout shows, kept current.")
@@ -114,8 +119,8 @@ this way.")
   "The task record this popout shows.")
 
 (defvar-local harness-ui-report--box nil
-  "What `harness-ui-report-compose-functions' gave this popout as drawn
-last: (SUBMIT . PLACEHOLDER), or nil for no box.")
+  "What `harness-ui-report-compose-functions' gave this popout at its last draw.
+That is (SUBMIT . PLACEHOLDER), or nil for no box.")
 
 (defvar-local harness-ui-report--expanded (make-hash-table :test 'equal)
   "Referenced tool calls whose full output this popout shows.")
@@ -127,6 +132,15 @@ last: (SUBMIT . PLACEHOLDER), or nil for no box.")
   "The window a report drawn away from its buffer is sized for.
 `harness-ui-report-string' draws in a scratch buffer no window shows;
 its images fit this one instead.")
+
+(defvar harness-ui-report--defer-images t
+  "Non-nil while a report shows its images as they come.
+Its popout draws them that way: a loading line goes where each image
+will be, and the image is drawn a moment later, so the report appears
+at once rather than after Emacs decoded every screenshot it shows
+\(`harness-ui-image-load').  A report drawn into a string, for a view
+that shows it among its own text, draws them straight away instead: a
+string has nowhere to draw an image later.")
 
 (defvar harness-chat--transcript-end)
 
@@ -191,19 +205,32 @@ feedback to `:feedback'."
 See `harness-ui-popout-open-file'."
   (harness-ui-popout-open-file path))
 
+(defun harness-ui-report--image-frame ()
+  "Return the frame the report's images are drawn for.
+That is its window's frame (`harness-ui-report--window', the window a
+report drawn away from its buffer is sized for; else the windows showing
+it), or the selected one when it shows nowhere.  Not simply the selected
+frame: an image is drawn a moment after the report showed
+\(`harness-ui-image-load'), with whatever frame happens to be selected
+then, and a screenshot is only drawable where the report shows."
+  (let ((window (or harness-ui-report--window (car (get-buffer-window-list nil nil t)))))
+    (if (window-live-p window) (window-frame window) (selected-frame))))
+
 (defun harness-ui-report--image-width ()
   "Return the most pixels wide an evidence image is: the popout's width.
 Less a column: an image as wide as the window would wrap onto a line of
 its own."
-  (max 1 (- (harness-ui-popout-pixel-width harness-ui-report--window)
-            (frame-char-width))))
+  (let ((frame (harness-ui-report--image-frame)))
+    (max 1 (- (harness-ui-popout-pixel-width harness-ui-report--window)
+              (frame-char-width frame)))))
 
 (defun harness-ui-report--image-max-height ()
   "Return the most pixels high an evidence image is in this popout.
 `harness-ui-report-image-max-height', and never more than shows whole
 in the popout with its caption under it."
-  (let ((max harness-ui-report-image-max-height))
-    (max 1 (min (if (floatp max) (round (* max (frame-inner-height))) max)
+  (let ((max harness-ui-report-image-max-height)
+        (frame (harness-ui-report--image-frame)))
+    (max 1 (min (if (floatp max) (round (* max (frame-inner-height frame))) max)
                 (harness-ui-popout-pixel-height 2)))))
 
 (defun harness-ui-report--view-image (path id title)
@@ -214,6 +241,39 @@ TITLE names the task.  Closing it shows the report again."
 
 (defun harness-ui-report--insert-image (path)
   "Insert the image PATH as large as the popout lets it be.
+Drawing it takes a moment, which a screenshot of a whole frame does, so
+a line where it goes says it is loading and the image comes as soon as
+the popout has shown (`harness-ui-image-load'); `harness-ui-report--draw-image'
+is what draws it.
+
+A report drawn into a string for a view that shows it among its own
+text, which has nowhere to draw later, draws the image straight away."
+  (let* ((label (format "[image %s]" (abbreviate-file-name path)))
+         (frame (harness-ui-report--image-frame))
+         (readable (and (display-images-p frame) (not (file-remote-p path)) (file-readable-p path)))
+         (too-large (and readable (harness-ui-image-too-large path frame))))
+    (if (and harness-ui-report--defer-images readable (not too-large))
+        (harness-ui-image-load (harness-ui-report--image-loading label path)
+                               (lambda () (harness-ui-report--draw-image path label)))
+      (harness-ui-report--draw-image path label))))
+
+(defun harness-ui-report--image-loading (label path)
+  "Return the line standing in for the image LABEL of PATH while it draws.
+It reads where the image goes, says it is loading, and clicking it, or
+RET on it, shows the image larger, as the image does
+\(`harness-ui-report--view-image')."
+  (let* ((task harness-ui-report--task)
+         (view (lambda () (interactive) (harness-ui-report--view-image path (plist-get task :id)
+                                                                       (harness-ui-report--title task)))))
+    (concat (propertize (concat label " loading…") 'face 'harness-dim-face
+                        'pointer 'hand 'follow-link t
+                        'help-echo (format "%s\nloading… mouse-1 or RET: view it larger"
+                                           (abbreviate-file-name path))
+                        'keymap (harness-ui-mouse-keymap view))
+            "\n")))
+
+(defun harness-ui-report--draw-image (path label)
+  "Draw the image PATH, labelled LABEL, as large as the popout lets it be.
 It takes the popout's width and up to `harness-ui-report-image-max-height';
 clicking it, or RET on it, shows it larger still, in a popout of its
 own, and dragging it drops the file into another application
@@ -221,10 +281,10 @@ own, and dragging it drops the file into another application
 file, which reading here would block on, a button opening the file is
 inserted instead; so it is for an image too large for Emacs to draw
 \(`harness-ui-image-too-large'), which says so."
-  (let* ((label (format "[image %s]" (abbreviate-file-name path)))
-         (task harness-ui-report--task)
-         (readable (and (display-images-p) (not (file-remote-p path)) (file-readable-p path)))
-         (too-large (and readable (harness-ui-image-too-large path)))
+  (let* ((task harness-ui-report--task)
+         (frame (harness-ui-report--image-frame))
+         (readable (and (display-images-p frame) (not (file-remote-p path)) (file-readable-p path)))
+         (too-large (and readable (harness-ui-image-too-large path frame)))
          (image (and readable (not too-large)
                      (ignore-errors
                        (apply #'create-image path nil nil
@@ -249,16 +309,22 @@ inserted instead; so it is for an image too large for Emacs to draw
 (defun harness-ui-report--insert-call (item task)
   "Insert ITEM, a reference to an earlier tool call of TASK's session, as a link.
 The call's title, status, input and output are shown as the chat shows
-them; [Open in the session] goes to the call.  The output is capped,
-with a button for the rest, unless the report is drawn in full."
+them; [Open in the session] goes to the call.  A call that started a
+sub-agent (`:child-id') names it in a session line, and the text of the
+call opens that session, as the chat's call block does; the buttons
+keep their own keys.  The output is capped, with a button for the rest,
+unless the report is drawn in full."
   (let* ((call-id (plist-get item :call-id))
+         (child (let ((c (plist-get item :child-id)))
+                  (and (stringp c) (not (string-empty-p c)) c)))
          (failed (plist-get item :is-error))
          (output (or (plist-get item :output) ""))
          (limit harness-ui-report-output-limit)
          (expanded (or harness-ui-report--full (gethash call-id harness-ui-report--expanded)))
          (long (and (not expanded) (> (length output) limit)))
          (shown (if long (substring output 0 limit) output))
-         (indent (propertize "    " 'face 'harness-md-code-block)))
+         (indent (propertize "    " 'face 'harness-md-code-block))
+         (start (point)))
     ;; The link line: what it is, then the call as the chat names it.
     (insert "  " (propertize "[tool call]" 'face 'harness-dim-face
                             'help-echo "A link to this call in the session's transcript")
@@ -270,26 +336,38 @@ with a button for the rest, unless the report is drawn in full."
       (insert (propertize "  input: " 'face 'harness-label-face)
               (propertize (harness-truncate-end (string-replace "\n" " " input) 400) 'face 'harness-dim-face)
               "\n"))
+    ;; The sub-agent the call started, as the chat's session line links it.
+    (when child
+      (insert "  " (propertize "session: " 'face 'harness-dim-face))
+      (harness-ui-button (harness-ui-session-name child)
+                         (lambda () (harness-ui-display-session child))
+                         :help (format "Open the session %s" (harness-ui-session-name child)))
+      (insert "\n"))
     (insert (propertize (if failed "  error\n" "  output\n") 'face 'harness-label-face))
     (cond
      ((string-empty-p output) (insert (propertize "  (no output)\n" 'face 'harness-dim-face)))
      (t
       (insert (propertize (if (string-suffix-p "\n" shown) shown (concat shown "\n"))
-                          'face 'harness-md-code-block 'line-prefix indent 'wrap-prefix indent))
-      (when long
-        ;; `harness-ui-button' inserts the button itself, at point.
-        (insert "  ")
-        (harness-ui-button (format "[show all (%d more chars)]" (- (length output) limit))
-                           (lambda ()
-                             (puthash call-id t harness-ui-report--expanded)
-                             (harness-ui-popout-refresh (list 'report (plist-get task :id))))
-                           :help "Show the whole output")
-        (insert "\n")))))
-  (insert "  ")
-  (harness-ui-button "[Open in the session]"
-                     (lambda () (harness-ui-report--open-call item task))
-                     :help "Show the session this call ran in, at the call")
-  (insert "\n"))
+                          'face 'harness-md-code-block 'line-prefix indent 'wrap-prefix indent))))
+    ;; The call's text opens the session it started; the buttons under it
+    ;; are inserted after, so each keeps its own action and keys.
+    (when child
+      (harness-ui-add-session-keys (current-buffer) child (harness-ui-session-name child)
+                                   start (point)))
+    (when long
+      ;; `harness-ui-button' inserts the button itself, at point.
+      (insert "  ")
+      (harness-ui-button (format "[show all (%d more chars)]" (- (length output) limit))
+                         (lambda ()
+                           (puthash call-id t harness-ui-report--expanded)
+                           (harness-ui-popout-refresh (list 'report (plist-get task :id))))
+                         :help "Show the whole output")
+      (insert "\n"))
+    (insert "  ")
+    (harness-ui-button "[Open in the session]"
+                       (lambda () (harness-ui-report--open-call item task))
+                       :help "Show the session this call ran in, at the call")
+    (insert "\n")))
 
 (defun harness-ui-report--call-position (item)
   "Return where ITEM's call is in this chat buffer's transcript, or nil.
@@ -478,6 +556,9 @@ banner of a task's session does.  Images fit WINDOW, by default the
 selected one.  The buttons work wherever the string is inserted."
   (when (harness-ui-report--report task)
     (let ((harness-ui-report--full t)
+          ;; A string has nowhere to draw an image later: they are drawn
+          ;; into it straight away.
+          (harness-ui-report--defer-images nil)
           (harness-ui-report--window (or window (selected-window))))
       (with-temp-buffer
         (harness-ui-report--insert task)

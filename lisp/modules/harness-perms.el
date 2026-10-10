@@ -12,12 +12,23 @@
 ;;                       answer decides; turning it off needs none
 ;;    7 sandbox-guard    shell commands the sandbox would make destructive
 ;;                       (`git worktree prune' and the like) are refused
+;;    8 supervisor       a plugin's stage, not this module's (see below): a
+;;                       session in supervisor mode is denied, for good,
+;;                       every tool but the ones it plans and coordinates
+;;                       with, and bash where the sandbox cannot confine it;
+;;                       it only refuses, and allows nothing
 ;;   10 jail             every path must lie inside an allowed root, or,
 ;;                       for a call that only reads, in the harness itself
 ;;                       or a skills directory; otherwise the user is asked
 ;;                       for the directory
 ;;   20 mode             ask / accept-edits / auto / yolo, plus standing rules
 ;;                       and the tools and reads that never need approval
+;;   28 supervisor approval
+;;                       a plugin's stage (see below): a supervising
+;;                       session's plan (submit_plan, retry_step) asks the
+;;                       user in ask mode only; in every other mode, and
+;;                       when the user is away, it is allowed, so the judge
+;;                       never rules on a plan
 ;;   30 auto             a cheap model judges what is still undecided, in
 ;;                       auto mode and in every non-interactive session;
 ;;                       a denial is put to the user when one is present
@@ -31,9 +42,16 @@
 ;; `:hint', because a denial the model can act on is the difference
 ;; between an autonomous session and one that stalls.  Other modules
 ;; add stages of their own: the session tools have the user confirm
-;; session_move at 6 (`harness-perms-confirm', see Confirmations), and
-;; the tasks module keeps the turns that write a backlog task up
-;; read-only at 25.
+;; session_move at 6 (`harness-perms-confirm', see Confirmations), the
+;; supervisor module denies a supervising session what it may not use at
+;; 8, ahead of the jail and every question, the tasks module keeps the
+;; turns that write a backlog task up read-only at 25, and the supervisor
+;; module has the user alone approve a plan at 28.  A plan changes nothing
+;; by itself, since every call of its workers is decided in the worker's
+;; own session, so `submit_plan' and `retry_step' ask the user in ask mode
+;; only; in accept-edits, auto and yolo mode, and in a non-interactive
+;; session whatever its mode, they are allowed, and the judge never rules
+;; on them.  A standing deny rule still denies them.
 ;;
 ;; Non-interactive mode (the user is away) is no permission policy of
 ;; its own: what the session's mode would ask the user, the auto-mode
@@ -198,7 +216,7 @@ these tools.")
 
 (defconst harness-perms--inspection-tools
   '("emacs_buffers" "emacs_buffer" "emacs_windows" "emacs_describe" "emacs_find_definition" "emacs_messages"
-    "session_info" "session_list" "session_read" "session_search" "session_wait"
+    "session_info" "session_list" "session_read" "session_search" "session_history" "session_wait"
     "task_list" "task_wait" "notification_providers")
   "Tools that only inspect the harness itself or the user's live Emacs.
 Inspecting its own harness is one of the things that make the harness
@@ -1522,7 +1540,7 @@ CTX names the session."
          (entry (and dir (cl-find-if (lambda (e) (harness-perms--within-p (plist-get e :dir) dir)) entries)))
          (shown (and dir (abbreviate-file-name dir))))
     (cond
-     ((null dir) (harness-tool-error "Give path, the directory you need."))
+     ((null dir) (harness-tool-error "Give path, the directory you need"))
      ;; The user edited the prompt's pattern: say what they granted.
      ((and grant (not (equal (plist-get grant :dir) dir)))
       (let ((glob (harness-perms--glob-p (plist-get grant :dir))))

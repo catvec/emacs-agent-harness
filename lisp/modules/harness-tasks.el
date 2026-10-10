@@ -14,7 +14,7 @@
 ;; for a ticket title (see Titles).
 ;;
 ;; A task's session also runs on a shorter context than an interactive
-;; one by default: `harness-tasks-context-limit' (256k tokens) caps the
+;; one by default: `harness-tasks-context-limit' (384k tokens) caps the
 ;; session's context window, so the harness compacts a task sooner and
 ;; hands it a smaller transcript to carry on from.  Set it to nil to
 ;; give task sessions the whole window, like any other session, or to
@@ -24,12 +24,16 @@
 ;; in a fresh worktree on a branch of its own (the `worktree' module),
 ;; its session is told to commit there, and when the agent finishes the
 ;; branch goes through the merge queue (the `merge' module) into the
-;; branch checked out at the project root.  A task is complete only once
-;; its changes are merged.  The merge queue needs a parent session to
-;; merge into, so every project gets one quiet session at its root,
-;; named by `harness-tasks--merge-session-name', that only ever receives
-;; merges.  Conflicts are handed back to the task's own session by the
-;; merge queue; any other failure puts the task in front of the user.
+;; branch checked out at the project root -- a main checkout, which the
+;; queue takes as a target in its own right, with no session behind it.
+;; It is the same queue, the same conflict resolution and the same
+;; events as a sub-agent merging into the session that started it, which
+;; a task's own session may have started: its branch waits in the queue
+;; while those merges into its worktree are still to come, and it may
+;; not hand in until they are through.  A task is complete only once its
+;; changes are merged.  Conflicts are handed back to the task's own
+;; session by the merge queue; any other failure puts the task in front
+;; of the user.
 ;; Archiving a merged task removes its worktree and its merged branch.
 ;; The worktree is locked until its branch is merged, so a `git worktree
 ;; prune' run where it cannot be seen (in another session's sandbox)
@@ -86,6 +90,30 @@
 ;; goes to the highest priority waiting, the oldest of those first.  It
 ;; never stops a task at work, and backlog tasks still wait for someone
 ;; to start them.
+;;
+;; Queue: a project's pending queue can be suspended
+;; (`task/suspend-queue', the board's P, task_control's suspend-queue):
+;; the scheduler then starts none of its waiting tasks on its own, so
+;; the board is clear for one urgent task, which an explicit
+;; `task/start' still starts (as it starts a task whatever the limit).
+;; `task/resume-queue' lets the waiting tasks start again at once.  The
+;; suspension is per project, like the concurrency limit, kept across
+;; restarts in `harness-tasks--queue-name', and shown on the board.
+;;
+;; Return to pending: `task/return-to-pending' (the board's u,
+;; task_control's return-to-pending) stops the turn of a task at work
+;; and puts it back in the pending queue, keeping its session, branch
+;; and worktree: when it starts again its own session carries on where
+;; it stopped, told so by the harness.  It goes to the front of its
+;; priority's queue, ahead of the tasks that never started, the ones
+;; returned first starting first; a higher priority still goes first.
+;; Returning it frees its slot for the other waiting tasks, and starts
+;; nothing itself, so the task waits -- also while the queue is
+;; suspended -- for the next task the queue starts, for
+;; `task/resume-queue', or for an explicit `task/start'.  A message to
+;; a returned task (`task/prompt'), and feedback sending it back with
+;; `task/reject', start it the same way when its queue runs, and are
+;; kept and delivered with the start while it is suspended.
 ;;
 ;; Duplicates: the agent first looks for related tasks on the board
 ;; (task_list).  When one already asks for exactly the same change it
@@ -245,7 +273,7 @@ own setting, from the board or `task/submit', wins over both."
   :type `(choice (const :tag "Configured default" nil) ,@harness-tasks--thinking-levels)
   :group 'harness)
 
-(defcustom harness-tasks-context-limit 256000
+(defcustom harness-tasks-context-limit 384000
   "Most tokens of context a task session uses, or nil for its whole window.
 A task session compacts when its context comes within the usual reserve
 of this limit, so unattended tasks compact earlier than interactive
@@ -410,9 +438,6 @@ complete only when the merge queue has merged that branch."
 (defconst harness-tasks--merge-attempts 3
   "Merges a task may try before it waits for the user.")
 
-(defconst harness-tasks--merge-session-name "Task merges"
-  "Name of the session at a project's root that task branches merge into.")
-
 (defcustom harness-tasks-resume-interrupted t
   "When non-nil, tasks a stopped harness interrupted carry on by themselves.
 A task that was working when the harness stopped (Emacs quit,
@@ -430,6 +455,13 @@ task's write-up: it is written again, or with nil waits for a retry."
   "Your last turn on this task stopped before the task was finished: %s. Check where you left off, then carry on with the task."
   "Message that has a task's session work again after its turn stopped.
 `task/retry' sends it; %s says how the turn stopped.")
+
+(defconst harness-tasks--paused-message
+  "This task was returned to the queue and its turn stopped; it has started again now. Check where you left off -- the files you changed are still there -- then carry on with the task."
+  "Message that starts a task returned to pending again.
+`task/return-to-pending' puts a working task back in the queue; when
+the queue starts it again its own session carries on (see
+`harness-tasks--start-paused'), told so by this message.")
 
 (defcustom harness-tasks-store-in-repository t
   "When non-nil, a git project keeps its tasks inside its repository.
@@ -465,6 +497,12 @@ interrupted carries on.")
 (defconst harness-tasks--backup-suffix ".bak"
   "Suffix of the copy of the global store from before records moved out of it.")
 
+(defconst harness-tasks--queue-name "task-queues.json"
+  "File in the state directory naming the projects whose queue is suspended.
+The suspension is a property of this harness's board, not of the tasks
+themselves, so it is kept out of the task stores, whose format stays as
+it was for harnesses without the feature.")
+
 (defconst harness-tasks--symbol-keys '(:state :outcome :merge-status :priority)
   "Keys whose values are symbols in memory and strings on disk.")
 
@@ -493,6 +531,23 @@ A save skips the stores whose text would not change.")
 (defvar harness-tasks--starting (make-hash-table :test 'equal)
   "Task ids that are starting: worktree or session made, first turn not begun.
 They hold a slot so a burst of submissions never overshoots the limit.")
+
+(defvar harness-tasks--queues (make-hash-table :test 'equal)
+  "Project root -> t while that project's pending queue is suspended.
+A suspended queue starts nothing on its own: `task/suspend-queue' stops
+it, `task/resume-queue' starts it again, and an explicit `task/start'
+always starts its task (see `harness-tasks--schedule').")
+
+(defvar harness-tasks--queues-loaded nil
+  "Non-nil once `harness-tasks--queue-name' was read.
+Reading is lazy, so a test run or a reload reads the file of its own
+state directory the first time it looks at a queue.")
+
+(defvar harness-tasks--returning (make-hash-table :test 'equal)
+  "Task ids whose turn is being stopped by a return to pending.
+The turn ends soon after (`agent/cancel' waits out its grace), and
+`harness-tasks--on-turn-ended' must not take the cut-short turn for the
+task's own end: the task is waiting in the queue, not at work.")
 
 ;;;; Records
 
@@ -541,8 +596,15 @@ that session brings the task back to work, so the session stays."
     view))
 
 (defun harness-tasks--set (id &rest plist)
-  "Merge PLIST into task ID and store it.  Return its view."
-  (harness-tasks--put (apply #'harness-plist-merge (harness-tasks--get id) (list plist))))
+  "Merge PLIST into task ID and store it.  Return its view.
+A change that names `:state' ends what the task waits for (`:waiting',
+see `harness-tasks--on-turn-ended'), unless it sets a wait itself."
+  (let ((task (apply #'harness-plist-merge (harness-tasks--get id) (list plist))))
+    (harness-tasks--put (if (and (plist-member plist :state)
+                                 (not (plist-member plist :waiting))
+                                 (plist-member task :waiting))
+                            (harness-plist-remove task :waiting)
+                          task))))
 
 (defun harness-tasks--intern (task)
   "Turn the string enum values of a stored TASK back into symbols.
@@ -598,20 +660,38 @@ a priority can come from JSON, a tool or a person.  nil is medium."
 
 (defun harness-tasks--start-order (tasks)
   "Return TASKS in the order they get slots (destructively).
-That is the highest priority first, the oldest first among equals."
+That is the highest priority first; among equals a task returned to
+pending (`task/return-to-pending') comes before one that never started,
+the returned ones in the order they were returned, the others oldest
+first.  A returned task waits only behind tasks of a higher priority,
+whose turn outranks its place in line."
   (sort tasks (lambda (a b)
                 (let ((pa (cl-position (harness-tasks--priority a) harness-tasks-priorities))
                       (pb (cl-position (harness-tasks--priority b) harness-tasks-priorities)))
-                  (if (= pa pb)
-                      (< (plist-get a :created) (plist-get b :created))
-                    (> pa pb))))))
+                  (cond
+                   ((/= pa pb) (> pa pb))
+                   ((harness-tasks--returned-p a)
+                    (if (harness-tasks--returned-p b)
+                        (< (plist-get a :returned) (plist-get b :returned))
+                      t))
+                   ((harness-tasks--returned-p b) nil)
+                   (t (< (plist-get a :created) (plist-get b :created))))))))
+
+(defun harness-tasks--returned-p (task)
+  "Non-nil when TASK was returned to pending, so it leads its priority's queue.
+`:returned' is when it was returned; it is cleared when the task starts
+again."
+  (and (plist-get task :returned) t))
 
 (defun harness-tasks--refinement-p (task)
-  "Non-nil when a turn of TASK's session refines it rather than doing it.
+  "Non-nil when a turn of TASK's session refines it rather than does it.
 That is while it is refining, and while it waits in the backlog with
-the session that wrote it up."
+the session that wrote it up -- never a task returned to pending, whose
+session has the work and whose next turn carries on with it."
   (or (eq (plist-get task :state) 'refining)
-      (and (eq (plist-get task :state) 'pending) (plist-get task :session) t)))
+      (and (eq (plist-get task :state) 'pending) (plist-get task :session)
+           (not (harness-tasks--returned-p task))
+           t)))
 
 (defun harness-tasks--turn-p (task)
   "Non-nil while a turn of TASK's session runs (from the moment it is prompted)."
@@ -865,10 +945,12 @@ has it; one that cannot be written leaves its records there."
       (error (harness-log 'error "tasks: could not save the task records: %S" err)))))
 
 (defun harness-tasks--forget-stores ()
-  "Forget what this process read and wrote of the stores."
+  "Forget what this process read and wrote of the stores and of the queues."
   (clrhash harness-tasks--stores)
   (clrhash harness-tasks--written)
-  (setq harness-tasks--backup-checked nil))
+  (clrhash harness-tasks--queues)
+  (setq harness-tasks--backup-checked nil
+        harness-tasks--queues-loaded nil))
 
 (defun harness-tasks--load ()
   "Read the task records from their stores once.
@@ -920,10 +1002,14 @@ user, whose answer the queue then waits for too."
 (defun harness-tasks--view (task)
   "Return TASK as methods and events show it: with its `:column'.
 Its `:priority' is always there: a record from before priorities shows
-the default, medium."
+the default, medium.  `:queue-suspended' is there, true, while the
+task's project's pending queue is suspended."
   ;; `append' copies TASK, so `plist-put' changes only the view.
-  (plist-put (append task (list :column (harness-tasks--column task)))
-             :priority (harness-tasks--priority task)))
+  (let ((view (plist-put (append task (list :column (harness-tasks--column task)))
+                         :priority (harness-tasks--priority task))))
+    (if (harness-tasks--task-suspended-p task)
+        (append view (list :queue-suspended t))
+      view)))
 
 ;;;; Git
 
@@ -955,19 +1041,11 @@ the default, medium."
         (harness-call-async 'worktree/create root :branch (harness-tasks--branch-name task))
         (lambda (wt) (append (list :base base) wt)))))))
 
-(defun harness-tasks--merge-target (root)
-  "Return the id of the session at project ROOT that task branches merge into."
-  (let ((existing (cl-find-if (lambda (s) (and (equal (plist-get s :name) harness-tasks--merge-session-name)
-                                               (equal (plist-get s :cwd) root)
-                                               (null (plist-get s :worktree))))
-                              (harness-call 'session/list (list :project root)))))
-    (plist-get (or existing
-                   (harness-call 'session/create :cwd root :name harness-tasks--merge-session-name))
-               :id)))
-
 (defun harness-tasks--enqueue-merge (id)
   "Queue task ID's branch for the merge queue, or put the task before the user.
-`:merge-queued' records when the branch joined the queue."
+The target is the project root: the main checkout, which the merge
+queue takes as a target of its own.  `:merge-queued' records when the
+branch joined the queue."
   (let* ((task (harness-tasks--get id))
          (attempts (1+ (or (plist-get task :merge-attempts) 0))))
     (cond
@@ -978,7 +1056,7 @@ the default, medium."
      ((harness-call 'merge/status (plist-get task :session)) nil)
      (t
       (condition-case err
-          (let ((target (harness-tasks--merge-target (plist-get task :project))))
+          (let ((target (plist-get task :project)))
             (harness-tasks--set id :state 'merging :merge-status 'queued :merge-attempts attempts
                                 :merge-target target :merge-queued (float-time) :outcome nil :error nil)
             (harness-call 'merge/enqueue (plist-get task :session) target
@@ -1074,7 +1152,7 @@ is not merged yet.  Return a promise, or nil when there is nothing to do."
 Before the task starts they write it up (`harness-tasks--refine-prompt');
 afterwards they learn how to hand the finished work in, and, in a
 worktree, how it reaches the main branch -- or, in the main tree
-(`harness-tasks--main-tree-p'), that the work takes effect there."
+\(`harness-tasks--main-tree-p'), that the work takes effect there."
   (let ((task (harness-tasks--by-session (plist-get session :id))))
     (cond
      ((and task (harness-tasks--refinement-p task)
@@ -1291,6 +1369,71 @@ listed under it (`session/btw'), so only the board's have no parent."
       (concat prompt "\n\n" harness-tasks--btw-prompt "\n")
     prompt))
 
+;;;; Queue suspension
+;;
+;; A project's pending queue can be suspended: the scheduler then starts
+;; none of its waiting tasks on its own, so the board is clear for one
+;; urgent task, which `task/start' still starts (as it starts a task
+;; whatever the limit).  The suspension is per project, like
+;; `harness-tasks-max-running', and outlives a restart: the projects
+;; whose queue is suspended are named in `harness-tasks--queue-name' in
+;; the state directory.  `task/suspend-queue', `task/resume-queue' and
+;; `task/toggle-queue' (the board's P, task_control's suspend-queue and
+;; resume-queue) are the only ways it changes; resuming schedules at
+;; once, so the waiting tasks start again up to the limit.
+
+(defun harness-tasks--queue-file ()
+  "Return the path of the file naming the projects with a suspended queue."
+  (expand-file-name harness-tasks--queue-name (harness-tasks--state-directory)))
+
+(defun harness-tasks--queue-key (project)
+  "Return PROJECT as the key suspended queues are kept under, or nil."
+  (and project (file-name-as-directory (expand-file-name project))))
+
+(defun harness-tasks--load-queues ()
+  "Read the suspended queues once from this harness's state directory."
+  (unless harness-tasks--queues-loaded
+    (setq harness-tasks--queues-loaded t)
+    (clrhash harness-tasks--queues)
+    (dolist (project (harness-json-parse (harness-read-file (harness-tasks--queue-file))))
+      (when (stringp project)
+        (puthash (harness-tasks--queue-key project) t harness-tasks--queues)))))
+
+(defun harness-tasks--save-queues ()
+  "Write the suspended queues now; an empty set deletes the file."
+  (let ((projects (sort (hash-table-keys harness-tasks--queues) #'string<))
+        (path (harness-tasks--queue-file)))
+    (if projects
+        (harness-tasks--write-json path (harness-json-array projects))
+      (harness-tasks--delete-json path))))
+
+(defun harness-tasks--suspended-p (project)
+  "Non-nil when PROJECT's pending queue is suspended."
+  (harness-tasks--load-queues)
+  (and (harness-tasks--queue-key project)
+       (gethash (harness-tasks--queue-key project) harness-tasks--queues)
+       t))
+
+(defun harness-tasks--task-suspended-p (task)
+  "Non-nil when TASK's project's pending queue is suspended."
+  (harness-tasks--suspended-p (harness-tasks--slot-project task)))
+
+(defun harness-tasks--set-suspended (project suspended)
+  "Suspend PROJECT's queue when SUSPENDED, else resume it; return the state.
+The change is written at once and emitted as `task/queue' (PROJECT
+SUSPENDED), which the boards follow."
+  (harness-tasks--load-queues)
+  (let* ((key (harness-tasks--queue-key project))
+         (now (and suspended t))
+         (was (and key (gethash key harness-tasks--queues) t)))
+    (when (and key (not (eq now was)))
+      (if now
+          (puthash key t harness-tasks--queues)
+        (remhash key harness-tasks--queues))
+      (harness-tasks--save-queues)
+      (harness-emit 'task/queue key now))
+    now))
+
 ;;;; Scheduling
 ;;
 ;; `harness-tasks-max-running' limits each project on its own: every
@@ -1332,7 +1475,9 @@ and the session list shows them under it."
   "Non-nil when TASK takes one of its project's slots.
 It does while it starts, and while it is active with its own session
 running or blocked mid-turn: one waiting on the user keeps its slot, as
-its turn goes on once answered.  Only that session counts, and only
+its turn goes on once answered.  So does one that waits on work its
+session left running (`:waiting', see `agent/outstanding'), such as the
+workers of a supervisor's plan.  Only that session counts, and only
 when it is top-level (`harness-tasks--top-level-p'): the sub-agents,
 forks and conflict resolvers working for a task take no slot of their
 own, and neither does a sub-agent made a task (`task/adopt'), which
@@ -1343,7 +1488,8 @@ the conflicts, and nor does writing a backlog task up (refining)."
       (and (eq (plist-get task :state) 'active)
            (let ((session (harness-tasks--session task)))
              (and (harness-tasks--top-level-p session)
-                  (memq (plist-get session :status) '(running blocked)))))))
+                  (or (plist-get task :waiting)
+                      (memq (plist-get session :status) '(running blocked))))))))
 
 (defun harness-tasks--slot-project (task)
   "Return the project whose slots TASK takes: its `:project', else its `:cwd'.
@@ -1370,21 +1516,29 @@ sub-agent or the merge queue.  `most-positive-fixnum' without a limit."
   (and (eq (plist-get task :state) 'pending) (not (harness-tasks--backlog-p task))
        (not (plist-get task :archived))))
 
-(defun harness-tasks--schedule ()
+(defun harness-tasks--schedule (&optional skip)
   "Start the queued tasks of every project while it has slots free.
 They go by priority, highest first, the oldest first among equals
 \(`harness-tasks--start-order').  Projects have slots of their own
 \(`harness-tasks--free-slots'): the walk keeps what is left of each
 one's, so a project at its limit holds up only its own tasks.  Backlog
-tasks wait for `task/start' instead."
+tasks wait for `task/start' instead, and so do the tasks of a project
+whose queue is suspended (`task/suspend-queue'): the suspension holds
+back the starts the scheduler makes on its own, never an explicit
+`task/start'.  SKIP, a task id, is left out of this pass: returning a
+task to pending starts it again with the next pass, not with the one
+that stops it."
+  (harness-tasks--load-queues)
   (let ((free (make-hash-table :test 'equal)))
     (dolist (task (harness-tasks--start-order (harness-tasks--sorted #'harness-tasks--queued-p)))
-      (let* ((project (harness-tasks--slot-project task))
-             (left (or (gethash project free) (harness-tasks--free-slots project))))
-        (when (> left 0)
-          (cl-decf left)
-          (harness-tasks--start task))
-        (puthash project left free)))))
+      (unless (or (equal (plist-get task :id) skip)
+                  (harness-tasks--task-suspended-p task))
+        (let* ((project (harness-tasks--slot-project task))
+               (left (or (gethash project free) (harness-tasks--free-slots project))))
+          (when (> left 0)
+            (cl-decf left)
+            (harness-tasks--start task))
+          (puthash project left free))))))
 
 (defun harness-tasks--on-config-changed (key &rest _)
   "Start the tasks a new limit lets through, when KEY is the limit.
@@ -1423,18 +1577,24 @@ harness.  The task's prompt and the user's feedback are the user's."
 (defun harness-tasks--start (task)
   "Start TASK: make its worktree in a git project, then its session.
 A backlog task already has the session that wrote it up; that session
-moves into the worktree and does the work.  A task started again after a
-restart cut its start short keeps the worktree it got.  A task that
-declared `:main-tree' gets no worktree: its session works in the
-project's main checkout, where it was submitted from (`task/submit')."
+moves into the worktree and does the work.  A task returned to pending
+has a session that already worked on it: that session stays where it is
+and carries on (`harness-tasks--start-paused'), no new worktree made.
+A task started again after a restart cut its start short keeps the
+worktree it got.  A task that declared `:main-tree' gets no worktree:
+its session works in the project's main checkout, where it was
+submitted from (`task/submit')."
   (let ((id (plist-get task :id))
         (worktree (plist-get task :worktree))
-        (launch (if (harness-tasks--session task)
-                    #'harness-tasks--continue-session
-                  #'harness-tasks--open-session)))
+        (launch (cond ((and (harness-tasks--returned-p task) (harness-tasks--session task)
+                            (harness-tasks--work-begun-p task))
+                       #'harness-tasks--start-paused)
+                      ((harness-tasks--session task)
+                       #'harness-tasks--continue-session)
+                      (t #'harness-tasks--open-session))))
     (puthash id t harness-tasks--starting)
     (harness-tasks--set id :state 'active :outcome nil :error nil :duplicate-of nil
-                        :started (float-time) :finished nil)
+                        :returned nil :started (float-time) :finished nil)
     (cond
      ((harness-tasks--main-tree-p task)
       ;; No worktree even where the project has them: the main checkout.
@@ -1479,8 +1639,11 @@ so has it compact sooner."
 They are the current work: running, pending and blocked tasks.  Review,
 done and archived tasks are history and are left alone.")
 
-(defconst harness-tasks-pref-keys '(:model :thinking :permission-mode :non-interactive)
-  "Session settings a task carries until its next start.")
+(defconst harness-tasks-pref-keys '(:model :thinking :permission-mode :non-interactive :supervisor)
+  "Session settings a task carries until its next start.
+`:supervisor' is the session `:ext' key of the supervisor module, t or
+`:false'; a harness without that module keeps the setting on the task
+and does nothing with it (see `harness-tasks--apply-supervisor').")
 
 (defun harness-tasks--non-interactive-p (task)
   "Non-nil when TASK starts non-interactive.
@@ -1525,8 +1688,9 @@ adds a hint to it, so a session something else already changed (`all'
 commands change sessions and tasks alike) is not told twice.  A
 setting the policy fixes for every session is refused before anything
 changes (see `harness-session-check-policy').  A `:priority' is the
-task's own, never its session's: it orders the queue.  Return TASK's
-view."
+task's own, never its session's: it orders the queue.  `:supervisor'
+is the session's `:ext' switch, not a `session/update' setting, so it
+is applied by `harness-tasks--apply-supervisor'.  Return TASK's view."
   (let* ((id (plist-get task :id))
          (prefs (cl-loop for k in harness-tasks-pref-keys
                          when (plist-member settings k)
@@ -1541,11 +1705,27 @@ view."
       (let* ((session (harness-tasks--session task))
              (changes (and session
                            (cl-loop for (k v) on prefs by #'cddr
-                                    unless (harness-setting-equal-p k v (plist-get session k))
+                                    unless (or (eq k :supervisor)
+                                               (harness-setting-equal-p k v (plist-get session k)))
                                     append (list k v)))))
         (when (and changes (harness-method-exists-p 'session/update))
-          (apply #'harness-call 'session/update (plist-get session :id) changes))))
+          (apply #'harness-call 'session/update (plist-get session :id) changes)))
+      (harness-tasks--apply-supervisor task settings))
     (harness-call 'task/get id)))
+
+(defun harness-tasks--apply-supervisor (task settings)
+  "Turn the supervisor mode of TASK's session to what SETTINGS names.
+Supervisor mode is per session, in its `:ext' plist, and the module
+that governs sessions is what sets it (`supervisor/set'); without that
+module the task keeps the setting for when a harness that has it starts
+it, and a write-up's session is left alone, as it only reads: the
+setting means how the work runs, not how it is written up."
+  (when (and (plist-member settings :supervisor)
+             (plist-get task :session)
+             (not (harness-tasks--refinement-p task))
+             (harness-method-exists-p 'supervisor/set))
+    (harness-call 'supervisor/set (plist-get task :session)
+                  (if (harness-json-true-p (plist-get settings :supervisor)) t :false))))
 
 (defun harness-tasks--open-session (id cwd worktree)
   "Create task ID's session in CWD (in WORKTREE, when non-nil) and prompt it.
@@ -1766,6 +1946,86 @@ takes the task's title."
                                            (harness-tasks--from-harness))
                        (lambda (e) (harness-tasks--fail id e))))
     (error (harness-tasks--fail id err))))
+
+(defun harness-tasks--start-paused (id cwd worktree)
+  "Start task ID again in the session that already worked on it.
+That is a task returned to pending (`task/return-to-pending'): its
+session stays in CWD, its worktree when it has one, with everything it
+changed, and the harness tells it to carry on where it stopped
+\(`harness-tasks--paused-message').  No session and no worktree is made:
+the task keeps the ones it has, and they keep their settings.  Messages
+kept while the task waited (`harness-tasks--queue-message') go to the
+session with the start, so nothing sent it is lost.  WORKTREE is the
+task's worktree, if any, for the hint."
+  (condition-case err
+      (let* ((task (harness-tasks--get id))
+             (sid (plist-get task :session)))
+        (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
+          (harness-call 'session/resume sid))
+        (harness-call 'session/hint sid
+                      (cond
+                       (worktree (format "Task started again in %s on branch %s"
+                                         (abbreviate-file-name worktree) (plist-get task :branch)))
+                       ((harness-tasks--main-tree-p task)
+                        (format "Task started again in the main tree %s" (abbreviate-file-name cwd)))
+                       (t "Task started again")))
+        (harness-catch (harness-call-async 'agent/prompt sid
+                                           (list (list :type "text" :text harness-tasks--paused-message))
+                                           (harness-tasks--from-harness))
+                       (lambda (e) (harness-tasks--fail id e)))
+        (harness-tasks--deliver-queued id sid))
+    (error (harness-tasks--fail id err))))
+
+(defun harness-tasks--queue-message (id text &optional attachments from)
+  "Keep a message for task ID, to deliver when it starts again.
+A message to a task returned to pending while its queue is suspended
+(`harness-tasks--task-suspended-p') is kept this way instead of
+starting the task: TEXT, ATTACHMENTS and who FROM it was
+\(`harness-sender-session' or nil for the user) go to the session with
+the task's next start.  Return the task's view."
+  (let ((task (harness-tasks--get id)))
+    (harness-tasks--set id :queued (append (plist-get task :queued)
+                                           (list (list :text text :attachments attachments :from from))))))
+
+(defun harness-tasks--deliver-queued (id session-id)
+  "Send the messages kept for task ID to SESSION-ID, in order, and forget them.
+Each goes as a message of its own, with the sender it was sent with: a
+message from another session's agent keeps saying so, the user's is the
+user's."
+  (let ((queued (plist-get (harness-tasks--get id) :queued)))
+    (when queued (harness-tasks--set id :queued nil))
+    (dolist (item queued)
+      (harness-catch (harness-call-async 'agent/prompt session-id
+                                         (harness-tasks--blocks
+                                          (list :prompt (plist-get item :text)
+                                                :attachments (plist-get item :attachments)))
+                                         (let ((from (plist-get item :from)))
+                                           (and from (list :from from))))
+                     (lambda (e) (harness-tasks--fail id e))))))
+
+(defun harness-tasks--to-pending (id &rest plist)
+  "Put task ID back in the pending queue, with PLIST merged in.
+Its session, branch and worktree stay; `:returned' is now, so it leads
+its priority's queue (see `harness-tasks--start-order'), and its state
+before is forgotten: no outcome, no round of feedback pending, no
+verification.  Return the task's view."
+  (apply #'harness-tasks--set id
+         :state 'pending :returned (float-time) :backlog nil
+         :outcome nil :error nil :waiting nil :finished nil
+         :merge-status nil :merge-attempts 0
+         :verified nil :verified-at nil
+         :recap nil :recap-at nil :recap-turns nil :recap-tools nil
+         plist))
+
+(defun harness-tasks--stop-turn (id)
+  "Stop the turn of task ID's session, if one runs, for a return to pending.
+`harness-tasks--returning' says so until the turn ends, and the turn
+stops as `task/cancel' stops a working task: without waiting for it."
+  (let ((sid (plist-get (harness-tasks--get id) :session)))
+    (when (and sid (harness-tasks--turn-p (harness-tasks--get id)))
+      (puthash id t harness-tasks--returning)
+      (when (harness-method-exists-p 'agent/cancel)
+        (harness-call 'agent/cancel sid)))))
 
 ;;;; Refinement
 
@@ -2074,10 +2334,23 @@ task's worktree is locked again for the new work."
      ((and (eq (plist-get task :state) 'merging) (plist-get task :merge-status)) nil)
      (t (harness-tasks--relock-worktree task)
         (apply #'harness-tasks--set (plist-get task :id) :state 'active :outcome nil :error nil :finished nil
-               :merged nil :archived nil
+               :merged nil :archived nil :returned nil
                (append
                 (unless (eq (plist-get task :state) 'merging) (list :verified nil :verified-at nil))
                 (when (memq (plist-get task :state) '(review done)) (list :reopened (float-time)))))))))
+
+(defun harness-tasks--outstanding (task)
+  "Return what runs for TASK's session outside its own turn, or nil.
+That is the text of `agent/outstanding': work a module started for the
+session that goes on without its turn, a supervisor plan's workers say.
+Nil when no module reports any, and without the agent module."
+  (let ((sid (plist-get task :session)))
+    (when (and sid (harness-method-exists-p 'agent/outstanding))
+      (condition-case err
+          (harness-call 'agent/outstanding sid)
+        (error (harness-log 'warn "task %s: asking what its session has outstanding failed: %s"
+                            (plist-get task :id) (harness-error-message err))
+               nil)))))
 
 (defun harness-tasks--on-turn-ended (session-id reason)
   "Advance SESSION-ID's task when its turn ended with REASON.
@@ -2086,12 +2359,33 @@ until the user verified it; after that, or without review, it completes
 the task outside git -- in the main tree too, which has nothing to
 merge -- and queues its merge inside.  A round that ends without a
 report handed in gets one saying so (`harness-tasks--missing-report').
-A refinement turn puts its write-up in the backlog."
+A refinement turn puts its write-up in the backlog.  A clean end of a
+turn is not the end of the work while something the session started
+still runs outside it (`harness-tasks--outstanding'): the task then
+neither goes to review nor merges, but stays active, with the text of
+what runs as its `:waiting' until its state next changes.  The turn the
+session takes when that work is done, or once nothing runs any more,
+ends the task as usual.
+
+The turn a return to pending stopped is the exception: the task waits
+in the queue, and this turn says nothing about it.  It is left out of
+the scheduling pass that follows, so the return never starts the task
+again (see `harness-tasks--schedule'); a start the task got while that
+turn was still stopping did steer the turn being cancelled and so went
+nowhere, and is made here, once the turn is gone."
   (remhash session-id harness-tasks--refine-calls)
   (when-let* ((task (harness-tasks--by-session session-id)))
-    (let ((id (plist-get task :id)))
+    (let ((id (plist-get task :id))
+          (waiting nil)
+          (stopped nil))
       (remhash id harness-tasks--starting)
       (cond
+       ((gethash id harness-tasks--returning)
+        (remhash id harness-tasks--returning)
+        (setq stopped t)
+        (when (eq (plist-get task :state) 'active)
+          (harness-log 'info "task %s: the turn it was returned from ended after it started again; starting it once more" id)
+          (harness-tasks--start-paused id (plist-get task :worktree) (plist-get task :worktree))))
        ((harness-tasks--refinement-p task) (harness-tasks--finish-refinement id reason))
        ((not (eq reason 'end-turn))
         (unless (plist-get task :merge-status)
@@ -2099,6 +2393,8 @@ A refinement turn puts its write-up in the backlog."
        ((plist-get task :merge-status) nil) ; a conflict turn; merge/finished decides
        ;; Merged mid-turn: done, or in review when that merge needs one.
        ((and (memq (plist-get task :state) '(done review)) (harness-tasks--merged-p task)) nil)
+       ((setq waiting (harness-tasks--outstanding task))
+        (harness-tasks--set id :state 'active :waiting waiting))
        ((harness-tasks--needs-review-p task)
         (apply #'harness-tasks--to-review id :outcome reason :error nil :finished (float-time)
                (harness-tasks--missing-report task)))
@@ -2108,7 +2404,9 @@ A refinement turn puts its write-up in the backlog."
         (harness-tasks--enqueue-merge id))
        (t (apply #'harness-tasks--to-done id 'finished :outcome reason :finished (float-time)
                  (harness-tasks--missing-report task))))
-      (harness-run-soon #'harness-tasks--schedule))))
+      (if stopped
+          (harness-run-soon #'harness-tasks--schedule id)
+        (harness-run-soon #'harness-tasks--schedule)))))
 
 (defun harness-tasks--on-pending-changed (session-id &rest _)
   "Re-announce SESSION-ID's task: requests coming and going move its column."
@@ -2247,14 +2545,17 @@ It starts at once when its project has a slot free, otherwise it waits
 as pending: `harness-tasks-max-running' limits each project on its own.
 OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode',
 `:thinking', `:non-interactive' (an explicit false turns it off),
-`:priority' (low, medium or high, as a symbol or a string; medium by
-default: waiting tasks start by priority, see `harness-tasks-priorities')
-and `:main-tree' (work in the project's main checkout, with no worktree,
-no branch and nothing to merge; for work that has to touch the checkout
-itself, such as cleaning up uncommitted changes); missing ones come
-from the `harness-tasks-' defaults, else from what the directory
-configures: a task is interactive unless `harness-tasks-non-interactive'
-or the directory's `harness-non-interactive' is on.  With `:refine'
+`:supervisor' (t to plan and delegate, an explicit false to work
+hands-on; without it the task takes `harness-supervisor-tasks' when it
+starts, and without that module nothing), `:priority' (low, medium or
+high, as a symbol or a string; medium by default: waiting tasks start
+by priority, see `harness-tasks-priorities') and `:main-tree' (work in
+the project's main checkout, with no worktree, no branch and nothing
+to merge; for work that has to touch the checkout itself, such as
+cleaning up uncommitted changes); missing ones come from the
+`harness-tasks-' defaults, else from what the directory configures: a
+task is interactive unless `harness-tasks-non-interactive' or the
+directory's `harness-non-interactive' is on.  With `:refine'
 the task goes to the backlog instead: an agent writes it up (state
 refining), then it waits in pending until `task/start' -- unless the
 agent finds the board has it already, and refuses it as a duplicate.
@@ -2281,6 +2582,9 @@ session takes it."
     (when (plist-member opts :non-interactive)
       (setq task (plist-put task :non-interactive
                             (if (harness-json-true-p (plist-get opts :non-interactive)) t :false))))
+    (when (plist-member opts :supervisor)
+      (setq task (plist-put task :supervisor
+                            (if (harness-json-true-p (plist-get opts :supervisor)) t :false))))
     (when main-tree
       (setq task (append task (list :main-tree t))))
     (when refine
@@ -2310,11 +2614,9 @@ waits in pending until `task/start'."
 
 (defun harness-tasks--adoptable-p (session)
   "Non-nil when SESSION may become a task.
-It must be open, not a task already, not a merge target and not a
-conversation about the board."
+It must be open, not a task already and not a conversation about the board."
   (and (not (eq (plist-get session :status) 'inactive))
        (not (harness-tasks--by-session (plist-get session :id)))
-       (not (equal (plist-get session :name) harness-tasks--merge-session-name))
        (not (harness-tasks--btw-p session))))
 
 (harness-defmethod task/adoptable (&optional cwd)
@@ -2401,30 +2703,42 @@ no limit (`harness-tasks-max-running'; a board shows it as \"N at a
 time\").  Model, thinking and non-interactive are the values a new task would
 really get: the task defaults, else what the project configures.  So
 non-interactive is on only when `harness-tasks-non-interactive' is, or
-`harness-non-interactive' for the project.  `:require-verification'
-is t while finished work waits for the user's review, else false (not
-nil, which JSON could not tell from a harness that does not say):
-`harness-tasks-require-verification'."
+`harness-non-interactive' for the project.  `:supervisor' is there
+only when the supervisor module is loaded, and is what a task without
+a setting of its own would get, `harness-supervisor-tasks';
+`:require-verification' is t while finished work waits for the user's
+review, else false (not nil, which JSON could not tell from a harness
+that does not say): `harness-tasks-require-verification'.
+`:queue-suspended' is t while the project's pending queue is suspended
+\(`task/suspend-queue')."
   (let ((root (and cwd (harness-tasks--project cwd))))
-    (list :max-running harness-tasks-max-running
-          :permission-mode harness-tasks-permission-mode
-          :non-interactive (and (or harness-tasks-non-interactive
-                                    (harness-json-true-p (harness-tasks--config 'harness-non-interactive root)))
-                                t)
-          :require-verification (if harness-tasks-require-verification t :false)
-          :model (or harness-tasks-model (harness-tasks--config 'harness-model root))
-          :thinking (or harness-tasks-thinking (harness-tasks--config 'harness-thinking root))
-          :worktrees (and root (harness-tasks--git-p root) t))))
+    (append
+     (list :max-running harness-tasks-max-running
+           :queue-suspended (if (harness-tasks--suspended-p root) t :false)
+           :permission-mode harness-tasks-permission-mode
+           :non-interactive (and (or harness-tasks-non-interactive
+                                     (harness-json-true-p (harness-tasks--config 'harness-non-interactive root)))
+                                 t)
+           :require-verification (if harness-tasks-require-verification t :false)
+           :model (or harness-tasks-model (harness-tasks--config 'harness-model root))
+           :thinking (or harness-tasks-thinking (harness-tasks--config 'harness-thinking root))
+           :worktrees (and root (harness-tasks--git-p root) t))
+     ;; A harness without the supervisor module has no such setting to
+     ;; report, and its tasks work as they always did.
+     (and (boundp 'harness-supervisor-tasks)
+          (list :supervisor (if harness-supervisor-tasks t :false))))))
 
 (harness-defmethod task/set-all (settings &optional filter)
   "Apply SETTINGS to every current task FILTER selects; return the ids changed.
 SETTINGS is a plist of `:model', `:thinking', `:permission-mode',
-`:non-interactive' (an explicit false turns it off) and `:priority'
-\(low, medium or high, as `task/set-priority' reads it).  Only the
-settings given change: without `:priority' (or with nil) every task
-keeps its own, so a bulk edit sets priorities only when asked to.  A
-started task's session gets the session settings too, so its next turn
-uses them; a pending task keeps them for when it starts.  A priority is
+`:non-interactive' (an explicit false turns it off), `:supervisor' (t
+supervises, an explicit false works hands-on) and `:priority' (low,
+medium or high, as `task/set-priority' reads it).  Only the settings
+given change: without `:priority' (or with nil) every task keeps its
+own, so a bulk edit sets priorities only when asked to.  A started
+task's session gets the session settings too, so its next turn uses
+them; a pending task keeps them for when it starts, and the session of
+a backlog write-up keeps them until the task starts.  A priority is
 the task's own and orders the queue (it starts nothing).  FILTER:
 `:columns' (default `harness-tasks-bulk-columns', the running, pending
 and blocked tasks), `:ids' to name tasks outright, `:except' ids to
@@ -2472,16 +2786,74 @@ closed, and still be the one the task goes on in."
             (not (harness-json-true-p (plist-get task :archived)))
             (memq (harness-tasks--column task) columns))))))
 
+(harness-defmethod task/suspend-queue (&optional cwd)
+  "Suspend the pending queue of CWD's project (the current one by default).
+No waiting task of that project then starts on its own: the board is
+clear for one urgent task, which `task/start' starts as it always does,
+whatever the limit.  A task already waiting waits on, and one at work
+goes on.  The suspension is per project and kept, so it outlives a
+restart.  Return (:project PROJECT :suspended t)."
+  (let ((project (harness-tasks--project (or cwd default-directory))))
+    (harness-tasks--set-suspended project t)
+    (list :project project :suspended t)))
+
+(harness-defmethod task/resume-queue (&optional cwd)
+  "Start starting the pending tasks of CWD's project again, at once.
+They start by priority, the oldest first among equals, a task returned
+to pending first of its priority, up to `harness-tasks-max-running'.
+Return (:project PROJECT :suspended :false)."
+  (let ((project (harness-tasks--project (or cwd default-directory))))
+    (harness-tasks--set-suspended project nil)
+    (harness-tasks--schedule)
+    (list :project project :suspended :false)))
+
+(harness-defmethod task/toggle-queue (&optional cwd)
+  "Suspend the pending queue of CWD's project if it is running, else resume it.
+Return (:project PROJECT :suspended STATE), the new state: t while the
+queue is suspended, :false once it runs again."
+  (let* ((project (harness-tasks--project (or cwd default-directory)))
+         (suspended (not (harness-tasks--suspended-p project))))
+    (harness-tasks--set-suspended project suspended)
+    (when (not suspended) (harness-tasks--schedule))
+    (list :project project :suspended (if suspended t :false))))
+
 (harness-defmethod task/start (id)
   "Start pending task ID now, even when every slot of its project is taken.
 A backlog task starts too, and so does one whose write-up stopped (with
-the prompt it has), but not one an agent is writing up right now."
+the prompt it has), but not one an agent is writing up right now.  A
+task returned to pending starts in the session that already worked on
+it, which carries on where it stopped (`harness-tasks--start-paused').
+Its project's queue being suspended (task/suspend-queue) does not hold
+this up: an explicit start always starts the task."
   (let ((task (harness-tasks--get id)))
     (unless (memq (plist-get task :state) '(pending refining)) (error "Task %s already started" id))
     (when (harness-tasks--turn-p task)
       (error "Task %s is still being written up; wait for it or stop it" id))
     (harness-tasks--start task)
     (harness-call 'task/get id)))
+
+(harness-defmethod task/return-to-pending (id)
+  "Stop the turn of active task ID and put it back in the pending queue.
+The task keeps its session, branch and worktree, so it carries on where
+it stopped when it starts again (`harness-tasks--start-paused'), and it
+goes to the front of its priority's queue: ahead of the tasks that
+never started, behind only tasks of a higher priority, and among the
+returned ones the first returned starts first.  Returning it frees its
+slot for the other waiting tasks; the return itself starts nothing,
+suspended or not, so the task waits for the next task the queue starts,
+for `task/resume-queue', or for an explicit `task/start'.  Return the
+task's view."
+  (let ((task (harness-tasks--get id)))
+    (unless (eq (plist-get task :state) 'active)
+      (error "Task %s is not at work (%s); only a task at work can be returned to pending"
+             id (plist-get task :state)))
+    (when (gethash id harness-tasks--starting)
+      (error "Task %s is still starting; wait for it or stop it" id))
+    ;; The queue first, then the turn: a cancel that ends the turn at once
+    ;; then finds the task waiting, not at work (`harness-tasks--returning').
+    (prog1 (harness-tasks--to-pending id)
+      (harness-tasks--stop-turn id)
+      (harness-tasks--schedule id))))
 
 (harness-defmethod task/set-priority (id priority)
   "Give task ID priority PRIORITY: low, medium or high; return the task.
@@ -2526,25 +2898,43 @@ OPTS `:from' says who sent the message when the user did not, as
 Before a backlog task starts, TEXT is feedback on its write-up.  While
 the task waits for review, the user's TEXT sends it back as the
 feedback, as `task/reject' does; another session's is no review and
-does not (`harness-tasks--on-message')."
+does not (`harness-tasks--on-message').
+
+A task returned to pending is the message's when it starts: while its
+queue is suspended the message is kept on the task and delivered with
+the start (`harness-tasks--queue-message'), so it does not get around
+the suspension; otherwise it starts the task now, as an explicit
+`task/start' would, and the message follows the start's own carry-on."
   (let ((task (harness-tasks--get id))
         (from (let ((f (plist-get opts :from))) (and (harness-sender-kind f) f))))
     (unless (harness-tasks--session task) (error "Task %s has no session yet" id))
     (when (plist-get task :worktree-removed)
       (error "Task %s was archived and its worktree removed; submit a new task" id))
-    (let ((sid (plist-get task :session))
-          (blocks (harness-tasks--blocks (list :prompt text :attachments attachments)))
-          (opts (and from (list :from from))))
-      (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
-        (harness-call 'session/resume sid))
-      (when (plist-get task :archived) (harness-tasks--set id :archived nil))
-      (harness-tasks--set id :merge-attempts 0
-                          :recap nil :recap-at nil :recap-turns nil :recap-tools nil)
-      (if (harness-tasks--refinement-p task)
-          (harness-tasks--refine-turn id sid blocks opts)
-        (harness-catch (harness-call-async 'agent/prompt sid blocks opts)
-                       (lambda (e) (harness-tasks--fail id e))))
-      t)))
+    (cond
+     ((and (harness-tasks--returned-p task) (harness-tasks--task-suspended-p task))
+      (harness-log 'info "task %s: keeping the message until its queue starts it again" id)
+      (harness-tasks--queue-message id text attachments from))
+     ((harness-tasks--returned-p task)
+      (harness-tasks--start task)
+      (harness-catch (harness-call-async 'agent/prompt
+                                         (plist-get task :session)
+                                         (harness-tasks--blocks (list :prompt text :attachments attachments))
+                                         (and from (list :from from)))
+                     (lambda (e) (harness-tasks--fail id e))))
+     (t
+      (let ((sid (plist-get task :session))
+            (blocks (harness-tasks--blocks (list :prompt text :attachments attachments)))
+            (opts (and from (list :from from))))
+        (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
+          (harness-call 'session/resume sid))
+        (when (plist-get task :archived) (harness-tasks--set id :archived nil))
+        (harness-tasks--set id :merge-attempts 0
+                            :recap nil :recap-at nil :recap-turns nil :recap-tools nil)
+        (if (harness-tasks--refinement-p task)
+            (harness-tasks--refine-turn id sid blocks opts)
+          (harness-catch (harness-call-async 'agent/prompt sid blocks opts)
+                         (lambda (e) (harness-tasks--fail id e)))))))
+    t))
 
 (harness-defmethod task/merge (id)
   "Queue task ID's branch for the merge queue again (after a failed merge).
@@ -2664,6 +3054,11 @@ active again and comes back to review when that turn ends.  Feedback
 may be ATTACHMENTS alone, a screenshot say, but not nothing.  Any
 message the user sends the session meanwhile does the same; one from
 another session's agent does not (`harness-tasks--on-message').
+
+While the task's project is suspended, sending it back is a start the
+suspension holds back: the task goes back to the front of the queue it
+should start from, with the feedback kept, and its session gets it when
+it starts again (`task/resume-queue', or an explicit `task/start').
 Return the task."
   (let ((task (harness-tasks--get id)))
     (unless (eq (plist-get task :state) 'review)
@@ -2676,13 +3071,22 @@ Return the task."
     (let ((sid (plist-get task :session))
           (blocks (harness-tasks--blocks (list :prompt (string-trim (or feedback ""))
                                                :attachments attachments))))
-      (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
-        (harness-call 'session/resume sid))
-      ;; Active before the prompt goes out, so the message is not taken
-      ;; for one more sending the task back (`harness-tasks--on-message').
-      (harness-tasks--send-back id (harness-tasks--feedback-text blocks))
-      (harness-catch (harness-call-async 'agent/prompt sid (harness-tasks--reject-blocks blocks))
-                     (lambda (e) (harness-tasks--fail id e)))
+      (if (harness-tasks--task-suspended-p task)
+          (progn
+            (harness-log 'info "task %s: keeping the feedback until its queue starts it again" id)
+            (harness-tasks--to-pending id
+                                       :feedback (append (plist-get task :feedback)
+                                                         (list (list :text (harness-tasks--feedback-text blocks)
+                                                                     :at (float-time)))))
+            (harness-tasks--queue-message id (harness-tasks--reject-text (string-trim (or feedback "")))
+                                          attachments))
+        (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
+          (harness-call 'session/resume sid))
+        ;; Active before the prompt goes out, so the message is not taken
+        ;; for one more sending the task back (`harness-tasks--on-message').
+        (harness-tasks--send-back id (harness-tasks--feedback-text blocks))
+        (harness-catch (harness-call-async 'agent/prompt sid (harness-tasks--reject-blocks blocks))
+                       (lambda (e) (harness-tasks--fail id e))))
       (harness-call 'task/get id))))
 
 (harness-defmethod task/for-session (session-id)
@@ -2796,9 +3200,10 @@ up again, merges in flight are queued again and waiting tasks start."
 (harness-declare-event 'task/deleted "(ID) after a task is removed.")
 (harness-declare-event 'task/review "(TASK) when a task's finished work starts waiting for the user's review.")
 (harness-declare-event 'task/done "(TASK HOW) when a task becomes done; HOW is merged, finished, verified or completed.")
+(harness-declare-event 'task/queue "(PROJECT SUSPENDED) when a project's pending queue is suspended or resumed.")
 
 (harness-define-module 'tasks
-  :doc "Task mode: one session per task on a shorter context, from backlog write-up or worktree through your review to merged, with a concurrency limit per project that starts waiting tasks by priority."
+  :doc "Task mode: one session per task on a shorter context, from backlog write-up or worktree through your review to merged, with a concurrency limit per project that starts waiting tasks by priority; a project's queue can be suspended (task/suspend-queue), and a task at work can be returned to the front of it (task/return-to-pending)."
   :requires '(store project session agent)
   :init #'harness-tasks--init
   :shutdown #'harness-tasks--shutdown)

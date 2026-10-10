@@ -778,21 +778,61 @@ user message after that answer: \"No user message to send\"."
       (should (null (car (last (car seen)))))
       (should-not (harness-call 'agent/activity id)))))
 
+(ert-deftest harness-agent-activity-carries-each-call-and-its-note ()
+  "Every running call shows in the activity, with the note it reported."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (finish nil)
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "s1" :name "slow" :input (:what "tests"))
+              (:type text :delta "ok")
+              (:type done :stop-reason end-turn))))
+      (harness-define-tool "slow" :label "Slow job" :description "slow" :kind 'exec
+                           :subject (lambda (input) (plist-get input :what))
+                           :handler (lambda (_input ctx)
+                                      (funcall (plist-get ctx :note)
+                                               "running Bash: npm test\n12.3k/256k before compact")
+                                      (harness-with-promise (resolve reject)
+                                        (ignore reject)
+                                        (setq finish (lambda () (funcall resolve "done"))))))
+      (let ((p (harness-call 'agent/prompt id "go")))
+        (harness-test-wait (lambda () finish) 5 "the tool to start")
+        (let* ((a (harness-call 'agent/activity id))
+               (calls (plist-get a :calls)))
+          ;; The oldest call is the activity itself, as before.
+          (should (eq 'tool (plist-get a :phase)))
+          (should (equal "Slow job: tests" (plist-get a :title)))
+          (should (= 1 (length calls)))
+          (should (equal "s1" (plist-get (car calls) :call-id)))
+          (should (equal "slow" (plist-get (car calls) :tool)))
+          (should (equal "running Bash: npm test\n12.3k/256k before compact"
+                         (plist-get (car calls) :note))))
+        (funcall finish)
+        (harness-await p))
+      (should-not (harness-call 'agent/activity id))
+      ;; The note went with the call: nothing is left to draw.
+      (should-not (gethash id harness-agent--calls)))))
+
 (ert-deftest harness-agent-reload-subscribes-new-handlers ()
   "A reload does not initialise a running module again, yet its new handlers run."
   (harness-agent-test-with
     (let ((subscribed (lambda (event fn) (cl-find fn (gethash event harness--subscribers) :key #'cdr))))
       (should (funcall subscribed 'tools/progress #'harness-agent--on-tool-progress))
+      (should (funcall subscribed 'tools/note #'harness-agent--on-tool-note))
       ;; As if the running harness predated them.
       (harness-off (cons 'tools/progress #'harness-agent--on-tool-progress))
+      (harness-off (cons 'tools/note #'harness-agent--on-tool-note))
       (harness-off (cons 'permission/decided #'harness-agent--on-permission-decided))
       (should-not (funcall subscribed 'tools/progress #'harness-agent--on-tool-progress))
       (let ((harness--defining-module 'agent))
         (harness-load-compiled (expand-file-name "lisp/modules/harness-agent.el" harness-test-root)))
       (should (funcall subscribed 'tools/progress #'harness-agent--on-tool-progress))
+      (should (funcall subscribed 'tools/note #'harness-agent--on-tool-note))
       (should (funcall subscribed 'permission/decided #'harness-agent--on-permission-decided))
       ;; Subscribing is idempotent: one handler, however often loaded.
       (should (= 1 (cl-count #'harness-agent--on-tool-progress (gethash 'tools/progress harness--subscribers)
+                             :key #'cdr)))
+      (should (= 1 (cl-count #'harness-agent--on-tool-note (gethash 'tools/note harness--subscribers)
                              :key #'cdr))))))
 
 (ert-deftest harness-agent-before-turn-gate ()
@@ -975,6 +1015,310 @@ The harness has a web_search tool that must never run; a filter on
         (should (string-match-p "Cancelled before" (plist-get result :output))))
       ;; A result reported after the turn is not recorded twice.
       (should (= 2 (cl-count 'tool-result (harness-agent-test-kinds id)))))))
+
+;;;; What stops a turn, and what is left running
+
+(defun harness-agent-test-requests-of (thunk)
+  "Call THUNK; return the provider requests made meanwhile, oldest first."
+  (let ((requests nil))
+    (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+               ((symbol-function 'harness-method/provider/complete)
+                (lambda (req) (push req requests) (funcall orig req))))
+      (funcall thunk))
+    (nreverse requests)))
+
+(defun harness-agent-test-last-message-text (request)
+  "Return the text of the last message REQUEST sends, which is a user message."
+  (let ((last (car (last (plist-get request :messages)))))
+    (should (eq 'user (plist-get last :role)))
+    (plist-get (car (last (plist-get last :content))) :text)))
+
+(defun harness-agent-test-stopping-script ()
+  "Return a demo script that answers every request with a short reply, ending its turn."
+  (lambda (_request) '((:type text :delta "Done.") (:type done :stop-reason end-turn))))
+
+(defun harness-agent-test-stop-steps (answer)
+  "Return how many steps a turn takes when an `agent/stop' handler answers ANSWER once.
+The handler lets the model stop the second time."
+  (let* ((id (harness-agent-test-session))
+         (harness-provider-demo-script-override (harness-agent-test-stopping-script))
+         (asked 0)
+         (steps 0)
+         (handler (lambda (_value next _session)
+                    (funcall next (if (= 1 (cl-incf asked)) answer '(:stop t)))))
+         (watch (harness-on 'agent/step-started (lambda (_ n) (setq steps n)))))
+    (harness-add-filter 'agent/stop handler)
+    (unwind-protect
+        (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "go")) :stop-reason)))
+      (harness-remove-filter 'agent/stop handler)
+      (harness-off watch))
+    steps))
+
+(ert-deftest harness-agent-stop-handler-sends-the-model-on ()
+  "A handler that answers (:stop nil :message TEXT) has the turn take a step more.
+The model's next request ends with TEXT, a steering message of the
+harness's, and the turn ends once the model stops again.  The handler
+gets (:stop t) and the session, and the step is asked of `agent/step'."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override (harness-agent-test-stopping-script))
+           (asked nil)
+           (gated 0))
+      (harness-add-filter 'agent/step (lambda (gate next _session) (cl-incf gated) (funcall next gate)))
+      (harness-add-filter 'agent/stop
+                          (lambda (value next session)
+                            (push (list value (plist-get session :id)) asked)
+                            (funcall next (if (cdr asked)
+                                              value
+                                            (list :stop nil :message "Check the plan once more.")))))
+      (let ((requests (harness-agent-test-requests-of
+                       (lambda ()
+                         (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "go"))
+                                                          :stop-reason)))))))
+        (should (= 2 (length requests)))
+        (should (equal "go" (harness-agent-test-last-message-text (car requests))))
+        (should (equal "Check the plan once more." (harness-agent-test-last-message-text (cadr requests))))
+        ;; The model saw its own answer first, then the message.
+        (should (equal '(user assistant user) (mapcar (lambda (m) (plist-get m :role))
+                                                      (plist-get (cadr requests) :messages)))))
+      ;; Asked after each stop, with the session.
+      (should (equal (list (list '(:stop t) id) (list '(:stop t) id)) asked))
+      (should (= 1 gated))
+      (should (equal '(user assistant user assistant) (harness-agent-test-kinds id)))
+      ;; Recorded as steering from the harness, as `agent/prompt' records one.
+      (let ((nudge (nth 2 (harness-call 'session/nodes id))))
+        (should (equal "Check the plan once more." (plist-get nudge :content)))
+        (should (plist-get (plist-get nudge :meta) :steering))
+        (should (equal (harness-sender-system "harness") (harness-node-sender nudge))))
+      (should (eq 'idle (plist-get (harness-call 'session/get id) :status)))
+      (should (= 1 (plist-get (plist-get (harness-call 'session/get id) :usage) :turns))))))
+
+(ert-deftest harness-agent-stop-message-is-the-harness-s-unless-told ()
+  "The message is from the harness unless the answer names a sender of its own."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override (harness-agent-test-stopping-script))
+           (other (harness-sender-session '(:id "s-other" :name "Other")))
+           (answers (list (list :stop nil :message "one")
+                          (list :stop nil :message "two" :from other)
+                          (list :stop nil :message "three" :from "nobody")
+                          '(:stop t))))
+      (harness-add-filter 'agent/stop (lambda (_value next _session) (funcall next (pop answers))))
+      (harness-test-await (harness-call 'agent/prompt id "go"))
+      (let ((nodes (harness-agent-test-steering-nodes id)))
+        (should (equal '("one" "two" "three") (mapcar (lambda (n) (plist-get n :content)) nodes)))
+        (should (equal (list (harness-sender-system "harness") other (harness-sender-system "harness"))
+                       (mapcar #'harness-node-sender nodes)))))))
+
+(ert-deftest harness-agent-stop-answers-that-send-the-model-on-or-not ()
+  "Only an answer that does not stop and says something sends the model on."
+  (harness-agent-test-with
+    (dolist (answer (list '(:stop t) '(:stop t :message "ignored") '(:stop nil) '(:stop nil :message "")
+                          '(:stop nil :message " \n") '(:stop nil :message 7) nil 'garbage))
+      (should (equal (list answer 1) (list answer (harness-agent-test-stop-steps answer)))))
+    ;; Not stopping, as JSON says it, sends it on too, and so does a message alone.
+    (dolist (answer (list '(:stop nil :message "go on") '(:stop :false :message "go on") '(:message "go on")))
+      (should (equal (list answer 2) (list answer (harness-agent-test-stop-steps answer)))))))
+
+(ert-deftest harness-agent-stop-continuations-are-capped ()
+  "A turn is sent on at most `harness-agent--max-stop-continues' times.
+After that it ends whatever the handlers would say, without asking
+them; the next turn is sent on again."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override (harness-agent-test-stopping-script))
+           (asked 0)
+           (steps 0))
+      (should (= 3 harness-agent--max-stop-continues))
+      (harness-on 'agent/step-started (lambda (_ n) (setq steps n)))
+      (harness-add-filter 'agent/stop
+                          (lambda (_value next _session)
+                            (cl-incf asked)
+                            (funcall next (list :stop nil :message (format "Again, %d." asked)))))
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "go")) :stop-reason)))
+      (should (= 3 asked))
+      (should (= 4 steps))
+      (should (equal '(user assistant user assistant user assistant user assistant)
+                     (harness-agent-test-kinds id)))
+      (should (= 3 (length (harness-agent-test-steering-nodes id))))
+      (should-not (harness-agent-running-p id))
+      ;; The count is the turn's own.
+      (setq asked 0 steps 0)
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "and again")) :stop-reason)))
+      (should (= 3 asked))
+      (should (= 4 steps)))))
+
+(ert-deftest harness-agent-stop-without-a-handler-changes-nothing ()
+  "With no handler a model that stops ends its turn, in one step, as it always did.
+The filter is not even run."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override (harness-agent-test-stopping-script))
+           (steps 0)
+           (asked nil)
+           (run-filter (symbol-function 'harness-run-filter-async))
+           (watch (harness-on 'agent/step-started (lambda (_ n) (setq steps n)))))
+      (ignore watch)
+      (cl-letf (((symbol-function 'harness-run-filter-async)
+                 (lambda (name &rest args) (push name asked) (apply run-filter name args))))
+        (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "go"))
+                                         :stop-reason))))
+      (should-not (memq 'agent/stop asked))
+      (should (= 1 steps))
+      (should (equal '(user assistant) (harness-agent-test-kinds id)))
+      (should-not (harness-agent-test-steering-nodes id))
+      (should-not (gethash id harness-agent--stop-continues)))))
+
+(ert-deftest harness-agent-stop-handler-failures-end-the-turn-normally ()
+  "A handler that fails is logged and the turn ends as if it had not been there.
+A handler before it that sent the model on still does."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override (harness-agent-test-stopping-script))
+           (steps 0))
+      (harness-on 'agent/step-started (lambda (_ n) (setq steps n)))
+      (harness-add-filter 'agent/stop (lambda (&rest _) (error "agent-stop-boom")) 50)
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "go")) :stop-reason)))
+      (should (= 1 steps))
+      (with-current-buffer (get-buffer-create harness-log-buffer-name)
+        (should (string-match-p "agent-stop-boom" (buffer-string))))
+      ;; A promise that rejects is as good as an error.
+      (harness-add-filter 'agent/stop (lambda (&rest _) (harness-rejected '(error "agent-stop-rejected"))) 40)
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "again")) :stop-reason)))
+      (should (= 1 steps))
+      ;; Ahead of them, a handler that sends the model on.
+      (let ((once t))
+        (harness-add-filter 'agent/stop
+                            (lambda (value next _session)
+                              (funcall next (if (prog1 once (setq once nil))
+                                                (list :stop nil :message "Not so fast.")
+                                              value)))
+                            10))
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt id "once more")) :stop-reason)))
+      (should (= 2 steps))
+      (should-not (harness-agent-running-p id)))))
+
+(ert-deftest harness-agent-stop-cancelled-while-the-filter-runs ()
+  "A turn cancelled while the `agent/stop' filters run ends cancelled, whatever they answer.
+The user's cancel reaches a handler that holds the turn up as
+`agent/cancelling'; it lets go, and the turn ends at once, without the
+message it answers with and not after the grace period."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override (harness-agent-test-stopping-script))
+           (hold nil)
+           (steps 0))
+      (should (> harness-agent--cancel-grace 2))
+      (harness-on 'agent/step-started (lambda (_ n) (setq steps n)))
+      (harness-add-filter 'agent/stop (lambda (_value next _session) (setq hold next) nil))
+      (harness-on 'agent/cancelling
+                  (lambda (sid)
+                    (when (and hold (equal sid id))
+                      (funcall hold (list :stop nil :message "too late")))))
+      (let ((p (harness-call 'agent/prompt id "go")))
+        (harness-test-wait (lambda () hold) 5 "the filter")
+        (should (harness-agent-running-p id))
+        (should (harness-call 'agent/cancel id))
+        (should (eq 'cancelled (plist-get (harness-test-await p 2) :stop-reason))))
+      (should (= 1 steps))
+      (should-not (harness-agent-running-p id))
+      (should-not (harness-agent-test-steering-nodes id))
+      (should (equal '(user assistant) (harness-agent-test-kinds id)))
+      (should (eq 'idle (plist-get (harness-call 'session/get id) :status))))))
+
+(ert-deftest harness-agent-stop-answer-for-a-turn-that-ended-is-ignored ()
+  "An answer that comes after the turn ended some other way changes nothing.
+The turn ended blocked, or cancelled by the grace period of a handler
+that did not let go."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override (harness-agent-test-stopping-script))
+           (harness-agent--cancel-grace 0.1)
+           (hold nil))
+      (harness-add-filter 'agent/stop (lambda (_value next _session) (setq hold next) nil))
+      (pcase-dolist (`(,ending . ,reason)
+                     (list (cons (lambda () (harness-agent--end (harness-agent-turn-for id) 'blocked)) 'blocked)
+                           (cons (lambda () (harness-call 'agent/cancel id)) 'cancelled)))
+        (setq hold nil)
+        (let ((p (harness-call 'agent/prompt id "go")))
+          (harness-test-wait (lambda () hold) 5 "the filter")
+          (funcall ending)
+          (should (eq reason (plist-get (harness-test-await p) :stop-reason)))
+          (funcall hold (list :stop nil :message "too late"))
+          (should-not (harness-agent-running-p id))
+          (should (eq 'idle (plist-get (harness-call 'session/get id) :status)))))
+      (should (equal '(user assistant user assistant) (harness-agent-test-kinds id)))
+      (should-not (harness-agent-test-steering-nodes id)))))
+
+(ert-deftest harness-agent-stop-answer-of-a-flagged-turn-ends-it-cancelled ()
+  "An answer that finds its turn cancelled, its provider silent, ends it cancelled."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override (harness-agent-test-stopping-script))
+           (hold nil)
+           (steps 0))
+      (harness-on 'agent/step-started (lambda (_ n) (setq steps n)))
+      (harness-add-filter 'agent/stop (lambda (_value next _session) (setq hold next) nil))
+      (let ((p (harness-call 'agent/prompt id "go")))
+        (harness-test-wait (lambda () hold) 5 "the filter")
+        ;; Flagged cancelled; the grace period before the turn is ended for
+        ;; good has not run out, so the answer is what finds it so.
+        (should (> harness-agent--cancel-grace 2))
+        (should (harness-call 'agent/cancel id))
+        (funcall hold (list :stop nil :message "too late"))
+        (should (eq 'cancelled (plist-get (harness-test-await p 2) :stop-reason))))
+      (should (= 1 steps))
+      (should-not (harness-agent-test-steering-nodes id))
+      (should-not (harness-agent-running-p id)))))
+
+(ert-deftest harness-agent-stop-answer-after-a-message-arrived-still-steps ()
+  "A message sent to the turn while the filters run gets its step, though they say stop."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override (harness-agent-test-stopping-script))
+           (hold nil)
+           (asked 0))
+      (harness-add-filter 'agent/stop
+                          (lambda (value next _session)
+                            (if (= 1 (cl-incf asked))
+                                (progn (setq hold next) nil)
+                              (funcall next value))))
+      (let* ((p (harness-call 'agent/prompt id "go"))
+             (requests (progn
+                         (harness-test-wait (lambda () hold) 5 "the filter")
+                         (harness-call 'agent/prompt id "and also this")
+                         (harness-agent-test-requests-of
+                          (lambda ()
+                            (funcall hold '(:stop t))
+                            (should (eq 'end-turn (plist-get (harness-test-await p) :stop-reason))))))))
+        (should (= 1 (length requests)))
+        (should (equal "and also this" (harness-agent-test-last-message-text (car requests)))))
+      (should (= 2 asked))
+      (should (equal '(user assistant user assistant) (harness-agent-test-kinds id))))))
+
+(ert-deftest harness-agent-outstanding-collects-what-modules-report ()
+  "`agent/outstanding' is the text the filter's handlers build, nil when none reports."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session))
+          (other (harness-agent-test-session)))
+      (should-not (harness-call 'agent/outstanding id))
+      (harness-add-filter 'agent/outstanding
+                          (lambda (value sid) (if (equal sid id) "2 workers running" value))
+                          10)
+      (should (equal "2 workers running" (harness-call 'agent/outstanding id)))
+      ;; Another module appends its own, after "; ".
+      (harness-add-filter 'agent/outstanding
+                          (lambda (value sid)
+                            (if (equal sid id) (concat (and value (concat value "; ")) "a seed is warming") value))
+                          20)
+      (should (equal "2 workers running; a seed is warming" (harness-call 'agent/outstanding id)))
+      ;; Asked for a session it has nothing for, it reports nothing.
+      (should-not (harness-call 'agent/outstanding other))
+      ;; A handler that fails is skipped; what is no text is nothing.
+      (harness-add-filter 'agent/outstanding (lambda (&rest _) (error "outstanding-boom")) 30)
+      (should (equal "2 workers running; a seed is warming" (harness-call 'agent/outstanding id)))
+      (harness-add-filter 'agent/outstanding (lambda (_value sid) (and (equal sid other) "  ")) 5)
+      (should-not (harness-call 'agent/outstanding other)))))
 
 ;;;; Provider checkpoints and the head
 

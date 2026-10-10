@@ -100,9 +100,29 @@ is never used for any other failure.")
 (defconst harness-acp-extension-prefixes
   '("session/" "agent/" "provider/" "tools/list" "usage/" "fallback/" "worktree/" "merge/"
     "config/" "skills/" "permission/" "compaction/" "handoff/" "naming/" "sandbox/status"
-    "harness/api" "harness/version" "harness/reload" "harness-dev/" "question/" "project/" "task/"
-    "notification/" "acp/remote-" "pet/" "version/" "insights/")
-  "Bus method name prefixes callable as `_harness/NAME'.")
+    "harness/api" "harness/modules" "harness/version" "harness/reload" "harness-dev/" "question/"
+    "project/" "task/"
+    "notification/" "acp/remote-" "pet/" "version/" "insights/" "supervisor/" "seed/")
+  "Bus method name prefixes callable as `_harness/NAME'.
+Modules of the user's own add theirs to
+`harness-acp-extra-method-prefixes'.")
+
+(defvar harness-acp-extra-method-prefixes nil
+  "More bus method name prefixes callable as `_harness/NAME'.
+A module of your own (see `harness-extra-module-directories') that
+offers methods to clients, such as its UI half in the user's Emacs,
+adds their prefix here as it loads, as \"hello/\" for `hello/greet':
+
+  (with-eval-after-load \\='harness-acp
+    (add-to-list \\='harness-acp-extra-method-prefixes \"hello/\"))
+
+The harness's own prefixes are `harness-acp-extension-prefixes'.")
+
+(defvar harness-acp-extra-events nil
+  "More bus events forwarded to clients as `_harness/event' notifications.
+A module of your own adds the events its UI half listens to, as
+`harness-acp-extra-method-prefixes' says for methods.  The harness's
+own are `harness-acp--forwarded-events'.")
 
 (defconst harness-acp--enum-keys
   '(:status :kind :permission-mode :behavior :scope :group-by :period :days :tier)
@@ -147,8 +167,8 @@ it can answer for another one.")
     fallback/changed fallback/switched
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed worktree/locked worktree/unlocked session/forked session/head-moved
-    session/moved
-    question/answered task/changed task/deleted task/review task/done permission/dir-allowed permission/dir-revoked
+    session/moved session/ext-changed supervisor/changed
+    question/answered task/changed task/deleted task/review task/done task/queue permission/dir-allowed permission/dir-revoked
     config/changed harness/reloaded tools/file-written acp/remote-changed pet/changed pet/said version/checked)
   "Bus events forwarded verbatim as `_harness/event' notifications.")
 
@@ -674,7 +694,8 @@ must when `harness-acp-token' is set."
 
 (defun harness-acp--extension-allowed-p (name)
   "Non-nil when bus method NAME (a string) may be called over ACP."
-  (cl-some (lambda (p) (string-prefix-p p name)) harness-acp-extension-prefixes))
+  (cl-some (lambda (p) (string-prefix-p p name))
+           (append harness-acp-extension-prefixes harness-acp-extra-method-prefixes)))
 
 (defun harness-acp--extension-methods ()
   "Return the names of every callable extension method, sorted."
@@ -875,6 +896,12 @@ An image's `_harness.label', the token naming it in the message's text
   "Describe the bus (methods, events, filters, modules) in wire shape."
   (harness-acp--normalise (harness-describe-api)))
 
+(harness-defmethod harness/modules ()
+  "Describe every module of the harness, as `harness-module-descriptions' does.
+In wire shape: what `harness-describe-modules' lists of a harness that
+runs in another Emacs, such as its own process."
+  (harness-acp--normalise (harness-module-descriptions)))
+
 (harness-defmethod harness/version ()
   "Return the harness and Emacs versions."
   (list :version (harness-acp--version) :emacs emacs-version
@@ -990,8 +1017,11 @@ Nil means the turn ended; see `agent/activity' for the shape."
     (harness-acp--broadcast-update sid (list :sessionUpdate "_harness/session_deleted"))))
 
 (defun harness-acp--on-any-event (event args)
-  "Forward EVENT with ARGS as `_harness/event' when it is in the forwarded set."
-  (when (and harness-acp--clients (memq event harness-acp--forwarded-events))
+  "Forward EVENT with ARGS as `_harness/event' when it is in the forwarded set.
+That is `harness-acp--forwarded-events' and `harness-acp-extra-events'."
+  (when (and harness-acp--clients
+             (or (memq event harness-acp--forwarded-events)
+                 (memq event harness-acp-extra-events)))
     (harness-acp--broadcast "_harness/event" (list :event (symbol-name event) :args (harness-json-array args)))))
 
 ;;;; Bus events -> requests to the client
@@ -1062,7 +1092,10 @@ outcome.  A shell command's request carries where it runs in
 `diagrams', when the options have them, holds one per option:
 {type: \"ascii\", text} or {type: \"image\", path, mime}.  PATH is a file
 here, on the harness's machine: a client that cannot read it asks for
-the image with `_harness/question/image' (`question/image')."
+the image with `_harness/question/image' (`question/image').  `cowboy'
+marks the harness's question about a cold prompt cache and says what
+each choice costs (see harness-cowboy.el); a client that knows it
+draws its own panel, any other shows the question and its options."
   (let* ((payload (or (plist-get pending :payload) pending))
          (pid (plist-get pending :id)))
     (harness-acp--request-clients
@@ -1070,7 +1103,8 @@ the image with `_harness/question/image' (`question/image')."
      (append (list :sessionId sid :requestId pid
                    :question (plist-get payload :question)
                    :options (plist-get payload :options))
-             (and (plist-get payload :diagrams) (list :diagrams (plist-get payload :diagrams))))
+             (and (plist-get payload :diagrams) (list :diagrams (plist-get payload :diagrams)))
+             (and (plist-get payload :cowboy) (list :cowboy (plist-get payload :cowboy))))
      (lambda (result)
        (harness-acp--call-safely 'question/answer sid pid (plist-get result :answer))))))
 

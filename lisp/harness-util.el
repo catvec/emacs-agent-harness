@@ -405,8 +405,9 @@ model of another provider holds (:mode transcript|compact :file PATH
 (defun harness-node-compaction-kind (node)
   "Return the kind of compaction NODE is, as a string, or nil for no compaction.
 That is its `:meta' `:compaction': \"summary\", \"brief\" (a summary of
-only the first and last messages) or \"transcript\" (a note pointing at
-the conversation written to the file of its `:meta' `:file').  A
+only the first and last messages), \"transcript\" (a note pointing at
+the conversation written to the file of its `:meta' `:file') or
+\"fresh\" (a note saying nothing of the conversation was carried over).  A
 compaction node from before there were kinds is a \"summary\"; so is
 one a handoff's old model wrote, while the new model's is \"brief\".
 NODE's kind may be the symbol or, as a client hears it, its name."
@@ -446,6 +447,50 @@ RECORD is what `harness-node-permission' returns."
   (let ((u (and (consp record) (plist-get record :undo))))
     (cond ((and (stringp u) (not (string-empty-p u))) (intern u))
           ((and u (symbolp u) (not (memq u '(t :false :null)))) u))))
+
+;;;; The note of the session judge
+
+;; A new session's opening message may be judged -- read by a cheap model
+;; that says whether the job is a supervising one or a hands-on one
+;; (harness-supervisor.el).  The harness then writes a hint into the
+;; session's transcript saying how the message was read, in its own
+;; voice, and the hint holds in its `:meta' `:supervisor' what the chat's
+;; buttons act on: the two things the user can do about the choice, and
+;; how far each has got.  `harness-node-supervisor' reads it, the chat
+;; draws the buttons from it (harness-ui-chat.el), and `supervisor/act'
+;; is what they call.
+
+(defun harness-node-supervisor (node)
+  "Return the session judge's note record of NODE, or nil.
+NODE is the hint written when a session's opening message was judged.
+Its `:meta' `:supervisor' holds
+
+  (:judged t|:false   ; what the judge read; absent when it gave no answer
+   :model MODEL       ; the model that read the message
+   :mode t|:false     ; the mode the note left the session in
+   :setting KEY       ; the setting that decides how sessions start
+   :cwd DIR           ; where that setting is written
+   :actions ACTIONS)  ; (:action NAME :label LABEL :help HELP :state STATE)
+
+where each action's STATE is nil while it was not taken, `done' once it
+was, and `undone' once it was taken back, and NAME, with \"always\" and
+\"mode\" the two of them, is what `supervisor/act' is asked to do.
+Names, labels and symbols may have travelled as strings; the states read
+back as symbols."
+  (let ((record (plist-get (plist-get node :meta) :supervisor)))
+    (when (and (consp record) (plist-get record :actions))
+      (plist-put (copy-sequence record) :actions
+                 (mapcar (lambda (action)
+                           (plist-put (copy-sequence action) :state
+                                      (harness-supervisor-note-state (plist-get action :state))))
+                         (plist-get record :actions))))))
+
+(defun harness-supervisor-note-state (value)
+  "Return the judge's note action state VALUE names, a symbol, or nil.
+VALUE may have travelled over JSON, as a string."
+  (let ((s (cond ((and (stringp value) (not (string-empty-p value))) (intern value))
+                 ((and value (symbolp value) (not (memq value '(t :false :null)))) value))))
+    (and (memq s '(done undone)) s)))
 
 ;;;; Paths
 
@@ -632,7 +677,7 @@ KEY extracts the string to match; LIMIT caps the result count."
   (or (null s) (string-blank-p s)))
 
 (defun harness-safe-substring (string from &optional to)
-  "Like `substring' but clamps FROM and TO into range."
+  "Like `substring' on STRING, but clamps FROM and TO into its range."
   (let* ((len (length string))
          (from (max 0 (min from len)))
          (to (if to (max from (min to len)) len)))
@@ -682,7 +727,7 @@ walking the process table catches it."
 (defun harness-kill-process-tree (tree &optional signal)
   "Send SIGNAL (TERM by default) to every process in TREE.
 TREE is what `harness-process-tree' returned: the root and its group
-(when local) and the descendants collected with it.  Best-effort: a
+\(when local) and the descendants collected with it.  Best-effort: a
 process that is already gone is not an error."
   (let ((sig (or signal 'term))
         (pid (plist-get tree :pid))
@@ -837,6 +882,69 @@ An ACP error, (acp-error CODE MESSAGE DATA), reads as its MESSAGE."
          (condition-case nil (error-message-string err)
            (error (format "%S" err))))
         (t (format "%S" err))))
+
+(defconst harness-error-message-limit 200
+  "Longest error text the harness reports, in characters.
+A message longer than this is cut where it is logged, hinted and shown:
+an error that carries a whole transcript, prompt or request body as its
+data would otherwise be repeated whole in *Messages*, in a session's
+history and in the tree.")
+
+(defun harness-error--cut (text limit)
+  "Return TEXT cut to LIMIT characters, with an ellipsis when it was."
+  (if (and (stringp text) (> (length text) limit))
+      (concat (substring text 0 (max 0 (1- (max 1 limit)))) "…")
+    text))
+
+(defun harness-error--short-data (data limit &optional depth)
+  "Return error DATA with long strings cut to LIMIT characters.
+Lists and vectors are walked, so a string nested in a plist an error
+carries is cut too.  DEPTH bounds the walk; deep data is left as a
+placeholder rather than walked at all."
+  (cond ((> (or depth 0) 4) (if (stringp data) (harness-error--cut data limit) "…"))
+        ((stringp data) (harness-error--cut data limit))
+        ((consp data)
+         (let ((items nil) (rest data) (n 0))
+           (while (and (consp rest) (< n 20))
+             (push (harness-error--short-data (car rest) limit (1+ (or depth 0))) items)
+             (setq rest (cdr rest) n (1+ n)))
+           (let ((items (nreverse items)))
+             (if (null rest) items
+               (append items (harness-error--short-data rest limit (1+ (or depth 0))))))))
+        ((vectorp data)
+         (apply #'vector
+                (mapcar (lambda (d) (harness-error--short-data d limit (1+ (or depth 0))))
+                        (cl-subseq (append data nil) 0 (min 20 (length data))))))
+        (t data)))
+
+(defun harness-error--one-line (text)
+  "Return TEXT with runs of whitespace, newlines included, as single spaces.
+A message reported in *Messages*, a hint or a tree row reads as one
+line; the transcript an error may quote is full of newlines."
+  (string-trim (replace-regexp-in-string "[ \t\n\r\f\v]+" " " (or text ""))))
+
+(defun harness-error-short-message (err &optional limit)
+  "Return a short, readable message for ERR, an error data list or string.
+Like `harness-error-message', but long strings among ERR's data are cut
+to LIMIT characters (`harness-error-message-limit' by default) and so is
+the message.  An error whose data carries a whole transcript or request
+body -- a `json-value-p' failure, say -- then reads in one short line in
+*Messages*, in a session hint and in the tree, rather than repeating it."
+  (let* ((limit (max 16 (or limit harness-error-message-limit)))
+         (msg (cond ((stringp err) err)
+                    ((and (eq (car-safe err) 'acp-error) (stringp (nth 2 err))
+                          (not (string-empty-p (nth 2 err))))
+                     (nth 2 err))
+                    ((and (consp err) (symbolp (car err)))
+                     (condition-case nil
+                         (error-message-string (cons (car err) (harness-error--short-data (cdr err) limit)))
+                       (error (harness-error--cut (let ((print-length 20) (print-level 6))
+                                                    (format "%S" err))
+                                                  limit))))
+                    (t (harness-error--cut (let ((print-length 20) (print-level 6))
+                                             (format "%S" err))
+                                           limit)))))
+    (harness-error--one-line (harness-error--cut msg limit))))
 
 (defmacro harness-ignore-errors-logged (context &rest body)
   "Run BODY, logging any error with CONTEXT instead of signalling."
