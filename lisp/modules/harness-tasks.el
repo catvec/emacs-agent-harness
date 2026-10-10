@@ -1726,15 +1726,17 @@ blocks to deliver."
       (harness-tasks--aside-blocks blocks)))))
 
 (defun harness-tasks--continue-session (id cwd worktree)
-  "Start task ID's work in the session that wrote it up, moved to CWD.
+  "Start task ID's work in its session, moved to CWD.
 WORKTREE, when non-nil, is the task's worktree.  The session takes the
 task's settings instead of the refinement's read-only ones.  When the
 directory changes, the provider's conversation is dropped: the Claude
-CLI keeps conversations per directory.  The start message carries
-everything the work needs, and the new conversation gets the
-transcript, which keeps the refinement, as text
-\(`harness-provider-history-text').  A session that has no name yet
-takes the task's title."
+CLI keeps conversations per directory.  A backlog task's session wrote
+the task up, so it is given the start message -- the write-up in full,
+then the request it came from, as the harness's words -- and the new
+conversation gets the transcript, which keeps the refinement, as text
+\(`harness-provider-history-text').  Any other task's session has never
+seen the task, so it is given the task itself, as the user's words.  A
+session that has no name yet takes the task's title."
   (condition-case err
       (let* ((task (harness-tasks--get id))
              (sid (plist-get task :session))
@@ -1773,10 +1775,13 @@ takes the task's title."
                         (format "Task started in the main tree %s" (abbreviate-file-name cwd)))
                        (t "Task started")))
         (harness-catch (harness-call-async 'agent/prompt sid
-                                           (harness-tasks--blocks
-                                            (list :prompt (harness-tasks--start-text task)
-                                                  :attachments (plist-get task :attachments)))
-                                           (harness-tasks--from-harness))
+                                           (if (harness-tasks--backlog-p task)
+                                               (harness-tasks--blocks
+                                                (list :prompt (harness-tasks--start-text task)
+                                                      :attachments (plist-get task :attachments)))
+                                             (harness-tasks--blocks task))
+                                           (and (harness-tasks--backlog-p task)
+                                                (harness-tasks--from-harness)))
                        (lambda (e) (harness-tasks--fail id e))))
     (error (harness-tasks--fail id err))))
 
@@ -2533,7 +2538,8 @@ the prompt it has), but not one an agent is writing up right now."
 A task whose write-up stopped can be written by hand this way; it then
 waits in the backlog like a refined one.  A task named from its prompt
 \(not a backlog task, named from the words it was written up from) is
-named again from the new one."
+named again from the new one, and its session drops the title it took
+so it takes the new one too."
   (let ((task (harness-tasks--get id)))
     (unless (memq (plist-get task :state) '(pending refining))
       (error "Only tasks that have not started can be edited"))
@@ -2546,6 +2552,10 @@ named again from the new one."
       (if (equal before (harness-tasks--naming-text view))
           view
         (prog1 (harness-tasks--set id :name nil)
+          ;; The session took the title the task is losing; drop it there too.
+          (let ((session (harness-tasks--session task)))
+            (when (and session (not (harness-string-blank-p (plist-get session :name))))
+              (harness-call 'session/update (plist-get session :id) :silent t :name nil)))
           (harness-tasks--name id))))))
 
 (harness-defmethod task/prompt (id text &optional attachments opts)
