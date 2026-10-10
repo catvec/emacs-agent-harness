@@ -408,6 +408,170 @@ tell it from the user's messages."
                                                                           (list :session_id other :action "answer" :answer "teal"))))
       (should (equal "teal" (plist-get (harness-test-await ask 5) :content))))))
 
+;;;; Waiting on a sub-agent
+;;
+;; A sub-agent is an ordinary child session, and a wait on one must
+;; settle as a wait on any session does.  Its parent cannot see it run
+;; while `spawn_agent' blocks the parent's turn, and the child has
+;; finished by the time the parent's spawn returns, so a wait made then
+;; -- the parent's own, or a third session's -- must settle on the spot
+;; rather than wait for a change that can never come.
+
+(defconst harness-tools-sessions-test-slow-child
+  '((:type wait :seconds 0.5) (:type text :delta "child says hi") (:type done :stop-reason end-turn))
+  "A child's script whose turn runs long enough to be waited on.")
+
+(declare-function harness-provider-demo--last-user-text "harness-provider-demo")
+
+(defun harness-tools-sessions-test-spawn (parent &rest plist)
+  "Start a sub-agent of PARENT with PLIST's input; return (CHILD . PROMISE).
+The promise is the `spawn_agent' call's; the child id is the session it
+made, found as soon as it exists."
+  (let ((promise (harness-call 'tools/execute
+                               parent (list :id (harness-short-id)
+                                            :name "spawn_agent"
+                                            :input (harness-plist-merge (list :prompt "child work") plist)))))
+    (harness-test-wait (lambda () (plist-get (car (harness-call 'session/list (list :kind 'subagent))) :id))
+                       5 "a sub-agent to exist")
+    (cons (plist-get (car (harness-call 'session/list (list :kind 'subagent))) :id) promise)))
+
+(defun harness-tools-sessions-test-spawned (parent &rest plist)
+  "Run spawn_agent in PARENT with PLIST, wait for it, and return the child's id."
+  (let ((spawned (apply #'harness-tools-sessions-test-spawn parent plist)))
+    (harness-test-await (cdr spawned) 10)
+    (car spawned)))
+
+(defun harness-tools-sessions-test-wait (sid name input)
+  "Run tool NAME with INPUT as SID; return its promise."
+  (harness-call 'tools/execute sid (list :id (harness-short-id) :name name :input input)))
+
+(ert-deftest harness-tools-sessions-wait-on-a-sub-agent-settles ()
+  "A wait on a sub-agent settles when its turn ends, as on any session.
+Both a fresh sub-agent and a fork one, waited on by a third session
+while its parent's `spawn_agent' call is still running."
+  (harness-tools-sessions-test-with
+    (let ((harness-provider-demo--delay 0.01)
+          (harness-provider-demo-script-override harness-tools-sessions-test-slow-child))
+      (dolist (fork '(nil t))
+        (let* ((watcher (harness-tools-sessions-test-session :name "Watcher"))
+               (parent (harness-tools-sessions-test-session :name "Parent"))
+               (spawned (harness-tools-sessions-test-spawn parent :fork fork))
+               (child (car spawned))
+               (wait (harness-tools-sessions-test-wait
+                      watcher "session_wait" (list :session_id child :until "stopped" :timeout_seconds 5))))
+          (should (harness-call 'agent/running child))
+          (let ((text (plist-get (harness-test-await wait 5) :content)))
+            (should (string-match-p "Done waiting" text))
+            (should (string-match-p (regexp-quote child) text))
+            (should (string-match-p "child says hi" text)))
+          ;; The parent's blocking call got the same answer, and nothing waits.
+          (should (string-match-p "child says hi"
+                                  (plist-get (harness-test-await (cdr spawned) 5) :content)))
+          (should (zerop (hash-table-count harness-tools-sessions--waiters)))
+          (should-not harness-tools-sessions--recheck-timer))))))
+
+(ert-deftest harness-tools-sessions-wait-changed-on-a-finished-sub-agent-settles ()
+  "`changed' on a sub-agent that already finished settles, it does not hang.
+`spawn_agent' is blocking, so the parent's call returns at the child's
+turn end: by the time anyone can wait on the child, its state has
+already changed for the last time.  A wait that then asked for a change
+used to run into its timeout although the child was done."
+  (harness-tools-sessions-test-with
+    (let* ((watcher (harness-tools-sessions-test-session :name "Watcher"))
+           (parent (harness-tools-sessions-test-session :name "Parent"))
+           (child (harness-tools-sessions-test-spawned parent)))
+      ;; The child has finished: its turn ended before the wait below.
+      (should-not (harness-call 'agent/running child))
+      (let ((text (harness-tools-sessions-test-ok watcher "session_wait"
+                                                  (list :session_id child :until "changed"
+                                                        :timeout_seconds 5))))
+        (should (string-match-p "Done waiting" text))
+        (should (string-match-p "idle" text))
+        (should (string-match-p "Reply from the other session" text))))))
+
+(ert-deftest harness-tools-sessions-wait-on-several-sub-agents-mode-any ()
+  "Several sub-agents, mode any and all: as with any other sessions."
+  (harness-tools-sessions-test-with
+    (let* ((harness-provider-demo--delay 0.01)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (if (string-match-p "slow" (harness-provider-demo--last-user-text request))
+                  '((:type wait :seconds 3) (:type text :delta "slow done") (:type done :stop-reason end-turn))
+                '((:type text :delta "fast done") (:type done :stop-reason end-turn)))))
+           (watcher (harness-tools-sessions-test-session :name "Watcher"))
+           (parent (harness-tools-sessions-test-session :name "Parent"))
+           (slow (car (harness-tools-sessions-test-spawn parent :prompt "slow child")))
+           (fast (car (harness-tools-sessions-test-spawn parent :prompt "fast child"))))
+      (should (harness-call 'agent/running slow))
+      ;; any: the first of them to stop settles the wait, the slow one still runs.
+      (let ((text (harness-tools-sessions-test-ok
+                   watcher "session_wait"
+                   (list :session_ids (list slow fast) :mode "any" :until "stopped" :timeout_seconds 5))))
+        (should (string-match-p "Done waiting" text))
+        (should (harness-call 'agent/running slow)))
+      ;; all: waits for the slow one too.
+      (let ((text (harness-tools-sessions-test-ok
+                   watcher "session_wait"
+                   (list :session_ids (list slow fast) :until "stopped" :timeout_seconds 10))))
+        (should (string-match-p "Done waiting" text))
+        (should-not (harness-call 'agent/running slow))))))
+
+(ert-deftest harness-tools-sessions-wait-settles-without-events ()
+  "A wait settles even when no subscribed event announces the change.
+The events are the ordinary way a wait is looked at; the safety
+re-check (`harness-tools-sessions-wait-recheck') is the floor under
+them, so a change nothing announced cannot hold a wait for its whole
+timeout -- what a sub-agent's finish was reported to do."
+  (harness-tools-sessions-test-with
+    (let ((harness-tools-sessions-wait-recheck 0.2)
+          (harness-provider-demo--delay 0.01)
+          (harness-provider-demo-script-override harness-tools-sessions-test-slow-child))
+      (let* ((watcher (harness-tools-sessions-test-session :name "Watcher"))
+             (parent (harness-tools-sessions-test-session :name "Parent"))
+             (child (car (harness-tools-sessions-test-spawn parent)))
+             (wait (harness-tools-sessions-test-wait
+                    watcher "session_wait" (list :session_id child :until "stopped" :timeout_seconds 5))))
+        (harness-test-wait (lambda () (= 1 (hash-table-count harness-tools-sessions--waiters))) 5 "a waiter")
+        ;; Take every poker away: only the safety re-check is left.
+        (dolist (ev '(session/status session/changed session/deleted session/pending-changed
+                      session/node-added session/head-moved agent/turn-started
+                      task/changed task/deleted))
+          (harness-off (cons ev 'harness-tools-sessions--poke)))
+        (harness-off (cons 'agent/turn-ended 'harness-tools-sessions--on-turn-ended))
+        (should (string-match-p "Done waiting" (plist-get (harness-test-await wait 8) :content)))
+        (should (zerop (hash-table-count harness-tools-sessions--waiters)))
+        (should-not harness-tools-sessions--recheck-timer)))))
+
+(ert-deftest harness-tools-sessions-wait-on-a-sub-agent-until-blocked ()
+  "A sub-agent that asks the user is waited on as any session: blocked,
+then, once answered, idle."
+  (harness-tools-sessions-test-with
+    (let* ((harness-provider-demo--delay 0.01)
+           (harness-provider-demo-script-override
+            '((:type wait :seconds 0.2)
+              (:type tool-call :id "q" :name "ask_user" :input (:question "Which colour?"))
+              (:type text :delta "child answered")
+              (:type done :stop-reason end-turn)))
+           (watcher (harness-tools-sessions-test-session :name "Watcher"))
+           (parent (harness-tools-sessions-test-session :name "Parent"))
+           (spawned (harness-tools-sessions-test-spawn parent))
+           (child (car spawned))
+           (blocked (harness-tools-sessions-test-wait
+                     watcher "session_wait" (list :session_id child :until "blocked" :timeout_seconds 5))))
+      ;; Its turn ends blocked, so the parent's call answers with that.
+      (harness-catch (cdr spawned) #'ignore)
+      (let ((text (plist-get (harness-test-await blocked 5) :content)))
+        (should (string-match-p "Done waiting" text))
+        (should (string-match-p "waiting on the user: question .*Which colour\\?" text)))
+      (should (string-match-p "Answered" (harness-tools-sessions-test-ok
+                                          watcher "session_control"
+                                          (list :session_id child :action "answer" :answer "teal"))))
+      (let ((text (harness-tools-sessions-test-ok watcher "session_wait"
+                                                  (list :session_id child :until "idle" :timeout_seconds 10))))
+        (should (string-match-p "Done waiting" text))
+        (should (string-match-p "child answered" text))))))
+
+
 (ert-deftest harness-tools-sessions-control ()
   (harness-tools-sessions-test-with
     (let ((harness-provider-demo--delay 0.2)

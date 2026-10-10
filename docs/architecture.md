@@ -4323,8 +4323,19 @@ task waiting for review takes neither for the user's review: only
 entries re-checked on session and task events, settled by their
 condition, their timeout (`harness-tools-sessions--wait-default`, at most
 `-wait-max`) or the end of the waiting turn; a timeout is a report, not
-an error.  Nothing here grants permissions: permission requests and
-permission modes stay with the user, and `task_submit` uses the task
+an error.  Events are not their only look: while any wait runs, the
+safety re-check (`harness-tools-sessions-wait-recheck`) walks them every
+few seconds too, so a change none of those events announced -- a
+subscriber lost to a reload, a session settled by a module of its own, a
+finish that happened before the wait was made -- cannot hold a wait for
+its whole timeout while its condition already holds.  That is what a
+wait on a sub-agent needs: `spawn_agent` is blocking, so the parent's
+call returns at the child's turn end, and by the time the parent can
+wait on it the child has finished -- an `until=changed` wait settles at
+once for a session that is not running, rather than wait for a change
+that can never come.  Nothing here grants permissions: permission
+requests and permission modes stay with the user, and `task_submit`
+uses the task
 defaults.  Nor does `session_control` answer the harness's question
 about a cold prompt cache (its payload's `:cowboy`): what to spend on
 another session's conversation is the user's call.  The task tools need the `tasks` module.

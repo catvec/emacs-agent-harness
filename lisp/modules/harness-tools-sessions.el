@@ -55,6 +55,17 @@
 ;; Waits never block: each is an entry in `harness-tools-sessions--waiters'
 ;; re-checked by one subscriber whenever a session or task changes, and
 ;; settled by its condition, its timeout, or the end of the waiting turn.
+;; The subscriber is not the only way a wait is looked at: a slow safety
+;; re-check (`harness-tools-sessions-wait-recheck') runs while any wait
+;; does, so a change that no subscribed event announced -- a subscriber
+;; lost to a reload, a session settled by a module of its own, a finish
+;; that happened before the wait was made -- cannot hold a wait for its
+;; whole timeout when its condition already holds.  This matters most for
+;; a sub-agent: `spawn_agent' is blocking, so its parent can only first
+;; wait on it once it has already finished, and `until=changed' would
+;; otherwise wait for a change that can never come (`--reached-p' settles
+;; a changed wait on an idle or closed session: nothing new of its own is
+;; coming from it).
 
 ;;; Code:
 
@@ -72,6 +83,21 @@
 
 (defconst harness-tools-sessions--wait-max 3600
   "Longest wait, in seconds, a `session_wait' or `task_wait' call may ask for.")
+
+(defcustom harness-tools-sessions-wait-recheck 2
+  "Seconds between the safety re-checks of running waits, or nil for none.
+A wait is settled the moment its condition first holds, as the events
+that announce a session's or task's changes tell the module to look
+again; this is a floor under those events, so a change none of them
+announced -- a subscriber lost to a reload, a status a module set on its
+own, a finish that happened before the wait was made -- cannot hold a
+wait for its whole timeout while its condition already holds.  The
+re-check is a walk over the running waits; with none running, nothing
+runs."
+  :type '(choice (const :tag "No safety re-check" nil)
+                 (number :tag "Seconds"))
+  :safe (lambda (v) (or (null v) (and (numberp v) (> v 0))))
+  :group 'harness)
 
 (defconst harness-tools-sessions--grep-program "grep"
   "Program `session_search' runs over the transcript logs.")
@@ -1044,6 +1070,33 @@ the wait with a reason symbol (met, timeout or cancelled).")
                (funcall (plist-get w :finish) 'met)))
            (copy-hash-table harness-tools-sessions--waiters)))
 
+(defvar harness-tools-sessions--recheck-timer nil
+  "Timer of the safety re-check of the running waits, or nil for none.")
+
+(defun harness-tools-sessions--arm-recheck ()
+  "Keep the waits' safety re-check armed while any wait runs.
+See `harness-tools-sessions-wait-recheck': this is the floor under the
+events that settle waits, so none can hang on a change nothing announced."
+  (when (and harness-tools-sessions-wait-recheck
+             (not harness-tools-sessions--recheck-timer)
+             (> (hash-table-count harness-tools-sessions--waiters) 0))
+    (setq harness-tools-sessions--recheck-timer
+          (run-at-time harness-tools-sessions-wait-recheck nil
+                       #'harness-tools-sessions--recheck))))
+
+(defun harness-tools-sessions--recheck ()
+  "Look at every running wait once, and keep the next re-check armed."
+  (setq harness-tools-sessions--recheck-timer nil)
+  (harness-tools-sessions--poke)
+  (harness-tools-sessions--arm-recheck))
+
+(defun harness-tools-sessions--disarm-recheck ()
+  "Stop the safety re-check of the waits when none of them waits any more."
+  (when (and harness-tools-sessions--recheck-timer
+             (zerop (hash-table-count harness-tools-sessions--waiters)))
+    (cancel-timer harness-tools-sessions--recheck-timer)
+    (setq harness-tools-sessions--recheck-timer nil)))
+
 (defun harness-tools-sessions--on-turn-ended (session-id &rest _)
   "Settle the waits made by SESSION-ID's turn, which has ended, then re-check."
   (maphash (lambda (_ w)
@@ -1063,12 +1116,14 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
                      (when (gethash id harness-tools-sessions--waiters)
                        (remhash id harness-tools-sessions--waiters)
                        (when timer (cancel-timer timer))
+                       (harness-tools-sessions--disarm-recheck)
                        (funcall resolve (condition-case err (funcall report why)
                                           (error (harness-tool-error (harness-error-message err)))))))))
       (if (funcall check)
           (funcall resolve (funcall report 'met))
         (puthash id (list :check check :finish finish :session-id (plist-get ctx :session-id))
                  harness-tools-sessions--waiters)
+        (harness-tools-sessions--arm-recheck)
         (setq timer (run-at-time timeout nil finish 'timeout))))))
 
 (defun harness-tools-sessions--timeout (input)
@@ -1078,7 +1133,15 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
                 (if (numberp v) v harness-tools-sessions--wait-default)))))
 
 (defun harness-tools-sessions--reached-p (sid until baseline)
-  "Non-nil when session SID satisfies UNTIL; BASELINE is its state at the start."
+  "Non-nil when session SID satisfies UNTIL; BASELINE is its state at the start.
+A `changed' wait is met by any new state of the session and also by an
+idle or closed one: a session that is not running and not waiting on
+the user has nothing new of its own coming, so waiting for a change
+that can never come would only hold the caller until the timeout.  It
+is what a wait made on a sub-agent meets: `spawn_agent' is blocking, so
+the parent can first wait on the child once its turn has ended.  A
+blocked session is left to the wait: its turn is not over, and it
+changes when its question is answered."
   (if (not (harness-call 'session/exists-p sid))
       t
     (let ((status (harness-tools-sessions--status sid)))
@@ -1086,7 +1149,8 @@ CTX is the tool context; REPORT is called with met, timeout or cancelled."
         ("idle" (eq status 'idle))
         ("blocked" (eq status 'blocked))
         ("running" (eq status 'running))
-        ("changed" (not (equal baseline (harness-tools-sessions--state sid))))
+        ("changed" (or (memq status '(idle inactive))
+                       (not (equal baseline (harness-tools-sessions--state sid)))))
         (_ (not (eq status 'running)))))))
 
 (defun harness-tools-sessions--state (sid)
@@ -1124,7 +1188,7 @@ INPUT is the tool call's input plist and CTX its context."
 
 (harness-define-tool "session_wait"
   :label "Wait for sessions"
-  :description "Wait for other sessions without polling. until=stopped (default) returns when each session is no longer running (its turn ended, it is blocked on the user, or it closed); idle, blocked and running wait for that status; changed waits for any new status, message or pending request. mode=all (default) waits for every session, any for the first. Returns each session's status, what it waits on and its last reply; on timeout it returns the same report, not an error."
+  :description "Wait for other sessions without polling. until=stopped (default) returns when each session is no longer running (its turn ended, it is blocked on the user, or it closed); idle, blocked and running wait for that status; changed waits for any new status, message or pending request, and returns at once for an idle or closed session, whose own work is over (a sub-agent spawned by a blocking spawn_agent is such a session: it has finished by the time its parent can wait on it). mode=all (default) waits for every session, any for the first. Returns each session's status, what it waits on and its last reply; on timeout it returns the same report, not an error."
   :schema '(:type "object"
             :properties (:session_id (:type "string" :description "A session id, unique id prefix or unique name.")
                          :session_ids (:type "array" :items (:type "string") :description "Several sessions.")
@@ -1414,6 +1478,7 @@ INPUT is the tool call's input plist and CTX its context."
 Install the stage that has the user confirm session_move, too: the tool
 is registered at load time, and must never be offered without it."
   (dolist (ev '(session/status session/changed session/deleted session/pending-changed
+                session/node-added session/head-moved
                 agent/turn-started task/changed task/deleted))
     (harness-on ev #'harness-tools-sessions--poke 90))
   (harness-on 'agent/turn-ended #'harness-tools-sessions--on-turn-ended 90)
