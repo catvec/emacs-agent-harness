@@ -1482,6 +1482,11 @@ call to one anyway, in every permission mode.
   merges into the main checkout, and may be the target of the sessions
   it starts in between, at any depth: one queue, one conflict
   resolution, one set of events.
+  A merged branch lands as one commit, not as the small ones its agent
+  made: its subject is the session's name, and its body lists the
+  commits the branch brought and their diffstat, so the history reads
+  as one pull request per task. A branch whose work is already in the
+  target merges without a commit.
   Order follows the work: a branch may be queued upward while the
   merges into its own worktree are still to come, but it waits for
   them, and the session may not hand in (`hand_in`) until they are

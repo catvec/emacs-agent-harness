@@ -3380,6 +3380,7 @@ so switching to either loses nothing.
 
 - `worktree/list ROOT`, `worktree/create ROOT &key branch path base`,
   `worktree/remove ROOT PATH &optional FORCE`, `worktree/prune ROOT`,
+  `worktree/prune-merged ROOT &optional DRY-RUN`,
   `worktree/lock ROOT PATH &optional REASON`,
   `worktree/unlock ROOT PATH &optional ANY`, `worktree/lock-existing ROOT`,
   `worktree/root-of PATH`, `worktree/branch PATH`,
@@ -3416,14 +3417,34 @@ so switching to either loses nothing.
     gone, and skips locked ones as git does.  It returns git's lines plus
     a `Kept ...` line for each locked worktree whose directory is missing
     (`worktree/remove` takes those away).
+  - `worktree/prune-merged ROOT &optional DRY-RUN` removes the
+    worktrees whose work has already merged -- what keeps the harness's
+    own worktrees (`worktree/create` makes one per session) from piling
+    up for years.  A worktree is removed when it is not the main or a
+    bare one, has not lost its directory and git would not prune it, is
+    unlocked (by the harness or anyone else), is clean, is used by no
+    session that is still working (an inactive one does not count), and
+    has merged: either its HEAD is an ancestor of ROOT's HEAD, or its
+    path is in the merged-worktree record.  That record exists because a
+    merge lands as one squash commit: the branch tip is then in no
+    history, so ancestry cannot say the worktree merged.  The merge
+    queue's `merge/finished` event writes the child's worktree to
+    merged-worktrees.json in the state directory
+    (`harness-worktree--on-merge-finished`), and `worktree/removed`
+    takes it out again.  Each worktree is checked and removed through
+    `worktree/remove`; a failure is logged and the rest go on.  DRY-RUN
+    names what would go and removes nothing (the worktree list's `P`
+    asks before removing: `p` stays `worktree/prune`).
   - Worktrees made before locks: `worktree/lock-existing ROOT` locks the
     registered worktrees in the directory the harness puts its worktrees
     in (`harness-worktree-directory-function`, ROOT/.worktrees/ by
     default) that have no lock, whose directory exists, and that the sync
     filter `worktree/lock-existing-p` (value t, args ROOT WORKTREE) does
     not turn down; the tasks module turns down merged tasks' worktrees.
-    The main checkout and foreign worktrees are never touched.  On
-    `harness/started` and `harness/reloaded` it runs for the main
+    The main checkout and foreign worktrees are never touched.  A
+    repository with many of them is locked a bounded number at a time
+    (`harness-worktree--lock-concurrency`, 8), not one git at a time.
+    On `harness/started` and `harness/reloaded` it runs for the main
     checkout of every repository the sessions work in, once per
     repository: worktree-locks.json in the state directory lists those
     done, so a merged and unlocked worktree stays unlocked.  The
@@ -3460,12 +3481,29 @@ session may itself be a target with a queue of its own.
   wait for and starts as soon as the lock is free.  Each merge is a
   transaction that never leaves the target's checkout mid-merge.
   `git merge-tree --write-tree` merges the child's branch
-  into the target's HEAD off to the side; a clean result becomes a merge
-  commit (`git commit-tree`, message as `git merge --no-ff` writes it)
-  and the checkout moves onto it with `git merge --ff-only`, which git
-  refuses, changing nothing, when it would overwrite uncommitted or
-  untracked work there or a merge is already in progress (the merge
-  fails; a HEAD that moved meanwhile is merged again).  On conflict the
+  into the target's HEAD off to the side; a clean result becomes ONE
+  commit (`git commit-tree`) whose only parent is the target's HEAD --
+  a branch lands as a pull request's worth of work, not as the small
+  commits its agent made, which are not ancestors of the target
+  afterwards.  Its subject is the child session's name and its body
+  lists the commits the branch brings (bounded) and their diffstat
+  (`harness-merge--message`), so the target's history stays legible
+  with so many tasks merging.  The checkout moves onto the commit with
+  `git merge --ff-only`, which git refuses, changing nothing, when it
+  would overwrite uncommitted or untracked work there or a merge is
+  already in progress (the merge fails; a HEAD that moved meanwhile is
+  merged again).  A branch whose work the target already holds -- merged
+  before, or the same change committed there -- leaves nothing to
+  commit: a merge whose tree equals the target's HEAD tree is done
+  with, without a commit (`git merge-base --is-ancestor` catches a
+  branch that is in history; the tree comparison catches one that was
+  squashed in).  Because a squash leaves the branch's commits out of
+  the target's history, the merge records the tip it merged in
+  `refs/harness/merged/BRANCH` (`harness-merge--record-merged-tip`) and
+  computes that branch's next merge from it (`git merge-tree
+  --merge-base`): a branch that carries on after it merged -- sent back
+  to work, or prompted again -- brings only its new commits instead of
+  replaying its own squash commit and conflicting with it.  On conflict the
   target is untouched and the lock passes on at once, and the target's
   commit is to be `git merge`d into the child's branch, in its own
   worktree.  By default (`harness-merge-conflict-resolver` `fresh`) the

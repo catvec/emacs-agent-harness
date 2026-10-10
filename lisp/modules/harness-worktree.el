@@ -29,6 +29,15 @@
 ;; are locked once per repository when the harness starts
 ;; (`worktree/lock-existing').  Locks with another reason belong to
 ;; someone else and are left alone.
+;;
+;; Merged worktrees.  The merge queue lifts a merged worktree's lock but
+;; leaves the directory, so the harness's worktrees accumulate.  A merge
+;; lands as one squash commit, whose branch tip is not in the target's
+;; history, so git ancestry alone no longer says which worktrees merged:
+;; the merge queue's `merge/finished' event records the child's worktree
+;; in `harness-worktree--merged-file', and `worktree/prune-merged'
+;; removes the recorded (or still-ancestor) worktrees that are clean,
+;; unlocked and used by no working session.
 
 ;;; Code:
 
@@ -64,6 +73,13 @@ harness's: it unlocks only its own.")
   "File in `harness-state-directory' naming the repositories already locked.
 Those are the repositories whose existing worktrees
 `harness-worktree--lock-known' locked, which it does once per repository.")
+
+(defconst harness-worktree--merged-file "merged-worktrees.json"
+  "File in `harness-state-directory' naming the worktrees whose branch merged.
+The merge queue lifts a merged worktree's lock but does not remove its
+directory, and a merge lands as one squash commit whose branch tip is
+not in the target's history: `harness-worktree--on-merge-finished'
+records the worktree here and `worktree/prune-merged' reads it back.")
 
 (defvar harness-state-directory)
 
@@ -406,6 +422,36 @@ missing (`worktree/remove' takes those away)."
                        (lambda (worktrees) (append pruned (harness-worktree--kept-lines worktrees)))
                        (lambda (_) pruned)))))))
 
+(harness-defmethod worktree/prune-merged (root &optional dry-run)
+  "Remove the worktrees of ROOT whose work has already merged.
+A worktree goes when it is registered, is neither the main nor a bare
+worktree, has not lost its directory and git would not prune it, is not
+locked (by the harness or anyone else), has a clean working copy, is
+used by no session that is still working -- an inactive one does not
+count -- and either its HEAD is an ancestor of ROOT's HEAD or it is in
+the merged-worktree record (see `harness-worktree--merged-file', which
+the merge queue writes for a squash merge).  `worktree/prune' drops
+stale records only; this removes the directories themselves.  Return a
+promise of the paths removed, or, with DRY-RUN, of the paths that would
+be removed, removing nothing."
+  (let ((root (file-name-as-directory (expand-file-name root))))
+    (harness-then
+     (harness-call 'worktree/list root)
+     (lambda (worktrees)
+       (harness-then
+        (harness-worktree--merged-to-remove
+         root (cl-remove-if-not #'harness-worktree--merged-candidate-p worktrees))
+        (lambda (candidates)
+          (if dry-run
+              (mapcar (lambda (wt) (plist-get wt :path)) candidates)
+            (harness-then
+             (harness-worktree--remove-each root candidates)
+             (lambda (removed)
+               (when removed
+                 (harness-log 'info "worktree: pruned %d merged worktree(s) of %s"
+                              (length removed) root))
+               removed)))))))))
+
 (harness-defmethod worktree/root-of (path)
   "Return a promise of the main repository root for PATH.
 PATH may be inside any worktree of the repository (or a file in it)."
@@ -433,6 +479,156 @@ Ahead and behind count commits relative to the upstream, 0 without one."
   (harness-then (harness-worktree--git path "status" "--porcelain=v2" "--branch")
                 #'harness-worktree--parse-status))
 
+;;;; Merged worktrees
+
+;; The worktrees a merge has landed, for `worktree/prune-merged'.  A
+;; merge lands as one squash commit, so the branch tip is not in the
+;; target's history and git ancestry cannot tell that the worktree
+;; merged: the merge queue's `merge/finished' event records the child's
+;; worktree here instead, once per repository in the harness state
+;; directory (like `harness-worktree--locked-roots-file').
+
+(defun harness-worktree--merged-path ()
+  "Return the file naming the worktrees whose branch merged."
+  (expand-file-name harness-worktree--merged-file harness-state-directory))
+
+(defun harness-worktree--merged-record ()
+  "Return the paths of the worktrees known to have merged."
+  (let ((data (ignore-errors
+                (harness-json-parse (harness-read-file (harness-worktree--merged-path))))))
+    (and (listp data) (cl-remove-if-not #'stringp data))))
+
+(defun harness-worktree--write-merged-record (paths)
+  "Write PATHS as the merged-worktree record."
+  (harness-write-file-atomically (harness-worktree--merged-path)
+                                 (harness-json-encode (harness-json-array paths))))
+
+(defun harness-worktree--canonical (path)
+  "Return PATH normalised the way the merged-worktree record keeps it."
+  (file-name-as-directory (harness-path-normalize path)))
+
+(defun harness-worktree--note-merged (path)
+  "Record worktree PATH as one whose branch merged."
+  (when (stringp path)
+    (let* ((path (harness-worktree--canonical path))
+           (paths (harness-worktree--merged-record)))
+      (unless (member path paths)
+        (harness-worktree--write-merged-record (append paths (list path)))))))
+
+(defun harness-worktree--forget-merged (path)
+  "Drop worktree PATH from the merged-worktree record."
+  (when (stringp path)
+    (let* ((path (harness-worktree--canonical path))
+           (paths (harness-worktree--merged-record)))
+      (when (member path paths)
+        (harness-worktree--write-merged-record (cl-remove path paths :test #'equal))))))
+
+(defun harness-worktree--merged-recorded-p (path)
+  "Non-nil when PATH is recorded as a worktree whose branch merged."
+  (and (stringp path)
+       (member (harness-worktree--canonical path) (harness-worktree--merged-record))))
+
+(defun harness-worktree--on-merge-finished (child _target status)
+  "Record CHILD's worktree when its branch merged.
+STATUS is the merge's outcome; only `merged' records anything.  The
+merge queue emits this for every target, a session or a main checkout."
+  (when (eq status 'merged)
+    (let ((session (and (harness-method-exists-p 'session/get)
+                        (ignore-errors (harness-call 'session/get child)))))
+      (harness-worktree--note-merged (plist-get session :worktree)))))
+
+(defun harness-worktree--on-worktree-removed (_root path)
+  "Drop the removed worktree PATH from the merged-worktree record."
+  (harness-worktree--forget-merged path))
+
+(defun harness-worktree--merged-candidate-p (wt)
+  "Non-nil when WT could be pruned as merged, before any git runs."
+  (and (stringp (plist-get wt :path))
+       (not (harness-json-true-p (plist-get wt :main)))
+       (not (harness-json-true-p (plist-get wt :bare)))
+       (not (harness-json-true-p (plist-get wt :locked)))
+       (not (plist-get wt :missing))
+       (not (plist-get wt :prunable))))
+
+(defun harness-worktree--session-uses-p (path)
+  "Non-nil when a session that is not inactive works in PATH."
+  (and (harness-method-exists-p 'session/list)
+       (cl-some (lambda (s)
+                  (and (not (eq (plist-get s :status) 'inactive))
+                       (cl-some (lambda (dir)
+                                  (and (stringp dir) (harness-worktree--same-path-p dir path)))
+                                (list (plist-get s :worktree) (plist-get s :cwd)))))
+                (ignore-errors (harness-call 'session/list)))))
+
+(defun harness-worktree--merged-p (root wt)
+  "Return a promise of non-nil when WT of ROOT has already merged.
+Either its HEAD is an ancestor of ROOT's HEAD (a merge that kept the
+branch's commits) or the worktree is in the merged-worktree record (a
+squash merge, whose branch tip is no longer in the target's history)."
+  (if (harness-worktree--merged-recorded-p (plist-get wt :path))
+      (harness-resolved t)
+    (let ((head (plist-get wt :head)))
+      (if (or (null head) (string-empty-p head))
+          (harness-resolved nil)
+        (harness-then
+         (harness-run-command (list "git" "-C" (directory-file-name root)
+                                    "merge-base" "--is-ancestor" head "HEAD")
+                              :cwd root :name "harness-git")
+         (lambda (result) (eql (plist-get result :exit) 0)))))))
+
+(defun harness-worktree--merged-to-remove-p (root wt)
+  "Return a promise of non-nil when WT of ROOT should be removed as merged."
+  (if (not (harness-worktree--merged-candidate-p wt))
+      (harness-resolved nil)
+    (harness-then
+     (harness-worktree--merged-p root wt)
+     (lambda (merged)
+       (when (and merged
+                  (not (harness-worktree--session-uses-p (plist-get wt :path))))
+         (harness-then
+          (harness-call 'worktree/status (plist-get wt :path))
+          (lambda (st) (not (harness-json-true-p (plist-get st :dirty))))))))))
+
+(defun harness-worktree--merged-to-remove (root worktrees)
+  "Return a promise of the WORKTREES of ROOT to remove as merged, in order.
+A worktree whose check fails is kept and logged, not the whole prune."
+  (let ((kept nil))
+    (cl-labels ((next (rest)
+                  (if (null rest)
+                      (harness-resolved (nreverse kept))
+                    (harness-then
+                     (harness-catch
+                      (harness-worktree--merged-to-remove-p root (car rest))
+                      (lambda (err)
+                        (harness-log 'warn "worktree: could not check %s: %s"
+                                     (plist-get (car rest) :path) (harness-error-message err))
+                        nil))
+                     (lambda (yes)
+                       (when yes (push (car rest) kept))
+                       (next (cdr rest)))))))
+      (next worktrees))))
+
+(defun harness-worktree--remove-each (root worktrees)
+  "Remove the WORKTREES of ROOT one after the other.
+Return a promise of the paths removed; a failure is logged and the next
+worktree goes on."
+  (let ((removed nil))
+    (cl-labels ((next (rest)
+                  (if (null rest)
+                      (harness-resolved (nreverse removed))
+                    (let ((path (plist-get (car rest) :path)))
+                      (harness-then
+                       (harness-catch
+                        (harness-then
+                         (harness-call 'worktree/remove root path)
+                         (lambda (_) (push path removed)))
+                        (lambda (err)
+                          (harness-log 'warn "worktree: could not prune the merged %s: %s"
+                                       path (harness-error-message err))
+                          nil))
+                       (lambda (_) (next (cdr rest))))))))
+      (next worktrees))))
+
 ;;;; Locking the worktrees made before the harness locked them
 
 (defun harness-worktree--container (root)
@@ -453,29 +649,55 @@ CONTAINER is the directory holding the harness's worktrees of ROOT."
        (harness-worktree--inside-p container (plist-get wt :path))
        (harness-run-filter 'worktree/lock-existing-p t root wt)))
 
+(defconst harness-worktree--lock-concurrency 8
+  "Most `git worktree lock' invocations run at once, in `worktree/lock-existing'.")
+
 (defun harness-worktree--lock-each (root worktrees)
-  "Lock WORKTREES of ROOT one after the other.
-Return a promise of the paths locked.  A failure is logged and the
-next worktree goes on."
-  (let ((locked nil))
-    (cl-labels ((next (rest)
-                  (if (null rest)
-                      (harness-resolved (nreverse locked))
-                    (let* ((wt (car rest))
-                           (path (plist-get wt :path)))
-                      (harness-then
-                       (harness-catch
-                        (harness-then
-                         (harness-worktree--on root "lock" path "--reason"
-                                               (harness-worktree--lock-reason (plist-get wt :branch)))
-                         (lambda (_)
-                           (push path locked)
-                           (harness-emit 'worktree/locked root path)))
-                        (lambda (err)
-                          (harness-log 'warn "worktree: could not lock %s: %s" path (harness-error-message err))
-                          nil))
-                       (lambda (_) (next (cdr rest))))))))
-      (next worktrees))))
+  "Lock WORKTREES of ROOT, up to `harness-worktree--lock-concurrency' at once.
+Return a promise of the paths locked, in the order given.  A failure is
+logged and the next worktree goes on."
+  (if (null worktrees)
+      (harness-resolved nil)
+    (let* ((n (length worktrees))
+           (locked (make-vector n nil))
+           (next 0)
+           (in-flight 0)
+           (remaining n)
+           (done (harness-make-promise)))
+      (cl-labels
+          ((settle ()
+             (when (zerop (cl-decf remaining))
+               (harness-resolve done (cl-remove nil (append locked nil)))))
+           (start-one ()
+             (when (< next n)
+               (let* ((i next)
+                      (wt (nth i worktrees))
+                      (path (plist-get wt :path)))
+                 (cl-incf next)
+                 (cl-incf in-flight)
+                 (harness-then
+                  (harness-catch
+                   (harness-then
+                    (harness-worktree--on
+                     root "lock" path "--reason"
+                     (harness-worktree--lock-reason (plist-get wt :branch)))
+                    (lambda (_)
+                      (aset locked i path)
+                      (harness-emit 'worktree/locked root path)))
+                   (lambda (err)
+                     (harness-log 'warn "worktree: could not lock %s: %s"
+                                  path (harness-error-message err))
+                     nil))
+                  (lambda (_)
+                    (cl-decf in-flight)
+                    (settle)
+                    (start-one))))))
+           (pump ()
+             (while (and (< in-flight harness-worktree--lock-concurrency)
+                         (< next n))
+               (start-one))))
+        (pump)
+        done))))
 
 (harness-defmethod worktree/lock-existing (root)
   "Lock the worktrees the harness keeps for ROOT that have no lock yet.
@@ -548,9 +770,12 @@ reloads."
 
 (defun harness-worktree--init ()
   "Lock the existing worktrees whenever the harness starts or reloads.
-Safe to call again."
+Record the worktrees whose branch merges, and forget the ones
+removed.  Safe to call again."
   (harness-on 'harness/started #'harness-worktree--lock-known)
-  (harness-on 'harness/reloaded #'harness-worktree--lock-known))
+  (harness-on 'harness/reloaded #'harness-worktree--lock-known)
+  (harness-on 'merge/finished #'harness-worktree--on-merge-finished)
+  (harness-on 'worktree/removed #'harness-worktree--on-worktree-removed))
 
 ;; A reload does not run `:init' again for a ready module, so a running
 ;; harness that reloads this file subscribes here and still locks the
