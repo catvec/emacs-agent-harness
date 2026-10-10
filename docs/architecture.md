@@ -4460,7 +4460,7 @@ TRAMP prefixes come from the session host):
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: given to the session the task is submitted with, and the order waiting tasks start in) | meta |
 | `task_control` | Control task | task_id, action (start/queue/message/cancel/merge/verify/reject/complete/archive/restore/delete/priority), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
-| `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
+| `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption), cannot_continue (cannot finish: to user input, nothing merges), no_merge (informational: verify completes without the merge queue) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
 | `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus (for the user: stays until the task is done) | exec (tools-dev; offered in a checkout of the harness only; the instance stops by itself once nothing needs it; needs no approval: `harness-perms--auto-allow-tools`) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
 | `notification_providers` | Notification providers | (none) | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -4488,7 +4488,13 @@ the words of the queue, naming each child and its state -- the work the
 session's own branch is built on has to be in it first.  Evidence is required: an image or a video (a path inside the
 session's roots), a file, code, a note, or `tool_call' naming an
 earlier call of the session, which is copied into the report as a
-snapshot so the view can show it as the link it is.
+snapshot so the view can show it as the link it is.  Two optional flags
+change where the hand-in goes.  `cannot_continue' is for a task that
+cannot be finished: it goes to the user's input instead of review,
+nothing merges, and evidence may be empty -- the summary says what
+blocks it.  `no_merge' is for work that changes nothing: it still waits
+for review, and verifying it completes the task without the merge
+queue.
 
 `open_harness` (`tools-dev`) opens a second Emacs running the harness
 from a checkout of this project -- a task's worktree, say -- so harness

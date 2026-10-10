@@ -11,6 +11,7 @@
 (defvar harness-agent--turns)
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
+(defvar harness-tasks--waking)
 (defvar harness-tasks--naming)
 (defvar harness-tasks--naming-queue)
 (defvar harness-tasks--loaded)
@@ -52,6 +53,7 @@ turn `harness-tasks-require-verification' on themselves."
      (clrhash harness-agent--turns)
      (clrhash harness-tasks--table)
      (clrhash harness-tasks--starting)
+     (clrhash harness-tasks--waking)
      (clrhash harness-tasks--naming)
      (harness-tasks--forget-stores)
      ;; Nothing of an earlier test waits to be written over this one's files.
@@ -3633,6 +3635,104 @@ that started none carries no key."
       (should (member "hand_in" (funcall names sid)))
       (should (member "hand_in" (funcall names nil))))))
 
+(declare-function harness-tasks--no-merge-p "harness-tasks")
+(declare-function harness-tasks--wake "harness-tasks")
+(declare-function harness-tasks--waking-p "harness-tasks")
+(declare-function harness-tasks--wake-worthy-p "harness-tasks")
+(declare-function harness-tasks--on-turn-started "harness-tasks")
+
+(ert-deftest harness-tasks-hand-in-cannot-continue-waits-for-the-user ()
+  "A task handing in `cannot_continue' waits for the user, not for review.
+Its report is kept, nothing merges, and the call itself is a success."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-handin)
+    (let ((harness-tasks-require-verification t)
+          (harness-provider-demo-script-override
+           '((:type tool-call :id "h1" :name "hand_in"
+              :input (:summary "# Blocked\n\nNeed a decision" :evidence nil :cannot_continue t)))))
+      (let* ((id (harness-tasks-test-submit "decide the schema"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (harness-test-wait
+         (lambda () (eq 'needs-input (plist-get (harness-tasks-test-task id) :column)))
+         10 "the task to wait for the user")
+        (let ((task (harness-tasks-test-task id)))
+          ;; It never went to review: it is active, before the user.
+          (should (eq 'active (plist-get task :state)))
+          (should (eq 'cannot-continue (plist-get task :outcome)))
+          (should (eq 'needs-input (plist-get task :column)))
+          (should (plist-get task :report))
+          (should-not (harness-json-true-p (plist-get (plist-get task :report) :missing)))
+          (should (equal "# Blocked\n\nNeed a decision"
+                         (plist-get (plist-get task :report) :summary)))
+          (should (string-match-p "Blocked" (plist-get task :error)))
+          (should-not (plist-get task :finished))
+          (should-not (plist-get task :merged))
+          (should-not (plist-get task :merge-status)))
+        ;; The tool call succeeded: the refusal path ends nothing.
+        (let ((result (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'tool-result)
+                                                   (equal (plist-get n :call-id) "h1")))
+                                  (harness-call 'session/nodes sid))))
+          (should result)
+          (should-not (plist-get result :is-error)))))))
+
+(ert-deftest harness-tasks-hand-in-no-merge-completes-without-merging ()
+  "A `no_merge' hand-in still waits for review; verifying completes it unmerged.
+The branch never joins the merge queue, even in a git project with a
+worktree, so nothing reaches main."
+  (harness-tasks-test-with-git
+    (harness-test-load-module 'tools-handin)
+    (let ((harness-tasks-require-verification t)
+          (merges 0)
+          (done-how nil))
+      (harness-on 'task/done (lambda (_task how) (setq done-how how)))
+      ;; The queue's own method: calling it proves a merge was queued.
+      (cl-letf (((symbol-function 'harness-method/merge/enqueue)
+                 (lambda (&rest _) (cl-incf merges) nil)))
+        (setq harness-provider-demo-script-override
+              '((:type tool-call :id "h1" :name "hand_in"
+                 :input (:summary "# Findings" :evidence ("a note") :no_merge t))))
+        (let ((id (harness-tasks-test-submit "report on the build")))
+          (harness-tasks-test-wait-state id 'review)
+          (let ((task (harness-tasks-test-task id)))
+            (should (harness-tasks--no-merge-p task))
+            (should (plist-get task :no-merge))
+            (should-not (plist-get task :merge-status))
+            (should-not (plist-get task :merge-queued)))
+          (harness-call 'task/verify id)
+          (harness-tasks-test-wait-state id 'done)
+          (let ((task (harness-tasks-test-task id)))
+            (should (eq 'done (plist-get task :state)))
+            ;; `:outcome' keeps the turn's own end-turn; the `task/done'
+            ;; event carries how it completed, here `verified'.
+            (should (plist-get task :verified))
+            (should-not (plist-get task :merged))
+            (should-not (plist-get task :merge-status))
+            (should-not (plist-get task :merge-queued)))
+          (should (eq 'verified done-how))
+          (should (= 0 merges))
+          ;; Nothing reached main: the branch was never merged.
+          (should (equal "one\n" (harness-tasks-test--main-text root))))))))
+
+(ert-deftest harness-tasks-hand-in-no-merge-without-review-is-done ()
+  "Without review a `no_merge' hand-in completes at once and merges nothing."
+  (harness-tasks-test-with-git
+    (harness-test-load-module 'tools-handin)
+    (let ((harness-tasks-require-verification nil))
+      (setq harness-provider-demo-script-override
+            '((:type tool-call :id "h1" :name "hand_in"
+               :input (:summary "# Findings" :evidence ("a note") :no_merge t))))
+      (let ((id (harness-tasks-test-submit "report on the build")))
+        (harness-tasks-test-wait-state id 'done)
+        (let ((task (harness-tasks-test-task id)))
+          (should (eq 'done (plist-get task :state)))
+          (should (eq 'end-turn (plist-get task :outcome)))
+          (should (plist-get task :finished))
+          (should-not (plist-get task :merged))
+          (should-not (plist-get task :merge-status))
+          (should-not (plist-get task :merge-queued)))
+        ;; The branch never merged into main.
+        (should (equal "one\n" (harness-tasks-test--main-text root)))))))
+
 ;; A round whose turn ends without hand_in -- the model replied instead,
 ;; or could not call the tool (Claude Code offering it none of the
 ;; harness's tools had it write its calls as text) -- must not leave its
@@ -3952,6 +4052,50 @@ by the harness; no new session or worktree is made."
            10 "the carry-on message")
           (harness-tasks-test-wait-state id 'done)
           (should (equal "two\n" (harness-tasks-test--main-text root))))))))
+
+;;;; Waking a stopped task while a message is on its way
+
+(ert-deftest harness-tasks-wake-shows-a-stopped-task-at-work ()
+  "A user's message on its way to a stopped task shows it at work at once.
+Until its turn starts the task would still show where it stopped; the
+marker clears when the turn begins."
+  (harness-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           '((:type done :stop-reason error :error "boom"))))
+      (let* ((id (harness-tasks-test-submit "will fail"))
+             (sid (plist-get (harness-tasks-test-task id) :session)))
+        (harness-test-wait
+         (lambda () (eq 'needs-input (plist-get (harness-tasks-test-task id) :column)))
+         10 "the task to stop in needs-input")
+        (should (eq 'active (harness-tasks-test-state id)))
+        ;; The message is on its way: show it at work though no turn runs.
+        (harness-tasks--wake id)
+        (should (eq 'active (plist-get (harness-call 'task/get id) :column)))
+        (should (harness-tasks--waking-p (harness-tasks-test-task id)))
+        ;; The turn starting clears the marker.
+        (harness-tasks--on-turn-started sid)
+        (should-not (harness-tasks--waking-p (harness-tasks-test-task id)))
+        (should-not (gethash id harness-tasks--waking))))))
+
+(ert-deftest harness-tasks-wake-worthy-only-for-stopped-and-done ()
+  "Only a task a user's message moves shows the waking marker.
+A task stopped part way (active with an outcome) or a completed one
+being reopened is woken; one in review, pending or being written up is
+not, and neither is one at work or merging already."
+  (harness-tasks-test-with
+    (let ((sid (plist-get (harness-call 'session/create :cwd default-directory) :id)))
+      (dolist (id '("t-review" "t-pending" "t-refining" "t-active"))
+        (harness-tasks--put (list :id id :project default-directory :cwd default-directory
+                                  :prompt "task" :session sid :state 'active
+                                  :created (float-time))))
+      (harness-tasks--set "t-review" :state 'review)
+      (harness-tasks--set "t-pending" :state 'pending)
+      (harness-tasks--set "t-refining" :state 'refining)
+      (harness-tasks--set "t-active" :state 'active :outcome 'error)
+      (should-not (harness-tasks--wake-worthy-p (harness-tasks-test-task "t-review")))
+      (should-not (harness-tasks--wake-worthy-p (harness-tasks-test-task "t-pending")))
+      (should-not (harness-tasks--wake-worthy-p (harness-tasks-test-task "t-refining")))
+      (should (harness-tasks--wake-worthy-p (harness-tasks-test-task "t-active"))))))
 
 (provide 'harness-tasks-test)
 ;;; harness-tasks-test.el ends here
