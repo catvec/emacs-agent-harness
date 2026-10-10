@@ -398,10 +398,12 @@ leave free.  None is left out by the menu."
                 (should-not (member key keys))
                 (push key keys)
                 (should-not (harness-ui--menu-key-taken-p key))
-                ;; Behind `.' one plain key; otherwise a chord, never a plain key.
+                ;; Behind `.' one plain key; otherwise a chord -- a key
+                ;; with a modifier, the chat's C-c C-c or its M-n --
+                ;; never a plain key, which the menu's own groups own.
                 (if dotted
                     (should (= 2 (length events)))
-                  (should (memq 'control (event-modifiers (aref events 0)))))
+                  (should (event-modifiers (aref events 0))))
                 (should (cl-some (lambda (map)
                                    (or (eq command (lookup-key map own))
                                        ;; Or the key's global command, remapped:

@@ -343,6 +343,9 @@ number of options, and a permission's `y`, `s`, `a`, `n` and `N`, and
 | `C-c C-f` / `C-c C-b` | Show the next or previous diagram of a question's options |
 | `C-c C-k` | Cancel the running turn |
 | `TAB` | Complete in the compose box; on a permission request cut short, show its whole input; elsewhere, fold or unfold the block at point |
+| `M-n` / `M-p` | Jump to the next or previous message: what you or the agent wrote, the agent's plan included. Thinking and tool calls are passed over, so a long run of them takes one key to get past |
+| `M-N` / `M-P` | Jump to the next or previous message you wrote — the prompt the session started with included, however far down it is |
+| `C-M-n` / `C-M-p` | Jump to the next or previous tool call or thinking block; a run of tool calls folded under one summary line is one stop. Coming from the box, the first jump lands on the newest one |
 | `C-c C-s` | Search the transcript |
 | `C-c C-t` | Show or hide the session's todo list |
 | `C-c C-w` | Copy the last reply |
