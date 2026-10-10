@@ -3876,6 +3876,42 @@ task up only reads, so it
 has no setting and `:ext` `:supervisor-write-up` t until the task
 starts, when it takes the task's setting.  Only the user changes it later.
 
+`harness-supervisor` and `harness-supervisor-tasks` are each `auto` (the
+default), `t` or nil, both layered (`harness-config-keys`) so a project's
+.dir-locals.el can decide how its sessions and its tasks start.  `auto`
+starts the session supervising and sets `:ext` `:supervisor-judge` t,
+and a cheap model decides from the opening message: a subscriber of
+`agent/turn-started` sends an ephemeral request beside the session's
+first turn (no tools, no thinking, one word asked;
+`harness-supervisor-judge-model`, the provider's cheap tier by default)
+holding the message alone, so the turn never waits for it.  A verdict
+starts the session as `supervisor/set` would and writes the note that
+says so, with `supervisor/changed`; a provider error, an unusable word
+or `harness-supervisor--judge-timeout` takes `:supervisor-judge` away
+and leaves the mode it started with, with the note saying that too.  A setting that decides (`t`/nil) and `supervisor/set` both take
+`:supervisor-judge` away, so the user's switch is never judged and a
+verdict that arrives after it is dropped.  A `submit_plan` or
+`retry_step' call the model wrote while the judge was still reading (its
+tool list from before the flip) is refused by its handler
+(`harness-supervisor--hands-on-result'), so no plan starts behind the
+mode's back.  Deleting a session forgets its judgement.
+
+The note the judge leaves (`harness-supervisor--note') is a hint, which
+the model never gets, written in the harness's voice: what was decided,
+and what to do about it.  Its `:meta` `:supervisor' holds the record the
+chat draws its buttons from (`harness-node-supervisor',
+harness-util.el): the judgement, the mode, the setting that decides how
+sessions start here and where it is written, and the two actions, each
+with the state nil, `done' or `undone'.  `supervisor/act' (SESSION-ID
+NODE-ID ACTION) is what a button calls: `always' writes the setting with
+`config/set' -- `harness-supervisor' at the session's directory, or
+`harness-supervisor-tasks' at the project of the task whose session it
+is -- and takes it back out of that layer with `config/unset', `mode'
+switches the session as `supervisor/set' does.  Each call moves its
+action on, records the state in the note (`session/update-node', so the
+chat redraws it with its [undo], then [redo]) and answers with the state
+and a message for the echo area.  Only the user calls it.
+
 - `supervisor/set SESSION-ID ON` → session plist: ON `t` for on, `:false`
   or nil for off, stored as `:false`, never removed.  Adds the hint
   "Supervisor mode on" or "Supervisor mode off" and emits
@@ -3896,11 +3932,17 @@ starts, when it takes the task's setting.  Only the user changes it later.
   `supervisor/set`.  Only the user does this, over ACP as
   `_harness/supervisor/set-all` with `:on` and `:filter` (the UI's
   `harness-set-supervisor-all`, the menu's V); there is no tool.
-- Settings: `harness-supervisor` (t; layered like `harness-model`, see
-  config), `harness-supervisor-tasks` (t), `harness-supervisor-tiers`
+- Settings: `harness-supervisor` (`auto`: a cheap model judges the
+  session from its opening message; `t` always supervises and nil is
+  always hands-on; layered like `harness-model`, see config),
+  `harness-supervisor-tasks` (the same three, for the sessions of
+  tasks, also layered, so a project decides how its tasks start),
+  `harness-supervisor-judge-model`
+  (`auto`: the provider's cheap tier, else the session's own model),
+  `harness-supervisor-tiers`
   (nil: an alist from `mundane`, `standard` or `hard` to a model id),
   `harness-supervisor-thinking` (`((deepseek . "max"))`: an alist from a
-  provider id to the level its sessions run at while they supervise) and
+  provider id to the level its sessions run at while they supervise),
   `harness-supervisor-worker-thinking` (`((deepseek . "medium"))`: an
   alist from a provider id to the level workers on its models run at),
   and `harness-supervisor-step-budget` (80), in the settings section

@@ -40,8 +40,11 @@ OpenAI-compatible APIs and AWS Bedrock.
   coordinates while workers on cheaper models make the changes. The
   harness enforces it with tools rather than a prompt: the supervising
   session has no write tools, its shell is read-only and offline, and
-  every turn ends on a decision. On by default, and a click on the
-  header line (or `C-c h V`) switches a session to working hands-on.
+  every turn ends on a decision. A cheap model judges a new session's
+  opening message by default and starts it supervising or hands-on, and
+  a note in the harness's own voice says so, with buttons to stop the
+  judging for later sessions and to put this one in the other mode; a
+  click on the header line (or `C-c h V`) switches it at any time.
   Task sessions follow `harness-supervisor-tasks`, and the task board's
   settings line has the same switch for the task about to be submitted,
   or, in bulk edit, for every current task.
@@ -935,18 +938,49 @@ does the cheap work at the expensive price. A supervising session is not
 offered the tools that change things, and the permission layer denies a
 call to one anyway, in every permission mode.
 
-- **On by default.** New top-level sessions supervise
-  (`harness-supervisor`), and so do the sessions of the tasks the board
-  starts (`harness-supervisor-tasks`). Both are on the settings page,
-  under **Supervisor mode**, and `harness-supervisor` can be set per
-  project like the other settings of new sessions (see
-  [Configuration](#configuration)). They decide how a session starts;
+- **Judged by default: supervising or hands-on.** `harness-supervisor`
+  (new top-level sessions) and `harness-supervisor-tasks` (the sessions
+  of tasks) are each one of three, on the settings page under
+  **Supervisor mode**: `auto`, the default, has a cheap model read the
+  session's opening message and start it the way the message reads;
+  **Always supervise** and **Always hands-on** fix the mode instead.
+  Both can be set per project like the other settings of new sessions
+  (see [Configuration](#configuration)); the session of a task takes
+  `harness-supervisor-tasks` when its work starts, the write-up before
+  that only reading. They decide how a session starts;
   from then on each session has its own switch, and changing a setting
   leaves the sessions that exist as they are. A task can carry a mode
   of its own, set on the task board's settings line -- the next task, or,
   in bulk edit (`B`), the current ones: its session then starts with
   that, whatever the setting says. Sub-agents and BTW side conversations
   never supervise, and a fork starts as its parent is.
+
+- **The session judge.** Under `auto` the harness asks
+  `harness-supervisor-judge-model` (by default the session provider's
+  cheap model) one question about the opening message: a supervising job
+  or a hands-on one? It is a request of its own, tiny, with no tools and
+  no thinking, and it runs beside the session's first turn, which never
+  waits for it: the session starts supervising as new sessions always
+  did, and turns hands-on when the judge reads the message that way.
+  Either way a note in the harness's own voice says which, as the naming
+  of a session reads "renamed to X" rather than repeating what the model
+  said: "judged supervising (claude:claude-haiku)", or "judged hands-on
+  (…)", or "not judged (…): supervising as configured". The judge's own
+  answer is never shown, and the note never reaches the model. The note
+  carries the two things to do about the choice as buttons, like the
+  [Undo] of a lasting permission answer: one stops the judging of new
+  sessions, by writing the setting that decided this one at the project
+  it read, and one puts this session in the other mode, as `C-c h V`
+  does. Each click shows the way back, `[undo: …]`, and an undo the way
+  on, `[redo: …]`; the note records which state each action is in, so a
+  chat draws them again after a reload. The judge is
+  asked once, never for a session whose setting is not `auto`, and never
+  over a switch you made, before the message or after it: a flip drops
+  the pending judgement, and a verdict that arrives after it is ignored.
+  A model that is unavailable, answers something unusable or does not
+  answer in time leaves the configured default standing, and the note
+  says so. A plan call the model wrote before it turned hands-on is
+  refused, so nothing starts behind the mode's back.
 - **The header button and `C-c h V`.** The header line of a session
   starts with a `supervisor` badge, or a `hands-on` one once the mode is
   off; a window too narrow for the whole line drops it before the
@@ -1096,14 +1130,17 @@ call to one anyway, in every permission mode.
   worker's message also says which session, model and error the attempt
   before had, so it can read what was tried (`session_read`) and not
   repeat it.
-- **In tasks.** The session of a task supervises by default, and the
-  last step of its plan commits (`git add -A && git commit`). Once the
-  plan has finished and the supervisor has checked the result, it calls
-  `hand_in`; feedback from your review leads to a new plan that fixes
-  the work. While workers run, the task stays active, with a line of what
-  it waits for, instead of going to review when the turn that submitted
-  the plan ends. The session that writes a backlog task up only reads,
-  and takes the setting when the task starts.
+- **In tasks.** The session of a task starts as the task's own setting
+  says, else `harness-supervisor-tasks` (judged, by default, from the
+  message that starts the work), and a
+  supervising task session plans and delegates: the last step of its plan
+  commits (`git add -A && git commit`). Once the plan has finished and the
+  supervisor has checked the result, it calls `hand_in`; feedback from
+  your review leads to a new plan that fixes the work. While workers run,
+  the task stays active, with a line of what it waits for, instead of
+  going to review when the turn that submitted the plan ends. The session
+  that writes a backlog task up only reads, and takes the setting when
+  the task starts.
 - **Merging back.** The merge queue takes a target rather than a
   parent: the session a branch merges into, or the main checkout
   itself. A sub-agent started in a worktree (`spawn_agent` with
@@ -1634,12 +1671,12 @@ shows where its effective value comes from.
 The page leads with the settings most people change, grouped by what
 they are for: **New sessions** (model, thinking, permission mode,
 non-interactive, supervisor mode), **Supervisor mode** (whether
-sessions and tasks supervise, the models of the tiers, the thinking
-levels of supervisors and their workers, the step budget),
-**Spending** (the budget, one for all sessions together),
-**Compaction** (what stands in for a conversation that grew
-too long, and which model writes a brief summary), **Files and safety**
-(directory access,
+sessions and tasks supervise or a cheap model judges them, the judge's
+model, the models of the tiers, the thinking levels of supervisors and
+their workers, the step budget), **Spending** (the
+budget, one for all sessions together), **Compaction** (what stands in
+for a conversation that grew too long, and which model writes a brief
+summary), **Files and safety** (directory access,
 sandbox policy, standing permission rules), **Task board** (what task
 sessions start with, and when their work counts as done),
 **Notifications** (which task events notify you, and through which
@@ -1681,8 +1718,9 @@ it is for. Each record in a list folds to one line; `Edit` opens it and
 `INS` adds one, filled in from what that kind of record starts as.
 
 Settings that name a model (the default model, the task, refine, recap,
-search and auto-mode judge models, Copilot's default model, and the
-fallback list) are dropdowns rather than text fields. The button names
+search, auto-mode judge and session judge models, Copilot's default
+model, and the fallback list) are dropdowns rather than text fields.
+The button names
 the model (`Fable 5.1 (Claude) ▾`), next to its id and context window,
 and opens a picker of the models the configured providers list, grouped
 by provider, with their context window and price. A pick saves at once.

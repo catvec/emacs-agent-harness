@@ -176,8 +176,19 @@
 
 ;;;; Settings
 
-(defcustom harness-supervisor t
-  "Whether new top-level sessions supervise.
+(defcustom harness-supervisor 'auto
+  "How new top-level sessions start: supervising, hands-on, or judged.
+
+`auto' (the default) has a cheap model read the session's opening
+message and start it as the message reads (`harness-supervisor-judge-model').
+The judgement runs beside the session's first turn and never holds it
+up; while it runs, and when the model cannot answer, the session
+supervises, as new sessions did before the judge.  `t' makes every new
+top-level session supervise whatever its opening message says, and nil
+makes it hands-on.  Whichever it is, the session's own switch (`:ext'
+`:supervisor', shown in the chat header and flipped with V) decides from
+then on, and a session the user switched is never judged.
+
 A supervising session plans and coordinates: workers on cheaper models
 make the changes, while the session itself cannot change a file, runs
 only read-only, offline shell commands and ends every turn on a
@@ -188,16 +199,39 @@ which its header line shows and the V key flips, so changing
 the setting leaves the sessions that exist as they are.  Sub-agents and
 side conversations never supervise, and a fork starts as its parent is.
 It is on the settings page, under Supervisor mode."
-  :type 'boolean :safe #'booleanp :group 'harness)
+  :type '(choice (const :tag "Let a model decide from the first message" auto)
+                 (const :tag "Always supervise" t)
+                 (const :tag "Always hands-on" nil))
+  :safe (lambda (v) (or (eq v 'auto) (booleanp v)))
+  :group 'harness)
 
-(defcustom harness-supervisor-tasks t
-  "Whether the sessions of tasks supervise.
+(defcustom harness-supervisor-tasks 'auto
+  "How the sessions of tasks start: supervising, hands-on, or judged.
 Like `harness-supervisor', for the sessions the task board starts.  With
 nil they work hands-on, as task sessions always did.  The session that
 writes a task up for the backlog only reads, so it does not supervise;
-it takes this setting when the task starts.  It is on the settings
+it takes this setting when the task starts, and the judge then reads the
+message that starts the work.  It is on the settings page, under
+Supervisor mode."
+  :type '(choice (const :tag "Let a model decide from the first message" auto)
+                 (const :tag "Always supervise" t)
+                 (const :tag "Always hands-on" nil))
+  :safe (lambda (v) (or (eq v 'auto) (booleanp v)))
+  :group 'harness)
+
+(defcustom harness-supervisor-judge-model 'auto
+  "Model that judges how a new session starts, as PROVIDER:NAME, or `auto'.
+`auto' (the default) asks the session's provider for its `cheap' tier
+\(see `harness-provider-tier-model'), falling back to the session's own
+model when the provider names none: whether an opening message is a
+supervising job or a hands-on one is one word, which the fastest,
+cheapest model gives as well as any.  A PROVIDER:NAME forces that
+model, and nil uses the session's own model.  It is on the settings
 page, under Supervisor mode."
-  :type 'boolean :safe #'booleanp :group 'harness)
+  :type '(choice (const :tag "The session provider's cheap model" auto)
+                 (const :tag "The session's own model" nil)
+                 (string :tag "Model" :names model))
+  :group 'harness)
 
 (defcustom harness-supervisor-tiers nil
   "Models the workers of a supervisor's plan run on, by tier of the step.
@@ -273,6 +307,25 @@ the median turn made 61 tool calls before its plan, the 75th percentile
 80 and the 90th percentile 103.  It is on the settings page, under
 Supervisor mode."
   :type 'integer :safe (lambda (v) (and (integerp v) (> v 0))) :group 'harness)
+
+(defconst harness-supervisor--judge-key :supervisor-judge
+  "The `:ext' key that says a model may still decide how a session starts.
+Set when an `auto' session is created, and removed once the judge
+answered or failed, or the user switched the mode, so that a session is
+judged once, from its opening message, and never over a choice the user
+made (see `harness-supervisor--start-session' and `supervisor/set').")
+
+(defvar harness-supervisor--judging (make-hash-table :test 'equal)
+  "Session id -> t while the judge of its opening message is in flight.")
+
+(defvar harness-supervisor--judge-timeout 30
+  "Seconds a session judge may take before the configured default stands.
+The judgement runs beside the session's first turn and never holds it
+up, so this is not a wait: a request with no answer by then is
+cancelled, the default mode stands, and a hint says so.")
+
+(defconst harness-supervisor--judge-max-tokens 8
+  "Output budget of a session judge: one word is the whole answer.")
 
 (defvar harness-supervisor-tools '("no_plan_needed" "submit_plan" "retry_step")
   "Names of the tools only a supervising session gets.
@@ -527,11 +580,14 @@ neither is a session older than this module."
 (defun harness-supervisor--set (session-id value)
   "Set session SESSION-ID's supervisor mode to VALUE, t or `:false'.
 The one path of `supervisor/set' and `supervisor/set-all': store the
-setting in the session's `:ext', leave the transcript hint that says
+setting in the session's `:ext', drop a pending judgement of how the
+session starts (the user's choice is the session's, see
+`harness-supervisor--judge-key'), leave the transcript hint that says
 which it is now, and emit `supervisor/changed'.  Return the session
 plist."
   (let ((session (harness-call 'session/set-ext session-id :supervisor value
                                (if (eq value t) "Supervisor mode on" "Supervisor mode off"))))
+    (harness-supervisor--forget-judge session-id)
     (harness-emit 'supervisor/changed session-id value)
     session))
 
@@ -543,7 +599,9 @@ transcript, \"Supervisor mode on\" or \"Supervisor mode off\", and the
 event `supervisor/changed' (SESSION-ID ON), with ON t or `:false'.  On
 takes effect at the next tool call, which the permission stage checks
 against the session as it is then; off gives the tools back from the
-next step.  Only the user does this, over ACP as `_harness/supervisor/set'
+next step.  A pending judgement of how the session starts is dropped:
+the user's choice is the session's (`harness-supervisor--judge-key').
+Only the user does this, over ACP as `_harness/supervisor/set'
 with `:sessionId' and `:on', or through the task board's bulk edit
 \(`task/set-all', which applies a task's setting to its session); the
 agent has no tool for it."
@@ -559,10 +617,11 @@ session the module governs changes: one whose `supervisor/get' is
 non-nil, a top-level session or a fork.  A sub-agent, a side
 conversation, a session from before the module and one already at the
 asked value are left alone.  Each change goes the way `supervisor/set'
-does -- the same `:ext' `:supervisor' setting, transcript hint and
-`supervisor/changed' event.  Only the user does this, over ACP as
-`_harness/supervisor/set-all' with `:on' and `:filter'; the agent has
-no tool for it.  Return the ids changed, newest first."
+does -- the same `:ext' `:supervisor' setting, the same dropped
+judgement, transcript hint and `supervisor/changed' event.  Only the
+user does this, over ACP as `_harness/supervisor/set-all' with `:on'
+and `:filter'; the agent has no tool for it.  Return the ids changed,
+newest first."
   (let ((value (if (harness-json-true-p on) t :false))
         changed)
     (dolist (session (harness-call 'session/select filter))
@@ -659,14 +718,26 @@ it from a session older than this module, which is never governed.")
 Each is decided once, so that a later event never overrides a switch the
 user flipped.")
 
-(defun harness-supervisor--setting (cwd)
-  "Return non-nil when `harness-supervisor' is on for new sessions at CWD."
-  (harness-json-true-p
+(defun harness-supervisor--choice (value)
+  "Return the supervisor choice VALUE stands for: `auto', t or nil.
+`auto' (a symbol or its name) lets a model decide how a session starts,
+true supervises, and nil and `:false' are hands-on."
+  (cond ((or (eq value 'auto) (equal value "auto")) 'auto)
+        ((harness-json-true-p value) t)
+        (t nil)))
+
+(defun harness-supervisor--setting (key cwd)
+  "Return the choice KEY has for new sessions at CWD: `auto', t or nil.
+That is what the .dir-locals.el layers make of it there, over the global
+value (harness-config.el): `harness-supervisor' decides how a top-level
+session starts, `harness-supervisor-tasks' how the session of a task
+starts, and a project may override either."
+  (harness-supervisor--choice
    (if (harness-method-exists-p 'config/get)
        (condition-case nil
-           (harness-call 'config/get 'harness-supervisor cwd)
-         (error harness-supervisor))
-     harness-supervisor)))
+           (harness-call 'config/get key cwd)
+         (error (symbol-value key)))
+     (symbol-value key))))
 
 (defun harness-supervisor--kind (session)
   "Return the kind of SESSION, a plist, as a symbol."
@@ -678,26 +749,50 @@ user flipped.")
 A hint would start the transcript of a session that has no message yet."
   (harness-call 'session/set-ext id key value))
 
+(defun harness-supervisor--start-session (id choice)
+  "Start session ID with supervisor CHOICE, a symbol `auto', t or nil.
+`auto' supervises from the start and marks the session for the judge to
+decide (`harness-supervisor--judge-key'); t supervises, nil is hands-on,
+and both take the judge's mark away, so a setting that decides is never
+judged.  The setting is stored silently: the session has no message yet,
+and a hint now would start its transcript."
+  (if (eq choice 'auto)
+      (progn
+        (harness-supervisor--set-ext id :supervisor t)
+        (harness-supervisor--set-ext id harness-supervisor--judge-key t))
+    (harness-supervisor--set-ext id :supervisor (if choice t :false))
+    (harness-supervisor--forget-judge id)))
+
+(defun harness-supervisor--forget-judge (id)
+  "Take session ID's pending judgement away, if it has one.
+The judge's mark is removed for good: a verdict that comes in later is
+dropped, and the mode the session now has stands."
+  (let ((ext (plist-get (harness-call 'session/get id) :ext)))
+    (when (plist-get ext harness-supervisor--judge-key)
+      (harness-supervisor--set-ext id harness-supervisor--judge-key nil))))
+
 (defun harness-supervisor--on-created (id session)
   "Give the new session ID, whose plist is SESSION, its supervisor setting.
 A subscriber of `session/created'.  A top-level session takes
-`harness-supervisor' for its directory, and a fork its parent's value
-when the parent has one.  A sub-agent, a side conversation and any
-other kind are never governed; only a top-level session of its own
-starts supervised.  A setting its maker gave it in `:ext' stays."
+`harness-supervisor' for its directory (`harness-supervisor--start-session':
+`auto' is judged from its opening message), and a fork its parent's
+value when the parent has one, never the judge.  A sub-agent, a side
+conversation and any other kind are never governed; only a top-level
+session of its own starts supervised.  A setting its maker gave it in
+`:ext' stays."
   (condition-case err
       (unless (plist-member (plist-get session :ext) :supervisor)
         (let* ((kind (harness-supervisor--kind session))
-               (parent-id (plist-get session :parent-id))
-               (value (cond
-                       ((and (eq kind 'main) (null parent-id))
-                        (if (harness-supervisor--setting (plist-get session :cwd)) t :false))
-                       ((and (eq kind 'fork) parent-id (harness-call 'session/exists-p parent-id))
-                        (harness-supervisor--value (harness-call 'session/get parent-id))))))
-          ;; `session/create' announces and returns the session as it is
-          ;; after this, so its maker and the header see the setting.
-          (when value
-            (harness-supervisor--set-ext id :supervisor value))))
+               (parent-id (plist-get session :parent-id)))
+          (cond
+           ((and (eq kind 'main) (null parent-id))
+            (harness-supervisor--start-session
+             id (harness-supervisor--setting 'harness-supervisor (plist-get session :cwd))))
+           ((and (eq kind 'fork) parent-id (harness-call 'session/exists-p parent-id))
+            ;; `session/create' announces and returns the session as it is
+            ;; after this, so its maker and the header see the setting.
+            (let ((value (harness-supervisor--value (harness-call 'session/get parent-id))))
+              (when value (harness-supervisor--set-ext id :supervisor value)))))))
     (error (harness-log 'warn "supervisor: setting up session %s failed: %S" id err))))
 
 (defun harness-supervisor--write-up-p (task)
@@ -708,13 +803,15 @@ has none."
   (or (eq (plist-get task :state) 'refining)
       (and (eq (plist-get task :state) 'pending) (plist-get task :session) t)))
 
-(defun harness-supervisor--task-value (task)
-  "Return the supervisor value the session of TASK takes: t or `:false'.
+(defun harness-supervisor--task-value (task cwd)
+  "Return the supervisor value the session of TASK takes: `auto', t or nil.
 A task submitted with its own setting keeps it (see `task/submit' and
-`task/set-all'); without one it takes `harness-supervisor-tasks'."
+`task/set-all'); without one it takes `harness-supervisor-tasks' at the
+task's project -- which a project's .dir-locals.el may override -- with
+`auto' judged from the message that starts the work."
   (if (plist-member task :supervisor)
-      (if (harness-json-true-p (plist-get task :supervisor)) t :false)
-    (if harness-supervisor-tasks t :false)))
+      (and (harness-json-true-p (plist-get task :supervisor)) t)
+    (harness-supervisor--setting 'harness-supervisor-tasks cwd)))
 
 (defun harness-supervisor--on-task-changed (task)
   "Set the supervisor setting of the session of TASK, a task view, when it is new.
@@ -723,20 +820,25 @@ task, and the one that writes a backlog task up, as top-level sessions,
 and links them to the task afterwards.  While the session has no
 message yet, the session of a write-up has no setting, as it only reads,
 and the session of the work takes the task's own setting, else
-`harness-supervisor-tasks'.  A session that wrote a task up takes it
-when the task starts.  Both act on a brand-new session only, once, so a
-restart never overrides the user's switch; a session the user adopted
-as a task is theirs already."
+`harness-supervisor-tasks' at the task's project -- which a project's
+.dir-locals.el may override -- with `auto' judged from the message that
+starts the work.  A session that wrote a task up takes it when the task
+starts.  Both act on a brand-new session only, once, so a restart never
+overrides the user's switch; a session the user adopted as a task is
+theirs already."
   (condition-case err
-      (let ((sid (plist-get task :session)))
+      (let* ((sid (plist-get task :session))
+             (cwd (or (plist-get task :project) (plist-get task :cwd))))
         (when (and sid (harness-call 'session/exists-p sid))
           (let* ((session (harness-call 'session/get sid))
+                 (cwd (or cwd (plist-get session :cwd)))
                  (write-up (harness-supervisor--write-up-p task)))
             (cond
              ((and (plist-get (plist-get session :ext) harness-supervisor--write-up-key)
                    (not write-up))
               (unless (harness-supervisor--value session)
-                (harness-supervisor--set-ext sid :supervisor (harness-supervisor--task-value task)))
+                (harness-supervisor--start-session
+                 sid (harness-supervisor--task-value task cwd)))
               (harness-supervisor--set-ext sid harness-supervisor--write-up-key nil))
              ((or (plist-get session :head)
                   (plist-get task :adopted)
@@ -746,10 +848,399 @@ as a task is theirs already."
               (puthash sid t harness-supervisor--configured)
               (if write-up
                   (progn (harness-supervisor--set-ext sid :supervisor nil)
+                         (harness-supervisor--forget-judge sid)
                          (harness-supervisor--set-ext sid harness-supervisor--write-up-key t))
-                (harness-supervisor--set-ext sid :supervisor (harness-supervisor--task-value task))))))))
+                (harness-supervisor--start-session
+                 sid (harness-supervisor--task-value task cwd))))))))
     (error (harness-log 'warn "supervisor: setting up the session of task %s failed: %S"
                         (plist-get task :id) err))))
+
+;;;; The session judge
+
+;; A session that starts by judgement (`harness-supervisor' or
+;; `harness-supervisor-tasks' is `auto') is read as the work reads: a
+;; cheap model (the provider's cheap tier, `harness-supervisor-judge-model')
+;; is asked, from the opening message alone, whether the job is a
+;; supervising one or a hands-on one, and the session starts as it
+;; answers.  The request goes out as the first turn starts and runs
+;; beside it (as naming does, harness-naming.el): it never holds the turn
+;; up, and until it answers, and when it fails, the session supervises as
+;; new sessions did before this.  The answer is applied to the session's
+;; own switch, with a hint in the harness's voice, so the choice is never
+;; silent, and the user's V key still flips it at any time -- a flip
+;; takes the judge's mark away (`harness-supervisor--forget-judge'), and
+;; a verdict that arrives after it is dropped.
+
+(defconst harness-supervisor--judge-system-prompt
+  (concat "You decide how one session of a coding agent should start, from the engineer's opening message.\n\n"
+          "A SUPERVISING session investigates, writes a plan, and coordinates workers on cheaper models that make "
+          "the changes; it cannot change files itself.  A HANDS-ON session works directly: it reads and changes "
+          "the files itself.\n\n"
+          "Choose HANDS-ON when the session can do or answer the message itself, right away: a question, a "
+          "discussion, a look around, a small or well-specified change in one or two files.\n"
+          "Choose SUPERVISE when the work is large enough to plan and share out: a feature, a refactor, a "
+          "migration, several files or steps, parallel work, or a message that asks for a plan, a review of other "
+          "work, or coordination.\n"
+          "When in doubt, choose SUPERVISE.  The engineer can flip the choice in one keystroke if you read it "
+          "wrong, so do not ask for clarification.\n\n"
+          "Reply with exactly one word: SUPERVISE or HANDS-ON.  No explanation.")
+  "What the session judge is told about its job.")
+
+(defun harness-supervisor--judge-model (session)
+  "Return the model the session judge uses for SESSION.
+`harness-supervisor-judge-model' names one; `auto' asks the session's
+own provider for its `cheap' tier (see `harness-provider-tier-model'),
+falling back to the session's model when the provider names none, and
+nil uses the session's model."
+  (let ((model (plist-get session :model))
+        (choice harness-supervisor-judge-model))
+    (cond ((or (eq choice 'auto) (equal choice "auto"))
+           (or (and model (harness-method-exists-p 'provider/tier-model)
+                    (ignore-errors (harness-call 'provider/tier-model model 'cheap)))
+               model))
+          ((and (stringp choice) (not (string-empty-p choice))) choice)
+          (t model))))
+
+(defconst harness-supervisor--judge-message-chars 4000
+  "Characters of the opening message the session judge is given.
+A long write-up is enough to read from its start; the rest is the same
+job.")
+
+(defun harness-supervisor--judge-question (text)
+  "Return the judge's question about TEXT, the session's opening message."
+  (format (concat "The engineer's opening message to the session:\n\n<message>\n%s\n</message>\n\n"
+                  "How should the session start?  Reply with exactly one word: SUPERVISE or HANDS-ON.")
+          (harness-truncate-end (string-trim text) harness-supervisor--judge-message-chars)))
+
+(defun harness-supervisor--judge-verdict (text)
+  "Return the mode the judge's reply TEXT names: t, `:false' or nil.
+t is supervise, `:false' is hands-on and nil is no usable answer.  The
+first word decides, so markdown, quotes, a full stop or an explanation
+after it are all fine."
+  (let ((line (replace-regexp-in-string
+               "\\`[^a-z]+" ""
+               (downcase (string-trim (or (harness-first-line (or text "")) ""))))))
+    (cond ((string-match-p "\\`hands?[ -]?on\\|\\`handson" line) :false)
+          ((string-match-p "\\`supervis" line) t))))
+
+(defun harness-supervisor--judge-ask (session text)
+  "Ask the session judge how SESSION starts from its opening message TEXT.
+Return a promise of the verdict, t (supervise) or `:false' (hands-on).
+The request is `:ephemeral', with no tools, no thinking and no provider
+state, so the session's own conversation never sees it and it can run
+beside the session's first turn.  The promise rejects when the session
+has no model to ask, the provider fails, the model gives no usable word,
+or it takes longer than `harness-supervisor--judge-timeout'."
+  (let ((promise (harness-make-promise))
+        (model (harness-supervisor--judge-model session))
+        (reply "") (timer nil) (handle nil))
+    (cl-flet ((finish (ok value)
+                (unless (harness-promise-settled-p promise)
+                  (when timer (cancel-timer timer))
+                  (if ok (harness-resolve promise value) (harness-reject promise value)))))
+      (cond
+       ((null model) (finish nil "there is no model to ask"))
+       (t
+        (setq timer
+              (run-at-time harness-supervisor--judge-timeout nil
+                           (lambda ()
+                             (finish nil (format "the model took longer than %ss"
+                                                 harness-supervisor--judge-timeout))
+                             (when handle (ignore-errors (funcall (plist-get handle :cancel)))))))
+        (condition-case err
+            (setq handle
+                  (harness-call
+                   'provider/complete
+                   (list :model model :ephemeral t
+                         :session (list :id (format "%s-judge" (plist-get session :id))
+                                        :cwd (plist-get session :cwd)
+                                        :host (plist-get session :host))
+                         :system harness-supervisor--judge-system-prompt
+                         :messages (list (list :role 'user
+                                               :content (list (list :type "text"
+                                                                    :text (harness-supervisor--judge-question text)))))
+                         :tools nil :no-thinking t
+                         :max-tokens harness-supervisor--judge-max-tokens
+                         :on-event
+                         (lambda (ev)
+                           (pcase (plist-get ev :type)
+                             ('text (setq reply (concat reply (or (plist-get ev :delta) ""))))
+                             ('done
+                              (let ((verdict (and (not (memq (plist-get ev :stop-reason) '(error cancelled)))
+                                                  (harness-supervisor--judge-verdict reply))))
+                                (cond
+                                 ((memq (plist-get ev :stop-reason) '(error cancelled))
+                                  (finish nil (or (plist-get ev :error)
+                                                  (format "%s" (plist-get ev :stop-reason)))))
+                                 (verdict (finish t verdict))
+                                 (t (finish nil (if (harness-string-blank-p reply)
+                                                    "the model answered nothing"
+                                                  (format "the model answered %S"
+                                                          (harness-truncate-end (string-trim reply) 80))))))))
+                             (_ nil))))))
+          (error (finish nil (harness-error-message err))))))
+      promise)))
+
+;;;; The note of the judgement
+
+;; The judge does not only decide: it says so.  Right after the session
+;; starts in the mode it read, the harness writes a hint into its
+;; transcript -- in the harness's own voice, as the naming of a session
+;; reads "renamed to X" rather than repeating what the naming model said
+;; ("harness-naming.el"), and the model never gets the hint.  The note
+;; holds, in its `:meta' `:supervisor' (`harness-node-supervisor'), the
+;; two things the user may want to do about the choice, which the chat
+;; draws as buttons (harness-ui-chat.el):
+;;
+;; - always <mode>: stop judging new sessions, and let the mode the judge
+;;   read stand for them.  That is the setting that decided this session
+;;   -- `harness-supervisor', or `harness-supervisor-tasks' for the
+;;   session of a task -- written where such a setting is written
+;;   (harness-config.el), at the project of the session.
+;; - the other mode: put this session itself in the other one, exactly
+;;   as the V key and the chat header do (`supervisor/set').
+;;
+;; Each is a lasting change, so each offers the way back: a click shows
+;; [undo], an undo [redo], and the note records how far it got.
+
+(defconst harness-supervisor--note-meta :supervisor
+  "The `:meta' key of the note that says how a session was judged.")
+
+(defconst harness-supervisor--note-actions '("always" "mode")
+  "The two actions the note after a judgement offers.
+\"always\" stops judging new sessions, \"mode\" puts the session in the
+other mode (see `harness-node-supervisor').")
+
+(defun harness-supervisor--note-setting (session)
+  "Return (KEY . CWD) of the setting that decides how SESSION starts.
+KEY is `harness-supervisor-tasks' at the project of the task whose
+session it is, `harness-supervisor' at its own directory otherwise: the
+setting the note's \"always\" action writes, so that the sessions after
+this one start as the judge read it, and none of them is judged."
+  (let* ((id (plist-get session :id))
+         (task (and (harness-method-exists-p 'task/for-session)
+                    (ignore-errors (harness-call 'task/for-session id)))))
+    (cons (if task 'harness-supervisor-tasks 'harness-supervisor)
+          (file-name-as-directory
+           (expand-file-name (or (and task (plist-get task :project))
+                                 (plist-get session :cwd)))))))
+
+(defun harness-supervisor--judged-mode (session)
+  "Return the mode SESSION starts in after the judgement: t or `:false'.
+The judge's own verdict, or the mode the session has when it gave none."
+  (if (harness-json-true-p (harness-supervisor--value session)) t :false))
+
+(defun harness-supervisor--note-text (verdict mode err model)
+  "Return the text of the note that says how the opening message was judged.
+VERDICT is t or `:false', what the judge read, or nil when it gave no
+answer, ERR being why; MODE is the mode the session starts in, t or
+`:false', and MODEL the model that was asked."
+  (if verdict
+      (format "judged %s (%s)" (if (eq verdict t) "supervising" "hands-on")
+              (or model "the session's model"))
+    (format "not judged (%s): %s as configured" (or err "no answer")
+            (if (eq mode t) "supervising" "hands-on"))))
+
+(defun harness-supervisor--note-actions (mode key)
+  "Return the actions the note after a judgement offers.
+MODE is the mode the note leaves the session in, t or `:false', and KEY
+the setting that decides how sessions start.  Each is (:action NAME
+:label LABEL :help HELP :state nil), as `harness-node-supervisor'
+describes; the state moves as the user takes the action and takes it
+back again (`supervisor/act').  The setting's action needs the config
+module (`config/set', `config/unset'); without it the note offers only
+the mode, which is the session's own."
+  (let ((always (if (eq mode t) "always supervise" "always hands-on"))
+        (other (if (eq mode t) "hands-on" "supervising"))
+        actions)
+    (when (harness-method-exists-p 'config/set)
+      (push (list :action "always" :label always :state nil
+                  :help (format "Stop judging new sessions: set %s to %s here" key always))
+            actions))
+    (push (list :action "mode" :label (format "switch to %s" other) :state nil
+                :help (format "Put this session in the other mode: %s" other))
+          actions)
+    (nreverse actions)))
+
+(defun harness-supervisor--note (session verdict err)
+  "Write into SESSION's transcript the note that says how it was judged.
+VERDICT is t or `:false', what the judge read, or nil when it gave no
+answer, ERR being why: the session then starts in the mode it has.  The
+note is a hint, which the model never gets, and carries what the chat's
+buttons act on (see `harness-node-supervisor').  Return the note, or nil
+when there is no transcript to write it in."
+  (when (harness-method-exists-p 'session/append)
+    (let* ((id (plist-get session :id))
+           (setting (harness-supervisor--note-setting session))
+           (mode (or verdict (harness-supervisor--judged-mode session)))
+           (model (harness-supervisor--judge-model session)))
+      (condition-case failure
+          (harness-call
+           'session/append
+           id
+           (list :kind 'hint
+                 :content (harness-supervisor--note-text verdict mode err model)
+                 :meta (list harness-supervisor--note-meta
+                             (append (and verdict (list :judged verdict))
+                                     (list :model (or model "")
+                                           :mode mode
+                                           :setting (symbol-name (car setting))
+                                           :cwd (cdr setting)
+                                           :actions (harness-supervisor--note-actions mode (car setting)))))))
+        (error (harness-log 'warn "supervisor: could not note the judgement of %s: %s"
+                            id (harness-error-message failure))
+               nil)))))
+
+(defun harness-supervisor--note-moved (record action state extra)
+  "Return RECORD with the state of ACTION moved to STATE, EXTRA folded in.
+RECORD is what `harness-node-supervisor' returned and ACTION the name of
+one of its actions; EXTRA is more of that action's plist, or nil."
+  (plist-put (harness-plist-remove record :actions)
+             :actions
+             (mapcar (lambda (a)
+                       (if (equal action (format "%s" (plist-get a :action)))
+                           (append (harness-plist-remove a :state) (list :state state) extra)
+                         a))
+                     (plist-get record :actions))))
+
+(defun harness-supervisor--note-always (record entry next)
+  "Move the note's \"always\" action ENTRY of RECORD to NEXT.
+Return (MESSAGE . EXTRA), EXTRA being the action's plist to fold in.
+NEXT is `done' to stop judging new sessions -- the setting that decides
+them (`:setting') takes the mode the judge read, at the layer such a
+setting is written in for that directory -- and `undone' to take that
+value out of the layer it went into, so that the layer below decides
+again.  EXTRA is the action's `:scope', the layer the way back uses."
+  (let* ((key (intern (format "%s" (plist-get record :setting))))
+         (cwd (plist-get record :cwd))
+         (mode (harness-json-true-p (plist-get record :judged)))
+         (name (if mode "always supervise" "always hands-on")))
+    (if (eq next 'done)
+        (let ((set (harness-call 'config/set key (and mode t) :cwd cwd)))
+          (cons (format "Judging off for new sessions here: %s" name)
+                (list :scope (format "%s" (car set)))))
+      (harness-call 'config/unset key :cwd cwd
+                    :scope (intern (format "%s" (or (plist-get entry :scope) "project"))))
+      (cons (format "Judging on again for new sessions here (%s was dropped)" key) nil))))
+
+(defun harness-supervisor--note-mode (session-id record next)
+  "Move the note's \"mode\" action of RECORD to NEXT; return (MESSAGE . nil).
+NEXT is `done' to put SESSION-ID in the other mode, `undone' to put it
+back in the one the note left it in.  The switch is `supervisor/set',
+what the V key and the chat header do, so it is a hint in the transcript
+and the event the header follows; the message is for the echo area."
+  (let* ((mode (if (harness-json-true-p (plist-get record :mode)) t :false))
+         (value (if (eq next 'done) (if (eq mode t) :false t) mode)))
+    (harness-call 'supervisor/set session-id value)
+    (cons (if (eq value t) "Supervisor mode on" "Supervisor mode off (hands-on)") nil)))
+
+(harness-defmethod supervisor/act (session-id node-id action)
+  "Do the next thing the judge's note NODE-ID of SESSION-ID offers.
+ACTION names one of the note's actions (`harness-node-supervisor'):
+\"always\" stops judging new sessions and lets the mode the judge read
+stand for them, by writing the setting that decides how they start
+\(harness-config.el), and \"mode\" puts this session in the other one,
+what V does (`supervisor/set').  Each call moves the action on: not
+taken yet, then taken, then taken back, then taken again, so the chat's
+one button reads [the action], [undo: it] and [redo: it] in turn
+\(harness-ui-chat.el).  The note records how far it got and the chat
+follows it (`session/node-updated').  Only the user calls this, over ACP
+as `_harness/supervisor/act'.  Return (:state STATE :message TEXT):
+STATE is `done' or `undone', and the echo area says TEXT."
+  (let* ((action (format "%s" action))
+         (node (and (harness-method-exists-p 'session/node)
+                    (harness-call 'session/node session-id node-id)))
+         (record (harness-node-supervisor node))
+         (entry (and record
+                     (cl-find action (plist-get record :actions)
+                              :key (lambda (a) (format "%s" (plist-get a :action)))
+                              :test #'equal))))
+    (unless record
+      (signal 'harness-error (list (format "%s is no note of a session judgement" node-id))))
+    (unless entry
+      (signal 'harness-error (list (format "The note offers no %s action" action))))
+    (let* ((next (if (eq (plist-get entry :state) 'done) 'undone 'done))
+           (result (if (equal action "always")
+                       (harness-supervisor--note-always record entry next)
+                     (harness-supervisor--note-mode session-id record next))))
+      (harness-call 'session/update-node
+                    session-id node-id
+                    :meta (plist-put (copy-sequence (plist-get node :meta))
+                                     harness-supervisor--note-meta
+                                     (harness-supervisor--note-moved record action next (cdr result))))
+      (list :state next :message (car result)))))
+
+(defun harness-supervisor--judge-start (session-id verdict session)
+  "Start SESSION-ID in the mode VERDICT names, and note that it was judged.
+VERDICT is t to supervise or `:false' hands-on, and SESSION its plist.
+The judge's mark is removed first, so nothing judges the session again,
+and the event `supervisor/changed' -- which the chat header follows --
+and the note, with its `:meta', the chat's buttons, say the rest."
+  (harness-supervisor--set-ext session-id harness-supervisor--judge-key nil)
+  (harness-call 'session/set-ext session-id :supervisor verdict)
+  (harness-supervisor--note session verdict nil)
+  (harness-emit 'supervisor/changed session-id verdict))
+
+(defun harness-supervisor--judge-done (session-id verdict err)
+  "Start session SESSION-ID as the judge VERDICT says, or keep its mode on ERR.
+VERDICT is t or `:false'; ERR is why the judge gave none, and the
+configured default then stands with a hint saying so.  A session the
+user switched meanwhile carries no judge mark, and is left alone."
+  (remhash session-id harness-supervisor--judging)
+  (condition-case failure
+      (let ((session (and (harness-call 'session/exists-p session-id)
+                          (harness-call 'session/get session-id))))
+        (when (and session (plist-get (plist-get session :ext) harness-supervisor--judge-key))
+          (if verdict
+              (harness-supervisor--judge-start session-id verdict session)
+            (harness-supervisor--set-ext session-id harness-supervisor--judge-key nil)
+            (harness-supervisor--note session nil err))))
+    (error (harness-log 'warn "supervisor: starting session %s as the judge said failed: %S"
+                        session-id failure))))
+
+(defun harness-supervisor--judge-text (session-id)
+  "Return the text of the message that just started SESSION-ID's turn, or nil.
+The last user message in the transcript is the one the turn answers."
+  (let (text)
+    (dolist (node (harness-call 'session/nodes session-id))
+      (when (and (eq (plist-get node :kind) 'user)
+                 (not (harness-string-blank-p (plist-get node :content))))
+        (setq text (plist-get node :content))))
+    text))
+
+(defun harness-supervisor--judge-p (session)
+  "Non-nil when a model is to judge how SESSION starts from its first message.
+That is a new `auto' session (`harness-supervisor--judge-key'), still
+supervising as it was created, with a model to ask."
+  (and (plist-get (plist-get session :ext) harness-supervisor--judge-key)
+       (harness-supervisor--session-p session)
+       (harness-method-exists-p 'provider/complete)
+       (harness-supervisor--judge-model session)))
+
+(defun harness-supervisor--judge-turn (session-id)
+  "Judge how SESSION-ID starts from the message that opened its turn, if it may.
+The request runs beside the turn (`harness-supervisor--judge-ask') and
+its verdict starts the session; a failure keeps the configured default.
+A session already being judged, or one with nothing to judge, is left."
+  (when (and (not (gethash session-id harness-supervisor--judging))
+             (harness-call 'session/exists-p session-id))
+    (let* ((session (harness-call 'session/get session-id))
+           (text (and (harness-supervisor--judge-p session)
+                      (harness-supervisor--judge-text session-id))))
+      (when (and text (not (harness-string-blank-p text)))
+        (puthash session-id t harness-supervisor--judging)
+        (harness-then (condition-case err
+                          (harness-supervisor--judge-ask session text)
+                        (error (harness-rejected (harness-error-message err))))
+                      (lambda (verdict) (harness-supervisor--judge-done session-id verdict nil))
+                      (lambda (err) (harness-supervisor--judge-done session-id nil err)))))))
+
+(defun harness-supervisor--on-first-turn (session-id)
+  "Judge how SESSION-ID starts, if this is its first turn and it may be judged.
+A subscriber of `agent/turn-started', beside the budget's own handler."
+  (condition-case err
+      (harness-supervisor--judge-turn session-id)
+    (error (harness-log 'warn "supervisor: judging session %s failed: %S" session-id err))))
 
 ;;;; Turns: decisions and the budget
 
@@ -798,6 +1289,7 @@ A supervisor's running workers are cancelled, and the step of a deleted
 worker is cancelled (see `harness-supervisor--forget-plans')."
   (harness-supervisor--on-turn-started session-id)
   (remhash session-id harness-supervisor--configured)
+  (remhash session-id harness-supervisor--judging)
   (remhash session-id harness-supervisor--raised)
   (condition-case err
       (progn (harness-supervisor--forget-plans session-id)
@@ -2107,6 +2599,18 @@ NODE and CALL-ID are the fork point.  Every step starts out pending."
           (if (equal (plist-get step :context) "fresh") ", fresh" "")
           (if (plist-get step :after) (format ", after %s" (string-join (plist-get step :after) " ")) "")))
 
+(defun harness-supervisor--hands-on-result (tool)
+  "Return the error result for TOOL called by a session that is not supervising.
+That is a call the model wrote while it still was -- before the session
+judge read its opening message as a hands-on job, say -- and holding a
+tool list from then; the call would plan work the session is now to do
+itself.  Refusing it holds what the permission stage holds for the other
+direction, a mode turned on while the model has an old tool list."
+  (harness-tool-error
+   (format (concat "%s: this session is hands-on now (the session judge read its opening message as a hands-on job),"
+                   " so it does the work itself, with its own tools, rather than planning it. Nothing was recorded.")
+           tool)))
+
 (defun harness-supervisor--submit-plan (input ctx)
   "Handler of the submit_plan tool: record INPUT's plan and start its workers.
 CTX is the call's context.  A plan with problems is refused as a whole,
@@ -2121,8 +2625,12 @@ mapping of tiers to models."
   (let* ((sid (plist-get ctx :session-id))
          (session (harness-call 'session/get sid))
          (read (harness-supervisor--read-plan input)))
-    (if (cdr read)
-        (harness-supervisor--problems-result "submit_plan" (cdr read))
+    (cond
+     ((not (harness-supervisor--session-p session))
+      (harness-supervisor--hands-on-result "submit_plan"))
+     ((cdr read)
+      (harness-supervisor--problems-result "submit_plan" (cdr read)))
+     (t
       (harness-then
        (harness-supervisor--tier-models session (car read))
        (lambda (steps)
@@ -2151,7 +2659,7 @@ mapping of tiers to models."
                         (concat "\n" (harness-supervisor--fallback-text session fallback))
                       "")
                     "\nThis ends your turn. The harness reports a failed step, and the finished plan, to you in a new message: do not wait or poll.")
-            :end-turn t)))))))
+            :end-turn t))))))))
 
 (harness-define-tool "submit_plan"
   :label "Submit plan"
@@ -2233,8 +2741,12 @@ and a hint tells the supervisor which."
                                                                     (harness-supervisor--step plan id) "done"))
                                                       (plist-get step :after)))))
                                      (if waits (format ", waiting for %s" (string-join waits ", ")) ""))))))))
-    (if problems
-        (harness-supervisor--problems-result "retry_step" problems)
+    (cond
+     ((not (harness-supervisor--session-p (harness-call 'session/get sid)))
+      (harness-supervisor--hands-on-result "retry_step"))
+     (problems
+      (harness-supervisor--problems-result "retry_step" problems))
+     (t
       (let* ((plan-id (plist-get plan :id))
              (session (harness-call 'session/get sid))
              (attempt (1+ (or (plist-get step :attempts) 0)))
@@ -2263,8 +2775,7 @@ and a hint tells the supervisor which."
              (harness-supervisor--start-step sid plan-id step-id)
              (harness-tool-ok
               (format "Step %s of plan %s runs again on %s (tier %s, attempt %d). The steps held on it start once it is done."
-                      step-id plan-id (plist-get now :model) (plist-get now :tier) attempt)))))))))
-
+                      step-id plan-id (plist-get now :model) (plist-get now :tier) attempt))))))))))
 
 (defun harness-supervisor--known-steps (plans)
   "Return a text naming the steps of the latest of PLANS, for an error."
@@ -2474,6 +2985,8 @@ appended.  Other sessions keep PROMPT."
   (harness-on 'session/ext-changed #'harness-supervisor--on-ext-changed)
   (harness-on 'task/changed #'harness-supervisor--on-task-changed)
   (harness-on 'agent/turn-started #'harness-supervisor--on-turn-started)
+  ;; The judge of a session's opening message runs beside the first turn.
+  (harness-on 'agent/turn-started #'harness-supervisor--on-first-turn)
   (harness-on 'agent/tool-call #'harness-supervisor--on-tool-call)
   (harness-on 'tools/finished #'harness-supervisor--on-tool-finished)
   (harness-on 'session/deleted #'harness-supervisor--on-session-deleted)
@@ -2502,6 +3015,7 @@ left once they are (`harness-tasks--pick-up').  A reload hooks in again
   (harness-off (cons 'session/ext-changed #'harness-supervisor--on-ext-changed))
   (harness-off (cons 'task/changed #'harness-supervisor--on-task-changed))
   (harness-off (cons 'agent/turn-started #'harness-supervisor--on-turn-started))
+  (harness-off (cons 'agent/turn-started #'harness-supervisor--on-first-turn))
   (harness-off (cons 'agent/tool-call #'harness-supervisor--on-tool-call))
   (harness-off (cons 'tools/finished #'harness-supervisor--on-tool-finished))
   (harness-off (cons 'session/deleted #'harness-supervisor--on-session-deleted))

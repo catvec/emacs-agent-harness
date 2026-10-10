@@ -144,7 +144,7 @@ non-interactive anyway."
 (defconst harness-config-keys
   '(harness-model harness-permission-mode harness-thinking harness-btw-thinking
     harness-allowed-directories harness-sandbox-policy harness-non-interactive
-    harness-supervisor)
+    harness-supervisor harness-supervisor-tasks)
   "Settings that take part in layering.
 A module defines some of them, `harness-supervisor' the supervisor
 plugin: until it is loaded the key takes part in nothing, and every
@@ -159,9 +159,9 @@ reader of the layers skips it (see `harness-config--layered-keys').")
     (supervisor
      :title "Supervisor mode"
      :doc "Top-level sessions plan and delegate: the session's model investigates and writes a plan, and worker sub-agents on cheaper models carry it out. The supervisor cannot change files itself."
-     :keys (harness-supervisor harness-supervisor-tasks harness-supervisor-tiers
-            harness-supervisor-thinking harness-supervisor-worker-thinking
-            harness-supervisor-step-budget))
+     :keys (harness-supervisor harness-supervisor-tasks harness-supervisor-judge-model
+            harness-supervisor-tiers harness-supervisor-thinking
+            harness-supervisor-worker-thinking harness-supervisor-step-budget))
     (spending
      :title "Spending"
      :doc "What all sessions together may spend.  Budgets for one project, one session or a calendar period are made in the usage dashboard."
