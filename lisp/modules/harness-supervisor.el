@@ -64,8 +64,13 @@
 ;; turn.  A step runs in a worker, a session of its own with the full tool
 ;; set, on the model of its tier: `harness-supervisor-tiers', else the one
 ;; of the supervisor's provider that ranks alike (`provider/tier-model':
-;; cheap, balanced, frontier), else the supervisor's own, with a hint.  A
-;; fork step forks the supervisor at the call that submitted the plan, a
+;; cheap, balanced, frontier).  A provider whose catalogue has not answered
+;; yet is waited for, briefly (`harness-supervisor--tier-wait'), so a slow
+;; listing does not read as a provider with no model for the tier; only one
+;; that truly names none gives the step the supervisor's own model, and the
+;; hint says which provider it is and why (the step keeps the reason as
+;; `:model-fallback').  A fork step forks the supervisor at the call that
+;; submitted the plan, a
 ;; node every step of the plan shares; when a plan has two or more fork
 ;; steps on one model they all fork through one seed (`seed/fork'), so
 ;; that the context is written to that model's prompt cache once.  A fresh
@@ -116,9 +121,11 @@
 ;; :created :steps', a step `:id :title :prompt :tier :reason :context
 ;; :after :model :state :session :attempts :result :error', and, once it
 ;; ran, `:worker-model' (the model of its worker) and, once it started
-;; again, `:previous'.  A step is pending, running, done, failed,
-;; interrupted, cancelled or superseded: a new plan supersedes the steps
-;; of the earlier ones that have not started, and their running steps
+;; again, `:previous'.  A step whose tier found no model keeps
+;; `:model-fallback', the reason (`unknown', `unlisted' or `none'), and
+;; runs on the supervisor's own model.  A step is pending, running, done,
+;; failed, interrupted, cancelled or superseded: a new plan supersedes the
+;; steps of the earlier ones that have not started, and their running steps
 ;; finish as usual.
 ;;
 ;; What the supervisor hears.  A step that is done is a hint, and starts
@@ -198,8 +205,13 @@ An alist from a tier -- mundane, standard or hard -- to a model id.  A
 tier it leaves out runs on the tier of the supervising session's
 provider that ranks alike: mundane on its cheap model, standard on its
 balanced one, hard on its frontier one (see `harness-model-tiers').
-With nil, the default, all three do.  It is on the settings page, under
-Supervisor mode."
+With nil, the default, all three do.  A provider whose catalogue has
+not answered yet is given a few seconds to list its models, so a
+listing that answers late still gives a step the model of its tier.  A
+provider that names no model for a tier -- a static catalogue with no
+price to rank, say -- runs that step on the supervisor's own model, and
+the hint says which provider and why; name the model here to change
+that.  It is on the settings page, under Supervisor mode."
   :type '(alist :key-type (choice (const :tag "Mundane" mundane)
                                   (const :tag "Standard" standard)
                                   (const :tag "Hard" hard))
@@ -1181,41 +1193,142 @@ It is an error result so that the turn still owes a decision (see
 
 ;;;; The plan engine: models
 
-(defun harness-supervisor--provider-tier-model (model tier)
-  "Return the model of the provider of MODEL that ranks with TIER, or nil."
-  (when (and (stringp model) (harness-method-exists-p 'provider/tier-model))
-    (condition-case err
-        (let ((found (harness-call 'provider/tier-model model
-                                   (cdr (assoc tier harness-supervisor--provider-tiers)))))
-          (and (stringp found) (not (string-empty-p found)) found))
-      (error (harness-log 'warn "supervisor: finding the %s model for %s failed: %S" tier model err)
-             nil))))
+(defconst harness-supervisor--tier-wait 10
+  "Seconds a plan waits for a provider's model catalogue before choosing.
+When the model of a step's tier cannot be told yet because the provider
+has not listed its models, the plan waits this long for them
+\(`provider/tier-model-async'): a catalogue that answers late still
+gives the step the model of its tier.  After that the step runs on the
+supervisor's own model, and a hint says why.")
 
-(defun harness-supervisor--tier-model (session tier)
-  "Return (MODEL . FALLBACK) for the workers of TIER of the supervising SESSION.
+(defun harness-supervisor--provider-name (model)
+  "Return the label of MODEL's provider, to name it in a hint, or \"the provider\"."
+  (or (ignore-errors
+        (let* ((pid (and (stringp model) (harness-model-provider model)))
+               (provider (and pid (harness-provider-get pid))))
+          (and provider (harness-provider-label provider))))
+      "the provider"))
+
+(defun harness-supervisor--provider-tier-model (model rank wait)
+  "Return a promise of (MODEL . REASON) from the provider of MODEL for RANK.
+RANK is `cheap', `balanced' or `frontier'.  WAIT non-nil waits for a
+provider that has not listed its models yet, at most
+`harness-supervisor--tier-wait' seconds; without it the catalogue is
+read as it stands.  A provider that fails to answer counts as
+\(nil . unlisted), which the caller tells as such."
+  (cond
+   ((not (and (stringp model) (harness-method-exists-p 'provider/tier-model)))
+    (harness-resolved (cons nil 'unknown)))
+   (t
+    (let* ((async (and wait (harness-method-exists-p 'provider/tier-model-async)))
+           (method (cond (async 'provider/tier-model-async)
+                         ((harness-method-exists-p 'provider/tier-model-info) 'provider/tier-model-info)
+                         (t 'provider/tier-model)))
+           (answer (harness-call-async method model rank))
+           (failure (lambda (err)
+                      (harness-log 'warn "supervisor: finding the %s model for %s failed: %S"
+                                   rank model err)
+                      (cons nil 'unlisted))))
+      (if (not async)
+          (harness-then answer
+                        (lambda (found)
+                          (if (consp found)
+                              found
+                            (let ((id (and (stringp found) (not (string-empty-p found)) found)))
+                              (cons id (and (null id) 'unknown)))))
+                        failure)
+        ;; A provider that answers late must not hold the plan: give it
+        ;; `harness-supervisor--tier-wait' seconds, then decide without it.
+        (let* ((done (harness-make-promise))
+               (timer (run-at-time harness-supervisor--tier-wait nil
+                                   (lambda () (harness-resolve done (cons nil 'unlisted))))))
+          (harness-then answer
+                        (lambda (found) (cancel-timer timer) (harness-resolve done found))
+                        (lambda (err) (cancel-timer timer)
+                                (harness-resolve done (funcall failure err))))
+          done))))))
+
+(defun harness-supervisor--tier-model (session tier &optional wait)
+  "Return a promise of (MODEL . REASON) for the workers of TIER of SESSION.
 MODEL is the model of `harness-supervisor-tiers' for TIER, else the one
 of SESSION's provider that ranks with TIER (cheap, balanced or
-frontier), else SESSION's own, and FALLBACK is then non-nil."
-  (let ((override (cdr (assoc-string tier harness-supervisor-tiers))))
-    (if (and (stringp override) (not (string-empty-p override)))
-        (cons override nil)
-      (let ((found (harness-supervisor--provider-tier-model (plist-get session :model) tier)))
-        (if found
-            (cons found nil)
-          (cons (plist-get session :model) t))))))
+frontier); REASON is nil then.  Else MODEL is SESSION's own model and
+REASON says why no model was found: `unknown', `unlisted' or `none'
+\(see `harness-provider-tier-model-info').  WAIT non-nil waits, at most
+`harness-supervisor--tier-wait' seconds, for a provider that has not
+listed its models yet."
+  (let ((override (cdr (assoc-string tier harness-supervisor-tiers)))
+        (model (plist-get session :model)))
+    (cond
+     ((and (stringp override) (not (string-empty-p override)))
+      (harness-resolved (cons override nil)))
+     ((not (stringp model))
+      (harness-resolved (cons nil 'unknown)))
+     (t
+      (harness-then
+       (harness-supervisor--provider-tier-model
+        model (cdr (assoc tier harness-supervisor--provider-tiers)) wait)
+       (lambda (found)
+         (if (car found)
+             found
+           (cons model (cdr found)))))))))
+
+(defun harness-supervisor--tier-models (session steps)
+  "Return a promise of STEPS, each with the model of its tier, and why not.
+Each step gets `:model' and, when no model was found for its tier,
+`:model-fallback', the reason (`harness-supervisor--tier-model').  The
+provider's catalogue is waited for, briefly, so that one that answers
+late still gives the step the model of its tier."
+  (let ((tiers (delete-dups (delq nil (mapcar (lambda (step) (plist-get step :tier)) steps)))))
+    (harness-then
+     (harness-all (mapcar (lambda (tier) (harness-supervisor--tier-model session tier t)) tiers))
+     (lambda (answers)
+       (let ((found (cl-mapcar #'cons tiers answers)))
+         (mapcar (lambda (step)
+                   (let ((answer (or (cdr (assoc (plist-get step :tier) found))
+                                     (cons (plist-get session :model) 'unknown))))
+                     (harness-supervisor--with step
+                                               :model (car answer)
+                                               :model-fallback (and (cdr answer)
+                                                                    (symbol-name (cdr answer))))))
+                 steps))))))
+
+(defun harness-supervisor--fallback-why (session step)
+  "Return in words why no model was found for STEP's tier of SESSION."
+  (let* ((tier (plist-get step :tier))
+         (rank (cdr (assoc tier harness-supervisor--provider-tiers))))
+    (pcase (plist-get step :model-fallback)
+      ("none" (format "%s names no %s model"
+                      (harness-supervisor--provider-name (plist-get session :model))
+                      (or rank tier)))
+      ("unlisted" (format "%s has not listed its models"
+                          (harness-supervisor--provider-name (plist-get session :model))))
+      (_ "no model was found for it"))))
+
+(defun harness-supervisor--fallback-text (session steps)
+  "Return the text saying which STEPS run on SESSION's own model, and why, or nil.
+It has a line for each step and a last line naming the model they run
+on; the hint and the answer of `submit_plan' use it."
+  (when steps
+    (let ((n (length steps))
+          (model (plist-get session :model)))
+      (concat
+       (mapconcat (lambda (step)
+                    (format "No model was found for the tier of step %s (%s): %s."
+                            (plist-get step :id) (plist-get step :tier)
+                            (harness-supervisor--fallback-why session step)))
+                  steps "\n")
+       "\n"
+       (format "%s on this session's own model, %s: set harness-supervisor-tiers to name the model a tier runs on."
+               (if (> n 1) "They run" "It runs")
+               (or model "?"))))))
 
 (defun harness-supervisor--fallback-hint (session steps)
-  "Say in SESSION's transcript which STEPS run on its own model.
+  "Say in SESSION's transcript which STEPS run on its own model, and why.
 They do for want of another."
   (when steps
     (harness-call 'session/hint (plist-get session :id)
-                  (format "No model was found for the tier of %s: %s run%s on this session's own model, %s"
-                          (string-join (mapcar (lambda (step) (format "step %s (%s)" (plist-get step :id)
-                                                                      (plist-get step :tier)))
-                                               steps)
-                                       ", ")
-                          (if (cdr steps) "they" "it") (if (cdr steps) "" "s")
-                          (plist-get session :model)))))
+                  (harness-supervisor--fallback-text session steps))))
 
 ;;;; The plan engine: workers
 
@@ -1986,43 +2099,48 @@ NODE and CALL-ID are the fork point.  Every step starts out pending."
 (defun harness-supervisor--submit-plan (input ctx)
   "Handler of the submit_plan tool: record INPUT's plan and start its workers.
 CTX is the call's context.  A plan with problems is refused as a whole,
-every problem named.  Otherwise the plan is recorded on the session --
-the steps of its earlier plans that have not started are superseded --
-shown like the `plan' tool shows one, and its ready steps start.  The
-answer ends the turn: the harness reports back."
+every problem named.  Otherwise each step is given the model of its
+tier -- the provider's catalogue is waited for, briefly, when it has
+not answered yet -- the plan is recorded on the session (the steps of
+its earlier plans that have not started are superseded), shown like the
+`plan' tool shows one, and its ready steps start.  The answer ends the
+turn: the harness reports back.  It may answer with a promise: a
+provider whose catalogue answers slowly delays the answer, not the
+mapping of tiers to models."
   (let* ((sid (plist-get ctx :session-id))
          (session (harness-call 'session/get sid))
          (read (harness-supervisor--read-plan input)))
     (if (cdr read)
         (harness-supervisor--problems-result "submit_plan" (cdr read))
-      (let* ((fallback nil)
-             (steps (mapcar (lambda (step)
-                              (let ((model (harness-supervisor--tier-model session (plist-get step :tier))))
-                                (when (cdr model) (push step fallback))
-                                (harness-supervisor--with step :model (car model))))
-                            (car read)))
-             ;; The call's own node, taken before the plan and its hint join the transcript.
-             (plan (harness-supervisor--make-plan input steps
-                                                  (harness-supervisor--call-node sid (plist-get ctx :call-id))
-                                                  (plist-get ctx :call-id)))
-             (n (length steps)))
-        (harness-supervisor--save-plans
-         sid (append (mapcar #'harness-supervisor--supersede (harness-supervisor--plans sid)) (list plan)))
-        (harness-call 'session/set-plan sid (plist-get plan :summary))
-        (harness-call 'session/append sid (list :kind 'plan :content (plist-get plan :summary)
-                                                :title (plist-get plan :title)
-                                                :meta (list :plan-id (plist-get plan :id))))
-        (harness-call 'session/hint sid (format "Plan submitted: %d step%s" n (if (= n 1) "" "s")))
-        (harness-supervisor--fallback-hint session (nreverse fallback))
-        (when (and (harness-method-exists-p 'agent/running) (harness-call 'agent/running sid))
-          (puthash sid t harness-supervisor--ending))
-        (harness-supervisor--start-ready sid (plist-get plan :id))
-        (harness-tool-ok
-         (concat (format "Plan %s submitted: %d step%s, started where they are ready.\n"
-                         (plist-get plan :id) n (if (= n 1) "" "s"))
-                 (mapconcat #'harness-supervisor--step-line steps "\n")
-                 "\nThis ends your turn. The harness reports a failed step, and the finished plan, to you in a new message: do not wait or poll.")
-         :end-turn t)))))
+      (harness-then
+       (harness-supervisor--tier-models session (car read))
+       (lambda (steps)
+         ;; The call's own node, taken before the plan and its hint join the transcript.
+         (let* ((plan (harness-supervisor--make-plan input steps
+                                                     (harness-supervisor--call-node sid (plist-get ctx :call-id))
+                                                     (plist-get ctx :call-id)))
+                (n (length steps))
+                (fallback (cl-remove-if-not (lambda (step) (plist-get step :model-fallback)) steps)))
+           (harness-supervisor--save-plans
+            sid (append (mapcar #'harness-supervisor--supersede (harness-supervisor--plans sid)) (list plan)))
+           (harness-call 'session/set-plan sid (plist-get plan :summary))
+           (harness-call 'session/append sid (list :kind 'plan :content (plist-get plan :summary)
+                                                   :title (plist-get plan :title)
+                                                   :meta (list :plan-id (plist-get plan :id))))
+           (harness-call 'session/hint sid (format "Plan submitted: %d step%s" n (if (= n 1) "" "s")))
+           (harness-supervisor--fallback-hint session fallback)
+           (when (and (harness-method-exists-p 'agent/running) (harness-call 'agent/running sid))
+             (puthash sid t harness-supervisor--ending))
+           (harness-supervisor--start-ready sid (plist-get plan :id))
+           (harness-tool-ok
+            (concat (format "Plan %s submitted: %d step%s, started where they are ready.\n"
+                            (plist-get plan :id) n (if (= n 1) "" "s"))
+                    (mapconcat #'harness-supervisor--step-line steps "\n")
+                    (if fallback
+                        (concat "\n" (harness-supervisor--fallback-text session fallback))
+                      "")
+                    "\nThis ends your turn. The harness reports a failed step, and the finished plan, to you in a new message: do not wait or poll.")
+            :end-turn t)))))))
 
 (harness-define-tool "submit_plan"
   :label "Submit plan"
@@ -2109,23 +2227,33 @@ and a hint tells the supervisor which."
       (let* ((plan-id (plist-get plan :id))
              (session (harness-call 'session/get sid))
              (attempt (1+ (or (plist-get step :attempts) 0)))
-             (new-tier (and (not (harness-string-blank-p tier)) (not (equal tier (plist-get step :tier))) tier))
-             (model (and new-tier (harness-supervisor--tier-model session new-tier)))
-             (now (apply #'harness-supervisor--update-step
-                         sid plan-id step-id
-                         :prompt (if (harness-string-blank-p notes)
-                                     (plist-get step :prompt)
-                                   (format "%s\n\nNotes for attempt %d: %s" (plist-get step :prompt) attempt notes))
-                         ;; A step that moves to another tier has its reason: why this one.
-                         (and new-tier (list :tier new-tier :model (car model) :reason reason)))))
-        (when (cdr model)
-          (harness-supervisor--fallback-hint session (list now)))
-        (harness-supervisor--hint sid (format "Retrying step %s on %s (attempt %d): %s"
-                                              step-id (plist-get now :model) attempt reason))
-        (harness-supervisor--start-step sid plan-id step-id)
-        (harness-tool-ok
-         (format "Step %s of plan %s runs again on %s (tier %s, attempt %d). The steps held on it start once it is done."
-                 step-id plan-id (plist-get now :model) (plist-get now :tier) attempt))))))
+             (new-tier (and (not (harness-string-blank-p tier))
+                            (not (equal tier (plist-get step :tier))) tier)))
+        (harness-then
+         (if new-tier
+             (harness-supervisor--tier-model session new-tier t)
+           (harness-resolved nil))
+         (lambda (model)
+           (let ((now (apply #'harness-supervisor--update-step
+                             sid plan-id step-id
+                             :prompt (if (harness-string-blank-p notes)
+                                         (plist-get step :prompt)
+                                       (format "%s\n\nNotes for attempt %d: %s"
+                                               (plist-get step :prompt) attempt notes))
+                             ;; A step that moves to another tier has its reason: why this one.
+                             (and new-tier
+                                  (list :tier new-tier :model (car model) :reason reason
+                                        :model-fallback (and (cdr model)
+                                                             (symbol-name (cdr model))))))))
+             (when (and new-tier (cdr model))
+               (harness-supervisor--fallback-hint session (list now)))
+             (harness-supervisor--hint sid (format "Retrying step %s on %s (attempt %d): %s"
+                                                   step-id (plist-get now :model) attempt reason))
+             (harness-supervisor--start-step sid plan-id step-id)
+             (harness-tool-ok
+              (format "Step %s of plan %s runs again on %s (tier %s, attempt %d). The steps held on it start once it is done."
+                      step-id plan-id (plist-get now :model) (plist-get now :tier) attempt)))))))))
+
 
 (defun harness-supervisor--known-steps (plans)
   "Return a text naming the steps of the latest of PLANS, for an error."
