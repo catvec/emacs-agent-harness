@@ -36,8 +36,9 @@ OpenAI-compatible APIs and AWS Bedrock.
   `elisp`, `ssh`, `open_harness`) hold a slot per machine -- one per
   processor plus a slight burst (`harness-tool-slots-count`), so a task
   board full of agents cannot start processes without end -- and the
-  calls waiting go by session priority (low, medium or high; `C-c h p`,
-  `harness-set-priority`), so the commands of a task you marked high go
+  calls waiting go by session priority (low, medium or high; `C-c h +`
+  and `C-c h -` raise and lower it, `C-c h y` sets it, and a task's is
+  its session's), so the commands of a task you marked high go
   before a low one's. The test suites run at idle CPU and I/O priority,
   yielding to whatever you are doing.
 - **Task board.** Run tasks in parallel, each in its own session and git
@@ -287,6 +288,8 @@ the menu's Version entry says so.
 | `C-c h l` | `harness-sessions` | Show the session list |
 | `SPC` | `harness-ui-sessions-requests` | Pop out what the session at point waits on |
 | `b` | `harness-ui-sessions-toggle-blocked` | In the session list, show only the sessions waiting for you, or every session again |
+| `+` / `-` | `harness-ui-sessions-raise-priority` / `harness-ui-sessions-lower-priority` | In the session list, raise or lower the priority of the session at point (with `C-u`, ask for the level) |
+| `p` | `harness-ui-sessions-set-priority` | In the session list, set the priority of the session at point |
 | `y` / `n` | `harness-ui-sessions-allow` / `harness-ui-sessions-deny` | On the lines of a listed session waiting on a permission request, answer it with Allow or Deny, as the request's own `y` and `n` do |
 | `C-c h a` | `harness-tasks` | Show the task board |
 | `C-c h /` | `harness-tasks-search` | Find tasks, or act on them, by saying so in words |
@@ -302,6 +305,9 @@ the menu's Version entry says so.
 | `C-c h T` | `harness-set-thinking` | Choose the thinking level |
 | `C-c h H` | `harness-set-thinking-all` | Choose a thinking level and set it on every current session and task of every project |
 | `C-c h p` | `harness-set-permission-mode` | Choose the permission mode |
+| `C-c h +` / `C-c h -` | `harness-priority-raise` / `harness-priority-lower` | Raise or lower the priority of the session in front of you: low, medium or high, the order the harness serves its commands in (with `C-u`, ask for the level) |
+| `C-c h y` | `harness-set-priority` | Set the priority of the session in front of you — a task's priority is its session's |
+| `C-c h Y` | `harness-set-priority-all` | Give every current session and task of every project one priority |
 | `C-c h i` | `harness-toggle-non-interactive` | Toggle non-interactive mode, in which a session never waits for you |
 | `C-c h I` | `harness-set-non-interactive-all` | Turn non-interactive mode on or off for every current session and task of every project |
 | `C-c h V` | `harness-toggle-supervisor` | Toggle supervisor mode: a session that supervises plans and leaves the changes to workers on cheaper models, a hands-on one may change files itself (see [Supervisor mode](#supervisor-mode)) |
@@ -1083,6 +1089,39 @@ call to one anyway, in every permission mode.
   else works as before: no turn has to end on a decision, sessions keep
   every tool, and the header line shows no segment.
 
+### Priorities
+
+Every session has a **priority**: low, **medium** (the default) or
+**high**. It is always the session's own — a task's priority is its
+session's, and every task has that session from the moment it is
+submitted, so a task waiting for a slot already carries the priority it
+will start with, and setting a task's priority is setting its session's.
+The harness serves the work of a session by it: the tools that start
+processes hold a slot per machine and give the waiting calls to the
+highest priority session first (the "Polite with your machine" bullet in
+[Features](#features)), and the task board starts waiting tasks the same
+way (see [Task board](#task-board)).
+
+The commands take the session in front of you:
+
+- `C-c h +` and `C-c h -` raise and lower it a level and say what it is
+  now (`C-u` on either asks for the level);
+- `C-c h y` sets it, asking for the level (`harness-set-priority`);
+- `C-c h Y` gives every current session and task session of every
+  project the level you choose (`harness-set-priority-all`);
+- in the session list (`C-c h l`), a **Priority** column shows each
+  session's own level, quiet at medium, and `+`, `-` and `p` change the
+  priority of the session at point;
+- the chat's header line shows `priority: high` or `priority: low` when
+  it is not the default, and a click there changes it.
+
+A session with no priority of its own takes its parent's, so the
+sub-agents and forks working for a task work at the task's priority. An
+agent sets one with the `set_priority` tool (a `session_id`, and
+`all=true` for every current session and task of every project at once),
+the session of a task being the one `task_list` shows for it;
+`task_control`'s `priority` action does the same for a task's session.
+
 ### Task board
 
 `C-c h a` opens the task board of the current project. Each task runs in
@@ -1134,7 +1173,10 @@ your checkout itself can be submitted to the **main tree** instead (the
   as cleaning up uncommitted changes; those tasks show `main tree` on
   their card, and a refined task keeps the choice for when you start it.
   An agent can ask for the same thing with `task_submit`'s `main_tree`.
-- Every task has a **priority**: low, medium (the default) or high. It
+- Every task has a **priority**: low, medium (the default) or high. A
+  task has no priority of its own — it is its session's, which every
+  task gets as it is submitted, so setting a task's priority is setting
+  its session's (see [Priorities](#priorities)). It
   matters when `harness-tasks-max-running` limits how many of a
   project's tasks work at once: the others wait in *Pending*, and a
   free slot goes to the highest priority waiting, the oldest of those
@@ -1142,12 +1184,14 @@ your checkout itself can be submitted to the **main tree** instead (the
   never stops a task at work, and a backlog task still waits for you to
   start it. The `medium priority` button beside the Submit / Refine
   switch sets the next task's (a click cycles it through high and low);
-  `+` and `-` on a card raise and lower that task's, to reorder the
+  `+` and `-` on a card raise and lower that task's — the session's it
+  already has, waiting or not — to reorder the
   queue, and bulk edit (`B`) has a priority button that sets every
   current task's at once, only when you click it. A high task shows `↑`
   before its title and a low one `↓`. An
-  agent sets it with `task_submit`'s `priority` and `task_control`'s
-  `priority` action, and the board's search understands "do the docs
+  agent sets it with `task_submit`'s `priority`, `task_control`'s
+  `priority` action or `set_priority` on the task's session, and the
+  board's search understands "do the docs
   task first".
 - Task sessions run on at most 256k tokens of context
   (`harness-tasks-context-limit`): they compact sooner than interactive
