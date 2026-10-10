@@ -19,7 +19,7 @@ module needs something more, add it here first.
                 provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval,
                 tools-web, tools-agent, tools-sessions, tools-notify, tools-handin,
-                tools-dev
+                tools-compact, tools-dev
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE,
@@ -973,25 +973,57 @@ effect at AT; `usage/price` uses its answer instead of `:pricing`.  This
 is how the DeepSeek provider follows its peak and off-peak tiers, and it
 keeps the catalogue plain data that crosses the wire unchanged.
 
-Model tiers: `:tiers' names a model (`:cheap' `:balanced' `:frontier'
-are the common ones) by a name, id or regexp, so the harness can pick a
-model on its own - the auto-mode judge asks for the cheap one -
-without the user naming one.  A tier the provider does not name, and a
-provider that declares none, falls back to its own catalogue sorted by
-price: `provider/tier-model MODEL-ID &optional TIER' returns the `:cheap'
-one by default, or nil when the provider is unknown or lists nothing
-(the caller then uses what it has).  MODEL-ID may also be a provider id
-alone.  This is what ties the judge to the
-session's provider.  Claude, DeepSeek, Bedrock and Copilot name their
-tiers; the dynamic OpenAI-compatible catalogues fall back to price.
+Model tiers: `:tiers` names a model for each of the four tiers of
+`harness-model-tiers`, weakest first, so the harness can pick a model on
+its own without the user naming one:
+
+| Tier | For | Claude | DeepSeek |
+|---|---|---|---|
+| `:simple` | small, well-specified work and the harness's own calls (auto-mode judge, naming, summaries, a plan's simple steps) | Haiku | Flash at `low` |
+| `:medium` | everyday work: a plan's medium steps | Sonnet | Flash at `high` |
+| `:hard` | the strongest model the harness picks on its own: what a supervisor plans on, and a step `retry_step` escalates | Opus | Flash at `max` |
+| `:frontier` | the very top model, which the harness never picks on its own: only the user does | Fable | nil (none) |
+
+A tier's value is a model name, id or regexp of the catalogue; a plist
+`(:model MATCHER :thinking LEVEL)`, the model run at that thinking level
+(how DeepSeek makes three tiers of one model); or nil, which says the
+provider has no model for the tier (`harness-provider-tiers-type` is
+the customize type).  The names of old, `:cheap` and `:balanced`, read
+as `:simple` and `:medium`, and a plist saved in them reads its
+`:frontier` as `:hard`, the strongest model the harness picked then
+(`harness-provider-normalize-tiers`).
+
+`provider/tier-model MODEL-ID &optional TIER` returns the `:simple` one
+by default.  A tier the provider does not name, and a provider that
+declares none, falls back to its own catalogue sorted by price (the
+four tiers spread over the priced models, `:simple` the cheapest and
+`:frontier` the dearest); a tier named as nil has no model and no price
+picks one.  It returns nil when the provider is unknown, lists nothing
+or has no model for the tier (the caller then uses what it has);
+`provider/tier-model-info` returns `(MODEL . REASON)`, REASON
+`unknown`, `unlisted` or `none` saying why not, and
+`provider/tier-model-async` waits for a catalogue that answers late.
+MODEL-ID may also be a provider id alone.  This is what ties the judge
+to the session's provider.  Claude, DeepSeek, Bedrock and Copilot name
+their tiers; the dynamic OpenAI-compatible catalogues fall back to
+price unless an endpoint names `:tiers`.  `provider/tier-thinking
+MODEL-ID &optional TIER` returns the level the tier names, nil for a
+tier that names none (Claude's), without reading the catalogue; and
+`provider/fit-thinking MODEL-ID LEVEL` brings a level within the
+`:thinking-levels` of the model (`max` is `high` on a model whose
+strongest is `high`).
+
 The other way round, `provider/model-tier MODEL-ID` says which tier a
-model is in its provider: the one `:tiers' names it for (`:balanced'
-first, then `:frontier', then `:cheap', when several do), else its
-place in the catalogue by price (cheapest third `:cheap', dearest third
-`:frontier'), else `:balanced'.  So Claude's Fable 5.1, which no tier
-names and which costs the most, is `:frontier'.  The fallback module
-maps a model to "its model of similar ability" at another provider
-through the two.
+model is in its provider (`simple`, `medium`, `hard` or `frontier`, a
+symbol without a colon): the one `:tiers` names it for (`:medium`
+first, then `:hard`, `:frontier` and `:simple`, when several do, as
+DeepSeek's three name one model), else its place in the catalogue by
+price (the cheapest sixth simple, the dearest sixth frontier, the
+nearest tier the provider has a model for), else `medium`.  So Claude's
+Fable 5.1 is `frontier` and Opus 5.5 `hard`.  The fallback module maps a
+model to "its model of similar ability" at another provider through the
+two, stepping to the nearest tier the other provider has (below first):
+a Fable session falls back to DeepSeek's hard tier.
 
 The catalogue is cached per provider.  Defining a provider again, as
 every `harness-reload` does, forgets that provider's models and no
@@ -2016,7 +2048,7 @@ non-interactive session it stays a denial.
   `auto` (reads inside the jail allowed; a cheap model,
   `harness-perms-auto-model`, decides the rest with a reason; falls back
   to ask).  The judge model defaults to `auto', which asks the session's
-  own provider for its `:cheap' tier (`provider/tier-model'), so a
+  own provider for its `:simple' tier (`provider/tier-model'), so a
   session on DeepSeek is judged by a DeepSeek model and one on Claude by
   Claude Haiku; a provider without tiers is sorted by price, and the
   session's own model is the last resort.  Naming a model, or nil for
@@ -2411,7 +2443,8 @@ non-interactive session it stays a denial.
   hold) pauses it at a boundary.  Automatic compaction runs between
   turns (`agent/before-turn'), not inside one, so a native-provider
   turn that outgrows the window reaches the provider's own error;
-  budgets refuse new turns.
+  a hard budget spent mid-turn ends the turn at the next step boundary
+  (see "usage" below), and one already spent refuses a new turn.
 - Each step reads the session's model afresh: a model switch reaches a
   running turn at its next step, never mid-step.  The step sends only
   the provider state its model can continue and drops one of another
@@ -2485,7 +2518,10 @@ non-interactive session it stays a denial.
   session), `usage/project-budgets ROOT` (the project budgets of ROOT
   and the period budgets of everything or of ROOT, as statuses; what
   the task board shows), `usage/plan-budget AMOUNT PERIOD DAYS`,
-  `usage/totals`, `usage/series (:bucket day|hour …)`, `usage/record ROW`.
+  `usage/totals`, `usage/series (:bucket day|hour …)`, `usage/record ROW`,
+  `usage/cost-compare (&rest usage/totals filters, :models :reference-model
+  :at)` (what the recorded tokens would cost at other models' prices; see
+  "Cost comparison").
   BUDGET = `(:id :scope session|project|period :target ID-OR-ROOT
   :amount F :hard BOOL :period day|week|month :days business|all
   :baseline F :baseline-period-start "YYYY-MM-DD")`.
@@ -2538,7 +2574,10 @@ non-interactive session it stays a denial.
   auth-source host api.anthropic.com user admin); without one nothing
   is fetched and it gives `(:available nil :reason)`.  Pro and Max
   subscriptions have no cost report.
-- Hard budgets block via `agent/before-turn`; soft ones emit
+- Hard budgets stop a turn: `agent/before-turn` refuses a new one, and
+  `agent/step` refuses the next step of a running one, which then ends
+  `blocked` with the reason as a hint (the step in flight finishes, so a
+  hosted loop's call in progress is not cut off).  Soft ones emit
   `usage/budget-warning` and a session hint at 80% and 100%.  Budgets
   count billed cost, so calls a subscription covers spend none; what
   providers report and a baseline count toward both.
@@ -2670,7 +2709,7 @@ decision log), so it is the same for every provider.  Methods are
 - `insights/narrative &key since until project period refresh` →
   promise of `(:summary :themes :patterns :friction :suggestions :model
   :at :stale)`, or `(:skipped TEXT [:error t])`.  A model of the user's
-  provider (`harness-insights-model`, `auto` the cheap tier of
+  provider (`harness-insights-model`, `auto` the simple tier of
   `harness-model` as configured for the project) gets a digest of the
   REPORT (figures, and each session's kind, name and first request,
   at most `harness-insights--prompt-chars` characters) and answers in
@@ -2699,7 +2738,8 @@ another.  `harness-fallback-models` (global, *Models and services*) is
 the order of preference, first used to last, its first entry the
 preferred provider: each entry a provider id, standing for that
 provider's model of similar ability (the tier of the session's model,
-see `provider/model-tier`), or a model id used as it is.  nil turns the
+see `provider/model-tier`, or the nearest tier that provider has a model
+for, weaker first), or a model id used as it is.  nil turns the
 switching off; running out is still noticed, shown and hinted.
 
 - Marks: a provider that ran out is marked, the whole provider (key
@@ -2750,9 +2790,11 @@ switching off; running out is still noticed, shown and hinted.
   ((:session SID :original MODEL :model MODEL) …) :enabled BOOL)`,
   ENTRY = `(:entry STRING :provider ID :model MODEL-OR-NIL :label
   :provider-label :registered BOOL :mark MARK-OR-NIL :tiers
-  ((:tier "cheap" :model ID :label …) …))`, `:tiers` for a provider
-  entry only.  `fallback/clear KEY` forgets the mark KEY (a provider's
-  forgets its models' marks too); → non-nil when one went.
+  ((:tier "simple" :model ID :label … :out BOOL [:thinking LEVEL]) …))`,
+  `:tiers` for a provider entry only: the model of each of its four
+  tiers, and the thinking level the tier names, if any.
+  `fallback/clear KEY` forgets the mark KEY (a provider's forgets its
+  models' marks too); → non-nil when one went.
   `fallback/mark KEY &rest (:kind :until :reason)` marks by hand.
   Event `fallback/changed` after any mark or session record changes.
 
@@ -2822,7 +2864,7 @@ a request whose own timeout fired are never retried.
     summariser sent the conversation as text costs.  A summary of a
     sample is a brief one.
   - `brief`: a summary of a sample, written by OPTS `:model`, else
-    `harness-compaction-brief-model` (`auto`, the default: the cheap
+    `harness-compaction-brief-model` (`auto`, the default: the simple
     tier of the session's provider, `provider/tier-model`, else the
     session's model; nil: the session's model; or a model named), and
     ending in a note that it was written from only the first and last
@@ -2841,6 +2883,18 @@ a request whose own timeout fired are never retried.
     over, and telling the model to look back at what it needs with
     session_history (`harness-compaction--fresh-note`), or, without
     that tool, to ask the user.
+  - `truncate`: no request and no file either.  The oldest nodes are
+    dropped and the most recent ones are kept, as they were, whole tool
+    exchanges at a time: the nodes are chosen newest first
+    (`harness-compaction--truncate-plan`, `harness-compaction--node-units`)
+    up to `harness-compaction--truncate-keep` of the usable window and
+    re-appended after the node, which carries a note
+    (`harness-compaction--truncate-note`) saying how many nodes of
+    about how many tokens went and that the most recent are kept below.
+    It is what a conversation too big to summarise gets: nothing has to
+    be read to make it, and `:meta` records `:truncate-dropped`,
+    `:truncate-kept` and `:dropped-tokens`.  It refuses (`harness-error`)
+    when nothing would be dropped, since then there is nothing to cut.
   Every kind but `fresh`, whose note says so already, ends in a line
   pointing the model at the session_history tool
   (`harness-compaction-history-tool`, `harness-compaction--history-note`):
@@ -2868,10 +2922,28 @@ a request whose own timeout fired are never retried.
   with the compaction instead of adding it to the old one, whose
   context is what compacting was for.  The state of another provider,
   left by a handoff, stays.  One compaction runs per session at a time,
-  a second call returning the running promise; OPTS `:idle` refuses a
+  a second call returning the running promise.  OPTS `:idle` refuses a
   session running a turn (`agent/running`), whose turn would go on
   writing after the conversation it replaces, as compacting by hand
   does.
+
+  OPTS `:queue` and `:interrupt` are for just that session instead of a
+  refusal.  While a turn runs, `:queue` records the compaction in
+  `harness-compaction--pending` and returns at once -- it must not wait
+  for the compaction, since the compaction waits for the same turn: the
+  promise resolves to `(:queued t :kind KIND :interrupt BOOL)`, never to
+  the node the compaction later appends.  `:interrupt` also cancels the
+  running turn (`agent/cancel`) after storing the entry, so the
+  compaction runs once the turn is over; the step in flight and
+  anything it had not recorded are lost.  The queued compaction runs at
+  the session's next boundary: the `agent/step` and `agent/before-turn`
+  gates (`harness-compaction--gate`, priority 12, ahead of cowboy's 15
+  and automatic compaction's 20, so the fresh context is what those see)
+  run it, or, for a turn that ends first (a `cancelled` one included),
+  the `agent/turn-ended` handler does.  A `:queue` or `:interrupt` call
+  to an idle session compacts at once, like any other.  A compaction
+  already waiting is replaced; the pending entry lives in the harness
+  process and is dropped when the session is.
 - `compaction/estimate SESSION-ID` → `(:context :model :model-label
   :messages :cached :carry-on :carry-on-cached :compacting :kind
   :kinds)`: the context the next message sends, how many messages it
@@ -2887,12 +2959,15 @@ a request whose own timeout fired are never retried.
   for writes (DeepSeek, priced 0) still charges the input.  A brief
   summary reads the system prompt, the sample and the ask; either
   writes up to the summary's budget
-  (`harness-compaction--summary-output`).  A transcript and a fresh
-  start cost nothing and leave their note (`:after`) in place of the
-  context.
+  (`harness-compaction--summary-output`).  A transcript, a fresh start
+  and a truncation cost nothing and leave their note (`:after`) in place
+  of the context; a truncation's entry also carries `:kept` and
+  `:dropped` (how many nodes each) and `:kept-tokens` and
+  `:dropped-tokens`, with `:after` the note plus what is kept, and
+  `:dropped` 0 when nothing can be cut (`:after` is then the context).
 - Settings (section "Compaction"): `harness-compaction-kind`, the kind
-  automatic compaction makes (`summary`), and
-  `harness-compaction-brief-model`.
+  automatic compaction makes (`summary`; any of the kinds, `truncate`
+  included), and `harness-compaction-brief-model`.
 - Auto: `agent/before-turn` compacts, as `harness-compaction-kind`
   says, when the context comes within
   `harness-compaction--context-reserve` of the window unless the provider
@@ -3065,7 +3140,7 @@ so switching to either loses nothing.
   latest one when the conversation has moved on since, as a fork's has),
   each cut to 3000 characters, and the question.  It goes to
   `harness-naming-model` (`auto`, the default: the session provider's
-  `:cheap` tier, `provider/tier-model`) with `:ephemeral t`,
+  `:simple` tier, `provider/tier-model`) with `:ephemeral t`,
   `:no-thinking t`, a 40-token budget and no provider state, so the
   hosted providers answer it apart from the session's conversation (a
   CLI process of its own for Claude Code, a throwaway session for
@@ -3427,7 +3502,8 @@ priority).
   writing a backlog task up (`refining`).  `:priority` is `low`, `medium`
   (the default; `med` reads as it) or `high`, a symbol or a string in
   any case; anything else is refused before the task is made.  A
-  priority only orders the queue: it never stops a task at work, and a
+  priority orders the queue, and stops a task at work only for work
+  sent back from review that outranks it (pre-emption, below); a
   backlog task still waits for `task/start`.  Missing options come from
   `harness-tasks-model`, `-permission-mode` (auto), `-thinking` and
   `-non-interactive` (off), else from what the directory configures, so
@@ -3623,6 +3699,46 @@ priority).
   false rather than nil), and a board's `V` turns it off and on with
   `config/set`, globally and saved, as the settings page does; tasks
   already in review wait on until verified.
+- Pre-emption: work sent back from review keeps to
+  `harness-tasks-max-running`, though its slot may have gone to another
+  task while it waited for review.  `harness-tasks--make-room` finds it
+  one: a free slot, else the slot of a task at work it outranks
+  (`harness-tasks--outranks-p`: a lower priority, or its own priority
+  when that task is not work sent back itself, `:sent-back` being when
+  it was).  Of those, `harness-tasks--victim` takes the lowest priority,
+  then work that is not feedback, then the one at work since last; a
+  task waiting on work its session left running (`:waiting`), another
+  project's task, and any task while the limit is 0 give none up.  The
+  victim is pre-empted (`harness-tasks--preempt`): returned to pending
+  with `:return-reason` `preempted` and `:preempted-by` the task sent
+  back, its turn stopped, and a hint in its session once the turn has
+  ended ("Task pre-empted: ...").  A task still starting (its worktree
+  being made) is pre-empted the same way: its start launches nothing
+  (`harness-tasks--start-current-p`), and its next start reuses the
+  worktree being made (`harness-tasks--worktree-promise`).  When a slot
+  frees, it carries on in its session, prompted with
+  `harness-tasks--preempted-message`, as a task returned to pending is
+  with `harness-tasks--paused-message`.  With no task it outranks, or
+  its queue suspended, the task sent back waits instead
+  (`harness-tasks--hold-back`): pending, `:return-reason` `sent-back`,
+  its round kept in `:feedback` and the reject text queued (`:queued`)
+  for its start, which opens with `harness-tasks--sent-back-message`.
+  It leads its priority in the queue (`harness-tasks--start-order`), and
+  while its queue runs the scheduler lets it pre-empt as soon as it
+  outranks a task at work: its priority raised, or that task's lowered
+  (`harness-tasks--on-priority-changed` runs a pass).  No other waiting
+  task pre-empts.  `task/reject` returns the task, active or pending,
+  for the client to say which; `task/prompt` to a task waiting that way
+  queues its message.  Feedback typed in the chat of a task in review
+  sends it back too: with no slot to take, the message is recorded but
+  its turn refused by the tasks module's `agent/before-turn` filter
+  (`harness-tasks--before-turn`, "Turn not started: its task ... waits
+  in the queue ..."), and the message reaches the model with the turn
+  that starts the task.  That filter refuses the turn of any other
+  sender (another session's agent, the harness) to a task returned to
+  pending, pre-empted or sent back while it waits; the user's own
+  message to a returned or pre-empted task starts it, as `task/start`
+  would.  A task that never started is left alone.
 - A turn starting in a task's session makes the task active again, so a
   message sent from a done task's chat buffer reopens it; an archived task
   comes back to the board.
@@ -3785,7 +3901,7 @@ on them, answered by a cheap model that returns JSON only.
   one more round (`harness-tasks-search--final-text` closes it) and must
   answer then.
 - The model is `harness-tasks-search-model`: `auto` (the default) takes
-  the provider of the task model's `cheap` tier (`provider/tier-model`),
+  the provider of the task model's `simple` tier (`provider/tier-model`),
   nil uses the task model itself, a string forces one.
   `harness-tasks-search-thinking` (nil) is its thinking level, the
   output budget is `harness-tasks-search--max-tokens`, and a call taking
@@ -3911,7 +4027,7 @@ again brings it back as it was.
   longer than `harness-pet--timeout` is cancelled.  Its cost is recorded
   with `usage/record` with `:session nil`, under the project of the
   session it spoke about.
-- Model: `harness-pet-model`, `auto` (the default) the cheap tier
+- Model: `harness-pet-model`, `auto` (the default) the simple tier
   (`provider/tier-model`) of the session's model, or of `harness-model`
   for a hatching or a petting; nil that model itself; a string forces
   one.
@@ -4081,7 +4197,7 @@ starts the session supervising and sets `:ext` `:supervisor-judge` t,
 and a cheap model decides from the opening message: a subscriber of
 `agent/turn-started` sends an ephemeral request beside the session's
 first turn (no tools, no thinking, one word asked;
-`harness-supervisor-judge-model`, the provider's cheap tier by default)
+`harness-supervisor-judge-model`, the provider's simple tier by default)
 holding the message alone, so the turn never waits for it.  A verdict
 starts the session as `supervisor/set` would and writes the note that
 says so, with `supervisor/changed`; a provider error, an unusable word
@@ -4136,18 +4252,20 @@ and a message for the echo area.  Only the user calls it.
   `harness-supervisor-tasks` (the same three, for the sessions of
   tasks, also layered, so a project decides how its tasks start),
   `harness-supervisor-judge-model`
-  (`auto`: the provider's cheap tier, else the session's own model),
+  (`auto`: the provider's simple tier, else the session's own model),
   `harness-supervisor-tiers`
-  (nil: an alist from `mundane`, `standard` or `hard` to a model id),
-  `harness-supervisor-thinking` (`((deepseek . "max"))`: an alist from a
-  provider id to the level its sessions run at while they supervise),
-  `harness-supervisor-worker-thinking` (`((deepseek . "medium"))`: an
-  alist from a provider id to the level workers on its models run at),
+  (nil: an alist from `simple`, `medium` or `hard`, or the names of old
+  `mundane` and `standard`, to a model id or a plist `(:model ID
+  :thinking LEVEL)`, either key left out to keep the default)
   and `harness-supervisor-step-budget` (80), in the settings section
-  "Supervisor mode".
-- Thinking levels.  A session whose provider
-  `harness-supervisor-thinking` names has its thinking raised to that
-  level while it supervises: `session/ext-changed` on `:supervisor` with
+  "Supervisor mode".  The thinking levels are the tiers' own, in the
+  providers' tier settings (section "Model tiers": see provider).
+- Thinking levels go with the tier.  A supervisor plans on the hard
+  tier, so a session whose provider's hard tier names a thinking level
+  (`provider/tier-thinking MODEL 'hard`: DeepSeek's `max`, none for
+  Claude), fitted to its model (`provider/fit-thinking`), has its
+  thinking raised to that level while it supervises:
+  `session/ext-changed` on `:supervisor` with
   a true value calls `session/update` `:thinking LEVEL` `:silent t`,
   remembering what it had in `harness-supervisor--raised` (and the level
   it raised it to), and a false or nil value puts the remembered level
@@ -4157,8 +4275,8 @@ and a message for the echo area.  Only the user calls it.
   This covers a top-level session, a fork that takes its parent's
   setting, a task session (including one `harness-supervisor-tasks` turns
   hands-on right after creation, whose level is put back), and the user
-  turning the mode on or off.  `harness-supervisor--provider-thinking`
-  reads the alist by `harness-model-provider`.
+  turning the mode on or off.  `harness-supervisor--thinking` reads the
+  level.
 - Enforcement, in order.  Filter `agent/tools` (90) offers a supervising
   session only an allowlist: the reading tools (`read_file grep glob
   list_dir file_info`, the `session_*` and `task_*` that only look,
@@ -4230,9 +4348,11 @@ and a message for the echo area.  Only the user calls it.
   `(:id "p-…" :title :summary :node :call-id :created F :steps (STEP…))`,
   `:node` and `:call-id` being the call that submitted it, which every
   fork step forks the supervisor at.  Step: `(:id :title :prompt :tier
-  :reason :context :after (ID…) :model :state :session :attempts N
-  :result :error :worker-model :previous)`: `:tier`
-  mundane|standard|hard, `:context` fork|fresh, `:state`
+  :reason :context :after (ID…) :model :thinking :state :session
+  :attempts N :result :error :worker-model :previous)`: `:tier`
+  simple|medium|hard (hard only after `retry_step`; a plan of old's
+  mundane and standard read as simple and medium), `:thinking` the
+  level its tier names, if any, `:context` fork|fresh, `:state`
   pending|running|done|failed|interrupted|cancelled|superseded,
   `:session` the worker, `:result` its last reply, `:worker-model` the
   model the worker was made for (`retry_step` may change `:model`
@@ -4243,19 +4363,28 @@ and a message for the echo area.  Only the user calls it.
 - `submit_plan summary steps &optional title`, `steps` being `{id, title,
   prompt, tier, reason, context, after}`, is refused whole, every
   problem named, for an id used twice, an `after` naming no step, a
-  cycle, an unknown tier or context or a blank prompt.  Otherwise it
+  cycle, a `hard` or unknown tier (a plan's steps are simple or medium:
+  the supervisor runs on the hard model, and a step that would need it
+  is not broken down enough), an unknown context or a blank prompt.
+  Otherwise it
   records the plan, sets the session's plan (`session/set-plan`) to the
   summary, adds a `plan` node and the hint "Plan submitted: N steps",
   starts the ready steps and ends the turn (`:end-turn t`).
   `retry_step step reason &optional plan tier prompt` runs a failed,
   interrupted or cancelled step again on a new worker (`plan` defaults
-  to the latest that has the step, `tier` moves it to that tier's model,
-  `prompt` adds notes to its prompt) and does not end the turn.  Both are
-  kind meta.
+  to the latest that has the step, `tier` moves it to that tier's model
+  and level, simple, medium or hard, the only way a step reaches hard;
+  `prompt` adds notes to its prompt) and does not end the turn.  Both
+  are kind meta.  No step ever runs on the frontier tier.
 - Models.  A step runs on `harness-supervisor-tiers` for its tier, else
-  the model of the supervisor's provider that ranks alike
-  (`provider/tier-model` cheap, balanced, frontier for mundane,
-  standard, hard), else the supervisor's own, with a hint.
+  the model of the supervisor's provider of the same tier
+  (`provider/tier-model` simple, medium or hard), else the supervisor's
+  own, with a hint.  Its `:thinking` is the level
+  `harness-supervisor-tiers` gives the tier, else the one the worker
+  model's provider names for it (`provider/tier-thinking`: DeepSeek's
+  `low`, `high` and `max`), fitted to the worker's model; nil when
+  neither names one.  The answers of `submit_plan` and `retry_step` and
+  the report of a failed step name it.
 - Workers.  A step whose `:after` steps are all done starts: a worker
   session of kind `subagent` named "Step ID: TITLE" is made, with
   `:context-window-limit` from `harness-tools-agent-context-limit`.  A
@@ -4266,10 +4395,10 @@ and a message for the echo area.  Only the user calls it.
   supervisor's directory, worktree and host, with the supervisor as its
   parent and the supervisor's permission mode, thinking level,
   non-interactive switch and allowed directories; the thinking level is
-  the one `harness-supervisor-worker-thinking` names for the provider of
-  the worker's own model, else the supervisor's own, and the same
-  `:thinking` is passed to a fork so that a raised supervisor level is
-  not inherited.  The worker gets one
+  the step's `:thinking`, else the supervisor's own, fitted to the
+  worker's model (`harness-supervisor--worker-thinking`), and a fork is
+  given it as `:thinking` when it differs from the supervisor's, so that
+  a raised supervisor level is not inherited.  The worker gets one
   `agent/prompt`, from the supervisor session: the `:preamble` of
   `seed/fork`, an opening that tells a fork it is a worker now, the step,
   the attempt before it when the step starts again (below), what the
@@ -4410,7 +4539,7 @@ names its own working and temporary directories.
   on `:parent-id` (the merge queue, say) sees the seed as their parent.
   The supervisor module forks its workers this way.
 
-### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval, tools-web, tools-agent, tools-sessions, tools-notify, tools-handin
+### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval, tools-web, tools-agent, tools-sessions, tools-notify, tools-handin, tools-compact
 
 Tool names, labels and inputs (all paths relative to cwd or absolute;
 TRAMP prefixes come from the session host):
@@ -4461,6 +4590,7 @@ TRAMP prefixes come from the session host):
 | `task_control` | Control task | task_id, action (start/queue/message/cancel/merge/verify/reject/complete/archive/restore/delete/priority), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption), cannot_continue (cannot finish: to user input, nothing merges), no_merge (informational: verify completes without the merge queue) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
+| `compact` | Compact the conversation | kind (summary/brief/transcript/fresh/truncate, default summary), mode (queue/interrupt, default queue), reason | meta (tools-compact; offered to every session, so an agent compacts its own conversation) |
 | `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus (for the user: stays until the task is done) | exec (tools-dev; offered in a checkout of the harness only; the instance stops by itself once nothing needs it; needs no approval: `harness-perms--auto-allow-tools`) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
 | `notification_providers` | Notification providers | (none) | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -4488,13 +4618,39 @@ the words of the queue, naming each child and its state -- the work the
 session's own branch is built on has to be in it first.  Evidence is required: an image or a video (a path inside the
 session's roots), a file, code, a note, or `tool_call' naming an
 earlier call of the session, which is copied into the report as a
-snapshot so the view can show it as the link it is.  Two optional flags
+snapshot so the view can show it as the link it is.  A `tool_call'
+names the call by its call id or node id, by the name of its tool (its
+newest call), or by the `#N' or `<tool>#N' handle (1 = newest) a miss
+lists newest-first with node ids and a distinguishing snippet -- the
+model never sees its own call ids, so the name and the handle make
+quoting a call a one-shot rather than a round of probing.  `hand_in'
+calls are not counted and are not named by the tool-name or handle
+forms (an exact call id or node id still names one), so the handles a
+miss lists stay put between the miss and the retry.  Two optional flags
 change where the hand-in goes.  `cannot_continue' is for a task that
 cannot be finished: it goes to the user's input instead of review,
 nothing merges, and evidence may be empty -- the summary says what
 blocks it.  `no_merge' is for work that changes nothing: it still waits
 for review, and verifying it completes the task without the merge
 queue.
+
+`compact` (`tools-compact`) lets an agent compact its own conversation
+when it sees the context filling up mid-task, and lets the harness ask
+for one the same way: the handler calls the core `compaction/compact`
+with OPTS `:kind` (`harness-compaction-kinds`: summary (the default),
+brief, transcript, fresh or truncate), `:reason` (kept on the node's
+`:meta`) and `:mode` for what a running turn means.  `queue`, the
+default, registers the compaction for the turn's next boundary and lets
+the turn go on; `interrupt` cancels the running turn first
+(`agent/cancel`) and compacts as soon as it is over, losing the step in
+flight, so a tool call never kills its own turn unless asked to.  With a
+turn running, either answer returns at once with what was queued (a
+tool that waited for the compaction would hold open the step the
+compaction waits for); an idle session compacts at once.  A
+compaction already under way (`harness-compaction-busy-p`) makes the
+call a no-op that says so.  The tool has no `agent/tools` filter, so
+every session is offered it except a session in supervisor mode, whose
+allowlist does not name it.
 
 `open_harness` (`tools-dev`) opens a second Emacs running the harness
 from a checkout of this project -- a task's worktree, say -- so harness
@@ -4734,7 +4890,7 @@ A recap of a session that is no task's is written here too, by
 `(:text TEXT :at FLOAT)', the task card's recap for a session that is
 a task's, since the card shows it and already keeps it fresh, else the
 one kept for the session in `harness-recap--sessions' with the same
-short call a card's is (the `harness-tasks-recap-model' cheap tier, at
+short call a card's is (the `harness-tasks-recap-model' simple tier, at
 most `harness-tasks-recap-max-tokens' tokens, without thinking unless
 `harness-tasks-recap-thinking' names a level) and the same thresholds
 `harness-tasks-recap-turns', `harness-tasks-recap-seconds' and
@@ -4986,8 +5142,8 @@ three gates before its code runs, in order:
 1. The permission chain decides it as any call of kind exec, in every
    mode (the same approval as bash).
 2. The handler asks a judge model, as the auto-mode permission judge
-   is asked: one `:ephemeral` `provider/complete` on the cheap tier of
-   the session's model (`provider/tier-model MODEL 'cheap`, else the
+   is asked: one `:ephemeral` `provider/complete` on the simple tier of
+   the session's model (`provider/tier-model MODEL 'simple`, else the
    model itself), no tools, no thinking, 200 output tokens and once
    more with 2048 when those ran out, at most 30 s in all.  It reads
    the very code that would run, fenced by a tag of the call's own, and
@@ -5418,28 +5574,35 @@ Origins, in this order and each once: the loaded checkout as it is now
 sessions' projects belong to (`session/list`,
 `harness-files-owning-checkout`); repositories by URL (kind `remote`,
 read with `git ls-remote`).  The repository the loaded checkout pulls
-from (`:upstream t`) comes first of its kind: the remote its branch
-tracks and the branch it tracks there (`for-each-ref
-%(upstream:remotename)`, the remote's URL from `git config`), or
-`origin` and the branch its HEAD names on a detached HEAD.  straight.el
-and other package managers set that remote to the recipe's repository,
-so an install from GitHub is compared with GitHub and one from sourcehut
-with sourcehut.  It is named after its host (github, sourcehut, gitlab,
-codeberg, bitbucket, else the host, else upstream) and left out when
+from (`:upstream t`) comes first of its kind, as
+`harness-revision-remote` resolves it -- the same function
+`harness-update` fetches by, so the two always agree: the remote its
+branch tracks and the branch it tracks there (`for-each-ref
+%(upstream:remotename)`, the remote's URL from `git config`), else
+`origin`, else its only remote; without a tracked upstream the version
+module compares with the branch the remote's HEAD names, read with
+ls-remote.  straight.el and other package managers set that remote to
+the recipe's repository, so an install from GitHub is compared with
+GitHub and one from sourcehut with sourcehut.  It is named after its
+host (github, sourcehut, gitlab, codeberg, bitbucket, else the host,
+else upstream) and left out when
 `harness-version-origins` names its URL on its branch or on none.  It is
 read in the harness process, which has no straight.el, and from any
 package manager's clone.  Nothing is fetched: the relation (`rev-list
 --left-right --count`) and the newest eight commits each side lacks
-(`log --no-merges`) are worked out in the first local repository
-holding both commits, local checkouts first and the loaded one last,
-as package managers clone shallowly.  When none holds both and the
-loaded checkout lacks the origin's commit (`cat-file -e`), the harness
-lacks it too: the origin is ahead, uncounted.
+(`log -z --no-merges` in `harness-revision-commit-format`, parsed by
+`harness-revision-parse-commits`) are worked out in the first local
+repository holding both commits, local checkouts first and the loaded
+one last, as package managers clone shallowly.  When none holds both
+and the loaded checkout lacks the origin's commit (`cat-file -e`),
+the harness lacks it too: the origin is ahead, uncounted.
 
 `version/check (&optional max-age)` → promise of the report `(:checked
 :version :running :origins :verdict)`, each origin `(:name :kind
 :location :branch :upstream :commit :subject :date :dirty :status
-:missing :extra :missing-commits :extra-commits :error)`, `:status`
+:missing :extra :missing-commits :extra-commits :error)`,
+`:missing-commits` and `:extra-commits` the newest commits, each
+`(:commit :date :subject :body)`; `:status`
 same, newer, older, diverged, ahead (a commit the harness lacks, no
 local repository holding both), unknown (the running commit is in none)
 or error, and `:verdict` behind (an origin is newer, diverged or
@@ -5568,8 +5731,20 @@ scrolling the chat froze Emacs for seconds.  A checkout (`session/head-moved`) m
 another path, so the buffer loads it again rather than leave the
 branch behind on screen.  Markdown is rendered by the built-in renderer in
 `harness-ui-markdown` (headings, emphasis, code spans, fenced code with
-the language's major mode, lists, quotes, links).  A click or `RET` on
-a link opens it (`harness-ui-markdown-open-link`): a URL with
+the language's major mode, lists, quotes, links, tables).  Tables are
+fitted to the window: a table wider than the chat wraps each cell
+inside its column, so the columns stay aligned, and is drawn again when
+the window's width changes.  The text rendered as Markdown is the
+agent's messages and plans; the user's messages, their line breaks kept
+as typed (`harness-ui-markdown-hard-breaks`); an ask_user question, in
+its panel and in its block; and its answer, which the block shows as a
+message of the user's because it stands in for the next prompt (a
+dismissed question, or a failed or refused call, shows none).  The
+answer is the block's last lines, after its details and outside their
+fold, so a folded block still shows it; there each of its rows ends on
+a newline of its own, and so is drawn to the window's edge in the
+user's colour.  A click
+or `RET` on a link opens it (`harness-ui-markdown-open-link`): a URL with
 `browse-url`, anything else as a file in `default-directory` -- the
 session's directory, in a chat -- in another window, at the line a
 `#L12` or `:12` suffix names.  The link's keymap binds `mouse-2` as well
@@ -5580,6 +5755,10 @@ rear-nonsticky, so an insertion inside it gets through).  Its double and
 triple clicks are bound to `ignore`: unbound, they ran as single clicks
 and opened the link again after the first click had.  Tool and thinking
 nodes collapse; runs of coalescable tools fold into a summary block.
+A run folds from its first call: a lone call is a run of one under its
+summary, which names the call as its header does ("1 tool call: Read
+file x.el"), and each later call of the run, with the thinking between,
+joins that block.
 Thinking between two calls of a run does not break it but folds in
 with them, since a model that thinks before every call would never
 have a run otherwise; thinking before a run's first call or after its
@@ -5687,14 +5866,16 @@ option as on any question; answers go through
 text typed in the box answers it too.  Without a `:cowboy` the ordinary
 question panel shows.
 Prompt cache warning (`harness-ui-cache`, module `ui-cache`): once the
-session's `:cache :expires` has passed while it is idle, closed or
-blocked, a panel above the box says so ("Prompt cache expired at
+session's `:cache :expires` has passed while it is idle or closed, a
+panel above the box says so ("Prompt cache expired at
 14:07, 5 minutes after its last use") and what the next message costs:
 it re-sends ~N tokens (`:usage :context`) uncached, about the
 cache-write (else input) price of those tokens instead of their
 cache-read price, at the model's list prices, when the catalogue
-prices both.  A running session shows none: its request is using the
-cache again.  A session switched away from the model whose cache its
+prices both.  A session whose turn is still running shows none, a
+session blocked on an answer included: the next request is that turn's
+own, not the user's next message, and a running session's requests use
+the cache again.  A session switched away from the model whose cache its
 requests last used (`:cache :model`) shows the panel at once,
 whatever the time ("Prompt cache cold  cached for Opus 4.6, not
 DeepSeek V4"), with the same cost: the new model reads nothing of
@@ -5725,14 +5906,16 @@ Pressing one runs `compaction/compact` (`harness-ui-compact-run`); the
 line says so while it runs (`harness-ui-compact-doing`), and the panel
 goes once the compaction resets the cache.  A session the cowboy
 module compacts before a message shows as running with the activity
-`compacting` meanwhile, so the panel offers nothing then either.  A session blocked on an answer is in the middle of a
-turn: its panel offers nothing.
+`compacting` meanwhile, so the panel offers nothing then either.  A
+session blocked on an answer is in the middle of a turn, so it shows
+no panel at all.
 Tools go by their labels everywhere: a tool block's header shows the
 label in `harness-tool-title-face` and what the call is about after it
 in `harness-tool-subject-face` (the faces stand in for the colon of the
 title), a summary block counts the calls by label ("5 tool calls: Read
 file ×3, Search files, Find files", then " · thinking ×2" for the
-thinking folded in with them), and so do the permission panel,
+thinking folded in with them; a run of one names its call, label and
+subject, in plain text), and so do the permission panel,
 the activity line and the spinner's tooltip.  A title recorded before tools had
 labels starts with the tool's name ("read_file x.el"), which the label
 replaces, so old transcripts read the same.  Under a folded call's
@@ -5749,7 +5932,17 @@ the fold, whose button opens that session.  A call the harness recorded
 line, as that sender's message does, rather than joining the agent's
 turn or a run of calls, and shows as running until its result comes,
 whatever its session is doing.
-Auto-scroll follows unless the user scrolled up.  While the session
+Auto-scroll follows unless the user scrolled up.  While a window on the
+chat is away from the end, scrolled up by any command or moved there
+with the jump keys, the header line shows "↓ newer messages", which
+jumps back down.  The header reads a flag, `harness-chat--notice`, that
+the post-command hook and `window-scroll-functions` keep current; it
+never measures the window itself.  `pos-visible-in-window-p` measures
+a window's header line by formatting it, so a header that called it
+would be evaluated again inside itself, without end, until
+`max-lisp-eval-depth`: the header drawn empty, the mode line losing its
+status, and every redisplay taking seconds.
+While the session
 runs, an activity line under the last block says what the turn does
 and for how long: waiting for the model, thinking, writing, preparing a
 tool call (with the size of its input so far), running one (with the
@@ -5776,8 +5969,9 @@ cost and [menu]; clicking a setting changes it, and "non-interactive"
 makes the session interactive again.  A narrow window drops the cost
 first, then the thinking level, the context and the model.  The mode
 line has the status: its icon and word, the spinner while a turn runs
-(its tooltip says what the turn does), and the turn's duration while it
-runs or blocks.  The todo list is left to its panel above the compose
+(its tooltip says what the turn does), and the turn's duration while
+the turn runs, not while the session is blocked waiting on the user.
+The todo list is left to its panel above the compose
 box, what the turn does to the activity line, and the output tokens and
 rate to the session list and a running task's card.  The output
 rate ("48 tok/s", `harness-ui-format-rate`) is the session's rate as the
@@ -6298,10 +6492,21 @@ when the two differ), each origin with its commit and status (the
 repository the loaded checkout pulls from says so), the commits the
 harness lacks (an origin at the same commit with the same status as one
 listed above says so instead of listing them again; an ahead one has
-none to list), and what to do: reload when the loaded checkout moved
-on, pull into the loaded checkout (`straight-pull-package` under
-straight.el) when a remote has newer commits, push when only a local
-checkout has them.
+none to list), and the update: an `[Update harness]` button (`u`) when
+this Emacs can reload the harness it shows, the last update's outcome
+(`harness--last-update`) and, for one that brought commits, its
+changelog.  A commit is shown as its message, subject and body, never
+its diff or file statistics.  The button runs `harness-update': a
+checkout straight.el installed is pulled with `straight-pull-package',
+the way its package manager updates it, and put back with `git reset
+--keep' when the commit it lands on fails the check; any other checkout
+is fetched by the remote and branch `harness-revision-remote' resolves
+and fast-forwarded to the commit it names, checked first by another
+Emacs; a detached HEAD, or a checkout with no remote, is refused with a
+message that says so.  What to do without updating is said too: reload
+when the loaded checkout moved on, push when only a local checkout has
+them.  The page follows `harness-update-hook', which `harness-update'
+runs with the outcome as it settles, and redraws.
 Opening it shows the last report at once and asks `version/check` with
 a max-age of a minute; `g` asks with 0; `version/checked` redraws it,
 and the menu's Version entry says "not the latest" after a report that
@@ -6649,6 +6854,23 @@ similar ability") and each model.  `M-<up>`/`M-<down>` move the entry
 at point, `d` removes it (or the budget at point), `c` clears its mark.
 It follows `fallback/changed` and `config/changed`.
 
+Cost comparison (`harness-ui-cost-compare`, module `ui-cost-compare`):
+the dashboard's `C` or `[compare]` (`harness-cost-compare`) opens
+`*harness cost comparison*`, which asks `usage/cost-compare` (module
+`cost-compare`) what the tokens the dashboard recorded -- its period's,
+or one session's -- would have cost at each priced model of the
+catalogue.  The answer re-prices the recorded token counts with the
+rates the catalogue carries (a model's `:pricing', or the plist its
+`:pricing-fn' answers for the clock, as DeepSeek does) through
+`usage/price', and compares each result with the recorded `:list-cost',
+the tokens' value at API prices, since a call a plan covered was billed
+nothing.  Tokens a model prices no cache read for, or prices a cache
+write below its input for, are reported and priced as input, which is
+what that model would have billed them; a model the catalogue does not
+price reads unknown, never zero.  The rows are cheapest first, marked
+where they are the model the usage ran on.  It is read-only: no row,
+cost or budget changes.
+
 The Budgets section lists the harness's budgets, the Budget setting's
 and the sessions' own (`usage/budget-status` on "settings" and
 "session:SID").  A budget's line has [delete]
@@ -6683,13 +6905,20 @@ a task's session is of kind task and goes by its task's title, as on the
 board, until the model names it after its first turn — the list loads
 the tasks with `_harness/task/list` and follows `task/changed' and
 `task/deleted'),
-conversation tree (`harness-ui-tree`), usage dashboard (`harness-ui-usage`,
+conversation tree (`harness-ui-tree`: each row's properties, its
+`mouse-face` among them, stop before its newline, so hovering highlights
+that row alone), usage dashboard (`harness-ui-usage`,
 svg charts via svg.el; by project, the rows of a project's git
 worktrees, its tasks' and sub-agents', fold by their `:main` into one
 line with their sum and count, folded until TAB, RET or a click unfolds
 it, `w` or `[show worktrees]` every project, the main checkout's own
 usage first, then each worktree's; a redraw keeps every window's start
-and point lines), Insights report (`harness-ui-insights`:
+and point lines), cost comparison (`harness-ui-cost-compare`:
+`*harness cost comparison*`, the tokens the dashboard recorded
+re-priced at every priced model of the catalogue, cheapest first, each
+with the difference from their value at API prices, opened from the
+dashboard's `C' or `[compare]', `g' refresh and `t' the period;
+read-only), Insights report (`harness-ui-insights`:
 `*harness insights*`, a read-only view with a placeholder until
 `_harness/insights/compute` answers, then the totals, the written
 summary (`_harness/insights/narrative`, asked for once the figures

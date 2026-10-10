@@ -50,8 +50,9 @@ not run out, and the turn that failed carries on there.  Tasks keep
 going the same way, until every entry has run out.
 
 An entry is a provider id, such as \"deepseek\", standing for that
-provider's model of similar ability to the session's (its cheap,
-balanced or frontier model), or a model id, PROVIDER:MODEL, used as it
+provider's model of similar ability to the session's (its model of the
+same tier, simple, medium, hard or frontier, or of the nearest tier it
+has a model for), or a model id, PROVIDER:MODEL, used as it
 is: (\"claude\" \"deepseek:deepseek-flash\") uses Claude Code first and
 DeepSeek-V4.1-Flash once Claude's quota is used up.
 
@@ -441,19 +442,36 @@ narrows to the models a report scopes the used-up window to."
 
 ;;;; Choosing a model
 
+(defconst harness-fallback--tiers '(simple medium hard frontier)
+  "The tiers of models, weakest first (see `harness-model-tiers').")
+
+(defun harness-fallback--tier-order (tier)
+  "Return the tiers to look in for a model like one of TIER, nearest first.
+TIER itself, then the tiers below it, the strongest first, then those
+above it: a provider with no model of TIER stands for the next best
+it has."
+  (let* ((i (or (cl-position tier harness-fallback--tiers) 1)))
+    (append (list (nth i harness-fallback--tiers))
+            (reverse (cl-subseq harness-fallback--tiers 0 i))
+            (nthcdr (1+ i) harness-fallback--tiers))))
+
 (defun harness-fallback--entry-model (entry own)
   "Return the model ENTRY of `harness-fallback-models' stands for, for OWN.
 A model id is itself; a provider id is that provider's model in the
-tier OWN is in at its own provider; nil when there is none."
+tier OWN is in at its own provider, else in the nearest tier it has a
+model for, below that tier first (DeepSeek has no frontier model, so a
+session on Claude's frontier model carries on on DeepSeek's hard one);
+nil when there is none."
   (cond
    ((not (and (stringp entry) (not (string-blank-p entry)))) nil)
    ((harness-fallback--model-p entry) (string-trim entry))
    ((harness-method-exists-p 'provider/tier-model)
-    (ignore-errors
-      (harness-call 'provider/tier-model (string-trim entry)
-                    (if (harness-method-exists-p 'provider/model-tier)
-                        (harness-call 'provider/model-tier own)
-                      'balanced))))))
+    (let ((tier (or (and (harness-method-exists-p 'provider/model-tier)
+                         (ignore-errors (harness-call 'provider/model-tier own)))
+                    'medium)))
+      (cl-some (lambda (tier)
+                 (ignore-errors (harness-call 'provider/tier-model (string-trim entry) tier)))
+               (harness-fallback--tier-order tier))))))
 
 (defun harness-fallback--preference (own)
   "Return the models to try for a session whose own model is OWN, best first.
@@ -684,18 +702,24 @@ SESSION moves there (a switch with why `out') and the step is retried."
                                         (when-let* ((m (and (member pid registered)
                                                             (harness-method-exists-p 'provider/tier-model)
                                                             (ignore-errors (harness-call 'provider/tier-model pid tier)))))
-                                          (list :tier (symbol-name tier) :model m
-                                                :label (plist-get (harness-fallback--model-info m) :label)
-                                                :out (if (harness-fallback-out-p m) t :false))))
-                                      '(cheap balanced frontier))))))))
+                                          (append
+                                           (list :tier (symbol-name tier) :model m
+                                                 :label (plist-get (harness-fallback--model-info m) :label)
+                                                 :out (if (harness-fallback-out-p m) t :false))
+                                           (when-let* ((level (and (harness-method-exists-p 'provider/tier-thinking)
+                                                                   (ignore-errors
+                                                                     (harness-call 'provider/tier-thinking pid tier)))))
+                                             (list :thinking level)))))
+                                      harness-fallback--tiers)))))))
 
 (harness-defmethod fallback/status ()
   "Return the fallback list and what is out, for a dashboard.
 \(:enabled BOOL :models (ENTRY ...) :marks (MARK ...) :moved ((:session
 SID :original MODEL :model MODEL) ...)).  ENTRY is (:entry STRING
 :provider ID :model MODEL-OR-NIL :label :provider-label :registered
-BOOL :known BOOL :mark MARK-OR-NIL :tiers ((:tier :model :label :out)
-...)), `:tiers' for a provider entry: the model each tier maps to.
+BOOL :known BOOL :mark MARK-OR-NIL :tiers ((:tier :model :label :out
+:thinking) ...)), `:tiers' for a provider entry: the model each tier
+maps to, and the thinking level it runs at when the tier names one.
 MARK is (:key :provider :model :kind :reason :since :until :guess
 :source :label), `:guess' non-nil when `:until' is a retry time rather
 than a reset the provider gave."

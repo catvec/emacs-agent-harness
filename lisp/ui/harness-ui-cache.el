@@ -11,7 +11,9 @@
 ;; provider keeps it: the session's `:cache', (:at TIME :ttl SECONDS
 ;; :expires TIME :model MODEL).  Once that moment is past, a panel above
 ;; the compose box says so, with how much context the next message sends
-;; uncached and what that costs at list prices.
+;; uncached and what that costs at list prices.  A session whose turn is
+;; still running shows no panel, blocked on an answer included: its next
+;; request is part of that turn, not the next message.
 ;;
 ;; It offers to compact the conversation first, so the next message sends
 ;; only what stands in for it (harness-ui-compact.el): a button for each
@@ -22,8 +24,7 @@
 ;; where a summary on the session's model reads all of it uncached, as
 ;; carrying on would.  A transcript file asks no model at all.  The
 ;; buttons' keys work while point is on their line.  A session blocked
-;; on an answer is in the middle of a turn, which no compaction
-;; interrupts: its panel only informs.
+;; on an answer is in the middle of a turn, so it shows no panel at all.
 ;;
 ;; A cache serves one model, so a session switched to another model
 ;; finds nothing cached for it: the panel says so at once, with what the
@@ -45,10 +46,12 @@
 ;; moment its session's cache lapses, which draws the tail again then
 ;; (`harness-compose-redraw'), the switch banner included.  Nothing
 ;; polls.  A session update moves the timer, as a new request keeps the
-;; cache longer, and hides the panel as soon as a request is under way.
-;; The panel names clock times, never ages, so it stays true for as long
-;; as it shows without being drawn again.  A session that never used a
-;; cache, a new one included, has no `:cache' and never shows it.
+;; cache longer, and the panel goes while the session runs -- a turn
+;; waiting on an answer included -- to come back when the turn ends with
+;; the cache lapsed.  The panel names clock times, never ages, so it
+;; stays true for as long as it shows without being drawn again.  A
+;; session that never used a cache, a new one included, has no `:cache'
+;; and never shows it.
 
 ;;; Code:
 
@@ -117,27 +120,38 @@ has nothing cached for its own."
   (let ((cached (plist-get (plist-get session :cache) :model)))
     (and cached (not (equal cached (plist-get session :model))) cached)))
 
+(defun harness-ui-cache--running-p (session)
+  "Non-nil when SESSION's turn is still running, whatever its status reads.
+A session waiting on an answer -- a tool approval, say -- reads
+`blocked', but it is in the middle of a turn: its next request is part
+of that turn, not the user's next message, which is what the panel
+speaks of.  The live token figures the UI keeps for a session are
+non-nil exactly while its turn runs (`harness-ui-session-live')."
+  (and (harness-ui-session-live (plist-get session :id)) t))
+
 (defun harness-ui-cache--state (session &optional now)
   "Return what the cache panel shows of SESSION at NOW, or nil for nothing.
 NOW is the current time by default.  The panel shows once the cache
 SESSION's requests last used has lapsed (its `:cache' `:expires' is
 past), and at once when that cache is of a model SESSION no longer uses
-\(`:from'), while SESSION waits for the user: idle, closed, or blocked
-on an answer.  A running session sends requests, which keep the cache.
-States that read the same are `equal', so a session update that
-changes nothing the panel says does not draw it again."
+\(`:from'), while SESSION waits for the user: idle or closed.  A session
+whose turn is still running shows nothing: a session blocked on an
+answer is in the middle of a turn, and the panel speaks of the user's
+next message, which only a session that is not running has.  States
+that read the same are `equal', so a session update that changes
+nothing the panel says does not draw it again."
   (let* ((cache (plist-get session :cache))
          (expires (plist-get cache :expires))
          (from (harness-ui-cache--other-model session))
          (status (format "%s" (plist-get session :status))))
     (when (and (numberp expires)
-               (member status '("idle" "inactive" "blocked"))
+               (member status '("idle" "inactive"))
+               (not (harness-ui-cache--running-p session))
                (or from (>= (or now (float-time)) expires)))
       (list :at (plist-get cache :at) :ttl (plist-get cache :ttl) :expires expires
             :context (plist-get (plist-get session :usage) :context)
             :model (plist-get session :model)
-            :from from
-            :blocked (equal status "blocked")))))
+            :from from))))
 
 (defun harness-ui-cache--asked-p (session)
   "Non-nil while SESSION waits on the question about its cold cache.
@@ -190,10 +204,6 @@ when the catalogue does not price both."
          (cached (harness-ui-cache--price tokens model :cache-read)))
     (and uncached cached (> uncached cached) (cons uncached cached))))
 
-(defun harness-ui-cache--next (state)
-  "Return what sends the context again for STATE, as a sentence's subject."
-  (if (plist-get state :blocked) "The next request" "Your next message"))
-
 (defun harness-ui-cache--help (state)
   "Return the tooltip of the cache panel for STATE."
   (concat
@@ -208,8 +218,7 @@ when the catalogue does not price both."
              (harness-ui-cache--duration (plist-get state :ttl))
              (format-time-string "%H:%M:%S" (plist-get state :at))
              (format-time-string "%H:%M:%S" (plist-get state :expires))))
-   (format "%s sends the whole context, %s tokens, at the uncached rate, and caches it again."
-           (harness-ui-cache--next state)
+   (format "Your next message sends the whole context, %s tokens, at the uncached rate, and caches it again."
            (harness-format-tokens (plist-get state :context)))))
 
 (defun harness-ui-cache--heading (state now)
@@ -241,7 +250,7 @@ first (`harness-ui-cache--offer'), which goes last."
          (string
           (concat
            (harness-ui-cache--heading state now)
-           (propertize (concat "   " (harness-ui-cache--next state)
+           (propertize (concat "   Your next message"
                                (if (and (numberp tokens) (> tokens 0))
                                    (format " re-sends ~%s tokens uncached" (harness-format-tokens tokens))
                                  " re-sends the conversation uncached")
@@ -321,10 +330,8 @@ ESTIMATE is nil while it is asked."
 A button for each kind of compaction (`harness-ui-compact-kinds') says
 what it costs as the harness estimates it; while it is asked, or
 without a price, the buttons only name the kinds.  While a compaction
-the panel started runs, the line says so instead.  A session blocked on
-an answer is running a turn, which no compaction interrupts: nil."
+the panel started runs, the line says so instead."
   (cond
-   ((plist-get state :blocked) nil)
    (harness-ui-cache--compacting
     (propertize (format "   %s\n" (harness-ui-compact-doing harness-ui-cache--compacting))
                 'face 'harness-dim-face))

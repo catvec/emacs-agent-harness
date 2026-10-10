@@ -66,6 +66,8 @@
 (require 'harness-util)
 (require 'harness-ui)
 
+(declare-function harness-cost-compare "harness-ui-cost-compare")
+
 (defgroup harness-ui-usage nil
   "The usage and cost dashboard." :group 'harness-ui)
 
@@ -409,9 +411,20 @@ a load in progress or an error stay longest.  WIDTH is as
     (list (cond (harness-ui-usage--loading (list (propertize "  loading…" 'face 'harness-dim-face) 95))
                 (harness-ui-usage--error
                  (list (concat "  " (propertize (format "error: %s" harness-ui-usage--error) 'face 'error)) 95)))
+          (list (concat "  " (harness-ui-usage--segment "compare" #'harness-ui-usage-compare-costs nil
+                                                        "Compare these costs at other models' prices"))
+                58)
           (list (concat "  " (harness-ui-usage--segment "g" #'harness-ui-usage-refresh nil "Refresh")) 60)
           (list (harness-ui-usage--segment "q" #'quit-window nil "Quit") 65)))
    width))
+
+(defun harness-ui-usage-compare-costs ()
+  "Show what the recorded usage would have cost at other models' prices.
+The comparison is the `ui-cost-compare' module's (`harness-cost-compare')."
+  (interactive)
+  (if (fboundp 'harness-cost-compare)
+      (harness-cost-compare)
+    (user-error "The cost comparison (module ui-cost-compare) is not loaded")))
 
 (defun harness-ui-usage--period-command (period)
   "Return a command selecting PERIOD."
@@ -713,22 +726,39 @@ every label, folded ones too, so unfolding moves no column."
 
 ;;;; Fallback list
 
+(defconst harness-ui-usage--fallback-label-width 96
+  "Most columns the name of a fallback entry, its tiers included, takes.
+The column is as wide as the longest name, up to this; a longer one is
+cut.  A provider's four tiers fit: Claude Code's are some 86 columns.")
+
 (defun harness-ui-usage--fallback-tier-text (entry)
   "Return what provider fallback ENTRY stands for, one per tier.
-Such as \"cheap→Haiku 4.5 · balanced→Sonnet 5 · frontier→Opus 5.5\", the
-provider's word left off a model label it repeats."
+Such as \"simple→Haiku 4.5 · medium→Sonnet 5 · hard→Opus 5.5 ·
+frontier→Fable 5.1\": the provider's word is left off a model label
+that repeats it, and a thinking level the tier names follows its model.
+A provider whose tiers are all one model, as DeepSeek's are, names it
+once: \"V4.1-Flash: simple low · medium high · hard max\"."
   (let* ((provider (or (plist-get entry :provider-label) (plist-get entry :provider) ""))
          (word (car (split-string provider)))
          (tiers (delq nil (mapcar
                            (lambda (tier)
                              (when-let* ((m (plist-get tier :model)))
-                               (let ((label (or (plist-get tier :label) m)))
+                               (let ((label (or (plist-get tier :label) m))
+                                     (level (plist-get tier :thinking)))
                                  (when (and word (not (string-empty-p word))
-                                            (string-prefix-p (concat word " ") label))
+                                            (> (length label) (1+ (length word)))
+                                            (member (substring label 0 (1+ (length word)))
+                                                    (list (concat word " ") (concat word "-"))))
                                    (setq label (substring label (1+ (length word)))))
-                                 (format "%s→%s" (plist-get tier :tier) label))))
-                           (plist-get entry :tiers)))))
-    (string-join tiers " · ")))
+                                 (list (plist-get tier :tier) label (and (stringp level) level)))))
+                           (plist-get entry :tiers))))
+         (level (lambda (tier) (if (nth 2 tier) (concat " " (nth 2 tier)) ""))))
+    (if (and (cdr tiers)
+             (cl-every (lambda (tier) (equal (nth 1 tier) (nth 1 (car tiers)))) tiers))
+        (concat (nth 1 (car tiers)) ": "
+                (mapconcat (lambda (tier) (concat (car tier) (funcall level tier))) tiers " · "))
+      (mapconcat (lambda (tier) (format "%s→%s%s" (car tier) (nth 1 tier) (funcall level tier)))
+                 tiers " · "))))
 
 (defun harness-ui-usage--fallback-entry-label (entry)
   "Return how fallback ENTRY reads: its model, or its provider and tiers."
@@ -775,8 +805,13 @@ absent."
     (insert " ")
     (harness-ui-button "[refresh]" #'harness-ui-usage-refresh :help "Reload the dashboard (g)")
     (insert "\n")
-    (let ((entries (plist-get fallback :models))
-          (number 0))
+    (let* ((entries (plist-get fallback :models))
+           (number 0)
+           ;; One column for every entry's name, so their states line up.
+           (width (min harness-ui-usage--fallback-label-width
+                       (apply #'max 30 (mapcar (lambda (entry)
+                                                 (length (harness-ui-usage--fallback-entry-label entry)))
+                                               entries)))))
       (insert (propertize
                (if entries
                    "  the list is the order of preference, first used to last; sessions move back up it as entries come back\n"
@@ -786,7 +821,9 @@ absent."
         (let* ((start (point))
                (state (harness-ui-usage--fallback-state entry)))
           (insert (format "  %2d. " (cl-incf number)))
-          (insert (format "%-74s " (harness-truncate-end (harness-ui-usage--fallback-entry-label entry) 74)))
+          (insert (string-pad (harness-truncate-end (harness-ui-usage--fallback-entry-label entry) width)
+                              width)
+                  " ")
           (insert (propertize (car state)
                               'face (if (plist-get entry :mark) 'warning 'harness-dim-face)
                               'help-echo (or (cdr state) nil)))
@@ -893,7 +930,7 @@ own budget has no baseline: a session spends only through the harness."
                         'face 'harness-dim-face)))
   (if statuses
       (mapc #'harness-ui-usage--insert-budget (harness-ui-budgets-by-use statuses))
-    (insert (propertize "  no budgets yet — a budget warns at 80% and 100%, a hard one stops the next turn\n"
+    (insert (propertize "  no budgets yet — a budget warns at 80% and 100%, a hard one stops the turn\n"
                         'face 'harness-dim-face)))
   (insert "\n"))
 
@@ -952,6 +989,7 @@ so neither a refresh nor a fold scrolls it."
     (define-key map (kbd "M-<down>") #'harness-ui-usage-fallback-down)
     (define-key map (kbd "s") #'harness-ui-usage-set-baseline)
     (define-key map (kbd "I") #'harness-ui-usage-import-api-cost)
+    (define-key map (kbd "C") #'harness-ui-usage-compare-costs)
     (define-key map (kbd "P") #'harness-ui-usage-plan)
     (define-key map (kbd "r") #'harness-ui-usage-refresh-plan)
     (define-key map (kbd "w") #'harness-ui-usage-toggle-worktrees)
@@ -1306,7 +1344,7 @@ BACKFILLS non-nil asks only for what no provider reports."
          ;; A session spends only through the harness, which records it all.
          (baseline (unless (equal scope "session")
                      (harness-ui-usage--read-baseline period nil (equal scope "period"))))
-         (hard (y-or-n-p "Hard budget (block the next turn once it is spent)? "))
+         (hard (y-or-n-p "Hard budget (stop the turn once it is spent)? "))
          (label (read-string "Label (optional): ")))
     (append (list :scope scope :amount amount :hard (if hard t :false))
             (and target (list :target target))

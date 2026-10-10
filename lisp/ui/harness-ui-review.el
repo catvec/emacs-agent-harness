@@ -175,7 +175,7 @@ task's session for the feedback that sends it back
         (user-error "Sending the work back needs feedback: type what should change")
       (harness-ui-call "_harness/task/reject"
                        (list :id (plist-get task :id) :feedback text :attachments attachments)
-                       (lambda (_) (message "Sent back: the session works on your feedback"))
+                       #'harness-ui-tasks--say-sent-back
                        (lambda (e) (message "Could not send it back: %s" (harness-error-message e)))))))
 
 ;;;; The banner

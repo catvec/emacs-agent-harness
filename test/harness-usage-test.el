@@ -5,6 +5,7 @@
 
 (defvar harness-usage--live)
 (defvar harness-usage-live-interval)
+(defvar harness-provider-demo-script-override)
 (declare-function harness-usage--live-tick "harness-usage")
 
 (defmacro harness-usage-test-with (&rest body)
@@ -320,6 +321,35 @@ also once the worktree is gone; other groupings have no `:main'."
         (should (equal "2026-09-14" (plist-get (car plan) :date)))
         (should (cl-every (lambda (p) (= 10.0 (plist-get p :allowance))) plan))))))
 
+(ert-deftest harness-usage-budget-fraction-monotonic ()
+  "A budget's fraction does not tick down within a period.
+The same recorded spend read at a later moment gives the same fraction,
+more recorded spending never lowers it, and a new period may start
+lower."
+  (harness-usage-test-with
+    (let* ((now (harness-usage-test-ts 2026 9 16))
+           (b (harness-call 'usage/set-budget '(:scope period :period month :days all :amount 100)))
+           (id (plist-get b :id)))
+      (harness-call 'usage/record (list :ts (harness-usage-test-ts 2026 9 10) :session "s"
+                                        :project "/p/" :model "m" :cost 10.0))
+      ;; The same spend read at a later moment in the same period.
+      (let ((a (harness-call 'usage/budget-status id :now now))
+            (later (harness-call 'usage/budget-status id :now (harness-usage-test-ts 2026 9 25))))
+        (should (= (plist-get a :fraction) (plist-get later :fraction)))
+        (should (harness-usage-test-near 0.1 (plist-get a :fraction))))
+      ;; More recorded spending: never a lower fraction.
+      (let ((before (plist-get (harness-call 'usage/budget-status id :now now) :fraction)))
+        (harness-call 'usage/record (list :ts (harness-usage-test-ts 2026 9 16) :session "s"
+                                          :project "/p/" :model "m" :cost 5.0))
+        (let ((after (plist-get (harness-call 'usage/budget-status id :now now) :fraction)))
+          (should (>= after before))
+          (should (harness-usage-test-near 0.15 after))))
+      ;; A new period may start lower: October counts only October's rows.
+      (harness-call 'usage/record (list :ts (harness-usage-test-ts 2026 10 2) :session "s"
+                                        :project "/p/" :model "m" :cost 2.0))
+      (let ((oct (harness-call 'usage/budget-status id :now (harness-usage-test-ts 2026 10 5))))
+        (should (harness-usage-test-near 0.02 (plist-get oct :fraction)))))))
+
 (ert-deftest harness-usage-baseline-counts-in-its-period-only ()
   "A month budget made mid-month counts what was spent before it, that month only."
   (harness-usage-test-with
@@ -440,6 +470,71 @@ also once the worktree is gone; other groupings have no `:main'."
         (should (= 0 (plist-get (harness-call 'usage/totals :session other) :calls)))))))
 
 (defvar harness-budget)
+
+(ert-deftest harness-usage-hard-budget-stops-a-running-turn ()
+  "A hard budget crossed by a step stops the turn at the next boundary.
+The step in flight finishes and is recorded; no further step runs; the
+turn ends `blocked' with the reason as a hint, and the session is idle."
+  (harness-usage-test-with
+    (let* ((id (harness-usage-test-session :budget '(:amount 0.0005 :hard t)))
+           (steps 0)
+           (requests 0)
+           (script '((:type usage :input 400 :output 30 :cost 0.0008 :context 500)
+                     (:type tool-call :id "mid-1" :name "list_dir" :input (:path "."))
+                     (:type text :delta "done")
+                     (:type usage :input 400 :output 30 :cost 0.0008 :context 900)
+                     (:type done :stop-reason end-turn)))
+           ;; The tool call makes the turn take a second step, which the
+           ;; budget crossed by the first must refuse.  Bound, not set: no
+           ;; other test may see it.  REQUESTS counts the steps the
+           ;; provider was asked for.
+           (harness-provider-demo-script-override
+            (lambda (_request) (cl-incf requests) script)))
+      (harness-on 'agent/step-started (lambda (_sid n) (setq steps n)))
+      (let ((r (harness-await (harness-call 'agent/prompt id "go"))))
+        (should (eq 'blocked (plist-get r :stop-reason)))
+        (should (string-match-p "Budget session exhausted" (plist-get r :error))))
+      (should (= 1 steps))
+      (should (= 1 requests))
+      (let ((totals (harness-call 'usage/totals :session id)))
+        (should (= 1 (plist-get totals :calls)))
+        (should (harness-usage-test-near 0.0008 (plist-get totals :cost))))
+      (should (eq 'idle (plist-get (harness-call 'session/get id) :status)))
+      (should-not (plist-get (harness-call 'session/get id) :pending))
+      (should (cl-some (lambda (h) (string-match-p "Budget session exhausted: spent" h))
+                       (harness-usage-test-hints id)))
+      ;; The turn ended itself; a new one is still refused by before-turn.
+      (let ((again (harness-await (harness-call 'agent/prompt id "again"))))
+        (should (eq 'blocked (plist-get again :stop-reason)))
+        (should (string-match-p "Budget session exhausted" (plist-get again :error)))
+        (should (cl-some (lambda (h) (string-match-p "Turn not started: Budget session exhausted" h))
+                         (harness-usage-test-hints id)))))))
+
+(ert-deftest harness-usage-soft-budget-lets-the-running-turn-finish ()
+  "A soft budget warns but never stops a turn: the step after the one
+that crossed it still runs, and the turn ends on its own."
+  (harness-usage-test-with
+    (let* ((id (harness-usage-test-session :budget '(:amount 0.0005)))
+           (steps 0)
+           (requests 0)
+           (script '((:type usage :input 400 :output 30 :cost 0.0008 :context 500)
+                     (:type tool-call :id "mid-1" :name "list_dir" :input (:path "."))
+                     (:type text :delta "done")
+                     (:type usage :input 400 :output 30 :cost 0.0008 :context 900)
+                     (:type done :stop-reason end-turn)))
+           (harness-provider-demo-script-override
+            (lambda (_request) (cl-incf requests) script)))
+      (harness-on 'agent/step-started (lambda (_sid n) (setq steps n)))
+      (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "go")) :stop-reason)))
+      (should (= 2 steps))
+      (should (= 2 requests))
+      (let ((totals (harness-call 'usage/totals :session id)))
+        (should (= 2 (plist-get totals :calls)))
+        (should (harness-usage-test-near 0.0016 (plist-get totals :cost))))
+      (let ((st (car (harness-call 'usage/session-budgets id))))
+        (should-not (plist-get st :hard))
+        (should (> (plist-get st :fraction) 1.0)))
+      (should (eq 'idle (plist-get (harness-call 'session/get id) :status))))))
 
 (ert-deftest harness-usage-budget-setting-is-one-budget-for-all-sessions ()
   "The Budget setting is one budget that every session spends from.

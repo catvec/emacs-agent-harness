@@ -75,11 +75,21 @@
                            (plist-get (harness-call 'provider/model "deepseek:deepseek-flash") :id)))
             (should (eq 'harness-deepseek-rates-at
                         (plist-get (harness-call 'provider/model "deepseek:deepseek-flash") :pricing-fn)))
-            ;; The provider names its tiers, so the judge does not sort prices.
-            (should (equal "deepseek:deepseek-flash"
-                           (harness-call 'provider/tier-model "deepseek:deepseek-v4-pro" 'cheap)))
-            (should (equal "deepseek:deepseek-v4-pro"
-                           (harness-call 'provider/tier-model "deepseek:deepseek-flash" 'frontier)))))
+            ;; The provider names its tiers, so the judge does not sort prices:
+            ;; Flash does it all, at a thinking level for each tier, and no
+            ;; DeepSeek model is frontier.
+            (dolist (tier '(simple medium hard))
+              (should (equal "deepseek:deepseek-flash"
+                             (harness-call 'provider/tier-model "deepseek:deepseek-v4-pro" tier))))
+            (should (equal '("low" "high" "max")
+                           (mapcar (lambda (tier) (harness-call 'provider/tier-thinking "deepseek:deepseek-flash" tier))
+                                   '(simple medium hard))))
+            (should (equal (cons nil 'none)
+                           (harness-call 'provider/tier-model-info "deepseek:deepseek-flash" 'frontier)))
+            (should (eq 'medium (harness-call 'provider/model-tier "deepseek:deepseek-flash")))
+            ;; Pro, the dearest, would be frontier by its price: hard, as
+            ;; DeepSeek has no frontier model.
+            (should (eq 'hard (harness-call 'provider/model-tier "deepseek:deepseek-v4-pro")))))
       (harness-provider-unregister 'deepseek)
       (setq harness-deepseek--registered nil))))
 
