@@ -159,8 +159,8 @@ reader of the layers skips it (see `harness-config--layered-keys').")
     (supervisor
      :title "Supervisor mode"
      :doc "Top-level sessions plan and delegate: the session's model investigates and writes a plan, and worker sub-agents on cheaper models carry it out. The supervisor cannot change files itself."
-     :keys (harness-supervisor harness-supervisor-tasks harness-supervisor-tiers
-            harness-supervisor-step-budget))
+     :keys (harness-supervisor harness-supervisor-tasks harness-supervisor-judge-model
+            harness-supervisor-tiers harness-supervisor-step-budget))
     (spending
      :title "Spending"
      :doc "What all sessions together may spend.  Budgets for one project, one session or a calendar period are made in the usage dashboard."

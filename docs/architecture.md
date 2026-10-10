@@ -3793,6 +3793,26 @@ adopted); the session that writes a backlog task up only reads, so it
 has no setting and `:ext` `:supervisor-write-up` t until the task
 starts.  Only the user changes it later.
 
+`harness-supervisor` and `harness-supervisor-tasks` are each `auto` (the
+default), `t` or nil.  `auto` starts the session supervising and sets
+`:ext` `:supervisor-judge` t, and a cheap model decides from the opening
+message: a subscriber of `agent/turn-started` sends an ephemeral request
+beside the session's first turn (no tools, no thinking, one word asked;
+`harness-supervisor-judge-model`, the provider's cheap tier by default)
+holding the message alone, so the turn never waits for it.  A verdict
+starts the session as `supervisor/set` would, with a hint in the
+harness's voice ("Supervisor mode on: the session judge (MODEL) read
+this opening message as a supervising job …") and `supervisor/changed`;
+a provider error, an unusable word or `harness-supervisor--judge-timeout`
+takes `:supervisor-judge` away and leaves the mode it started with, with
+a hint.  A setting that decides (`t`/nil) and `supervisor/set` both take
+`:supervisor-judge` away, so the user's switch is never judged and a
+verdict that arrives after it is dropped.  A `submit_plan` or
+`retry_step' call the model wrote while the judge was still reading (its
+tool list from before the flip) is refused by its handler
+(`harness-supervisor--hands-on-result'), so no plan starts behind the
+mode's back.  Deleting a session forgets its judgement.
+
 - `supervisor/set SESSION-ID ON` → session plist: ON `t` for on, `:false`
   or nil for off, stored as `:false`, never removed.  Adds the hint
   "Supervisor mode on" or "Supervisor mode off" and emits
@@ -3802,8 +3822,12 @@ starts.  Only the user changes it later.
   supervises (nil for a session that is not there).  On takes effect at
   the next tool call, since the permission stage reads the live session,
   off at the next step, for the tool list.
-- Settings: `harness-supervisor` (t; layered like `harness-model`, see
-  config), `harness-supervisor-tasks` (t), `harness-supervisor-tiers`
+- Settings: `harness-supervisor` (`auto`: a cheap model judges the
+  session from its opening message; `t` always supervises and nil is
+  always hands-on; layered like `harness-model`, see config),
+  `harness-supervisor-tasks` (`auto`), `harness-supervisor-judge-model`
+  (`auto`: the provider's cheap tier, else the session's own model),
+  `harness-supervisor-tiers`
   (nil: an alist from `mundane`, `standard` or `hard` to a model id) and
   `harness-supervisor-step-budget` (80), in the settings section
   "Supervisor mode".

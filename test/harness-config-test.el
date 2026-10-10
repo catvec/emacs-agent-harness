@@ -99,6 +99,7 @@ reaching a custom file."
                                      (and (boundp 'harness-emacs-eval) (list 'harness-emacs-eval))
                                      (cl-remove-if-not #'boundp harness-config-keys)
                                      (cl-remove-if-not #'boundp '(harness-supervisor-tasks
+                                                                  harness-supervisor-judge-model
                                                                   harness-supervisor-tiers
                                                                   harness-supervisor-step-budget)))
                              #'string<)))
