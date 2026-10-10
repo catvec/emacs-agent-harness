@@ -167,6 +167,21 @@ switches to the session's project first, so that is what is watched."
       (call-interactively (harness-ui-chat-test-link-command pos)))
     opened))
 
+(defun harness-ui-chat-test-call-block (buf call-id)
+  "Return the block of the tool call CALL-ID in BUF, or nil."
+  (cl-find call-id (harness-ui-chat-test-blocks buf "tool-call")
+           :key (lambda (b) (plist-get (harness-chat-block-node b) :call-id))
+           :test #'equal))
+
+(defun harness-ui-chat-test-find-in (buf block text &optional from)
+  "Return the position after TEXT in BLOCK of BUF, after FROM, or nil."
+  (let ((pos (harness-ui-chat-test-find buf text (or from (harness-chat-block-start block)))))
+    (and pos (<= pos (harness-chat-block-end block)) pos)))
+
+(defun harness-ui-chat-test-cached (&rest ids)
+  "Wait until the UI's session cache holds every one of IDS."
+  (harness-test-wait (lambda () (cl-every #'harness-ui-session ids)) 5 "the sessions in the cache"))
+
 ;;;; Rendering a full turn
 
 (ert-deftest harness-ui-chat-tour-renders-every-kind ()
@@ -477,6 +492,275 @@ sub-agent from the block: the call node names it from the start."
             (should (equal worker opened)))
           ;; The failed call still says so.
           (should (harness-ui-chat-test-find buf "failed")))))))
+
+(ert-deftest harness-ui-chat-call-links-the-session-its-input-names ()
+  "A tool call given a session shows the session line a call that started
+one does.  That is session_read's `session_id', written as the model
+writes it, a unique prefix of the id or the name, as the session tools
+take it: the name on the line is the shared session link and opens the
+whole session.  A reference naming no session, or the chat's own, and a
+call given none show no line; and a call is no link as a whole for the
+sessions its input names."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Reader"))
+           (other (harness-ui-chat-test-session "Subject"))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-ui-chat-test-cached sid other)
+      (dolist (call (list (list "r1" "Read by prefix" (list :session_id (substring other 0 8)))
+                          (list "r2" "Read by name" (list :session_id "subject"))
+                          (list "r3" "Read nobody" (list :session_id "no such session"))
+                          (list "r4" "Read myself" (list :session_id sid))
+                          (list "r5" "Read nothing" (list :limit 5))))
+        (harness-call 'session/append sid
+                      (list :kind 'tool-call :tool "session_read" :call-id (nth 0 call)
+                            :title (nth 1 call) :input (nth 2 call))))
+      (harness-test-wait (lambda () (harness-ui-chat-test-call-block buf "r5")) 5 "the calls rendered")
+      (with-current-buffer buf
+        (dolist (call '(("r1" . "Read by prefix") ("r2" . "Read by name")))
+          (let* ((block (harness-ui-chat-test-call-block buf (car call)))
+                 (title (harness-ui-chat-test-find-in buf block (cdr call)))
+                 (line (harness-ui-chat-test-find-in buf block "session: Subject")))
+            (should block)
+            (should title)
+            (should line)
+            ;; The name is the shared session link, and opens the whole id.
+            (should (harness-ui-chat-test-link-p (1- line)))
+            (should (equal other (harness-ui-chat-test-link-open (1- line))))
+            (should (equal other (harness-ui-chat-test-link-open (- line (length "Subject")))))
+            ;; Above the fold, as the child's line is; the call itself is no link.
+            (should-not (invisible-p (1- line)))
+            (should-not (get-text-property (1- title) 'keymap))))
+        (dolist (id '("r3" "r4" "r5"))
+          (let ((block (harness-ui-chat-test-call-block buf id)))
+            (should block)
+            (should-not (harness-ui-chat-test-find-in buf block "session: "))
+            (should-not (harness-ui-chat-test-find-in buf block "sessions: "))))
+        ;; A reference to nobody is plain text, whatever it says.
+        (let* ((block (harness-ui-chat-test-call-block buf "r3"))
+               (title (harness-ui-chat-test-find-in buf block "Read nobody")))
+          (should title)
+          (should-not (get-text-property (1- title) 'keymap))
+          (should-not (get-text-property (1- (harness-ui-chat-test-find-in buf block "no such session"))
+                                         'keymap)))))))
+
+(ert-deftest harness-ui-chat-call-links-every-session-its-input-names ()
+  "A call that names several sessions, as session_wait does with
+`session_ids', shows a \"sessions:\" line with one link for each, in the
+order the call gives them and once each, however it writes them (ids,
+prefixes, names) and whatever else it names; every link opens its own
+session.  One session left reads \"session:\" again."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Waiter"))
+           (a (harness-ui-chat-test-session "Alpha"))
+           (b (harness-ui-chat-test-session "Beta"))
+           (c (harness-ui-chat-test-session "Gamma"))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-ui-chat-test-cached sid a b c)
+      (dolist (call (list (list "w1" "Wait for two" (list :session_ids (vector a (substring b 0 8))))
+                          (list "w2" "Wait for three" (list :session_id "gamma"
+                                                            :session_ids (vector b "nobody" a c)))
+                          (list "w3" "Wait for one" (list :session_ids (vector (upcase "alpha") "nobody" sid)))
+                          (list "w4" "Wait for ids" (list :session_ids (vector a b) :timeout 30))))
+        (harness-call 'session/append sid
+                      (list :kind 'tool-call :tool "session_wait" :call-id (nth 0 call)
+                            :title (nth 1 call) :input (nth 2 call))))
+      (harness-test-wait (lambda () (harness-ui-chat-test-call-block buf "w4")) 5 "the calls rendered")
+      (with-current-buffer buf
+        (cl-flet ((names-open (id names)
+                    ;; The line reads NAMES, a list of (NAME . SESSION), in order, each
+                    ;; name a link opening its own session, ", " between them.
+                    (let* ((block (harness-ui-chat-test-call-block buf id))
+                           (from (harness-ui-chat-test-find-in
+                                  buf block (if (cdr names) "sessions: " "session: ")))
+                           (rest names))
+                      (should block)
+                      (should from)
+                      (should-not (harness-ui-chat-test-find-in
+                                   buf block (if (cdr names) "  session: " "  sessions: ")))
+                      (while rest
+                        (let* ((entry (pop rest))
+                               (end (harness-ui-chat-test-find-in buf block (car entry) from)))
+                          (should end)
+                          (should (= end (+ from (length (car entry)))))
+                          (should (harness-ui-chat-test-link-p (- end (length (car entry)))))
+                          (should (harness-ui-chat-test-link-p (1- end)))
+                          (should (equal (cdr entry) (harness-ui-chat-test-link-open (1- end))))
+                          (should (equal (if rest ", " "\n")
+                                         (buffer-substring-no-properties end (+ end (if rest 2 1)))))
+                          (setq from (+ end 2)))))))
+          ;; Written as an id and a prefix.
+          (names-open "w1" (list (cons "Alpha" a) (cons "Beta" b)))
+          ;; The session_id first, the others in order, each one once.
+          (names-open "w2" (list (cons "Gamma" c) (cons "Beta" b) (cons "Alpha" a)))
+          ;; "nobody" names none and the chat's own session is left out: one is left.
+          (names-open "w3" (list (cons "Alpha" a)))
+          ;; The ids the input prints whole -- in the summary line, which cuts
+          ;; the list short, and in the listing -- are links to their sessions.
+          (names-open "w4" (list (cons "Alpha" a) (cons "Beta" b)))
+          (let* ((block (harness-ui-chat-test-call-block buf "w4"))
+                 (end (marker-position (harness-chat-block-end block)))
+                 (seen nil))
+            (save-excursion
+              (goto-char (harness-chat-block-start block))
+              (while (re-search-forward "[0-9a-f]\\{8\\}\\(?:-[0-9a-f]\\{4\\}\\)\\{3\\}-[0-9a-f]\\{12\\}" end t)
+                (let ((id (match-string-no-properties 0)))
+                  (should (member id (list a b)))
+                  (should (harness-ui-chat-test-link-p (match-beginning 0)))
+                  (should (harness-ui-chat-test-link-p (1- (match-end 0))))
+                  (should (equal id (harness-ui-chat-test-link-open (match-beginning 0))))
+                  (push id seen))))
+            (should (member a seen))
+            (should (member b seen))))))))
+
+(ert-deftest harness-ui-chat-call-sessions-are-the-child-then-the-input-ones ()
+  "The sessions a call names are its child's, found in the call or in its
+result, then those its `session_id' and `session_ids' refer to, whether
+the list comes as a list or as a vector: in that order, each once, the
+chat's own session and the references that name none or several left out,
+and anything but a reference ignored."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Reader"))
+           (a (harness-ui-chat-test-session "Alpha"))
+           (b (harness-ui-chat-test-session "Beta"))
+           (c (harness-ui-chat-test-session "Twin"))
+           (d (harness-ui-chat-test-session "Twin"))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-ui-chat-test-cached sid a b c d)
+      (with-current-buffer buf
+        (cl-flet ((sessions (call &optional result) (harness-chat--call-sessions call result)))
+          ;; No session named.
+          (should-not (sessions nil))
+          (should-not (sessions (list :tool "bash" :input (list :command "true"))))
+          (should-not (sessions (list :tool "session_read" :input nil)))
+          (should-not (sessions (list :input (list :session_id ""))))
+          ;; The child comes first, from the call or from the result.
+          (should (equal (list a) (sessions (list :meta (list :child-id a)))))
+          (should (equal (list a) (sessions nil (list :meta (list :child-id a)))))
+          (should (equal (list a b) (sessions (list :input (list :session_id "Beta") :meta (list :child-id a)))))
+          (should (equal (list a b) (sessions (list :input (list :session_id b))
+                                              (list :meta (list :child-id a)))))
+          ;; The session_id, then the session_ids, as a list or as a vector.
+          (should (equal (list b a) (sessions (list :input (list :session_id b :session_ids (list a))))))
+          (should (equal (list b a) (sessions (list :input (list :session_id b :session_ids (vector a))))))
+          (should (equal (list a b) (sessions (list :input (list :session_ids (list (substring a 0 8) "beta"))))))
+          ;; Once each, the child too.
+          (should (equal (list a b) (sessions (list :input (list :session_id a :session_ids (vector b a b (substring b 0 8)))
+                                                    :meta (list :child-id a)))))
+          ;; Neither the chat's own session, nor a reference to none or to
+          ;; several (two sessions named Twin), nor a value that is no reference.
+          (should (equal (list a) (sessions (list :input (list :session_ids (vector sid a))))))
+          (should-not (sessions (list :input (list :session_id sid))))
+          (should-not (sessions (list :input (list :session_id "Twin"))))
+          (should-not (sessions (list :input (list :session_id "no such session"))))
+          (should (equal (list b) (sessions (list :input (list :session_ids (vector "Twin" nil 42 :b '(x) "" b))))))
+          (should-not (sessions (list :input (list :session_id 42 :session_ids "alpha"))))
+          (should-not (sessions (list :input (list :session_ids 7))))
+          (should-not (sessions (list :input (list :session_ids :null))))
+          ;; An input that is not an object gives nothing and breaks nothing.
+          (should-not (sessions (list :input "not an object")))
+          (should-not (sessions (list :input (vector "x")))))))))
+
+(ert-deftest harness-ui-chat-tool-text-links-the-session-ids-it-prints ()
+  "A full session id the cache knows, printed in a call's input or output
+-- a session_list listing, the id a session_read call is given -- is the
+shared session link wherever it stands, over the faces the text has, and
+opens that session.  An id the cache does not know and the text around
+the ids stay plain."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Lister"))
+           (other (harness-ui-chat-test-session "Subject"))
+           (unknown (harness-uuid))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-ui-chat-test-cached sid other)
+      (harness-call 'session/append sid
+                    (list :kind 'tool-call :tool "session_list" :call-id "l1"
+                          :title "List sessions" :input (list :limit 20)))
+      (harness-call 'session/append sid
+                    (list :kind 'tool-result :call-id "l1"
+                          :output (format "%s  idle     main     \"Subject\"  model demo:scripted\n%s  idle     main     \"Stranger\"  model demo:scripted\n"
+                                          other unknown)))
+      (harness-call 'session/append sid
+                    (list :kind 'tool-call :tool "session_read" :call-id "l2"
+                          :title "Read a session" :input (list :session_id other)))
+      (harness-call 'session/append sid
+                    (list :kind 'tool-result :call-id "l2"
+                          :output (format "%s \"Subject\": idle\n  last reply:\nDone.\n" other)))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf "Done.")) 5 "the calls rendered")
+      (with-current-buffer buf
+        ;; The listing: the known id is a link, over the output's face; the
+        ;; one the cache does not know, and the words, are not.
+        (let* ((block (harness-ui-chat-test-call-block buf "l1"))
+               (known-end (harness-ui-chat-test-find-in buf block other))
+               (unknown-end (harness-ui-chat-test-find-in buf block unknown))
+               (word-end (harness-ui-chat-test-find-in buf block "\"Subject\"")))
+          (should (and known-end unknown-end word-end))
+          (dolist (pos (list (- known-end 36) (- known-end 18) (1- known-end)))
+            (should (harness-ui-chat-test-link-p pos))
+            (should (harness-ui-chat-test-face-at pos 'harness-ui-output-face))
+            (should (equal other (harness-ui-chat-test-link-open pos))))
+          (should (string-match-p (regexp-quote "open the session Subject")
+                                  (get-text-property (1- known-end) 'help-echo)))
+          (dolist (pos (list (- unknown-end 36) (1- unknown-end) (1- word-end) known-end))
+            (should-not (get-text-property pos 'keymap))
+            (should-not (get-text-property pos 'mouse-face))
+            (should-not (harness-ui-chat-test-face-at pos 'harness-ui-session-link-face))
+            (should (harness-ui-chat-test-face-at pos 'harness-ui-output-face))))
+        ;; The call that is given the id: it stands in the input summary, in
+        ;; the input listing and in the output, and the session line names it
+        ;; too; each opens the session.
+        (let* ((block (harness-ui-chat-test-call-block buf "l2"))
+               (from (harness-chat-block-start block))
+               (found 0))
+          (while-let ((end (harness-ui-chat-test-find-in buf block other from)))
+            (setq from end)
+            (cl-incf found)
+            (should (harness-ui-chat-test-link-p (1- end)))
+            (should (harness-ui-chat-test-link-p (- end 36)))
+            (should (equal other (harness-ui-chat-test-link-open (1- end)))))
+          (should (= 3 found))
+          (let ((line (harness-ui-chat-test-find-in buf block "session: Subject")))
+            (should line)
+            (should (equal other (harness-ui-chat-test-link-open (1- line))))))))))
+
+(ert-deftest harness-ui-chat-session-id-in-a-sub-agents-call-keeps-its-own-link ()
+  "A call that started a sub-agent opens it from anywhere on its block, but
+a session id printed in its text still opens its own session: the id's
+link wins over the block's keys, which stay under it, and the words next
+to the id open the sub-agent as before."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Parent"))
+           (kid (harness-ui-chat-test-session "Kid"))
+           (other (harness-ui-chat-test-session "Subject"))
+           (buf (harness-ui-chat-test-open sid)))
+      (harness-ui-chat-test-cached sid kid other)
+      (harness-call 'session/append sid
+                    (list :kind 'tool-call :tool "spawn_agent" :call-id "k1"
+                          :title "Sub-agent: Kid"
+                          :input (list :prompt (format "carry on from session %s" other) :name "Kid")
+                          :meta (list :model "demo:scripted" :child-id kid)))
+      (harness-call 'session/append sid
+                    (list :kind 'tool-result :call-id "k1"
+                          :output (format "Handed the rest to %s, then stopped." other)
+                          :meta (list :child-id kid)))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf "then stopped.")) 5 "the call rendered")
+      (with-current-buffer buf
+        (let* ((block (harness-ui-chat-test-call-block buf "k1"))
+               (title (harness-ui-chat-test-find-in buf block "Sub-agent"))
+               (line (harness-ui-chat-test-find-in buf block "session: Kid"))
+               (id-end (harness-ui-chat-test-find-in buf block other
+                                                     (harness-ui-chat-test-find-in buf block "Handed the rest to")))
+               (prompt-end (harness-ui-chat-test-find-in buf block other)))
+          (should (and title line id-end prompt-end (< prompt-end id-end)))
+          ;; The ids open the session they name, in the input and the output.
+          (dolist (end (list prompt-end id-end))
+            (should (harness-ui-chat-test-link-p (1- end)))
+            (should (equal other (harness-ui-chat-test-link-open (1- end))))
+            (should (equal other (harness-ui-chat-test-link-open (- end 36)))))
+          ;; The rest of the block opens the sub-agent: the title, the session
+          ;; line, the words beside the id.
+          (dolist (pos (list (1- title) (1- line) (- id-end 37) id-end))
+            (should (keymapp (get-text-property pos 'keymap)))
+            (should (equal kid (harness-ui-chat-test-link-open pos)))))))))
 
 (ert-deftest harness-ui-chat-messages-the-user-did-not-write ()
   "A message the harness or another session sent names its sender, not \"You\",

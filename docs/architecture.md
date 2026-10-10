@@ -5785,7 +5785,21 @@ A call naming a session in `:meta` `:child-id` (a `spawn_agent` call
 once its result names the sub-agent, or the merge queue's call for its
 conflict resolver from the start) gets a `session:` line, also above
 the fold, whose button opens that session; the call's whole block opens
-it too, from its title, input or output.  Every clickable session name
+it too, from its title, input or output.  A call naming sessions in its
+input (`session_id`, `session_ids`: what `session_read`,
+`session_send`, `session_wait`, `set_priority` and the other session
+tools are given) gets the same line, `sessions:` when it names several.
+Its references are resolved against the session cache the way the
+session tools resolve them (`harness-ui-resolve-session`: an id, then a
+unique id prefix, then a unique name, compared without regard to case),
+so one that names no session, or several, shows no link, and the chat's
+own session is left out.  Full session ids printed in a call's input
+and output -- a `session_list` listing, a `session_wait` report -- are
+session links too (`harness-ui-link-session-ids`), both in the chat and
+in the report popout: only a whole id the cache knows counts, never a
+short one, which is as likely a git hash, and a call's block-wide keys
+stay under such a link, so the id opens its own session and the rest of
+the block the call's.  Every clickable session name
 in the UI is drawn by `harness-ui-session-link` (this line, the sender
 of a message from another session, the panels of the merge queue and
 of the running sub-agents...): face `harness-ui-session-link-face`, a
@@ -6821,9 +6835,11 @@ session (`harness-ui-children`, module `ui-children`: beside the merge
 queue above the compose box, a line per sub-agent still running -- its
 session link, how long its turn has gone on, and the text of the
 activity line or, before its first activity arrives, its current todo
-item -- drawn from the session cache, the `_harness/activity` updates
-that `harness-ui-update-functions` bring for every session, which it
-keeps per session, and the `agent/turn-started` and `agent/turn-ended`
+item, cut to the room the chat's narrowest window leaves so the line
+never wraps and moves the box below it -- drawn from the session
+cache, the `_harness/activity` updates that
+`harness-ui-update-functions` bring for every session, which it keeps
+per session, and the `agent/turn-started` and `agent/turn-ended`
 events, so nothing asks a child anything; a seed conversation is left
 out by its `:seed` marker, and a chat draws the panel at most once a
 second, one timer per chat taking the updates of all its children, and

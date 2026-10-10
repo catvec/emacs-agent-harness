@@ -130,19 +130,24 @@ That is the child session's name, or the first characters of its id
 when it has none, marked bold while the merge is live and dim once it
 is through.  A merge naming its child session (`:child') shows the name
 as a clickable link to it (`harness-ui-session-link'), truncated as the
-panel truncates names; one naming no child shows plain text."
+panel truncates names, so it wears `harness-ui-session-link-face' like
+every session link; the bold or dim mark is added under that face.  One
+naming no child shows plain text, bold or dim."
   (let* ((child (plist-get item :child))
          (plain (or (plist-get item :name)
                     (and (stringp child) (not (string-empty-p child))
                          (substring child 0 (min 8 (length child))))
                     "unnamed"))
-         (text (propertize (harness-truncate-end plain 24)
-                           'face (if (harness-ui-merge--live-p item) 'bold 'harness-dim-face)
-                           'wrap-prefix "   ")))
-    (if (and (stringp child) (not (string-empty-p child)))
-        (harness-ui-session-link child text
-                                 (format "mouse-1, RET: open the session %s" plain))
-      text)))
+         (shown (harness-truncate-end plain 24))
+         (text (if (and (stringp child) (not (string-empty-p child)))
+                   (harness-ui-session-link child shown
+                                            (format "mouse-1, RET: open the session %s" plain))
+                 (copy-sequence shown))))
+    (add-face-text-property 0 (length text)
+                            (if (harness-ui-merge--live-p item) 'bold 'harness-dim-face)
+                            t text)
+    (put-text-property 0 (length text) 'wrap-prefix "   " text)
+    text))
 
 (defun harness-ui-merge--lines (items)
   "Return one line per ITEM of a merge view, as the panel shows them.

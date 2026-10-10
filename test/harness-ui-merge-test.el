@@ -190,6 +190,10 @@ session at ROOT) and `worker' (a session in WT, of PARENT)."
           (let* ((pos (string-match (car case) panel))
                  (map (get-text-property pos 'keymap panel)))
             (should map)
+            ;; It wears the session link's face like every session link, with
+            ;; the bold of a live merge under it.
+            (should (equal '(harness-ui-session-link-face bold)
+                           (ensure-list (get-text-property pos 'face panel))))
             (should (eq 'highlight (get-text-property pos 'mouse-face panel)))
             (should (eq 'hand (get-text-property pos 'pointer panel)))
             (should (stringp (get-text-property pos 'help-echo panel)))
@@ -201,12 +205,34 @@ session at ROOT) and `worker' (a session in WT, of PARENT)."
                            (lambda (id &optional _position) (push id visited) nil)))
                   (call-interactively command))
                 (should (equal (list (cdr case)) visited))))))
+        ;; A finished merge's name is a link too, with the dim face of a
+        ;; finished merge under the link's.
+        (dolist (case '(("merged-worker" . "c5") ("failed-worker" . "c6")))
+          (let* ((pos (string-match (car case) panel))
+                 (map (get-text-property pos 'keymap panel)))
+            (should map)
+            (should (equal '(harness-ui-session-link-face harness-dim-face)
+                           (ensure-list (get-text-property pos 'face panel))))
+            (should (eq 'highlight (get-text-property pos 'mouse-face panel)))
+            (should (equal "   " (get-text-property pos 'wrap-prefix panel)))))
         ;; A merge view item naming no child session shows plain text,
-        ;; with no keys of its own.
-        (let ((plain (harness-ui-merge--name (list :name "orphan" :status "queued" :position 9))))
+        ;; with no keys of its own: bold while it is live, dim once through.
+        (let ((plain (harness-ui-merge--name (list :name "orphan" :status "queued" :position 9)))
+              (done (harness-ui-merge--name (list :name "orphan" :status "merged"))))
           (should (equal "orphan" plain))
           (should-not (get-text-property 0 'keymap plain))
-          (should-not (get-text-property 0 'mouse-face plain)))
+          (should-not (get-text-property 0 'mouse-face plain))
+          (should (equal 'bold (get-text-property 0 'face plain)))
+          (should (equal "   " (get-text-property 0 'wrap-prefix plain)))
+          (should (equal "orphan" done))
+          (should (equal 'harness-dim-face (get-text-property 0 'face done)))
+          (should-not (get-text-property 0 'keymap done)))
+        ;; The name is built fresh each time: the item's own string is not marked.
+        (let* ((name (copy-sequence "short-name"))
+               (item (list :child "c1" :name name :status "queued" :position 1)))
+          (harness-ui-merge--name item)
+          (harness-ui-merge--name (list :name name :status "queued" :position 1))
+          (should-not (text-properties-at 0 name)))
         ;; A merge with a child but no name shows the start of the child's
         ;; id: eight characters of a long one, all of a short one.
         (dolist (case '(("abcdefghijkl" . "abcdefgh") ("c9" . "c9") ("abcdefgh" . "abcdefgh")))

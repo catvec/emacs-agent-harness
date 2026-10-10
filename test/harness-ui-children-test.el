@@ -158,6 +158,55 @@ until its first activity arrives."
     ;; Without activity, the todo stands in; with neither, nothing.
     (should (equal "" (harness-ui-children--progress (harness-ui-session "r2"))))))
 
+(defun harness-ui-children-test--lines (chat)
+  "Return the lines of the panel CHAT draws now, without properties."
+  (with-current-buffer chat
+    (split-string (harness-ui-children-test--text (harness-ui-children--panel)) "\n" t)))
+
+(ert-deftest harness-ui-children-line-fits-the-window ()
+  "A child's line is one screen line, whatever its progress says.
+Two chats side by side are not wide, and a line that reaches the edge of
+its window wraps its end to the next one, back at the margin, and moves
+the compose box below each time it comes or goes: the progress is cut to
+the room the name and the time leave, in the narrowest window showing the
+chat, and left out where there is none."
+  (harness-ui-children-test-with
+    (harness-ui-children-test--cache "r1" "subagent" "running" "check suite" parent)
+    (puthash "r1" (list :phase "tool" :tool "bash" :title "bash"
+                        :detail (concat "run 4 of 40: for i in $(seq 1 40); do printf"
+                                        " 'run %s of 40: ' \"$i\"; python3 -m unittest"))
+             harness-ui-children--activity)
+    (harness-ui-children--on-event "agent/turn-started" '("r1"))
+    (harness-ui-children-test-with-chat (chat _redraws)
+      ;; In no window, the chat is taken to be 80 columns wide.
+      (let ((lines (harness-ui-children-test--lines chat)))
+        (should (string-match-p "Sub-agents  1 running" (car lines)))
+        (should (string-match-p "check suite  [0-9]+s  Running bash… · run 4 of 40" (cadr lines)))
+        (should (< (string-width (cadr lines)) 80)))
+      (save-window-excursion
+        (delete-other-windows)
+        (let* ((wide (selected-window))
+               ;; Fifty columns, a divider among them; the other window has
+               ;; what the frame has left of its 80.
+               (narrow (split-window wide 50 t)))
+          (set-window-buffer wide chat)
+          (let ((width (window-body-width wide)))
+            (should (< width 80))
+            (let ((lines (harness-ui-children-test--lines chat)))
+              (should (= 2 (length lines)))
+              (dolist (line lines)
+                (should (< (string-width line) width)))
+              ;; Cut at the end, with the mark of it, not left out.
+              (should (string-match-p "check suite  [0-9]+s  Running bash.*…\\'" (cadr lines)))))
+          ;; Shown in both windows, the narrower decides, and its width
+          ;; leaves the progress no room: the name and the time alone.
+          (set-window-buffer narrow chat)
+          (should (< (window-body-width narrow) (window-body-width wide)))
+          (let ((line (cadr (harness-ui-children-test--lines chat))))
+            (should (< (string-width line) (window-body-width narrow)))
+            (should (string-match-p "check suite  [0-9]+s\\'" line))
+            (should-not (string-match-p "Running\\|…" line))))))))
+
 (ert-deftest harness-ui-children-panel-disappears-when-nothing-runs ()
   "A session with no running sub-agent shows no panel."
   (harness-ui-children-test-with

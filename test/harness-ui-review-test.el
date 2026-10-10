@@ -567,6 +567,77 @@ line, and its text opens that session, like the chat's call block."
       ;; No report, nothing to draw.
       (should-not (harness-ui-report-string (list :id "t-none"))))))
 
+(ert-deftest harness-ui-review-report-links-the-session-ids-a-call-prints ()
+  "A full session id the cache knows, in the input or the output of a tool
+call in a report, is the shared session link, as it is in the chat: RET
+or a click opens that session.  An id the cache does not know stays text.
+In the call of a sub-agent the id keeps its own link, and the rest of
+the call's text opens the sub-agent."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (let ((harness-acp--server-enabled nil))
+      (dolist (m '(acp ui ui-compose ui-markdown ui-popout ui-tasks ui-report))
+        (harness-test-load-module m)))
+    (let* ((harness-ui--sessions (make-hash-table :test 'equal))
+           (known "0a1b2c3d-1111-4111-8111-111111111111")
+           (unknown "7f7f7f7f-4444-4444-8444-444444444444")
+           (output (format "%s \"Subject\": idle\n%s \"Stranger\": idle\n" known unknown))
+           (call (list :kind "tool-call" :id "n-1" :call-id "c-read" :tool "session_read"
+                       :title "session_read" :input (format "{\"session_id\":\"%s\"}" known)
+                       :output output))
+           (spawn (list :kind "tool-call" :id "n-2" :call-id "c-spawn" :tool "spawn_agent"
+                        :title "Sub-agent: Kid" :input "{\"name\":\"Kid\"}"
+                        :output (format "Handed the rest to %s, then stopped." known)
+                        :child-id "kid12345"))
+           (task (list :id "t-ids" :session "s-ids" :state "review"
+                       :report (list :summary "Done" :at 1.0 :evidence (list call spawn))))
+           (opened nil))
+      (puthash known (list :id known :name "Subject") harness-ui--sessions)
+      (cl-letf (((symbol-function 'harness-ui-visit-session)
+                 (lambda (id &rest _) (setq opened id))))
+        (cl-flet ((open-at (pos how)
+                    (setq opened nil)
+                    (call-interactively (lookup-key (get-text-property pos 'keymap) how))
+                    opened)
+                  (linked-p (pos)
+                    (let ((face (get-text-property pos 'face)))
+                      (and (memq 'harness-ui-session-link-face (ensure-list face))
+                           (eq 'highlight (get-text-property pos 'mouse-face))
+                           (keymapp (get-text-property pos 'keymap))))))
+          (dolist (insert (list (lambda () (harness-ui-report--insert task))
+                                (lambda () (insert (harness-ui-report-string task)))))
+            (with-temp-buffer
+              (funcall insert)
+              ;; The input line and the output of the first call mention the
+              ;; known id, the output the unknown one as well.
+              (goto-char (point-min))
+              (let ((mentions 0)
+                    (end (save-excursion (search-forward "Sub-agent: Kid"))))
+                (while (search-forward known end t)
+                  (cl-incf mentions)
+                  (should (linked-p (match-beginning 0)))
+                  (should (linked-p (1- (match-end 0))))
+                  (should (equal known (open-at (match-beginning 0) (kbd "RET"))))
+                  (should (equal known (open-at (1- (match-end 0)) [mouse-1]))))
+                (should (= 2 mentions)))
+              (goto-char (point-min))
+              (search-forward unknown)
+              (should-not (get-text-property (match-beginning 0) 'keymap))
+              (should-not (linked-p (match-beginning 0)))
+              (should-not (get-text-property (1- (match-end 0)) 'keymap))
+              ;; The sub-agent's call: its text opens the sub-agent, its id the
+              ;; session it names.
+              (goto-char (point-min))
+              (search-forward "Handed the rest to")
+              (let ((words (match-beginning 0)))
+                (should (equal "kid12345" (open-at words (kbd "RET"))))
+                (search-forward known)
+                (should (linked-p (match-beginning 0)))
+                (should (equal known (open-at (match-beginning 0) (kbd "RET"))))
+                (should (equal known (open-at (1- (match-end 0)) [mouse-1])))
+                (should (equal "kid12345" (open-at (match-end 0) (kbd "RET"))))
+                (should (equal "kid12345" (open-at (match-end 0) [mouse-1])))))))))))
+
 (defun harness-ui-review-test--report (board id)
   "Pop out the report of task ID as BOARD's [Review] does; return its buffer.
 The board's record is the one the wire gives, as the UI sees it."

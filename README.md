@@ -520,7 +520,7 @@ turns, steps and tool calls; `task_wait` shows the same for every
 session it waits on, a section each; a `bash` command still running
 says how many lines it has written and shows the latest one.
 
-![A session's chat whose spawn_agent call runs, and the sub-agent's own chat beside it: the note under the spawn call says what the child does, with a recap and its context, steps and tool calls, and the note under the child's bash call says it is still running with the latest line](docs/media/notes.png)
+![A session's chat after its spawn_agent call started a sub-agent, and the sub-agent's own chat beside it: the panel above the session's compose box lists the running child, with its name as a link, how long its turn has gone on and what it is doing, and the note under the child's bash call says it is still running with the latest line](docs/media/notes.png)
 
 A session may use its working directory, its worktree, the directories
 in `harness-allowed-directories` and the ones you grant it. It also has

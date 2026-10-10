@@ -5,7 +5,8 @@
 ;; A session that started sub-agents shows them pinned at the bottom of
 ;; its chat, beside the todo list and the merge queue, above the compose
 ;; box: one line per child that is still running, with its name, how
-;; long it has been at work and what it is doing now.  It stays there
+;; long it has been at work and what it is doing now, cut to the room
+;; the chat's window leaves so the line never wraps.  It stays there
 ;; while the child works and goes when it stops, so the user watching the
 ;; parent session sees its workers without scrolling back to the
 ;; `spawn_agent' call that started them -- which a background sub-agent
@@ -42,6 +43,7 @@
 (defvar harness-ui-update-functions)
 (defvar harness-ui-event-functions)
 
+(declare-function harness-chat--windows "harness-ui-chat" ())
 (declare-function harness-chat--activity-text "harness-ui-chat" (activity))
 (declare-function harness-chat--activity-details "harness-ui-chat" (activity))
 (declare-function harness-chat--format-elapsed "harness-ui-chat" (seconds))
@@ -131,25 +133,39 @@ current todo item stands in."
   (when-let* ((since (gethash (plist-get child :id) harness-ui-children--turn-start)))
     (harness-chat--format-elapsed (- (float-time) since))))
 
+(defun harness-ui-children--room ()
+  "Return how many columns one line of the panel may take in this chat.
+That is the body of the narrowest window showing the buffer, 80 when no
+window does, less two columns: the running icon is an image a little
+wider than the character it stands for, and a line that reaches the
+edge of its window wraps."
+  (let ((windows (harness-chat--windows)))
+    (- (if windows (apply #'min (mapcar #'window-body-width windows)) 80) 2)))
+
 (defun harness-ui-children--line (child)
   "Return the panel's line for CHILD, a running sub-agent.
 The name is the one shared session link (`harness-ui-session-link'), so
-a click opens the child; the progress and elapsed time follow, dim."
+a click opens the child; the elapsed time and the progress follow, dim.
+It is one screen line, so the compose box below never jumps as the line
+comes and goes: the progress is cut to the room the chat's window leaves
+\(`harness-ui-children--room') and left out where there is hardly any."
   (let* ((id (plist-get child :id))
          (name (or (plist-get child :name) id))
-         (progress (harness-ui-children--progress child))
-         (elapsed (harness-ui-children--elapsed child)))
-    (concat "   "
-            (propertize (harness-ui-icon 'harness-icon-running)
-                        'face 'harness-status-running-face)
-            " "
-            (harness-ui-session-link id (harness-truncate-end name 24)
-                                     (format "Open the session %s" name))
-            (if elapsed
-                (concat "  " (propertize elapsed 'face 'harness-dim-face))
-              "")
-            (unless (string-empty-p progress)
-              (concat "  " (propertize (harness-truncate-end (string-trim progress) 60)
+         (progress (string-trim (harness-ui-children--progress child)))
+         (elapsed (harness-ui-children--elapsed child))
+         (head (concat "   "
+                       (propertize (harness-ui-icon 'harness-icon-running)
+                                   'face 'harness-status-running-face)
+                       " "
+                       (harness-ui-session-link id (harness-truncate-end name 24)
+                                                (format "Open the session %s" name))
+                       (if elapsed
+                           (concat "  " (propertize elapsed 'face 'harness-dim-face))
+                         "")))
+         (room (min 60 (- (harness-ui-children--room) (string-width head) 2))))
+    (concat head
+            (when (and (not (string-empty-p progress)) (>= room 8))
+              (concat "  " (propertize (truncate-string-to-width progress room nil nil "…")
                                        'face 'harness-dim-face)))
             "\n")))
 

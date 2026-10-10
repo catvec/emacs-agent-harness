@@ -1218,17 +1218,47 @@ Only a tool call's block names one (`harness-chat--child-id')."
        (harness-chat--child-id (harness-chat-block-node block)
                                (harness-chat-block-result block))))
 
+(defun harness-chat--call-sessions (call result)
+  "Return the ids of the sessions a tool call names, in order, each once.
+First the session CALL started (`harness-chat--child-id', which looks
+in CALL and in RESULT), then the sessions its input refers to: its
+`session_id', a reference as the session tools take one, and its
+`session_ids', a list of them.  Any tool that is given sessions this way
+-- session_read, session_send, session_wait, set_priority... -- names
+them here.  Each reference is resolved against the session cache
+\(`harness-ui-resolve-session'), so one that names no session, or
+several, is left out, and so is the session this chat shows, which a
+link would only lead back to."
+  (let* ((input (plist-get call :input))
+         (many (plist-get input :session_ids))
+         (child (harness-chat--child-id call result))
+         (ids (and child (list child))))
+    (dolist (ref (cons (plist-get input :session_id)
+                       (and (or (listp many) (vectorp many)) (append many nil))))
+      (when-let* ((id (harness-ui-resolve-session ref)))
+        (unless (equal id harness-ui-session-id)
+          (cl-pushnew id ids :test #'equal))))
+    (nreverse ids)))
+
 (defun harness-chat--child-line (call result)
-  "Return the line linking the session a tool call started, or \"\".
+  "Return the line linking the sessions a tool call names, or \"\".
 That is the sub-agent of a spawn_agent call, the `:child-id' in the
 `:meta' of CALL or of RESULT: the merge queue's and the supervisor's
 calls name their child from the start, and so does a model's
-spawn_agent call from the moment its child exists.  The name is a
-session link (`harness-ui-session-link')."
-  (if-let* ((id (harness-chat--child-id call result)))
-      (let ((name (harness-chat--session-name id (plist-get (plist-get call :input) :name))))
-        (concat (propertize "  session: " 'face 'harness-dim-face)
-                (harness-ui-session-link id name (format "Open the session %s" name))
+spawn_agent call from the moment its child exists.  It is also each
+session the call's input refers to, such as the one session_read reads
+or the ones session_wait waits for (`harness-chat--call-sessions').  One
+session reads \"  session: NAME\", several \"  sessions: A, B\", each
+name a session link (`harness-ui-session-link')."
+  (if-let* ((ids (harness-chat--call-sessions call result)))
+      (let ((child (harness-chat--child-id call result)))
+        (concat (propertize (if (cdr ids) "  sessions: " "  session: ") 'face 'harness-dim-face)
+                (mapconcat (lambda (id)
+                             (let ((name (harness-chat--session-name
+                                          id (and (equal id child)
+                                                  (plist-get (plist-get call :input) :name)))))
+                               (harness-ui-session-link id name (format "Open the session %s" name))))
+                           ids (propertize ", " 'face 'harness-dim-face))
                 "\n"))
     ""))
 
@@ -1300,7 +1330,12 @@ running call, each with its `:note' when it has one (see
                            (propertize title 'face 'harness-tool-title-face))
                          "  " (harness-chat--tool-status result (and call-only node)) "\n"))
          (line (and input (harness-chat--input-summary input title)))
-         (summary (concat (if line (concat (propertize (concat "  " line) 'face 'harness-dim-face) "\n") "")
+         ;; A session id in the call's input or output is a session link.
+         (summary (concat (if line
+                              (concat (harness-ui-link-session-ids
+                                       (propertize (concat "  " line) 'face 'harness-dim-face))
+                                      "\n")
+                            "")
                           (harness-chat--child-line node result)
                           (harness-chat--note-lines node)))
          ;; What the user is shown of the result -- an image, a video
@@ -1311,7 +1346,8 @@ running call, each with its `:note' when it has one (see
          (details
           (concat
            (if input (concat (propertize "  input\n" 'face 'harness-label-face)
-                             (propertize (harness-chat--input-listing input) 'line-prefix indent 'wrap-prefix indent))
+                             (propertize (harness-ui-link-session-ids (harness-chat--input-listing input))
+                                         'line-prefix indent 'wrap-prefix indent))
              "")
            (cond
             ((null result) "")
@@ -1322,8 +1358,9 @@ running call, each with its `:note' when it has one (see
                                        "  reason\n"
                                      (format "  output (%s chars)\n" (harness-format-tokens (length output))))
                                    'face 'harness-label-face)
-                       (propertize (harness-chat--ensure-newline shown) 'face 'harness-ui-output-face
-                                   'line-prefix indent 'wrap-prefix indent)
+                       (harness-ui-link-session-ids
+                        (propertize (harness-chat--ensure-newline shown) 'face 'harness-ui-output-face
+                                    'line-prefix indent 'wrap-prefix indent))
                        (if long
                            (concat "  " (harness-chat--button
                                          (format "show all (%d more chars)" (- (length output) limit))

@@ -2188,6 +2188,158 @@ list does.  A label and tooltip the caller gives win over the defaults."
       (kill-buffer chat)
       (delete-directory root t))))
 
+(ert-deftest harness-ui-resolve-session-reads-the-cache-as-the-session-tools-do ()
+  "A reference names a cached session as the session tools take one: its
+id, else a unique prefix of an id, else a unique name, in any case.  One
+that matches no session, or several, names none, and so does anything
+that is not a reference."
+  (let ((harness-ui--sessions (make-hash-table :test 'equal))
+        (alpha "0a1b2c3d-1111-4111-8111-111111111111")
+        (alpine "0a1b2c3d-2222-4222-8222-222222222222")
+        (beta "5e5e5e5e-3333-4333-8333-333333333333")
+        (twin-a "7f7f7f7f-4444-4444-8444-444444444444")
+        (twin-b "9d9d9d9d-5555-4555-8555-555555555555")
+        (decoy "c0c0c0c0-6666-4666-8666-666666666666"))
+    (dolist (s (list (list :id alpha :name "Alpha") (list :id alpine :name "Alpine")
+                     (list :id beta :name "Beta Reader")
+                     (list :id twin-a :name "Twin") (list :id twin-b :name "twin")
+                     ;; Its name is the start of Beta's id.
+                     (list :id decoy :name "5e5e")))
+      (puthash (plist-get s :id) s harness-ui--sessions))
+    ;; An id, whole.
+    (should (equal alpha (harness-ui-resolve-session alpha)))
+    (should (equal twin-b (harness-ui-resolve-session twin-b)))
+    ;; A prefix of one id, with the blanks round a reference left out; a
+    ;; prefix two ids share names neither of them.
+    (should (equal beta (harness-ui-resolve-session "5e5e5")))
+    (should (equal twin-a (harness-ui-resolve-session "  7f7f  \n")))
+    (should-not (harness-ui-resolve-session "0a1b"))
+    (should (equal alpha (harness-ui-resolve-session "0a1b2c3d-1")))
+    ;; Ids are lowercase and a prefix is not case-folded, as with the tools.
+    (should-not (harness-ui-resolve-session "5E5E5"))
+    ;; A name, in any case; two sessions of one name name neither.
+    (should (equal beta (harness-ui-resolve-session "Beta Reader")))
+    (should (equal beta (harness-ui-resolve-session "beta READER")))
+    (should (equal alpha (harness-ui-resolve-session " alpha ")))
+    (should-not (harness-ui-resolve-session "Twin"))
+    (should-not (harness-ui-resolve-session "TWIN"))
+    ;; Prefixes come before names: "5e5e" is a prefix of Beta's id as well
+    ;; as the decoy's name, and the prefix wins, as the session tools have it.
+    (should (equal beta (harness-ui-resolve-session "5e5e")))
+    ;; Without a prefix hit the name counts: "Alp" is not a name, "Alpine" is.
+    (should (equal alpine (harness-ui-resolve-session "alpine")))
+    (should-not (harness-ui-resolve-session "Alp"))
+    ;; Nothing it knows.
+    (should-not (harness-ui-resolve-session "no such session"))
+    (should-not (harness-ui-resolve-session "ffffffff-0000-4000-8000-000000000000"))
+    ;; Not a reference.
+    (dolist (ref (list nil "" "   " "\n" 42 'alpha :alpha (list alpha) (vector alpha)))
+      (should-not (harness-ui-resolve-session ref)))
+    ;; A session without a name is reached by its id alone.
+    (puthash "e1e1e1e1-7777-4777-8777-777777777777" (list :id "e1e1e1e1-7777-4777-8777-777777777777")
+             harness-ui--sessions)
+    (should (equal "e1e1e1e1-7777-4777-8777-777777777777" (harness-ui-resolve-session "e1e1")))
+    (should-not (harness-ui-resolve-session "nil"))
+    ;; Reading the cache is all it does: nothing is added or dropped.
+    (should (= 7 (hash-table-count harness-ui--sessions)))
+    ;; An empty cache knows no one.
+    (clrhash harness-ui--sessions)
+    (should-not (harness-ui-resolve-session alpha))
+    (should-not (harness-ui-resolve-session "Alpha"))))
+
+(ert-deftest harness-ui-link-session-ids-links-the-ids-the-cache-knows ()
+  "A whole session id the cache knows, among other words, gets the shared
+session link's look and keys in place.  The text keeps its own faces
+under the link's and its words around the id stay as they are; an id
+the cache does not know, a short id, and an id inside a longer word are
+left alone."
+  (let* ((harness-ui--sessions (make-hash-table :test 'equal))
+         (known "0a1b2c3d-1111-4111-8111-111111111111")
+         (other "5e5e5e5e-3333-4333-8333-333333333333")
+         (unknown "7f7f7f7f-4444-4444-8444-444444444444")
+         (opened nil))
+    (puthash known (list :id known :name "Alpha") harness-ui--sessions)
+    (puthash other (list :id other :name "Beta") harness-ui--sessions)
+    (cl-letf (((symbol-function 'harness-ui-visit-session)
+               (lambda (id &rest _) (push id opened))))
+      (cl-flet ((faces (string pos) (ensure-list (get-text-property pos 'face string)))
+                (plain-p (string start end)
+                  ;; No look and no keys between START and END.
+                  (cl-loop for pos from start below end
+                           never (or (get-text-property pos 'keymap string)
+                                     (get-text-property pos 'mouse-face string)
+                                     (get-text-property pos 'help-echo string)
+                                     (memq 'harness-ui-session-link-face
+                                           (ensure-list (get-text-property pos 'face string)))))))
+        ;; A known id inside text of another face: both faces, the link's first.
+        (let* ((text (format "read %s now, %s too, and %s." known unknown (substring known 0 8)))
+               (string (propertize (copy-sequence text) 'face 'harness-dim-face))
+               (start (string-search known text))
+               (end (+ start (length known)))
+               (result (harness-ui-link-session-ids string)))
+          ;; In place: the string given comes back, its text as it was.
+          (should (eq string result))
+          (should (equal text (substring-no-properties result)))
+          (dolist (pos (list start (+ start 17) (1- end)))
+            (should (equal '(harness-ui-session-link-face harness-dim-face) (faces string pos)))
+            (should (eq 'highlight (get-text-property pos 'mouse-face string)))
+            (should (eq 'hand (get-text-property pos 'pointer string)))
+            (should (equal "mouse-1, RET: open the session Alpha" (get-text-property pos 'help-echo string)))
+            (should (keymapp (get-text-property pos 'keymap string))))
+          ;; The keys open that session through `harness-ui-visit-session'.
+          (let ((keys (get-text-property start 'keymap string)))
+            (setq opened nil)
+            (call-interactively (lookup-key keys (kbd "RET")))
+            (should (equal (list known) opened))
+            (setq opened nil)
+            (call-interactively (lookup-key keys [mouse-1]))
+            (should (equal (list known) opened)))
+          ;; The text around it keeps its own face and gets nothing else; an
+          ;; unknown id and a short id are text.
+          (should (plain-p string 0 start))
+          (should (plain-p string end (length text)))
+          (should (equal '(harness-dim-face) (faces string 0)))
+          (should (equal '(harness-dim-face) (faces string (string-search unknown text))))
+          (should-not (get-text-property (string-search unknown text) 'keymap string))
+          (should-not (get-text-property (string-search (substring known 0 8) text end) 'keymap string)))
+        ;; Several ids, each opening its own session: at either end of the
+        ;; string, in quotes, in a path and in brackets.
+        (let* ((ids (list known other known other known))
+               (text (format "%s\nwith \"%s\" in /tmp/%s.json and (%s)\n%s" known other known other known))
+               (string (harness-ui-link-session-ids (copy-sequence text)))
+               (from 0))
+          (dolist (id ids)
+            (let ((at (string-search id text from)))
+              (should at)
+              (setq from (+ at (length id)))
+              (setq opened nil)
+              (call-interactively (lookup-key (get-text-property at 'keymap string) (kbd "RET")))
+              (should (equal (list id) opened))
+              (should (memq 'harness-ui-session-link-face (faces string at)))
+              (should (memq 'harness-ui-session-link-face (faces string (1- from))))
+              ;; The characters beside the id are text.
+              (should (plain-p string (max 0 (1- at)) (if (zerop at) 0 at)))
+              (should (plain-p string from (min (length text) (1+ from))))))
+          (should (= from (length text))))
+        ;; Not whole ids: part of a longer word or of a longer run of hex.
+        (dolist (text (list (concat "x" known) (concat known "x") (concat known "f")
+                            (concat "_" known) (concat known "_") (concat "a" known "b")
+                            (substring known 0 35) (substring known 1)
+                            (string-replace "-" "_" known)))
+          (let ((string (harness-ui-link-session-ids (copy-sequence text))))
+            (should (equal text (substring-no-properties string)))
+            (should (plain-p string 0 (length text)))))
+        ;; Uppercase is no session id of the harness's.
+        (let ((string (harness-ui-link-session-ids (upcase known))))
+          (should (plain-p string 0 (length known))))
+        ;; Nothing to link: the string comes back as it was.
+        (should (null (harness-ui-link-session-ids nil)))
+        (should (equal "" (harness-ui-link-session-ids "")))
+        (let ((string (propertize "no session in here, only a hash 0a1b2c3d" 'face 'bold)))
+          (should (eq string (harness-ui-link-session-ids string)))
+          (should (equal '(bold) (faces string 0)))
+          (should (plain-p string 0 (length string))))))))
+
 (ert-deftest harness-ui-switch-to-project-only-switches-to-a-local-directory ()
   "`harness-ui-switch-to-project' switches only to a local, existing root.
 A remote root, a missing one or none at all switches nothing, and nor

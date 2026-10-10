@@ -2266,6 +2266,74 @@ name."
       (put-text-property 0 (length text) 'help-echo help text))
     text))
 
+(defun harness-ui-resolve-session (ref)
+  "Return the id of the cached session REF names, or nil.
+REF is a reference as the session tools take one: a session id, a
+unique prefix of an id or a unique name, which is compared without
+regard to case.  They are tried in that order, as
+`harness-tools-sessions--resolve' tries them, but against the session
+cache (`harness-ui--sessions') instead of the harness, so this costs one
+pass over the cache at most.  REF names no session when it is no
+string, is blank, matches none of the cached sessions or matches more
+than one."
+  (when (stringp ref)
+    (let ((ref (string-trim ref)))
+      (unless (string-empty-p ref)
+        (if (harness-ui-session ref)
+            ref
+          (let ((name (downcase ref))
+                by-prefix by-name)
+            (maphash (lambda (id session)
+                       (when (string-prefix-p ref id)
+                         (push id by-prefix))
+                       (let ((named (plist-get session :name)))
+                         (when (and (stringp named) (equal name (downcase named)))
+                           (push id by-name))))
+                     harness-ui--sessions)
+            (let ((hits (or by-prefix by-name)))
+              (and hits (null (cdr hits)) (car hits)))))))))
+
+(defconst harness-ui--session-id-regexp
+  "[0-9a-f]\\{8\\}\\(?:-[0-9a-f]\\{4\\}\\)\\{3\\}-[0-9a-f]\\{12\\}"
+  "Regexp matching a session id: a UUID as `harness-uuid' writes it.")
+
+(defun harness-ui--word-char-at-p (string index)
+  "Return non-nil when STRING has a letter, digit or underscore at INDEX.
+Nil when INDEX lies outside STRING.  An id with one on either side is
+part of a longer word, not a session id."
+  (and (>= index 0) (< index (length string))
+       (let ((c (aref string index)))
+         (or (<= ?0 c ?9) (<= ?a c ?z) (<= ?A c ?Z) (eq c ?_)))))
+
+(defun harness-ui-link-session-ids (string)
+  "Make every session id in STRING a session link, in place, and return STRING.
+This is the shared session link (`harness-ui-session-link') applied in
+place, for text that names sessions among other words, such as a tool
+call's input and output, rather than for a name on its own.  Each whole
+session id the cache knows (`harness-ui-session') wears
+`harness-ui-session-link-face' over the faces the text has already, and
+a click or RET on it opens the session in its project, with the keys
+and tooltip of `harness-ui-add-session-keys' and the action of
+`harness-ui-session-action'.  Session ids are UUIDs (`harness-uuid'):
+only a whole one counts, not one inside a longer word, and never a short
+id, which is as likely a git hash.  An id the cache does not know stays
+plain text."
+  (when (and (stringp string) (>= (length string) 36))
+    (let ((case-fold-search nil)
+          (pos 0))
+      (while (string-match harness-ui--session-id-regexp string pos)
+        (let ((start (match-beginning 0))
+              (end (match-end 0)))
+          (unless (or (harness-ui--word-char-at-p string (1- start))
+                      (harness-ui--word-char-at-p string end))
+            (let ((id (substring-no-properties string start end)))
+              (when (harness-ui-session id)
+                (add-face-text-property start end 'harness-ui-session-link-face nil string)
+                (harness-ui-add-session-keys string id nil start end
+                                             (harness-ui-session-action id)))))
+          (setq pos end)))))
+  string)
+
 (defun harness-ui-add-keymap (start end map)
   "Give START..END the keymap MAP, composed under any button keymaps."
   (let ((pos start))
