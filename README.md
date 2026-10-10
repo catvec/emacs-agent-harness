@@ -1141,7 +1141,7 @@ your checkout itself can be submitted to the **main tree** instead (the
   agent sets it with `task_submit`'s `priority` and `task_control`'s
   `priority` action, and the board's search understands "do the docs
   task first".
-- Task sessions run on at most 256k tokens of context
+- Task sessions run on at most 384k tokens of context
   (`harness-tasks-context-limit`): they compact sooner than interactive
   sessions, so a long task works from a smaller transcript between
   turns. Set it to another number of tokens to tune that, or to nil to

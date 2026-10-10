@@ -2805,7 +2805,7 @@ and hinted.
   (`:context-window' override, else its model's, capped by its
   `:context-window-limit'), so a session capped below its model's
   window compacts at the cap, which is how task sessions compact
-  earlier (`harness-tasks-context-limit', 256k tokens by default).
+  earlier (`harness-tasks-context-limit', 384k tokens by default).
   It judges the session as it is then, read again: the fallback,
   earlier in the chain, may have moved it to another model.
 
@@ -3248,7 +3248,7 @@ record from before priorities reads `medium` without being rewritten.
   other new-task settings.  A refined (`:refine`) task keeps it for when
   it starts, and its session, made at the task's directory for the
   write-up, then stays there rather than moving into a worktree.
-- A task's session also runs on `harness-tasks-context-limit' (256000)
+- A task's session also runs on `harness-tasks-context-limit' (384000)
   tokens of context at most, so it compacts earlier than an interactive
   session; nil gives it the whole window.  A refined task's write-up
   session, and a session adopted by `task/adopt', get it too.  A
