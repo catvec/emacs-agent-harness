@@ -1285,6 +1285,16 @@ your checkout itself can be submitted to the **main tree** instead (the
   on any card. The agent has the same as the `open_harness` tool, which
   starts such an instance for its own worktree and says how to drive it
   (`scripts/dev.sh` with its socket).
+- These instances stop by themselves once nothing needs them. One
+  opened for you to look at (Open harness, or the agent's
+  `open_harness` with `focus`) stays until its task is done, archived
+  or deleted. One the agent opened to test its work stops once that
+  work stops: when the task goes to review, is done, or stops on an
+  error or a cancel; when a sub-agent finishes; when a conversation is
+  closed or has been idle for an hour. Removing a worktree stops its
+  instance first, and every instance exits once the Emacs you run the
+  harness in quits. A sweep every ten minutes also stops the instances
+  of finished tasks that an older harness left running.
 - To skip review, press `V` or click `[Review: on]` in the board's
   header line. Finished tasks then merge and complete without waiting
   for you, and if tasks are already waiting for review, the board offers

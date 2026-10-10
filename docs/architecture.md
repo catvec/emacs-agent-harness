@@ -3094,7 +3094,10 @@ so switching to either loses nothing.
   - `worktree/remove` lifts a harness lock first, and puts it back when
     git still refuses (local changes).  FORCE is `git worktree remove -f
     -f`, past local changes and any lock.  Task archive and the worktree
-    list's `d` go through it.
+    list's `d` go through it.  Before git runs, the async filter
+    `worktree/before-remove` (value nil, args ROOT PATH) lets whatever
+    runs from the worktree let go of it: tools-dev stops the Emacs that
+    `open_harness` started there.
   - `worktree/prune` runs `git worktree prune -v` outside the sandbox,
     where git sees every worktree, so it prunes only worktrees really
     gone, and skips locked ones as git does.  It returns git's lines plus
@@ -4262,7 +4265,7 @@ TRAMP prefixes come from the session host):
 | `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete/priority), message (the feedback, for reject), priority (low/medium/high, for priority) | meta |
 | `task_wait` | Wait for tasks | task_id / task_ids, until (settled/done/needs-input/active/review/merging/changed; settled counts review), mode, timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
 | `hand_in` | Hand in the finished work | summary, evidence (image/video/file/code/note/tool_call, each with a caption) | meta (task sessions only; needs no approval: `harness-perms--auto-allow-tools`) |
-| `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus | exec (tools-dev; offered in a checkout of the harness only; needs no approval: `harness-perms--auto-allow-tools`) |
+| `open_harness` | Open harness in Emacs | path (default: the session's worktree, else its cwd), focus (for the user: stays until the task is done) | exec (tools-dev; offered in a checkout of the harness only; the instance stops by itself once nothing needs it; needs no approval: `harness-perms--auto-allow-tools`) |
 | `notify` | Notification | message, title, urgency (low/normal/critical), providers, url | meta (needs no approval: `harness-perms--auto-allow-tools`) |
 | `notification_providers` | Notification providers | (none) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `merge_done` | Finish merge | none | meta (merge module) |
@@ -4298,7 +4301,9 @@ checkout's own live development loop (`scripts/dev.sh start`) with
 `HARNESS_DEV_SOCKET=harness-dev-HASH`, a socket derived from the
 checkout's true name, so the same worktree reuses its instance and two
 worktrees never share one; the instance's state and compiled files stay
-in that checkout's `scripts/.dev/state-SOCKET`.  The result lists the
+in that checkout's `scripts/.dev/state-SOCKET`, passed as
+`HARNESS_DEV_STATE` (dev.sh keeps one it inherits, so an instance
+opened by the harness of another would share that one's state).  The result lists the
 `scripts/dev.sh` commands that drive it (shot, keys, eval, errors,
 reload, stop) prefixed with that socket.  `path` defaults to the
 session's worktree, else its cwd; a directory that is not a checkout
@@ -4309,6 +4314,77 @@ FOCUS` does the same for the UI (focus raises the frame); Open harness
 in the menu of a task board's review card calls it, and the tool
 is in `harness-perms--auto-allow-tools', so the agent needs no approval
 to use it.
+
+Instances stop once nothing needs them, since nothing inside one ever
+stops it.  `tools-dev` records each instance it opens, and who for, in
+`dev-instances.json` in the state directory: `(:socket :path :sessions
+:user :task :opened)`, plus `:adopted` for one the sweep found.
+`:sessions` holds the sessions whose agents opened it.  `:user` marks
+one opened for the user to look at (the board's Open harness, or the
+tool with `focus`), and `:task` is the task it shows: the task of the
+session or of a session it descends from, else the task whose worktree
+it runs from.  An instance is needed while one of these holds:
+
+- one of its sessions is at work: its turn runs or waits on the user,
+  or `agent/outstanding` has something;
+- for a task's session, its task works: active with no `:outcome`, or
+  its session at work (as when merging).  For a sub-agent nothing
+  further counts.  Any other session needs it while it is open and
+  active within `harness-tools-dev--idle-timeout` (an hour);
+- it is the user's and its task is not done, archived or deleted.
+  Without a task, a session that opened it, or one it descends from,
+  is still open;
+- a working task, or a session at work, has its checkout as worktree
+  (or cwd).  The instance belongs to the worktree, whichever agent
+  opened it.
+
+An instance whose checkout is gone is never needed.  The check runs
+`harness-tools-dev--check-delay` seconds after `agent/turn-ended`,
+`session/deactivated`, `session/deleted`, `task/review`, `task/done`,
+`task/deleted` or `worktree/removed`, and only while something is
+recorded.  Instances being started or stopped are skipped, and a start
+waits for a stop of the same socket.  The tool's result tells the
+model when its instance stops (`harness-tools-dev--lifetime`).
+
+The sweep (`harness-tools-dev--sweep`) runs a minute after the module
+starts and every ten minutes after that.  It reads the process table
+(`harness-tools-dev-processes`: this user's Emacs processes whose
+command line is `--daemon=harness-dev-HASH -l
+CHECKOUT/scripts/harness-dev.el`) and forgets the records of
+instances that no longer run.  It adopts an unrecorded instance whose
+checkout is the worktree of one of this harness's tasks or sessions,
+or is gone, then checks everything.  Any other instance is someone
+else's and stays, and so does the one this harness runs in (its
+`daemonp`, or its parent's command line, see
+`harness-tools-dev--own-socket`).
+
+Stopping (`harness-tools-dev--stop`) runs `emacsclient -a false -s
+SOCKET --eval (kill-emacs)`, from Emacs's own `invocation-directory`,
+so nothing of the checkout has to exist.  A daemon still running
+`harness-tools-dev--kill-grace` seconds later has its process tree
+killed with TERM, then KILL.  The record is forgotten and
+`harness-dev/stopped` (SOCKET PATH REASON) is emitted.  The
+`worktree/before-remove` filter stops the instance of a worktree before
+git removes it.  As a backstop, `scripts/dev.sh start` runs with
+`HARNESS_DEV_OWNER` set to the Emacs the user runs
+(`harness-tools-dev--owner`: the harness process's parent, named by
+HARNESS_SERVER_PARENT, else this Emacs), and `scripts/harness-dev.el`
+checks every ten seconds that it still runs (same pid and start time),
+calling `kill-emacs` once it is gone.  A restart of the harness process
+alone leaves the instances running; the new process reads the record.
+A daemon started by hand has no owner, so this backstop leaves it
+running.  Methods:
+
+- `harness-dev/instances`: the records, each with `:needed` and
+  `:reason` (why nothing needs it).
+- `harness-dev/stop PATH`: stops the instance of PATH, recorded or
+  not.  It resolves to non-nil when one was stopped.
+- `harness-dev/sweep`: sweeps now, and resolves to the sockets
+  stopped.
+
+Tests set `harness-tools-dev--processes-function` to `ignore` and
+`harness-tools-dev--first-sweep` to nil (test helpers), so that no test
+finds or stops an Emacs it did not start.
 
 `bash` (tools-shell) lets a module confine a session's commands further
 through the sync filter `tools/sandbox-options`, run before each command
@@ -5906,7 +5982,8 @@ harness in its menu (`mouse-3`, `harness-ui-tasks-open-harness`; no
 button, the title's click opening the session as on every card): it
 starts the worktree's own live development loop in an Emacs of its
 own, frame raised, through `harness-dev/open`, so the work can be
-tried before it is verified.  `b` or [BTW] (or the
+tried before it is verified.  That instance stops once the task is
+done, archived or deleted (see tools-dev).  `b` or [BTW] (or the
 usual BTW command) opens a BTW side conversation over the board about
 its tasks (`task/btw`).  `SPC` over a card, or [Answer…] / [Request…]
 on it, pops out what the task at point needs -- the permission prompt or
