@@ -1,13 +1,27 @@
-;;; harness-merge.el --- Merge queue for worktree sessions  -*- lexical-binding: t; -*-
+;;; harness-merge.el --- Merge queue for worktree branches  -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; A child session working in a git worktree asks to be merged back
-;; into its parent's working directory with `merge/enqueue'.  Requests
-;; queue per parent and are served one at a time: the head of the queue
-;; takes the parent's lock when the parent is idle, or when its running
-;; turn reaches a step boundary (the `agent/step' and `agent/before-turn'
-;; filters hold the parent until the lock is free again).
+;; A session working in a git worktree asks for its branch to be merged
+;; with `merge/enqueue', naming the *target*: the session whose working
+;; directory the branch merges into, or, for a task's branch, the main
+;; checkout itself (a directory).  One queue per target, served one
+;; merge at a time: the head of the queue takes the target's lock when
+;; that session is idle, or when its running turn reaches a step
+;; boundary (the `agent/step' and `agent/before-turn' filters hold it
+;; until the lock is free again).  A main checkout has no session to
+;; hold: its merges start as soon as the lock is free.
+;;
+;; Targets nest.  A session may itself work in a worktree -- a task's
+;; session does -- and start sub-agents in worktrees of their own, each
+;; of which asks for a merge into it; its own branch, in turn, asks for
+;; a merge into the main checkout.  Both levels are the same queue, the
+;; same conflict resolution and the same events.  Order is built in:
+;; a session's branch may be queued upward, but it waits there while
+;; the merges into its own working directory are still queued, merging
+;; or in conflict, so work reaches the main checkout in the order it
+;; was built.  A session with such merges pending may not hand in
+;; either (`merge/pending', which the hand_in tool consults).
 ;;
 ;; A merge is a transaction: the parent's checkout only ever moves by
 ;; a fast-forward to a finished merge commit, never through a merge in
@@ -22,8 +36,8 @@
 ;; So work someone left in the parent's checkout is never lost, and a
 ;; harness that stops mid-merge leaves the checkout as it was.
 ;;
-;; A conflict never reaches the parent's checkout.  The lock goes at
-;; once and the parent's HEAD has to be merged into the child's branch,
+;; A conflict never reaches the target's checkout.  The lock goes at
+;; once and the target's HEAD has to be merged into the child's branch,
 ;; in the child's worktree, the conflicts resolved there and committed;
 ;; the `merge_done' tool then queues the branch again.  A safety timer
 ;; gives up on a conflict nobody resolves.
@@ -89,16 +103,27 @@ Nil means the child session's model."
 ;;;; State
 
 (defvar harness-merge--queues (make-hash-table :test 'equal)
-  "Parent session id -> list of queue entries, oldest first.
-An entry is (:child ID :parent ID :status queued|merging|conflict
-:requested FLOAT :message STRING :branch NAME :files (…) :resolver ID).
+  "Target key -> list of queue entries, oldest first.
+A target is the session a branch merges into, keyed by its id, or a
+main checkout, keyed by its directory.  An entry is (:child ID :target
+KEY :parent ID-or-nil :cwd DIR :status queued|merging|conflict
+:requested FLOAT :message STRING :branch NAME :files (…)
+:resolver ID).  `:parent' is the target session's id, nil for a main
+checkout, and `:cwd' the directory the branch merges into.
 `:resolver' is the fresh session resolving the entry's conflicts.")
 
 (defvar harness-merge--locks (make-hash-table :test 'equal)
-  "Parent session id -> child session id holding the merge lock.")
+  "Target key -> child session id holding the merge lock.")
 
 (defvar harness-merge--holds (make-hash-table :test 'equal)
-  "Parent session id -> list of NEXT continuations of held agent steps.")
+  "Target session id -> list of NEXT continuations of held agent steps.
+A main checkout holds no steps: it has no session to pause.")
+
+(defvar harness-merge--history (make-hash-table :test 'equal)
+  "Target key -> merges finished recently, newest first.
+Each is as `harness-merge--public' returns them, with `:reason' and
+`:finished' (the time it ended); the view keeps the last
+`harness-merge--history-limit' of them.")
 
 (defvar harness-merge--timers (make-hash-table :test 'equal)
   "Child session id -> safety timer of its unresolved conflict.")
@@ -112,6 +137,9 @@ queued the branch again.")
 
 (defconst harness-merge--ff-retries 3
   "Times a merge is computed again when the parent's HEAD moves under it.")
+
+(defconst harness-merge--history-limit 10
+  "Finished merges of one target its view still shows.")
 
 ;;;; Helpers
 
@@ -160,6 +188,51 @@ queued the branch again.")
   (cl-loop for (k v) on props by #'cddr do (plist-put entry k v))
   entry)
 
+;;;; Targets
+
+;; A merge target is a session -- the branch merges into its working
+;; directory -- or a main checkout, named by its directory.  Both are
+;; keyed as one string, so the queues, the locks and the history are
+;; looked up the same way at any depth.
+
+(defun harness-merge--key (target)
+  "Return the queue key of TARGET: a session id, or a directory.
+TARGET is a session id, a directory, the plist (:root DIR) or the
+plist (:session ID).  A session the harness does not know keys its own
+id: it simply has no queue."
+  (cond
+   ((and (stringp target) (file-directory-p target))
+    (directory-file-name (expand-file-name target)))
+   ((consp target)
+    (harness-merge--key (or (plist-get target :root) (plist-get target :session))))
+   (t target)))
+
+(defun harness-merge--target (target)
+  "Return TARGET as a plist (:key KEY :cwd DIR :session ID).
+TARGET is a session id, a directory (a main checkout), (:root DIR) or
+(:session ID).  `:session' is the target's session id, nil for a main
+checkout.  Signal `harness-error' when TARGET names no session, and
+return a session target whose directory is missing as it is: the merge
+itself refuses it."
+  (let ((key (harness-merge--key target))
+        (id (if (consp target) (plist-get target :session) target)))
+    (cond
+     ((and (consp target) (plist-get target :root))
+      (list :key key :cwd (file-name-as-directory key) :session nil))
+     ((file-directory-p key)
+      (list :key key :cwd (file-name-as-directory key) :session nil))
+     (t
+      (let ((session (harness-merge--session id)))
+        (unless session (signal 'harness-error (list (format "No session %s" id))))
+        (list :key key :cwd (plist-get session :cwd) :session id))))))
+
+(defun harness-merge--target-label (target)
+  "Return a short label for TARGET's queue key: a session name, or a directory's."
+  (let ((key (harness-merge--key target)))
+    (if (harness-merge--session key)
+        (harness-merge--label key)
+      (abbreviate-file-name (directory-file-name key)))))
+
 (defun harness-merge--git (cwd &rest args)
   "Run git ARGS in CWD; return a promise of (:exit :stdout :stderr)."
   (harness-run-command (append (list "git" "-C" (directory-file-name cwd)) args)
@@ -171,52 +244,109 @@ queued the branch again.")
        (locate-dominating-file dir ".git")))
 
 (defun harness-merge--parent-running-p (parent-id)
-  "Non-nil while PARENT-ID has a running turn."
-  (if (harness-method-exists-p 'agent/running)
-      (harness-call 'agent/running parent-id)
-    (eq (plist-get (harness-merge--session parent-id) :status) 'running)))
+  "Non-nil while the session PARENT-ID has a running turn.
+A main checkout has no session and is never running: nil."
+  (and parent-id
+       (if (harness-method-exists-p 'agent/running)
+           (harness-call 'agent/running parent-id)
+         (eq (plist-get (harness-merge--session parent-id) :status) 'running))))
 
-(defun harness-merge--public (entry position)
-  "Return the public plist of queue ENTRY at POSITION."
+(defun harness-merge--public (entry &optional position)
+  "Return the public plist of queue ENTRY at POSITION.
+`:name' is the child's name, which the chat shows beside its state,
+and `:reason' and `:finished' the outcome and time of a finished merge."
   (list :child (plist-get entry :child) :parent (plist-get entry :parent)
+        :target (plist-get entry :target)
         :position position :status (plist-get entry :status)
-        :requested (plist-get entry :requested) :resolver (plist-get entry :resolver)))
+        :requested (plist-get entry :requested) :resolver (plist-get entry :resolver)
+        :name (harness-merge--label (plist-get entry :child))
+        ;; A merge waiting for the target's own merges, not for its turn.
+        :waiting (and (eq (plist-get entry :status) 'queued)
+                      (harness-merge--waiting-for-children-p entry) t)
+        :reason (plist-get entry :reason) :finished (plist-get entry :finished)))
+
+(defun harness-merge--live-entries (target)
+  "Return the entries of TARGET's queue that are not finished yet.
+Those are the merges it waits for: queued, merging or in conflict."
+  (cl-remove-if-not (lambda (e) (memq (plist-get e :status) '(queued merging conflict)))
+                    (gethash (harness-merge--key target) harness-merge--queues)))
+
+(defun harness-merge--waiting-for-children-p (entry)
+  "Non-nil when ENTRY waits for merges into its own child's directory.
+Its child is a session that is itself a target with merges queued,
+merging or in conflict, so the branch is built on work that is not in
+it yet; it merges once those are through (see `harness-merge--pump')."
+  (and (harness-merge--live-entries (plist-get entry :child)) t))
+
+(defun harness-merge--startable-p (entry)
+  "Non-nil when ENTRY is queued and nothing of its own is in the way."
+  (and (eq (plist-get entry :status) 'queued)
+       (not (harness-merge--waiting-for-children-p entry))))
 
 ;;;; Methods
 
-(harness-defmethod merge/enqueue (child-id parent-id &rest opts)
-  "Queue CHILD-ID's worktree branch for a merge into PARENT-ID's cwd.
-OPTS may carry `:message' for the log.  The child must have a
-`:worktree' and the parent a `:cwd' inside a git repository.  Return
-the 1-based queue position.  Emits `merge/queued'."
-  (let ((child (harness-merge--session child-id))
-        (parent (harness-merge--session parent-id)))
+(harness-defmethod merge/enqueue (child-id target &rest opts)
+  "Queue CHILD-ID's worktree branch for a merge into TARGET.
+TARGET is the session whose working directory the branch merges into,
+or a directory: a task's branch merges into the main checkout, where
+there is no session to name.  OPTS may carry `:message' for the log.
+The child must have a `:worktree'.  Return the 1-based queue position.
+Emits `merge/queued'.
+
+A session that is itself a target of merges still queued (its own
+sub-agents') may be queued in its turn, but its merge waits until they
+are through: a branch merges on top of the work it was built on."
+  (let* ((child (harness-merge--session child-id))
+         (resolved (harness-merge--target target))
+         (key (plist-get resolved :key))
+         (parent-id (plist-get resolved :session))
+         (cwd (plist-get resolved :cwd)))
     (unless child (signal 'harness-error (list (format "No session %s" child-id))))
-    (unless parent (signal 'harness-error (list (format "No session %s" parent-id))))
     (unless (plist-get child :worktree)
       (signal 'harness-error (list (format "Session %s has no worktree; only worktree sessions can be merged" child-id))))
     (unless (harness-merge--in-git-repo-p (plist-get child :cwd))
       (signal 'harness-error (list (format "The child's directory %s is not a git worktree" (plist-get child :cwd)))))
-    (unless (harness-merge--in-git-repo-p (plist-get parent :cwd))
-      (signal 'harness-error (list (format "The parent's directory %s is not inside a git repository" (plist-get parent :cwd)))))
+    (unless (harness-merge--in-git-repo-p cwd)
+      (signal 'harness-error (list (format "The target's directory %s is not inside a git repository" cwd))))
     (when (harness-merge--entry child-id)
       (signal 'harness-error (list (format "Session %s is already queued for a merge" child-id))))
-    (let* ((entry (list :child child-id :parent parent-id :status 'queued
+    (let* ((entry (list :child child-id :target key :parent parent-id :cwd cwd :status 'queued
                         :requested (float-time) :message (plist-get opts :message)))
-           (entries (append (gethash parent-id harness-merge--queues) (list entry)))
+           (entries (append (gethash key harness-merge--queues) (list entry)))
            (position (length entries)))
-      (puthash parent-id entries harness-merge--queues)
-      (harness-emit 'merge/queued child-id parent-id position)
+      (puthash key entries harness-merge--queues)
+      (harness-emit 'merge/queued child-id (or parent-id key) position)
       (harness-merge--hint parent-id (format "Merge requested by %s (queue position %d)"
                                              (harness-merge--label child-id) position))
       (unless (harness-merge--parent-running-p parent-id)
-        (harness-run-soon #'harness-merge--pump parent-id))
+        (harness-run-soon #'harness-merge--pump key))
       position)))
 
-(harness-defmethod merge/queue (parent-id)
-  "Return the merge queue of PARENT-ID.
-Each item is (:child :parent :position :status :requested :resolver)."
-  (cl-loop for e in (gethash parent-id harness-merge--queues) for i from 1
+(harness-defmethod merge/queue (target)
+  "Return the merge queue of TARGET: a session id, or a main checkout's directory.
+Each item is (:child :parent :target :position :status :requested
+:resolver :name :reason :finished); only the live merges, not the ones
+already finished (`merge/view' shows those too)."
+  (cl-loop for e in (gethash (harness-merge--key target) harness-merge--queues) for i from 1
+           collect (harness-merge--public e i)))
+
+(harness-defmethod merge/view (target)
+  "Return the merge queue of TARGET as a session's chat shows it.
+That is its live merges (queued, merging or in conflict), as
+`merge/queue' returns them, then the merges it finished recently,
+newest first, each with `:reason' and `:finished' (a float time) and
+`:status' merged, failed, aborted or cancelled."
+  (let ((key (harness-merge--key target)))
+    (append (cl-loop for e in (gethash key harness-merge--queues) for i from 1
+                     collect (harness-merge--public e i))
+            (gethash key harness-merge--history))))
+
+(harness-defmethod merge/pending (session-id)
+  "Return the merges SESSION-ID waits for, as `merge/queue' items.
+Those are the branches merging into its working directory that are not
+through yet: its own sub-agents'.  It may not hand in, nor have its own
+branch merge upward, while this says anything."
+  (cl-loop for e in (harness-merge--live-entries session-id) for i from 1
            collect (harness-merge--public e i)))
 
 (harness-defmethod merge/status (child-id)
@@ -235,42 +365,45 @@ Return non-nil when an entry was removed."
 
 ;;;; Scheduling
 
-(defun harness-merge--release-holds (parent-id)
-  "Let every held step of PARENT-ID continue."
-  (let ((nexts (gethash parent-id harness-merge--holds)))
-    (remhash parent-id harness-merge--holds)
+(defun harness-merge--release-holds (target)
+  "Let every held step of TARGET, a session id, continue."
+  (let ((nexts (gethash target harness-merge--holds)))
+    (remhash target harness-merge--holds)
     (dolist (next (nreverse nexts))
       (condition-case err
           (funcall next (list :proceed t))
         (error (harness-log 'error "merge: releasing a held step failed: %S" err))))))
 
-(defun harness-merge--pump (parent-id)
-  "Start the next merge of PARENT-ID, or release its held steps when done."
+(defun harness-merge--pump (target)
+  "Start what TARGET's queue can start, or release its held steps when through.
+A merge whose child is itself a target with merges pending is left
+queued: another entry, of a child that is ready, may go first.  When
+that child's queue drains, `harness-merge--finish' pumps this one again."
   (cond
-   ((gethash parent-id harness-merge--locks) nil)
-   (t (let ((entry (cl-find 'queued (gethash parent-id harness-merge--queues)
-                            :key (lambda (e) (plist-get e :status)))))
-        (if entry
-            (harness-merge--start entry)
-          (harness-merge--release-holds parent-id))))))
+   ((gethash target harness-merge--locks) nil)
+   ((null (gethash target harness-merge--queues)) (harness-merge--release-holds target))
+   (t (when-let* ((entry (cl-find-if #'harness-merge--startable-p
+                                     (gethash target harness-merge--queues))))
+        (harness-merge--start entry)))))
 
 (defun harness-merge--hold (value next session)
   "Hold the step of SESSION (a `agent/step' or `agent/before-turn' handler).
-When merges are queued or in progress for the session, keep NEXT until
-the queue drains; otherwise pass VALUE on.  Always returns nil: the
-filter core would adopt a returned promise as the gate value."
-  (let ((parent-id (plist-get session :id)))
-    (if (or (gethash parent-id harness-merge--locks)
+When merges are queued or in progress into the session -- its own
+sub-agents' -- keep NEXT until the queue drains; otherwise pass VALUE
+on.  Always returns nil: the filter core would adopt a returned promise
+as the gate value."
+  (let ((target (plist-get session :id)))
+    (if (or (gethash target harness-merge--locks)
             (cl-some (lambda (e) (eq (plist-get e :status) 'queued))
-                     (gethash parent-id harness-merge--queues)))
+                     (gethash target harness-merge--queues)))
         (progn
-          (push next (gethash parent-id harness-merge--holds))
+          (push next (gethash target harness-merge--holds))
           (let ((waiting (cl-find-if (lambda (e) (memq (plist-get e :status) '(queued merging conflict)))
-                                     (gethash parent-id harness-merge--queues))))
+                                     (gethash target harness-merge--queues))))
             (when waiting
-              (harness-merge--hint parent-id (format "Pausing for merge from %s…"
-                                                     (harness-merge--label (plist-get waiting :child))))))
-          (harness-merge--pump parent-id))
+              (harness-merge--hint target (format "Pausing for merge from %s…"
+                                                  (harness-merge--label (plist-get waiting :child))))))
+          (harness-merge--pump target))
       (funcall next value))
     nil))
 
@@ -292,10 +425,10 @@ call in the child's transcript gets its result either way, first."
 ;;;; The merge
 
 (defun harness-merge--live-p (entry)
-  "Non-nil while ENTRY is still the merge holding its parent's lock.
+  "Non-nil while ENTRY is still the merge holding its target's lock.
 An asynchronous step checks this first, so a cancelled merge stops."
   (and (eq (plist-get entry :status) 'merging)
-       (equal (gethash (plist-get entry :parent) harness-merge--locks) (plist-get entry :child))))
+       (equal (gethash (plist-get entry :target) harness-merge--locks) (plist-get entry :child))))
 
 (defun harness-merge--out (result)
   "Return the trimmed stdout and stderr of the git RESULT."
@@ -304,18 +437,19 @@ An asynchronous step checks this first, so a cancelled merge stops."
 (defun harness-merge--start (entry)
   "Take the lock for ENTRY and run its merge."
   (let* ((child-id (plist-get entry :child))
+         (target (plist-get entry :target))
          (parent-id (plist-get entry :parent))
          (child (harness-merge--session child-id))
-         (parent (harness-merge--session parent-id)))
+         (parent (and parent-id (harness-merge--session parent-id))))
     (cond
-     ((or (null child) (null parent))
+     ((or (null child) (and parent-id (null parent)))
       (harness-merge--finish entry 'failed "a session disappeared"))
      (t
-      (puthash parent-id child-id harness-merge--locks)
+      (puthash target child-id harness-merge--locks)
       (harness-merge--set entry :status 'merging)
-      (harness-emit 'merge/started child-id parent-id)
+      (harness-emit 'merge/started child-id (or parent-id target))
       (let ((child-cwd (plist-get child :cwd))
-            (parent-cwd (plist-get parent :cwd)))
+            (parent-cwd (plist-get entry :cwd)))
         (harness-then
          (harness-merge--git child-cwd "status" "--porcelain")
          (lambda (status)
@@ -438,17 +572,18 @@ the child's branch in its worktree, by a fresh session or the child
 itself (`harness-merge-conflict-resolver'), and merge_done is called."
   (let* ((child-id (plist-get entry :child))
          (parent-id (plist-get entry :parent))
+         (key (plist-get entry :target))
          (child (harness-merge--session child-id))
          (child-cwd (directory-file-name (or (plist-get child :cwd) "")))
          (short (substring head 0 (min 12 (length head))))
          (instructions
           (format "run `git merge %s` (the tip of %s), resolve the conflicts, `git add` the files and commit the merge with `git commit --no-edit`. Keep both sides' work. Do not touch %s. When the merge is committed, call the merge_done tool and the branch is merged again."
-                  short (if (string-empty-p target) "the parent" target) (directory-file-name parent-cwd)))
+                  short (if (string-empty-p target) "the target" target) (directory-file-name parent-cwd)))
          (listing (mapconcat (lambda (f) (concat "- " f)) files "\n")))
     (harness-merge--set entry :status 'conflict :files files :resolver nil)
-    (when (equal (gethash parent-id harness-merge--locks) child-id)
-      (remhash parent-id harness-merge--locks))
-    (harness-emit 'merge/conflict child-id parent-id files)
+    (when (equal (gethash key harness-merge--locks) child-id)
+      (remhash key harness-merge--locks))
+    (harness-emit 'merge/conflict child-id (or parent-id key) files)
     (puthash child-id
              (run-at-time harness-merge--hold-timeout nil #'harness-merge--timeout entry)
              harness-merge--timers)
@@ -471,7 +606,7 @@ itself (`harness-merge-conflict-resolver'), and merge_done is called."
          child-id
          (format "Merging your branch %s into %s would conflict in these files:\n%s\n\nNothing was changed there. Bring the parent's work into your branch instead, in your own worktree %s: %s"
                  branch (directory-file-name parent-cwd) listing child-cwd instructions))))
-    (harness-run-soon #'harness-merge--pump parent-id)))
+    (harness-run-soon #'harness-merge--pump key)))
 
 (defun harness-merge--start-resolver (entry child prompt)
   "Start a fresh session resolving ENTRY's conflicts with PROMPT; return its id.
@@ -493,9 +628,10 @@ nil when it cannot start; the child is then steered instead."
                                       :non-interactive (if (harness-json-true-p (plist-get child :non-interactive)) t :false)))
                (id (plist-get session :id)))
           (harness-merge--set entry :resolver id)
-          (harness-emit 'merge/resolver child-id (plist-get entry :parent) id)
+          (harness-emit 'merge/resolver child-id
+                        (or (plist-get entry :parent) (plist-get entry :target)) id)
           (harness-merge--hint child-id (format "Merge into %s has conflicts in %s; session %s resolves them in this worktree"
-                                                (harness-merge--label (plist-get entry :parent))
+                                                (harness-merge--target-label (plist-get entry :target))
                                                 (string-join (plist-get entry :files) ", ")
                                                 (harness-merge--label id)))
           ;; Before the prompt: its turn starting shows the call, and a
@@ -614,33 +750,49 @@ stopped it."
   "Lift the harness's lock on the worktree of ENTRY's child, now merged.
 Return a promise, or nil without a worktree or the worktree module."
   (let* ((child (harness-merge--session (plist-get entry :child)))
-         (parent (harness-merge--session (plist-get entry :parent)))
          (worktree (plist-get child :worktree)))
     (when (and worktree (harness-method-exists-p 'worktree/unlock))
       (harness-catch
-       (harness-call-async 'worktree/unlock (or (plist-get parent :cwd) worktree) worktree)
+       (harness-call-async 'worktree/unlock (or (plist-get entry :cwd) worktree) worktree)
        (lambda (err)
          (harness-log 'warn "merge: could not unlock the merged worktree %s: %s"
                       worktree (harness-error-message err))
          nil)))))
+
+(defun harness-merge--remember (entry status reason)
+  "Keep ENTRY, closed with STATUS and REASON, in its target's history.
+The view (`merge/view') shows the merges a target finished recently."
+  (let* ((target (plist-get entry :target))
+         (item (harness-merge--public entry)))
+    (plist-put item :status status)
+    (plist-put item :reason reason)
+    (plist-put item :finished (float-time))
+    (puthash target (cons item (seq-take (gethash target harness-merge--history)
+                                         (1- harness-merge--history-limit)))
+             harness-merge--history)))
 
 (defun harness-merge--finish (entry status &optional reason)
   "Close ENTRY with STATUS (merged, failed, aborted, cancelled) and REASON.
 Releases the lock, dequeues, hints both sessions and serves the queue.
 A merged child's worktree loses the harness's lock."
   (let* ((child-id (plist-get entry :child))
+         (target (plist-get entry :target))
          (parent-id (plist-get entry :parent))
          (resolver (plist-get entry :resolver))
          (timer (gethash child-id harness-merge--timers))
+         ;; The target's own branch, if it is queued upward, may be free to
+         ;; merge now that this was one of the merges it waited for.
+         (upward (harness-merge--entry target))
          (suffix (if reason (format " (%s)" reason) "")))
     (when (eq status 'merged) (harness-merge--unlock-worktree entry))
     (when timer (cancel-timer timer) (remhash child-id harness-merge--timers))
-    (puthash parent-id (cl-remove entry (gethash parent-id harness-merge--queues))
+    (harness-merge--remember entry status reason)
+    (puthash target (cl-remove entry (gethash target harness-merge--queues))
              harness-merge--queues)
-    (when (null (gethash parent-id harness-merge--queues))
-      (remhash parent-id harness-merge--queues))
-    (when (equal (gethash parent-id harness-merge--locks) child-id)
-      (remhash parent-id harness-merge--locks))
+    (when (null (gethash target harness-merge--queues))
+      (remhash target harness-merge--queues))
+    (when (equal (gethash target harness-merge--locks) child-id)
+      (remhash target harness-merge--locks))
     ;; Set before the resolver is stopped: a turn that ends at once must
     ;; not fail the merge again (`harness-merge--on-turn-ended').
     (harness-merge--set entry :status status)
@@ -650,10 +802,11 @@ A merged child's worktree loses the harness's lock."
       (harness-merge--close-call resolver (format "the merge was %s%s, so the sub-agent was stopped" status suffix))
       (when (harness-method-exists-p 'agent/cancel)
         (ignore-errors (harness-call 'agent/cancel resolver))))
-    (harness-emit 'merge/finished child-id parent-id status)
+    (harness-emit 'merge/finished child-id (or parent-id target) status)
     (harness-merge--hint parent-id (format "Merge from %s finished: %s%s" (harness-merge--label child-id) status suffix))
-    (harness-merge--hint child-id (format "Merge into %s finished: %s%s" (harness-merge--label parent-id) status suffix))
-    (harness-run-soon #'harness-merge--pump parent-id)
+    (harness-merge--hint child-id (format "Merge into %s finished: %s%s" (harness-merge--target-label target) status suffix))
+    (when upward (harness-run-soon #'harness-merge--pump (plist-get upward :target)))
+    (harness-run-soon #'harness-merge--pump target)
     status))
 
 ;;;; The merge_done tool
@@ -661,14 +814,14 @@ A merged child's worktree loses the harness's lock."
 (defun harness-merge--requeue (entry)
   "Put ENTRY, whose conflicts were resolved, back in its queue."
   (let* ((child-id (plist-get entry :child))
-         (parent-id (plist-get entry :parent))
+         (target (plist-get entry :target))
          (timer (gethash child-id harness-merge--timers)))
     (when timer (cancel-timer timer) (remhash child-id harness-merge--timers))
     (harness-merge--set entry :status 'queued :files nil :resolver nil)
-    (harness-emit 'merge/queued child-id parent-id
-                  (1+ (or (cl-position entry (gethash parent-id harness-merge--queues)) 0)))
-    (unless (harness-merge--parent-running-p parent-id)
-      (harness-run-soon #'harness-merge--pump parent-id))))
+    (harness-emit 'merge/queued child-id (or (plist-get entry :parent) target)
+                  (1+ (or (cl-position entry (gethash target harness-merge--queues)) 0)))
+    (unless (harness-merge--parent-running-p (plist-get entry :parent))
+      (harness-run-soon #'harness-merge--pump target))))
 
 (defun harness-merge--done (_input ctx)
   "Handler of the merge_done tool.
@@ -754,14 +907,14 @@ session resolving a merge's conflicts works in the child's worktree."
 
 (harness-merge--init)
 
-(harness-declare-event 'merge/queued "(CHILD-ID PARENT-ID POSITION) after a merge was requested.")
-(harness-declare-event 'merge/started "(CHILD-ID PARENT-ID) when a merge takes the parent's lock.")
-(harness-declare-event 'merge/conflict "(CHILD-ID PARENT-ID FILES) when a merge would conflict; they are resolved in the child's worktree.")
-(harness-declare-event 'merge/resolver "(CHILD-ID PARENT-ID RESOLVER-ID) when a fresh session starts resolving a merge's conflicts.")
-(harness-declare-event 'merge/finished "(CHILD-ID PARENT-ID STATUS) merged, failed, aborted or cancelled.")
+(harness-declare-event 'merge/queued "(CHILD-ID TARGET POSITION) after a merge was requested, TARGET naming the queue: the session the branch merges into, or a main checkout's directory.")
+(harness-declare-event 'merge/started "(CHILD-ID TARGET) when a merge takes its target's lock.")
+(harness-declare-event 'merge/conflict "(CHILD-ID TARGET FILES) when a merge would conflict; they are resolved in the child's worktree.")
+(harness-declare-event 'merge/resolver "(CHILD-ID TARGET RESOLVER-ID) when a fresh session starts resolving a merge's conflicts.")
+(harness-declare-event 'merge/finished "(CHILD-ID TARGET STATUS) merged, failed, aborted or cancelled.")
 
 (harness-define-module 'merge
-  :doc "Merge queue: worktree branches merged back into the parent session."
+  :doc "Merge queue: worktree branches merged into the session they were built on, or into the main checkout."
   :requires '(session agent)
   :init #'harness-merge--init)
 

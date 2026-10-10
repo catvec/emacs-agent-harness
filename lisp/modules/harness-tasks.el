@@ -24,12 +24,16 @@
 ;; in a fresh worktree on a branch of its own (the `worktree' module),
 ;; its session is told to commit there, and when the agent finishes the
 ;; branch goes through the merge queue (the `merge' module) into the
-;; branch checked out at the project root.  A task is complete only once
-;; its changes are merged.  The merge queue needs a parent session to
-;; merge into, so every project gets one quiet session at its root,
-;; named by `harness-tasks--merge-session-name', that only ever receives
-;; merges.  Conflicts are handed back to the task's own session by the
-;; merge queue; any other failure puts the task in front of the user.
+;; branch checked out at the project root -- a main checkout, which the
+;; queue takes as a target in its own right, with no session behind it.
+;; It is the same queue, the same conflict resolution and the same
+;; events as a sub-agent merging into the session that started it, which
+;; a task's own session may have started: its branch waits in the queue
+;; while those merges into its worktree are still to come, and it may
+;; not hand in until they are through.  A task is complete only once its
+;; changes are merged.  Conflicts are handed back to the task's own
+;; session by the merge queue; any other failure puts the task in front
+;; of the user.
 ;; Archiving a merged task removes its worktree and its merged branch.
 ;; The worktree is locked until its branch is merged, so a `git worktree
 ;; prune' run where it cannot be seen (in another session's sandbox)
@@ -403,9 +407,6 @@ complete only when the merge queue has merged that branch."
 
 (defconst harness-tasks--merge-attempts 3
   "Merges a task may try before it waits for the user.")
-
-(defconst harness-tasks--merge-session-name "Task merges"
-  "Name of the session at a project's root that task branches merge into.")
 
 (defcustom harness-tasks-resume-interrupted t
   "When non-nil, tasks a stopped harness interrupted carry on by themselves.
@@ -956,19 +957,11 @@ the default, medium."
         (harness-call-async 'worktree/create root :branch (harness-tasks--branch-name task))
         (lambda (wt) (append (list :base base) wt)))))))
 
-(defun harness-tasks--merge-target (root)
-  "Return the id of the session at project ROOT that task branches merge into."
-  (let ((existing (cl-find-if (lambda (s) (and (equal (plist-get s :name) harness-tasks--merge-session-name)
-                                               (equal (plist-get s :cwd) root)
-                                               (null (plist-get s :worktree))))
-                              (harness-call 'session/list (list :project root)))))
-    (plist-get (or existing
-                   (harness-call 'session/create :cwd root :name harness-tasks--merge-session-name))
-               :id)))
-
 (defun harness-tasks--enqueue-merge (id)
   "Queue task ID's branch for the merge queue, or put the task before the user.
-`:merge-queued' records when the branch joined the queue."
+The target is the project root: the main checkout, which the merge
+queue takes as a target of its own.  `:merge-queued' records when the
+branch joined the queue."
   (let* ((task (harness-tasks--get id))
          (attempts (1+ (or (plist-get task :merge-attempts) 0))))
     (cond
@@ -979,7 +972,7 @@ the default, medium."
      ((harness-call 'merge/status (plist-get task :session)) nil)
      (t
       (condition-case err
-          (let ((target (harness-tasks--merge-target (plist-get task :project))))
+          (let ((target (plist-get task :project)))
             (harness-tasks--set id :state 'merging :merge-status 'queued :merge-attempts attempts
                                 :merge-target target :merge-queued (float-time) :outcome nil :error nil)
             (harness-call 'merge/enqueue (plist-get task :session) target
@@ -2321,11 +2314,9 @@ waits in pending until `task/start'."
 
 (defun harness-tasks--adoptable-p (session)
   "Non-nil when SESSION may become a task.
-It must be open, not a task already, not a merge target and not a
-conversation about the board."
+It must be open, not a task already and not a conversation about the board."
   (and (not (eq (plist-get session :status) 'inactive))
        (not (harness-tasks--by-session (plist-get session :id)))
-       (not (equal (plist-get session :name) harness-tasks--merge-session-name))
        (not (harness-tasks--btw-p session))))
 
 (harness-defmethod task/adoptable (&optional cwd)

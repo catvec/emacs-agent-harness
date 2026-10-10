@@ -156,7 +156,6 @@
 (require 'harness-util)
 (require 'harness-tools)
 
-(defvar harness-tasks--merge-session-name)
 (defvar harness-tools-agent-planning-section)
 (defvar harness-perms-dir-tool)
 (defvar harness-supervisor--ending)
@@ -628,14 +627,6 @@ user flipped.")
   (let ((kind (plist-get session :kind)))
     (if (stringp kind) (intern kind) kind)))
 
-(defun harness-supervisor--merge-session-p (session)
-  "Non-nil when SESSION, a plist, is the one task branches merge into.
-The tasks module makes it for itself and names it
-`harness-tasks--merge-session-name'; it is no one's conversation."
-  (and (boundp 'harness-tasks--merge-session-name)
-       (stringp (plist-get session :name))
-       (equal (plist-get session :name) (symbol-value 'harness-tasks--merge-session-name))))
-
 (defun harness-supervisor--set-ext (id key value)
   "Set KEY of session ID's `:ext' to VALUE (nil removes it), with no hint.
 A hint would start the transcript of a session that has no message yet."
@@ -645,16 +636,15 @@ A hint would start the transcript of a session that has no message yet."
   "Give the new session ID, whose plist is SESSION, its supervisor setting.
 A subscriber of `session/created'.  A top-level session takes
 `harness-supervisor' for its directory, and a fork its parent's value
-when the parent has one.  The merge session of the tasks module, a
-sub-agent, a side conversation and any other kind are never governed.
-A setting its maker gave it in `:ext' stays."
+when the parent has one.  A sub-agent, a side conversation and any
+other kind are never governed; only a top-level session of its own
+starts supervised.  A setting its maker gave it in `:ext' stays."
   (condition-case err
       (unless (plist-member (plist-get session :ext) :supervisor)
         (let* ((kind (harness-supervisor--kind session))
                (parent-id (plist-get session :parent-id))
                (value (cond
-                       ((and (eq kind 'main) (null parent-id)
-                             (not (harness-supervisor--merge-session-p session)))
+                       ((and (eq kind 'main) (null parent-id))
                         (if (harness-supervisor--setting (plist-get session :cwd)) t :false))
                        ((and (eq kind 'fork) parent-id (harness-call 'session/exists-p parent-id))
                         (harness-supervisor--value (harness-call 'session/get parent-id))))))
@@ -1227,7 +1217,7 @@ hint that cannot be added fails nothing."
                              (harness-tools-agent-context-limit-hint limit fork inherited))))
         (harness-supervisor--hint (plist-get worker :id) text))
     (error (harness-log 'warn "supervisor: no context cap hint for %s: %s"
-                        (plist-get worker :id) (harness-error-message err)))))
+                        (plist-get worker :id) (harness-error-short-message err)))))
 
 (defun harness-supervisor--refit-limit (session-id worker)
   "Fit the context window limit of WORKER to its compacted conversation.
@@ -1248,7 +1238,7 @@ is set, nil when nothing caps a worker or the context cannot be told."
           (harness-call 'session/update wid :context-window-limit limit :silent t)
           (list :context-limit limit :context-inherited (round context))))
     (error (harness-log 'warn "supervisor: could not fit the context limit of %s: %s"
-                        (plist-get worker :id) (harness-error-message err))
+                        (plist-get worker :id) (harness-error-short-message err))
            nil)))
 
 (defun harness-supervisor--seeded-p (plan step)
@@ -1332,9 +1322,9 @@ what it now holds (`harness-supervisor--refit-limit'), whose
        (harness-resolved nil)))
      done
      (lambda (err)
-       (harness-log 'warn "supervisor: compacting the fork %s failed: %s" wid (harness-error-message err))
+       (harness-log 'warn "supervisor: compacting the fork %s failed: %s" wid (harness-error-short-message err))
        (harness-supervisor--hint
-        wid (format "No compaction (%s): carrying on with the whole conversation" (harness-error-message err)))
+        wid (format "No compaction (%s): carrying on with the whole conversation" (harness-error-short-message err)))
        (funcall done)))))
 
 (defun harness-supervisor--make-worker (session-id plan step)
@@ -1546,7 +1536,7 @@ new worker is told of (`harness-supervisor--worker-text')."
          (lambda (err)
            (harness-supervisor--step-ended
             session-id plan-id step-id "failed"
-            (format "the worker could not be made: %s" (harness-error-message err)))))))))
+            (format "the worker could not be made: %s" (harness-error-short-message err)))))))))
 
 (defun harness-supervisor--start-ready (session-id plan-id)
   "Start the steps of plan PLAN-ID of session SESSION-ID that are ready."
@@ -1557,7 +1547,7 @@ new worker is told of (`harness-supervisor--worker-text')."
             (harness-supervisor--start-step session-id plan-id (plist-get step :id))
           (error (harness-supervisor--step-ended
                   session-id plan-id (plist-get step :id) "failed"
-                  (format "the worker could not be started: %s" (harness-error-message err)))))))))
+                  (format "the worker could not be started: %s" (harness-error-short-message err)))))))))
 
 (defun harness-supervisor--compaction-words (kind)
   "Return in words what a compaction of KIND, a string, leaves of a conversation."
@@ -1611,7 +1601,7 @@ whose supervisor was deleted, does not run."
               (condition-case hint-err
                   (harness-supervisor--restart-hint session-id step worker)
                 (error (harness-log 'warn "supervisor: no hint for step %s: %s"
-                                    step-id (harness-error-message hint-err))))
+                                    step-id (harness-error-short-message hint-err))))
               ;; The worker shows in the supervisor's chat as the
               ;; spawn_agent call that would have started it.
               (harness-supervisor--open-call session-id wid step)
@@ -1626,11 +1616,11 @@ whose supervisor was deleted, does not run."
                (lambda (err)
                  (harness-supervisor--turn-ended session-id plan-id step-id wid
                                                  (list :stop-reason 'error
-                                                       :error (harness-error-message err)))))))
+                                                       :error (harness-error-short-message err)))))))
         ;; A step must not stay running for a worker that never got its job.
         (error (harness-supervisor--step-ended
                 session-id plan-id step-id "failed"
-                (format "the worker could not be given its step: %s" (harness-error-message err))))))))
+                (format "the worker could not be given its step: %s" (harness-error-short-message err))))))))
 
 (defun harness-supervisor--turn-ended (session-id plan-id step-id worker-id result)
   "Settle step STEP-ID of plan PLAN-ID of SESSION-ID: the turn of WORKER-ID ended.
@@ -1695,7 +1685,7 @@ cannot be shown fails nothing.  Return the open call, or nil."
           (puthash worker-id (list :session session-id :call-id call-id :started (float-time))
                    harness-supervisor--spawns))
       (error (harness-log 'warn "supervisor: could not show the worker %s in %s: %s"
-                          worker-id session-id (harness-error-message err))
+                          worker-id session-id (harness-error-short-message err))
              nil))))
 
 (defun harness-supervisor--spawn-call-node (session-id worker-id)
@@ -1771,7 +1761,7 @@ result node, or nil."
                                             (and call (list :duration
                                                             (- (float-time) (plist-get call :started)))))))
         (error (harness-log 'warn "supervisor: could not record the result of the worker %s: %s"
-                            worker (harness-error-message err))
+                            worker (harness-error-short-message err))
                nil)))))
 
 ;;;; The plan engine: what the supervisor is told
@@ -1789,7 +1779,7 @@ QUEUE the message waits for the session's next message instead."
    (harness-call-async 'agent/prompt session-id text
                        (append (list :from (harness-supervisor--sender)) (and queue (list :queue t))))
    (lambda (err)
-     (harness-log 'warn "supervisor: reporting to %s failed: %s" session-id (harness-error-message err)))))
+     (harness-log 'warn "supervisor: reporting to %s failed: %s" session-id (harness-error-short-message err)))))
 
 (defun harness-supervisor--send (session-id text)
   "Report TEXT to the supervising session SESSION-ID.

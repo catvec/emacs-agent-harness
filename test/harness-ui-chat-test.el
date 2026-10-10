@@ -537,6 +537,53 @@ wrote.  The output goes after the context and before the rate."
           (should (equal "Context tokens in use: 170; output tokens: 70."
                          (get-text-property (+ 2 output) 'help-echo header))))))))
 
+(ert-deftest harness-ui-chat-header-context-figure-raises-the-limit ()
+  "The token figure in the chat header is a button.  It offers the
+session's context limit, up to the model's own window (8k for the demo
+model), and the header shows the new window at once.  The conversation
+is untouched: no node, compaction or turn is added by the change."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Capped"))
+           (buf (harness-ui-chat-test-open sid))
+           (nodes (length (harness-call 'session/nodes sid))))
+      ;; A cap like a sub-agent's: 4k of the 8k model.
+      (harness-call 'session/update sid :context-window-limit 4000 :silent t)
+      (harness-test-wait (lambda () (equal 4000 (plist-get (harness-ui-session sid) :context-window-limit)))
+                         5 "the cap to reach the UI")
+      (harness-test-wait (lambda () (with-current-buffer buf
+                                      (equal 4000 (plist-get harness-chat--session
+                                                             :context-window-limit))))
+                         5 "the cap to reach the chat")
+      (with-current-buffer buf
+        (let* ((header (harness-chat--header most-positive-fixnum))
+               (pos (string-search "0/4.0k" header)))
+          (should pos)
+          ;; A button as the header's other segments are.
+          (should (get-text-property pos 'local-map header))
+          (should (eq 'mode-line-highlight (get-text-property pos 'mouse-face header)))
+          (should (string-match-p "capped at 4.0k" (get-text-property pos 'help-echo header)))
+          (should (string-match-p "changes the limit" (get-text-property pos 'help-echo header)))
+          ;; Run what the button runs: no limit, the model's whole window.
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt table &rest _)
+                       (car (cl-find-if (lambda (o) (string-prefix-p "no limit" (car o))) table)))))
+            (call-interactively #'harness-set-context-limit))))
+      (harness-test-wait (lambda () (null (plist-get (harness-ui-session sid) :context-window-limit)))
+                         5 "the limit cleared")
+      (harness-test-wait (lambda () (with-current-buffer buf
+                                      (equal 8000 (plist-get harness-chat--session :context-window))))
+                         5 "the chat's new window")
+      (with-current-buffer buf
+        (should (string-search "0/8.0k" (harness-chat--header most-positive-fixnum))))
+      ;; The conversation is not touched: at most the hint that says the
+      ;; limit changed, and no restart (a user or assistant node), no
+      ;; compaction and no turn.
+      (let ((now (harness-call 'session/nodes sid)))
+        (should (<= (length now) (1+ nodes)))
+        (dolist (n now)
+          (should (equal "hint" (format "%s" (plist-get n :kind))))))
+      (should (equal "idle" (plist-get (harness-ui-session sid) :status))))))
+
 (ert-deftest harness-ui-chat-hover-help-is-one-line ()
   "Every tooltip of a rendered session fits one echo-area line.
 With tooltips off (`tooltip-mode' nil) the help shows in the echo area,
@@ -780,6 +827,79 @@ cost the UI as much for chats nobody looked at as for the one it showed."
                            5 "the re-render")
         (should-not harness-chat--stale)
         (should (harness-ui-chat-test-face-at (1- (harness-ui-chat-test-find buf "more")) 'italic))))))
+
+;;;; Very long messages
+
+(ert-deftest harness-ui-chat-long-message-shows-a-page ()
+  "A message of hundreds of KB shows one page, the rest behind a button.
+In the buffer whole, redisplay wraps the enormous text and lays it out
+on every redisplay, and `recenter' and `harness-ui-text-height' walk
+all of it: opening or scrolling such a chat froze Emacs for seconds
+(2026-10-09).  The tool output and the report view already capped what
+they show; a message that long does too now."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Long message"))
+           (buf (harness-ui-chat-test-open sid))
+           ;; One enormous line, as the harness's own long messages are.
+           (content (make-string 800000 ?x))
+           (limit harness-chat--message-limit))
+      (with-current-buffer buf
+        (harness-chat--apply-update (list :sessionUpdate "_harness/node"
+                                          :node (list :id "n-long" :kind "assistant" :content content)))
+        (let ((block (gethash "n-long" harness-chat--blocks)))
+          ;; The whole message is kept ...
+          (should (equal content (harness-chat-block-content block)))
+          ;; ... while the buffer holds one page of it, and the button.
+          (should (< (buffer-size) (+ limit 2000)))
+          (should (harness-ui-chat-test-find buf (format "show more (%d more chars)" (- 800000 limit))))
+          ;; Pressing the button shows another page, not the whole message.
+          (goto-char (harness-ui-chat-test-find buf "show more"))
+          (harness-chat-push)
+          (should (= (* 2 limit) (harness-chat-block-shown block)))
+          (should (< (buffer-size) (+ (* 2 limit) 2000)))
+          (should (harness-ui-chat-test-find buf (format "show more (%d more chars)" (- 800000 (* 2 limit))))))
+        ;; A message one page and a bit long shows the rest, not more pages.
+        (harness-chat--apply-update (list :sessionUpdate "_harness/node"
+                                          :node (list :id "n-rest" :kind "assistant"
+                                                      :content (make-string (+ limit 5000) ?y))))
+        (should (harness-ui-chat-test-find buf (format "show the rest (%d more chars)" 5000)))))))
+
+(ert-deftest harness-ui-chat-long-system-message-shows-a-page ()
+  "The same for the enormous message the harness sends a worker itself.
+A supervisor's step prompt, the plan and a report are user messages
+with a sender (see `harness-node-sender'); one of them was the message
+the user's Emacs froze on."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Long system message"))
+           (buf (harness-ui-chat-test-open sid))
+           (content (make-string 800000 ?s))
+           (limit harness-chat--message-limit))
+      (with-current-buffer buf
+        (harness-chat--apply-update
+         (list :sessionUpdate "_harness/node"
+               :node (list :id "n-prompt" :kind "user" :content content
+                           :meta (list :from (harness-sender-system "supervisor")))))
+        (should (harness-ui-chat-test-find buf "System · supervisor"))
+        (should (< (buffer-size) (+ limit 2000)))
+        (should (harness-ui-chat-test-find buf (format "show more (%d more chars)" (- 800000 limit))))))))
+
+(ert-deftest harness-ui-chat-streaming-a-long-message-stays-a-page ()
+  "A long message streaming in is drawn a page at a time, not whole.
+The chunks are appended to the buffer as they come and rendered
+shortly after; appended whole, a message of hundreds of KB would be in
+the buffer -- and laid out on every redisplay -- until then."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "Streaming long message"))
+           (buf (harness-ui-chat-test-open sid))
+           (limit harness-chat--message-limit)
+           (chunk (make-string 5000 ?z)))
+      (with-current-buffer buf
+        (harness-chat--apply-update (list :sessionUpdate "_harness/node"
+                                          :node (list :id "n-stream" :kind "assistant" :content "")))
+        (dotimes (_ 10)
+          (harness-chat--apply-update (harness-ui-chat-test-chunk "n-stream" chunk)))
+        (should (= (* 10 5000) (length (harness-chat-block-content (gethash "n-stream" harness-chat--blocks)))))
+        (should (< (buffer-size) (+ limit 2000)))))))
 
 ;;;; The activity line
 
@@ -3724,6 +3844,51 @@ layout, and C-c C-z there buries it, back to the user's buffer."
           (ignore-errors (delete-other-windows (harness-ui--main-window))))
         (kill-buffer file)
         (kill-buffer view)))))
+
+(ert-deftest harness-ui-chat-redisplay-does-not-measure-a-huge-line ()
+  "The redisplay helper answers without looking at a huge line whole.
+A chat line can be megabytes long (a model wrote a whole file, or an
+error carried a request body), and measuring it on every redisplay is
+what made redisplay expensive; the helper looks a bounded distance
+either way along the line instead."
+  (with-temp-buffer
+    (insert "short line\n")
+    (should (harness-chat--line-at-most-p (point-min) 10000))
+    (erase-buffer)
+    (insert (make-string 5000 ?x) "\n" "tail\n")
+    (should (harness-chat--line-at-most-p 1 10000))
+    (erase-buffer)
+    (insert (make-string 40000 ?x) "\n" "tail\n")
+    ;; Anywhere on the huge line, from either end.
+    (should-not (harness-chat--line-at-most-p 1 10000))
+    (should-not (harness-chat--line-at-most-p 20000 10000))
+    (should-not (harness-chat--line-at-most-p 40000 10000))
+    ;; The line after it is ordinary again.
+    (should (harness-chat--line-at-most-p 40002 10000))))
+
+(ert-deftest harness-ui-chat-redisplay-leaves-a-huge-line-alone ()
+  "A line too long to show whole is left where it is.
+Asking redisplay to bring such a line fully into view would rescan it on
+every redisplay; the window, not scrolled, is told yes only for a line
+it can show."
+  (harness-ui-chat-test-with
+    (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session)))
+           (window (selected-window))
+           (huge (get-buffer-create " *harness-chat-huge-line*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer huge
+              (insert (make-string 40000 ?x) "\n" "tail\n")
+              (goto-char (point-min)))
+            (set-window-buffer window huge)
+            (set-window-point window (point-min))
+            (should-not (harness-chat--cursor-line-fully-visible window))
+            (with-current-buffer buf (goto-char (point-min)))
+            (set-window-buffer window buf)
+            (set-window-point window (point-min))
+            (should (harness-chat--cursor-line-fully-visible window)))
+        (set-window-buffer window buf)
+        (kill-buffer huge)))))
 
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here

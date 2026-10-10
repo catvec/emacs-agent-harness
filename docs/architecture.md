@@ -3103,18 +3103,35 @@ so switching to either loses nothing.
 
 ### merge
 
-- `merge/enqueue CHILD-SID PARENT-SID` → position; `merge/queue PARENT-SID`;
-  `merge/cancel CHILD-SID`.  When the parent reaches a step boundary
-  (`agent/step` filter) or is idle, the head of the queue gets the lock:
-  each merge is a transaction that never leaves the parent's checkout
-  mid-merge.  `git merge-tree --write-tree` merges the child's branch
-  into the parent's HEAD off to the side; a clean result becomes a merge
+One queue serves every merge: a sub-agent's branch into the session
+that started it (its working directory, a worktree), a task's branch
+into the main checkout, nested at any depth.  What a merge names is a
+*target*, not a parent: the session the branch merges into, or -- for a
+branch with no session to merge into, a task's -- the main checkout
+itself, given as its directory.  Both are keyed, locked, scheduled and
+resolved the same way, and both emit the same events, so a task's
+session may itself be a target with a queue of its own.
+
+- `merge/enqueue CHILD-SID TARGET &optional :message` → position;
+  `merge/queue TARGET`; `merge/view TARGET` (`merge/queue` items then
+  the merges TARGET finished recently, newest first, each with `:name`,
+  `:reason` and `:finished` -- what the session's chat panel shows);
+  `merge/pending SESSION-SID` (the merges into a session that are not
+  through yet: queued, merging or in conflict; what it may not hand in
+  past, see tools); `merge/status CHILD-SID`; `merge/cancel CHILD-SID`.
+  TARGET is a session id or a directory.  When the target is a session
+  and it reaches a step boundary (`agent/step` filter) or is idle, the
+  head of its queue gets the lock; a main checkout has no session to
+  wait for and starts as soon as the lock is free.  Each merge is a
+  transaction that never leaves the target's checkout mid-merge.
+  `git merge-tree --write-tree` merges the child's branch
+  into the target's HEAD off to the side; a clean result becomes a merge
   commit (`git commit-tree`, message as `git merge --no-ff` writes it)
   and the checkout moves onto it with `git merge --ff-only`, which git
   refuses, changing nothing, when it would overwrite uncommitted or
   untracked work there or a merge is already in progress (the merge
   fails; a HEAD that moved meanwhile is merged again).  On conflict the
-  parent is untouched and the lock passes on at once, and the parent's
+  target is untouched and the lock passes on at once, and the target's
   commit is to be `git merge`d into the child's branch, in its own
   worktree.  By default (`harness-merge-conflict-resolver` `fresh`) the
   harness starts a fresh `subagent` session for it -- a child of the
@@ -3139,22 +3156,34 @@ so switching to either loses nothing.
   answers the call (see session).  With
   `child`, the child session itself gets that as a steering message.  A merged child's worktree loses
   the harness's lock (`worktree/unlock`; see worktree).
-- `merge/status CHILD-SID`; the `merge_done` tool (called by the child
-  or its resolver) checks the child's
-  worktree contains the parent's commit, merged and committed, and
+- `merge_done` (called by the child or its resolver) checks the child's
+  worktree contains the target's commit, merged and committed, and
   queues the branch again.
-- Events `merge/queued CHILD PARENT POSITION`, `merge/started`,
-  `merge/conflict CHILD PARENT FILES`, `merge/finished CHILD PARENT STATUS`
-  (merged|failed|aborted|cancelled).
-- Moves (`session/move`): a merge goes into the parent's cwd as it is
+- Events `merge/queued CHILD TARGET POSITION`, `merge/started`,
+  `merge/conflict CHILD TARGET FILES`, `merge/resolver CHILD TARGET
+  RESOLVER`, `merge/finished CHILD TARGET STATUS`
+  (merged|failed|aborted|cancelled).  TARGET is the target's session id,
+  or the main checkout's directory for a root target.
+- Nesting: a session's own branch may be queued upward (`merge/enqueue`
+  with the child being a session that is itself a target) while the
+  merges into it are still to come, but it does not start: the pump
+  takes an entry whose child has nothing of its own pending, and when
+  that child's queue drains the queue it is itself queued in is pumped
+  again (`harness-merge--startable-p`, `harness-merge--finish`), so a
+  branch merges on top of the work it was built on.  A session may not
+  hand in while `merge/pending` says anything (see tools): the work it
+  builds on has to be in its branch first.  A merge that failed does not
+  wait there -- the child's work is the child's to fix, and the queue
+  told the session with a hint -- and the queue view shows it.
+- Moves (`session/move`): a merge goes into the target's cwd as it is
   when the merge starts, so the `session/before-move` filter
-  (`harness-merge--before-move`) keeps a parent with branches queued to
+  (`harness-merge--before-move`) keeps a session with branches queued to
   merge into it where it is, and a session resolving a merge's
   conflicts, until those merges are through.  A child (in a worktree)
-  never moves.  A parent that moves before a child queued its branch
+  never moves.  A target that moves before a child queued its branch
   gets that branch merged into its new cwd, which only works when the
   new cwd is a checkout of the same repository: `merge/enqueue` refuses
-  a parent outside any git repository, and git cannot merge a branch
+  a target outside any git repository, and git cannot merge a branch
   another repository does not have.
 
 ### tasks
@@ -3314,9 +3343,10 @@ record from before priorities reads `medium` without being rewritten.
   found without a title (from before, or whose naming failed) are named
   at start-up (`harness-tasks--pick-up`) and on reload.
 - With nothing to review (below), a turn ending `end-turn` queues
-  `merge/enqueue SID TARGET`, TARGET being the project's root session
-  named `harness-tasks--merge-session-name`
-  (created on demand); `merge/finished … merged` makes the task `done`.
+  `merge/enqueue SID TARGET`, TARGET being the project root itself: the
+  main checkout, which the merge queue takes as a target with no session
+  behind it (`merge/enqueue` accepts a directory); `merge/finished …
+  merged` makes the task `done`.
   While its branch holds a place in the queue the task is in the
   `merging` column (`:merge-queued` says when it joined).
   Failures the agent can fix (uncommitted work) are steered by the merge
@@ -3786,8 +3816,7 @@ than the module).  It is set when the session is created
 (`session/created`), so the header shows it from the start: a `main`
 session with no parent takes `harness-supervisor` as `config/get` has it
 at its directory, a fork its parent's value, and a setting its maker gave
-in `:ext` stays; the merge session of the tasks module is never
-governed.  The session of a task takes `harness-supervisor-tasks`
+in `:ext` stays.  The session of a task takes `harness-supervisor-tasks`
 (`task/changed`, once, while it has no message and the task was not
 adopted); the session that writes a backlog task up only reads, so it
 has no setting and `:ext` `:supervisor-write-up` t until the task
@@ -4110,7 +4139,7 @@ TRAMP prefixes come from the session host):
 | `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`) |
 | `plan` | Plan | plan | meta |
 | `todo_write` | Todo list | todos | meta |
-| `spawn_agent` | Sub-agent | prompt, fork, model, name, cwd, worktree | meta (the jail checks `cwd`, as it checks bash's) |
+| `spawn_agent` | Sub-agent | prompt, fork, model, name, cwd, worktree | meta (runs the child in the background and returns at once; the jail checks `cwd`, as it checks bash's) |
 | `skill_search` / `skill_load` | Search skills / Load skill | query / name, file (one of the skill's supporting files) | read (needs no approval: `harness-perms--auto-allow-tools`) |
 | `session_list` | List sessions | status, kind, parent_id, name, include_inactive, all_projects, limit | read (needs no approval: `harness-perms--inspection-tools`) |
 | `session_search` | Search sessions | query, regexp, all_projects, max_sessions, max_matches | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -4120,7 +4149,7 @@ TRAMP prefixes come from the session host):
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta (answer refuses the harness's cold-cache question, left to the user) |
 | `session_move` | Move session | directory, session_id (default: this session), keep_old_directory, reason | meta (the user confirms every call, in every mode; see perms, Confirmations, and `session/move`) |
 | `set_non_interactive` | Non-interactive mode | enabled, session_id (default: this session) or all (every current session and task of every project), reason | meta (perms module's away-request stage: turning it on is decided only by the user's answer, in every mode, and denied at once in a non-interactive session; turning it off is allowed at once) |
-| `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds | read (needs no approval: `harness-perms--inspection-tools`) |
+| `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds (optional: wake anyway after this long) | read (registers a wake-up prompt and returns at once; needs no approval: `harness-perms--inspection-tools`) |
 | `task_list` | List tasks | column (pending/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: the order waiting tasks start in) | meta |
 | `task_control` | Control task | task_id, action (start/message/cancel/merge/verify/reject/complete/archive/restore/delete/priority), message (the feedback, for reject), priority (low/medium/high, for priority) | meta |
@@ -4146,7 +4175,11 @@ the turn to end via the result's `:end-turn' -- `harness-agent--finish-turn'
 cancels the provider and ends the turn with `end-turn', as if the model
 had stopped itself -- so the review step puts the task in front of the
 user.  The filter `agent/tools' drops it where `task/for-session' finds
-no task.  Evidence is required: an image or a video (a path inside the
+no task.  A session whose sub-agents' branches are still merging into it
+cannot hand in: `merge/pending SESSION-SID' is consulted first (when the
+module is loaded), and while it says anything the call is refused, in
+the words of the queue, naming each child and its state -- the work the
+session's own branch is built on has to be in it first.  Evidence is required: an image or a video (a path inside the
 session's roots), a file, code, a note, or `tool_call' naming an
 earlier call of the session, which is copied into the report as a
 snapshot so the view can show it as the link it is.
@@ -4187,6 +4220,35 @@ policy, or a remote directory) fails with an error instead of running
 unconfined.  With no handler the command runs as it always did.  The
 supervisor module makes the commands of a supervising session read-only
 and offline this way.
+
+Every `spawn_agent` call runs its child in the background: the tool
+call returns as soon as the child's turn starts, with a result naming
+the child session (its `:meta` carries `:child-id`, which the chat
+links), never waiting for its answer.  A child's first turn settles its
+entry with the `agent/prompt` result (`harness-tools-agent--child-result'),
+which holds a failure's error; a later turn -- the wake-up turn of a
+wait the child registered, say -- settles it on `agent/turn-ended`
+(`harness-tools-agent--on-turn-ended`).  When the child's turn ends and
+nothing of it is outstanding any more (`harness-tools-agent--child-busy-p`,
+which asks `agent/outstanding`), tools-agent sends the parent a message
+of the harness's (`harness-sender-system "sub-agent"`) built from
+`harness-tools-agent--child-summary`: the child's last reply and its
+footer of tool calls and cost, the reason when its turn ended any other
+way than `end-turn`, its worktree and branch when it worked in one, and,
+past `harness-tools-max-output-chars`, cut in the middle with a note to
+read the child's session.  An idle parent starts a turn on it, a running
+one is steered, as a supervisor step's report is.  With several
+`spawn_agent` calls made in one step each tool call runs without
+blocking the others, so the children work at once.  A running child
+counts as work outstanding for its parent:
+`harness-tools-agent--outstanding`, a handler of the sync filter
+`agent/outstanding`, reports every entry of
+`harness-tools-agent--children` whose `:parent` is the session, as
+"Sub-agent NAME running" or "Sub-agents A, B running" (an entry says
+`:parent`, `:name`, `:worktree`, `:branch` and `:result`, kept until the
+child is done), so a task whose session's turn ended stays active
+(`harness-tasks--on-turn-ended`) instead of going to review while its
+sub-agents run.
 
 `spawn_agent` (tools-agent) runs its child on a deliberately shorter
 context window: `harness-subagent-context-limit` (256000 tokens; nil for
@@ -4341,12 +4403,39 @@ message as coming from here rather than from the user; `session_read`
 and `session_search` tag such nodes the same way.  `task_control`'s
 message does the same through `task/prompt` (its OPTS `:from`), so a
 task waiting for review takes neither for the user's review: only
-`task_control` reject sends work back (see tasks).  Waits are
-entries re-checked on session and task events, settled by their
-condition, their timeout (`harness-tools-sessions--wait-default`, at most
-`-wait-max`) or the end of the waiting turn; a timeout is a report, not
-an error.  Nothing here grants permissions: permission requests and
-permission modes stay with the user, and `task_submit` uses the task
+`task_control` reject sends work back (see tasks).  Waits never block
+the tool that asks for one, and are entries in
+`harness-tools-sessions--waiters` re-checked by one subscriber when a
+session or task event fires.  `task_wait` settles its promise with the
+report when its condition, its timeout
+(`harness-tools-sessions--wait-default`, at most `-wait-max`) or the end
+of the waiting turn says so; a timeout is a report, not an error.
+`session_wait` does not settle a call: it returns at once, with the
+report when the condition already holds and otherwise with a
+registration (`harness-tools-sessions--watch`, its entry carrying
+`:wake` and the `:label` its outstanding line shows), and the session is
+woken with the same report as a message of the harness's own
+(`harness-sender-system "session wait"`, through `agent/prompt`: an idle
+session starts a turn on it, a running one is steered) when
+`harness-tools-sessions--poke` sees the condition hold.  A registration
+outlives the turn that made it, and counts for `agent/outstanding` as
+"Waiting on IDS" (`harness-tools-sessions--outstanding`) until it
+settles -- except after a turn the user cancelled, which drops it
+(`harness-tools-sessions--on-turn-ended`); its optional
+`timeout_seconds` wakes the session with a "still waiting" report
+instead.  The subscriber is not the only look at a wait: while any
+runs, the safety re-check (`harness-tools-sessions-wait-recheck`) walks
+them every few seconds too, so a change none of those events announced
+-- a subscriber lost to a reload, a session settled by a module of its
+own, a finish that happened before the wait was made -- cannot leave a
+registration while its condition already holds; and a `changed` wait is
+met at once by an idle or closed session, whose own work is over and
+from which nothing new of its own is coming -- a wait on a sub-agent
+that has already finished is such a session, and since a registration
+may have no timeout at all, asking it for a change that can never come
+would leave it waiting forever.  Nothing here grants permissions:
+permission requests and permission modes stay with the user, and
+`task_submit` uses the task
 defaults.  Nor does `session_control` answer the harness's question
 about a cold prompt cache (its payload's `:cowboy`): what to spend on
 another session's conversation is the user's call.  The task tools need the `tasks` module.
@@ -4864,7 +4953,13 @@ Chat buffer (`harness-ui-chat`): transcript region (read-only) + queue
 list + attachments row + compose region at the bottom.  Rendering is
 incremental (append and in-place update by node id using markers);
 older history renders in chunks on demand so a million-token session
-stays snappy.  A checkout (`session/head-moved`) makes the transcript
+stays snappy.  A message longer than `harness-chat--message-limit`
+characters is drawn a page at a time as well, the rest behind a "show
+more" button that adds a page a press: in the buffer whole -- the plan
+or a step prompt a supervisor sends a worker, or a model's long answer
+-- every redisplay of the chat wraps and lays out all of it, and
+`recenter' and `harness-ui-text-height' walk it, so opening or
+scrolling the chat froze Emacs for seconds.  A checkout (`session/head-moved`) makes the transcript
 another path, so the buffer loads it again rather than leave the
 branch behind on screen.  Markdown is rendered by the built-in renderer in
 `harness-ui-markdown` (headings, emphasis, code spans, fenced code with
@@ -5089,6 +5184,23 @@ no longer running and never drop in between.  Every change runs
 second at most, as the events come), the session list and the task
 boards at most every half second, and only when a figure they show
 reads otherwise.
+The context figure is a button (`harness-ui-context-limit-map`): in the
+chat header it is a segment as the settings beside it are, and in the
+session list and on a task card a click acts on the session the figure
+shows.  Mouse-1 on it, or `C-c h e` (`harness-set-context-limit`),
+offers that session's context window limit: the current one, a few
+round sizes under the model's own window (read from its catalogue
+entry, never assumed), and no limit, which uses the whole of it; a
+number typed instead sets that many tokens, clamped to the model's
+window.  The offer names what holds the window: a sub-agent's limit
+(`harness-subagent-context-limit'), a task's
+(`harness-tasks-context-limit'), or one set for the session itself.
+The change is a `session/update' of `:context-window-limit' -- a window
+set for the session outright is cleared with it, since it would win
+over the limit (see `harness-ui--apply-context-limit') -- so the
+conversation is neither restarted nor compacted: the header line and
+the other views show the new window at once, and the new limit takes
+effect at the session's next request.
 Other UI
 modules hook into a chat buffer without owning it:
 `harness-chat-send-functions` sees each message sent
@@ -5867,7 +5979,15 @@ review -- its heading, the handed-in report in full and always
 expanded, then [Verify] (`C-c C-v`), [Send back] (`C-c C-x`) and
 [Review] -- shown above the compose box of the task's session, a chat
 panel (`harness-chat-panel-functions`), and at the end of its report
-popout (`harness-ui-report-panel-functions`); the session's box sends
+popout (`harness-ui-report-panel-functions`); the merge queue of a
+session whose sub-agents merge into it (`harness-ui-merge`, module
+`ui-merge`: beside the todo list above the compose box, a line per
+child marked queued, merging, in conflict, merged or failed with the
+reason the queue gave, the live ones first and the last few finished
+after them, drawn from `merge/view` over ACP -- fetched once per
+session and again on every `merge/*` event of that queue, so the panel
+follows the merges as they happen; a session with nothing merging and
+nothing merged recently shows no panel); the session's box sends
 as always and the harness takes any message the user sends the task's
 session for the feedback that sends it back (`harness-tasks--on-message'), so
 [Send back] only points at the box, while
