@@ -3,19 +3,31 @@
 ;;; Commentary:
 
 ;; / on the task board -- or [Search] in its header line, or C-c h /
-;; from anywhere, which opens the project's board first -- reads a line
-;; in the minibuffer, Emacs's own command palette: a question about the
-;; tasks ("did I have a task about the question button?") or an order
-;; to manage some ("get rid of the mq land task", "restart the errored
-;; tasks").  The line goes with the board to a quick, cheap model
-;; (`task/search', see harness-tasks-search.el), which answers with the
-;; tasks the line is about and what to do with them, never with prose.
+;; there, which is the board's own search on a board (see
+;; harness-ui-quick-search.el) -- turns the board's compose box into a
+;; search box, in colours of its own.  What the box held waits aside and
+;; comes back once the search is sent, or the search box closed with
+;; C-g.  A line in words there is a question about the tasks ("did I
+;; have a task about the question button?"), an order to manage some
+;; ("get rid of the mq land task", "restart the errored tasks"), or a
+;; session or a command to find ("where did I debug the merge queue?",
+;; "how do I attach a file?").  RET sends it, with the board and the
+;; harness's commands, to a quick, cheap model (`search/ask', see
+;; harness-tasks-search.el) that favours tasks; it answers with the
+;; tasks, sessions and commands the line is about and what to do with
+;; the tasks, never with prose.  M-p and M-n in the search box bring
+;; back earlier searches, the quick search's among them.
 ;;
 ;; The board then shows only those tasks, in their columns, archived
-;; ones included, under a banner that says what it shows: the line, how
-;; many tasks, and what the model looked at besides the board.  C-g on
-;; the board, or [Clear], shows every task again.  The tasks stay shown
-;; while they change, so what an action does shows on their cards.
+;; ones included, under a banner that says what it shows: the line, what
+;; it matched, and what the model looked at besides the board.  The
+;; sessions and commands it found follow, each on a line of its own with
+;; its buttons -- [Open] a session, at the message where the search found
+;; its words when it did (`harness-quick-search-open-session'), [Run] or
+;; [Describe] a command -- and the model's note, or the search's when
+;; nothing matched and it looked wider.  C-g on the board, or [Clear],
+;; shows every task again.  The tasks stay shown while they change, so
+;; what an action does shows on their cards.
 ;;
 ;; An order runs at once when it is easily undone or does no harm --
 ;; archive (of a task not at work), restore, retry, start, a new
@@ -25,24 +37,24 @@
 ;; An order that interrupts work, merges it or sends words to an agent
 ;; -- stop, archive of a task at work, verify, mark done, message, send
 ;; back -- is proposed instead: the banner asks, with a button that
-;; does it and one that skips it, and / then RET on an empty line does
-;; it too.
+;; does it and one that skips it, and / then RET on an empty box does
+;; it too, as the search box's placeholder says.
 ;;
-;; The model's process starts as the line is being typed
-;; (`task/search-warm'), so the answer comes sooner, and the header
-;; line's [Search] spins while the model works.
+;; The model's process starts as the search box opens (`search/warm'),
+;; so the answer comes sooner, and the header line's [Search] spins
+;; while the model works.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'text-property-search)
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-ui)
 (require 'harness-ui-compose)
 (require 'harness-ui-tasks)
-
-(harness-ui-define-icon harness-icon-search "search" "⌕" "find" "A search.")
+(require 'harness-ui-quick-search)
 
 (defface harness-task-search-face '((t :inherit harness-task-title-face))
   "The line a board's search asked, in the banner above the tasks it shows."
@@ -52,9 +64,6 @@
   "What a board's search proposes to do, waiting for your OK."
   :group 'harness-ui-tasks)
 
-(defvar harness-ui-tasks-search-history nil
-  "The lines searched on task boards, for the minibuffer's history.")
-
 (defvar-local harness-ui-tasks-search--state nil
   "This board's search, or nil.  A plist:
 `:query'    the line asked;
@@ -62,6 +71,11 @@
 `:status'   `searching', `acting', `done' or `failed';
 `:model'    the model that answers, once known;
 `:ids'      the ids of the tasks shown, or `all' before an answer;
+`:tasks'    those tasks as the answer names them;
+`:sessions' the sessions it found, as `search/ask' names them;
+`:commands' the commands it found, entries of the catalogue;
+`:note'     what the model, or the search, says of the answer;
+`:widened'  non-nil when the search looked wider, having found nothing;
 `:looked'   what the model looked at besides the board;
 `:error'    why the search failed;
 `:proposed' actions waiting for the user's OK;
@@ -74,7 +88,19 @@
   "The number of this board's latest search.  Answers to earlier ones are dropped.")
 
 (defvar-local harness-ui-tasks-search--model nil
-  "The model that answers this board's searches, as `task/search-warm' said.")
+  "The model that answers this board's searches, as `search/warm' said.")
+
+(defvar-local harness-ui-tasks-search--draft nil
+  "What this board's compose box held when it turned into a search box.
+A plist: `:text' and `:attachments', which come back when the search
+box closes, with `:target', what the box did then (see
+`harness-ui-tasks--target'); `:in-box' is non-nil when point was in
+the box, not on the board, and `:task' is the task whose card point
+was on, which point goes back to.")
+
+(defconst harness-ui-tasks-search--max-found 4
+  "The most sessions, and the most commands, a board's banner lists.
+A line says how many more the search found.")
 
 ;;;; Words
 
@@ -183,13 +209,56 @@ Failures follow, each saying why: \"could not retry “C”: it is working alrea
         (name (capitalize name))))))
 
 (defun harness-ui-tasks-search--short (proposed)
-  "PROPOSED in a few words, for the minibuffer's prompt."
+  "PROPOSED in a few words, for the search box's placeholder."
   (let* ((groups (harness-ui-tasks-search--group proposed))
          (n (length proposed)))
     (if (cdr groups)
         (format "do the %d proposed actions" n)
       (format "%s %s" (downcase (harness-ui-tasks-search--do-label proposed))
               (if (= n 1) (harness-ui-tasks-search--title (car proposed)) (format "%d tasks" n))))))
+
+(defun harness-ui-tasks-search-proposal-text ()
+  "What this board's search proposes, in a few words, or nil.
+The search box's placeholder names it, since \\`RET' on the empty box
+does it."
+  (when-let* ((proposed (plist-get harness-ui-tasks-search--state :proposed)))
+    (substring-no-properties (harness-ui-tasks-search--short proposed))))
+
+(defun harness-ui-tasks-search--plural (n word)
+  "N WORDs, in words: \"1 session\", \"2 sessions\"."
+  (format "%d %s%s" n word (if (= n 1) "" "s")))
+
+(defun harness-ui-tasks-search--count (n)
+  "N tasks in words."
+  (pcase n (0 "no task matches") (1 "1 task") (_ (format "%d tasks" n))))
+
+(defun harness-ui-tasks-search--counts (state)
+  "What the search STATE matched, in words: \"1 task · 2 sessions · 1 command\".
+No task is \"no task matches\", whatever else it found."
+  (let ((ids (plist-get state :ids))
+        (sessions (length (plist-get state :sessions)))
+        (commands (length (plist-get state :commands))))
+    (string-join
+     (delq nil (list (harness-ui-tasks-search--count (if (listp ids) (length ids) 0))
+                     (and (> sessions 0) (harness-ui-tasks-search--plural sessions "session"))
+                     (and (> commands 0) (harness-ui-tasks-search--plural commands "command"))))
+     " · ")))
+
+(defun harness-ui-tasks-search--found-text (plan)
+  "Say what PLAN, an answer, found, for the echo area.
+That is \"1 task matches · 2 sessions\", or \"No task matches “…”\"
+with what else it found."
+  (let ((n (length (plist-get plan :ids)))
+        (sessions (length (plist-get plan :sessions)))
+        (commands (length (plist-get plan :commands))))
+    (string-join
+     (delq nil (list (pcase n
+                       (0 (format "No task matches %s" (harness-ui-tasks--quote (plist-get plan :query))))
+                       (1 "1 task matches")
+                       (_ (format "%d tasks match" n)))
+                     (and (> sessions 0) (harness-ui-tasks-search--plural sessions "session"))
+                     (and (> commands 0) (harness-ui-tasks-search--plural commands "command"))))
+     " · ")))
 
 ;;;; The banner
 
@@ -207,51 +276,116 @@ Failures follow, each saying why: \"could not retry “C”: it is working alrea
                       right))
             "\n")))
 
-(defun harness-ui-tasks-search--count (n)
-  "N tasks in words."
-  (pcase n (0 "no task matches") (1 "1 task") (_ (format "%d tasks" n))))
+(defun harness-ui-tasks-search--found-button (name)
+  "Return the function that makes the board's buttons of the thing NAME.
+It takes what `harness-quick-search-session-line' gives its BUTTON:
+the label, the action and the tooltip.  NAME keeps each button's
+place on the board across redraws, with its label."
+  (lambda (label action help)
+    (harness-ui-tasks--button label action help (format "search:%s:%s" name label))))
+
+(defun harness-ui-tasks-search--fit-found (text)
+  "TEXT, lines of what a search found, fitted to the board.
+TEXT is what `harness-quick-search-session-line' and its kin return;
+each line's buttons go against the right edge, as the banner's do."
+  (mapconcat (lambda (line)
+               (if-let* ((at (text-property-any 0 (length line) 'button t line)))
+                   (harness-ui-tasks-search--line (string-trim-right (substring line 0 at)) (substring line at))
+                 (harness-ui-tasks-search--line line nil)))
+             (split-string text "\n" t)
+             ""))
+
+(defun harness-ui-tasks-search--more (n word)
+  "The line that says N more WORDs were found than listed, or \"\"."
+  (if (> n 0)
+      (harness-ui-tasks-search--line
+       (propertize (format "    … %s more" (harness-ui-tasks-search--plural n word)) 'face 'harness-dim-face)
+       nil)
+    ""))
+
+(defun harness-ui-tasks-search--found-lines (state)
+  "The lines of what the search STATE found besides tasks.
+That is its note, then the sessions and the commands, at most
+`harness-ui-tasks-search--max-found' of each, with the board's buttons."
+  (let ((note (plist-get state :note))
+        (sessions (plist-get state :sessions))
+        (commands (plist-get state :commands))
+        (max harness-ui-tasks-search--max-found))
+    (concat
+     (if (and (stringp note) (not (string-blank-p note)))
+         (harness-ui-tasks-search--line
+          (concat "  "
+                  (if (plist-get state :widened)
+                      (harness-ui-level-icon 'caution)
+                    (propertize (harness-ui-icon 'harness-icon-search) 'face 'harness-dim-face))
+                  " " (propertize (harness-ui-one-line note) 'face 'harness-dim-face))
+          nil)
+       "")
+     (mapconcat (lambda (session)
+                  (harness-ui-tasks-search--fit-found
+                   (harness-quick-search-session-line
+                    session (harness-ui-tasks-search--found-button (format "session:%s" (plist-get session :id))))))
+                (take max sessions) "")
+     (harness-ui-tasks-search--more (- (length sessions) max) "session")
+     (mapconcat (lambda (command)
+                  (harness-ui-tasks-search--fit-found
+                   (harness-quick-search-command-line
+                    command (harness-ui-tasks-search--found-button (format "command:%s" (plist-get command :command))))))
+                (take max commands) "")
+     (harness-ui-tasks-search--more (- (length commands) max) "command"))))
 
 (defun harness-ui-tasks-search--banner ()
   "The text above a board its search filters: what it shows, and what was done.
-Its first line has the line asked and where the search is; a second
-says what the actions did, and a third asks about what waits for an OK."
+Its first line has the line asked and where the search is, or what it
+matched; the note and the sessions and commands it found follow, then
+what the actions did, then a line that asks about what waits for an OK."
   (let* ((state harness-ui-tasks-search--state)
          (status (plist-get state :status))
-         (ids (plist-get state :ids))
          (dot (propertize "  ·  " 'face 'harness-dim-face))
-         (head (concat "  " (propertize (harness-ui-icon 'harness-icon-search) 'face 'harness-dim-face) " "
-                       (propertize (harness-ui-tasks--quote (harness-truncate-end (plist-get state :query) 80))
+         (icon (concat "  " (propertize (harness-ui-icon 'harness-icon-search) 'face 'harness-dim-face) " "))
+         (first
+          (lambda (rest right)
+            ;; The line asked, then REST: the line asked gives way first,
+            ;; so what the search found stays in sight.
+            (let ((room (- (harness-ui-tasks--width) 6 (string-width right) (string-width rest)
+                           (string-width icon) (string-width dot) 2)))
+              (harness-ui-tasks-search--line
+               (concat icon
+                       (propertize (harness-ui-tasks--quote
+                                    (harness-truncate-end (plist-get state :query) (max 12 (min 80 room))))
                                    'face 'harness-task-search-face)
-                       dot))
+                       dot rest)
+               right))))
          (clear (harness-ui-tasks-search--button
                  "[Clear]" #'harness-ui-tasks-search-clear "Show every task again (C-g)")))
     (concat
      (pcase status
        ('searching
-        (harness-ui-tasks-search--line
-         (concat head (propertize (format "asking %s%s"
-                                          (if-let* ((model (or (plist-get state :model) harness-ui-tasks-search--model)))
-                                              (harness-ui-model-label model)
-                                            "the model")
-                                          harness-ui-tasks--ellipsis)
-                                  'face 'harness-dim-face))
-         (harness-ui-tasks-search--button "[Cancel]" #'harness-ui-tasks-search-clear
-                                          "Drop this search and show every task (C-g)")))
+        (funcall first
+                 (propertize (format "asking %s%s"
+                                     (if-let* ((model (or (plist-get state :model) harness-ui-tasks-search--model)))
+                                         (harness-ui-model-label model)
+                                       "the model")
+                                     harness-ui-tasks--ellipsis)
+                             'face 'harness-dim-face)
+                 (harness-ui-tasks-search--button "[Cancel]" #'harness-ui-tasks-search-clear
+                                                  "Drop this search and show every task (C-g)")))
        ('failed
-        (harness-ui-tasks-search--line
-         (concat head (harness-ui-level-icon 'failure) " "
-                 (propertize (concat "the search failed: " (harness-ui-one-line (plist-get state :error)))
-                             'face 'harness-failure-face))
-         (concat (harness-ui-tasks-search--button "[Retry]" #'harness-ui-tasks-search-retry "Ask again")
-                 " " clear)))
+        (funcall first
+                 (concat (harness-ui-level-icon 'failure) " "
+                         (propertize (concat "the search failed: " (harness-ui-one-line (plist-get state :error)))
+                                     'face 'harness-failure-face))
+                 (concat (harness-ui-tasks-search--button "[Retry]" #'harness-ui-tasks-search-retry "Ask again")
+                         " " clear)))
        (_
-        (harness-ui-tasks-search--line
-         (concat head
-                 (propertize (harness-ui-tasks-search--count (if (listp ids) (length ids) 0)) 'face 'harness-dim-face)
-                 (if-let* ((looked (plist-get state :looked)))
-                     (concat dot (propertize looked 'face 'harness-dim-face))
-                   ""))
-         clear)))
+        (funcall first
+                 (concat (propertize (harness-ui-tasks-search--counts state) 'face 'harness-dim-face)
+                         (if-let* ((looked (plist-get state :looked)))
+                             (concat dot (propertize looked 'face 'harness-dim-face))
+                           ""))
+                 clear)))
+     ;; What else it found.
+     (harness-ui-tasks-search--found-lines state)
      ;; What ran.
      (cond
       ((plist-get state :running)
@@ -279,7 +413,7 @@ says what the actions did, and a third asks about what waits for an OK."
                  (format "[%s]" (harness-ui-tasks-search--do-label proposed))
                  #'harness-ui-tasks-search-confirm
                  (substitute-command-keys
-                  "Do what the search proposes (or \\<harness-ui-tasks-board-map>\\[harness-ui-tasks-search] then RET on an empty line)"))
+                  "Do what the search proposes (or \\<harness-ui-tasks-board-map>\\[harness-ui-tasks-search] then RET on an empty box)"))
                 " "
                 (harness-ui-tasks-search--button "[Skip]" #'harness-ui-tasks-search-dismiss
                                                  "Leave it undone"))))
@@ -317,6 +451,9 @@ says what the actions did, and a third asks about what waits for an OK."
   ;; Forced: the banner says what the search is doing, which the board's
   ;; key -- the tasks -- does not change.
   (harness-ui-tasks--render t)
+  ;; The search box's placeholder names what an empty RET does, which
+  ;; an answer may just have changed.
+  (when (harness-ui-tasks--searching-p) (harness-compose-update-placeholder))
   (force-mode-line-update))
 
 (defun harness-ui-tasks-search--update (board seq &rest changes)
@@ -331,7 +468,7 @@ A search the board dropped, or one asked after, is left alone."
         (harness-ui-tasks-search--install)
         t))))
 
-;;;; Searching
+;;;; The search box
 
 (defun harness-ui-tasks-search--board ()
   "The board a search goes to: this buffer when it is one, else the project's."
@@ -344,65 +481,143 @@ A search the board dropped, or one asked after, is left alone."
   "Have the harness start the model of this board's next search now.
 It also says which model answers, which the banner names."
   (let ((board (current-buffer)))
-    (harness-ui-call "_harness/task/search-warm" (list :cwd harness-ui-tasks--dir)
+    (harness-ui-call "_harness/search/warm" (list :cwd harness-ui-tasks--dir)
                      (lambda (r)
                        (when (and (buffer-live-p board) (plist-get r :model))
                          (with-current-buffer board
                            (setq harness-ui-tasks-search--model (plist-get r :model)))))
                      #'ignore)))
 
-(defun harness-ui-tasks-search--read ()
-  "Read the line to search, naming in the prompt what an empty line does."
-  (let ((proposed (plist-get harness-ui-tasks-search--state :proposed)))
-    (read-string (if proposed
-                     (format "Find or act on tasks (RET: %s): " (harness-ui-tasks-search--short proposed))
-                   "Find or act on tasks: ")
-                 nil 'harness-ui-tasks-search-history)))
+(defun harness-ui-tasks-search--open ()
+  "Turn this board's compose box into a search box, and put point in it.
+What the box held waits aside (`harness-ui-tasks-search--draft') until
+the search is sent or the box closed (`harness-ui-tasks-search-leave').
+A box that is a search box already keeps its line."
+  (unless (harness-ui-tasks--searching-p)
+    (setq harness-ui-tasks-search--draft
+          (list :text (harness-compose-text)
+                :attachments harness-compose-attachments
+                :target harness-ui-tasks--target
+                :in-box (harness-compose-in-p)
+                :task (and (not (harness-compose-in-p)) (get-text-property (point) 'harness-task-id))))
+    (setq harness-compose-attachments nil)
+    (harness-ui-tasks--set-compose "" '(search)))
+  (unless harness-quick-search-box-mode (harness-quick-search-box-mode 1))
+  (setq harness-quick-search-box-function #'harness-ui-tasks-search-submit)
+  (harness-ui-tasks-search--warm)
+  (goto-char harness-compose-end)
+  (dolist (w (get-buffer-window-list nil nil t)) (set-window-point w (point))))
+
+(defun harness-ui-tasks-search-end ()
+  "Stop this board's compose box taking a search, keys and all.
+What the box held before is forgotten, and what it does is left as it
+is: `harness-ui-tasks-search-leave' gives both back instead.  The board
+calls this when the box turns to something else, a reply say."
+  (when harness-quick-search-box-mode (harness-quick-search-box-mode -1))
+  (setq harness-quick-search-box-function nil
+        harness-ui-tasks-search--draft nil))
+
+(defun harness-ui-tasks-search-leave ()
+  "Close this board's search box: the box gets back what it held before.
+Its text and attachments come back, and what it did -- a new task, an
+edited prompt, a message.  Point goes back to the card it was on when
+the search box opened, if the board still shows it, else stays in the
+box.  Nothing happens when the box takes no search."
+  (when (harness-ui-tasks--searching-p)
+    (let ((draft harness-ui-tasks-search--draft))
+      (harness-ui-tasks-search-end)
+      (setq harness-compose-attachments (plist-get draft :attachments))
+      (harness-ui-tasks--set-compose (or (plist-get draft :text) "") (plist-get draft :target))
+      (when-let* ((task (plist-get draft :task))
+                  (card (save-excursion
+                          (goto-char (point-min))
+                          (text-property-search-forward 'harness-task-id task #'equal))))
+        (goto-char (prop-match-beginning card))
+        (dolist (w (get-buffer-window-list nil nil t)) (set-window-point w (point)))))))
+
+(defun harness-ui-tasks-search-submit (text)
+  "Search TEXT, the line this board's search box sent, or do what is proposed.
+TEXT is trimmed.  A line goes to the search, and to the history of
+searches (`harness-quick-search-history'); the box gets back what it
+held before (`harness-ui-tasks-search-leave').  An empty line does what
+the board's search proposes, when it proposes something; else the
+search box stays, saying what it takes."
+  (let ((query (string-trim (or text ""))))
+    (cond
+     ((and (string-empty-p query) (plist-get harness-ui-tasks-search--state :proposed))
+      (harness-ui-tasks-search-leave)
+      (harness-ui-tasks-search-confirm))
+     ((string-empty-p query)
+      (message "Say what to find, or what to do"))
+     (t
+      (add-to-history 'harness-quick-search-history query)
+      ;; Point goes to the best match when it was on the board before
+      ;; the search box opened, as it would have stayed there.
+      (let ((focus (if (harness-ui-tasks--searching-p)
+                       (not (plist-get harness-ui-tasks-search--draft :in-box))
+                     (not (harness-compose-in-p)))))
+        (harness-ui-tasks-search-leave)
+        (harness-ui-tasks-search--start query focus))))))
 
 ;;;###autoload
 (defun harness-tasks-search (&optional query)
-  "Find tasks on the project's board, or act on them, by saying so.
-QUERY, read in the minibuffer, is a question about the tasks (\"did I
-have a task about the question button?\", \"what is stuck?\") or an
-order to manage some (\"get rid of the mq land task\", \"restart the
-errored tasks\").  It goes with the board to a quick, cheap model
-\(`harness-tasks-search-model'), which answers with the tasks QUERY is
-about and what to do with them.
+  "Find tasks, sessions and commands from the project's board, or act on tasks.
+The board's compose box turns into a search box, in colours of its own;
+what it held waits aside, and comes back once the search is sent or
+the box closed with \\<harness-ui-tasks-mode-map>\\[harness-ui-tasks-compose-quit].  A line there is a question about the
+tasks (\"did I have a task about the question button?\", \"what is
+stuck?\"), an order to manage some (\"get rid of the mq land task\",
+\"restart the errored tasks\"), or a session or a command to find
+\(\"where did I debug the merge queue?\").  \\`RET' sends it, with the
+board and the harness's commands, to a quick, cheap model
+\(`harness-tasks-search-model'), which favours tasks: it answers with
+the tasks the line is about and what to do with them, and the sessions
+and commands it found.  \\`M-p' and \\`M-n' bring back earlier searches.
 
 The board shows those tasks only, under a banner that says what it
-shows; \\<harness-ui-tasks-mode-map>\\[harness-ui-tasks-compose-quit] there shows every task again.  What is easily undone or
-does no harm (archive, restore, retry, start) is done at once and the
-banner says so, with [Undo]; what interrupts work, merges it or sends
-words to an agent is proposed, and an empty QUERY then does it.
+shows and lists the sessions and commands found, with buttons to open
+or run them; \\[harness-ui-tasks-compose-quit] there shows every task again.  What is easily
+undone or does no harm (archive, restore, retry, start) is done at once
+and the banner says so, with [Undo]; what interrupts work, merges it or
+sends words to an agent is proposed, and \\`RET' on the empty search box
+then does it.
 
 On a board this searches it; elsewhere the current project's board
-opens first."
+opens first.  With QUERY, from Lisp, the search starts at once, and the
+compose box is left as it is."
   (interactive)
   (let ((board (or (harness-ui-tasks-search--board) (user-error "No task board to search"))))
     (with-current-buffer board
-      (when (called-interactively-p 'any) (harness-ui-tasks-search--warm))
-      (let ((query (string-trim (or query (harness-ui-tasks-search--read)))))
-        (cond
-         ((not (string-empty-p query)) (harness-ui-tasks-search--start query))
-         ((plist-get harness-ui-tasks-search--state :proposed) (harness-ui-tasks-search-confirm))
-         (t (message "Say what to find, or what to do")))))))
+      (if query
+          (harness-ui-tasks-search-submit query)
+        (harness-ui-tasks-search--open)))
+    board))
 
-(defun harness-ui-tasks-search--start (query)
-  "Ask this board's search model about QUERY, and show what it finds."
+;;;; Searching
+
+(defun harness-ui-tasks-search--start (query &optional focus)
+  "Ask this board's search model about QUERY, and show what it finds.
+The search favours tasks; the board, where it was typed and the
+harness's commands go along (`search/ask').  FOCUS non-nil gives point
+to the best match, once the board shows it."
   (let* ((board (current-buffer))
          (seq (cl-incf harness-ui-tasks-search--seq))
          (old harness-ui-tasks-search--state)
          ;; \"Them\" in QUERY means the tasks a finished search shows.
-         (shown (let ((ids (plist-get old :ids))) (and (listp ids) ids))))
+         (shown (let ((ids (plist-get old :ids))) (and (listp ids) ids)))
+         (opts (list :bias "tasks"
+                     :context (harness-quick-search-context)
+                     :shown shown
+                     :commands (harness-quick-search-commands))))
     (setq harness-ui-tasks--error nil
           harness-ui-tasks-search--state
           (list :query query :seq seq :status 'searching
                 ;; Until the answer, the board shows what it showed.
                 :ids (if (listp (plist-get old :ids)) (plist-get old :ids) 'all)
-                :focus (not (harness-compose-in-p))))
+                :focus focus))
     (harness-ui-tasks-search--install)
     (harness-ui-tasks-search--spin)
-    (harness-ui-call "_harness/task/search" (list :cwd harness-ui-tasks--dir :query query :opts (list :shown shown))
+    (harness-ui-call "_harness/search/ask" (list :cwd harness-ui-tasks--dir :query query :opts opts)
                      (lambda (plan) (harness-ui-tasks-search--arrived board seq plan))
                      (lambda (err)
                        (harness-ui-tasks-search--update board seq :status 'failed
@@ -416,6 +631,11 @@ opens first."
          (ids (plist-get plan :ids)))
     (when (harness-ui-tasks-search--update board seq :status 'done :ids ids :model (plist-get plan :model)
                                            :looked (plist-get plan :looked) :proposed later
+                                           :tasks (plist-get plan :tasks)
+                                           :sessions (plist-get plan :sessions)
+                                           :commands (plist-get plan :commands)
+                                           :note (plist-get plan :note)
+                                           :widened (eq t (plist-get plan :widened))
                                            :results nil :undo nil)
       (with-current-buffer board
         (when (and ids (plist-get harness-ui-tasks-search--state :focus))
@@ -425,10 +645,7 @@ opens first."
         (cond
          (now (harness-ui-tasks-search--apply board seq now))
          (later (message "%s" (substring-no-properties (harness-ui-tasks-search--ask-text later))))
-         (t (message "%s" (pcase (length ids)
-                            (0 (format "No task matches %s" (harness-ui-tasks--quote (plist-get plan :query))))
-                            (1 "1 task matches")
-                            (n (format "%d tasks match" n))))))))))
+         (t (message "%s" (harness-ui-tasks-search--found-text plan))))))))
 
 (defun harness-ui-tasks-search--apply (board seq actions)
   "Run ACTIONS of BOARD's search SEQ; then say how they went.
@@ -453,6 +670,33 @@ the board shows that search."
                       :results (mapcar (lambda (a) (append a (list :ok :false :error (harness-error-message err))))
                                        actions))
                      (message "The search's actions failed: %s" (harness-error-message err)))))
+
+(defun harness-ui-tasks-search-show-plan (plan)
+  "Show PLAN on this board, as its search would: its tasks, under a banner.
+PLAN is what `search/ask' answers, or as much of it as the quick
+search's [Board] has: (:ids IDS :query QUERY), with `:sessions',
+`:commands', `:note', `:widened', `:looked' and `:model' when it has
+them.  The board shows the tasks IDS only, point on the first, under a
+banner naming QUERY and the rest.  Nothing is done, nor proposed: PLAN's
+actions stay where they were found.  An answer still on its way to this
+board's own search is dropped."
+  (unless (harness-ui-tasks--board-p (current-buffer)) (user-error "Not a task board"))
+  (let ((ids (plist-get plan :ids)))
+    (setq harness-ui-tasks--error nil
+          harness-ui-tasks-search--state
+          (list :query (or (plist-get plan :query) "")
+                :seq (cl-incf harness-ui-tasks-search--seq)
+                :status 'done :ids ids :model (plist-get plan :model)
+                :looked (plist-get plan :looked)
+                :tasks (plist-get plan :tasks)
+                :sessions (plist-get plan :sessions)
+                :commands (plist-get plan :commands)
+                :note (plist-get plan :note)
+                :widened (eq t (plist-get plan :widened))))
+    (harness-ui-tasks-search--install)
+    (when ids
+      (setq harness-ui-tasks--focus (cons (car ids) (float-time)))
+      (harness-ui-tasks--focus-card))))
 
 ;;;; Commands of the banner
 
@@ -487,7 +731,8 @@ Archive and restore undo each other; a priority goes back to what it was."
 (defun harness-ui-tasks-search-retry ()
   "Ask the line of this board's search again."
   (interactive)
-  (harness-ui-tasks-search--start (plist-get (harness-ui-tasks-search--state-or-error) :query)))
+  (harness-ui-tasks-search--start (plist-get (harness-ui-tasks-search--state-or-error) :query)
+                                  (not (harness-compose-in-p))))
 
 (defun harness-ui-tasks-search-clear ()
   "Drop this board's search: every task shows again.
@@ -551,29 +796,28 @@ time the header line is drawn, which is on every key typed."
   (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
     (harness-ui-one-line
      (substitute-command-keys
-      "Find tasks, or act on them, by saying so in words (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-search])"))))
+      "Find tasks, sessions and commands, or act on tasks, by saying so in words (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-search])"))))
 
 ;;;; Module
 
 (defun harness-ui-tasks-search--init ()
-  "Hook the search into the boards and the global keys."
-  (add-hook 'harness-ui-tasks-header-functions #'harness-ui-tasks-search--header)
-  (define-key harness-ui-map (kbd "/") #'harness-tasks-search)
-  (ignore-errors
-    (unless (ignore-errors (transient-get-suffix 'harness-menu "/"))
-      (transient-append-suffix 'harness-menu "a" '("/" "Search tasks" harness-tasks-search)))))
+  "Hook the search into the boards' header line.
+Its key is the board's own / (`harness-ui-tasks-search'); / under the
+harness prefix is the quick search's, which on a board is this search."
+  (add-hook 'harness-ui-tasks-header-functions #'harness-ui-tasks-search--header))
 
 (defun harness-ui-tasks-search--shutdown ()
-  "Stop the spinner."
+  "Stop the spinner, and give every board's search box back what it held."
   (when (timerp harness-ui-tasks-search--timer) (cancel-timer harness-ui-tasks-search--timer))
-  (setq harness-ui-tasks-search--timer nil))
-
-(declare-function transient-get-suffix "transient")
-(declare-function transient-append-suffix "transient")
+  (setq harness-ui-tasks-search--timer nil)
+  (dolist (board (harness-ui-tasks--buffers))
+    (with-current-buffer board
+      (when (harness-ui-tasks--searching-p)
+        (ignore-errors (harness-ui-tasks-search-leave))))))
 
 (harness-define-module 'ui-tasks-search
-  :doc "The task board's search: find tasks or act on them in words, answered by a cheap model."
-  :requires '(ui-tasks)
+  :doc "The task board's search: find tasks, sessions and commands or act on tasks in words, answered by a cheap model."
+  :requires '(ui-tasks ui-quick-search)
   :init #'harness-ui-tasks-search--init
   :shutdown #'harness-ui-tasks-search--shutdown)
 

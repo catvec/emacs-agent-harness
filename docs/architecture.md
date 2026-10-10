@@ -4139,7 +4139,8 @@ priority).
 
 One search over the transcripts of every session
 (lisp/modules/harness-session-search.el), for the `session_search` tool,
-the task board's search and the UI's `harness-search-sessions` (C-c h g;
+the harness's search in words (tasks-search, below: the quick search and
+the task board's) and the UI's `harness-search-sessions` (C-c h g;
 lisp/ui/harness-ui-search.el).
 
 - The transcripts stay in their node logs.  The index is a cache of
@@ -4219,55 +4220,158 @@ lisp/ui/harness-ui-search.el).
   cycles the mode, `a` narrows to the project the search started from
   or widens to every project, `s` asks another query, `g` searches
   again and `+` shows more sessions.  RET opens a session at a match:
-  `harness-ui-chat-goto-node NODE SESSION REGEXP` loads the transcript
-  and its older pages until the node shows, opens a group or fold that
-  hides it (and a long output's hidden part), and puts point on the
-  first match of REGEXP in it, the text the snippet marked; a node off
-  the session's current branch is reported.  The conversation tree
-  opens a node the same way.
+  `harness-ui-search-visit SESSION NODE REGEXP` opens the session as the
+  session list does, then `harness-ui-chat-goto-node NODE SESSION
+  REGEXP` loads the transcript and its older pages until the node shows,
+  opens a group or fold that hides it (and a long output's hidden part),
+  and puts point on the first match of REGEXP in it, the text the
+  snippet marked; a node off the session's current branch is reported.
+  `harness-ui-search-hit-regexp HIT &optional QUERY MODE` makes the
+  REGEXP from a hit's `:snippet` and `:ranges` (for none marked, from the
+  query of a literal or regexp search).  Both serve the quick search's
+  [Open], whose sessions carry the same `:node`, `:snippet` and `:ranges`
+  (see tasks-search).  The conversation tree opens a node the same way.
 
 ### tasks-search
 
-The task board's search: a query in words ("did I have a task about the
-question button?", "restart the errored tasks") finds tasks and may act
-on them, answered by a cheap model that returns JSON only.
+The harness's search in words: a query ("did I have a task about the
+question button?", "restart the errored tasks", "where did I debug the
+merge queue?", "how do I attach a file?") finds tasks, sessions and
+commands, and may act on tasks, answered by a cheap model that returns
+JSON only.  `search/ask` is its one method, for the whole harness: the
+task board asks it favouring tasks, any other view favouring what the
+place suggests.  The module requires tasks, provider and session-search:
+transcripts are searched by `session/search` (see session-search), full
+text, and by nothing else.
 
-- `task/search CWD QUERY &optional (:shown IDS)` → promise of
-  `(:query QUERY :ids IDS :actions ACTIONS :model MODEL :looked LOOKED)`.
-  Nothing changes yet.  IDS are the tasks QUERY is about, best match
-  first, archived ones included; ACTIONS are what QUERY orders, each
-  `(:task ID :action NAME :text TEXT :title TITLE :confirm BOOL)`, NAME
-  one of `harness-tasks-search-actions` (`archive`, `restore`, `stop`,
-  `retry`, `start`, `verify`, `complete`, `message`, `reject`,
-  `priority`), TEXT the words a message or a send-back carries or the
-  priority a `priority` action gives (one naming none, or the level the
-  task's session already has, or for a done task, is dropped), and
-  `:confirm` t for an action
-  that interrupts work, merges it or sends words to an agent (stop,
-  verify, complete, message, reject, and archive of a working task),
-  false for the rest.  `:shown` is what the board shows now, which
-  "them" in QUERY means.  `:looked` says what the model read besides the
-  board.
-- The message to the model carries a compact dump of the board: for
-  every task (newest first, at most `harness-tasks-search--max-tasks`)
-  its id, column and state, title, the request it was asked in, its
-  priority when it is not medium, the todo it is on, what it waits for
-  the user on, the summary it handed in, its branch, times and errors.
-  The system prompt
-  (`harness-tasks-search--system`) is constant, and the model must
-  answer one line of JSON `{"show":[ID…],"do":[{"task":ID,"action":…}]}`.
-  Unknown ids are dropped and acted-on tasks are always shown.  When the
-  model asks to look further instead of answering -- `{"grep":TEXT}` over
-  the transcripts of the tasks' sessions or `{"read":[ID…]}` for the
-  latest transcript, at most `harness-tasks-search--read-limit` tasks --
-  it gets one more round (`harness-tasks-search--final-text` closes it)
-  and must answer then.  TEXT is searched by `session/search` in text
-  mode (see session-search): its words in any form, the best two matches
-  of each task session that has them; when none has every word the
-  answer says these have some of them, and when none has any, with an
-  embedding model set, that they are the nearest in meaning.  Without
-  the session-search module the logs (`sessions/*.nodes.jsonl` under the
-  state directory) are grepped in a subprocess for TEXT as typed.
+- `search/ask CWD QUERY &optional OPTS` → promise of the plan
+  `(:query QUERY :model MODEL :bias BIAS :looked LOOKED :session-query
+  SESSION-QUERY :note NOTE :widened WIDENED :ids IDS :actions ACTIONS
+  :tasks TASKS :sessions SESSIONS :commands COMMANDS)`.  Nothing changes
+  yet.  CWD is the
+  project the query was typed in, and OPTS a plist:
+  - `:bias` what to favour: `"tasks"`, `"sessions"` or `"commands"`
+    (singular too).  By default it is what the view of `:context`
+    suggests: tasks on the board, sessions in the session list or a
+    conversation tree, commands anywhere else.  It only favours: the
+    model is given all three kinds whatever it favours.
+  - `:context` where the query was typed, `(:view VIEW :title TITLE
+    :mode MODE :session ID :project DIR)`: VIEW is `"board"`,
+    `"chat"`, `"sessions"`, `"tree"` or another word for any other
+    buffer, TITLE and MODE that buffer's, ID the session the user is in,
+    which the answer leaves out, and DIR the project.  The model reads it
+    as one line ("Context: the chat of session ... Favour commands, then
+    sessions; tasks count too.").
+  - `:commands` the commands the model may name, the UI's catalogue,
+    each `(:command NAME :keys KEYS :where WHERE :label LABEL :doc DOC
+    :here HERE)`, HERE true when the command runs where the query was
+    typed.  Keys, menus and modes are the UI's to know, and the UI may be
+    in another Emacs, so it sends them along; without any, no command is
+    named.  Only an entry of the catalogue is ever named.
+  - `:shown` the ids the board shows now, which "them" in QUERY means.
+
+  IDS are the tasks QUERY is about, best match first, archived ones
+  included, and TASKS those tasks again, each `(:id :title :status
+  :session)`, for a view that has no board.  SESSIONS are the sessions it
+  is about, of any project, best first, each `(:id :name :kind :status
+  :project :cwd :updated :snippet :node :ranges :task)`: `:project` the
+  name of its project; `:snippet` the passage around the first match a
+  search of the transcripts found in it, on one line, `:node` the id of
+  the node that holds it and `:ranges` where the matches are in the
+  snippet, each `(START END)` -- all three nil for a session found by its
+  name only; `:task` the task of the board it works on or nil.  A view
+  opens the session at `:node`, the words found highlighted (the quick
+  search's [Open], below).  COMMANDS are the entries of the catalogue it
+  is about, best first.  BIAS is what the search favoured, LOOKED says
+  what the model looked at besides what it was given, and SESSION-QUERY
+  is the text the sessions' transcripts were searched with, or would be:
+  what the model asked them for when it looked (`{"sessions":TEXT}`,
+  else `{"grep":TEXT}`), else the words of QUERY that say something
+  (`harness-tasks-search--content`, those the transcripts up front and
+  widening search for), nil when QUERY has none.  A view that shows
+  every match in the sessions searches for it (the quick search's
+  [All matches], below), not for the line as typed, whose "where did I"
+  would only dilute a full-text search.  NOTE is the model's word on the
+  answer ("No task matched; these sessions mention it.") or
+  nil.  WIDENED is t when the model answered with nothing and the search
+  added what comes nearest itself (Widening, below), NOTE saying so, else
+  false.  ACTIONS are what QUERY orders, in order, each `(:task ID
+  :action NAME :text TEXT :title TITLE :confirm BOOL)`, NAME one of
+  `harness-tasks-search-actions` (`archive`, `restore`, `stop`, `retry`,
+  `start`, `verify`, `complete`, `message`, `reject`, `priority`), TEXT
+  the words a message or a send-back carries or the priority a
+  `priority` action gives (one naming none, or the level the task's
+  session already has, or for a done task, is dropped), and `:confirm` t
+  for an action that interrupts work, merges it or sends words to an
+  agent (stop, verify, complete, message, reject, and archive of a
+  working task), false for the rest.  `task/search-apply` runs them.
+- The first message to the model carries the project and the time, the
+  context line, a compact dump of the board, the sessions, the commands
+  and the query.  The board is every task (newest first, at most
+  `harness-tasks-search--max-tasks`, fewer when the search favours
+  something else) with its id, column and state, title, the request it
+  was asked in, its priority when it is not medium, the todo it is on,
+  what it waits for the user on, the summary it handed in, its branch,
+  times and errors.  The sessions are the other sessions, best match of
+  their names first and then the newest, at most
+  `harness-tasks-search--max-sessions` (a search favouring tasks shows
+  only those whose names match), each by the first eight characters of
+  its id, its kind, status and project and its name.  The commands are
+  those the words of the query match, with their keys, where they apply
+  and what they do, at most `harness-tasks-search--max-commands`; a
+  search favouring commands that matches few adds the menu's.  The system
+  prompt (`harness-tasks-search--system`) is constant, shared by every
+  search whatever it favours, and the model must answer one line of JSON
+  `{"show":[ID...],"sessions":[ID...],"commands":[NAME...],"do":[{"task":ID,"action":...}],"note":"..."}`.
+  Unknown ids and commands are dropped, acted-on tasks are always shown,
+  and a session is named by its id or the start of it.
+- The transcripts up front.  A search that favours sessions (the
+  session list, the conversation tree, [Search sessions]) searches every
+  session's transcript before the model reads anything
+  (`harness-tasks-search--upfront`): `session/search`, text mode, for the
+  words of the query that say something
+  (`harness-tasks-search--content`: the query without the stop words of
+  `harness-tasks-search--stop-words`, so "where did I write the API
+  guide?" is searched as "write API guide": the full-text search wants
+  every word, so "where" and "did" would keep it from finding anything
+  or, once it settled for some of the words, rank unrelated sessions
+  first), leaving out the session the user is in, at most
+  `harness-tasks-search--max-found` sessions with their best two
+  matches.  What it finds goes to the model as a block of its own
+  ("Sessions that mention ..., best first"), ahead of the sessions listed
+  by their names, which leave those out, and the sessions are remembered
+  with where their first match is (`:node`, `:snippet`, `:ranges`): one
+  found by what was said in it can be named after a single call of the
+  model, and a view opens it there.  The model's process is taken once
+  that search is done.  A search that favours tasks or commands does not
+  do this; its model may ask to look.
+- Looking further.  When the model asks to look further instead of
+  answering, with one object holding any of `{"grep":TEXT}` (the
+  transcripts of the tasks' sessions), `{"read":[ID...]}` (the latest
+  transcript of at most `harness-tasks-search--read-limit` tasks),
+  `{"sessions":TEXT}` (the transcripts and names of every session, not
+  only the tasks'; the sessions found are remembered with where their
+  first match is) or `{"commands":TEXT}` (the catalogue, matched by
+  words), it gets one more round (`harness-tasks-search--final-text`
+  closes it) and must answer then.  The prompt tells it to use that one
+  look to search beyond what the search favours when that has no answer,
+  and to say so in `note`.  A TEXT for "grep" or "sessions" is a
+  full-text query for `session/search` (see session-search), and the
+  prompt says so: its words match in any form and every word must match,
+  "quoted words" match as a phrase, `word*` as a prefix, `a OR b` either,
+  `-word` leaves out what has it, best match first, the best two matches
+  of each session.  When no session has every word the answer says the
+  ones listed have some of them, and when none has any, with an
+  embedding model set, that they are the nearest in meaning.  A
+  `session/search` that fails is told to the model ("The session search
+  failed: ...") and logged as a warning, and the search goes on.
+- Widening.  When the answer shows, names and does nothing, the search
+  adds what comes nearest itself (`harness-tasks-search--nearest`)
+  without asking the model again: the sessions a search of the
+  transcripts for the words of the query that say something finds and the
+  commands it matches, at most `harness-tasks-search--max-nearest` of
+  each, with `:widened` t and a NOTE saying so, or saying that nothing
+  matched at all.
 - The model is `harness-tasks-search-model`: `auto` (the default) takes
   the provider of the task model's `simple` tier (`provider/tier-model`),
   nil uses the task model itself, a string forces one.
@@ -4279,10 +4383,11 @@ on them, answered by a cheap model that returns JSON only.
   history and CLAUDE.md stay out of it.  Every search gets its own
   session id, and its process is closed when it ends
   (`provider/close`).
-- `task/search-warm CWD` → `(:model MODEL :warm BOOL)`: start the model
-  process the next search of CWD's board will use (`provider/warm`), so
-  the answer comes sooner; a process left unused is closed after
-  `harness-tasks-search--warm-idle` seconds.
+- `search/warm CWD` → `(:model MODEL :warm BOOL)`: start the model
+  process the next search of CWD's project will use (`provider/warm`),
+  so the answer comes sooner, whatever the search favours; a process
+  left unused is closed after `harness-tasks-search--warm-idle` seconds.
+  A search box calls it as it opens.
 - `task/search-apply ACTIONS` → promise of one result per action,
   `(:task :action :title :ok :error :undo)`, run in order: archive stops
   a working task first and archives it once it stopped
@@ -4295,11 +4400,13 @@ on them, answered by a cheap model that returns JSON only.
   ARCHIVE and RESTORE carry `:undo`, the action that undoes them, and
   PRIORITY the priority action back to what the task had.
 - Searches are not sessions: their cost is recorded with `usage/record`
-  under the board's project with `:session nil`.
+  under the project with `:session nil`.
 - Settings `harness-tasks-search-model`, `harness-tasks-search-thinking`;
   the demo provider answers search requests heuristically (word match
-  plus action verbs, and priority words such as "prioritize"), so the
-  dev daemon, the tests and the screenshots work offline.
+  plus action verbs, and priority words such as "prioritize", and the
+  words of the sessions the transcripts' search listed, the sessions'
+  names and the commands' lines), so the dev daemon and the tests work
+  offline; the screenshots script answers them from a script of its own.
 
 ### pet
 
@@ -5901,7 +6008,7 @@ client shows them.
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `fallback/`, `worktree/`, `merge/`,
 `config/`, `skills/`, `permission/`, `question/`, `compaction/`, `handoff/`, `naming/`,
-`project/`, `task/`, `notification/`, `sandbox/status`, `harness-dev/`, `harness/api`,
+`project/`, `task/`, `search/`, `notification/`, `sandbox/status`, `harness-dev/`, `harness/api`,
 `harness/modules`, `harness/version`, `harness/reload`, `acp/remote-`, `pet/`, `version/`,
 `insights/`, `supervisor/`, `seed/` (`harness-acp-extension-prefixes`), or with one of
 `harness-acp-extra-method-prefixes`, which modules of the user's own
@@ -7274,27 +7381,118 @@ as `harness-tasks--start-order` has it; only queued tasks have a place
 in line).
 
 The board's search (`harness-ui-tasks-search`, `/` on the board,
-[Search] in its header, `C-c h /` anywhere, which opens the project's
-board first) reads a line in the minibuffer and sends it to
-`_harness/task/search`; the board then shows only the tasks the answer is
-about, archived ones included, under a banner that says the line, how
-many tasks it shows and what the model looked at besides the board.
-`harness-ui-tasks-filter` carries that: `:show` a predicate over a task,
-`:banner` a function returning the text above the columns, `:clear` the
-function that drops it, which `C-g` on the board runs when the compose
-box has nothing to leave ([Clear] does too).  The columns left without a
-task are hidden.  An action the answer does not need confirmed runs at
-once, and the banner and the echo area say what it did (the toast), with
-[Undo] when it can be undone (archive and restore undo each other, and
-a new priority goes back to the old one: "Made “A” high priority");
-`task/search-apply` runs them.  An action that interrupts work, merges
-it or sends words to an agent is proposed instead: the banner asks, with
-a button that does it and [Skip], and `/` then RET on an empty line does
-it too (the prompt names what an empty line would do).  The header's
-[Search] segment spins while the model works, and each search opens with
-`_harness/task/search-warm` so its process is started before the line is
-typed; the model's name shows while it answers.  The best match gets
-point once the board shows it (`harness-ui-tasks--focus`).
+[Search] in its header, `C-c h /` on a board) turns the board's compose
+box into a search box (`harness-tasks-search`) instead of reading the
+line in the minibuffer: the box's target becomes `(search)`
+(`harness-ui-tasks--target`, `harness-ui-tasks--searching-p`), its label
+says what it does with a `[cancel]` button, and it wears colours of its
+own (`harness-task-search-box-face` and its accent), as a message's box
+does.  What the box held -- its text, its attachments and its target, a
+new task, an edit or a message -- waits aside
+(`harness-ui-tasks-search--draft`) and comes back once the search is
+sent or `C-g` closes the box (`harness-ui-tasks-search-leave`); the box
+turning to another target ends the search
+(`harness-ui-tasks-search-end`).  The keys of the box are the quick
+search's (`harness-quick-search-box-mode`, below): `RET` sends the line
+to `harness-ui-tasks-search-submit`, where an empty line does what the
+search proposes, and `M-p`/`M-n` go through `harness-quick-search-history`,
+the one history of the board's searches and the quick search's.
+The line goes to `_harness/search/ask` favouring tasks, with where it was
+typed (`harness-quick-search-context`) and the catalogue of commands
+(`harness-quick-search-commands`); the board then shows only the tasks
+the answer is about, archived ones included, under a banner that says
+the line, what it matched ("1 task · 2 sessions · 1 command", or "no
+task matches") and what the model looked at besides the board.  The
+banner goes on with the answer's note, the sessions it names and the
+commands (at most four of each, then "... N more"), each drawn as the
+quick search draws it (`harness-quick-search-session-line`,
+`-command-line`) with the board's buttons: [Open], which opens a session
+found in a transcript at its match, as the quick search's does (below),
+[Run], [Describe].  A search that found nothing is widened by the search
+method, and the note says so.  `harness-ui-tasks-filter` carries the
+banner: `:show` a predicate over a task, `:banner` a function returning
+the text above the columns, `:clear` the function that drops it, which
+`C-g` on the board runs when the compose box has nothing to leave
+([Clear] does too).  The columns left without a task are hidden.  An
+action the answer does not need confirmed runs at once, and the banner
+and the echo area say what it did (the toast), with [Undo] when it can
+be undone (archive and restore
+undo each other, and a new priority goes back to the old one: "Made “A”
+high priority"); `task/search-apply` runs them.  An action that
+interrupts work, merges it or sends words to an agent is proposed
+instead: the banner asks, with a button that does it and [Skip], and `/`
+then RET on the empty box does it too (the box's placeholder names what
+an empty line would do).  The header's [Search] segment spins while the
+model works, and each search box opens with `_harness/search/warm`
+so its process is started before the line is typed; the model's name
+shows while it answers.  The best match gets point once the board shows
+it (`harness-ui-tasks--focus`).  `harness-ui-tasks-search-show-plan`
+shows a plan on the board without searching, which the quick search's
+[Board] uses.
+
+Quick search (`harness-ui-quick-search`, `C-c h /` anywhere but on a
+board, `/` in the `C-c h ?` menu, `harness-quick-search`): a popout
+(`harness-ui-popout`, KEY `(quick-search)`) at the bottom of the frame,
+opened from any buffer, whose shared compose box takes the line to
+search (`harness-quick-search-box-mode`: `RET` in the box calls
+`harness-quick-search-box-function` with the trimmed text, `M-p`/`M-n`
+walk `harness-quick-search-history`, and outside the box the keys are the
+buffer's own; `C-c C-c` sends too).  The line stays in the box.  It goes
+to `_harness/search/ask` with `:context` (`harness-quick-search-context`:
+the view of the buffer the popout was opened from -- board, chat,
+session list, conversation tree, settings or other -- its title and mode,
+the session of a chat, which the answer leaves out, and the project),
+`:bias` (`harness-quick-search-bias`: tasks on a board, sessions in the
+session list and the conversation tree, commands elsewhere) and
+`:commands`, the catalogue (`harness-quick-search-commands`): the
+harness menu's own commands, the keys under `harness-ui-prefix-key`, the
+`harness-menu-group` of every mode and every other interactive
+`harness-*` command, each with the keys it has in the buffer, where it
+applies, what the menu calls it, the first line of its documentation and
+whether it runs there.  What takes long in it does not depend on the
+buffer: the walk over every symbol of Emacs that finds the modes and the
+commands, which grows with each package loaded (some 20 ms in a plain
+Emacs, a tenth of a second in a big one), and each command's first line
+of documentation.  They are one scan
+(`harness-quick-search--scan-cache`) built ahead: the module's init
+schedules an idle timer (`harness-quick-search--idle-delay`, a second)
+that builds it in `while-no-input`, so typing stops the build and the
+next idle moment starts again; `after-load-functions` marks the scan
+stale and schedules one rebuild (at most one timer waits), the stale
+scan serving until then, so a command defined a moment ago may be
+missing for a second; only a search that finds no scan at all builds one
+on the spot, and the module's shutdown unhooks, cancels the timer and
+forgets the scan.  A search does only what its buffer decides, from the
+scan: the menu's suffixes, the keys under the prefix, the modes' groups,
+the `:here` flags and the keys it binds (a few milliseconds).  The
+popout draws where the search was opened from and what it favours, the
+line and what it found, a note ("widened", with a caution icon, when the
+search added the nearest) and a heading for each kind in the order the
+bias suggests -- Commands (keys, what it does, name and where it
+applies, [Run] when it runs where the search was opened, [Describe]),
+Sessions ([All matches] on the heading; for each: status, name, kind,
+project, when it was active, [Open] and, dim under it, the passage the
+search found), Tasks (id, title, state, [Board]) -- then
+[Search sessions] and [Search commands], which ask the line again with
+that bias.  [Run] closes the popout and calls the command interactively
+in the window and buffer the search was opened from; only an interned
+`harness-*` command runs.  [Open] is `harness-quick-search-open-session`
+on the session's entry of the plan: it closes the popout and calls
+`harness-ui-search-visit` (see session-search) with the entry's `:node`
+and the regexp `harness-ui-search-hit-regexp` makes of its `:snippet`
+and `:ranges`, so a session found in a transcript opens at the message
+that matched, point on the words found, highlighted; one found by its
+name opens as the session list opens it.  The module requires ui-search
+for this.  [All matches] is `harness-quick-search-all-matches`: it
+closes the popout and runs `harness-search-sessions` (C-c h g) for the
+words the search looked for in the sessions, the plan's `:session-query`
+(the line as typed when it has none), the session search's own view of
+every session that matches, with its snippets.
+[Board] opens the task board with the found tasks shown, and the actions
+of the answer are proposed with [Do it] and [Skip]: nothing is done
+unasked.  A search that found nothing even widened says "Nothing found".
+Answers carry the search's number and a popout drops those of an earlier
+search.
 
 Companion pet (`harness-ui-pet`, `C-c h z`, `harness-pet`, menu `z`):
 the buffer `*harness pet*`, and a few places besides.  Before it

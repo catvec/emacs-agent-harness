@@ -54,6 +54,13 @@ OpenAI-compatible APIs and AWS Bedrock.
   worktree, review the results, and merge them back through a merge
   queue. A per-project limit on running tasks starts the waiting ones
   by priority (low, medium, high).
+- **Quick search.** Say what you want -- "how do I attach a file?",
+  "where did I debug the merge queue?", "the task about the docs" -- and
+  a cheap model finds the command to run, the session to open, at the
+  message where it was said, or the task, from any buffer. It favours
+  tasks on the task board and commands and sessions elsewhere, and looks
+  wider when what it favours has no answer (see
+  [Quick search](#quick-search)).
 - **Supervisor mode.** A session on an expensive model plans and
   coordinates while workers on cheaper models make the changes. The
   harness enforces it with tools rather than a prompt: the supervising
@@ -77,7 +84,7 @@ OpenAI-compatible APIs and AWS Bedrock.
   in any form, ranked by a full-text index the harness keeps in SQLite,
   the exact text, a regular expression, or, with an embedding model,
   meaning. A match opens its session right where it was said. Agents
-  search the same way.
+  search the same way, and so does the quick search.
 - **Cost tracking.** Cost per turn, subscription quotas, budgets and a
   usage dashboard.
 - **Insights.** A report on how a day, a week or a month of work with
@@ -113,10 +120,12 @@ OpenAI-compatible APIs and AWS Bedrock.
 | The session list | The worktrees of a project and their sessions |
 | ![The session list with a permission request popped out, its allow and deny buttons under it](docs/media/popout-permission.png) | ![The task board with a question popped out, its options and a box to type another answer under it](docs/media/popout-question.png) |
 | A request popped out of the session list, answered there | A question popped out of the task board, answered there |
-| ![A BTW side conversation open under a session](docs/media/btw.png) | ![The harness menu opened from a chat](docs/media/menu.png) |
-| A BTW side conversation under its session | The menu, with the chat's own commands |
-| ![The task board writing a message to the session of a task at work, the compose box in amber](docs/media/tasks-message.png) | ![The task board filtered by a search in words: the query, one task matches, the archive it did and [Undo]](docs/media/tasks-search.png) |
-| Messaging a task's session: the box says so, in its colours | A search in words: the board shows what it is about, and acts |
+| ![A BTW side conversation open under a session](docs/media/btw.png) | ![The task board writing a message to the session of a task at work, the compose box in amber](docs/media/tasks-message.png) |
+| A BTW side conversation under its session | Messaging a task's session: the box says so, in its colours |
+| ![The harness menu opened from a chat](docs/media/menu.png) | ![The quick search opened from a chat: a popout under the code and the chat lists the command that attaches a file, with Run and Describe, and the session that wrote the API guide, with Open and the passage found in it, under a Sessions heading with All matches](docs/media/quick-search.png) |
+| The menu, with the chat's own commands | Quick search from a chat: a command to run, and a session found by what was said in it, to open |
+| ![The task board filtered by a search typed in its compose box: the query, one task matches, the archive it did and [Undo], and the box, blue, ready for the next search](docs/media/tasks-search.png) | |
+| A search in words, typed in the board's own box: the board shows what it is about, and acts | |
 | ![The Insights report over 30 days: the totals, the summary the model wrote, and the messages by hour of day and by weekday](docs/media/insights.png) | ![The Insights report further down: the busiest sessions, each tool's calls and failures, the permission decisions and the tasks](docs/media/insights-activity.png) |
 | Insights: a month of work, summed up by your model | The sessions, tools, permissions and tasks behind it |
 
@@ -243,7 +252,9 @@ mode line notifier, and starts the harness in the background.
    session opens in a window on the right.
 2. Type a message in the compose box at the bottom of the chat buffer
    and press `C-c C-c` to send it.
-3. Press `C-c h ?` to open a menu of every command.
+3. Press `C-c h ?` to open a menu of every command, or `C-c h /` to say
+   what you want in words and have the command, session or task found
+   (see [Quick search](#quick-search)).
 
 When the menu is opened from a harness buffer (a chat, the task board,
 the session list, the conversation tree, the worktree list, the usage
@@ -340,7 +351,7 @@ default), or nil for nowhere.
 | `y` / `n` | `harness-ui-sessions-allow` / `harness-ui-sessions-deny` | On the lines of a listed session waiting on a permission request, answer it with Allow or Deny, as the request's own `y` and `n` do |
 | `C-c h g` | `harness-search-sessions` | Search what was said in every session: words, the exact text, a regexp or meaning (see [Searching sessions](#searching-sessions)) |
 | `C-c h a` | `harness-tasks` | Show the task board |
-| `C-c h /` | `harness-tasks-search` | Find tasks, or act on them, by saying so in words |
+| `C-c h /` | `harness-quick-search` | Quick search: find a command, a session or a task in words; on the task board, in its compose box (see [Quick search](#quick-search)) |
 | `C-c h F` | `harness-fullscreen` | Start or end the fullscreen layout: the task board, session list or a main session on one side, a session beside it |
 | `C-c h X` | `harness-ui-open-view-in-frame` | Open a view — the board, the session list, the settings page — in a frame you choose |
 | `C-c h t` | `harness-tree` | Show the conversation tree |
@@ -389,6 +400,87 @@ With a prefix argument (`C-u`), the commands that open a session ask
 where to show it: `right` (the default, see
 `harness-ui-default-position`), `left`, `bottom`, `full`, `other` or
 `fullscreen` (see [Fullscreen overviews](#fullscreen-overviews)).
+
+### Quick search
+
+`C-c h /` (also `/` in the `C-c h ?` menu) finds a command, a session or
+a task from anywhere, by saying what you want: "how do I attach a
+file?", "where did I debug the merge queue?", "the task about the docs".
+It is the [task board's search](#task-board) for the whole harness, and
+it takes the line in the same compose box, so there is no prompt of its
+own to learn.
+
+![The quick search opened from a chat: a popout under the code and the chat lists the command that attaches a file, with Run and Describe, and the session that wrote the API guide, with Open and the passage found in it, under a Sessions heading with All matches](docs/media/quick-search.png)
+
+A popout opens at the bottom of the frame, with a box to type in. `RET`
+(or `C-c C-c`) sends the line to a quick, cheap model
+(`harness-tasks-search-model`, the provider's simple tier by default),
+together with where you typed it, the harness's commands, your tasks and
+your sessions. It answers with the commands, sessions and tasks the line
+is about, never with prose, and the popout lists them, each with its
+buttons. The line stays in the box, to be refined. `M-p` and `M-n` bring
+back earlier searches, the task board's among them
+(`harness-quick-search-history`), `TAB` moves between the buttons, and
+`C-g` closes the popout (so does `q` outside the box). The model's
+process starts as the popout opens, and what a search costs is recorded
+like any other call.
+
+- **Where you are sets what it favours.** On a task board it favours
+  tasks, in the session list and in a conversation tree sessions, and
+  anywhere else -- a chat, a file, the settings page -- commands, then
+  sessions. It only favours: the model reads the rest too, and the
+  popout lists commands, sessions and tasks in the order the place
+  suggests. Its first line says where the search was opened from and
+  what it favours; `[Search sessions]` and `[Search commands]` ask the
+  same line again, favouring those.
+- **Commands** come with their keys and what they do. The model knows
+  the harness menu's commands, those under the `C-c h` prefix, those the
+  mode of the buffer you are in lists in the menu (a chat's `C-c C-c`, a
+  board's `v`) and every other interactive `harness-*` command, each
+  with the key it has where you are, what the menu calls it or the first
+  line of its documentation, and the mode it belongs to. `[Run]` runs
+  one in the buffer you opened the search from, as if you had typed it
+  there, and shows only for a command that runs there; `[Describe]`
+  shows its documentation. Only harness commands are offered and run,
+  never any other command of Emacs. The walk over every symbol of Emacs
+  that finds them is done ahead, while Emacs is idle, and again after
+  files load, so opening the search or sending a line does not repeat it
+  each time (a command defined a moment ago may be missing for a
+  second).
+- **Sessions** are all of them, not only the tasks': chats, BTW side
+  conversations, sub-agents and forks, of every project, the one you are
+  in left out. They are found by what was said in them, with the
+  [session search](#searching-sessions), and not only by their names.
+  Where the search favours sessions (the session list, a conversation
+  tree, `[Search sessions]`), it first looks in every transcript for the
+  words of your line that say something -- "where did I write the API
+  guide?" looks for "write API guide" -- and hands the model what it
+  found. Elsewhere the model may ask to look, once, and the same search
+  answers; it takes the session search's syntax (`"a phrase"`, `pars*`,
+  `OR`, `-word`). `[Open]` opens a session in its project, as the
+  session list does, and, when your words were found in what was said
+  there, at that message with the words highlighted, as `RET` on a match
+  does in `C-c h g`; the passage found shows under the session.
+  `[All matches]`, on the Sessions heading, opens the session search's
+  own view (`C-c h g`) of every session that matches the words the
+  search looked for -- the same "write API guide", or what the model
+  asked the transcripts for -- with every match.
+- **Tasks** are the project's, as the board's search reads them.
+  `[Board]` shows one on its board, with the others the search found. An
+  order about tasks ("stop the docs task") is only proposed in the
+  popout: `[Do it]` does it and `[Skip]` leaves it.
+- **It does not stop at nothing.** When what the place favours has no
+  answer, the model is told to look beyond it -- once, in the sessions'
+  transcripts or in the commands -- and to say so in a note above the
+  results ("No task matched; these sessions mention it."). If it still
+  answers with nothing, the search adds the sessions and commands that
+  come nearest the line itself (the sessions by what their transcripts
+  say), with a note that says so, and only when there is nothing at all
+  does the popout say "Nothing found".
+
+On a task board `C-c h /` is the board's own search, the one `/` starts
+there, which filters the board. The session list keeps `/` for its fuzzy
+filter; `C-c h /` opens the quick search there.
 
 ### Chat buffers
 
@@ -1004,8 +1096,10 @@ as sessions go on. It is only a cache: deleting it loses nothing, and
 it is built again. Until it is built, or with
 `harness-session-search-index` set to nil, a word search matches the
 text as you typed it, and the results say so. Agents search the same
-index with the `session_search` tool, and so does the task board's
-search when it looks in the tasks' transcripts.
+index with the `session_search` tool, and so does the quick search (the
+task board's too) when it looks in the sessions' transcripts: it hands
+your words, in the search's syntax, to this search, and `[All matches]`
+in its popout opens the results here, for the words it looked for.
 
 Searching by meaning needs an embedding model. Set
 `harness-session-search-embedding-model` to one, such as
@@ -1703,23 +1797,38 @@ your checkout itself can be submitted to the **main tree** instead (the
   permission prompt or the question, with its options and diagrams --
   and answers it there. The card offers the same as [Answer…] or
   [Request…] next to [Allow] and [Deny].
-- `/` searches the board in words: a question ("did I have a task about
-  the question button?") or an order ("restart the errored tasks", "get
-  rid of the pagination task"). The line goes with a dump of the board
-  to a quick, cheap model (`harness-tasks-search-model`, the provider's
-  simple tier by default), which answers with the tasks it is about
-  and what to do, never with prose. The board then shows only those
-  tasks, archived ones included, under a banner that says what it shows;
-  `C-g` or `[Clear]` shows every task again. An order that is easily
-  undone or does no harm -- archive of a task not at work, restore,
-  retry, start, a new priority -- runs at once and the banner says so,
-  with `[Undo]`;
-  one that interrupts work, merges it or sends words to an agent --
-  stop, archive of a working task, verify, mark done, message, send
-  back -- is offered instead, and an empty `/` then `RET` runs it. The
-  model may look further once, in the sessions' transcripts, when the
-  board alone does not say enough. `[Search]` in the header does the
-  same, and `C-c h /` from anywhere opens the project's board first.
+- `/` searches in words, in the board's own compose box. It turns the
+  box into a search box, in colours of its own, and what the box held
+  -- a task being written, a message -- waits aside and comes back once
+  the search is sent or `C-g` closes the box. A line there is a
+  question about the tasks ("did I have a task about the question
+  button?"), an order ("restart the errored tasks", "get rid of the
+  pagination task"), or a session or a command to find ("where did I
+  debug the merge queue?", "how do I attach a file?"). `RET` sends it,
+  and `M-p` and `M-n` bring back earlier searches. The line goes with a
+  dump of the board, the other sessions and the harness's commands to a
+  quick, cheap model (`harness-tasks-search-model`, the provider's
+  simple tier by default), which favours tasks here and answers with
+  the tasks it is about, what to do with them, and the sessions and
+  commands it found, never with prose. The board then shows only those
+  tasks, archived ones included, under a banner that says what it shows
+  and lists the sessions and commands found, each with its `[Open]`
+  (at the message where your words were found, for a session found in
+  its transcript), `[Run]` or `[Describe]`; `C-g` on the board, once the
+  box is closed, or `[Clear]` shows every task again. When no task
+  matches, the search looks wider instead of saying so: the banner then
+  lists the sessions and commands that come nearest, with a note that
+  says that. An order that is easily undone or does no harm -- archive
+  of a task not at work, restore, retry, start, a new priority -- runs
+  at once and the banner says so, with `[Undo]`; one that interrupts
+  work, merges it or sends words to an agent -- stop, archive of a
+  working task, verify, mark done, message, send back -- is offered
+  instead, and `/` then `RET` on the empty box runs it. The model may
+  look further once, in the sessions' transcripts (by the
+  [session search](#searching-sessions)) or the commands, when what it
+  was given does not say enough. `[Search]` in the header does the same,
+  and `C-c h /` on a board is this search; from anywhere else it opens
+  the [quick search](#quick-search).
 - The header line shows what the board's tasks cost or, when a
   subscription pays, the plan with its 5-hour and weekly quota, as a
   chat's header does, then the fullest budget of the project. Click it

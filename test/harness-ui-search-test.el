@@ -56,6 +56,11 @@
 (declare-function harness-ui-search-toggle-scope "harness-ui-search")
 (declare-function harness-ui-search-new "harness-ui-search")
 (declare-function harness-ui-search-more "harness-ui-search")
+(declare-function harness-ui-search-visit "harness-ui-search")
+(declare-function harness-ui-search-hit-regexp "harness-ui-search")
+(declare-function harness-ui-search--insert-session "harness-ui-search")
+(declare-function harness-session-search-emacs-regexp "harness-session-search")
+(declare-function harness-ui-visit-session "harness-ui")
 (declare-function harness-ui-chat-goto-node "harness-ui-chat")
 (declare-function harness-chat--buffer-for "harness-ui-chat")
 (declare-function harness-chat-buffer "harness-ui-chat")
@@ -261,7 +266,91 @@
                   (plist-get (if (keywordp (cadr suffix)) (cdr suffix) (car (last suffix))) :command))))
     (should (eq (lookup-key harness-ui-search-mode-map (kbd "RET")) #'harness-ui-search-open))))
 
-;;;; Opening a session at a match
+;;;; Opening a session at a hit
+
+(ert-deftest harness-ui-search-visit-opens-the-session-at-the-node ()
+  "The session opens, then, with a node, its chat shows the node, point on
+the regexp; without a node it only opens."
+  (harness-ui-search-test-with
+    (let ((calls nil))
+      (cl-letf (((symbol-function 'harness-ui-visit-session)
+                 (lambda (sid &rest _) (push (list 'visit sid) calls) nil))
+                ((symbol-function 'harness-ui-chat-goto-node)
+                 (lambda (&rest args) (push (cons 'goto args) calls) nil)))
+        (harness-ui-search-visit "s-1" "n-1" "needle")
+        (harness-ui-search-visit "s-2")
+        (harness-ui-search-visit "s-3" "n-3"))
+      (should (equal '((visit "s-1") (goto "n-1" "s-1" "needle")
+                       (visit "s-2")
+                       (visit "s-3") (goto "n-3" "s-3" nil))
+                     (nreverse calls))))))
+
+(ert-deftest harness-ui-search-open-visits-the-match-at-point ()
+  "RET opens the session of the match at point at its node, on the words found."
+  (harness-ui-search-test-with
+    (let* ((project (harness-ui-search-test-project))
+           (sid (harness-ui-search-test-session "Parser work" project
+                                                '(:kind user :content "The parser crashes on unicode input"))))
+      (harness-ui-search-test-search "crash")
+      (with-current-buffer harness-ui-search--buffer-name
+        (let ((node (get-text-property (point) 'harness-ui-search-node))
+              (called nil))
+          (should node)
+          (cl-letf (((symbol-function 'harness-ui-search-visit) (lambda (&rest args) (setq called args))))
+            (harness-ui-search-open))
+          (should (equal (list sid node) (seq-take called 2)))
+          (should (string-match-p (nth 2 called) "crashes")))))))
+
+(ert-deftest harness-ui-search-hit-regexp-says-what-was-found ()
+  "The regexp matches what the snippet marks, in the forms found, longest first,
+any run of spaces as any other; with nothing marked it is the query, as the
+literal or regexp search took it."
+  (harness-ui-search-test-with
+    (let* ((snippet "…why the merge queue dropped a Commit…")
+           (merge (string-search "merge" snippet))
+           (queue (string-search "queue" snippet))
+           (commit (string-search "Commit" snippet)))
+      ;; Words marked one by one: each, as found there, in any case, the
+      ;; longer first.
+      (let ((re (harness-ui-search-hit-regexp
+                 (list :snippet snippet :ranges (list (list merge (+ merge 5)) (list commit (+ commit 6)))))))
+        (should (equal "commit\\|merge" re))
+        (should (string-match-p re "COMMIT")))
+      ;; A phrase, spaces as any spaces; the longest alternative first.
+      (let ((re (harness-ui-search-hit-regexp
+                 (list :snippet snippet :ranges (list (list queue (+ queue 5)) (list merge (+ queue 5)))))))
+        (should (equal "merge[[:space:]]+queue\\|queue" re))
+        (should (string-match-p re "merge \n queue")))
+      ;; What a regexp would read as one is quoted; a mark outside the snippet is no mark.
+      (should (equal "foo\\.bar("
+                     (harness-ui-search-hit-regexp (list :snippet "call foo.bar( twice" :ranges '((5 13))))))
+      (should-not (harness-ui-search-hit-regexp (list :snippet "short" :ranges '((3 30) (-1 2) (nil 1)))))
+      ;; Nothing marked: the query, as the mode took it.
+      (let ((hit (list :snippet "call foo.bar( twice")))
+        (should (equal "foo\\.bar(" (harness-ui-search-hit-regexp hit "foo.bar(" "literal")))
+        (let ((re (harness-ui-search-hit-regexp hit "bar\\((baz|quux)\\)" "regexp")))
+          (should (equal (harness-session-search-emacs-regexp "bar\\((baz|quux)\\)") re))
+          (should (string-match-p re "bar(baz)"))
+          (should-not (string-match-p re "bar(qux)")))
+        ;; In any other mode, or with no query, there is nothing to find.
+        (should-not (harness-ui-search-hit-regexp hit "foo.bar(" "text"))
+        (should-not (harness-ui-search-hit-regexp hit "foo.bar("))
+        (should-not (harness-ui-search-hit-regexp hit nil "literal"))
+        (should-not (harness-ui-search-hit-regexp hit "" "literal"))))))
+
+(ert-deftest harness-ui-search-results-hand-over-their-query-and-mode ()
+  "The results buffer gives the regexp of a hit with nothing marked its own
+query and mode: a literal search's text is what RET puts point on."
+  (harness-ui-search-test-with
+    (with-temp-buffer
+      (setq-local harness-ui-search--query "foo.bar(")
+      (setq-local harness-ui-search--mode "literal")
+      (harness-ui-search--insert-session
+       (list :id "s-1" :name "Calls" :hits (list (list :node "n-1" :snippet "call foo.bar( twice"))))
+      (let ((pos (text-property-not-all (point-min) (point-max) 'harness-ui-search-find nil)))
+        (should pos)
+        (should (equal "foo\\.bar(" (get-text-property pos 'harness-ui-search-find)))
+        (should (equal "n-1" (get-text-property pos 'harness-ui-search-node)))))))
 
 (ert-deftest harness-ui-search-opens-the-session-at-the-match ()
   "RET opens the session with point on what was found, far back as it may be."

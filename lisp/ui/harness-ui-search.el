@@ -21,6 +21,11 @@
 ;; m cycles the mode, a widens the search to every project or narrows
 ;; it to the one it was started from, s asks another query, g searches
 ;; again, + shows more sessions, and n and p go from match to match.
+;;
+;; Opening a session at a hit is a function of its own
+;; (`harness-ui-search-visit', with `harness-ui-search-hit-regexp' for
+;; the words to put point on), which the quick search's [Open] uses too
+;; (harness-ui-quick-search.el).
 
 ;;; Code:
 
@@ -146,28 +151,36 @@ project it is started from, when there is one.  a switches."
         (aset text i ?\s)))
     text))
 
-(defun harness-ui-search--find-regexp (hit)
-  "An Emacs regexp of what the search found in HIT, or nil.
-The chat puts point on it when the session opens there.  It matches
-the very text the snippet marks, in whatever form the words took
-there, any run of spaces in it as any other; with nothing marked, the
-query, as a literal or regexp search took it."
+(defun harness-ui-search-hit-regexp (hit &optional query mode)
+  "An Emacs regexp of what a search found in HIT, or nil.
+HIT is a plist with the `:snippet' a search found, a passage of a
+message, and the `:ranges' in it of what matched, each (START END): a
+hit of `session/search', or a session `search/ask' found.  The chat
+puts point on the regexp when a session opens at the hit
+\(`harness-ui-search-visit').  It matches the very text the snippet
+marks, in whatever form the words took there, any run of spaces in it
+as any other.
+
+With nothing marked it is QUERY, as a search in MODE, \"literal\" or
+\"regexp\", took it; in any other mode, or with no QUERY, there is none."
   (let* ((snippet (or (plist-get hit :snippet) ""))
          (found (delete-dups
                  (cl-loop for range in (plist-get hit :ranges)
                           for from = (car range) for to = (cadr range)
                           when (and (integerp from) (integerp to) (<= 0 from to (length snippet)))
                           collect (downcase (string-trim (substring-no-properties snippet from to))))))
-         (found (delete "" found)))
+         (found (delete "" found))
+         (query (and (stringp query) (not (string-empty-p query)) query)))
     (cond
      (found
       (mapconcat (lambda (text)
                    (mapconcat #'regexp-quote (split-string text "[ \t\n\r]+" t) "[[:space:]]+"))
                  (sort found (lambda (a b) (> (length a) (length b))))
                  "\\|"))
-     ((equal harness-ui-search--mode "literal") (regexp-quote harness-ui-search--query))
-     ((equal harness-ui-search--mode "regexp")
-      (ignore-errors (harness-session-search-emacs-regexp harness-ui-search--query))))))
+     ((null query) nil)
+     ((equal mode "literal") (regexp-quote query))
+     ((equal mode "regexp")
+      (ignore-errors (harness-session-search-emacs-regexp query))))))
 
 ;;;; Rendering
 
@@ -260,7 +273,10 @@ HELP is its tooltip."
             "\n")
     (add-text-properties start (point) (list 'harness-ui-search-session sid
                                              'harness-ui-search-node (plist-get (car hits) :node)
-                                             'harness-ui-search-find (and hits (harness-ui-search--find-regexp (car hits)))
+                                             'harness-ui-search-find (and hits
+                                                                          (harness-ui-search-hit-regexp
+                                                                           (car hits) harness-ui-search--query
+                                                                           harness-ui-search--mode))
                                              'mouse-face 'highlight
                                              'help-echo "RET: open this session at its best match"))
     (dolist (hit hits)
@@ -270,7 +286,9 @@ HELP is its tooltip."
                 " " (harness-ui-search--snippet hit) "\n")
         (add-text-properties from (point) (list 'harness-ui-search-session sid
                                                 'harness-ui-search-node (plist-get hit :node)
-                                                'harness-ui-search-find (harness-ui-search--find-regexp hit)
+                                                'harness-ui-search-find (harness-ui-search-hit-regexp
+                                                                         hit harness-ui-search--query
+                                                                         harness-ui-search--mode)
                                                 'mouse-face 'highlight
                                                 'help-echo "RET: open the session at this message"))))
     (when (> matches (length hits))
@@ -494,6 +512,17 @@ Point goes to the start of its line; at the last one it stays."
   (interactive)
   (harness-ui-search--move nil))
 
+(defun harness-ui-search-visit (session-id &optional node regexp)
+  "Open session SESSION-ID, at NODE when one is given.
+The session opens as `harness-ui-visit-session' has it.  With NODE its
+chat then shows that node, point on the first match in it of REGEXP, an
+Emacs regexp, and those matches highlighted (`harness-ui-chat-goto-node'):
+the way a search shows what it found.  See `harness-ui-search-hit-regexp'
+for the regexp of a hit."
+  (harness-ui-visit-session session-id)
+  (when node
+    (harness-ui-chat-goto-node node session-id regexp)))
+
 (defun harness-ui-search-open ()
   "Open the session of the match at point there, point on what was found.
 On a session's line it opens at its best match."
@@ -502,9 +531,7 @@ On a session's line it opens at its best match."
         (node (get-text-property (point) 'harness-ui-search-node))
         (regexp (get-text-property (point) 'harness-ui-search-find)))
     (unless sid (user-error "No session on this line"))
-    (harness-ui-visit-session sid)
-    (when (and node (fboundp 'harness-ui-chat-goto-node))
-      (harness-ui-chat-goto-node node sid regexp))))
+    (harness-ui-search-visit sid node regexp)))
 
 (defun harness-ui-search-mouse-open (event)
   "Open the session of the match clicked in EVENT."

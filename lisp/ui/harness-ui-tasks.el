@@ -43,9 +43,11 @@
 ;; the sessions it opens show beside it, until q on the board ends it
 ;; (`harness-fullscreen').  b or [BTW] asks about the tasks in a BTW side
 ;; conversation over the board, whose agent answers with the task and
-;; session tools (`task/btw').  / or [Search] finds tasks, or acts on
-;; them, from a line in words that a cheap model reads with the board;
-;; the board then shows only the tasks it is about
+;; session tools (`task/btw').  / or [Search] turns the compose box into
+;; a search box, in colours of its own: a line in words there, which a
+;; cheap model reads with the board, finds tasks, sessions and commands,
+;; or acts on tasks; the board then shows only the tasks it is about,
+;; and the sessions and commands it found above them
 ;; (harness-ui-tasks-search.el, through `harness-ui-tasks-filter').
 ;;
 ;; Priority: a task is low, medium (the default) or high priority, and
@@ -144,6 +146,15 @@ Either way the toggle above the compose box switches it per board."
   "The fact that says a task is high priority." :group 'harness-ui-tasks)
 (defface harness-task-priority-low-face '((t :inherit harness-dim-face :slant italic))
   "The fact that says a task is low priority." :group 'harness-ui-tasks)
+(defface harness-task-search-box-face
+  '((((background light)) :background "#e6effb" :extend t)
+    (((background dark)) :background "#1f2a3b" :extend t))
+  "The compose box while it takes the board's search.
+A colour of its own, as a message's box has, so a search cannot be
+taken for a new task." :group 'harness-ui-tasks)
+(defface harness-task-search-box-accent-face '((t :inherit link :underline nil))
+  "The prompt, bar and icon of the compose box while it takes the board's search.
+The blue of links, without their underline." :group 'harness-ui-tasks)
 
 (define-icon harness-icon-task-pending nil
   '((symbol "◌") (text "wait"))
@@ -188,6 +199,10 @@ show it (see `harness-ui-tasks-toggle-subtitle').")
 (declare-function harness-ui-popout-at-point "harness-ui-popout")
 (declare-function harness-ui-popout-try-at-point "harness-ui-popout")
 (declare-function harness-toggle-supervisor "harness-ui-supervisor")
+(declare-function harness-ui-tasks-search-submit "harness-ui-tasks-search")
+(declare-function harness-ui-tasks-search-leave "harness-ui-tasks-search")
+(declare-function harness-ui-tasks-search-end "harness-ui-tasks-search")
+(declare-function harness-ui-tasks-search-proposal-text "harness-ui-tasks-search")
 
 (defmacro harness-ui-tasks--with-task (id &rest body)
   "Run BODY with point on task ID's card.
@@ -229,7 +244,10 @@ section opened with its \"… N more  [Show all]\" line is left whole.")
 (defvar-local harness-ui-tasks--target nil
   "What the compose box does: nil for a new task, else (KIND . ID).
 KIND is edit, reply, answer, refine (feedback on a backlog task's
-write-up) or reject (feedback that sends a task back from review).")
+write-up) or reject (feedback that sends a task back from review).
+\(search), with no ID, is the board's search: the box takes a line to
+find tasks, sessions and commands with, or to act on tasks
+\(`harness-tasks-search').")
 (defvar-local harness-ui-tasks--refine nil
   "Non-nil when new tasks are refined for the backlog, not submitted.")
 (defvar-local harness-ui-tasks--bulk nil
@@ -1821,6 +1839,10 @@ sends a task back from review: anything but composing a task, new or
 edited."
   (memq (car harness-ui-tasks--target) '(reply answer refine reject)))
 
+(defun harness-ui-tasks--searching-p ()
+  "Non-nil when the compose box takes the board's search (`harness-tasks-search')."
+  (eq (car harness-ui-tasks--target) 'search))
+
 (defun harness-ui-tasks--compose-label ()
   "Return the compose box's label, which says what the box does.
 That depends on `harness-ui-tasks--target': a new task by default."
@@ -1842,6 +1864,7 @@ That depends on `harness-ui-tasks--target': a new task by default."
                              (harness-ui-tasks--quote
                               (let ((task (harness-ui-tasks--find id))) (if task (harness-ui-tasks--title task) id)))
                              " with feedback"))
+    (`(search . ,_) "Search tasks, sessions and commands, or say what to do with tasks")
     (_ "New task")))
 
 (defun harness-ui-tasks--setting-button (label command help)
@@ -2263,13 +2286,16 @@ writes it up, with settings of its own, so it counts as not started."
 (defun harness-ui-tasks--label-line (room messaging bar)
   "The compose label, fitted to ROOM columns: what the box does, and the
 Submit / Refine toggle or [cancel].  MESSAGING is non-nil when the box
-sends to a session, BAR what starts the line."
-  (let* ((cancel (if harness-ui-tasks--target
+sends to a session, BAR what starts the line.  A message and the
+board's search each lead with their icon, in their accent."
+  (let* ((searching (harness-ui-tasks--searching-p))
+         (cancel (if harness-ui-tasks--target
                      (concat "  " (harness-ui-tasks--button
                                    "[cancel]" #'harness-ui-tasks-compose-reset
-                                   (if (eq (car harness-ui-tasks--target) 'answer)
-                                       "Back to a new task (C-g); the question stays waiting"
-                                     "Back to a new task (C-g)")
+                                   (pcase (car harness-ui-tasks--target)
+                                     ('answer "Back to a new task (C-g); the question stays waiting")
+                                     ('search "Close the search: the box gets back what it held (C-g)")
+                                     (_ "Back to a new task (C-g)"))
                                    'harness-ui-tasks-compose-reset))
                    ""))
          (toggle (if harness-ui-tasks--target ""
@@ -2278,17 +2304,23 @@ sends to a session, BAR what starts the line."
                            ;; on its settings line instead.
                            (if (harness-ui-tasks--bulk-priority-p) ""
                              (concat "   " (harness-ui-tasks--priority-toggle))))))
-         (icon (if messaging (concat (harness-ui-icon 'harness-icon-message) " ") ""))
+         (accent (cond (messaging 'harness-compose-message-accent-face)
+                       (searching 'harness-task-search-box-accent-face)))
+         (icon (cond (messaging (concat (harness-ui-icon 'harness-icon-message) " "))
+                     ;; The search's icon is defined with it (harness-ui-tasks-search.el).
+                     (searching (let ((icon (ignore-errors (harness-ui-icon 'harness-icon-search))))
+                                  (if (and icon (not (string-empty-p icon))) (concat icon " ") "")))
+                     (t "")))
          (body (concat icon (harness-ui-tasks--compose-label)))
          (label (harness-ui-tasks--fit (concat bar body)
                                        (- room (string-width cancel) (string-width toggle)))))
     ;; The bar, the icon and the label each keep their own look: the
     ;; band behind them all, the accent on bar and icon, the label face
     ;; on the text.
-    (let ((head (if messaging (+ (length bar) (length icon)) 0)))
+    (let ((head (if accent (+ (length bar) (length icon)) 0)))
       (add-face-text-property head (length label) 'harness-label-face t label)
-      (when messaging
-        (add-face-text-property (length bar) (length label) 'harness-compose-message-accent-face t label)))
+      (when accent
+        (add-face-text-property (length bar) (length label) accent t label)))
     ;; Fitted again as a whole: the label shrinks to a minimum, the toggle not.
     (harness-ui-tasks--fit (concat label toggle cancel) room)))
 
@@ -2338,15 +2370,19 @@ for the compose box, so a longer line would take two.  A new task's
 label carries the Submit / Refine toggle, which the label makes room
 for.  A box that sends to a session wears its message colours here too,
 the label, bar and band around it, so what submitting will do is plain
-before a key is pressed.  What `harness-ui-tasks-corner-functions'
-draw sits at the right of the lines, which narrow for it, and above
-them."
+before a key is pressed; the board's search wears colours of its own.
+What `harness-ui-tasks-corner-functions' draw sits at the right of the
+lines, which narrow for it, and above them."
   (let* ((room (1- (harness-ui-tasks--width)))
          (messaging (harness-ui-tasks--messaging-p))
-         (band (and messaging 'harness-compose-message-face))
-         (bar (if messaging
-                  (harness-compose-bar 'harness-compose-message-accent-face 'harness-compose-message-face)
-                " "))
+         (searching (harness-ui-tasks--searching-p))
+         (band (cond (messaging 'harness-compose-message-face)
+                     (searching 'harness-task-search-box-face)))
+         (bar (cond (messaging
+                     (harness-compose-bar 'harness-compose-message-accent-face 'harness-compose-message-face))
+                    (searching
+                     (harness-compose-bar 'harness-task-search-box-accent-face 'harness-task-search-box-face))
+                    (t " ")))
          (lines (harness-ui-tasks--tail-lines messaging band bar))
          (corner (harness-ui-tasks--corner room lines))
          (beside (plist-get corner :beside))
@@ -2359,7 +2395,7 @@ them."
                  key (if right (concat (funcall fit (- room reserve)) right) (funcall fit room)) band))
     (let ((start (point)))
       ;; The bar down every attachment's line.
-      (harness-compose-insert-attachments (and messaging bar))
+      (harness-compose-insert-attachments (and band bar))
       (put-text-property start (point) 'harness-task-tail 'attachments)
       (when band (add-face-text-property start (point) band t)))))
 
@@ -2515,12 +2551,17 @@ the box, or on the same line above it (`harness-ui-tasks--anchor')."
         (goto-char list-end)
         (harness-ui-tasks--insert-tail-head)
         (put-text-property list-end (point) 'read-only t)
-        (if (harness-ui-tasks--messaging-p)
-            ;; A message to a session, not a task being composed: the box's
-            ;; own colours say so, with the band and bar around it.
-            (harness-compose-insert text nil :face 'harness-compose-message-face
-                                    :accent 'harness-compose-message-accent-face)
-          (harness-compose-insert text)))
+        (cond
+         ((harness-ui-tasks--messaging-p)
+          ;; A message to a session, not a task being composed: the box's
+          ;; own colours say so, with the band and bar around it.
+          (harness-compose-insert text nil :face 'harness-compose-message-face
+                                  :accent 'harness-compose-message-accent-face))
+         ;; A search, not a task either: colours of its own.
+         ((harness-ui-tasks--searching-p)
+          (harness-compose-insert text nil :face 'harness-task-search-box-face
+                                  :accent 'harness-task-search-box-accent-face))
+         (t (harness-compose-insert text))))
       (set-marker harness-ui-tasks--list-end list-end)
       (harness-ui-tasks--restore places)
       (set-buffer-modified-p nil))))
@@ -2533,6 +2574,13 @@ the box, or on the same line above it (`harness-ui-tasks--anchor')."
                                "What should change in the write-up")
                              harness-ui-tasks--ellipsis))
     (`(reject . ,_) (concat "What should change in the work" harness-ui-tasks--ellipsis))
+    (`(search . ,_)
+     (concat "Find or act on tasks; sessions and commands too" harness-ui-tasks--ellipsis
+             ;; RET on the empty box does what the search proposes: say so.
+             (if-let* ((does (and (fboundp 'harness-ui-tasks-search-proposal-text)
+                                  (harness-ui-tasks-search-proposal-text))))
+                 (format "  (RET: %s)" does)
+               "")))
     ((guard (and (null harness-ui-tasks--target) harness-ui-tasks--refine))
      (concat "Jot a task down: an agent writes it up for later" harness-ui-tasks--ellipsis))
     (`(edit . ,_) "New prompt…")
@@ -2541,7 +2589,12 @@ the box, or on the same line above it (`harness-ui-tasks--anchor')."
     (_ "Describe a task…")))
 
 (defun harness-ui-tasks--set-compose (text target)
-  "Put TEXT in the compose box for TARGET and move there."
+  "Put TEXT in the compose box for TARGET and move there.
+Another TARGET ends the search the box took, keys and all
+\(`harness-ui-tasks-search-end')."
+  (when (and (harness-ui-tasks--searching-p) (not (eq (car target) 'search))
+             (fboundp 'harness-ui-tasks-search-end))
+    (harness-ui-tasks-search-end))
   (setq harness-ui-tasks--target target)
   (harness-ui-tasks--render-tail text)
   (goto-char harness-compose-end)
@@ -3038,7 +3091,7 @@ task's key typed off a card.
         (". D" "Delete" harness-ui-tasks-delete)]
        ["Board"
         (". a" "New task" harness-ui-tasks-compose)
-        (". /" "Search, or act in words" harness-ui-tasks-search)
+        (". /" "Search: tasks, sessions, commands" harness-ui-tasks-search)
         (". I" "Adopt a session" harness-ui-tasks-adopt)
         (". X" "Archive completed" harness-ui-tasks-archive-done)
         (". A" "Show archived" harness-ui-tasks-toggle-archived)
@@ -3246,22 +3299,29 @@ way, it stays and a message says so."
 (defun harness-ui-tasks-compose ()
   "Move to the compose box to describe a new task."
   (interactive)
-  (if harness-ui-tasks--target
-      (harness-ui-tasks--set-compose "" nil)
-    (goto-char harness-compose-end)))
+  (cond
+   ;; The search closes, and the task being described comes back.
+   ((harness-ui-tasks--searching-p) (harness-ui-tasks-compose-reset))
+   (harness-ui-tasks--target (harness-ui-tasks--set-compose "" nil))
+   (t (goto-char harness-compose-end))))
 
 (defun harness-ui-tasks-compose-reset ()
-  "Empty the compose box and make it describe a new task again."
+  "Empty the compose box and make it describe a new task again.
+The board's search box closes instead, and the box gets back what it
+held before (`harness-ui-tasks-search-leave')."
   (interactive)
-  (setq harness-compose-attachments nil)
-  (harness-ui-tasks--set-compose "" nil))
+  (if (and (harness-ui-tasks--searching-p) (fboundp 'harness-ui-tasks-search-leave))
+      (harness-ui-tasks-search-leave)
+    (setq harness-compose-attachments nil)
+    (harness-ui-tasks--set-compose "" nil)))
 
 (defun harness-ui-tasks-compose-quit ()
-  "Leave the answer, message or edit box, or show every task again.
+  "Leave the answer, message, edit or search box, or show every task again.
 On the board \\<harness-ui-tasks-mode-map>\\[harness-ui-tasks-compose-quit] runs this.  Leaving is what
 `harness-ui-tasks-compose-reset' does: the box describes a new task
-again.  A question it was answering is not cancelled: it stays waiting
-on its task, whose card's [Answer] comes back to it.  With no such box
+again, or, leaving the search box, gets back what it held before.  A
+question it was answering is not cancelled: it stays waiting on its
+task, whose card's [Answer] comes back to it.  With no such box
 to leave, a board showing some tasks only (`harness-ui-tasks-filter',
 a search's) shows them all again.  With an active region, completion in
 progress, an open minibuffer or nothing of the sort, this quits the
@@ -3270,6 +3330,9 @@ usual way instead."
   (cond
    ((or (region-active-p) completion-in-region-mode (active-minibuffer-window))
     (harness-ui-tasks--keyboard-quit))
+   ((harness-ui-tasks--searching-p)
+    (harness-ui-tasks-compose-reset)
+    (message "Search closed"))
    (harness-ui-tasks--target
     (let ((answering (eq (car harness-ui-tasks--target) 'answer)))
       (harness-ui-tasks-compose-reset)
@@ -3291,8 +3354,17 @@ That is `keyboard-quit', or what the global map remaps it to (Doom's
   "Submit the compose box: a new task, an edited prompt, a message or an answer.
 A new task starts, or with the toggle on Refine goes to the backlog
 \(see `harness-ui-tasks-toggle-refine').  /skill references are expanded
-and attachments go along, as in a chat."
+and attachments go along, as in a chat.  The board's search box sends
+its line to the search instead (`harness-ui-tasks-search-submit')."
   (interactive)
+  (if (harness-ui-tasks--searching-p)
+      ;; Before `harness-compose-take', which refuses an empty box: an
+      ;; empty search line does what the search proposes.
+      (harness-ui-tasks-search-submit (harness-compose-text))
+    (harness-ui-tasks--submit-compose)))
+
+(defun harness-ui-tasks--submit-compose ()
+  "Submit what the compose box holds for a task (see `harness-ui-tasks-submit')."
   (pcase-let* ((`(,text . ,atts) (harness-compose-take))
                (target harness-ui-tasks--target)
                (refine harness-ui-tasks--refine)
@@ -3842,11 +3914,14 @@ which model to run this one on."
 (declare-function harness-tasks-search "harness-ui-tasks-search")
 
 (defun harness-ui-tasks-search ()
-  "Find tasks on the board, or act on them, by saying so in words.
-A line read in the minibuffer -- a question (\"did I have a task about
-the question button?\") or an order (\"restart the errored tasks\") --
-goes with the board to a quick, cheap model; the board then shows the
-tasks it is about and says what was done.  See `harness-tasks-search'."
+  "Find tasks, sessions and commands from the board, or act on tasks, in words.
+The compose box turns into a search box, what it held kept aside: a
+line typed there -- a question (\"did I have a task about the question
+button?\"), an order (\"restart the errored tasks\"), or a session or
+command to find -- goes with the board to a quick, cheap model, and the
+board then shows the tasks it is about, the sessions and commands it
+found, and what was done.  \\<harness-ui-tasks-mode-map>\\[harness-ui-tasks-compose-quit] closes the search box.  See
+`harness-tasks-search'."
   (interactive)
   (unless (fboundp 'harness-tasks-search)
     (user-error "The task search module (ui-tasks-search) is not loaded"))

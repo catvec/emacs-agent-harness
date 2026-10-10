@@ -101,7 +101,7 @@ is never used for any other failure.")
   '("session/" "agent/" "provider/" "tools/list" "usage/" "fallback/" "worktree/" "merge/"
     "config/" "skills/" "permission/" "compaction/" "handoff/" "naming/" "sandbox/status"
     "harness/api" "harness/modules" "harness/version" "harness/reload" "harness-dev/" "question/"
-    "project/" "task/"
+    "project/" "task/" "search/"
     "notification/" "acp/remote-" "pet/" "version/" "insights/" "supervisor/" "seed/" "priority/")
   "Bus method name prefixes callable as `_harness/NAME'.
 Modules of the user's own add theirs to
