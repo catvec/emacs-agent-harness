@@ -356,7 +356,7 @@ another session or task.")
 
 (defconst harness-supervisor--coordination-tools
   '("ask_user" "todo_write" "hand_in" "notify" "session_control" "session_send" "session_move"
-    "set_non_interactive" "task_control" "task_submit")
+    "set_non_interactive" "set_priority" "task_control" "task_submit")
   "Tools a supervising session uses to coordinate with the user and other sessions.")
 
 (defun harness-supervisor--allowed-tools ()
@@ -798,10 +798,11 @@ session of its own starts supervised.  A setting its maker gave it in
 (defun harness-supervisor--write-up-p (task)
   "Non-nil when TASK, a task view, is being written up or waits in the backlog.
 The tasks module's session then only reads.  That is the state
-`refining', or `pending' with a session: a task that waits for a slot
-has none."
+`refining', or `pending' in the backlog: a task that waits for a slot
+is not one, session and all."
   (or (eq (plist-get task :state) 'refining)
-      (and (eq (plist-get task :state) 'pending) (plist-get task :session) t)))
+      (and (eq (plist-get task :state) 'pending)
+           (harness-json-true-p (plist-get task :backlog)) t)))
 
 (defun harness-supervisor--task-value (task cwd)
   "Return the supervisor value the session of TASK takes: `auto', t or nil.

@@ -47,6 +47,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-files)
+(require 'harness-priority)
 
 (defvar harness-state-directory)
 
@@ -168,16 +169,15 @@ title is its prompt's first line."
   "Non-nil when TASK is archived."
   (harness-json-true-p (plist-get task :archived)))
 
-(defconst harness-tasks-search--priorities '("low" "medium" "high")
-  "The priorities a task may have, lowest first (see `harness-tasks-priorities').")
-
 (defun harness-tasks-search--priority (value)
   "VALUE as a priority, \"low\", \"medium\" or \"high\"; nil when it names none.
 VALUE is a string or a symbol; \"med\" is medium, and case and spaces
-around it do not matter."
-  (when-let* ((name (and value (or (stringp value) (symbolp value))
-                         (downcase (string-trim (format "%s" value))))))
-    (car (member (if (equal name "med") "medium" name) harness-tasks-search--priorities))))
+around it do not matter.  What a priority is, and which one a task
+has, is the priority plugin's (`harness-priority-levels',
+`harness-priority-of-task'), so the levels are read the way it reads
+them."
+  (when-let* ((level (harness-priority-known value)))
+    (symbol-name level)))
 
 (defun harness-tasks-search--waits-on (session)
   "Say what SESSION waits for the user on, or nil."
@@ -430,14 +430,19 @@ nothing; IDS name tasks of TASKS, at most
 (defun harness-tasks-search--read (task)
   "Return the latest transcript of TASK's session, briefly, as text."
   (let* ((session (harness-tasks-search--session task))
-         (id (plist-get task :id)))
-    (if (not session)
-        (format "%s has no session yet." id)
-      (let* ((nodes (ignore-errors (harness-call 'session/nodes (plist-get session :id) (list :limit 60))))
-             (nodes (last (cl-remove-if-not
+         (id (plist-get task :id))
+         (all (and session (ignore-errors
+                             (harness-call 'session/nodes (plist-get session :id) (list :limit 60))))))
+    (cond
+     ((not session)
+      (format "%s has no session yet." id))
+     ((null all)
+      (format "%s has not started yet." id))
+     (t
+      (let* ((nodes (last (cl-remove-if-not
                            (lambda (n) (member (harness-tasks-search--str (plist-get n :kind))
                                                '("user" "assistant" "tool-call" "plan")))
-                           nodes)
+                           all)
                           harness-tasks-search--read-nodes))
              (todos (plist-get session :todos)))
         (concat (format "%s, its latest transcript:" id)
@@ -449,7 +454,7 @@ nothing; IDS name tasks of TASKS, at most
                   "")
                 (mapconcat (lambda (n) (format "\n  [%s] %s" (harness-tasks-search--str (plist-get n :kind))
                                                (harness-tasks-search--squash (harness-tasks-search--node-text n) 300)))
-                           nodes ""))))))
+                           nodes "")))))))
 
 (defun harness-tasks-search--snippet (text needle)
   "The part of TEXT around NEEDLE, on one line."
@@ -834,11 +839,11 @@ Never `task/cancel' on a task that is not at work: that drops a pending one."
   (harness-call 'task/cancel id))
 
 (defun harness-tasks-search--message (id text)
-  "Send TEXT to task ID's session; a task without one yet gets it in its prompt."
+  "Send TEXT to task ID's session; a task waiting for a slot gets it in its prompt."
   (when (harness-string-blank-p text) (error "A message needs words"))
   (let ((task (harness-call 'task/get id)))
     (if (and (equal (harness-tasks-search--str (plist-get task :state)) "pending")
-             (not (plist-get task :session)))
+             (not (harness-json-true-p (plist-get task :backlog))))
         (harness-call 'task/update id (concat (plist-get task :prompt) "\n\n" text) (plist-get task :attachments))
       (harness-call 'task/prompt id text))))
 
@@ -872,8 +877,10 @@ priority it gives.  The promise never rejects."
             ("complete" (harness-call 'task/complete id))
             ("message" (harness-tasks-search--message id text))
             ("reject" (harness-call 'task/reject id text))
-            ;; Never nothing for medium, as `task/set-priority' would take it.
-            ("priority" (harness-call 'task/set-priority id
+            ;; A priority is its session's (the task has one from
+            ;; submission); never nothing for medium, which the level
+            ;; list does not count as one.
+            ("priority" (harness-call 'priority/set (plist-get task :session)
                                       (or priority (error "Unknown priority %s; it is low, medium or high"
                                                           (or text "(none)")))))
             (_ (error "Unknown action %s" (plist-get action :action)))))
@@ -906,8 +913,8 @@ priority it had for priority).  The actions mean what a search's model
 was told: archive stops a task at work first and archives it once
 stopped, stop never drops a pending task, retry is `task/retry',
 message is a follow-up to the session (or words added to the prompt of
-a task with no session yet), priority is `task/set-priority' with the
-action's text."
+a backlog task still being written up), priority is `priority/set' on
+the task's session, which is where a task's priority lives."
   (let ((results nil)
         (chain (harness-resolved nil)))
     (dolist (action actions)

@@ -61,14 +61,16 @@
 (declare-function harness-ui-tasks--card-buttons "harness-ui-tasks")
 
 (defmacro harness-ui-tasks-test-with (&rest body)
-  "Load the state layer, tasks, ACP and the board UI; run BODY with `board' open.
-Finished tasks are completed at once, without review, unless BODY turns
-`harness-tasks-require-verification' on."
+  "Load the state layer, the priority plugin, tasks, ACP and the board UI; run BODY.
+BODY runs with `board' open.  Finished tasks are completed at once,
+without review, unless BODY turns `harness-tasks-require-verification'
+on.  The priority plugin is named on purpose: a task's priority is its
+session's, and a `+` or `-` on a card goes through its `priority/set'."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
      (let ((harness-acp--server-enabled nil))
-       (dolist (m '(store project config provider provider-demo tools session agent tasks acp))
+       (dolist (m '(store project config provider provider-demo tools session agent priority tasks acp))
          (harness-test-load-module m)))
      (clrhash harness-sessions)
      (clrhash harness-tools)
@@ -628,7 +630,10 @@ boards' next tasks and, as the default, for new sessions, and says what
 keeps new work there interactive all the same.  With a prefix argument
 it turns it off for them all and leaves the default alone.
 `harness-set-model-all' switches the sessions and tasks of both
-projects too, each session once, and both boards' next tasks."
+projects too, each session once, and both boards' next tasks.  Every
+task has its session from submission, so the five sessions changed
+include the two waiting tasks' (the two the test names, the started
+task's, and those two): a waiting task's settings are its session's."
   (harness-ui-tasks-test-with
     (harness-test-load-module 'compaction)
     (harness-test-load-module 'handoff)
@@ -675,7 +680,7 @@ projects too, each session once, and both boards' next tasks."
                            def)))
                 (call-interactively #'harness-set-non-interactive-all))
               (let ((report (harness-ui-tasks-test--said said "Non-interactive on")))
-                (should (string-prefix-p (concat "Non-interactive on for 3 sessions and 3 tasks, and for new"
+                (should (string-prefix-p (concat "Non-interactive on for 5 sessions and 3 tasks, and for new"
                                                  " sessions and the open boards' new tasks.  But new sessions in ")
                                          report))
                 (should (string-search (format " start interactive (harness-non-interactive in %s)"
@@ -696,7 +701,7 @@ projects too, each session once, and both boards' next tasks."
                 (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "off")))
                   (harness-set-non-interactive-all t))
                 (let ((report (harness-ui-tasks-test--said said "Non-interactive off")))
-                  (should (equal (concat "Non-interactive off for 3 sessions and 3 tasks, and for the open boards'"
+                  (should (equal (concat "Non-interactive off for 5 sessions and 3 tasks, and for the open boards'"
                                          " new tasks.  But new tasks start non-interactive"
                                          " (harness-tasks-non-interactive); M-x harness-settings changes them.")
                                  report))))
@@ -715,7 +720,7 @@ projects too, each session once, and both boards' next tasks."
                          (lambda (callback) (funcall callback "demo:other" "Other (Demo)"))))
                 (harness-set-model-all))
               (let ((report (harness-ui-tasks-test--said said "Model → Other (Demo)")))
-                (should (string-prefix-p (concat "Model → Other (Demo) for 3 sessions and 3 tasks, and for new"
+                (should (string-prefix-p (concat "Model → Other (Demo) for 5 sessions and 3 tasks, and for new"
                                                  " sessions and the open boards' new tasks.  But new tasks start on ")
                                          report))
                 (should (string-search "(harness-tasks-model)" report)))
@@ -1273,6 +1278,109 @@ a step, and the card moves with it; off a card they type."
         (execute-kbd-macro "+")
         (execute-kbd-macro "-")
         (should (equal "+-" (harness-compose-text)))))))
+
+(ert-deftest harness-ui-tasks-click-the-priority-arrow ()
+  "A click on a card's arrow asks for that task's session's priority.
+The arrow is the priority UI's, so it carries the task's session id --
+a task's priority being its session's -- and a click on it sets that
+session's level, whatever card point is on."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      (harness-call 'task/submit default-directory "Click my arrow" (list :priority "high"))
+      (harness-ui-tasks-test--wait-text board "Pending  1")
+      (let* ((id (harness-ui-tasks-test--card-id board "Click my arrow"))
+             (sid (plist-get (harness-call 'task/get id) :session))
+             (pos (harness-ui-tasks-test--arrow-position board "Click my arrow")))
+        (should (stringp sid))
+        ;; The mark on the card is that arrow, and it names the session.
+        (with-current-buffer board
+          (should (equal sid (get-text-property pos 'harness-priority-session)))
+          (should (keymapp (get-text-property pos 'keymap)))
+          (should (eq 'harness-priority-high-face (get-text-property pos 'face))))
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "low")))
+          (harness-ui-tasks-test--goto-card board "Click my arrow")
+          (with-current-buffer board
+            (harness-ui-priority-click (list 'mouse-1 (list (selected-window) pos '(0 . 0) 0)))))
+        (should (equal "low" (harness-call 'priority/get sid)))))))
+
+(ert-deftest harness-ui-tasks-priority-goes-to-the-task-session ()
+  "`+' and `-' on a card change the task's session's priority, not a task field.
+A task's priority is its session's (`harness-priority-of-task'), so
+the level changes on the session -- the `session/ext-changed' event
+names it -- and no `:priority' is stored on the task.  A record from
+before every task had a session has none to change, and is refused
+rather than sent to the harness."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (changed nil))
+      (harness-call 'task/submit default-directory "Alpha, low" (list :priority "low"))
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*↓ Alpha, low")
+      (let* ((id (harness-ui-tasks-test--card-id board "Alpha, low"))
+             (sid (plist-get (harness-call 'task/get id) :session)))
+        (should (stringp sid))
+        (harness-on 'session/ext-changed
+                    (lambda (session-id key value) (push (list session-id key value) changed)))
+        ;; + raises it to medium: the change is the session's, and the
+        ;; task's own record keeps no priority at all.
+        (harness-ui-tasks-test--goto-card board "Alpha, low")
+        (with-current-buffer board (harness-ui-tasks-raise-priority))
+        (should (equal "medium" (harness-call 'priority/get sid)))
+        (should (equal (list sid :priority "medium") (car changed)))
+        (should-not (plist-member (gethash id harness-tasks--table) :priority))
+        ;; The card follows (the board's own view of it), so the next
+        ;; key moves from the level it now has.
+        (harness-test-wait (lambda () (with-current-buffer board
+                                        (equal "medium" (harness-ui-tasks--priority
+                                                         (harness-ui-tasks--find id)))))
+                           5 "the card to show medium")
+        ;; - takes it back down.
+        (setq changed nil)
+        (harness-ui-tasks-test--goto-card board "Alpha, low")
+        (with-current-buffer board (harness-ui-tasks-lower-priority))
+        (should (equal "low" (harness-call 'priority/get sid)))
+        (should (equal (list sid :priority "low") (car changed)))
+        ;; A task with no session (a record from before every task had
+        ;; one) has no priority to move: nothing is sent.
+        (with-current-buffer board
+          (setq harness-ui-tasks--tasks
+                (mapcar (lambda (task)
+                          (if (equal id (plist-get task :id))
+                              (plist-put (copy-sequence task) :session nil)
+                            task))
+                        harness-ui-tasks--tasks)))
+        (setq changed nil)
+        (harness-ui-tasks-test--goto-card board "Alpha, low")
+        (with-current-buffer board
+          (should-error (harness-ui-tasks-raise-priority) :type 'user-error))
+        (should-not changed)
+        (should (equal "low" (harness-call 'priority/get sid)))))))
+
+(ert-deftest harness-ui-tasks-priority-reload-follows-the-session ()
+  "A session's `:priority' ext change reloads the board holding its task's card.
+Nothing is stored on the task, so the new level arrives as the
+session's `session/ext-changed' event and the board asks the harness
+for the tasks again; another key of the same session, a session of no
+task on the board, and the list of every session's change, do not."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0)
+          (refreshed nil))
+      (harness-call 'task/submit default-directory "Alpha" nil)
+      (harness-ui-tasks-test--wait-text board "Pending  1\\(.\\|\n\\)*Alpha")
+      (let* ((sid (plist-get (harness-call 'task/get (harness-ui-tasks-test--card-id board "Alpha")) :session))
+             (other (plist-get (harness-call 'session/create :cwd default-directory :name "elsewhere") :id)))
+        (cl-letf (((symbol-function 'harness-ui-tasks--refresh-soon)
+                   (lambda (buffer) (push (buffer-name buffer) refreshed))))
+          ;; The priority of a task's session: the board reloads.
+          (harness-ui-tasks--on-event "session/ext-changed" (list sid ":priority" "high"))
+          (should (equal (list (buffer-name board)) refreshed))
+          ;; Another key of it, and a session no card of the board shows.
+          (setq refreshed nil)
+          (harness-ui-tasks--on-event "session/ext-changed" (list sid ":supervisor" t))
+          (harness-ui-tasks--on-event "session/ext-changed" (list other ":priority" "high"))
+          (should-not refreshed)
+          ;; The key the wire sends is a string, as it is for a keyword.
+          (harness-ui-tasks--on-event "session/ext-changed" (list sid "priority" "low"))
+          (should (equal (list (buffer-name board)) refreshed)))))))
 
 (ert-deftest harness-ui-tasks-new-task-priority ()
   "The button beside Submit sets the next task's priority; each click moves it on."
@@ -2132,6 +2240,20 @@ conflict which files its session is resolving."
   "The id of the task whose card in BOARD shows TEXT."
   (harness-ui-tasks-test--goto-card board text)
   (with-current-buffer board (plist-get (harness-ui-tasks--task) :id)))
+
+(defun harness-ui-tasks-test--arrow-position (board text)
+  "The buffer position of the priority arrow on the card in BOARD showing TEXT."
+  (with-current-buffer board
+    (harness-ui-tasks-test--goto-card board text)
+    (let ((end (line-end-position))
+          (glyphs (list (harness-ui-icon 'harness-icon-priority-high)
+                        (harness-ui-icon 'harness-icon-priority-low)))
+          found)
+      (dolist (glyph glyphs)
+        (save-excursion
+          (goto-char (line-beginning-position))
+          (when (search-forward glyph end t) (setq found (match-beginning 0)))))
+      found)))
 
 (defun harness-ui-tasks-test--line (&optional pos)
   "The text of the line at POS (default point)."
