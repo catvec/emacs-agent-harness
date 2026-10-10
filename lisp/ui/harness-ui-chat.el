@@ -3145,11 +3145,16 @@ COMMAND runs with the clicked window selected."
 (defun harness-chat--segment (text command help &optional face)
   "Return TEXT as a clickable segment running COMMAND, with HELP and FACE.
 HELP is the `help-echo': a string, or a function computing one on hover.
-Icons in TEXT stay clickable but are not hover-highlighted: an SVG keeps
-the background it was rendered on, so it would show as a dark box."
-  (let ((text (propertize text 'face face 'help-echo help 'mouse-face 'mode-line-highlight
+FACE is applied over TEXT when non-nil, so a figure that brings its own
+face keeps it.  Icons in TEXT stay clickable but are not
+hover-highlighted: an SVG keeps the background it was rendered on, so
+it would show as a dark box."
+  (let ((text (propertize text 'help-echo help 'mouse-face 'mode-line-highlight
                           'local-map (harness-chat--segment-map command)))
         (pos 0))
+    ;; Face only when given: a segment around a figure that brings its
+    ;; own face, as the context one does, must not wipe it.
+    (when face (put-text-property 0 (length text) 'face face text))
     (while (< pos (length text))
       (let ((next (next-single-property-change pos 'display text (length text))))
         (when (eq (car-safe (get-text-property pos 'display text)) 'image)
@@ -3292,7 +3297,12 @@ it."
                                                  #'harness-set-thinking "Thinking level (mouse-1: change)"
                                                  'harness-dim-face))
              20)
-       (list (concat "  " (harness-ui-format-context s)) 30)
+       (list (concat "  " (harness-chat--segment
+                           (harness-ui-format-context s)
+                           #'harness-set-context-limit
+                           (harness-ui-context-limit-help
+                            s (harness-ui-model-context-window (plist-get s :model)))))
+             30)
        (and output (list (concat "  " output) 7))
        (and rate (list (concat "  " rate) 5))
        (list (concat "  " (harness-chat--spend-segment s)) 10))

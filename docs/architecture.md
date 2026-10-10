@@ -5129,6 +5129,23 @@ no longer running and never drop in between.  Every change runs
 second at most, as the events come), the session list and the task
 boards at most every half second, and only when a figure they show
 reads otherwise.
+The context figure is a button (`harness-ui-context-limit-map`): in the
+chat header it is a segment as the settings beside it are, and in the
+session list and on a task card a click acts on the session the figure
+shows.  Mouse-1 on it, or `C-c h e` (`harness-set-context-limit`),
+offers that session's context window limit: the current one, a few
+round sizes under the model's own window (read from its catalogue
+entry, never assumed), and no limit, which uses the whole of it; a
+number typed instead sets that many tokens, clamped to the model's
+window.  The offer names what holds the window: a sub-agent's limit
+(`harness-subagent-context-limit'), a task's
+(`harness-tasks-context-limit'), or one set for the session itself.
+The change is a `session/update' of `:context-window-limit' -- a window
+set for the session outright is cleared with it, since it would win
+over the limit (see `harness-ui--apply-context-limit') -- so the
+conversation is neither restarted nor compacted: the header line and
+the other views show the new window at once, and the new limit takes
+effect at the session's next request.
 Other UI
 modules hook into a chat buffer without owning it:
 `harness-chat-send-functions` sees each message sent
