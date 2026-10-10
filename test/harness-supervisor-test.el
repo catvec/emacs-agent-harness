@@ -363,6 +363,29 @@ A DELAY is how a test has the judge answer while, or after, its turn runs."
     (list (list :type 'text :delta word)
           (list :type 'done :stop-reason 'end-turn))))
 
+(defun harness-supervisor-test-session-in (dir &rest plist)
+  "Create a demo session in DIR with PLIST's settings; return its id.
+Sessions in one directory share the settings of that directory, as
+sessions a project starts do."
+  (plist-get (apply #'harness-call 'session/create :cwd dir :model "demo:scripted" plist) :id))
+
+(defun harness-supervisor-test-note (sid)
+  "Return the note that says how session SID's opening message was judged."
+  (car (cl-remove-if-not #'harness-node-supervisor (harness-supervisor-test-nodes sid 'hint))))
+
+(defun harness-supervisor-test-note-record (sid)
+  "Return what the chat reads of session SID's judgement note, or nil."
+  (harness-node-supervisor (harness-supervisor-test-note sid)))
+
+(defun harness-supervisor-test-action (sid name)
+  "Return action NAME of session SID's judgement note, as the chat reads it."
+  (cl-find name (plist-get (harness-supervisor-test-note-record sid) :actions)
+           :key (lambda (action) (plist-get action :action)) :test #'equal))
+
+(defun harness-supervisor-test-act (sid action)
+  "Move ACTION of session SID's judgement note on; return what the harness answered."
+  (harness-call 'supervisor/act sid (plist-get (harness-supervisor-test-note sid) :id) action))
+
 (ert-deftest harness-supervisor-a-judged-supervising-job-keeps-the-mode ()
   "An `auto' session whose opening message reads supervising stays supervising."
   (harness-supervisor-test-with
@@ -380,7 +403,7 @@ A DELAY is how a test has the judge answer while, or after, its turn runs."
                            "the judge to answer")
         (should (eq t (harness-supervisor-test-get sid)))
         (should (harness-call 'supervisor/active-p sid))
-        (should (member "Supervisor mode on: the session judge (demo:scripted) read this opening message as a supervising job (C-c h V flips it)."
+        (should (member "judged supervising (demo:scripted)"
                         (harness-supervisor-test-hints sid)))
         ;; The judge was asked once, in a request of its own: ephemeral, the
         ;; opening message, and the one-word question.
@@ -406,7 +429,7 @@ A DELAY is how a test has the judge answer while, or after, its turn runs."
                            "the judge to read the message hands-on")
         (should-not (harness-call 'supervisor/active-p sid))
         (should-not (harness-supervisor-test-judge-mark sid))
-        (should (member "Hands-on: the session judge (demo:scripted) read this opening message as a hands-on job (C-c h V flips it)."
+        (should (member "judged hands-on (demo:scripted)"
                         (harness-supervisor-test-hints sid)))
         ;; Hands-on from then on: the writing tools come back, the plan tools go.
         (should (member "edit_file" (harness-supervisor-test-tool-names sid)))
@@ -500,8 +523,8 @@ A DELAY is how a test has the judge answer while, or after, its turn runs."
         (harness-test-wait (lambda () (not (gethash sid harness-supervisor--judging))) 5
                            "the dropped judge to finish")
         (should (eq t (harness-supervisor-test-get sid)))
-        (should-not (cl-some (lambda (hint) (string-match-p "session judge" hint))
-                             (harness-supervisor-test-hints sid)))))))
+        ;; The dropped verdict writes no note: the user's choice stands alone.
+        (should-not (harness-supervisor-test-note sid))))))
 
 (defun harness-supervisor-test-judge-failure (answer reason-regexp)
   "Run a session whose judge answers ANSWER and then gives no verdict.
@@ -525,14 +548,14 @@ REASON-REGEXP is matched against the hint that says the default stands."
     (let ((harness-supervisor 'auto))
       (harness-supervisor-test-judge-failure
        '((:type text :delta "Hard to say, maybe both.") (:type done :stop-reason end-turn))
-       "the session judge gave no answer (the model answered")
+       "not judged (the model answered")
       (harness-supervisor-test-judge-failure
        '((:type done :stop-reason error :error "no model today"))
-       "the session judge gave no answer (no model today)")
+       "not judged (no model today)")
       (let ((harness-supervisor--judge-timeout 0.05))
         (harness-supervisor-test-judge-failure
          '((:type wait :seconds 5) (:type done :stop-reason end-turn))
-         "the session judge gave no answer (the model took longer than")))))
+         "not judged (the model took longer than")))))
 
 (ert-deftest harness-supervisor-the-judge-is-asked-once ()
   "Once judged, later turns ask no judge again."
@@ -549,6 +572,180 @@ REASON-REGEXP is matched against the hint that says the default stands."
         (harness-supervisor-test-prompt sid "What does foo do?")
         (harness-supervisor-test-prompt sid "And bar?")
         (should (= 1 (length (harness-supervisor-test-judge-requests))))))))
+
+(ert-deftest harness-supervisor-the-note-is-the-harnesss-own-word ()
+  "The judgement reads as a harness hint, and the judge's answer is nowhere.
+The note says it in the harness's voice, carries the two actions as its
+`:meta', and the hint never reaches the model: nothing of the judge is
+shown as an agent response."
+  (harness-supervisor-test-with
+    (let* ((dir (harness-test-temp-dir))
+           (harness-supervisor 'auto))
+      (let ((sid (harness-supervisor-test-session-in dir)))
+        (setq harness-supervisor-test--script
+              (list (harness-supervisor-test-judge-says "HANDS-ON")
+                    (harness-supervisor-test-calls "no_plan_needed" '(:reason "a question"))
+                    '((:type text :delta "It copies the buffer.") (:type done :stop-reason end-turn))))
+        (harness-supervisor-test-prompt sid "What does this function do?")
+        (harness-test-wait (lambda () (null (harness-supervisor-test-judge-mark sid))) 5
+                           "the judge to answer")
+        ;; One note, in the harness's voice, saying what was decided.
+        (should (member "judged hands-on (demo:scripted)" (harness-supervisor-test-hints sid)))
+        (should (= 1 (length (cl-remove-if-not #'harness-node-supervisor
+                                               (harness-supervisor-test-nodes sid 'hint)))))
+        (let ((record (harness-supervisor-test-note-record sid)))
+          (should record)
+          (should-not (harness-json-true-p (plist-get record :judged)))
+          (should (equal "demo:scripted" (plist-get record :model)))
+          (should-not (harness-json-true-p (plist-get record :mode)))
+          (should (equal "harness-supervisor" (plist-get record :setting)))
+          (should (equal (file-name-as-directory (expand-file-name dir))
+                         (file-name-as-directory (expand-file-name (plist-get record :cwd)))))
+          (should (equal '("always" "mode")
+                         (mapcar (lambda (action) (plist-get action :action))
+                                 (plist-get record :actions))))
+          (should (equal '("always hands-on" "switch to supervising")
+                         (mapcar (lambda (action) (plist-get action :label))
+                                 (plist-get record :actions))))
+          (should (cl-every (lambda (action) (null (plist-get action :state)))
+                            (plist-get record :actions))))
+        ;; The judge's own answer is in no node of the transcript.
+        (should-not (let ((case-fold-search nil))
+                      (cl-some (lambda (node)
+                                 (string-match-p "HANDS-ON" (format "%s" (plist-get node :content))))
+                               (harness-call 'session/nodes sid))))
+        ;; Nor does the model ever get the note: it is no agent response.
+        (should-not (string-match-p "judged hands-on"
+                                    (harness-json-encode-text (harness-call 'session/messages sid))))))))
+
+(defun harness-supervisor-test-judge-a-question (sid)
+  "Run the turn of SID that the judge reads as a hands-on job, and wait for it."
+  (setq harness-supervisor-test--script
+        (list (harness-supervisor-test-judge-says "HANDS-ON")
+              (harness-supervisor-test-calls "no_plan_needed" '(:reason "a question"))
+              '((:type text :delta "It copies the buffer.") (:type done :stop-reason end-turn))))
+  (harness-supervisor-test-prompt sid "What does this function do?")
+  (harness-test-wait (lambda () (null (harness-supervisor-test-judge-mark sid))) 5
+                     "the judge to read the message hands-on"))
+
+(ert-deftest harness-supervisor-the-notes-always-action-stops-judging-here ()
+  "The note's \"always\" action writes the setting, and takes it back again.
+One click and no new session here is judged -- they start as the judge
+read this one -- the click after that judges them again, and the one
+after that stops the judging once more."
+  (harness-supervisor-test-with
+    (let* ((dir (harness-test-temp-dir))
+           (harness-supervisor 'auto))
+      (let ((sid (harness-supervisor-test-session-in dir)))
+        (harness-supervisor-test-judge-a-question sid)
+        (should (eq 'auto (harness-supervisor--setting 'harness-supervisor dir)))
+        ;; A click: new sessions here are hands-on, and none of them is judged.
+        (let ((answer (harness-supervisor-test-act sid "always")))
+          (should (eq 'done (plist-get answer :state)))
+          (should (string-match-p "always hands-on" (plist-get answer :message))))
+        (should-not (harness-supervisor--setting 'harness-supervisor dir))
+        (should (eq 'done (plist-get (harness-supervisor-test-action sid "always") :state)))
+        (setq harness-supervisor-test--requests nil
+              harness-supervisor-test--script (list harness-supervisor-test-stops))
+        (let ((next (harness-supervisor-test-session-in dir)))
+          (should (eq :false (harness-supervisor-test-get next)))
+          (should-not (harness-supervisor-test-judge-mark next))
+          (harness-supervisor-test-prompt next "What does this function do?")
+          (should-not (harness-supervisor-test-judge-requests)))
+        ;; Undone: the setting goes back to a model's choice, and sessions are judged.
+        (let ((answer (harness-supervisor-test-act sid "always")))
+          (should (eq 'undone (plist-get answer :state)))
+          (should (string-match-p "Judging on again" (plist-get answer :message))))
+        (should (eq 'auto (harness-supervisor--setting 'harness-supervisor dir)))
+        (should (eq 'undone (plist-get (harness-supervisor-test-action sid "always") :state)))
+        ;; Redone: the setting is the judge's mode again.
+        (should (eq 'done (plist-get (harness-supervisor-test-act sid "always") :state)))
+        (should-not (harness-supervisor--setting 'harness-supervisor dir))
+        (should (eq 'done (plist-get (harness-supervisor-test-action sid "always") :state)))))))
+
+(ert-deftest harness-supervisor-a-note-without-the-config-module-offers-the-mode-only ()
+  "The setting's action needs `config/set'; without it the note offers no more.
+A harness without the config module has no setting to write, so the note
+keeps the one action that is the session's own."
+  (harness-supervisor-test-with
+    (let ((harness-supervisor 'auto))
+      (let ((sid (harness-supervisor-test-session)))
+        (remhash 'config/set harness--methods)
+        (harness-supervisor-test-judge-a-question sid)
+        (should (equal '("mode")
+                       (mapcar (lambda (action) (plist-get action :action))
+                               (plist-get (harness-supervisor-test-note-record sid) :actions))))))))
+
+(ert-deftest harness-supervisor-the-notes-mode-action-puts-the-session-elsewhere ()
+  "The note's \"mode\" action is the V key's switch, with its way back.
+A click makes the session hands-on, and the click after that makes it
+supervise again, as the note records; the switch is a hint of its own,
+as a turn of the key is."
+  (harness-supervisor-test-with
+    (let ((harness-supervisor 'auto))
+      (let ((sid (harness-supervisor-test-session)))
+        (setq harness-supervisor-test--script
+              (list harness-supervisor-test-judge-supervises
+                    (harness-supervisor-test-calls "no_plan_needed" '(:reason "the whole layer"))
+                    '((:type text :delta "Plan it.") (:type done :stop-reason end-turn))))
+        (harness-supervisor-test-prompt sid "Rework the whole storage layer")
+        (harness-test-wait (lambda () (null (harness-supervisor-test-judge-mark sid))) 5
+                           "the judge to answer")
+        (should (eq t (harness-supervisor-test-get sid)))
+        (should (equal "switch to hands-on"
+                       (plist-get (harness-supervisor-test-action sid "mode") :label)))
+        ;; A click, as the V key would: hands-on, and the transcript says so.
+        (let ((answer (harness-supervisor-test-act sid "mode")))
+          (should (eq 'done (plist-get answer :state)))
+          (should (string-match-p "off" (plist-get answer :message))))
+        (should (eq :false (harness-supervisor-test-get sid)))
+        (should-not (harness-call 'supervisor/active-p sid))
+        (should (member "Supervisor mode off" (harness-supervisor-test-hints sid)))
+        (should (eq 'done (plist-get (harness-supervisor-test-action sid "mode") :state)))
+        ;; Undone: supervising again, and the note offers the switch again.
+        (should (eq 'undone (plist-get (harness-supervisor-test-act sid "mode") :state)))
+        (should (eq t (harness-supervisor-test-get sid)))
+        (should (member "Supervisor mode on" (harness-supervisor-test-hints sid)))
+        ;; Redone.
+        (should (eq 'done (plist-get (harness-supervisor-test-act sid "mode") :state)))
+        (should (eq :false (harness-supervisor-test-get sid)))))))
+
+(ert-deftest harness-supervisor-the-note-of-a-task-writes-the-tasks-setting ()
+  "A task session's note writes `harness-supervisor-tasks' at the task's project.
+That is the setting that decided how the session starts, so no session
+of a task here is judged either."
+  (harness-supervisor-test-with-tasks
+    (setq harness-supervisor-tasks 'auto
+          harness-supervisor 'auto)
+    (let* ((id (plist-get (harness-call 'task/submit default-directory "fix the parser") :id))
+           (sid (harness-supervisor-test-task-session id)))
+      (harness-supervisor-test-judge-a-question sid)
+      (should (equal "harness-supervisor-tasks" (plist-get (harness-supervisor-test-note-record sid) :setting)))
+      (should (eq 'auto (harness-supervisor--setting 'harness-supervisor-tasks default-directory)))
+      (let ((answer (harness-supervisor-test-act sid "always")))
+        (should (eq 'done (plist-get answer :state))))
+      (should-not (harness-supervisor--setting 'harness-supervisor-tasks default-directory))
+      ;; The tasks setting took it; how sessions of the user start is untouched.
+      (should (eq 'auto (harness-supervisor--setting 'harness-supervisor default-directory)))
+      (harness-supervisor-test-wait-task id 'done))))
+
+(ert-deftest harness-supervisor-a-note-action-that-cannot-be-taken-changes-nothing ()
+  "An action that fails leaves the note as it was, with its state nil.
+The harness then answers nothing, and the button is still the action."
+  (harness-supervisor-test-with
+    (let ((harness-supervisor 'auto))
+      (let ((sid (harness-supervisor-test-session)))
+        (harness-supervisor-test-judge-a-question sid)
+        ;; A call the harness cannot make: writing the setting fails, and the
+        ;; action stays the one to take.
+        (harness-register-method 'config/set (lambda (&rest _) (error "the policy fixes it")))
+        (should-error (harness-supervisor-test-act sid "always"))
+        (should (null (plist-get (harness-supervisor-test-action sid "always") :state)))
+        ;; A node that is no note, and an action the note does not offer.
+        (harness-call 'session/hint sid "Plan updated")
+        (let ((plan (car (last (harness-supervisor-test-nodes sid 'hint)))))
+          (should-error (harness-call 'supervisor/act sid (plist-get plan :id) "always")))
+        (should-error (harness-supervisor-test-act sid "whatever"))))))
 
 (ert-deftest harness-supervisor-the-demo-plays-the-session-judge ()
   "The demo provider answers the judge, so a demo session is judged like any other."
@@ -813,7 +1010,7 @@ REASON-REGEXP is matched against the hint that says the default stands."
       (should (string-match-p "fix the parser" (plist-get judge :text)))
       (should (eq :false (harness-supervisor-test-get sid)))
       (should-not (harness-supervisor-test-judge-mark sid))
-      (should (member "Hands-on: the session judge (demo:scripted) read this opening message as a hands-on job (C-c h V flips it)."
+      (should (member "judged hands-on (demo:scripted)"
                       (harness-supervisor-test-hints sid))))))
 
 (ert-deftest harness-supervisor-a-write-up-is-never-judged ()

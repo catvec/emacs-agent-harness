@@ -417,33 +417,37 @@ something else, a task's edit, is named itself."
       (should-not (cl-some (lambda (s) (string-search "--" (plist-get s :key))) settings)))))
 
 (ert-deftest harness-config-leaves-out-what-no-module-defines ()
-  "The supervisor's layered key and its section's options name nothing
+  "The supervisor's layered keys and its section's options name nothing
 before its plugin is loaded: the layers, the description and the methods
-that take a key all leave them out, as they would without the key."
+that take a key all leave them out, as they would without the keys."
   (skip-unless (executable-find "git"))
   (skip-unless (not (boundp 'harness-supervisor)))
   (harness-config-test-with
     (harness-config-test--write root '((nil . ((harness-supervisor . t) (harness-permission-mode . yolo)))))
     (should (memq 'harness-supervisor harness-config-keys))
+    (should (memq 'harness-supervisor-tasks harness-config-keys))
     (let ((layers (harness-call 'config/layers sub)))
       (dolist (layer '(policy global project directory))
-        (should-not (plist-member (cdr (assq layer layers)) 'harness-supervisor)))
+        (should-not (plist-member (cdr (assq layer layers)) 'harness-supervisor))
+        (should-not (plist-member (cdr (assq layer layers)) 'harness-supervisor-tasks)))
       ;; The others are there, global lists every key that is defined.
       (should (eq 'yolo (plist-get (cdr (assq 'project layers)) 'harness-permission-mode)))
-      (should (equal (remq 'harness-supervisor harness-config-keys)
+      (should (equal (remq 'harness-supervisor-tasks (remq 'harness-supervisor harness-config-keys))
                      (cl-loop for (key _) on (cdr (assq 'global layers)) by #'cddr collect key))))
     (let* ((d (harness-call 'config/describe sub))
            (keys (mapcar (lambda (s) (plist-get s :key)) (plist-get d :settings))))
       (should (member "harness-permission-mode" keys))
       (should-not (cl-some (lambda (key) (string-prefix-p "harness-supervisor" key)) keys))
       (should-not (member "supervisor" (mapcar (lambda (s) (plist-get s :name)) (plist-get d :sections)))))
-    ;; The key is unknown, not a variable with no value.
-    (dolist (call (list (lambda () (harness-call 'config/get 'harness-supervisor sub))
-                        (lambda () (harness-call 'config/get "harness-supervisor" sub))
-                        (lambda () (harness-call 'config/set 'harness-supervisor t :scope 'project :cwd sub))
-                        (lambda () (harness-call 'config/unset 'harness-supervisor :scope 'project :cwd sub))
-                        (lambda () (harness-call 'config/overrides 'harness-supervisor))))
-      (should (equal "Unknown config key harness-supervisor" (cadr (should-error (funcall call))))))
+    ;; The keys are unknown, not variables with no value.
+    (dolist (key '(harness-supervisor harness-supervisor-tasks))
+      (dolist (call (list (lambda () (harness-call 'config/get key sub))
+                          (lambda () (harness-call 'config/get (symbol-name key) sub))
+                          (lambda () (harness-call 'config/set key t :scope 'project :cwd sub))
+                          (lambda () (harness-call 'config/unset key :scope 'project :cwd sub))
+                          (lambda () (harness-call 'config/overrides key))))
+        (should (equal (format "Unknown config key %s" key)
+                       (cadr (should-error (funcall call)))))))
     (should (equal '((nil . ((harness-supervisor . t) (harness-permission-mode . yolo))))
                    (harness-config-test--read root)))))
 

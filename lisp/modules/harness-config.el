@@ -144,7 +144,7 @@ non-interactive anyway."
 (defconst harness-config-keys
   '(harness-model harness-permission-mode harness-thinking harness-btw-thinking
     harness-allowed-directories harness-sandbox-policy harness-non-interactive
-    harness-supervisor)
+    harness-supervisor harness-supervisor-tasks)
   "Settings that take part in layering.
 A module defines some of them, `harness-supervisor' the supervisor
 plugin: until it is loaded the key takes part in nothing, and every

@@ -41,9 +41,10 @@ OpenAI-compatible APIs and AWS Bedrock.
   harness enforces it with tools rather than a prompt: the supervising
   session has no write tools, its shell is read-only and offline, and
   every turn ends on a decision. A cheap model judges a new session's
-  opening message by default and starts it supervising or hands-on, in
-  the harness's own voice in the transcript; a click on the header line
-  (or `C-c h V`) switches a session to working hands-on at any time.
+  opening message by default and starts it supervising or hands-on, and
+  a note in the harness's own voice says so, with buttons to stop the
+  judging for later sessions and to put this one in the other mode; a
+  click on the header line (or `C-c h V`) switches it at any time.
 - **Notifications.** A desktop notification, and a push to your phone
   through Gotify once you set it up, when a task waits for your review
   or is done. Agents can notify you too.
@@ -881,10 +882,10 @@ call to one anyway, in every permission mode.
   **Supervisor mode**: `auto`, the default, has a cheap model read the
   session's opening message and start it the way the message reads;
   **Always supervise** and **Always hands-on** fix the mode instead.
-  `harness-supervisor` can be set per project like the other settings of
-  new sessions (see [Configuration](#configuration)), and the session of
-  a task takes `harness-supervisor-tasks` when its work starts, the
-  write-up before that only reading. They decide how a session starts;
+  Both can be set per project like the other settings of new sessions
+  (see [Configuration](#configuration)); the session of a task takes
+  `harness-supervisor-tasks` when its work starts, the write-up before
+  that only reading. They decide how a session starts;
   from then on each session has its own switch, and changing a setting
   leaves the sessions that exist as they are. Sub-agents and BTW side
   conversations never supervise, and a fork starts as its parent is.
@@ -895,16 +896,24 @@ call to one anyway, in every permission mode.
   no thinking, and it runs beside the session's first turn, which never
   waits for it: the session starts supervising as new sessions always
   did, and turns hands-on when the judge reads the message that way.
-  Either way the transcript says which, in a hint in the harness's own
-  voice ("Supervisor mode on: the session judge (claude:claude-haiku)
-  read this opening message as a supervising job (C-c h V flips it)."),
-  and the header button or `C-c h V` flips the mode as always. The judge
-  is asked once, never for a session whose setting is not `auto`, and
-  never over a switch you made, before the message or after it: a flip
-  drops the pending judgement, and a verdict that arrives after it is
-  ignored. A model that is unavailable, answers something unusable or
-  does not answer in time leaves the configured default standing, and a
-  hint says so. A plan call the model wrote before it turned hands-on is
+  Either way a note in the harness's own voice says which, as the naming
+  of a session reads "renamed to X" rather than repeating what the model
+  said: "judged supervising (claude:claude-haiku)", or "judged hands-on
+  (…)", or "not judged (…): supervising as configured". The judge's own
+  answer is never shown, and the note never reaches the model. The note
+  carries the two things to do about the choice as buttons, like the
+  [Undo] of a lasting permission answer: one stops the judging of new
+  sessions, by writing the setting that decided this one at the project
+  it read, and one puts this session in the other mode, as `C-c h V`
+  does. Each click shows the way back, `[undo: …]`, and an undo the way
+  on, `[redo: …]`; the note records which state each action is in, so a
+  chat draws them again after a reload. The judge is
+  asked once, never for a session whose setting is not `auto`, and never
+  over a switch you made, before the message or after it: a flip drops
+  the pending judgement, and a verdict that arrives after it is ignored.
+  A model that is unavailable, answers something unusable or does not
+  answer in time leaves the configured default standing, and the note
+  says so. A plan call the model wrote before it turned hands-on is
   refused, so nothing starts behind the mode's back.
 - **The header button and `C-c h V`.** The header line of a session
   starts with `supervisor`, or with `hands-on` once the mode is off. A

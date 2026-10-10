@@ -1733,6 +1733,95 @@ button."
                              5 "the reason")
           (should-not (harness-ui-chat-test-find buf "[Undo]")))))))
 
+(ert-deftest harness-ui-chat-the-judgement-note-offers-its-actions ()
+  "The note after a judgement draws its two actions as buttons.
+Clicking one asks the harness (`supervisor/act'), and the note is drawn
+again from what the harness says, with [undo] on that action and, once
+undone, [redo].  Another hint has no buttons."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (seen nil)
+           (shown nil)
+           (states (make-hash-table :test 'equal)))
+      ;; The harness half, as `supervisor/act' answers it: the state travels
+      ;; back as a string, as a node read from the store would.
+      (harness-register-method
+       'supervisor/act
+       (lambda (session-id node-id action)
+         (push (list session-id node-id action) seen)
+         (let* ((node (harness-call 'session/node session-id node-id))
+                (record (harness-node-supervisor node))
+                (next (if (equal "done" (gethash action states)) "undone" "done")))
+           (puthash action next states)
+           (harness-call 'session/update-node
+                         session-id node-id
+                         :meta (plist-put (copy-sequence (plist-get node :meta))
+                                          :supervisor
+                                          (plist-put (copy-sequence record) :actions
+                                                     (mapcar (lambda (a)
+                                                               (if (equal action (plist-get a :action))
+                                                                   (plist-put (copy-sequence a) :state next)
+                                                                 a))
+                                                             (plist-get record :actions)))))
+           (list :state next :message (format "%s: %s" next action)))))
+      (harness-call 'session/hint sid "Plan updated")
+      (harness-call 'session/append
+                    sid (list :kind 'hint :content "judged hands-on (demo:scripted)"
+                              :meta (list :supervisor
+                                          (list :judged :false :model "demo:scripted" :mode :false
+                                                :setting "harness-supervisor" :cwd dir
+                                                :actions (list (list :action "always"
+                                                                     :label "always hands-on" :state nil
+                                                                     :help "Stop judging new sessions: set harness-supervisor to always hands-on here")
+                                                               (list :action "mode"
+                                                                     :label "switch to supervising" :state nil
+                                                                     :help "Put this session in the other mode: supervising"))))))
+      (let* ((node-id (plist-get (car (cl-remove-if-not #'harness-node-supervisor
+                                                        (harness-call 'session/nodes sid)))
+                                 :id))
+             (buf (harness-ui-chat-test-open sid))
+             (click (lambda (text)
+                      (with-current-buffer buf
+                        (goto-char (1- (harness-ui-chat-test-find buf text)))
+                        (setq shown nil)
+                        (cl-letf (((symbol-function 'message)
+                                   (lambda (fmt &rest args) (when fmt (push (apply #'format fmt args) shown)))))
+                          (harness-chat-push)
+                          (harness-test-wait (lambda () shown) 5 "the echo area"))))))
+        (harness-test-wait (lambda () (harness-ui-chat-test-find
+                                       buf (concat "    judged hands-on (demo:scripted)  "
+                                                   "[always hands-on] [switch to supervising]\n")))
+                           5 "the note with its buttons")
+        (with-current-buffer buf
+          ;; The plain hint above keeps no buttons.
+          (should (harness-ui-chat-test-find buf "    Plan updated\n"))
+          (let ((pos (harness-ui-chat-test-find buf "[always hands-on]")))
+            (should (harness-ui-chat-test-face-at (- pos 2) 'button))
+            (should (equal "Stop judging new sessions: set harness-supervisor to always hands-on here"
+                           (get-text-property (- pos 2) 'help-echo))))
+          (should (equal "Put this session in the other mode: supervising"
+                         (get-text-property (- (harness-ui-chat-test-find buf "[switch to supervising]") 2)
+                                            'help-echo))))
+        ;; A click: the harness is asked, and the note offers the way back.
+        (funcall click "[switch to supervising]")
+        (should (equal "done: mode" (car shown)))
+        (should (equal (list sid node-id "mode") (car seen)))
+        (harness-test-wait (lambda () (harness-ui-chat-test-find buf "[undo: switch to supervising]"))
+                           5 "the note redrawn with its undo")
+        (with-current-buffer buf
+          (should (harness-ui-chat-test-find
+                   buf (concat "    judged hands-on (demo:scripted)  [always hands-on] "
+                               "[undo: switch to supervising]\n"))))
+        ;; Undoing offers the redo, and the redo the undo again.
+        (funcall click "[undo: switch to supervising]")
+        (should (equal "undone: mode" (car shown)))
+        (harness-test-wait (lambda () (harness-ui-chat-test-find buf "[redo: switch to supervising]"))
+                           5 "the note redrawn with its redo")
+        (funcall click "[redo: switch to supervising]")
+        (harness-test-wait (lambda () (harness-ui-chat-test-find buf "[undo: switch to supervising]"))
+                           5 "the note redrawn with its undo again")
+        (should (equal '("mode" "mode" "mode") (mapcar #'caddr (reverse seen))))))))
+
 (ert-deftest harness-ui-chat-permission-pattern-is-editable ()
   "A prompt about paths shows the pattern it is answered for; e edits it, the answer carries it."
   (harness-ui-chat-test-with

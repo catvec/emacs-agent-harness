@@ -448,6 +448,50 @@ RECORD is what `harness-node-permission' returns."
     (cond ((and (stringp u) (not (string-empty-p u))) (intern u))
           ((and u (symbolp u) (not (memq u '(t :false :null)))) u))))
 
+;;;; The note of the session judge
+
+;; A new session's opening message may be judged -- read by a cheap model
+;; that says whether the job is a supervising one or a hands-on one
+;; (harness-supervisor.el).  The harness then writes a hint into the
+;; session's transcript saying how the message was read, in its own
+;; voice, and the hint holds in its `:meta' `:supervisor' what the chat's
+;; buttons act on: the two things the user can do about the choice, and
+;; how far each has got.  `harness-node-supervisor' reads it, the chat
+;; draws the buttons from it (harness-ui-chat.el), and `supervisor/act'
+;; is what they call.
+
+(defun harness-node-supervisor (node)
+  "Return the session judge's note record of NODE, or nil.
+NODE is the hint written when a session's opening message was judged.
+Its `:meta' `:supervisor' holds
+
+  (:judged t|:false   ; what the judge read; absent when it gave no answer
+   :model MODEL       ; the model that read the message
+   :mode t|:false     ; the mode the note left the session in
+   :setting KEY       ; the setting that decides how sessions start
+   :cwd DIR           ; where that setting is written
+   :actions ACTIONS)  ; (:action NAME :label LABEL :help HELP :state STATE)
+
+where each action's STATE is nil while it was not taken, `done' once it
+was, and `undone' once it was taken back, and NAME, with \"always\" and
+\"mode\" the two of them, is what `supervisor/act' is asked to do.
+Names, labels and symbols may have travelled as strings; the states read
+back as symbols."
+  (let ((record (plist-get (plist-get node :meta) :supervisor)))
+    (when (and (consp record) (plist-get record :actions))
+      (plist-put (copy-sequence record) :actions
+                 (mapcar (lambda (action)
+                           (plist-put (copy-sequence action) :state
+                                      (harness-supervisor-note-state (plist-get action :state))))
+                         (plist-get record :actions))))))
+
+(defun harness-supervisor-note-state (value)
+  "Return the judge's note action state VALUE names, a symbol, or nil.
+VALUE may have travelled over JSON, as a string."
+  (let ((s (cond ((and (stringp value) (not (string-empty-p value))) (intern value))
+                 ((and value (symbolp value) (not (memq value '(t :false :null)))) value))))
+    (and (memq s '(done undone)) s)))
+
 ;;;; Paths
 
 (defun harness-path-normalize (path)
