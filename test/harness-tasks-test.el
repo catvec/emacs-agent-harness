@@ -1886,7 +1886,6 @@ tasks with a title are left alone."
 (defvar harness-merge--locks)
 (defvar harness-merge--holds)
 (defvar harness-tasks-worktrees)
-(defvar harness-tasks--merge-session-name)
 
 (defun harness-tasks-test--git (dir &rest args)
   "Run git ARGS synchronously in DIR; signal on failure, return stdout."
@@ -1981,8 +1980,10 @@ commits from call `harness-tasks-test--commit-on-call' on."
       (should (equal "two\n" (harness-tasks-test--main-text root)))
       (should (plist-get (harness-tasks-test-task id) :merged))
       (should (string-match-p "Merge branch" (harness-tasks-test--git root "log" "-1" "--format=%s")))
-      (should (cl-find harness-tasks--merge-session-name (harness-call 'session/list)
-                       :key (lambda (s) (plist-get s :name)) :test #'equal))
+      ;; The merge went into the main checkout itself: no session was made
+      ;; to stand behind it, only the task's own.
+      (should (equal (list (plist-get task :session))
+                     (mapcar (lambda (s) (plist-get s :id)) (harness-call 'session/list))))
       ;; Its record is in the main repository's git directory, out of every
       ;; working tree: neither the checkout the merge went into nor the
       ;; task's worktree shows it.
@@ -2147,11 +2148,9 @@ the task's own session.  With one slot, the next task starts meanwhile."
       (setq task (harness-tasks-test-task id))
       (should-not (plist-get task :merged))
       (should-not (plist-get task :worktree-removed))
-      ;; The agent's commit landed on main itself: no merge, no merge session.
+      ;; The agent's commit landed on main itself: no merge at all.
       (should (equal "change shared" (string-trim (harness-tasks-test--git root "log" "-1" "--format=%s"))))
-      (should (equal "two\n" (harness-tasks-test--main-text root)))
-      (should-not (cl-find harness-tasks--merge-session-name (harness-call 'session/list)
-                           :key (lambda (s) (plist-get s :name)) :test #'equal)))))
+      (should (equal "two\n" (harness-tasks-test--main-text root))))))
 
 (ert-deftest harness-tasks-git-refined-main-tree-task-stays-at-the-root ()
   "A backlog task that needs the main tree keeps its session at the root and merges nothing."

@@ -26,7 +26,6 @@
 (defvar harness-supervisor--reminders)
 (defvar harness-supervisor--calls)
 (defvar harness-supervisor--configured)
-(defvar harness-tasks--merge-session-name)
 (defvar harness-tasks--table)
 (defvar harness-tasks--starting)
 (defvar harness-tasks--naming)
@@ -292,16 +291,6 @@ Return a function that gives the requests it got, newest first."
       (let* ((child (harness-supervisor-test-session :kind 'subagent :parent-id parent))
              (fork (plist-get (harness-test-await (harness-call 'session/fork child :kind 'subagent)) :id)))
         (should-not (harness-supervisor-test-get fork))))))
-
-(ert-deftest harness-supervisor-the-merge-session-of-tasks-is-not-governed ()
-  "The session task branches merge into is named by the tasks module, and not governed."
-  (harness-supervisor-test-with
-    (let ((harness-tasks--merge-session-name "Task merges"))
-      (should-not (harness-supervisor-test-get (harness-supervisor-test-session :name "Task merges")))
-      (should (eq t (harness-supervisor-test-get (harness-supervisor-test-session :name "Other")))))
-    ;; Without the tasks module there is no such name to look for.
-    (makunbound 'harness-tasks--merge-session-name)
-    (should (eq t (harness-supervisor-test-get (harness-supervisor-test-session :name "Task merges"))))))
 
 (ert-deftest harness-supervisor-a-setting-its-maker-gave-stays ()
   "A session made with its setting in `:ext' keeps it."
