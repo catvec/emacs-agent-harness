@@ -3307,6 +3307,35 @@ The refusal says what to fix, and the task keeps working."
         (should (equal "the command" (plist-get item :caption)))
         (should (string-match-p "hello" (plist-get item :input)))))))
 
+(ert-deftest harness-tasks-hand-in-copies-the-child-session ()
+  "A referenced spawn_agent call carries the sub-agent it started into
+the report, so the report links the same session the chat does; a call
+that started none carries no key."
+  (harness-tasks-test-with
+    (harness-test-load-module 'tools-handin)
+    (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (kid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (harness-call 'session/append sid
+                    (list :kind 'tool-call :tool "spawn_agent" :call-id "sp1"
+                          :title "Sub-agent: kid" :input (list :name "kid" :prompt "go")
+                          :meta (list :model "demo:scripted" :child-id kid)))
+      (harness-call 'session/append sid (list :kind 'tool-result :call-id "sp1" :output "done"))
+      (let ((item (harness-tools-handin--call sid "sp1" 1)))
+        (should (equal "tool-call" (plist-get item :kind)))
+        (should (equal kid (plist-get item :child-id)))
+        (should (equal "done" (plist-get item :output))))
+      ;; The result's own name counts too, when the call carries none.
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "bash" :call-id "b1"
+                                              :title "Bash" :input '(:command "true")))
+      (harness-call 'session/append sid (list :kind 'tool-result :call-id "b1" :output "ok"
+                                              :meta (list :child-id kid)))
+      (should (equal kid (plist-get (harness-tools-handin--call sid "b1" 1) :child-id)))
+      ;; A call that started no session carries no key.
+      (harness-call 'session/append sid (list :kind 'tool-call :tool "bash" :call-id "b2"
+                                              :title "Bash" :input '(:command "true")))
+      (harness-call 'session/append sid (list :kind 'tool-result :call-id "b2" :output "ok"))
+      (should-not (plist-get (harness-tools-handin--call sid "b2" 1) :child-id)))))
+
 (ert-deftest harness-tasks-hand-in-offered-to-task-sessions-only ()
   "Only a task's session is offered hand_in; the catalogue keeps every tool."
   (harness-tasks-test-with

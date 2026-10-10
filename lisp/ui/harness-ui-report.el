@@ -249,16 +249,22 @@ inserted instead; so it is for an image too large for Emacs to draw
 (defun harness-ui-report--insert-call (item task)
   "Insert ITEM, a reference to an earlier tool call of TASK's session, as a link.
 The call's title, status, input and output are shown as the chat shows
-them; [Open in the session] goes to the call.  The output is capped,
-with a button for the rest, unless the report is drawn in full."
+them; [Open in the session] goes to the call.  A call that started a
+sub-agent (`:child-id') names it in a session line, and the text of the
+call opens that session, as the chat's call block does; the buttons
+keep their own keys.  The output is capped, with a button for the rest,
+unless the report is drawn in full."
   (let* ((call-id (plist-get item :call-id))
+         (child (let ((c (plist-get item :child-id)))
+                  (and (stringp c) (not (string-empty-p c)) c)))
          (failed (plist-get item :is-error))
          (output (or (plist-get item :output) ""))
          (limit harness-ui-report-output-limit)
          (expanded (or harness-ui-report--full (gethash call-id harness-ui-report--expanded)))
          (long (and (not expanded) (> (length output) limit)))
          (shown (if long (substring output 0 limit) output))
-         (indent (propertize "    " 'face 'harness-md-code-block)))
+         (indent (propertize "    " 'face 'harness-md-code-block))
+         (start (point)))
     ;; The link line: what it is, then the call as the chat names it.
     (insert "  " (propertize "[tool call]" 'face 'harness-dim-face
                             'help-echo "A link to this call in the session's transcript")
@@ -270,26 +276,38 @@ with a button for the rest, unless the report is drawn in full."
       (insert (propertize "  input: " 'face 'harness-label-face)
               (propertize (harness-truncate-end (string-replace "\n" " " input) 400) 'face 'harness-dim-face)
               "\n"))
+    ;; The sub-agent the call started, as the chat's session line links it.
+    (when child
+      (insert "  " (propertize "session: " 'face 'harness-dim-face))
+      (harness-ui-button (harness-ui-session-name child)
+                         (lambda () (harness-ui-display-session child))
+                         :help (format "Open the session %s" (harness-ui-session-name child)))
+      (insert "\n"))
     (insert (propertize (if failed "  error\n" "  output\n") 'face 'harness-label-face))
     (cond
      ((string-empty-p output) (insert (propertize "  (no output)\n" 'face 'harness-dim-face)))
      (t
       (insert (propertize (if (string-suffix-p "\n" shown) shown (concat shown "\n"))
-                          'face 'harness-md-code-block 'line-prefix indent 'wrap-prefix indent))
-      (when long
-        ;; `harness-ui-button' inserts the button itself, at point.
-        (insert "  ")
-        (harness-ui-button (format "[show all (%d more chars)]" (- (length output) limit))
-                           (lambda ()
-                             (puthash call-id t harness-ui-report--expanded)
-                             (harness-ui-popout-refresh (list 'report (plist-get task :id))))
-                           :help "Show the whole output")
-        (insert "\n")))))
-  (insert "  ")
-  (harness-ui-button "[Open in the session]"
-                     (lambda () (harness-ui-report--open-call item task))
-                     :help "Show the session this call ran in, at the call")
-  (insert "\n"))
+                          'face 'harness-md-code-block 'line-prefix indent 'wrap-prefix indent))))
+    ;; The call's text opens the session it started; the buttons under it
+    ;; are inserted after, so each keeps its own action and keys.
+    (when child
+      (harness-ui-add-session-keys (current-buffer) child (harness-ui-session-name child)
+                                   start (point)))
+    (when long
+      ;; `harness-ui-button' inserts the button itself, at point.
+      (insert "  ")
+      (harness-ui-button (format "[show all (%d more chars)]" (- (length output) limit))
+                         (lambda ()
+                           (puthash call-id t harness-ui-report--expanded)
+                           (harness-ui-popout-refresh (list 'report (plist-get task :id))))
+                         :help "Show the whole output")
+      (insert "\n"))
+    (insert "  ")
+    (harness-ui-button "[Open in the session]"
+                       (lambda () (harness-ui-report--open-call item task))
+                       :help "Show the session this call ran in, at the call")
+    (insert "\n")))
 
 (defun harness-ui-report--call-position (item)
   "Return where ITEM's call is in this chat buffer's transcript, or nil.

@@ -694,6 +694,24 @@ added once it exists."
                                             (plist-get child :id) err)))
                       child)))))
 
+(defun harness-tools-agent--call-node (session-id call-id)
+  "Return the newest tool-call node of SESSION-ID whose call id is CALL-ID, or nil."
+  (cl-find-if (lambda (node) (and (eq (plist-get node :kind) 'tool-call)
+                                  (equal (plist-get node :call-id) call-id)))
+              (harness-call 'session/nodes session-id) :from-end t))
+
+(defun harness-tools-agent--name-child (session-id call-id child-id)
+  "Name CHILD-ID on the tool call CALL-ID of SESSION-ID, as its result will.
+The call is the spawn_agent call that started the sub-agent: the chat
+links it to the child's session from the moment the child exists,
+rather than only once the call returns and its result names the child.
+The call node's `:meta' keeps what it held, such as the model.  Nothing
+happens when no such call node is on the transcript: a call run without
+one (`tools/execute' from outside an agent turn) has none to name."
+  (when-let* ((node (harness-tools-agent--call-node session-id call-id)))
+    (harness-call 'session/update-node session-id (plist-get node :id)
+                  :meta (plist-put (copy-sequence (plist-get node :meta)) :child-id child-id))))
+
 (defun harness-tools-agent--spawn (input ctx)
   "Handler of the spawn_agent tool.
 Run INPUT's prompt in a child of the session in CTX and return at once,
@@ -726,6 +744,13 @@ own once its turn ends and nothing of it is outstanding any more."
             (let* ((cid (plist-get child :id))
                    (entry (list :parent sid :name (plist-get child :name)
                                 :worktree worktree :branch branch :result nil)))
+              ;; From here the call itself names its sub-agent, not only its
+              ;; result: the chat links it while the call still runs.  A call
+              ;; that could not be named still runs; only its link waits.
+              (condition-case err
+                  (harness-tools-agent--name-child sid (plist-get ctx :call-id) cid)
+                (error (harness-log 'warn "tools-agent: naming the sub-agent %s on its call failed: %S"
+                                    cid err)))
               (puthash cid entry harness-tools-agent--children)
               (harness-emit 'agent/spawned sid cid)
               ;; The parent hears of the child's end in a message of its

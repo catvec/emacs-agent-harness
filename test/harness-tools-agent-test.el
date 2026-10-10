@@ -27,9 +27,11 @@
   "Create a demo session and return its id."
   (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted") :id))
 
-(defun harness-tools-agent-test-run (sid name input)
-  "Execute tool NAME with INPUT in SID; return the promise."
-  (harness-call 'tools/execute sid (list :id (harness-short-id) :name name :input input)))
+(defun harness-tools-agent-test-run (sid name input &optional call-id)
+  "Execute tool NAME with INPUT in SID; return the promise.
+CALL-ID, when given, is the call's id: the one a call node the session
+recorded for it carries.  Otherwise the call gets a fresh one."
+  (harness-call 'tools/execute sid (list :id (or call-id (harness-short-id)) :name name :input input)))
 
 (defun harness-tools-agent-test-kinds (id)
   (mapcar (lambda (n) (plist-get n :kind)) (harness-call 'session/nodes id)))
@@ -411,6 +413,69 @@ and the caller hears the answer, or that it was dismissed."
       (should (plist-get result :is-error))
       (should (string-match-p "needs a prompt" (plist-get result :content))))))
 
+(defun harness-tools-agent-test-record-call (sid call-id input)
+  "Record a spawn_agent call CALL-ID with INPUT in SID, as the agent does."
+  (harness-call 'session/append sid
+                (list :kind 'tool-call :tool "spawn_agent" :call-id call-id
+                      :title (harness-tool-title "spawn_agent" input)
+                      :input input
+                      :meta (list :model (plist-get (harness-call 'session/get sid) :model)))))
+
+(ert-deftest harness-tools-agent-spawn-names-the-child-on-its-call ()
+  "The spawn_agent call links its sub-agent from the moment it exists,
+not only once the call returns and its result names the child.  The
+call's own meta -- the model -- is kept."
+  (harness-tools-agent-test-with
+    (let* ((sid (harness-tools-agent-test-session))
+           (call-id "call-1")
+           (input '(:prompt "give me the tour" :name "explorer")))
+      (harness-tools-agent-test-record-call sid call-id input)
+      (let ((harness-provider-demo--delay 0.1)
+            (p (harness-tools-agent-test-run sid "spawn_agent" input call-id)))
+        ;; While the call runs the child exists, and the call names it.
+        (harness-test-wait (lambda () (harness-call 'session/list (list :parent-id sid)))
+                           5 "the child session")
+        (let* ((cid (plist-get (car (harness-call 'session/list (list :parent-id sid))) :id))
+               (node (harness-tools-agent--call-node sid call-id)))
+          (should (stringp cid))
+          (should (equal cid (plist-get (plist-get node :meta) :child-id)))
+          (should (equal "demo:scripted" (plist-get (plist-get node :meta) :model)))
+          (should-not (plist-get (plist-get node :meta) :from)))
+        (let* ((result (harness-test-await p))
+               (result-cid (plist-get (plist-get result :meta) :child-id)))
+          (should-not (plist-get result :is-error))
+          (should (stringp result-cid))
+          (should (equal result-cid
+                         (plist-get (plist-get (harness-tools-agent--call-node sid call-id) :meta)
+                                    :child-id))))))))
+
+(ert-deftest harness-tools-agent-spawn-names-its-child-on-a-call-that-failed ()
+  "A call whose child could not finish still names the child it created,
+so the chat can open it from the call however the call ended."
+  (harness-tools-agent-test-with
+    (let* ((sid (harness-tools-agent-test-session))
+           (call-id "call-2")
+           (input '(:prompt "hi" :name "doomed")))
+      (harness-tools-agent-test-record-call sid call-id input)
+      (let ((harness-provider-demo-script-override '((:type done :stop-reason error :error "boom"))))
+        (let* ((result (harness-test-await (harness-tools-agent-test-run sid "spawn_agent" input call-id)))
+               (cid (plist-get (plist-get result :meta) :child-id))
+               (node (harness-tools-agent--call-node sid call-id)))
+          (should (plist-get result :is-error))
+          (should (stringp cid))
+          (should (equal cid (plist-get (plist-get node :meta) :child-id))))))))
+
+(ert-deftest harness-tools-agent-no-call-node-nothing-to-name ()
+  "A spawn run without a call node -- `tools/execute' from outside an
+agent turn -- runs as it always did: there is no call to name."
+  (harness-tools-agent-test-with
+    (let* ((sid (harness-tools-agent-test-session))
+           (result (harness-test-await (harness-tools-agent-test-run sid "spawn_agent" '(:prompt "hi")))))
+      (should-not (plist-get result :is-error))
+      (should (stringp (plist-get (plist-get result :meta) :child-id)))
+      (should-not (cl-find-if (lambda (n) (eq (plist-get n :kind) 'tool-call))
+                              (harness-call 'session/nodes sid))))))
+
 (ert-deftest harness-tools-agent-session-info ()
   (harness-tools-agent-test-with
     (let* ((sid (harness-tools-agent-test-session)))
@@ -579,6 +644,12 @@ sub-agent the call started."
               ;; to link; the fork's finding arrives later as a report.
               (should-not (plist-get result :is-error))
               (should (equal cid (plist-get (plist-get result :meta) :child-id)))
+              ;; And so does the call itself, from the moment the child
+              ;; exists: the chat links it while the call still runs.
+              (let ((call (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'tool-call)
+                                                       (equal (plist-get n :call-id) "call_spawn")))
+                                      (harness-call 'session/nodes sid))))
+                (should (equal cid (plist-get (plist-get call :meta) :child-id))))
               (should (string-match-p "started (session" (plist-get result :output)))
               (should (eq 'subagent (plist-get (harness-call 'session/get cid) :kind)))
               (harness-test-wait (lambda () (harness-tools-agent-test-reports sid)) 20 "the fork's report")
