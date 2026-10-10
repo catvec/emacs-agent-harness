@@ -70,7 +70,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `insights` | The Insights report over 30 days of every project: the totals, the summary the scripted model wrote, the messages by hour and weekday | `harness-media-shot-insights` |
 | `insights-activity` | The same report further down: the busiest sessions, the tools, the permission decisions and the tasks | `harness-media-shot-insights-activity` |
 | `chat-cowboy` | A chat whose prompt cache went cold yesterday, `orders.py` beside it: another session's message waits while the panel asks what goes first, each choice with its cost | `harness-media-shot-chat-cowboy` |
-| `notes` | A session's chat whose `spawn_agent` call runs, and the sub-agent's chat beside it: the note under the spawn call says what the child does, with a recap of it and its facts, and the note under the child's `bash` call says it is still running | `harness-media-shot-notes` |
+| `notes` | A session's chat after its `spawn_agent` call started a sub-agent, and the sub-agent's chat beside it: the sub-agents panel above the session's compose box lists the child running, with its name as a link, how long its turn has gone on and what it does now, and the note under the child's `bash` call says it is still running | `harness-media-shot-notes` |
 
 ## How the pictures are made
 
@@ -296,10 +296,11 @@ Before committing, check that
 - **Times.**  Anything a view shows as "N ago" needs a time in
   `harness-media--age`, or it reads "just now".
 - **Bugs.**  When a picture shows the UI doing something wrong, fix the
-  UI rather than the picture.  Taking these pictures found four so
+  UI rather than the picture.  Taking these pictures found five so
   far: the chat header dropped the % of quota windows, Markdown tables
-  with inline code did not line up, a budget had "1 days left", and a
-  report's file evidence gave its link count for its size ("1 B").
+  with inline code did not line up, a budget had "1 days left", a
+  report's file evidence gave its link count for its size ("1 B"), and
+  the sub-agents panel's lines wrapped in a chat half the frame wide.
 - **Missing pictures.**  `test/harness-docs-test.el` fails when the
   README links a picture that is not in `docs/media`, which git.sr.ht
   and GitHub would show as a broken image: take it again with

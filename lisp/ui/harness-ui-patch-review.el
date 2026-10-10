@@ -4,7 +4,7 @@
 
 ;; A task waiting for review is a patch waiting for its reviewer.  This
 ;; module puts the patch in the review, in the task's report (the popout
-;; [Review] opens on the board and in the session), and reviews it the
+;; [Review Changes] opens on the board and in the session), and reviews it the
 ;; way a mailing list does: file by file in Ediff, with comments under
 ;; the lines they are about, quoted from the diff, sent back to the task
 ;; as its feedback in one go.
@@ -62,6 +62,8 @@
 (defvar ediff-buffer-A)
 (defvar ediff-buffer-B)
 (defvar ediff-keep-variants)
+(defvar ediff-help-message)
+(defvar ediff-whitespace)
 (defvar evil-local-mode)
 (defvar window-restore-killed-buffer-windows)
 (declare-function ediff-buffers "ediff" (buffer-a buffer-b &optional startup-hooks job-name))
@@ -69,6 +71,10 @@
 (declare-function ediff-really-quit "ediff-util" (reverse-default-keep-variants))
 (declare-function ediff-get-diff-posn "ediff-util" (buf-type pos &optional n control-buf))
 (declare-function ediff-next-difference "ediff-util" (&optional arg))
+(declare-function ediff-set-help-message "ediff-help" ())
+(declare-function ediff-indent-help-message "ediff-help" ())
+(declare-function ediff-set-help-overlays "ediff-help" ())
+(declare-function ediff-multiframe-setup-p "ediff-init" ())
 (declare-function evil-normalize-keymaps "evil-core" (&optional state))
 
 (defgroup harness-ui-patch-review nil
@@ -934,6 +940,14 @@ The path is padded to WIDTH; COUNTS are the box's comments."
                          row)
     row))
 
+(defun harness-ui-patch-review--viewed-text (review)
+  "Return how much of REVIEW is reviewed: \"N of M files viewed, K left\".
+N is how many files were compared in Ediff (`harness-ui-patch-review--seen-p')."
+  (let* ((files (harness-ui-patch-review--r-files review))
+         (seen (cl-count-if (lambda (file) (harness-ui-patch-review--seen-p review file)) files)))
+    (format "%d of %s viewed, %d left" seen (harness-ui-patch-review--plural (length files) "file")
+            (- (length files) seen))))
+
 (defun harness-ui-patch-review--heading (review comments)
   "Return the first line of REVIEW's changes: what is compared, how much changed.
 COMMENTS is how many comments the box has on them."
@@ -941,6 +955,11 @@ COMMENTS is how many comments the box has on them."
         (tip (harness-ui-patch-review--r-tip review)))
     (concat
      (propertize (if tip (format "Changes (%d)" (length files)) "Changes") 'face 'harness-label-face)
+     ;; How far through the files the reviewer is, just after the count.
+     (if (null files) ""
+       (concat "   " (propertize (harness-ui-patch-review--viewed-text review)
+                                 'face 'harness-dim-face
+                                 'help-echo "The files you have compared in Ediff, and those left")))
      (if (not tip) ""
        (concat
         "   " (propertize (harness-ui-patch-review--r-branch review) 'face 'bold)
@@ -1192,9 +1211,43 @@ business there.  It is read-only."
                       'keymap (harness-ui-mouse-keymap command))
           " " (harness-ui-kbd key)))
 
+(defun harness-ui-patch-review--ediff-progress ()
+  "Return where this comparison is, as a prefix for the brief help.
+It is \"File i of M · N viewed · \", or an empty string when the
+panel does not know its review yet: Ediff composes the brief help while
+setting the panel up, before the review's own keys and file are
+installed, so `harness-ui-patch-review--ediff-redraw-help' draws it
+again once they are."
+  (let* ((review harness-ui-patch-review--review)
+         (index harness-ui-patch-review--index)
+         (files (and review (harness-ui-patch-review--r-files review))))
+    (if (or (null files) (not (integerp index)) (< index 0) (>= index (length files)))
+        ""
+      (format "File %d of %d · %d viewed · "
+              (1+ index) (length files)
+              (cl-count-if (lambda (file) (harness-ui-patch-review--seen-p review file)) files)))))
+
+(defun harness-ui-patch-review--ediff-redraw-help ()
+  "Draw this Ediff control panel's brief help again, with its place in the files.
+Ediff composes it once while setting the panel up, before
+`harness-ui-patch-review--ediff-startup' has installed the review and
+its file, so on its own the panel would not say where the reviewer is."
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (ediff-set-help-message)
+    (insert ediff-help-message)
+    (unless (ediff-multiframe-setup-p) (ediff-indent-help-message))
+    (ediff-set-help-overlays)
+    (set-buffer-modified-p nil)
+    (goto-char (point-min))
+    (skip-chars-forward ediff-whitespace)))
+
 (defun harness-ui-patch-review--ediff-help ()
-  "Return the brief help of the Ediff control panel of a review."
-  (concat (harness-ui-patch-review--help-button "[Comment]" #'harness-ui-patch-review-comment "c")
+  "Return the brief help of the Ediff control panel of a review.
+It opens with where the reviewer is: which file of how many, and how
+many were compared already (`harness-ui-patch-review--ediff-progress')."
+  (concat (harness-ui-patch-review--ediff-progress)
+          (harness-ui-patch-review--help-button "[Comment]" #'harness-ui-patch-review-comment "c")
           "   " (harness-ui-patch-review--help-button "[Next file]" #'harness-ui-patch-review-ediff-next-file "N")
           "   " (harness-ui-patch-review--help-button "[Previous file]" #'harness-ui-patch-review-ediff-previous-file "P")
           "   " (harness-ui-patch-review--help-button "[Back to the report]" #'harness-ui-patch-review-ediff-quit "q")
@@ -1281,7 +1334,11 @@ It gets the review's keys and help, and gives the report back as it ends."
             (lambda () (harness-ui-patch-review--ediff-ended review index))
             nil t)
   (when (> ediff-number-of-differences 0)
-    (ediff-next-difference)))
+    (ediff-next-difference))
+  ;; Ediff drew the brief help while setting the panel up, before the
+  ;; review's own keys and file were installed: draw it again, so it opens
+  ;; with where in the files the reviewer is.
+  (harness-ui-patch-review--ediff-redraw-help))
 
 (defun harness-ui-patch-review--restore-windows (windows)
   "Give the frame of WINDOWS, a window configuration, its windows back.
@@ -1401,24 +1458,41 @@ the difference only deletes, then at the merge base, SIDE :old."
               (`(:new . ,line) (format ", line %d" line))
               (`(:old . ,line) (format ", line %d of the merge base" line))))))
 
-(defun harness-ui-patch-review-comment (text)
-  "Comment on the current difference with TEXT, read in the minibuffer.
-In the Ediff of a task's change.  The comment goes in the feedback box
-of the task's report, under the difference's lines quoted from the
-diff -- the branch's lines, or the merge base's for a difference that
-only deletes -- after any comment there already.  Without a current
-difference it is a comment on the file as a whole."
-  (interactive (list (read-string (harness-ui-patch-review--comment-prompt))))
+(defun harness-ui-patch-review-comment (&optional text)
+  "Comment on the current difference with TEXT.
+In the Ediff of a task's change.  Called from the panel it reads the
+comment in a buffer of its own, so it may run to several lines: C-c C-c
+comments, C-c C-k gives up (`string-edit').  The comment goes in the
+feedback box of the task's report, under the difference's lines quoted
+from the diff -- the branch's lines, or the merge base's for a
+difference that only deletes -- after any comment there already.
+Without a current difference it is a comment on the file as a whole."
+  (interactive)
   (let* ((review (harness-ui-patch-review--current))
-         (file (nth harness-ui-patch-review--index (harness-ui-patch-review--r-files review))))
-    (if (string-blank-p text)
-        (message "No comment")
-      (harness-ui-patch-review--add-comment review file (harness-ui-patch-review--ediff-position) text)
-      (message "In the report's box: %s on %s; C-c C-c there sends the feedback"
-               (harness-ui-patch-review--plural
-                (or (cdr (assoc (harness-ui-patch-review--header file) (harness-ui-patch-review--r-counts review))) 0)
-                "comment")
-               (harness-ui-patch-review--f-path file)))))
+         (file (nth harness-ui-patch-review--index (harness-ui-patch-review--r-files review)))
+         (where (harness-ui-patch-review--ediff-position)))
+    (if text
+        (harness-ui-patch-review--comment-added review file where text)
+      (require 'string-edit)
+      (string-edit (concat (harness-ui-patch-review--comment-prompt)
+                           "  C-c C-c comments, C-c C-k cancels")
+                   ""
+                   (lambda (written)
+                     (harness-ui-patch-review--comment-added review file where written))
+                   :abort-callback #'ignore))))
+
+(defun harness-ui-patch-review--comment-added (review file where text)
+  "Put TEXT, a comment on WHERE of FILE of REVIEW, in the feedback box.
+Say in the echo area how many comments FILE now has.  A blank TEXT is
+no comment, and says so."
+  (if (string-blank-p text)
+      (message "No comment")
+    (harness-ui-patch-review--add-comment review file where text)
+    (message "In the report's box: %s on %s; C-c C-c there sends the feedback"
+             (harness-ui-patch-review--plural
+              (or (cdr (assoc (harness-ui-patch-review--header file) (harness-ui-patch-review--r-counts review))) 0)
+              "comment")
+             (harness-ui-patch-review--f-path file))))
 
 ;;;; Following the tasks
 

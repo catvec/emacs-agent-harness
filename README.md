@@ -350,7 +350,8 @@ default), or nil for nowhere.
 | `C-c h g` | `harness-search-sessions` | Search what was said in every session: words, the exact text, a regexp or meaning (see [Searching sessions](#searching-sessions)) |
 | `C-c h a` | `harness-tasks` | Show the task board |
 | `C-c h /` | `harness-quick-search` | Quick search: find a command, a session or a task in words; on the task board, in its compose box (see [Quick search](#quick-search)) |
-| `C-c h F` | `harness-fullscreen` | Start or end the fullscreen layout: the task board or session list on the left, a session beside it |
+| `C-c h F` | `harness-fullscreen` | Start or end the fullscreen layout: the task board, session list or a main session on one side, a session beside it |
+| `C-c h X` | `harness-ui-open-view-in-frame` | Open a view — the board, the session list, the settings page — in a frame you choose |
 | `C-c h t` | `harness-tree` | Show the conversation tree |
 | `C-c h f` | `harness-fork-session` | Fork the current session |
 | `C-c h b` | `harness-btw` | Open a BTW side conversation (`C-u`: on a model of your choice) |
@@ -504,7 +505,7 @@ number of options, and a permission's `y`, `s`, `a`, `n` and `N`, and
 | `C-c C-p` | Edit the pattern the newest request about a path outside the session's directories is answered for |
 | `C-c C-f` / `C-c C-b` | Show the next or previous diagram of a question's options |
 | `C-c C-k` | Cancel the running turn |
-| `C-c C-u` | Go to the parent session: the session this one was forked from or started by (also on the `↑` in the header line, when there is one) |
+| `C-c C-u` | Go to the parent session: the session this one was forked from or started by (also on the `↑` in the header line, when there is one; a seed conversation in between is skipped, being a shared prompt cache rather than a conversation) |
 | `TAB` | Complete in the compose box; on a permission request cut short, show its whole input; elsewhere, fold or unfold the block at point |
 | `M-n` / `M-p` | Jump to the next or previous message: what you or the agent wrote, the agent's plan included. Thinking and tool calls are passed over, so a long run of them takes one key to get past |
 | `M-N` / `M-P` | Jump to the next or previous message you wrote — the prompt the session started with included, however far down it is |
@@ -617,6 +618,15 @@ queue gave, the live merges first and the last few finished under them.
 It follows the merges as they happen, and disappears when the queue is
 empty and nothing was merged recently.
 
+A session that started sub-agents lists the ones still running there
+too, in a panel of their own above the compose box: one line per child
+with its name, which opens the child when clicked, how long its turn has
+gone on and what it is doing now -- the text the activity line gives, or
+its current todo item until its first activity arrives. It follows the
+children as they work, draws at most once a second, and disappears when
+none is running. A seed conversation (see **Cache seeds**) is left out,
+being no worker.
+
 A tool call that runs for a while says what it is doing under its own
 header, in dim lines that go when the call ends. `spawn_agent`, which
 returns as soon as its child starts, makes that note of the child as it
@@ -626,7 +636,7 @@ turns, steps and tool calls; `task_wait` shows the same for every
 session it waits on, a section each; a `bash` command still running
 says how many lines it has written and shows the latest one.
 
-![A session's chat whose spawn_agent call runs, and the sub-agent's own chat beside it: the note under the spawn call says what the child does, with a recap and its context, steps and tool calls, and the note under the child's bash call says it is still running with the latest line](docs/media/notes.png)
+![A session's chat after its spawn_agent call started a sub-agent, and the sub-agent's own chat beside it: the panel above the session's compose box lists the running child, with its name as a link, how long its turn has gone on and what it is doing, and the note under the child's bash call says it is still running with the latest line](docs/media/notes.png)
 
 A session may use its working directory, its worktree, the directories
 in `harness-allowed-directories` and the ones you grant it. It also has
@@ -1375,8 +1385,10 @@ call to one anyway, in every permission mode.
   is then a fork of the seed, sends the seed's system prompt word for
   word, and reads the context from the cache. The seed is a sub-agent
   session like any other, named "Shared context for ..." in the session
-  list, and stays there until you delete it. One fork step on a model
-  has nothing to share and is forked directly.
+  list, and stays there until you delete it. The harness marks it as a
+  seed, so the header's `↑` (`C-c C-u`), `C-c h o` and the session
+  pickers pass over it. One fork step on a model has nothing to share
+  and is forked directly.
 - **Short context for workers.** A worker is a sub-agent, and
   sub-agents work on a deliberately short context window,
   `harness-subagent-context-limit` (256000 tokens by default, nil for
@@ -1800,25 +1812,51 @@ the board's commands.
 
 ### Fullscreen overviews
 
-The task board and the session list can take the whole frame: press `F`
-on either, or `C-c h F` from anywhere. The overview stays on the left
-and a session shows on the right: the one already in sight, else the
-task or session at point, else the most recent one. Every session you
-open from the overview takes the right side in turn, and so does
-anything else the harness shows while the layout lasts.
+The task board, the session list and a main session can take the whole
+frame: press `F` on one of them, or `C-c h F` from anywhere. The anchor
+stays on one side of the frame — the left by default, the right with
+`harness-ui-fullscreen-side` — and the session you inspect shows beside
+it: the one already in sight, else the task or session at point, else
+the anchor's most recent child for a session, else the most recent one.
+Every session you open while the layout lasts takes the slot beside the
+anchor, and so does anything else the harness shows without a position.
 
-- `C-c C-z` in the session on the right buries it: the buffer that was
-  there before comes back, such as the file the session took the place
-  of, and the layout stays, so the next session you open takes the
-  right side again. It is a key chord because plain keys in a session
-  type into its compose box.
-- `q` on the overview (or `F` again) ends the layout, and the windows
-  come back as they were. A file you visited on the right stays in
-  sight.
+- A main session is one with no parent session: the root of its forks,
+  sub-agents and BTW conversations. Put one in the layout and its most
+  recently updated child shows beside it, so a parent stays in sight
+  while you read the work it started.
+- `C-c C-z` in the session beside the anchor buries it: the buffer that
+  was there before comes back, such as the file the session took the
+  place of, and the layout stays, so the next session you open takes the
+  slot again. It is a key chord because plain keys in a session type
+  into its compose box.
+- `q` on a harness view — the board, the session list, the settings
+  page, usage, insights, the worktrees, the version page, the tree, the
+  directories, the log, the pet — buries it the same way, bringing back
+  what its window showed and keeping the layout. In a chat, board or
+  popout compose box `q` still types into the box. On the anchor itself
+  `q` (or `F` again) ends the layout, and the windows come back as they
+  were. A file you visited in the slot stays in sight.
 - Opening the other overview while the layout is on (`C-c h l` beside
-  the board, say) puts it on the left instead.
-- `harness-ui-fullscreen-width` sets the width of the overview: a
-  fraction of the frame (half, by default) or a number of columns.
+  the board, say) puts it on the anchor side instead. The session list
+  the mode line or a notification opens for the sessions waiting for you
+  is not an overview taking over: it shows beside the anchor, so the
+  board stays put.
+- The layout keeps its shape: a session shown in the `left` or `right`
+  position inside a layout takes the slot beside the anchor rather than
+  growing a second, skinny column, and a magit or transient popup is
+  never mistaken for the slot. `harness-ui-fullscreen-width` sets the
+  width of the anchor: a fraction of the frame (half, by default) or a
+  number of columns, clamped so the slot keeps a usable width.
+- The layout follows its anchor's window. When something takes that
+  window away — you close it, or a project switch brings the project's
+  own windows back — the layout is dropped and the buffers it showed
+  get back the positions they had before it, rather than staying marked
+  fullscreen with no layout to show in.
+- `C-c h X` (`harness-ui-open-view-in-frame`) opens a view in a frame
+  you choose, offering the frame of your last mouse click first: click a
+  frame and open the board or the settings page there without going to
+  the frame where the view already shows.
 - `fullscreen` is a position too, so `C-u C-c h a` and then `fullscreen`
   opens the board in the layout.
 
@@ -2677,7 +2715,7 @@ ACP, so it works the same with a local or a remote harness.
 | Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `cowboy` `handoff` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `supervisor` `seed` `acp` `acp-remote` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-ssh` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-merge` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` `ui-supervisor` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-merge` `ui-children` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` `ui-supervisor` |
 
 ### Modules of your own
 

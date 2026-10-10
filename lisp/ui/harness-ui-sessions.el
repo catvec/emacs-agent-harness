@@ -608,12 +608,16 @@ each, what it waits on, with buttons to answer it right there: [Allow]
 and [Deny] for a permission request, [Answer…] for a question.  RET
 opens a session in its project (`harness-ui-sessions-open'); b, or the
 banner's \[Show all], shows every session again.  The list shows in
-POSITION, as `harness-sessions' has it."
+POSITION, as `harness-sessions' has it; in a frame with the fullscreen
+layout it shows beside the anchor, in the slot, instead of taking the
+anchor's place."
   (interactive)
   (when-let* ((buf (get-buffer harness-ui-sessions--buffer-name)))
     ;; Every waiting session, whatever the list was filtered by before.
     (with-current-buffer buf (setq harness-ui-sessions--filter "")))
-  (harness-sessions t position t))
+  (harness-sessions t (or position
+                          (and (harness-ui--fullscreen-layout) 'slot))
+                    t))
 
 (defun harness-ui-sessions--id ()
   "Return the id of the session on this line, or signal a user error."

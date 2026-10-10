@@ -136,6 +136,8 @@
       (let ((harness-ui-default-position 'full))
         (harness-tree sid))
       (should (derived-mode-p 'harness-ui-tree-mode))
+      ;; q buries the tree rather than quitting its window.
+      (should (eq #'harness-ui-quit-view (key-binding (kbd "q"))))
       (should (equal "*harness tree: Trunk*" (buffer-name)))
       (harness-test-wait (lambda () harness-ui-tree--data) 5 "tree data")
       ;; Every node has a row, newest first; both sessions are in the family.

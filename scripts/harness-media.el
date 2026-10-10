@@ -1025,14 +1025,15 @@ The orders endpoints only touch a list in memory, and authentication is a set lo
    (harness-media--tool "read_file" :path "tests/test_app.py")
    (harness-media--say "`ORDERS` is module state, so `test_creates_an_order` saw the orders of whichever test ran before it. `setUp` now clears it, and the test passes in any order.")))
 
-(defun harness-media--task-script (todos changes message summary &optional hold evidence)
+(defun harness-media--task-script (todos changes message summary &optional hold evidence problem)
   "A task's turn: TODOS, CHANGES (tool calls), a commit as MESSAGE, SUMMARY.
 TODOS are the item texts.  With HOLD the turn stops working half way
 and never ends, so the task stays in progress, and nothing is committed.
-With EVIDENCE, hand_in's evidence items, the turn hands its work in
-with SUMMARY rather than saying it.  Every finished round should hand
-in, as a task session is told to: one that ends without it puts [No
-report] on the task's card (`harness-tasks--missing-report')."
+With EVIDENCE, hand_in's evidence items and PROBLEM, its required short
+summary of what must be fixed, the turn hands its work in with SUMMARY
+rather than saying it.  Every finished round should hand in, as a task
+session is told to: one that ends without it puts [No report] on the
+task's card (`harness-tasks--missing-report')."
   (let* ((n (length todos))
          (at (lambda (done)
                (apply #'harness-media--todos
@@ -1048,7 +1049,8 @@ report] on the task's card (`harness-tasks--missing-report')."
                   ;; A word first, as models do: a session is named after
                   ;; a first turn that said something.
                   (list (harness-media--say "Done, and the tests pass: handing it in for review.")
-                        (harness-media--tool "hand_in" :summary summary :evidence evidence))
+                        (harness-media--tool "hand_in" :problem (or problem summary) :summary summary
+                                             :evidence evidence))
                 (list (harness-media--say summary)))))))
 
 (defun harness-media--task-constant-time (_request)
@@ -1060,7 +1062,8 @@ report] on the task's card (`harness-tasks--missing-report')."
    "Compare API keys in constant time"
    "`authenticate()` now compares the key with every known key through `hmac.compare_digest`."
    nil
-   (list (list :file "acme/auth.py" :caption "The key check, through hmac.compare_digest"))))
+   (list (list :file "acme/auth.py" :caption "The key check, through hmac.compare_digest"))
+   "API keys are compared with `==`, so a wrong key leaks how much of it matched."))
 
 (defun harness-media--task-python (_request)
   "Task: require Python 3.12."
@@ -1073,7 +1076,8 @@ report] on the task's card (`harness-tasks--missing-report')."
    "Require Python 3.12"
    "pyproject.toml requires Python 3.12 and lists 3.12 and 3.13."
    nil
-   (list (list :file "pyproject.toml" :caption "requires-python and the supported versions"))))
+   (list (list :file "pyproject.toml" :caption "requires-python and the supported versions"))
+   "The package advertises Python 3.11 support that no test covers."))
 
 (defun harness-media--task-pagination (_request)
   "Task: paginate GET /orders, handed in with a chart and the test run."
@@ -1091,7 +1095,8 @@ report] on the task's card (`harness-tasks--missing-report')."
      nil
      (list (list :image "docs/orders-latency.svg"
                  :caption "p95 latency of GET /orders: flat at 11-14 ms with pagination, where it grew to 4.8 s with every order at once")
-           (list :tool_call (plist-get tests :id) :caption "The tests pass, the total included.")))))
+           (list :tool_call (plist-get tests :id) :caption "The tests pass, the total included."))
+     "GET /orders returns every order at once, so a client can only load the whole list.")))
 
 (defun harness-media--task-slow (_request)
   "Task: log slow requests."
@@ -1102,7 +1107,8 @@ report] on the task's card (`harness-tasks--missing-report')."
    "Log slow requests"
    "`acme.timing.timed()` wraps the app and logs every request slower than 500 ms."
    nil
-   (list (list :file "acme/timing.py" :caption "The timing middleware and its threshold"))))
+   (list (list :file "acme/timing.py" :caption "The timing middleware and its threshold"))
+   "Requests slower than 500 ms are invisible in the logs, so slowness is found only by report."))
 
 (defun harness-media--task-slow-again (_request)
   "Task: log slow requests, after review: the round hands its work in again."
@@ -1110,7 +1116,8 @@ report] on the task's card (`harness-tasks--missing-report')."
                              :old_string "SLOW_SECONDS = 0.5" :new_string "SLOW_SECONDS = 0.5  # seconds")
         (harness-media--git-commit "Say the threshold is in seconds")
         (harness-media--say "The threshold says it is in seconds now: handing it in again.")
-        (harness-media--tool "hand_in" :summary "`SLOW_SECONDS`, the threshold of `acme.timing`, says it is in seconds."
+        (harness-media--tool "hand_in" :problem "The threshold constant does not say it is in seconds."
+                             :summary "`SLOW_SECONDS`, the threshold of `acme.timing`, says it is in seconds."
                              :evidence (list (list :file "acme/timing.py" :caption "The threshold, in seconds")))))
 
 (defun harness-media--task-settings (_request)
@@ -1953,13 +1960,15 @@ the picture's recap is hand written, as the tasks' are."
     buffer))
 
 (defun harness-media-shot-notes ()
-  "The note under a running call, in a chat and in its sub-agent's.
+  "The sub-agents panel of a chat, and the note under its child's call.
 A session sends a sub-agent to run the check suite in a loop, still at
-it when the picture is taken.  The session's chat shows the note under
-its `spawn_agent' call -- what the child does, a recap of it and its
-context, steps and tool calls -- and the child's chat beside it shows
-the note under its own `bash' call: still running, the lines it has
-written and the latest of them."
+it when the picture is taken.  The session's chat lists the child in
+the panel above its compose box -- its name as a link, how long its
+turn has gone on and what it does now -- and the child's chat beside it
+shows the note under its own `bash' call: still running, the lines it
+has written and the latest of them.  The note of the `spawn_agent' call
+itself is not in the picture: that call returned as soon as the child
+started, and a note goes with its call."
   (harness-media--reset-layout)
   (let* ((parent (harness-media--new-session :name "Check the orders suite"
                                              :model "claude:claude-opus-5-5"
@@ -1974,9 +1983,15 @@ written and the latest of them."
       (harness-media--wait
        (lambda ()
          (and (string-match-p "recap:" (or (harness-tools-session-note child (list :recap t)) ""))
-              (string-match-p "lines so far" (or (harness-media--notes-call child) ""))))
-       60 "the notes under the calls")
-      (harness-media--fit 34 24 40)
+              (string-match-p "lines so far" (or (harness-media--notes-call child) ""))
+              ;; The panel the session's chat pins above its compose box.
+              (with-current-buffer pbuf
+                (string-match-p "Sub-agents  1 running" (buffer-string)))))
+       60 "the notes under the calls and the sub-agents panel")
+      ;; Fitted to what the two chats show, the panel drawn.
+      (harness-media--fit (max (harness-media--text-lines (get-buffer-window pbuf))
+                               (harness-media--text-lines (get-buffer-window cbuf)))
+                          nil 40)
       (harness-media--to-bottom pbuf)
       (harness-media--to-bottom cbuf)
       (harness-media--settle 1)

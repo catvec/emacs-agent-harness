@@ -708,6 +708,119 @@ weigh what the call would do, never whether a value looks complete."
       (should (equal "perms: auto judge gave no verdict for bash (end-turn); it replied: I refuse to answer in JSON"
                      (funcall warning))))))
 
+;;;; Read-only cloud commands
+
+(defun harness-perms-test--exec (command)
+  "Decide COMMAND, a shell command, and return the decision."
+  (harness-perms-test--decide
+   (list :session harness-perms-test--session :tool "bash" :kind 'exec
+         :input (list :command command) :call-id (harness-short-id))))
+
+(ert-deftest harness-perms-read-only-cloud-commands-need-no-judge ()
+  "A read-only cloud query must not reach the auto-mode judge.
+The judge runs on the cheapest model, sees the call alone and read a
+cloud service outside the allowed roots as egress: it denied an
+uptime-check read as sending email to a third party and `gsutil ls' as
+sending credentials off the machine.  The mode stage allows them in
+`auto' mode and for a session the user left non-interactive, before the
+judge would be asked."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (let* ((probe (harness-perms-test--judge-provider
+                 '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"it emails a third party\"}")
+                   (:type done :stop-reason end-turn))))
+         (harness-perms-auto-model "judge:x"))
+    (dolist (command '("gcloud monitoring uptime list-configs"
+                       "gcloud monitoring uptime list-configs --project my-proj"
+                       "gcloud compute instances list --format=json --project=my-proj"
+                       "gcloud projects get-iam-policy my-proj"
+                       "gcloud config get-value project"
+                       "gcloud logging read --limit=10"
+                       "gcloud iam service-accounts list"
+                       "gsutil ls gs://my-bucket"
+                       "gsutil ls -l gs://my-bucket"
+                       "gsutil cat gs://my-bucket/log.txt"
+                       "gsutil stat gs://my-bucket/object"
+                       "gcloud compute instances list && gcloud projects list"))
+      (let ((d (harness-perms-test--exec command)))
+        (should (eq 'allow (plist-get d :behavior)))
+        (should (string-match-p "cloud" (plist-get d :reason)))))
+    ;; The judge never saw any of them.
+    (should (null (funcall probe 'requests)))
+    ;; An interactive auto session allows them too, and the judge still sees nothing.
+    (setq harness-perms-test--session
+          (plist-put harness-perms-test--session :non-interactive nil))
+    (should (eq 'allow (plist-get (harness-perms-test--exec "gsutil ls gs://my-bucket") :behavior)))
+    (should (null (funcall probe 'requests)))))
+
+(ert-deftest harness-perms-cloud-writes-and-logins-still-go-to-the-judge ()
+  "A cloud command that is no obvious read is left to the judge.
+Writes, deletions, rsyncs, interactive logins and a credential printed
+are never allowed by the mode stage, and neither is a read hidden after
+another program, or a write verb that looks like a read operand."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (let* ((probe (harness-perms-test--judge-provider
+                 '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"it changes the cloud\"}")
+                   (:type done :stop-reason end-turn))))
+         (harness-perms-auto-model "judge:x")    ; the judge is consulted
+         (commands '("gcloud config set project my-proj"
+                     "gcloud compute instances delete my-instance"
+                     "gcloud monitoring uptime delete my-check"
+                     "gcloud auth login"
+                     "gcloud auth print-access-token"
+                     "gcloud container clusters get-credentials my-cluster"
+                     "gcloud compute ssh my-instance"
+                     "gsutil rm gs://my-bucket/object"
+                     "gsutil cp gs://my-bucket/object ."
+                     "gsutil rsync -r gs://a gs://b"
+                     "gcloud storage cp list.txt gs://my-bucket/"
+                     "gcloud compute instances clone list-instance src"
+                     "gcloud compute instances simulate-maintenance-event list-instance"
+                     "gsutil ls gs://my-bucket && rm -rf /"
+                     "gcloud compute instances list $(rm -rf /)"
+                     "sudo gcloud compute instances list"
+                     "gcloud compute instances list | jq ."
+                     "gcloud --project p compute instances list"
+                     "gcloud components install"
+                     "gsutil iam ch user:x:objectViewer gs://b")))
+    (dolist (command commands)
+      (let ((request (list :session harness-perms-test--session :tool "bash" :kind 'exec
+                           :input (list :command command) :call-id (harness-short-id))))
+        (should-not (harness-perms--read-only-cloud-p request))
+        (should (eq 'deny (plist-get (harness-perms-test--decide request) :behavior)))))
+    ;; Every command that names no outside path reached the judge.
+    (should (funcall probe 'requests))))
+
+(ert-deftest harness-perms-cloud-reads-still-ask-a-present-user ()
+  "A user who is present and a mode that asks still get their prompt.
+The allow is exactly where the judge would rule (auto mode, or the user
+away); ask mode asks the user, as for every other shell command."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let ((p (harness-run-filter-async
+            'permission/decide (list :behavior 'ask)
+            (list :session harness-perms-test--session :tool "bash" :kind 'exec
+                  :input (list :command "gsutil ls gs://my-bucket") :call-id "c-cloud"))))
+    (harness-test-wait (lambda () harness-perms-test--pending) 2 "the prompt")
+    (should-not (harness-promise-settled-p p))
+    (should (equal "bash" (plist-get (plist-get (car harness-perms-test--pending) :payload) :tool)))
+    (harness-call 'permission/answer "s1" (plist-get (car harness-perms-test--pending) :id) "deny-once")
+    (should (eq 'deny (plist-get (harness-test-await p) :behavior)))))
+
+(ert-deftest harness-perms-judge-prompt-names-read-only-cloud-work ()
+  "The judge is told read-only cloud queries are ordinary work.
+It reads the call alone, so its prompt says that authenticating to a
+service and reading the user's own resources is not egress and names
+the commands it must not deny, along with the writes and logins it
+still must."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (dolist (part '("gcloud monitoring uptime list-configs"
+                  "gsutil ls"
+                  "kubectl get pods"
+                  "not sending secrets off the machine"
+                  "auth print-access-token"
+                  "sending secrets or private data off the machine"))
+    (should (string-search part harness-perms--judge-system))))
+
 ;;;; The rules Claude Code's own auto mode follows
 
 (defun harness-perms-test--call-with-claude-settings (files fn &optional profile)

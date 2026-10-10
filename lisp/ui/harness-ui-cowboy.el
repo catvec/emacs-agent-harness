@@ -134,8 +134,8 @@ question pick an option, under them."
 (defun harness-ui-cowboy--sender (from)
   "Return who sent the message waiting, FROM, as the subject of a sentence.
 Another session's agent goes by its session's name, as the chat names
-it (now, else when it wrote, else a short id): a button that opens the
-session."
+it (now, else when it wrote, else a short id): a session link
+\(`harness-ui-session-link') that opens the session."
   (pcase (harness-sender-kind from)
     ('nil "Your message")
     ('session
@@ -146,9 +146,8 @@ session."
                        "?"))
             (shown (format "“%s”" label)))
        (concat "A message from session "
-               (if (and (stringp id) (fboundp 'harness-open-session))
-                   (harness-ui-action-button shown (lambda () (harness-open-session id))
-                                             :help (format "Open the session %s" label))
+               (if (stringp id)
+                   (harness-ui-session-link id shown (format "Open the session %s" label))
                  shown))))
     (_ (format "A message from %s" (harness-sender-description from)))))
 

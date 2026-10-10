@@ -26,6 +26,7 @@
      (clrhash harness-sessions)
      (clrhash harness-tools)
      (clrhash harness-agent--turns)
+     (clrhash harness-acp--virtual-state)
      (setq harness-acp--clients nil
            harness-acp-test-messages nil)
      (let ((harness-provider-demo--delay 0.005)
@@ -909,6 +910,93 @@ before the received hook; outside a slice it runs at once."
       (setq order nil)
       (harness-acp-once-received redraw)
       (should (equal '(redraw) order)))))
+
+(ert-deftest harness-acp-local-virtual-sessions-advertised ()
+  "The ACP session list advertises the two virtual sessions; loading the
+project list and refreshing it rewrites its first message in place."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (init (harness-test-await (harness-acp-initialize conn)))
+           (listed (harness-acp-test-request conn "session/list" nil))
+           (second (make-temp-file "harness-acp-virtual-" t)))
+      (unwind-protect
+          (progn
+            (should (plist-member (plist-get init :agentCapabilities) :sessionCapabilities))
+            (let* ((sessions (plist-get listed :sessions))
+                   (ids (mapcar (lambda (s) (plist-get s :sessionId)) sessions))
+                   (projects (cl-find "harness:projects" sessions :key (lambda (s) (plist-get s :sessionId)) :test #'equal))
+                   (task (cl-find "harness:new-task" sessions :key (lambda (s) (plist-get s :sessionId)) :test #'equal)))
+              (should (member "harness:projects" ids))
+              (should (member "harness:new-task" ids))
+              (should (equal "Projects" (plist-get projects :title)))
+              (should (equal "New task" (plist-get task :title)))
+              (should (stringp (plist-get projects :cwd)))
+              (should (stringp (plist-get task :cwd))))
+            ;; The extension still lists only real sessions.
+            (should-not (cl-some (lambda (s) (member (plist-get s :id) '("harness:projects" "harness:new-task")))
+                                 (harness-acp-test-request conn "_harness/session/list" nil)))
+            (harness-acp-test-request conn "session/load" (list :sessionId "harness:projects"))
+            (let* ((chunk (cl-find "user_message_chunk" (harness-acp-test-updates)
+                                   :key (lambda (u) (plist-get u :sessionUpdate)) :test #'equal))
+                   (node-id (plist-get (plist-get chunk :_harness) :nodeId))
+                   (before (plist-get (plist-get chunk :content) :text)))
+              (should chunk)
+              (should (stringp node-id))
+              (should (stringp before))
+              ;; A session in a second directory makes that directory a project.
+              (harness-acp-test-request conn "session/new"
+                                        (list :cwd second :_harness (list :model "demo:scripted")))
+              (harness-acp-test-request conn "session/prompt"
+                                        (list :sessionId "harness:projects"
+                                              :prompt (list (list :type "text" :text "refresh"))))
+              (let ((refreshed (cl-find-if
+                                (lambda (u)
+                                  (and (equal "user_message_chunk" (plist-get u :sessionUpdate))
+                                       (equal node-id (plist-get (plist-get u :_harness) :nodeId))
+                                       (not (equal before (plist-get (plist-get u :content) :text)))))
+                                (harness-acp-test-updates))))
+                (should refreshed)
+                (should (string-match-p (regexp-quote (file-name-as-directory second))
+                                        (plist-get (plist-get refreshed :content) :text))))))
+        (ignore-errors (delete-directory second t))))))
+
+(ert-deftest harness-acp-local-virtual-task-submit ()
+  "Prompting the new-task virtual session submits a task for its project."
+  (harness-acp-test-with
+    (harness-test-load-module 'priority)
+    (harness-test-load-module 'tasks)
+    (clrhash harness-tasks--table)
+    (clrhash harness-tasks--starting)
+    (clrhash harness-tasks--naming)
+    (harness-tasks--forget-stores)
+    (setq harness-tasks--loaded t
+          harness-tasks--dirty nil
+          harness-tasks--naming-queue nil)
+    (let* ((harness-tasks-max-running 0)
+           (harness-naming-auto nil)
+           (conn (harness-acp-test-connect))
+           (dir (make-temp-file "harness-acp-task-" t))
+           (prompt "Add a --verbose flag to the CLI"))
+      (unwind-protect
+          (progn
+            (harness-acp-test-request conn "session/load"
+                                      (list :sessionId "harness:new-task" :cwd dir))
+            (let ((r (harness-acp-test-request conn "session/prompt"
+                                               (list :sessionId "harness:new-task"
+                                                     :prompt (list (list :type "text" :text prompt))))))
+              (should (equal "end_turn" (plist-get r :stopReason)))
+              (let ((task-id (plist-get (plist-get r :_harness) :taskId)))
+                (should (stringp task-id))
+                (should (cl-find prompt (harness-call 'task/list dir)
+                                 :key (lambda (t) (plist-get t :prompt)) :test #'equal))
+                (let ((confirm (cl-find-if
+                                (lambda (u)
+                                  (and (equal "agent_message_chunk" (plist-get u :sessionUpdate))
+                                       (string-match-p (regexp-quote task-id)
+                                                       (plist-get (plist-get u :content) :text))))
+                                (harness-acp-test-updates))))
+                  (should confirm)))))
+        (ignore-errors (delete-directory dir t))))))
 
 (provide 'harness-acp-test)
 ;;; harness-acp-test.el ends here

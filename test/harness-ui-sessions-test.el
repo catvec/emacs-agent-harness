@@ -779,6 +779,32 @@ remote project, or one gone from disk, is not switched to."
         (set-window-buffer (selected-window) window-buffer)
         (kill-buffer chat)))))
 
+(ert-deftest harness-ui-session-link-and-a-list-row-open-through-visit-session ()
+  "The shared session link and a session list row open a session the same way.
+A click on the text `harness-ui-session-link' draws runs
+`harness-ui-visit-session', and so does RET on the list's row: the one
+path that switches to the session's project and shows it there.  A
+chat's session line and a tool call's block use the same link, so they
+open it the same way."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "task" root)
+    (let ((visited nil))
+      (cl-letf (((symbol-function 'harness-ui-visit-session)
+                 (lambda (id &rest _) (push id visited))))
+        ;; The link, as the chat's session line and a tool call draw it.
+        (with-temp-buffer
+          (insert (harness-ui-session-link "task"))
+          (goto-char (point-min))
+          (let ((command (lookup-key (get-text-property (point) 'keymap) [mouse-1])))
+            (should (commandp command))
+            (call-interactively command)))
+        ;; The list's own row.
+        (let ((default-directory root)) (harness-sessions))
+        (with-current-buffer harness-ui-sessions--buffer-name
+          (harness-ui-sessions-test--goto "task")
+          (harness-ui-sessions-open)))
+      (should (equal '("task" "task") (reverse visited))))))
+
 (defvar persp-mode)
 (defvar +workspaces-switch-project-function)
 (defvar doom-fallback-buffer-name)
@@ -1046,6 +1072,34 @@ aside."
       (goto-char (point-max))
       (should-not (tabulated-list-get-id))
       (should (equal "new" (harness-ui-sessions--overview-session))))))
+
+(ert-deftest harness-ui-sessions-waiting-shows-beside-the-anchor ()
+  "With the fullscreen layout on, the waiting list shows in the slot.
+It does not take the anchor's place: `harness-sessions-waiting' passes
+the `slot' position, which `harness-ui-display-buffer' shows beside the
+anchor."
+  (harness-ui-sessions-test-with-repo
+    (let* ((anchor (get-buffer-create "*harness waiting anchor*"))
+           (file (get-buffer-create "*harness waiting file*"))
+           (shown nil))
+      (unwind-protect
+          (progn
+            (with-current-buffer anchor
+              (setq-local harness-ui-overview-function #'ignore))
+            (delete-other-windows)
+            (switch-to-buffer file)
+            (harness-ui--fullscreen-enter anchor)
+            (should (harness-ui--fullscreen-layout))
+            ;; Capture what position the list is displayed in.
+            (cl-letf (((symbol-function 'harness-ui-display-view)
+                       (lambda (buffer &optional position)
+                         (setq shown (cons buffer position)))))
+              (harness-sessions-waiting))
+            (should (eq (get-buffer harness-ui-sessions--buffer-name) (car shown)))
+            (should (eq 'slot (cdr shown))))
+        (ignore-errors (harness-ui--fullscreen-leave))
+        (kill-buffer anchor)
+        (kill-buffer file)))))
 
 (provide 'harness-ui-sessions-test)
 ;;; harness-ui-sessions-test.el ends here

@@ -884,14 +884,14 @@ Only for a report of every project."
             (list (concat "  " (harness-ui-usage--segment "p" #'harness-ui-insights-set-project nil "Choose a project")) 55)
             (list (harness-ui-usage--segment "n" #'harness-ui-insights-write nil "Write the summary again") 58)
             (list (harness-ui-usage--segment "g" #'harness-ui-insights-refresh nil "Compute the report again") 60)
-            (list (harness-ui-usage--segment "q" #'quit-window nil "Quit") 65)))
+            (list (harness-ui-usage--segment "q" #'harness-ui-quit-view nil "Quit") 65)))
      width)))
 
 ;;;; Mode and commands
 
 (defvar harness-ui-insights-mode-map
   (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
+    (set-keymap-parent map harness-ui-view-map)
     (define-key map (kbd "g") #'harness-ui-insights-refresh)
     (define-key map (kbd "t") #'harness-ui-insights-cycle-period)
     (define-key map (kbd "p") #'harness-ui-insights-set-project)

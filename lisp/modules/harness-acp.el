@@ -760,6 +760,134 @@ ARGLIST is (CLIENT PARAMS)."
   (declare (indent 2))
   `(puthash ,name (lambda ,arglist ,@body) harness-acp--standard-methods))
 
+;;;; Virtual sessions
+
+(defconst harness-acp--virtual-sessions
+  '(("harness:projects" . "Projects")
+    ("harness:new-task" . "New task"))
+  "Sessions the harness advertises that are not backed by a real session.
+Each is (SESSION-ID . TITLE).  `session/load' renders them as a single
+first message, `session/prompt' acts on them (refresh, submit a task),
+and they never speak `_harness/*' update kinds, only standard ones, so
+a third-party ACP client shows them.")
+
+(defvar harness-acp--virtual-state (make-hash-table :test 'equal)
+  "Per virtual session state: SESSION-ID -> (:cwd TEXT NODE-ID).")
+
+(defun harness-acp--virtual-session-p (id)
+  "Non-nil when ID names a virtual session."
+  (and (stringp id) (assoc id harness-acp--virtual-sessions) t))
+
+(defun harness-acp--virtual-node-id (id)
+  "Return the stable node id of virtual session ID."
+  (if (equal id "harness:projects") "virtual-projects" "virtual-new-task"))
+
+(defun harness-acp--virtual-projects ()
+  "Return the project directories the project-list page shows, sorted."
+  (or (and (harness-method-exists-p 'insights/projects)
+           (ignore-errors (harness-call 'insights/projects)))
+      (and (harness-method-exists-p 'session/list)
+           (let (roots)
+             (dolist (s (harness-call 'session/list))
+               (when-let* ((p (plist-get s :project)))
+                 (cl-pushnew (file-name-as-directory (expand-file-name p))
+                             roots :test #'equal)))
+             (sort roots #'string<)))))
+
+(defun harness-acp--projects-text ()
+  "Return the text of the project-list page."
+  (let ((projects (harness-acp--virtual-projects)))
+    (if projects
+        (concat "Projects:\n"
+                (mapconcat (lambda (p) (concat "- " p)) projects "\n"))
+      "No projects yet.")))
+
+(defun harness-acp--new-task-text (cwd)
+  "Return the text of the new-task page for project CWD."
+  (concat "New task\nType the task and send it; the harness submits it to the project shown here.\n"
+          "Project: " cwd))
+
+(defun harness-acp--virtual-content (id cwd)
+  "Return the page text of virtual session ID in CWD."
+  (if (equal id "harness:projects")
+      (harness-acp--projects-text)
+    (harness-acp--new-task-text cwd)))
+
+(defun harness-acp--virtual-update (id text)
+  "Return the `session/update' object rendering TEXT as ID's first message."
+  (list :sessionUpdate "user_message_chunk"
+        :content (list :type "text" :text text)
+        :_harness (list :nodeId (harness-acp--virtual-node-id id) :virtual t)))
+
+(defun harness-acp--load-virtual (client sid params)
+  "Render virtual session SID for CLIENT; store its state from PARAMS."
+  (let* ((cwd (file-name-as-directory
+               (expand-file-name (or (plist-get params :cwd) default-directory))))
+         (node-id (harness-acp--virtual-node-id sid))
+         (text (harness-acp--virtual-content sid cwd)))
+    (puthash sid (list :cwd cwd :text text :node-id node-id)
+             harness-acp--virtual-state)
+    (harness-acp--client-notify client "session/update"
+                                (list :sessionId sid
+                                      :update (harness-acp--virtual-update sid text)))
+    :empty))
+
+(defun harness-acp--prompt-text (blocks)
+  "Return the text blocks of BLOCKS joined, as a prompt."
+  (string-trim
+   (mapconcat (lambda (b)
+                (if (equal (plist-get b :type) "text")
+                    (or (plist-get b :text) "")
+                  ""))
+              blocks "")))
+
+(defun harness-acp--prompt-virtual (client sid blocks)
+  "Act on a prompt of virtual session SID and answer it."
+  (let* ((state (gethash sid harness-acp--virtual-state))
+         (cwd (or (plist-get state :cwd)
+                  (file-name-as-directory (expand-file-name default-directory)))))
+    (if (equal sid "harness:projects")
+        (let* ((text (harness-acp--projects-text))
+               (old (plist-get state :text)))
+          (when state
+            (puthash sid (plist-put state :text text) harness-acp--virtual-state))
+          (unless (equal text old)
+            (harness-acp--client-notify
+             client "session/update"
+             (list :sessionId sid :update (harness-acp--virtual-update sid text))))
+          (list :stopReason "end_turn"
+                :_harness (list :virtual t :reason "refreshed")))
+      (let ((text (harness-acp--prompt-text blocks)))
+        (when (string-blank-p text)
+          (signal 'harness-acp-invalid-params (list "a task needs a prompt")))
+        (unless (harness-method-exists-p 'task/submit)
+          (signal 'harness-no-such-method (list 'task/submit)))
+        (let* ((task (harness-call 'task/submit cwd text))
+               (id (plist-get task :id))
+               (name (plist-get task :name)))
+          (harness-acp--client-notify
+           client "session/update"
+           (list :sessionId sid
+                 :update (list :sessionUpdate "agent_message_chunk"
+                               :content (list :type "text" :text
+                                              (format "Task %s submitted: %s" id (or name id)))
+                               :_harness (list :virtual t :taskId id))))
+          (list :stopReason "end_turn"
+                :_harness (list :virtual t :taskId id)))))))
+
+(defun harness-acp--session-info (session)
+  "Return the ACP SessionInfo plist for real SESSION."
+  (list :sessionId (plist-get session :id)
+        :cwd (file-name-as-directory
+              (expand-file-name (or (plist-get session :project) default-directory)))
+        :title (plist-get session :name)))
+
+(defun harness-acp--virtual-session-infos (cwd)
+  "Return the ACP SessionInfo plists of the virtual sessions for CWD."
+  (mapcar (lambda (pair)
+            (list :sessionId (car pair) :cwd cwd :title (cdr pair)))
+          harness-acp--virtual-sessions))
+
 (harness-acp--define-standard "initialize" (client params)
   (setf (harness-acp-client-initialized client) t
         (harness-acp-client-capabilities client) (plist-get params :clientCapabilities))
@@ -768,6 +896,7 @@ ARGLIST is (CLIENT PARAMS)."
                  (harness-acp-client-kind client) (plist-get emacs :pid) (plist-get emacs :host)))
   (list :protocolVersion harness-acp-protocol-version
         :agentCapabilities (list :loadSession t
+                                 :sessionCapabilities (list :list :empty)
                                  :promptCapabilities (list :image t :audio t :embeddedContext t))
         :agentInfo (list :name "emacs-agent-harness" :version (harness-acp--version))
         :authMethods (harness-json-array (harness-acp--auth-methods client))
@@ -822,15 +951,26 @@ shared secret when `harness-acp-token' is set."
           :modes (harness-acp--modes-plist session))))
 
 (harness-acp--define-standard "session/load" (client params)
-  (let* ((sid (harness-acp--param params :sessionId t))
-         (session (harness-call 'session/resume sid)))
-    (dolist (node (harness-call 'session/nodes sid))
-      (dolist (update (harness-acp--node-updates node nil))
-        (harness-acp--client-notify client "session/update" (list :sessionId sid :update update))))
-    (harness-acp--client-notify client "session/update"
-                                (list :sessionId sid
-                                      :update (list :sessionUpdate "_harness/session" :session session)))
-    :empty))
+  (let ((sid (harness-acp--param params :sessionId t)))
+    (if (harness-acp--virtual-session-p sid)
+        (harness-acp--load-virtual client sid params)
+      (let ((session (harness-call 'session/resume sid)))
+        (dolist (node (harness-call 'session/nodes sid))
+          (dolist (update (harness-acp--node-updates node nil))
+            (harness-acp--client-notify client "session/update" (list :sessionId sid :update update))))
+        (harness-acp--client-notify client "session/update"
+                                    (list :sessionId sid
+                                          :update (list :sessionUpdate "_harness/session" :session session)))
+        :empty))))
+
+(harness-acp--define-standard "session/list" (_client params)
+  "Return the real sessions and the virtual sessions as ACP SessionInfo."
+  (let* ((cwd (expand-file-name (or (plist-get params :cwd) default-directory)))
+         (real (if (harness-method-exists-p 'session/list)
+                   (mapcar #'harness-acp--session-info (harness-call 'session/list))
+                 nil)))
+    (list :sessions (harness-json-array
+                     (append real (harness-acp--virtual-session-infos cwd))))))
 
 (defun harness-acp--block-from-acp (block)
   "Turn an ACP prompt content BLOCK into a harness content block.
@@ -864,18 +1004,24 @@ An image's `_harness.label', the token naming it in the message's text
                           :error (plist-get result :error)
                           :duration (plist-get result :duration)))))
 
-(harness-acp--define-standard "session/prompt" (_client params)
+(harness-acp--define-standard "session/prompt" (client params)
   (let ((sid (harness-acp--param params :sessionId t))
         (blocks (mapcar #'harness-acp--block-from-acp (plist-get params :prompt))))
-    (unless (harness-method-exists-p 'agent/prompt)
-      (signal 'harness-no-such-method (list 'agent/prompt)))
-    (harness-then (harness-call-async 'agent/prompt sid blocks) #'harness-acp--stop-result)))
+    (if (harness-acp--virtual-session-p sid)
+        (harness-acp--prompt-virtual client sid blocks)
+      (progn
+        (unless (harness-method-exists-p 'agent/prompt)
+          (signal 'harness-no-such-method (list 'agent/prompt)))
+        (harness-then (harness-call-async 'agent/prompt sid blocks) #'harness-acp--stop-result)))))
 
 (harness-acp--define-standard "session/cancel" (_client params)
   (let ((sid (harness-acp--param params :sessionId t)))
-    (when (harness-method-exists-p 'agent/cancel)
-      (harness-call 'agent/cancel sid))
-    :empty))
+    (if (harness-acp--virtual-session-p sid)
+        :empty
+      (progn
+        (when (harness-method-exists-p 'agent/cancel)
+          (harness-call 'agent/cancel sid))
+        :empty))))
 
 (harness-acp--define-standard "session/set_mode" (_client params)
   (let* ((sid (harness-acp--param params :sessionId t))

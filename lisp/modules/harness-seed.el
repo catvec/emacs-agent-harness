@@ -33,6 +33,12 @@
 ;; keyed on `:parent-id' (the merge queue, say) sees the seed as their
 ;; parent.
 ;;
+;; A seed says so in its own record, in the `:seed' key of its `:ext'
+;; (`session/set-ext'), set when it is made.  That travels with the
+;; session to every client, so a client can leave a seed out of what it
+;; navigates to without guessing from the name; the UI reads it with
+;; `harness-ui-seed-session-p'.
+;;
 ;; A caller that may do without a seed asks `seed/warm-p' first: it says
 ;; whether a seed for (SOURCE, NODE, MODEL) exists whose cache is warm,
 ;; or which a turn is priming or warming now, so that `seed/fork' would
@@ -324,7 +330,9 @@ already is waited for instead, whoever began it, and no other follows."
 PLIST is `seed/fork''s.  Return a promise of the seed's id, resolved
 once the priming turn ended.  The seed is known from the moment it
 exists, so a priming turn that fails leaves it to be warmed by the
-next call.  Rejected when the fork cannot be made."
+next call.  Rejected when the fork cannot be made.  The seed is marked
+as one in its own `:ext' (`:seed'), so every client can leave it out of
+what it offers to open; see the commentary."
   (let* ((source (harness-call 'session/get source-id))
          (name (plist-get plist :seed-name)))
     (harness-then
@@ -337,6 +345,9 @@ next call.  Rejected when the fork cannot be made."
          (puthash id (list :id id :source source-id :node node :model model :created (float-time))
                   harness-seed--seeds)
          (puthash key id harness-seed--index)
+         ;; In the record the harness sends every client, not only in
+         ;; the tables here: this is how a client tells a seed apart.
+         (harness-call 'session/set-ext id :seed t)
          (harness-log 'info "seed: %s made for %s on %s; priming it" id source-id model)
          (harness-then (harness-seed--send id harness-seed-prime-message) (lambda (_) id)))))))
 

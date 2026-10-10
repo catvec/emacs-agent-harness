@@ -10,6 +10,7 @@
 
 (require 'harness-test-helpers)
 (require 'harness-ui)
+(require 'harness-ui-tasks)
 
 (defun harness-ui-notifications-test--answer (params)
   "Dispatch a `_harness/client/notify' request with PARAMS; return the answer."
@@ -59,8 +60,8 @@
 (ert-deftest harness-ui-notifications-click-opens-what-it-is-about ()
   (let ((opened nil) (handled nil)
         (harness-ui-notification-functions nil))
-    (cl-letf (((symbol-function 'harness-ui-display-session) (lambda (sid &rest _) (push sid opened))))
-      ;; By default, its session.
+    (cl-letf (((symbol-function 'harness-ui-visit-session) (lambda (sid &rest _) (push sid opened))))
+      ;; By default, its session, in its project.
       (harness-ui--notification-clicked '(:session "s1"))
       (should (equal '("s1") opened))
       ;; A UI module that knows better takes it.
@@ -106,6 +107,82 @@ macOS keeps notifications past a restart of the Emacs that showed them."
       (should-not (harness-notifications-desktop-clicked "n1"))
       (harness-test-wait (lambda () clicked) 2 "the click")
       (should (equal "s1" (plist-get clicked :session))))))
+
+(ert-deftest harness-ui-notifications-click-switches-to-the-tasks-project ()
+  "A click on a task's notification switches to its project before the board opens.
+The task's project may be a worktree, which belongs to its repository's
+main checkout (`harness-files-owning-checkout')."
+  (let* ((events nil) (roots nil)
+         (here (file-name-as-directory (expand-file-name default-directory)))
+         (harness-ui-switch-project-function (lambda (root) (push root roots) 'switched)))
+    (cl-letf (((symbol-function 'harness-files-owning-checkout)
+               (lambda (root) (push (list 'checkout root) events) here))
+              ((symbol-function 'harness-ui-session) (lambda (_id) nil))
+              ((symbol-function 'harness-tasks)
+               (lambda (&rest args) (push (cons 'board args) events) (generate-new-buffer " *task board*"))))
+      (unwind-protect
+          (progn
+            (should (harness-ui-tasks--on-notification '(:task "t1" :project "/task-worktree/")))
+            ;; The switch comes first, then the board for the task's project.
+            (should (equal '((board "/task-worktree/") (checkout "/task-worktree/"))
+                           events))
+            (should (equal (list here) roots)))
+        (dolist (b (buffer-list))
+          (when (string-prefix-p " *task board*" (buffer-name b)) (kill-buffer b)))))))
+
+(ert-deftest harness-ui-notifications-click-switches-to-the-sessions-project ()
+  "The session a notification names, when the harness has it, says the project.
+Its project is used rather than the notification's, which may be a task's
+worktree of another directory."
+  (let* ((events nil) (roots nil)
+         (here (file-name-as-directory (expand-file-name default-directory)))
+         (harness-ui-switch-project-function (lambda (root) (push root roots))))
+    (cl-letf (((symbol-function 'harness-files-owning-checkout)
+               (lambda (root) (push (list 'checkout root) events) here))
+              ((symbol-function 'harness-ui-session)
+               (lambda (_id) (list :id "s1" :project "/session-project/")))
+              ((symbol-function 'harness-tasks)
+               (lambda (&rest args) (push (cons 'board args) events) (generate-new-buffer " *task board*"))))
+      (unwind-protect
+          (progn
+            (should (harness-ui-tasks--on-notification
+                     '(:task "t1" :project "/task-worktree/" :session "s1")))
+            (should (equal '((board "/task-worktree/") (checkout "/session-project/"))
+                           events))
+            (should (equal (list here) roots)))
+        (dolist (b (buffer-list))
+          (when (string-prefix-p " *task board*" (buffer-name b)) (kill-buffer b)))))))
+
+(ert-deftest harness-ui-notifications-click-opens-the-board-without-switching ()
+  "With project switching off the board still opens, and no project is looked up."
+  (let* ((events nil)
+         (harness-ui-switch-project-function nil))
+    (cl-letf (((symbol-function 'harness-files-owning-checkout)
+               (lambda (root) (push (list 'checkout root) events) root))
+              ((symbol-function 'harness-tasks)
+               (lambda (&rest args) (push (cons 'board args) events) (generate-new-buffer " *task board*"))))
+      (unwind-protect
+          (progn
+            (should (harness-ui-tasks--on-notification '(:task "t1" :project "/task-worktree/")))
+            (should (equal '((board "/task-worktree/")) events)))
+        (dolist (b (buffer-list))
+          (when (string-prefix-p " *task board*" (buffer-name b)) (kill-buffer b)))))))
+
+(ert-deftest harness-ui-notifications-click-opens-the-board-when-switching-fails ()
+  "A project that cannot be resolved or switched to does not keep the board from opening."
+  (let* ((events nil)
+         (harness-ui-switch-project-function (lambda (_root) (error "No workspace for it"))))
+    (cl-letf (((symbol-function 'harness-files-owning-checkout)
+               (lambda (&rest _) (error "No checkout")))
+              ((symbol-function 'harness-ui-session) (lambda (_id) nil))
+              ((symbol-function 'harness-tasks)
+               (lambda (&rest args) (push (cons 'board args) events) (generate-new-buffer " *task board*"))))
+      (unwind-protect
+          (progn
+            (should (harness-ui-tasks--on-notification '(:task "t1" :project "/task-worktree/")))
+            (should (equal '((board "/task-worktree/")) events)))
+        (dolist (b (buffer-list))
+          (when (string-prefix-p " *task board*" (buffer-name b)) (kill-buffer b)))))))
 
 (ert-deftest harness-ui-notifications-summary ()
   (should (equal "system sent (notify-send, in the UI); gotify skipped (not set up); mail failed (refused)"
