@@ -1063,9 +1063,12 @@ continue it (`session/provider-state`), else nil.  A REQUEST may also carry
 `:builtin-tools`, a list of harness tool names (from `tools/builtin`):
 the provider turns on its own tools in their place for this request,
 and `:tools` lacks them.  `:no-thinking t` asks for no extended
-thinking (the auto-mode judge sends it); Claude Code, which takes no
-`:max-tokens`, then runs the CLI with `MAX_THINKING_TOKENS=0`, and
-other providers may ignore it.
+thinking, and wins over `:thinking` when both are sent.  Claude Code,
+which takes no `:max-tokens`, then runs the CLI with
+`MAX_THINKING_TOKENS=0`; a DeepSeek endpoint sends `reasoning_effort`
+"none", its off switch; an endpoint with no off switch sends nothing,
+so a model whose thinking is on by default may still think (see the
+auto-mode judge's retry below, which covers that).
 
 A REQUEST with `:ephemeral t` is a one-off question, such as the
 auto-mode judge's.  The provider answers it from the request alone, as
@@ -4518,7 +4521,8 @@ A recap of a session that is no task's is written here too, by
 a task's, since the card shows it and already keeps it fresh, else the
 one kept for the session in `harness-recap--sessions' with the same
 short call a card's is (the `harness-tasks-recap-model' cheap tier, at
-most `harness-tasks-recap-max-tokens' tokens) and the same thresholds
+most `harness-tasks-recap-max-tokens' tokens, without thinking unless
+`harness-tasks-recap-thinking' names a level) and the same thresholds
 `harness-tasks-recap-turns', `harness-tasks-recap-seconds' and
 `harness-tasks-recap-tool-calls', measured from the session's start
 until the first recap and from the last one after that (FORCE skips

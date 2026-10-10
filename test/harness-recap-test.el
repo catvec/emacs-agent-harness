@@ -177,10 +177,32 @@ and the tasks module would prompt the session while a test runs."
         (should (numberp (plist-get task :recap-at)))
         (should (equal "demo:scripted" (plist-get req :model)))
         (should-not (plist-get req :tools))
+        ;; A recap is one short line: thinking is off unless asked for.
+        (should (eq t (plist-get req :no-thinking)))
+        (should-not (plist-get req :thinking))
         (should (string-match-p "Do the widget" text))
         (should (string-match-p "Progress: 2 turns, 1 tool call" text))
         (should (string-match-p "\\[tool read_file\\]" text))
         (should (string-match-p "Recap this task now" text))))))
+
+(ert-deftest harness-recap-honours-a-thinking-level ()
+  "A configured recap thinking level goes out instead of `:no-thinking'."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-session))
+           (id (harness-recap-test-task sid))
+           (harness-provider-demo-script-override harness-recap-test-script)
+           (harness-tasks-recap-turns 1)
+           (harness-tasks-recap-thinking "high")
+           (requests nil))
+      (harness-call 'session/usage-add sid '(:turns 1))
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (push req requests) (funcall orig req))))
+        (should (equal "Implemented the widget, tests pass"
+                       (harness-test-await (harness-recap--maybe sid)))))
+      (let ((req (car requests)))
+        (should (equal "high" (plist-get req :thinking)))
+        (should-not (plist-get req :no-thinking))))))
 
 (ert-deftest harness-recap-not-due-makes-none ()
   (harness-recap-test-with

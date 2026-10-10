@@ -363,8 +363,13 @@ to the session's own model; nil uses the session's own model."
   :group 'harness)
 
 (defcustom harness-tasks-recap-thinking nil
-  "Thinking level of a recap request, or nil for the provider's default."
-  :type `(choice (const :tag "Provider default" nil) ,@harness-tasks--thinking-levels)
+  "Thinking level of a recap request, or nil to ask for no thinking.
+A recap is one short line and its budget is small
+\(`harness-tasks-recap-max-tokens'), so thinking is off by default: a
+model whose thinking is on by default would spend the budget on the
+reasoning and write no line.  A level here asks for thinking anyway,
+which needs a larger budget to fit."
+  :type `(choice (const :tag "No thinking" nil) ,@harness-tasks--thinking-levels)
   :group 'harness)
 
 (defcustom harness-tasks-recap-max-tokens 60
