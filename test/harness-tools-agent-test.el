@@ -1083,5 +1083,53 @@ Chat completion bodies are recorded in `harness-tools-agent-test--parallel-bodie
                 (harness-off watch))))
         (harness-provider-unregister 'teststrict)))))
 
+;;;; A background child in a worktree
+
+(defun harness-tools-agent-test--git (dir &rest args)
+  "Run git ARGS synchronously in DIR; signal on failure, return stdout."
+  (with-temp-buffer
+    (let ((default-directory (file-name-as-directory dir)))
+      (unless (zerop (apply #'call-process "git" nil t nil args))
+        (error "git %s failed: %s" args (buffer-string)))
+      (buffer-string))))
+
+(ert-deftest harness-tools-agent-spawn-background-worktree-reports-branch ()
+  "A background child in a worktree is reported with where it worked.
+The worktree step of the call keeps the branch, which the report names."
+  (harness-tools-agent-test-with
+    (harness-test-load-module 'worktree)
+    (let* ((base (harness-test-temp-dir))
+           (root (file-name-as-directory (expand-file-name "repo" base))))
+      (unwind-protect
+          (progn
+            (make-directory root t)
+            (harness-tools-agent-test--git root "init" "-q" "-b" "main")
+            (harness-tools-agent-test--git root "config" "user.name" "Harness Test")
+            (harness-tools-agent-test--git root "config" "user.email" "test@example.invalid")
+            (harness-tools-agent-test--git root "config" "commit.gpgsign" "false")
+            (with-temp-file (expand-file-name "README" root) (insert "hello\n"))
+            (harness-tools-agent-test--git root "add" "README")
+            (harness-tools-agent-test--git root "commit" "-q" "-m" "initial")
+            (let* ((sid (plist-get (harness-call 'session/create :cwd root
+                                                            :model "demo:scripted")
+                                   :id))
+                   (result (harness-test-await
+                            (harness-tools-agent-test-run
+                             sid "spawn_agent"
+                             '(:prompt "hi" :name "kid" :background t :worktree t))))
+                   (cid (plist-get (plist-get result :meta) :child-id))
+                   (child (harness-call 'session/get cid)))
+              (should-not (plist-get result :is-error))
+              (should (plist-get child :worktree))
+              (should (file-directory-p (plist-get child :worktree)))
+              (harness-test-wait (lambda () (harness-tools-agent-test-reports sid))
+                                 15 "the worktree child's report")
+              (let ((report (plist-get (car (harness-tools-agent-test-reports sid)) :content)))
+                (should (string-match-p "It worked in worktree" report))
+                (should (string-match-p (regexp-quote (abbreviate-file-name (plist-get child :worktree)))
+                                        report))
+                (should (string-match-p "on branch harness/" report)))))
+        (ignore-errors (delete-directory base t))))))
+
 (provide 'harness-tools-agent-test)
 ;;; harness-tools-agent-test.el ends here
