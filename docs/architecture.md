@@ -22,8 +22,9 @@ module needs something more, add it here first.
                 tools-compact, tools-dev
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
-                promises, modules), harness-util (json, ids, paths), harness-http (curl, SSE,
-                binary bodies), harness-policy (settings an administrator fixes)
+                promises, modules), harness-util (json, ids, paths, the thinking-level
+                order), harness-http (curl, SSE, binary bodies), harness-policy (settings
+                an administrator fixes), harness-slots (pools: at most so many at once)
 ```
 
 The core never shows UI and never calls a model.  UI modules never
@@ -176,7 +177,7 @@ subscribers with named functions, and make `:init` idempotent.
 `harness-reload` compiles every file first and refuses to load anything
 if one fails.  It loads harness.el, the core files, the libraries of
 lisp/ (`harness--library-files`: files, the Emacs endpoint, desktop
-notifications, server, revision) and the modules, so a module never runs against
+notifications, server, revision, slots) and the modules, so a module never runs against
 a library as it was before an update; a file added to lisp/ that both
 sides load belongs in one of those lists.  Records made before a reload
 keep their layout: a slot added to a struct goes last and is read in a
@@ -564,7 +565,11 @@ option and not only the layered ones, and no layer changes it.  Variables are
 `defcustom`s with `:safe` predicates so dir-locals never prompt:
 `harness-model` (default "claude:claude-fable-5-1"),
 `harness-permission-mode`, `harness-thinking`, `harness-btw-thinking`
-(the level BTWs start at, default "low"; nil for the session's),
+(the level BTWs start at, default "low", fitted to the levels their
+model offers; nil for the session's),
+`harness-btw-model` (the model BTWs run on: `auto`, the default, is the
+simple tier of the provider of the model they would otherwise use; a
+`PROVIDER:NAME`; nil for that model itself),
 `harness-allowed-directories`, `harness-sandbox-policy`,
 `harness-non-interactive`, `harness-supervisor`.  A module defines some
 of them, `harness-supervisor` the supervisor module: until it is loaded
@@ -715,22 +720,34 @@ its sender, and the hint says so (`harness-session--requeue`).
   tokens (see the compaction section), `:ext` to give it the settings of
   modules that keep some (see `session/set-ext`).  Fills
   project, defaults from `config/get`.  A `btw` session without
-  `:thinking` takes `harness-btw-thinking` when its model offers that
-  level (the catalogue lists it in `:thinking-levels`), else
-  `harness-thinking`.  → session.  Event `session/created ID SESSION`
-  fires once the record is stored.  A subscriber may change the session
-  meanwhile (the supervisor module sets its `:ext`), so `session/create`
-  announces (`session/changed`) and returns the session as the
-  `session/created` subscribers left it, not as it was when they were
-  told: its maker and the UIs see what they set, from the start.
+  `:model` runs on `harness-btw-model` applied to `harness-model` as
+  configured at its `:cwd` (`harness-session--btw-model`: by default
+  the simple tier of that model's provider, the model itself when the
+  provider names none), unless the policy fixes `harness-model`.  A
+  `btw` session without `:thinking` takes `harness-btw-thinking` fitted
+  to the thinking levels the catalogue lists for its (final) model in
+  `:thinking-levels` (`harness-session--btw-thinking`, by
+  `harness-thinking-level-fit`): that level when the model offers
+  it, else the strongest level it offers below it, else its weakest;
+  only with no level configured (nil), or a model whose catalogue lists
+  none, does it take `harness-thinking`.  → session.  Event
+  `session/created ID SESSION` fires once the record is stored.  A
+  subscriber may change the session meanwhile (the supervisor module
+  sets its `:ext`), so `session/create` announces (`session/changed`)
+  and returns the session as the `session/created` subscribers left it,
+  not as it was when they were told: its maker and the UIs see what
+  they set, from the start.
 - Settings a policy fixes ([policy.md](policy.md)): when the policy sets
   `harness-model`, `harness-permission-mode`, `harness-thinking` or
   `harness-non-interactive`, every session's copy is the policy's value
   (`harness-session--policy-options`; a BTW's thinking aside, which
-  follows `harness-btw-thinking`).  `session/create` and `session/fork`
-  give it whatever PLIST asks for, a record loaded from disk gets it,
-  and a reload (`harness/reloaded`) brings every session in line with
-  the policy as it is then, with `session/updated`.
+  follows `harness-btw-thinking`.  Its model is not aside: a policy on
+  `harness-model` fixes a BTW's model too, so it runs on the policy's
+  model, not the simple tier, and `harness-btw-model` changes nothing).
+  `session/create` and `session/fork` give it whatever PLIST asks for,
+  a record loaded from disk gets it, and a reload (`harness/reloaded`)
+  brings every session in line with the policy as it is then, with
+  `session/updated`.
   `session/update`, `session/set-all` and the task board refuse another
   value with "OPTION is set by policy (FILE) and cannot be changed",
   changing nothing; `harness-session-check-policy` is the check, which
@@ -852,14 +869,38 @@ its sender, and the hint says so (`harness-session--requeue`).
   which would carry on the parent's provider conversation; the provider
   then starts a new one from the transcript.  The fork's
   `:provider-node` is the node.  → new session.
-- `session/btw ID &optional NAME`: a BTW side conversation over ID, a
-  new, empty `btw` session sharing nothing with ID or with any other
-  BTW (no nodes, no fork node, no provider state, no directory grants).
-  It takes ID's cwd, project, host, worktree, model and permission
-  mode; `:parent-id` is ID only so lists show it under ID.  It thinks
-  at `harness-btw-thinking` as configured at ID's cwd ("low" by
-  default, so quick questions get quick answers) when the model offers
-  that level, else at ID's level.  Returns the new session.
+- `session/btw ID &optional NAME MODEL`: a BTW side conversation over
+  ID, a new, empty `btw` session sharing nothing with ID or with any
+  other BTW (no nodes, no fork node, no provider state, no directory
+  grants).  It takes ID's cwd, project, host, worktree and permission
+  mode; `:parent-id` is ID only so lists show it under ID.  Its model is
+  not ID's: a BTW is a quick question on the side, so it runs on
+  `harness-btw-model` as configured at ID's cwd (`harness-session--btw-model`;
+  `auto`, the default, is the simple tier of the provider of ID's model
+  via `provider/tier-model`, ID's model itself when the provider names
+  none; a `PROVIDER:NAME` forces that model, which the log notes and
+  ID's model replaces when `harness-allowed-models` leaves it out; nil
+  keeps ID's).  MODEL, a `PROVIDER:NAME`, is the per-BTW override: it
+  wins over the setting for this BTW alone (blank is none), is checked
+  with `harness-session-check-policy` (an error when the policy fixes
+  another `harness-model`, or `harness-allowed-models` leaves it out),
+  and is chosen once, at the start: from then on the BTW is a session
+  like any, whose model `session/update` can switch.  A policy on
+  `harness-model` fixes the BTW's model too.  It thinks at
+  `harness-btw-thinking` as configured at ID's cwd ("low" by default, so
+  quick questions get quick answers), fitted to the levels the catalogue
+  lists for its own model (`harness-thinking-level-fit`, the rule
+  Copilot's and Bedrock's efforts are fitted by too): that level
+  when the model offers it, else the strongest level it offers below it
+  (a DeepSeek model, which lists low, high and max, thinks at low for
+  medium), else its weakest.  So a BTW that stays on ID's own model
+  thinks no harder than the model has to, whatever ID's level is.  Only
+  where nothing is fitted -- no level configured (nil), or a model whose
+  catalogue lists no levels -- does it start at ID's level, which it
+  keeps only if its model is ID's or lists it too, else at
+  `harness-thinking`.  Over the wire it is
+  `_harness/session/btw {id, name, model}`, `model` sent only when one
+  was chosen.  Returns the new session.
 - `session/nodes ID &optional (:limit N :before NODE-ID)` → path nodes,
   oldest first; `session/node ID NODE-ID`; `session/tree ID` → every
   node of the family (session + ancestors + forks) as a list with
@@ -1468,8 +1509,18 @@ the defaults by its `:resolve`.  Usage events carry tokens and
 `:billing api` but no cost, so `session/usage-add` prices them from the
 catalogue.  Claude and Nova requests carry prompt cache points; Claude
 reasoning returned with tool calls is kept and sent back with them while
-the tool loop lasts.  `harness-http-request` takes `:binary t` for such
-framings: the response then reaches `:on-chunk` as unibyte strings.
+the tool loop lasts.  An adaptive model is asked for the effort the
+thinking level names, fitted to the levels it offers by the shared rule
+(`harness-thinking-level-fit`); a model that thinks within a budget gets
+the budget of the level (`harness-bedrock--thinking-budgets`).  A
+request is repeated, up to three times, when the connection was lost
+before any of the answer arrived (`:retry t`, the HTTP layer's, see
+retry: the request goes again as it was signed), and
+a throttled or failed response (429, 5xx, a throttling exception) while
+nothing has been streamed yet, with a hint for each wait
+(`harness-bedrock--maybe-retry`).  `harness-http-request` takes
+`:binary t` for such framings: the response then reaches `:on-chunk` as
+unibyte strings.
 
 An endpoint can point at a gateway in front of Bedrock instead.  Its
 `:endpoint-url` holds the prefix that Bedrock's paths go under, and a
@@ -1556,6 +1607,9 @@ version 3 or newer.  Per harness session one CLI process:
   tools are the harness's (external tools, `availableTools` set to their
   names) and whose system prompt is the harness's (`systemMessage` mode
   replace); resuming an open session again applies changed settings.
+  The request's thinking level is the session's `reasoningEffort`,
+  fitted to the efforts the catalogue lists for the model by the shared
+  rule (`harness-thinking-level-fit`); a model that lists none gets none.
 - The exception is Copilot's own web_search, which stands in for the
   harness's (`harness-provider-copilot-builtin-tools`; capability
   `:builtin-tools`).  A request whose `:builtin-tools` names it lists
@@ -1762,6 +1816,20 @@ non-interactive session it stays a denial.
   denied at once with a hint not to ask again, and the agent gets no
   steering message after it (see non-interactive below): there is no
   other way to reach that goal.
+
+- `session_settings` (tools-sessions) is weighed per call
+  (`harness-perms--call-kind`): `action=read` shows a session's settings
+  and changes nothing, so it is a read -- ask mode and accept-edits
+  allow it as any other read inside the roots, and no judge sees it --
+  while `action=set` changes harness state and keeps the `meta` its tool
+  declares, so ask mode asks the user about it (stage 90) and the judge
+  weighs it in auto mode and in a non-interactive session, the same guard
+  `session_send` and `session_control` get.  A standing rule comes first
+  and can allow or deny either (`harness-perms--rule-matches-p` weighs
+  the same kind).  The tool is declared `meta`, not `read`, so that a set
+  would ask even were the classification ever missing, and it refuses the
+  permission mode, non-interactive mode, allowed directories, the working
+  directory and the host, naming the tool that changes them.
 
 - The sandbox guard asks `sandbox/check-command` about every `exec` call
   whose input has a `:command` (the bash tool), passing the directory it
@@ -2848,6 +2916,13 @@ over, partial file deleted, when a transfer is cut
 (`harness-http-max-retries' times by default).  A cancelled request and
 a request whose own timeout fired are never retried.
 
+The providers that speak HTTP ask for it: the OpenAI-compatible ones
+(DeepSeek included) and Bedrock pass `:retry t' for every completion.
+So a lost connection is repeated for the harness's own calls -- a
+task's title, a permission judge, a recap -- which no step layer covers
+(they are no agent step), as well as for a turn's.  The Claude Code CLI
+retries its own API calls.
+
 ### compaction
 
 - `compaction/compact SESSION-ID &optional OPTS` → promise of the
@@ -2858,17 +2933,18 @@ a request whose own timeout fired are never retried.
   - `summary` (the default): the session's model (OPTS `:model`
     another) summarises the conversation, and the message reads
     "Summary of the conversation so far: ...".  OPTS `:context` is
-    `full` (the default) or `sample`, which keeps only the first and
-    last few messages (`harness-compaction--sample-head`/`-tail`) with a
-    user message saying how many were left out: a bound on what a
-    summariser sent the conversation as text costs.  A summary of a
-    sample is a brief one.
+    `full` (the default) or `sample`, which sends the conversation's
+    narrative — every user and assistant message, each tool call and
+    result in one line, never a payload — so a summariser that has to
+    be sent the conversation as text never takes its payloads at once.
+    A summary of a sample is a brief one.
   - `brief`: a summary of a sample, written by OPTS `:model`, else
     `harness-compaction-brief-model` (`auto`, the default: the simple
     tier of the session's provider, `provider/tier-model`, else the
     session's model; nil: the session's model; or a model named), and
-    ending in a note that it was written from only the first and last
-    messages and may lack what came between
+    ending in a note that it was written from the conversation's
+    narrative, tool calls and results named in a line, and so lacks
+    what they carried
     (`harness-compaction--brief-caveat`; OPTS `:caveat` replaces it, nil
     for none).  It costs cents however long the conversation.  A
     handoff's `compact-new` is one, written by the new model.
@@ -2901,6 +2977,11 @@ a request whose own timeout fired are never retried.
   the conversation it replaced is still on record.  The line is left
   out when the session's model does not have the tool
   (`harness-compaction-history-p`, from `tools/list`).
+  A model-written compaction (`summary` or `brief`) also keeps the
+  conversation's first message and its most recent one verbatim in the
+  node (`harness-compaction--verbatim-ends`), so a short task and the
+  latest message survive the summary; the cost estimate's `:after`
+  counts them.
   The node's `:meta` points at the compacted head and records the kind
   (`:compaction`, read back by `harness-node-compaction-kind`), the
   writer (`:model`, the session's for a transcript), what it was given
@@ -3096,7 +3177,8 @@ so switching to either loses nothing.
   lasts and pays for it all uncached once it lapsed (`:cache`), and
   `compact-new` has the *new* model summarise instead,
   from a bounded context (`compaction/compact` `:kind brief` with
-  `:model`: the first and last few messages): use it when the old
+  `:model`: the conversation's narrative, tool calls and results each
+  in one line): use it when the old
   provider cannot answer -- its plan ran out, it is down -- or to keep
   the job small.  The compaction node,
   marked `:handoff` with the mode, summariser and context, opens the new
@@ -3527,6 +3609,31 @@ priority).
   it starts: the session it was submitted with writes it up at the
   task's directory and then stays there rather than moving into a
   worktree.
+- Internal jobs and the limit.  The harness's own model calls -- a
+  task's title (`naming/title`, and a session's name, `naming/name`
+  with `:opening`), a card's recap, the judge of auto mode and of a
+  non-interactive session, emacs_eval's judge, the supervisor's, the
+  pet's and the insights' calls, a compaction's summary, the board's
+  search -- are internal jobs.  They go straight to `provider/complete`:
+  none is a turn of an agent, none makes a session or a task of its own,
+  and they run with no tools, under the id of the session they are
+  about or one of their own (`naming-…`, `SESSION-perms`).  So they
+  never take one of a project's slots, never wait for one and are never
+  counted by `harness-tasks--free-slots`: they go out whatever the
+  limit, a limit of 0 or a board with every slot taken included, and
+  the queue's gate on turns (`harness-tasks--before-turn`), which holds
+  those of a waiting task's session, never sees them.  The same goes
+  for the tool slots, which hold back tool calls only: `tools/execute`
+  runs the `permission/decide` chain, a judge's model call among its
+  stages, to its end before it runs the handler, where a governed tool
+  waits for its slot, so a judge decides while every slot of the
+  machine is taken and holds none itself (see tool-slots).
+  Non-interactive mode, which lets a judge decide for a user who is
+  away, concerns the sessions that could ask the user something; an
+  internal job cannot, so there is nothing to switch for it.  What
+  holds a title request back is a throttle of its own, not the limit,
+  and what retries one that failed is the layers below it, as for any
+  model call, not a timer of the tasks module (see Titles).
 - A task's session also runs on `harness-tasks-context-limit' (384000)
   tokens of context at most, so it compacts earlier than an interactive
   session; nil gives it the whole window.  A refined task's write-up
@@ -3627,10 +3734,41 @@ priority).
   it comes.  Nothing waits for a title: a failed request (or one that
   times out) leaves the task untitled, and a nameless session of it
   whose turn runs is then named from its first message (`naming/name`
-  with `:opening`).  At most `harness-tasks--naming-concurrency` (2)
-  requests are out at once, the rest queued; a queued request whose task
-  started meanwhile is dropped, as the start of its turn names its
-  session.  `task/update` clears `:name` and asks again when the text
+  with `:opening`).  The request is an internal job (see "Internal jobs
+  and the limit" above): it takes no slot of the project and waits for
+  none, so a task that waits for one, behind a full board or a limit of
+  0, is titled all the same.
+  A title is not asked for again by task mode.  The request is an
+  ordinary `provider/complete` request, so the layers below retry it as
+  they do any model call: the HTTP layer (`harness-http-request`, which
+  the OpenAI-compatible providers, DeepSeek among them, and Bedrock ask
+  to repeat a request whose connection was lost before any of the
+  answer arrived) and the Claude Code CLI for its own API calls.  A
+  title that still fails leaves a task that waits for a slot untitled
+  until its turn names its session, or the harness starts or reloads
+  (`harness-tasks--name-untitled`); no timer of the tasks module asks
+  again.  That includes a refusal an OpenAI-compatible server answered
+  to the streamed completion (an overloaded model's 429 or 5xx, say):
+  the HTTP layer repeats a response only when it did not stream its
+  body, while Bedrock repeats a throttled or failed one itself
+  (`harness-bedrock--maybe-retry`).
+  At most `harness-tasks--naming-concurrency` (2) requests are out at
+  once, the rest waiting: a pool of the slots library
+  (`harness-tasks--naming-pool`, see slots), a throttle of the title
+  requests alone, so that a burst of submissions or a board of untitled
+  tasks found at start-up does not start a Claude Code process for
+  each.  The waiting ones go by their task's priority
+  (`harness-tasks--naming-rank`: `harness-priority-of-task`, read again
+  whenever a slot frees, so a priority given while a request waits
+  counts), the highest first and the oldest first among equals, as the
+  board orders its tasks; a task whose request waits or is out is not
+  queued twice.  A request holds its slot from the moment it goes out
+  until `harness-tasks--named` has taken its answer or its failure.
+  When a slot comes to a request whose task started meanwhile (its turn
+  names its session) or is gone, it goes back at once and nothing is
+  sent.  The throttle has nothing to do with the project's slots
+  (`harness-tasks-max-running`): a request neither takes one nor waits
+  for one.  `task/update` clears `:name` and asks again when the text
   named from changed; a title of an older prompt is dropped.  Tasks
   found without a title (from before, or whose naming failed) are named
   at start-up (`harness-tasks--pick-up`) and on reload.
@@ -4285,7 +4423,7 @@ and a message for the echo area.  Only the user calls it.
   emacs_messages emacs_open`), `web_fetch web_search`, the coordination
   tools (`ask_user todo_write hand_in notify session_control
   session_send session_move set_non_interactive set_priority
-  task_control task_submit`), the tool that asks for a directory
+  task_control task_submit session_settings`), the tool that asks for a directory
   (`harness-perms-dir-tool`) and `harness-supervisor-tools`
   (`no_plan_needed submit_plan retry_step`), plus `bash` when
   `sandbox/confined-p` says its directory is confined.  Any other
@@ -4324,9 +4462,14 @@ and a message for the echo area.  Only the user calls it.
   on unchanged; failing closed is stage 8's.
 - Turns.  The decision tools are `harness-supervisor-decision-tools`
   (`no_plan_needed submit_plan retry_step hand_in task_submit
-  task_control session_send session_control`); a call is noted from
-  `agent/tool-call`, and a result that is an error takes it back out
-  (`tools/finished`), since it decided nothing.  The async filter
+  task_control session_send session_control session_settings`); a call
+  is noted from `agent/tool-call` (`harness-supervisor--decision-call-p`:
+  a `session_settings` call counts only when it changes a setting, since
+  a read decides nothing), and a result that is an error takes it back
+  out (`tools/finished`), since it decided nothing.  `session_settings`
+  is a decision because giving a worker a larger window or a stronger
+  model is coordination, like `session_send`, not hands-on work.  The
+  async filter
   `agent/stop` (see agent) answers a supervising session's stop with no
   decision in its turn by `(:stop nil :message REMINDER :from
   (harness-sender-system "supervisor"))`, twice at most in a turn; after
@@ -4581,6 +4724,7 @@ TRAMP prefixes come from the session host):
 | `session_history` | Session history | query, regexp, node_id, before, limit, max_chars, kinds, all | read (this session's own conversation from before its last compaction or handoff; needs no approval: `harness-perms--inspection-tools`) |
 | `session_send` | Message session | session_id, message, mode (send/queue), wait | meta |
 | `session_control` | Control session | session_id, action (cancel/resume/close/rename/answer), name, question_id, answer | meta (answer refuses the harness's cold-cache question, left to the user) |
+| `session_settings` | Session settings | action (read/set), session_id (default: this session), model, thinking (a level, or default for the model's own), context_window_limit (tokens: a number or "200k", or model/none for the model's own window), budget (USD, or none to remove it), budget_hard (a hard budget stops the next turn once spent) | meta (weighed per call, `harness-perms--call-kind`: a read is a read, a set asks in ask mode and is judged, as `session_send` is; the read shows the permission mode and non-interactive state, and the tool refuses them, allowed directories, the working directory and the host, naming `set_non_interactive`, `request_directory_access` or `session_move`) |
 | `session_move` | Move session | directory, session_id (default: this session), keep_old_directory, reason | meta (the user confirms every call, in every mode; see perms, Confirmations, and `session/move`) |
 | `set_non_interactive` | Non-interactive mode | enabled, session_id (default: this session) or all (every current session and task of every project), reason | meta (perms module's away-request stage: turning it on is decided only by the user's answer, in every mode, and denied at once in a non-interactive session; turning it off is allowed at once) |
 | `set_priority` | Set priority | priority (low/medium/high), session_id (default: this session) or all (every current session and task of every project) | meta (a priority is the session's, and every input here is a session id; a task's priority is set through its session) |
@@ -5067,6 +5211,36 @@ defaults.  Nor does `session_control` answer the harness's question
 about a cold prompt cache (its payload's `:cowboy`): what to spend on
 another session's conversation is the user's call.  The task tools need the `tasks` module.
 
+`session_settings` reads and changes what a session runs with: the
+model, the thinking level, the context window limit and the budget.  It
+works on the calling session by default and on another one by id, a
+unique id prefix or a name.  A read shows the model, the thinking, the
+window in effect with the limit that caps it and, best effort, what set
+it (`harness-session-context-limit-source`: the session's kind says
+`harness-subagent-context-limit` for a sub-agent or a fork, the tasks
+module's own cap value says `harness-tasks-context-limit` for a task,
+and any other limit is one set for the session -- the same reading the
+UI's `harness-ui-context-cap-name` gives), the budget, and the
+permission mode and non-interactive state, which it does not change: a
+call naming the permission mode, non-interactive mode, allowed
+directories, the working directory or the host is refused, and the
+refusal names `set_non_interactive`, `request_directory_access` or
+`session_move`.  A set is applied through `session/update` with
+`:silent t` (its own hint would say less), and `harness-session-check-policy`
+runs first, so a setting the policy fixes is refused before anything
+changes.  Every change leaves one hint in the affected session's
+transcript (`harness-tools-sessions--settings-hint`), naming who made
+it -- the caller's name, or "the session itself" -- the setting, the old
+value and the new one: "Context window limit 128k → 200k, set by session
+«planner»", and, for a running session, that it takes effect from its
+next request; a change to another session shows in the caller's result
+too.  A set that asks for what the session already has changes nothing
+and says so, and the permissions are weighed per call: a read is the
+read it is, and only a set goes through the chain as a change to harness
+state (see perms).  It is a tool of its own rather than more actions of
+`session_control`, whose every action is about another session (it
+refuses the calling session itself) and is `meta`.
+
 `notify` (`tools-notify`) sends a notification through
 `notification/send` with `:source "agent"`, `:kind "agent"` and the
 calling session's `:session` and `:project`, so a click opens the
@@ -5168,6 +5342,41 @@ code that signals is an error result, and code the lent Emacs stopped
 (its time limit, the user's key, C-g) is an error result that says it
 ran partway.
 
+### slots
+
+A library of lisp/ (lisp/harness-slots.el, in `harness--library-files`,
+loaded on both sides and used by the harness process's modules), not a
+module: the one place that knows "at most so many at once, the rest wait
+their turn", so that none of the modules that need it keeps a count and
+a line of its own.  `harness-slots-create :limit LIMIT :rank RANK` makes
+a pool.  LIMIT is a number, or a function of no arguments that returns
+one and is called whenever the limit matters, so it can change while the
+pool is in use.  A limit that rose starts nobody by itself (the next
+asker or giver-back would): whoever raised it calls `harness-slots-admit`,
+which starts the waiters that now fit.  A limit that fell stops no
+holder, and no waiter starts until the holders are under it again.
+
+`harness-slots-acquire POOL DATA` returns a promise of a ticket, a
+function of no arguments that gives the slot back once, however often it
+is called, so a holder that is done in two ways (its result, then its
+timeout) never frees a slot it no longer holds.  The promise resolves at
+once while the pool has room, and otherwise when a slot is given back.
+The waiters go oldest first.  With a RANK, a function of the DATA a
+waiter asked with, the highest rank goes first and the oldest of those
+first, and ranks are read again whenever a slot frees, so a waiter whose
+rank rose while it waited moves up the line.  `harness-slots-flush` lets
+every waiter run now and counts no one as holding a slot, which is what
+a module's shutdown does; `harness-slots-running`, `harness-slots-waiting`
+and `harness-slots-waiters` (the DATA of each, oldest first) read a pool.
+A pool is plain state in the process that makes it, with no timer and no
+module of its own.
+
+Its users: tool-slots keeps one pool per machine (limit
+`harness-tool-slots--slots`, rank the priority of the session a call
+serves), and tasks keeps one for its title requests (limit
+`harness-tasks--naming-concurrency`, rank the priority of the request's
+task; see Titles under tasks).
+
 ### tool-slots
 
 A plugin of its own -- a module, not part of tools-shell or tools-ssh --
@@ -5177,6 +5386,11 @@ that tries commands in parallel, and above all a test run, which
 `scripts/test.sh` starts an Emacs per file for, can otherwise take the
 machine over and stop whatever else the user runs, a game first of all.
 Disable the module (`harness-disabled-modules`) to turn the limit off.
+The slots of a machine are a pool of the slots library (see slots): this
+module says how many a machine has (`harness-tool-slots--slots`) and how
+a waiting call ranks (the priority of its session), and the library
+counts the calls holding a slot, keeps the line of those waiting and
+hands the slots out.
 
 Options:
 
@@ -5211,11 +5425,26 @@ handler runs, and a call that waited longer than a moment tells its
 session so as progress: "Waited 3.2s for a free slot on this machine
 (tool: bash)".  Tools that only read or write files, and the harness's
 own commands -- the merge queue, worktrees, the grep tool -- are never
-held, so a read_file does not queue behind a test run.
+held, so a read_file does not queue behind a test run.  Nor are the
+harness's own model calls: the judges (auto mode's, emacs_eval's) are
+`permission/decide` stages, which `tools/execute` runs to the end
+before it runs the handler, where the slot is asked for, so a call has
+been judged by the time it waits and a judge never holds a slot; titles,
+recaps and summaries are no tool calls at all (see "Internal jobs and
+the limit", under tasks).
 
 It is around advice on `harness-tools--run-handler`, added once by the
 module's `:init` and removed by its `:shutdown`, which also lets every
-waiting call run at once; a reload therefore never holds a slot twice.
+waiting call run at once (`harness-slots-flush`); a reload therefore
+never holds a slot twice.  A machine's slots left from before they were
+pools are taken over by a pool on first use (the calls that waited ask it
+in the order they came), and a call that held a slot across such a
+reload gives it back through `harness-tool-slots--give`, which counts
+nothing down -- the pool never counted that call -- so the call neither
+hangs nor takes a slot from another; the calls waiting that then fit
+start.  A call's result goes through even if giving its slot back fails
+\(`harness-tool-slots--finish`), so a turn never waits for ever on a
+ticket.
 The slots belong to the harness process that loads the module, so a
 second harness on the same machine has slots of its own (the limit is
 about one harness's own work, not about the machine's load).
@@ -6652,7 +6881,12 @@ own, frame raised, through `harness-dev/open`, so the work can be
 tried before it is verified.  That instance stops once the task is
 done, archived or deleted (see tools-dev).  `b` or [BTW] (or the
 usual BTW command) opens a BTW side conversation over the board about
-its tasks (`task/btw`).  `SPC` over a card, or [Answer…] / [Request…]
+its tasks (`task/btw CWD &optional NAME MODEL`): a new `btw` session at
+the project root, on `harness-btw-model` applied to `harness-model` as
+configured there (the simple tier of its provider, by default) or, for
+that conversation alone, on MODEL, which `C-u b` reads from the catalogue
+and the board's start function sends as `model` to `_harness/task/btw`
+only when one was chosen.  `SPC` over a card, or [Answer…] / [Request…]
 on it, pops out what the task at point needs -- the permission prompt or
 question its session waits on, a task's report -- through the shared
 `harness-ui-popout-at-point`, which runs whichever view of the item
@@ -6946,7 +7180,17 @@ keys and menu are a session's, `harness-ui-btw-minor-mode` only adding a BTW seg
 front of the header through `harness-chat-header-functions` (what it
 is about, [close], [keep]) and `C-c C-k`/`C-c C-o` to close and keep
 it; one over a session starts in that session's permission mode, and
-every one at the BTW thinking level (`harness-btw-thinking`).  The
+every one on the BTW model (`harness-btw-model`: by default the cheap
+tier of the provider of the model it would otherwise use) at the BTW
+thinking level (`harness-btw-thinking`, fitted to the levels its model
+offers: the nearest it has below it when it lacks the level, else its
+weakest).  `harness-btw` takes a MODEL
+(a `PROVIDER:NAME`, sent as `model` to `_harness/session/btw`, or to the
+view's start function as its second argument, only when one is given)
+for that BTW alone, and the symbol `choose` reads one from the
+catalogue first (`harness-ui-choose-model`; an empty answer opens
+nothing): a prefix argument does it, from `harness-btw`, the board's
+`harness-ui-tasks-btw` and the tree's `harness-ui-tree-btw`.  The
 first message names it `btw: ...`, unless it was named by hand.
 Closing it returns there; a BTW nothing was asked in is deleted with
 its buffer, once the harness confirms it holds no node of its own,

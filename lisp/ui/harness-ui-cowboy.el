@@ -58,7 +58,7 @@ Each entry is (CHOICE KEY): CHOICE as the harness names it (see
 panel.  Its capital answers \"always\", but for `hold'.")
 
 (defconst harness-ui-cowboy--labels
-  '(("brief" "Brief summary" "a cheap model summarises the first and last messages")
+  '(("brief" "Brief summary" "a cheap model summarises the narrative, tool calls in brief")
     ("summary" "Summary" "the session's model summarises it all, reading it uncached")
     ("transcript" "Transcript file" "the conversation goes to a file the model reads as it needs")
     ("fresh" "Start afresh" "nothing is carried over; the model looks back when it needs to")

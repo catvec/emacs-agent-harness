@@ -9,8 +9,13 @@
 ;; the session it was opened over, nor with any other BTW, even one
 ;; opened over the same session: it starts with an empty transcript and
 ;; a provider conversation of its own.  It works where that session
-;; does, with its model and permission mode, at the low thinking level
-;; of quick questions (`harness-btw-thinking'), and shows up under it in
+;; does, with its permission mode, but not on its model: a BTW is a
+;; quick question, so it runs on a cheap model (`harness-btw-model': by
+;; default the simple tier of the provider of the session's model), at
+;; the low thinking level of quick questions (`harness-btw-thinking').
+;; A prefix argument asks for another model for that one BTW, from the
+;; catalogue; the BTW can switch models afterwards like any session.
+;; It shows up under the session in
 ;; the session list and the conversation tree.  It is shown in its own
 ;; chat buffer, the full chat UI in another place: its header line
 ;; (model, permission mode and the rest, all clickable), keys and
@@ -58,11 +63,14 @@
 (defvar-local harness-ui-btw-start-function nil
   "How `harness-btw' starts a conversation over this buffer.
 A view without a session of its own sets it to a function of the new
-session's name returning a promise of the session (a wire plist), whose
-system prompt says what the conversation is about.  Like every BTW, it
-must be a new session on every call, never an earlier one.  The task
-board starts one about its tasks this way.  nil starts a BTW over the
-buffer's session (`session/btw').")
+session's name and, optionally, a model (NAME &optional MODEL),
+returning a promise of the session (a wire plist), whose system prompt
+says what the conversation is about.  MODEL, a PROVIDER:NAME, is given
+only when the user picked one for this BTW (a prefix argument to
+`harness-btw'); without it the conversation runs on `harness-btw-model'.
+Like every BTW, it must be a new session on every call, never an
+earlier one.  The task board starts one about its tasks this way.  nil
+starts a BTW over the buffer's session (`session/btw').")
 
 (defvar-local harness-ui-btw-about nil
   "What a BTW started over this buffer is about, such as \"the tasks\".
@@ -81,8 +89,32 @@ The BTW's compose box and its window's header say it.")
   "Return the name of a BTW whose first message is TEXT."
   (format "btw: %s" (harness-first-line text 40)))
 
+(defun harness-ui-btw--choose-model (session-id question)
+  "Read a model, then open a BTW on it over the current buffer; return a promise.
+The model comes from the catalogue (`harness-ui-choose-model'), which
+asks in the minibuffer once it is refreshed; an empty answer chooses
+nothing, opens nothing, and leaves the promise unsettled.  Otherwise
+the promise is that of `harness-btw' with SESSION-ID, QUESTION and the
+model, started in the buffer this was called in, whatever the current
+buffer is by then.  The session is found first, before the model is
+asked for: without SESSION-ID, the buffer's own (a view that starts its
+own conversations needs none)."
+  (let* ((over (current-buffer))
+         (session-id (or session-id
+                         (and (null harness-ui-btw-start-function)
+                              (harness-ui-current-session-id))))
+         (promise (harness-make-promise)))
+    (harness-ui-choose-model
+     (lambda (id _label)
+       (if (buffer-live-p over)
+           (harness-resolve promise (with-current-buffer over
+                                      (harness-btw session-id question id)))
+         (message "BTW failed: the buffer it was to open over is gone")
+         (harness-resolve promise nil))))
+    promise))
+
 ;;;###autoload
-(defun harness-btw (&optional session-id question)
+(defun harness-btw (&optional session-id question model)
   "Open a BTW side conversation, blank, ready for a question.
 It is a new session over SESSION-ID, by default the current buffer's
 session: listed under it, but sharing nothing with it or with earlier
@@ -91,20 +123,34 @@ starts its own conversations (`harness-ui-btw-start-function'), such as
 the task board, it is a new conversation about that view.  The question
 is written in the BTW's compose box like any message, and the first one
 names the conversation.  From Lisp, QUESTION is asked at once instead.
+
+A BTW is a quick question on the side, so it runs on a cheap model, not
+on the session's: `harness-btw-model', by default the simple tier of the
+provider of the session's model.  MODEL, a PROVIDER:NAME, runs this one
+BTW on that model instead.  The symbol `choose' reads the model from
+the catalogue first (`harness-ui-choose-model'), which is what a prefix
+argument does when called interactively; an empty answer opens nothing.
+The model is chosen once, here: the BTW can switch to another like any
+session.
 Return a promise that settles once the BTW is shown."
-  (interactive)
-  (let* ((over (current-buffer))
-         (start (and (null session-id) harness-ui-btw-start-function))
-         (about (and start harness-ui-btw-about))
-         (question (and question (not (string-blank-p question)) question))
-         (name (if question (harness-ui-btw-name question) harness-ui-btw-blank-name)))
-    (harness-then
-     (if start
-         (funcall start name)
-       (harness-ui-request "_harness/session/btw"
-                           (list :id (or session-id (harness-ui-current-session-id)) :name name)))
-     (lambda (child) (harness-ui-btw--show (plist-get child :id) over about question))
-     (lambda (e) (message "BTW failed: %s" (harness-error-message e)) nil))))
+  (interactive (list nil nil (and current-prefix-arg 'choose)))
+  (if (eq model 'choose)
+      (harness-ui-btw--choose-model session-id question)
+    (let* ((over (current-buffer))
+           (start (and (null session-id) harness-ui-btw-start-function))
+           (about (and start harness-ui-btw-about))
+           (question (and question (not (string-blank-p question)) question))
+           (model (and (stringp model) (not (string-blank-p model)) model))
+           (name (if question (harness-ui-btw-name question) harness-ui-btw-blank-name)))
+      (harness-then
+       (cond ((and start model) (funcall start name model))
+             (start (funcall start name))
+             (t (harness-ui-request "_harness/session/btw"
+                                    (append (list :id (or session-id (harness-ui-current-session-id))
+                                                  :name name)
+                                            (and model (list :model model))))))
+       (lambda (child) (harness-ui-btw--show (plist-get child :id) over about question))
+       (lambda (e) (message "BTW failed: %s" (harness-error-message e)) nil)))))
 
 (defun harness-ui-btw--show (id over about question)
   "Show BTW session ID in a side window over buffer OVER, point in its box.
