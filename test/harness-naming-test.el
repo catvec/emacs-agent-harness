@@ -129,7 +129,7 @@ at once; a turn waits until `harness-naming-test-release' ends it."
 
 (defmacro harness-naming-test-with-held (&rest body)
   "Run BODY with the provider `naming-held' defined, then drop it.
-Its models are \"big\" and \"small\", its cheap tier; see
+Its models are \"big\" and \"small\", its simple tier; see
 `harness-naming-test--held-complete' for how it answers."
   (declare (indent 0))
   `(progn
@@ -142,7 +142,7 @@ Its models are \"big\" and \"small\", its cheap tier; see
        :models (lambda () (harness-resolved
                            (list (list :name "big" :pricing '(:input 10.0 :output 50.0))
                                  (list :name "small" :pricing '(:input 1.0 :output 5.0)))))
-       :tiers '(:cheap "small")
+       :tiers '(:simple "small")
        :complete #'harness-naming-test--held-complete
        :close (lambda (id) (push id harness-naming-test--closed) t))
      (unwind-protect (progn ,@body)
@@ -268,7 +268,7 @@ question, ephemeral, with no provider state."
     (harness-naming-test-with-held
       (let ((session (list :model "naming-held:big")))
         (should (equal "naming-held:small" (harness-naming--model session)))
-        ;; A provider that names no cheap model leaves the session's own.
+        ;; A provider that names no simple model leaves the session's own.
         (should (equal "nobody:m" (harness-naming--model (list :model "nobody:m"))))
         (let ((harness-naming-model nil))
           (should (equal "naming-held:big" (harness-naming--model session))))

@@ -48,7 +48,7 @@
 ;;
 ;; `insights/narrative' writes the words.  The figures, and the names
 ;; and first requests of the sessions, go to a cheap model of the user's
-;; own provider (`harness-insights-model': the cheap tier of
+;; own provider (`harness-insights-model': the simple tier of
 ;; `harness-model' by default; no provider is named here) as a one-off
 ;; call, like the task board's search.  The model answers in JSON: a
 ;; summary, themes, patterns, friction and suggestions.  The answer is
@@ -99,11 +99,11 @@ of it leaves the harness."
 (defcustom harness-insights-model 'auto
   "Model that writes the Insights summary, as PROVIDER:NAME, or `auto'.
 `auto' (the default) asks the provider of `harness-model' for its
-`cheap' tier (see `harness-provider-tier-model'), as the task board's
+`simple' tier (see `harness-provider-tier-model'), as the task board's
 search does: the summary reads figures and a list, which a quick,
 cheap model does well.  A PROVIDER:NAME forces that model, and nil
 uses `harness-model' itself."
-  :type '(choice (const :tag "Your provider's cheap model" auto)
+  :type '(choice (const :tag "Your provider's simple model" auto)
                  (const :tag "Your default model" nil)
                  (string :tag "Model" :names model))
   :group 'harness)
@@ -956,7 +956,7 @@ configured for PROJECT."
          (choice harness-insights-model))
     (cond ((or (eq choice 'auto) (equal choice "auto"))
            (or (and base (harness-method-exists-p 'provider/tier-model)
-                    (ignore-errors (harness-call 'provider/tier-model base 'cheap)))
+                    (ignore-errors (harness-call 'provider/tier-model base 'simple)))
                base))
           ((and (stringp choice) (not (string-empty-p choice))) choice)
           (t base))))

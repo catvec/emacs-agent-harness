@@ -417,9 +417,15 @@ triangle when it failed.  That icon has a face of its own."
     (insert (propertize " " 'display `(space :align-to (- right ,(1+ (length time)))))
             (propertize time 'face 'harness-dim-face)
             "\n")
-    (add-text-properties start (point)
+    ;; The row's properties stop before its newline: Emacs highlights
+    ;; every contiguous character that shares a `mouse-face' value, so a
+    ;; row whose newline carried the same value as the next row would
+    ;; join it, and hovering anywhere would light up every node at once.
+    ;; Each row also gets a value of its own, so no two can merge even
+    ;; if the newline ever did carry one.
+    (add-text-properties start (1- (point))
                          (list 'harness-ui-tree-node node 'harness-ui-tree-row row
-                               'mouse-face 'highlight
+                               'mouse-face (list 'highlight)
                                'help-echo "mouse-1: open the session here; c: check out; f: fork; TAB: expand"))
     (when (equal sid harness-ui-tree--session-id)
       (add-face-text-property start (point) 'harness-tree-current-line-face t))

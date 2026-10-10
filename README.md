@@ -398,7 +398,7 @@ number of options, and a permission's `y`, `s`, `a`, `n` and `N`, and
 | `C-c C-t` | Show or hide the session's todo list |
 | `C-c C-w` | Copy the last reply |
 | `C-c >` | Quote, to reply: the selected text, or the agent's reply or plan at point (elsewhere the one above it, from the box the last), goes in the compose box as a Markdown quote, point under it. A selection keeps its code blocks, inline code and links as Markdown, and leaves out what a fold hides |
-| `C-c C-e` | Jump to the bottom |
+| `C-c C-e` | Jump to the bottom; while the window is scrolled away from it, the header line shows `↓ newer messages`, which does the same |
 | `C-c C-r` | Redraw the buffer |
 | `C-c C-z` | Bury the session: its window shows the buffer it showed before (a side window closes) |
 
@@ -683,8 +683,8 @@ permission mode. The one exception is a supervising session's plan:
 the judge never rules on `submit_plan` or `retry_step`, which are
 allowed (see **Approving plans** under
 [Supervisor mode](#supervisor-mode)). The judge runs on the session's own provider: its
-cheap tier (Claude Haiku, DeepSeek Flash, or the cheapest model that
-provider lists), so a session on one provider is never judged through
+simple tier (Claude Haiku, DeepSeek Flash, or the cheapest model that
+provider lists, see [Model tiers](#model-tiers)), so a session on one provider is never judged through
 another. Set `harness-perms-auto-model` to force one model. The judge
 sees only the one call: no conversation, and no project instructions
 such as CLAUDE.md. It refuses only what risks serious harm that is
@@ -785,7 +785,7 @@ kinds:
 
 - **Summary**: the session's model summarises the whole conversation.
   It reads all of it again, from the prompt cache while that lasts.
-- **Brief summary**: a cheap model (the cheap tier of the session's
+- **Brief summary**: a cheap model (the simple tier of the session's
   provider, such as Claude Haiku or DeepSeek Flash; see
   `harness-compaction-brief-model`) summarises only the first and last
   messages. It costs cents however long the conversation, but most of
@@ -936,9 +936,9 @@ a cheap model and starts at the `low` thinking level, whatever the
 session's model and level are. Two settings, independent of each other:
 
 - `harness-btw-model` is the model. By default (`auto`) it is the
-  cheap tier of the provider of the session's model (Haiku for a Claude
+  simple tier of the provider of the session's model (Haiku for a Claude
   Code session on Opus, say); the BTW keeps the session's own model when
-  its provider names no cheap one. Set it to a model (`PROVIDER:MODEL`)
+  its provider names no simple one. Set it to a model (`PROVIDER:MODEL`)
   to run every BTW on that one, or to nil to keep the session's model.
 - `harness-btw-thinking` is the level. Set it to choose another one, or
   to nil to start from the session's level. A model that does not offer
@@ -1028,7 +1028,7 @@ call to one anyway, in every permission mode.
 
 - **The session judge.** Under `auto` the harness asks
   `harness-supervisor-judge-model` (by default the session provider's
-  cheap model) one question about the opening message: a supervising job
+  simple model) one question about the opening message: a supervising job
   or a hands-on one? It is a request of its own, tiny, with no tools and
   no thinking, and it runs beside the session's first turn, which never
   waits for it: the session starts supervising as new sessions always
@@ -1110,33 +1110,45 @@ call to one anyway, in every permission mode.
   percentile after 80 and the 90th after 103, so the nudge comes when a
   turn is already among the slowest quarter.
 - **Plans, tiers and models.** Each step has a tier and a one-line
-  reason for it: `mundane` for mechanical, well-specified edits,
-  `standard` for ordinary work and `hard` for subtle design or
-  debugging. They map to the cheap, balanced and frontier models of the
-  supervisor's provider. `harness-supervisor-tiers` names a model for a
-  tier instead (a tier it leaves out keeps the default). A provider is
-  given a few seconds to list its models before a plan decides, so one
-  that answers late still gives a step the model of its tier; a provider
-  that names no model for a tier (its `:tiers` none, and none of its
-  priced models ranking as that tier) runs that step on the supervisor's
-  own model, and the hint and the answer of `submit_plan` name the
-  provider and say why, so a worker is never silently the expensive one.
-- **Thinking levels.** Thinking is a role thing: planning well is worth
-  the top effort, and the many small steps are not. A session that
-  starts supervising takes the level its provider names in
-  `harness-supervisor-thinking`, and each worker the level its own
-  model's provider names in `harness-supervisor-worker-thinking`. Both
-  are alists from a provider id to a level; by default DeepSeek
-  supervisors plan at `max`, and DeepSeek workers think at `medium`,
-  which DeepSeek's own mapping makes of its middle effort, one step
-  below max. A provider neither setting names, and a nil level, leaves
-  those sessions as they were: a worker thinks at its supervisor's
-  level. The supervisor's level is raised when the mode is turned on
-  and put back as it was when it is turned off; a level you choose while
-  the session supervises is left as it is when the mode goes off, and
-  after a restart of the harness the raised one stands. Workers keep the
-  level they started with. Both settings are on the settings page, under
-  **Supervisor mode**.
+  reason for it: `simple` for mechanical, well-specified edits and
+  `medium` for the rest. The tiers are those of the supervisor's
+  provider (see [Model tiers](#model-tiers)): on Claude, simple steps
+  run on Haiku and medium ones on Sonnet. A plan has no `hard` steps,
+  and `submit_plan` refuses one. The supervisor itself runs on the
+  hard model, so a step that seems to need it is not broken down
+  enough: the supervisor makes the hard decisions, writes them into
+  the prompts and splits the work until every step is medium at most.
+  Only `retry_step` puts a step on hard, after its worker was not up to
+  it (see **Retry and escalation**), and no step ever runs on the
+  frontier model. `harness-supervisor-tiers` names a model for a tier
+  instead, or a model and a thinking level (a tier it leaves out keeps
+  the default). A provider is given a few seconds to list its models
+  before a plan decides, so one that answers late still gives a step
+  the model of its tier; a provider that names no model for a tier (its
+  `:tiers` none, and none of its priced models ranking as that tier)
+  runs that step on the supervisor's own model, and the hint and the
+  answer of `submit_plan` name the provider and say why, so a worker is
+  never silently the expensive one. Plans of old, with the tiers
+  `mundane` and `standard`, read as simple and medium.
+- **Thinking levels.** Thinking goes with the tier: planning well is
+  worth the top effort, and the many small steps are not. A tier can
+  name the thinking level its model runs at, as DeepSeek's do: Flash
+  thinks at low on simple, at high on medium and at max on hard. A
+  session that starts supervising takes the level of its provider's
+  hard tier, and each worker the level of its step's tier (the one
+  `harness-supervisor-tiers` gives it, else the one the provider of the
+  worker's model names), fitted to the levels its model offers: a
+  worker whose tier names no level, as Claude's tiers do not, thinks at
+  its supervisor's level, and a Haiku worker of a supervisor at max
+  thinks at high. The answers of `submit_plan` and `retry_step` and the
+  report of a failed step name the level a worker runs at. The
+  supervisor's level
+  is raised when the mode is turned on and put back as it was when it
+  is turned off; a level you choose while the session supervises is
+  left as it is when the mode goes off, and after a restart of the
+  harness the raised one stands. Workers keep the level they started
+  with. The levels are set with the tiers, on the settings page under
+  **Model tiers**.
 - **Fork or fresh, and `after`.** A step's context is `fork` (the
   default) or `fresh`. A fork worker is a fork of the supervisor at the
   call that submitted the plan, so it sees everything the supervisor
@@ -1186,7 +1198,8 @@ call to one anyway, in every permission mode.
   steered.
 - **Retry and escalation.** After a failure the supervisor calls
   `retry_step`, which runs the step again on a new worker, with notes on
-  what went wrong and, when the model was not up to it, a higher tier. It
+  what went wrong and, when the model was not up to it, a higher tier:
+  medium, or hard, the only way a step gets the hard model. It
   does not end the turn, so several steps can be retried in one
   message. Or the supervisor submits a new plan, which supersedes the
   steps of the earlier ones that have not started (their running steps
@@ -1519,7 +1532,7 @@ your checkout itself can be submitted to the **main tree** instead (the
   the question button?") or an order ("restart the errored tasks", "get
   rid of the pagination task"). The line goes with a dump of the board
   to a quick, cheap model (`harness-tasks-search-model`, the provider's
-  cheapest tier by default), which answers with the tasks it is about
+  simple tier by default), which answers with the tasks it is about
   and what to do, never with prose. The board then shows only those
   tasks, archived ones included, under a banner that says what it shows;
   `C-g` or `[Clear]` shows every task again. An order that is easily
@@ -1727,7 +1740,7 @@ is no export. The harness process computes the figures, with a child
 Emacs reading the transcripts. Until they arrive, the buffer shows a
 placeholder, so your Emacs never waits.
 
-By default a cheap model of your provider writes the summary: the cheap
+By default a cheap model of your provider writes the summary: the simple
 tier of `harness-model`, or set `harness-insights-model`. Its input is
 the figures and each session's name and first request, never code or
 tool output. A summary is kept for a day for the same period and
@@ -1836,8 +1849,10 @@ The page leads with the settings most people change, grouped by what
 they are for: **New sessions** (model, thinking, permission mode,
 non-interactive, supervisor mode), **Supervisor mode** (whether
 sessions and tasks supervise or a cheap model judges them, the judge's
-model, the models of the tiers, the thinking levels of supervisors and
-their workers, the step budget), **Spending** (the
+model, the models of a plan's tiers, the step budget), **Model tiers**
+(each provider's simple, medium, hard and frontier models and the
+thinking levels they run at, see [Model tiers](#model-tiers)),
+**Spending** (the
 budget, one for all sessions together), **Compaction** (what stands in
 for a conversation that grew too long, and which model writes a brief
 summary), **Files and safety** (directory access,
@@ -1876,15 +1891,16 @@ anyone's configuration. [docs/configuration-audit.md](docs/configuration-audit.m
 is the audit behind that, and the rule for adding a setting.
 
 Settings that hold records — the OpenAI-compatible and Bedrock
-endpoints, Bedrock's per-model defaults, the standing permission rules
-— are edited as forms: every key the harness reads is named (Base URL,
+endpoints, Bedrock's per-model defaults, each provider's model tiers,
+the standing permission rules — are edited as forms: every key the harness reads is named (Base URL,
 Context window, Thinking…), has a value of its own kind, and says what
 it is for. Each record in a list folds to one line; `Edit` opens it and
 `INS` adds one, filled in from what that kind of record starts as.
 
 Settings that name a model (the default model, the task, refine, recap,
-search, auto-mode judge and session judge models, Copilot's default
-model, and the fallback list) are dropdowns rather than text fields.
+search, auto-mode judge and session judge models, the models of a
+plan's tiers, Copilot's default model, and the fallback list) are
+dropdowns rather than text fields.
 The button names
 the model (`Fable 5.1 (Claude) ▾`), next to its id and context window,
 and opens a picker of the models the configured providers list, grouped
@@ -2047,6 +2063,34 @@ Set the variables before it starts, or restart it after setting them.
 Saving the endpoint re-registers its provider and clears what was
 cached for it, so a changed URL or model list shows at once.
 
+### Model tiers
+
+Some calls get their model from the harness rather than from you: the
+auto-mode judge, a session's title, a brief summary, the workers of a
+supervisor's plan. The harness picks such a model by tier, from the
+provider the session is on. Each provider names a model for each of four
+tiers, weakest first:
+
+| Tier | For | Claude | DeepSeek |
+|---|---|---|---|
+| simple | Small, well-specified work, and the harness's own calls: the judge, titles, summaries | Haiku | Flash, low thinking |
+| medium | Everyday work: the steps of a supervisor's plan | Sonnet | Flash, high thinking |
+| hard | The strongest model the harness picks: what a supervisor plans on, and a step retried after its worker was not up to it | Opus | Flash, max thinking |
+| frontier | The very top model. Only you pick it; the harness never does | Fable | none |
+
+A tier names a model (a name, id or regexp of the provider's
+catalogue), the model at a thinking level, as DeepSeek runs its one
+Flash model at three levels, or no model at all. A tier that a provider
+leaves out is filled from its models sorted by price. When a provider
+has no model for a tier, the harness uses the nearest tier it has
+instead: a Fable session that falls back to DeepSeek carries on on
+DeepSeek's hard tier. The tiers of each provider are on the settings
+page (`C-c h S`) under **Model tiers** (`harness-provider-claude-tiers`,
+`harness-deepseek-tiers`, `harness-bedrock-tiers` and
+`harness-provider-copilot-tiers`); OpenAI-compatible endpoints take
+`:tiers` in their entry. Tiers saved in the names of old, `cheap`,
+`balanced` and `frontier`, are read as simple, medium and hard.
+
 ### Switching model or provider
 
 `C-c h m` (`harness-set-model`) chooses the model for the current
@@ -2127,8 +2171,10 @@ The usage dashboard (`C-c h u`) lists every quota window with its reset
 time, the plan's extra usage, and the value at API prices that the plan
 covered.  Its Fallback section sets `harness-fallback-models`, the order
 of use when a provider runs out of quota or money, first entry first:
-each entry a provider id (that provider's model of similar ability) or
-one model id.  Sessions run on the first entry that has not run out and
+each entry a provider id (that provider's model of the same
+[tier](#model-tiers), or of the nearest tier it has, shown with the
+thinking level the tier names: `simple→DeepSeek-V4.1-Flash low`) or one
+model id.  Sessions run on the first entry that has not run out and
 move back up to a higher one as soon as its quota comes back; a
 session's own model takes its provider's place in that order, and a
 provider the list does not name keeps its own model first, the list
@@ -2455,6 +2501,7 @@ Further documentation:
 
 ```sh
 scripts/test.sh                              # run every test suite, each in a clean Emacs
+scripts/test.sh --changed                    # only the suites the working tree's changes touch
 scripts/test.sh test/harness-core-test.el    # run one suite (optionally with an ERT selector)
 scripts/lint.sh [--checkdoc]                 # byte-compile every file out of tree
 scripts/dev.sh start                         # start a clean development Emacs
@@ -2463,6 +2510,18 @@ scripts/media.sh [NAME...]                   # take the screenshots in docs/medi
 
 Tests that talk to real models run only when `HARNESS_INTEGRATION=1` is
 set. See [docs/dev-loop.md](docs/dev-loop.md) for the full workflow.
+
+A test run is minutes and an edit is seconds, so a run is never worth
+repeating just to look at it. While you work, run only the suites your
+change touches (`scripts/test.sh --changed` picks them, or name the
+files yourself); the full run, with no arguments, is the one to make
+once before handing work in. Every suite's whole output is kept in
+`scripts/.dev/test-logs/<suite>.log` and the run's own lines and
+summary in `scripts/.dev/test-logs/last-run.txt` (`HARNESS_TEST_LOGS`
+moves them), so never pipe a run through `grep` or `tail`: a detail you
+did not see is still in the log, and reading it costs nothing where
+running the suite again costs minutes. A failing run prints each
+failing suite's log path.
 
 `scripts/test.sh` runs the suites at idle CPU and I/O priority
 (`nice -n 19`, `ionice -c 3`), so a run yields to whatever else you are

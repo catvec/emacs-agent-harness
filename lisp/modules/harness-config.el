@@ -103,11 +103,11 @@ session."
 (defcustom harness-btw-model 'auto
   "Model BTW side conversations run on, as PROVIDER:NAME, or `auto'.
 A BTW is for quick questions on the side, so by default (`auto') it
-runs on the cheap tier of the provider of the model it would
+runs on the simple tier of the provider of the model it would
 otherwise use (see `harness-provider-tier-model'): the model of the
 session it is opened over, or `harness-model' as configured for a BTW
 about a task board.  It keeps that model when the provider names no
-cheap one.  A PROVIDER:NAME forces that model, and nil keeps the
+simple one.  A PROVIDER:NAME forces that model, and nil keeps the
 model of the session.  How hard it thinks is `harness-btw-thinking',
 a setting of its own.  Either can be changed in the BTW like in any
 session, and one BTW can start on another model: a prefix argument to
@@ -184,8 +184,12 @@ reader of the layers skips it (see `harness-config--layered-keys').")
      :title "Supervisor mode"
      :doc "Top-level sessions plan and delegate: the session's model investigates and writes a plan, and worker sub-agents on cheaper models carry it out. The supervisor cannot change files itself."
      :keys (harness-supervisor harness-supervisor-tasks harness-supervisor-judge-model
-            harness-supervisor-tiers harness-supervisor-thinking
-            harness-supervisor-worker-thinking harness-supervisor-step-budget))
+            harness-supervisor-tiers harness-supervisor-step-budget))
+    (tiers
+     :title "Model tiers"
+     :doc "Which model of each provider does which work, and at what thinking level.  Simple runs the small jobs the harness does on its own (the auto-mode judge, naming, summaries) and the simple steps of a plan; medium the everyday steps; hard is what a supervisor plans on, and what a step its worker was not up to is retried on.  Frontier is the very top model: only you pick it, the harness never does."
+     :keys (harness-provider-claude-tiers harness-deepseek-tiers harness-bedrock-tiers
+            harness-provider-copilot-tiers))
     (spending
      :title "Spending"
      :doc "What all sessions together may spend.  Budgets for one project, one session or a calendar period are made in the usage dashboard."

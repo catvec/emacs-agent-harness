@@ -730,7 +730,7 @@ otherwise."
 MODEL is the model of the session the BTW is opened over, or
 `harness-model' as configured at CWD for a BTW over no session.  The
 answer is what `harness-btw-model' says at CWD: `auto' (or the string
-\"auto\"), the default, is the cheap tier of MODEL's provider, MODEL
+\"auto\"), the default, is the simple tier of MODEL's provider, MODEL
 itself when the provider names none (see `harness-provider-tier-model');
 a PROVIDER:NAME is that model, unless `harness-allowed-models' leaves it
 out, which the log says and MODEL stands for; nil is MODEL.  A policy
@@ -740,7 +740,7 @@ BTW's model too (`harness-session--pinned'), whatever this answers."
     (cond
      ((or (eq choice 'auto) (equal choice "auto"))
       (or (and model (harness-method-exists-p 'provider/tier-model)
-               (ignore-errors (harness-call 'provider/tier-model model 'cheap)))
+               (ignore-errors (harness-call 'provider/tier-model model 'simple)))
           model))
      ((and (stringp choice) (not (string-blank-p choice)))
       (let ((refusal (and (fboundp 'harness-provider-model-refusal)
@@ -848,7 +848,7 @@ deleted; symbolic links inside it are removed, never followed."
 (harness-defmethod session/create (&rest plist)
   "Create a session.  PLIST needs `:cwd'; see docs/architecture.md for the rest.
 A `btw' session without `:model' runs on `harness-btw-model', by
-default the cheap tier of the provider of `harness-model', both as
+default the simple tier of the provider of `harness-model', both as
 configured at `:cwd'; without `:thinking' it thinks at
 `harness-btw-thinking' fitted to the levels its model offers (that
 level, else the nearest it offers below it, else its weakest:
@@ -1598,7 +1598,7 @@ everything else is the configured default, as for any new session.
 
 A BTW is a quick question on the side, so it does not run on ID's model
 but on a cheap one: `harness-btw-model' as configured at ID's cwd, by
-default the cheap tier of the provider of ID's model, which stays ID's
+default the simple tier of the provider of ID's model, which stays ID's
 when the provider names none (`harness-session--btw-model').  MODEL, a
 PROVIDER:NAME, picks another model for this one BTW and wins over that
 setting; blank is none.  It is chosen here, once: from then on the BTW

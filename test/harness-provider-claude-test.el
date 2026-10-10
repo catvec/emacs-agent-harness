@@ -162,9 +162,21 @@ tool is answered with \"echo: TEXT\"."
       (should (plist-get caps :cost-reported)))
     ;; The provider names its tiers, so the judge does not sort prices.
     (should (equal "claude:claude-haiku-4-5-20251001"
-                   (harness-call 'provider/tier-model "claude:claude-opus-5-5" 'cheap)))
+                   (harness-call 'provider/tier-model "claude:claude-opus-5-5" 'simple)))
+    (should (equal "claude:claude-sonnet-5"
+                   (harness-call 'provider/tier-model "claude:claude-opus-5-5" 'medium)))
     (should (equal "claude:claude-opus-5-5"
-                   (harness-call 'provider/tier-model "claude:claude-haiku-4-5-20251001" 'frontier)))))
+                   (harness-call 'provider/tier-model "claude:claude-haiku-4-5-20251001" 'hard)))
+    (should (equal "claude:claude-fable-5-1"
+                   (harness-call 'provider/tier-model "claude:claude-haiku-4-5-20251001" 'frontier)))
+    ;; Each model is labelled with its own tier: Opus 5.5 is hard, the
+    ;; strongest the harness picks on its own, and only Fable is frontier.
+    (should (equal '(simple medium hard frontier)
+                   (mapcar (lambda (id) (harness-call 'provider/model-tier id))
+                           '("claude:claude-haiku-4-5-20251001" "claude:claude-sonnet-5"
+                             "claude:claude-opus-5-5" "claude:claude-fable-5-1"))))
+    ;; No tier names a thinking level: the session's own decides.
+    (should-not (harness-call 'provider/tier-thinking "claude:claude-opus-5-5" 'hard))))
 
 (ert-deftest harness-provider-claude-model-known-without-a-listing ()
   "Every Claude model has its window from the moment the provider is defined.
@@ -243,10 +255,15 @@ too, with an estimated window; the models known before stay."
     ;; What was known before stays.
     (should (funcall get "claude-fable-5-1"))
     (should (funcall get "claude-haiku-4-5-20251001"))
-    ;; The tiers name the CLI's aliases, the newest of each family.
-    (should (equal "claude:haiku" (harness-call 'provider/tier-model "claude" :cheap)))
-    (should (equal "claude:sonnet" (harness-call 'provider/tier-model "claude" :balanced)))
-    (should (equal "claude:opus" (harness-call 'provider/tier-model "claude" :frontier)))
+    ;; The tiers name the CLI's aliases, the newest of each family, and the
+    ;; frontier model the CLI does not alias.
+    (should (equal "claude:haiku" (harness-call 'provider/tier-model "claude" :simple)))
+    (should (equal "claude:sonnet" (harness-call 'provider/tier-model "claude" :medium)))
+    (should (equal "claude:opus" (harness-call 'provider/tier-model "claude" :hard)))
+    (should (equal "claude:claude-fable-5-1" (harness-call 'provider/tier-model "claude" :frontier)))
+    ;; The default alias stands for Opus 5.5, so it is hard too.
+    (should (eq 'hard (harness-call 'provider/model-tier "claude:default")))
+    (should (eq 'frontier (harness-call 'provider/model-tier "claude:claude-fable-5-1")))
     ;; The listing is kept, for the next start.
     (should (file-exists-p (expand-file-name "claude-models.json" harness-state-directory)))
     (setq harness-provider-claude--listing 'unread)

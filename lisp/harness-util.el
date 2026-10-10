@@ -915,6 +915,20 @@ logged."
         (error (harness-log 'warn "could not save %s: %S" symbol err)))))
   nil)
 
+(defun harness-renew-default (symbol &rest old)
+  "Give option SYMBOL its default again when it holds one of OLD.
+OLD are the defaults it had before.  A reload evaluates a `defcustom'
+again without changing the value it has, so a default that changed
+would stay as it was until Emacs restarts, and would look like a choice
+of the user's meanwhile, which the UI passes on to its harness process.
+A value the user saved through Customize is theirs and stays; so does
+any other value.  Return non-nil when the default was given again."
+  (when (and (default-boundp symbol)
+             (member (default-value symbol) old)
+             (get symbol 'standard-value))
+    (custom-reevaluate-setting symbol)
+    t))
+
 ;;;; Errors
 
 (defun harness-error-message (err)

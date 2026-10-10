@@ -11,7 +11,7 @@
 ;; a provider conversation of its own.  It works where that session
 ;; does, with its permission mode, but not on its model: a BTW is a
 ;; quick question, so it runs on a cheap model (`harness-btw-model': by
-;; default the cheap tier of the provider of the session's model), at
+;; default the simple tier of the provider of the session's model), at
 ;; the low thinking level of quick questions (`harness-btw-thinking').
 ;; A prefix argument asks for another model for that one BTW, from the
 ;; catalogue; the BTW can switch models afterwards like any session.
@@ -125,7 +125,7 @@ is written in the BTW's compose box like any message, and the first one
 names the conversation.  From Lisp, QUESTION is asked at once instead.
 
 A BTW is a quick question on the side, so it runs on a cheap model, not
-on the session's: `harness-btw-model', by default the cheap tier of the
+on the session's: `harness-btw-model', by default the simple tier of the
 provider of the session's model.  MODEL, a PROVIDER:NAME, runs this one
 BTW on that model instead.  The symbol `choose' reads the model from
 the catalogue first (`harness-ui-choose-model'), which is what a prefix
