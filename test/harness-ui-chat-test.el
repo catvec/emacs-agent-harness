@@ -750,6 +750,29 @@ buffer-local function changes only its buffer's header."
         (kill-local-variable 'harness-chat-header-functions)
         (should (equal own (harness-chat--header most-positive-fixnum)))))))
 
+(ert-deftest harness-ui-chat-header-prefix-segment-priorities ()
+  "A leading segment may carry a priority of its own, and makes room by it.
+One below the session's own goes before they do in a narrow window, so it
+costs the session no segment however narrow the window is."
+  (harness-ui-chat-test-with
+    (let* ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session "Mine")))
+           (own (with-current-buffer buf
+                  (let ((harness-chat-header-functions nil))
+                    (harness-chat--header most-positive-fixnum)))))
+      (with-current-buffer buf
+        (add-hook 'harness-chat-header-functions
+                  (lambda () (list " badge " 3)) nil t)
+        (let* ((full (harness-chat--header most-positive-fixnum))
+               (narrow (- (string-width full) 1)))
+          (should (equal " badge " (harness-chat--header-prefix)))
+          (should (string-prefix-p " badge  " full))
+          ;; One column short of the whole line: the badge goes, the
+          ;; session's own stay.
+          (should-not (string-match-p "badge" (harness-chat--header narrow)))
+          (should (equal (harness-chat--header narrow)
+                         (let ((harness-chat-header-functions nil))
+                           (harness-chat--header narrow)))))))))
+
 (defun harness-ui-chat-test-segment (header command)
   "Return (TEXT POS) of the segment of HEADER that runs COMMAND, or nil."
   (let ((map (harness-chat--segment-map command))
