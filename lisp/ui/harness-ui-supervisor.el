@@ -9,13 +9,13 @@
 ;; the plugin does not govern, a sub-agent or a side conversation, has no
 ;; such key and shows nothing.
 ;;
-;; A governed chat's header line starts with the state, before the status
-;; icon: " supervisor " in `harness-supervisor-face', or " hands-on " in
-;; `harness-dim-face'.  The spaces are the pad from the window's edge and
-;; the separator from the status icon, which the header's other segments
-;; have as well; the segment is fitted at `harness-ui-supervisor--priority',
-;; below every segment of the session's own, so a window too narrow for all
-;; of it drops the badge before it loses the model, the mode or the counts.
+;; A governed chat's header line starts with the state: " supervisor " in
+;; `harness-supervisor-face', or " hands-on " in `harness-dim-face'.  The
+;; spaces are the pad from the window's edge and the separator from the
+;; session's name, which the header's other segments have as well; the
+;; segment is fitted at `harness-ui-supervisor--priority', below every
+;; segment of the session's own, so a window too narrow for all of it
+;; drops the badge before it loses the model, the mode or the rest.
 ;; A click there toggles it, and so does V in the harness keys (C-c h V,
 ;; `harness-toggle-supervisor'), which asks the harness for the change with
 ;; `_harness/supervisor/set' and says what it changed.  The header follows
@@ -45,16 +45,16 @@
 
 (defconst harness-ui-supervisor--priority 3
   "Fit priority of the supervisor segment in a chat's header line.
-Below the output rate's (5), the first of the session's own segments to
-make room, so a narrow window drops the badge before it loses any of the
-session's own state; the companion pet's face, at 2, goes first, being
-only a decoration.")
+Below every one of the session's own segments, the first to make room,
+so a narrow window drops the badge before it loses any of the session's
+own state; the companion pet's face, at 2, goes first, being only a
+decoration.")
 
 (defun harness-ui-supervisor--header ()
   "Return the supervisor segment of this chat's header line, or nil.
 It is \" supervisor \" while the session supervises, and \" hands-on \"
 once the user turned that off: the spaces are the pad from the window's
-edge and the separator from the status icon, as the header's other
+edge and the separator from the session's name, as the header's other
 segments have theirs, and the segment is fitted at
 `harness-ui-supervisor--priority'.  A session the supervisor plugin does
 not govern has no segment.  Clicking the segment toggles the mode."

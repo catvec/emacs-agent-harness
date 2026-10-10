@@ -145,7 +145,8 @@ session's, and a `+` or `-` on a card goes through its `priority/set'."
       (should (string-empty-p (buffer-substring-no-properties harness-compose-start
                                                               harness-compose-end))))
     (harness-ui-tasks-test--wait-text board "Completed  1\\(.\\|\n\\)*Fix the flaky test")
-    (should (string-match-p "✓ 1\\|done 1" (with-current-buffer board (harness-ui-tasks--header most-positive-fixnum))))))
+    ;; The column's heading counts it: the header does not.
+    (should-not (string-match-p "✓ 1\\|done 1" (with-current-buffer board (harness-ui-tasks--header most-positive-fixnum))))))
 
 (ert-deftest harness-ui-tasks-compose-survives-redraws ()
   (harness-ui-tasks-test-with
@@ -290,7 +291,9 @@ keeping its other facts and its buttons."
            '((:type text :delta "oops") (:type done :stop-reason error :error "boom"))))
       (harness-ui-tasks-test--type-and-submit board "Break things")
       (harness-ui-tasks-test--wait-text board "Requires your input  1\\(.\\|\n\\)*stopped: error")
-      (should (string-match-p "1 need you" (with-current-buffer board (harness-ui-tasks--header)))))))
+      ;; The column's heading counts it, in the attention face: the header does not.
+      (should-not (string-match-p "need you" (with-current-buffer board
+                                                (harness-ui-tasks--header most-positive-fixnum)))))))
 
 (ert-deftest harness-ui-tasks-paused-mark-lines-up-with-the-square ()
   "A wide pause mark centres on the square's column, its text in line.
@@ -580,7 +583,8 @@ told from, like a worktree git lost track of, still leads back."
         (should-not harness-ui-tasks--bulk)
         (harness-ui-tasks-toggle-bulk)
         (should harness-ui-tasks--bulk)
-        (should (string-match-p "Bulk: editing" (harness-ui-tasks--header)))
+        ;; The header says it is on; how many tasks it edits is the banner's.
+        (should (string-match-p "\\[Bulk edit: on\\]" (harness-ui-tasks--header)))
         (should (string-match-p "EDITING 1 CURRENT TASK" (harness-ui-tasks-test--tail-text board)))
         (should (equal "for 1 task" (nth 2 (harness-ui--setting-target nil))))
         ;; The next task's own settings are untouched; the current one changes,
@@ -593,7 +597,9 @@ told from, like a worktree git lost track of, still leads back."
         (should (equal "yolo" (format "%s" (plist-get harness-ui-tasks--new :permission-mode))))
         (harness-ui-tasks-toggle-bulk)
         (should-not harness-ui-tasks--bulk)
-        (should-not (string-match-p "Bulk: editing" (harness-ui-tasks--header)))))))
+        (let ((header (harness-ui-tasks--header most-positive-fixnum)))
+          (should-not (string-match-p "Bulk edit: on" header))
+          (should (string-match-p "\\[Bulk edit\\]" header)))))))
 
 ;;;; Commands that change every session and task
 
@@ -1816,7 +1822,9 @@ the same would carry the bar on."
                                                notices))
                            5 "the review notice"))
       (should (string-match-p "Completed  0" (harness-ui-tasks-test--board-text board)))
-      (should (string-match-p "1 to review" (with-current-buffer board (harness-ui-tasks--header))))
+      ;; The column's heading counts it: the header does not.
+      (should-not (string-match-p "to review" (with-current-buffer board
+                                                 (harness-ui-tasks--header most-positive-fixnum))))
       (harness-ui-tasks-test--goto-card board "Fix the flaky test")
       (with-current-buffer board
         (should (equal '("Verify" "Send back")
@@ -1907,7 +1915,9 @@ click on its title opens."
                          "the worktree's dev loop to run")
       (should (equal "start" (cdr (assoc "args" (car (harness-test-dev-invocations checkout)))))))))
 
-;;;; Review: the switch that turns it off
+(defvar harness-config-sections)
+
+;;;; Review: turning it off
 
 (declare-function harness-ui-tasks-toggle-review "harness-ui-tasks")
 (declare-function harness-ui-tasks-refresh "harness-ui-tasks")
@@ -1919,47 +1929,33 @@ click on its title opens."
                                                      :require-verification)))
                      5 (format "the board to know review is %s" (if (eq review t) "on" "off"))))
 
-(defun harness-ui-tasks-test--switch (board)
-  "Return (TEXT HELP CLICK) of the Review switch in BOARD's header line, or nil.
-HELP is its tooltip, CLICK what a click on it runs."
-  (with-current-buffer board
-    ;; The whole header: which segments a narrow window keeps is not what
-    ;; this asks about, and the switch is one a window may drop.
-    (let* ((header (harness-ui-tasks--header most-positive-fixnum))
-           (start (string-search "[Review: " header)))
-      (when start
-        (list (substring-no-properties header start (1+ (string-search "]" header start)))
-              (let ((help (get-text-property start 'help-echo header)))
-                (if (functionp help) (funcall help (get-buffer-window board t) nil nil) help))
-              (lookup-key (get-text-property start 'keymap header) [header-line mouse-1]))))))
-
-(ert-deftest harness-ui-tasks-review-switch ()
-  "The Review switch turns review off and on again: an option, saved for every project.
-Off, finished work completes by itself and Ready for review goes away."
+(ert-deftest harness-ui-tasks-review-off-and-on ()
+  "V turns review off and on again: an option, saved for every project.
+Off, finished work completes by itself and Ready for review goes away.
+The settings page has the option under Task board, so the header line
+has no switch for it."
   (harness-ui-tasks-test-with
     (let ((harness-tasks-require-verification t)
           (saved nil))
+      (should (memq 'harness-tasks-require-verification
+                    (plist-get (alist-get 'tasks harness-config-sections) :keys)))
       (cl-letf (((symbol-function 'harness-save-user-option)
                  (lambda (symbol value) (set symbol value) (push (cons symbol value) saved)))
                 ;; Nothing waits for review, so turning it off asks nothing.
                 ((symbol-function 'y-or-n-p) (lambda (&rest _) (error "Asked about tasks waiting for review"))))
         (with-current-buffer board (harness-ui-tasks-refresh))
         (harness-ui-tasks-test--settings-say board t)
-        (pcase-let ((`(,text ,help ,_) (harness-ui-tasks-test--switch board)))
-          (should (equal "[Review: on]" text))
-          (should (string-search "Review is on" help))
-          (should (string-search "V to turn it off, for every project" help)))
+        (should-not (string-search "Review" (with-current-buffer board
+                                              (harness-ui-tasks--header most-positive-fixnum))))
         ;; V on the board turns it off.
         (with-current-buffer board
           (goto-char (point-min))
           (should (eq 'harness-ui-tasks-toggle-review (key-binding (kbd "V"))))
           (call-interactively (key-binding (kbd "V"))))
-        (harness-test-wait (lambda () (equal "[Review: off]" (car (harness-ui-tasks-test--switch board))))
-                           5 "the switch to show off")
+        (harness-ui-tasks-test--settings-say board :false)
         ;; Saved as the option, so it holds for every project and after a restart.
         (should (equal '((harness-tasks-require-verification)) saved))
         (should-not harness-tasks-require-verification)
-        (should (string-search "Review is off" (nth 1 (harness-ui-tasks-test--switch board))))
         ;; Finished work is done without waiting for anyone, and the board
         ;; has no column for review.
         (harness-ui-tasks-test--type-and-submit board "Fix the flaky test")
@@ -1967,12 +1963,11 @@ Off, finished work completes by itself and Ready for review goes away."
         (should (string-match-p "In progress  0" (harness-ui-tasks-test--board-text board)))
         (should-not (string-search "Ready for review" (harness-ui-tasks-test--board-text board)))
         (should-not (plist-get (car (harness-call 'task/list default-directory)) :verified))
-        ;; A click on the switch turns it on again.
-        (with-current-buffer board (funcall (nth 2 (harness-ui-tasks-test--switch board))))
+        ;; V again turns it on.
+        (with-current-buffer board (call-interactively #'harness-ui-tasks-toggle-review))
         (harness-test-wait (lambda () harness-tasks-require-verification) 5 "review on again")
         (should (equal '(harness-tasks-require-verification . t) (car saved)))
         (harness-ui-tasks-test--settings-say board t)
-        (should (equal "[Review: on]" (car (harness-ui-tasks-test--switch board))))
         (should (string-match-p "Ready for review  0" (harness-ui-tasks-test--board-text board)))))))
 
 (ert-deftest harness-ui-tasks-review-off-verifies-what-waits ()
@@ -2136,7 +2131,7 @@ there is now.  Refine, whose tasks wait for you anyway, shows none."
 
 (ert-deftest harness-ui-tasks-merging-section ()
   "Tasks the merge queue holds get a section of their own, after review.
-They keep the queue's order and count in the header.  A card there is
+They keep the queue's order, and the heading counts them.  A card there is
 one line, its recap folded as in review: the section says what the task
 is doing, and the line says when its merge is under way or in conflict.
 Shown, the subtitle says where the branch stands beside the recap, a
@@ -2208,8 +2203,9 @@ conflict which files its session is resolving."
           (harness-ui-tasks-tab))
         (should (= 1 (harness-ui-tasks-test--card-lines board "First to merge")))
         (should-not (string-match-p "Paged the orders" (harness-ui-tasks-test--board-text board)))
+        ;; The heading counts them; the header leaves it to the heading.
         (let ((header (with-current-buffer board (harness-ui-tasks--header most-positive-fixnum))))
-          (should (string-match-p "↣ 2\\|merge 2" header)))
+          (should-not (string-match-p "↣ 2\\|merge 2" header)))
         ;; Once it merged it shows under Completed, not in the queue.
         (harness-ui-tasks-test--change board first :state "done" :column "done" :merge-status nil
                                        :merged t :finished now)
@@ -2877,7 +2873,7 @@ each that applies, on one line, and setting a budget reloads them."
         (should (get-text-property pos 'local-map header))))))
 
 (ert-deftest harness-ui-tasks-header-keeps-the-quota-when-narrow ()
-  "In a narrow window the plan's quota outlasts the counts and the buttons.
+  "In a narrow window the plan's quota outlasts the buttons and the name.
 The budget makes room first; the plan and its quota windows stay longest
 but for [Refresh], still opening the usage dashboard."
   (harness-ui-tasks-test-with
@@ -2889,8 +2885,10 @@ but for [Refresh], still opening the usage dashboard."
     (harness-test-wait (lambda () (string-match-p "  Max . 5h 23% . 7d 41% . budget 0%  "
                                                   (harness-ui-tasks-test--header board)))
                        5 "the plan, its quota and the budget")
-    ;; The counts, the buttons and the Review switch go before the quota.
-    (let ((header (harness-ui-tasks-test--header board 62)))
+    ;; The buttons and the project's name go before the quota.  The
+    ;; queue switch takes the wide separator before it goes, as the
+    ;; counts did (see `harness-ui-tasks--header').
+    (let ((header (harness-ui-tasks-test--header board 56)))
       (should (string-match-p "\\` Tasks  Max . 5h 23% . 7d 41% . budget 0% \\[Refresh\\]\\'" header)))
     ;; Narrower still, the budget goes and the quota stays.
     (let ((header (harness-ui-tasks-test--header board 50)))
