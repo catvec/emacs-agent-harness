@@ -215,7 +215,11 @@ the panels this buffer draws and for redraw decisions.")
 (defvar-local harness-chat--coalescable nil "Names of coalescable tools.")
 (defvar-local harness-chat--turn-start nil "Float time the running turn started.")
 (defvar-local harness-chat--unseen nil "Non-nil when content arrived while scrolled up.")
-(defvar-local harness-chat--notice nil "Non-nil while the newer-messages notice is drawn.")
+(defvar-local harness-chat--notice nil
+  "Non-nil while the newer-messages notice is drawn.
+`harness-chat--update-notice' keeps it, from the post-command hook and
+`window-scroll-functions'; the header line (`harness-chat--header')
+reads it, as it must not measure the window itself.")
 (defvar-local harness-chat--dead nil "Non-nil once the session was deleted.")
 (defvar-local harness-chat--render-timers nil "Node id -> throttle timer.")
 (defvar-local harness-chat--render-cost 0
@@ -667,7 +671,11 @@ it is rather than asked to be shown whole."
 (defun harness-chat--at-bottom-p (&optional window)
   "Non-nil when WINDOW shows the end of the transcript.
 WINDOW defaults to the first window showing the buffer; without one
-the buffer counts as at the bottom."
+the buffer counts as at the bottom.
+Never call this from a header-line or mode-line `:eval': it measures
+the window (`pos-visible-in-window-p'), which formats those lines, so
+the call would run again inside itself, without end.  The header reads
+`harness-chat--notice' instead."
   (let ((w (or window (car (harness-chat--windows)))))
     (or (null w)
         (not (eq (window-buffer w) (current-buffer)))
@@ -734,13 +742,19 @@ On `harness-acp-received-hook'."
           (force-mode-line-update))))))
 
 (defun harness-chat--scrolled-up-p ()
-  "Non-nil when a window on this buffer is not at the newest message."
+  "Non-nil when a window on this buffer is not at the newest message.
+Never call this from a header-line or mode-line `:eval': measuring a
+window formats those lines, which would call it again, without end (see
+`harness-chat--at-bottom-p').  The header reads `harness-chat--notice',
+which `harness-chat--update-notice' sets from this."
   (cl-some (lambda (w) (not (harness-chat--at-bottom-p w)))
            (harness-chat--windows)))
 
 (defun harness-chat--update-notice (&rest _)
   "Show or hide the newer-messages notice as the window's position is now.
-The header line draws the notice, but Emacs redraws it only when told
+The header line draws the notice from `harness-chat--notice', which
+this sets: the header cannot measure the window itself (see
+`harness-chat--at-bottom-p').  Emacs redraws the header only when told
 to; this forces one redraw exactly when the notice changes.  Runs from
 `harness-chat--post-command' and from `window-scroll-functions'."
   (let ((show (or harness-chat--unseen (harness-chat--scrolled-up-p))))
@@ -1419,11 +1433,17 @@ running call, each with its `:note' when it has one (see
                                 (harness-chat--render-markdown output))))
                      'harness-user-face)
                     'harness-user-face 'harness-user-bar-face)))
+         ;; The block's last lines, after its details and outside the
+         ;; fold, so a folded block still shows them.  Not above the fold:
+         ;; a row is drawn to the window's edge in the face of the newline
+         ;; that ends it, and the fold hides the newline before the
+         ;; details (see `harness-chat--make-fold'), so the answer's last
+         ;; row would end on the fold's own newline, in the tool's colour.
+         (reply (cond (answer)
+                      (dismissed (propertize "  dismissed\n" 'face 'harness-dim-face))
+                      (t "")))
          (summary (concat (if ask
-                              (concat question
-                                      (cond (answer)
-                                            (dismissed (propertize "  dismissed\n" 'face 'harness-dim-face))
-                                            (t "")))
+                              question
                             (if line (concat (propertize (concat "  " line) 'face 'harness-dim-face) "\n") ""))
                           (harness-chat--child-line node result)
                           (harness-chat--note-lines node)))
@@ -1438,9 +1458,9 @@ running call, each with its `:note' when it has one (see
                              (propertize (harness-chat--input-listing input) 'line-prefix indent 'wrap-prefix indent))
              "")
            (cond
-            ;; A question's answer, or its dismissal, shows above the
-            ;; fold; the error of one that failed and the reason of one
-            ;; refused fold as any call's do.
+            ;; A question's answer, or its dismissal, is the block's
+            ;; reply, after the fold and outside it; the error of one that
+            ;; failed and the reason of one refused fold as any call's do.
             ((and ask (not (memq outcome '(failed denied)))) "")
             ((null result) "")
             ((string-empty-p output) (propertize "  (no output)\n" 'face 'harness-dim-face))
@@ -1459,7 +1479,7 @@ running call, each with its `:note' when it has one (see
                                    "\n")
                          "")))))))
     (harness-chat--margin
-     (harness-chat--face (concat header summary media (harness-chat--foldable details)) bg)
+     (harness-chat--face (concat header summary media (harness-chat--foldable details) reply) bg)
      bg)))
 
 (defun harness-chat--rerender-media (id)
@@ -3577,7 +3597,12 @@ making room as its priorities say.  WIDTH is as
       (list
        (list (concat "  " (harness-chat--segment "[menu]" #'harness-menu #'harness-chat--menu-help 'harness-dim-face))
              95)
-       (and (or harness-chat--unseen (harness-chat--scrolled-up-p))
+       ;; The cached flag, never `harness-chat--scrolled-up-p': measuring
+       ;; the window (`pos-visible-in-window-p') formats its header line,
+       ;; which would evaluate this again, and again, until
+       ;; `max-lisp-eval-depth' -- the header drawn empty, and a redisplay
+       ;; taking seconds.  `harness-chat--update-notice' keeps it current.
+       (and (or harness-chat--unseen harness-chat--notice)
             (list (concat "  " (harness-chat--segment "↓ newer messages" #'harness-chat-scroll-to-bottom
                                                       "Newer content below (mouse-1: jump to it)"
                                                       'harness-status-blocked-face))

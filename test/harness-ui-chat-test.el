@@ -1369,6 +1369,49 @@ The call and its result appear as any tool call's would."
         (harness-chat--append-local-block "hint" "again")
         (should harness-chat--unseen)))))
 
+(ert-deftest harness-ui-chat-header-reads-the-cached-notice ()
+  "The header shows the newer-messages notice without measuring the window.
+Measuring it (`pos-visible-in-window-p') formats the window's header
+line, so a header that measured would be evaluated again inside itself,
+without end: the header drawn empty, the mode line without its status,
+and a redisplay taking seconds.  The header reads the flag that the
+post-command hook and `window-scroll-functions' keep instead; content
+that came while scrolled up shows it before any command does."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (w (selected-window)))
+      (dotimes (i 80) (harness-call 'session/hint sid (format "line %d" i)))
+      (harness-test-wait (lambda () (with-current-buffer buf (= 80 (length harness-chat--order)))) 5 "hints rendered")
+      (set-window-buffer w buf)
+      (with-current-buffer buf
+        (set-window-start w (point-min))
+        (set-window-point w (point-min))
+        (harness-chat--post-command)
+        (should harness-chat--notice)
+        (cl-letf (((symbol-function 'pos-visible-in-window-p)
+                   (lambda (&rest _) (error "The header line measured its window")))
+                  ((symbol-function 'harness-chat--at-bottom-p)
+                   (lambda (&rest _) (error "The header line asked if its window is at the bottom")))
+                  ((symbol-function 'harness-chat--scrolled-up-p)
+                   (lambda (&rest _) (error "The header line asked if its window is scrolled up"))))
+          (should (string-match-p "newer messages" (harness-chat--header)))
+          (should (string-match-p "idle" (harness-chat--mode-line)))
+          ;; Content that arrived while scrolled up, before the next command.
+          (setq harness-chat--notice nil
+                harness-chat--unseen t)
+          (should (string-match-p "newer messages" (harness-chat--header)))
+          (setq harness-chat--unseen nil)
+          (should-not (string-match-p "newer messages" (harness-chat--header)))
+          (should (string-match-p "idle" (harness-chat--mode-line))))
+        ;; Back at the bottom, the hook takes the notice away.
+        (harness-chat--update-notice)
+        (should harness-chat--notice)
+        (harness-chat-scroll-to-bottom)
+        (harness-chat--post-command)
+        (should-not harness-chat--notice)
+        (should-not (string-match-p "newer messages" (harness-chat--header)))))))
+
 (ert-deftest harness-ui-chat-scrolls-by-pixels-wiring ()
   "The wheel, C-v and M-v scroll the chat by pixels, C-M-v too.
 An image is one line however tall, so scrolling by lines jumped past
@@ -4480,10 +4523,24 @@ without bullets."
           (should (equal "blue" (line-at "blue")))
           (should (equal "with a hint of grey" (line-at "with a hint of grey"))))))))
 
+(defun harness-ui-chat-test-visible-from (pos)
+  "Return the first position from POS on that is not invisible, or nil.
+That is where the display goes on after POS.  A row is drawn to the
+window's edge in the face of the newline that ends it, and a folded
+block hides the newline before its details, so the row above a fold
+ends on the first visible newline after it."
+  (while (and pos (< pos (point-max)) (invisible-p pos))
+    (setq pos (next-single-char-property-change pos 'invisible)))
+  (and pos (< pos (point-max)) pos))
+
 (ert-deftest harness-ui-chat-renders-ask-user-question-and-answer ()
   "An ask_user call shows its question as Markdown and its answer user-styled.
 The answer stands in for the next message the user would send, so it
-reads as a user message even while the tool block is still folded."
+reads as a user message even while the tool block is still folded: it
+is the block's last lines, after the details and outside their fold.
+A row is drawn to the window's edge in the face of the newline that
+ends it: the answer's rows end on newlines in the user's face, folded
+or not, and the question's row and the details' last on the tool's."
   (harness-ui-chat-test-with
     (let* ((sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid)))
@@ -4496,26 +4553,57 @@ reads as a user message even while the tool block is still folded."
          (list :sessionUpdate "_harness/node"
                :node (list :id "q1-out" :kind "tool-result" :call-id "qc1" :output "**red**")))
         (let* ((block (gethash "q1" harness-chat--blocks))
-               (question (harness-ui-chat-test-find buf "Which colour?"))
-               (answer (harness-ui-chat-test-find buf "red"))
-               (you (harness-ui-chat-test-find buf "You")))
+               (start (harness-chat-block-start block))
+               (question (harness-ui-chat-test-find buf "Which colour?" start))
+               (you (harness-ui-chat-test-find buf "You" start))
+               ;; The options in the details say "red" too: the answer is
+               ;; the "red" after "You".  `harness-ui-chat-test-find'
+               ;; returns the end of the match, the answer's newline.
+               (answer (and you (harness-ui-chat-test-find buf "red" you)))
+               (options (harness-ui-chat-test-find buf "options:" start)))
           (should block)
           (should (equal "tool-call" (harness-chat-block-kind block)))
           (should (harness-chat-block-collapsed block))
           ;; The question is part of the visible summary, not the fold.
           (should question)
-          (should-not (invisible-p question))
-          ;; The answer follows, is visible and is styled as a user message.
+          (should-not (invisible-p (1- question)))
+          ;; Its row ends on the fold's own newline, in the tool's face.
+          (let ((eol (harness-ui-chat-test-visible-from question)))
+            (should (eq ?\n (char-after eol)))
+            (should (harness-ui-chat-test-face-at eol 'harness-tool-face))
+            (should-not (harness-ui-chat-test-face-at eol 'harness-user-face)))
+          ;; The details are folded; the answer comes after them, visible
+          ;; and styled as a user message.
+          (should options)
+          (should (invisible-p (1- options)))
           (should you)
-          (should-not (invisible-p you))
+          (should (< options you))
+          (should-not (invisible-p (1- you)))
           (should answer)
-          ;; `harness-ui-chat-test-find' returns the end of the match,
-          ;; which is the answer's newline and sits under the fold; the
-          ;; answer's own text is visible.
           (should-not (invisible-p (1- answer)))
-          (should (memq 'harness-user-face (harness-ui-chat-test-faces-in block "red")))
-          (should (memq 'bold (harness-ui-chat-test-faces-in block "red")))
-          (should (harness-ui-chat-test-user-styled-p block)))))))
+          (should (harness-ui-chat-test-face-at (1- answer) 'harness-user-face))
+          (should (harness-ui-chat-test-face-at (1- answer) 'bold))
+          ;; Its last row ends on its own newline, in the user's face.
+          (should (eql answer (harness-ui-chat-test-visible-from answer)))
+          (should (eq ?\n (char-after answer)))
+          (should (harness-ui-chat-test-face-at answer 'harness-user-face))
+          (should (harness-ui-chat-test-user-styled-p block))
+          ;; Expanded: the question, the details, then the answer.
+          (harness-chat-toggle-block "q1")
+          (let* ((options (harness-ui-chat-test-find buf "options:" start))
+                 (eol (and options (harness-ui-chat-test-find buf "\n" options)))
+                 (you (harness-ui-chat-test-find buf "You" start))
+                 (answer (harness-ui-chat-test-find buf "red" you)))
+            (should-not (invisible-p (1- options)))
+            ;; The details' last row ends in the tool's face, not the user's.
+            (should (< eol you))
+            (should-not (invisible-p (1- eol)))
+            (should (harness-ui-chat-test-face-at (1- eol) 'harness-tool-face))
+            (should-not (harness-ui-chat-test-face-at (1- eol) 'harness-user-face))
+            ;; The answer's still in the user's.
+            (should (eq ?\n (char-after answer)))
+            (should-not (invisible-p answer))
+            (should (harness-ui-chat-test-face-at answer 'harness-user-face))))))))
 
 (defun harness-ui-chat-test-ask (result)
   "Show an ask_user call ended by RESULT, a tool-result plist; return its block.
@@ -4560,11 +4648,15 @@ question\", as an ordinary result; that is not what the user wrote."
           (should-not (string-search "You" text))
           (should-not (string-search "The user dismissed" text))
           (should-not (harness-ui-chat-test-user-styled-p block))
-          ;; A dim line under the question, above the fold.
+          ;; A dim line where an answer would be: after the question and
+          ;; the details, outside their fold.
           (should (harness-chat-block-collapsed block))
           (should-not (invisible-p (1- pos)))
           (should (memq 'harness-dim-face (harness-ui-chat-test-faces-in block "dismissed")))
-          (should (< (harness-ui-chat-test-find buf "Which colour?" (harness-chat-block-start block)) pos)))))))
+          (should (< (harness-ui-chat-test-find buf "Which colour?" (harness-chat-block-start block)) pos))
+          (let ((options (harness-ui-chat-test-find buf "options:" (harness-chat-block-start block))))
+            (should (invisible-p (1- options)))
+            (should (< options pos))))))))
 
 (ert-deftest harness-ui-chat-ask-user-failed-folds-its-error ()
   "An ask_user call that failed shows no answer; its error folds as any call's.

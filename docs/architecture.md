@@ -5611,7 +5611,11 @@ agent's messages and plans; the user's messages, their line breaks kept
 as typed (`harness-ui-markdown-hard-breaks`); an ask_user question, in
 its panel and in its block; and its answer, which the block shows as a
 message of the user's because it stands in for the next prompt (a
-dismissed question, or a failed or refused call, shows none).  A click
+dismissed question, or a failed or refused call, shows none).  The
+answer is the block's last lines, after its details and outside their
+fold, so a folded block still shows it; there each of its rows ends on
+a newline of its own, and so is drawn to the window's edge in the
+user's colour.  A click
 or `RET` on a link opens it (`harness-ui-markdown-open-link`): a URL with
 `browse-url`, anything else as a file in `default-directory` -- the
 session's directory, in a chat -- in another window, at the line a
@@ -5800,7 +5804,14 @@ whatever its session is doing.
 Auto-scroll follows unless the user scrolled up.  While a window on the
 chat is away from the end, scrolled up by any command or moved there
 with the jump keys, the header line shows "↓ newer messages", which
-jumps back down.  While the session
+jumps back down.  The header reads a flag, `harness-chat--notice`, that
+the post-command hook and `window-scroll-functions` keep current; it
+never measures the window itself.  `pos-visible-in-window-p` measures
+a window's header line by formatting it, so a header that called it
+would be evaluated again inside itself, without end, until
+`max-lisp-eval-depth`: the header drawn empty, the mode line losing its
+status, and every redisplay taking seconds.
+While the session
 runs, an activity line under the last block says what the turn does
 and for how long: waiting for the model, thinking, writing, preparing a
 tool call (with the size of its input so far), running one (with the
