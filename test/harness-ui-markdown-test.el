@@ -270,5 +270,43 @@ A file name is taken in `default-directory'; a file: URL is a file too."
           (should-error (harness-ui-markdown-follow-link) :type 'user-error))
         (should (= 8 (length visited)))))))
 
+(ert-deftest harness-md-table-fits-a-bound-width ()
+  "A table wider than its bound wraps inside its columns, still aligned."
+  (let* ((md "| name | description |\n|---|---|\n| alpha | a very long description that would not fit in a chat window at all, over and over and over again |\n")
+         (harness-ui-markdown-table-width 40)
+         (s (harness-ui-markdown-render md))
+         (plain (substring-no-properties s))
+         (lines (split-string plain "\n" t)))
+    (should (eq 'table (get-text-property 0 'harness-md-block s)))
+    (dolist (line lines)
+      (should (<= (string-width line) 40))
+      (should (string-match-p "│" line)))
+    (should (memq 'harness-md-table-header (harness-md-test-face-at s 0)))
+    ;; No word of the header or the long cell is lost to the wrapping.
+    (dolist (word '("name" "description" "alpha" "a" "very" "long" "description"
+                    "that" "would" "not" "fit" "in" "a" "chat" "window" "at" "all"
+                    "over" "and" "over" "and" "over" "again"))
+      (should (string-match-p word plain)))))
+
+(ert-deftest harness-md-table-breaks-a-long-word ()
+  "One long word breaks across the column instead of overflowing it."
+  (let* ((word (make-string 200 ?w))
+         (md (format "| a |\n|---|\n| %s |\n" word))
+         (harness-ui-markdown-table-width 30)
+         (s (harness-ui-markdown-render md))
+         (plain (substring-no-properties s)))
+    (dolist (line (split-string plain "\n" t))
+      (should (<= (string-width line) 30)))
+    (should (eq 'table (get-text-property 0 'harness-md-block s)))
+    ;; The whole word is still there, just broken across the lines.
+    (should (= 200 (cl-count ?w plain)))))
+
+(ert-deftest harness-md-table-unchanged-when-it-fits ()
+  "A table that already fits its bound renders exactly as without one."
+  (let ((md "| a | b |\n|---|---|\n| 1 | 2 |\n")
+        (natural (harness-ui-markdown-render "| a | b |\n|---|---|\n| 1 | 2 |\n")))
+    (let ((harness-ui-markdown-table-width 40))
+      (should (equal natural (harness-ui-markdown-render md))))))
+
 (provide 'harness-ui-markdown-test)
 ;;; harness-ui-markdown-test.el ends here
