@@ -5209,7 +5209,10 @@ the request came goes through the bus method that answers it
 (`permission/answer`, `question/answer`).
 
 Wire: JSON-RPC 2.0, one message per line.  Standard ACP methods:
-`initialize`, `authenticate`, `session/new {cwd}` → `{sessionId}`,
+`initialize` (advertises `sessionCapabilities.list`), `authenticate`,
+`session/new {cwd}` → `{sessionId}`,
+`session/list {cwd}` → `{sessions:[{sessionId,cwd,title}]}` (the real
+sessions plus the virtual ones below),
 `session/load {sessionId}` (replays the transcript as updates),
 `session/prompt {sessionId, prompt:[blocks]}` → `{stopReason}`,
 `session/cancel`, `session/set_mode {sessionId, modeId}`,
@@ -5246,6 +5249,18 @@ wanting to block on a remote host), asks for the image:
 read by the harness, for a question still pending; an error when there
 is none, or the file is gone or larger than
 `harness-tools-agent-image-max-bytes`, 16 MiB).
+
+Two sessions the harness advertises are not backed by real sessions:
+`harness:projects` (title "Projects") renders the project list, and
+`harness:new-task` (title "New task") submits what its chat input sends
+as a task.  `session/load` renders a virtual session as a single
+`user_message_chunk` whose first message is the page; prompting
+`harness:projects` refreshes it by rewriting that same message in place
+(the same `_harness.nodeId`), and prompting `harness:new-task` runs
+`task/submit` and answers with a confirmation `agent_message_chunk`
+naming the new task (`_harness.taskId`).  Virtual sessions send only
+standard update kinds, never `_harness/*` ones, so a third-party ACP
+client shows them.
 
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `fallback/`, `worktree/`, `merge/`,
