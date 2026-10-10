@@ -1228,7 +1228,11 @@ is not merged yet.  Return a promise, or nil when there is nothing to do."
                        nil)))))
 
 (defun harness-tasks--remove-worktree (task)
-  "Remove merged TASK's worktree and delete its branch; return a promise."
+  "Remove merged TASK's worktree and delete its branch; return a promise.
+The branch goes with `-D`: the merge queue lands a branch as one squash
+commit, so its tip is not an ancestor of the target, and `-d' would
+refuse a branch whose work is in all the same.  This runs only for a
+task the merge queue reported merged."
   (let ((root (plist-get task :project))
         (branch (plist-get task :branch)))
     (harness-then
@@ -1236,7 +1240,7 @@ is not merged yet.  Return a promise, or nil when there is nothing to do."
      (lambda (_)
        (harness-tasks--set (plist-get task :id) :worktree-removed t)
        (when branch
-         (harness-run-command (list "git" "-C" (directory-file-name root) "branch" "-d" branch)
+         (harness-run-command (list "git" "-C" (directory-file-name root) "branch" "-D" branch)
                               :cwd root :name "harness-tasks-git")))
      (lambda (err)
        (harness-log 'warn "task %s: keeping its worktree: %s" (plist-get task :id) (harness-error-message err))

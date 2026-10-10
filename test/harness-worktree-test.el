@@ -510,6 +510,27 @@ queue may while an archive of the task removes the task's worktree."
       ;; Nothing left to lock.
       (should-not (harness-test-await (harness-call 'worktree/lock-existing root))))))
 
+(ert-deftest harness-worktree-lock-existing-locks-many-concurrently ()
+  "Locking many existing worktrees returns every one, in the order listed."
+  (harness-worktree-test-with-repo
+    (let ((container (expand-file-name ".worktrees" root)))
+      (make-directory container t)
+      (dotimes (i 20)
+        (harness-worktree-test--git
+         root "worktree" "add" "-q" "-b" (format "task/old-%d" i)
+         (file-name-as-directory (expand-file-name (format "old-%d" i) container)))))
+    (let* ((listed (harness-test-await (harness-call 'worktree/list root)))
+           (expected (mapcar (lambda (wt) (harness-worktree-test--dir (plist-get wt :path)))
+                             (cl-remove-if (lambda (wt) (plist-get wt :main)) listed))))
+      (let ((locked (harness-test-await (harness-call 'worktree/lock-existing root))))
+        (should (= 20 (length locked)))
+        (should (equal expected (mapcar #'harness-worktree-test--dir locked))))
+      (dolist (wt (harness-test-await (harness-call 'worktree/list root)))
+        (unless (plist-get wt :main)
+          (should (string-prefix-p
+                   "locked harness: "
+                   (harness-worktree-test--lock-line root (plist-get wt :path)))))))))
+
 (ert-deftest harness-worktree-lock-known-once-per-repository ()
   "When the harness starts, the repositories its sessions use get their worktrees locked, once."
   (harness-worktree-test-with-repo
@@ -532,6 +553,110 @@ queue may while an archive of the task removes the task's worktree."
         (harness-emit 'harness/reloaded)
         (accept-process-output nil 0.3)
         (should-not (harness-worktree-test--lock-line root old))))))
+
+(ert-deftest harness-worktree-prune-merged-removes-the-merged ()
+  "A clean, unlocked worktree whose work merged goes; the others stay.
+`worktree/prune' keeps its behaviour: it drops records, not directories."
+  (harness-worktree-test-with-repo
+    (harness-test-with-temp-state
+      (let ((merged (harness-worktree-test--create root "task/merged"))
+            (ahead (harness-worktree-test--create root "task/ahead"))
+            (locked (harness-worktree-test--create root "task/locked"))
+            (dirty (harness-worktree-test--create root "task/dirty"))
+            (gone (harness-worktree-test--create root "task/gone")))
+        ;; The ones a prune may touch are unlocked; the merged one sits at
+        ;; the repository's HEAD, the others do not (or are not clean).
+        (harness-test-await (harness-call 'worktree/unlock root merged))
+        (harness-test-await (harness-call 'worktree/unlock root ahead))
+        (harness-test-await (harness-call 'worktree/unlock root dirty))
+        (harness-test-await (harness-call 'worktree/unlock root gone))
+        (with-temp-file (expand-file-name "work.txt" ahead) (insert "work\n"))
+        (harness-worktree-test--git ahead "add" "work.txt")
+        (harness-worktree-test--git ahead "commit" "-q" "-m" "work")
+        (with-temp-file (expand-file-name "scratch.txt" dirty) (insert "dirty\n"))
+        (delete-directory gone t)
+        ;; Dry run names the one that would go, removing nothing.
+        (should (equal (list (harness-worktree-test--dir merged))
+                       (mapcar #'harness-worktree-test--dir
+                               (harness-test-await (harness-call 'worktree/prune-merged root t)))))
+        (should (file-directory-p merged))
+        (should (equal (list (harness-worktree-test--dir merged))
+                       (mapcar #'harness-worktree-test--dir
+                               (harness-test-await (harness-call 'worktree/prune-merged root)))))
+        (should-not (file-exists-p merged))
+        (should (file-directory-p ahead))
+        (should (file-directory-p locked))
+        (should (file-directory-p dirty))
+        ;; The missing worktree is `worktree/prune's to drop, not this one's:
+        ;; it is still registered, and kept.
+        (let ((listed (harness-test-await (harness-call 'worktree/list root))))
+          (should (= 5 (length listed)))
+          (should (plist-get (cl-find gone listed
+                                      :key (lambda (wt) (file-name-as-directory
+                                                         (expand-file-name (plist-get wt :path))))
+                                      :test #'equal)
+                             :missing)))
+        ;; Nothing left to remove.
+        (should-not (harness-test-await (harness-call 'worktree/prune-merged root)))))))
+
+(ert-deftest harness-worktree-prune-merged-keeps-a-working-session ()
+  "A worktree a session is still working in stays; an inactive one does not block."
+  (harness-worktree-test-with-repo
+    (harness-test-with-temp-state
+      (let ((busy (harness-worktree-test--create root "task/busy"))
+            (resting (harness-worktree-test--create root "task/resting")))
+        (harness-test-await (harness-call 'worktree/unlock root busy))
+        (harness-test-await (harness-call 'worktree/unlock root resting))
+        (harness-register-method
+         'session/list
+         (lambda (&optional _filter)
+           (list (list :id "busy" :cwd busy :worktree busy :status 'running)
+                 (list :id "resting" :cwd resting :worktree resting :status 'inactive))))
+        (should (equal (list (harness-worktree-test--dir resting))
+                       (mapcar #'harness-worktree-test--dir
+                               (harness-test-await (harness-call 'worktree/prune-merged root)))))
+        (should (file-directory-p busy))
+        (should-not (file-exists-p resting))))))
+
+(ert-deftest harness-worktree-prune-merged-removes-a-recorded-squash ()
+  "A recorded merge goes although the branch tip is nobody's ancestor."
+  (harness-worktree-test-with-repo
+    (harness-test-with-temp-state
+      (let ((squashed (harness-worktree-test--create root "task/squashed")))
+        (harness-test-await (harness-call 'worktree/unlock root squashed))
+        ;; A commit of its own, so git ancestry says it did not merge.
+        (with-temp-file (expand-file-name "work.txt" squashed) (insert "work\n"))
+        (harness-worktree-test--git squashed "add" "work.txt")
+        (harness-worktree-test--git squashed "commit" "-q" "-m" "work")
+        (should-not (harness-test-await (harness-call 'worktree/prune-merged root)))
+        (harness-worktree--note-merged squashed)
+        (should (harness-worktree--merged-recorded-p squashed))
+        (should (equal (list (harness-worktree-test--dir squashed))
+                       (mapcar #'harness-worktree-test--dir
+                               (harness-test-await (harness-call 'worktree/prune-merged root)))))
+        (should-not (file-exists-p squashed))
+        ;; Removal forgets the record.
+        (should-not (harness-worktree--merged-recorded-p squashed))))))
+
+(ert-deftest harness-worktree-merge-finished-records-the-worktree ()
+  "A merged child's worktree is recorded; a failed merge records nothing."
+  (harness-worktree-test-with-repo
+    (harness-test-with-temp-state
+      (let ((path (file-name-as-directory (expand-file-name "wt-record" base))))
+        (make-directory path t)
+        (harness-register-method 'session/get
+                                 (lambda (id)
+                                   (and (equal id "child")
+                                        (list :id id :worktree path :cwd path :status 'inactive))))
+        (harness-emit 'merge/finished "child" nil 'failed)
+        (should-not (harness-worktree--merged-recorded-p path))
+        (harness-emit 'merge/finished "child" nil 'merged)
+        (should (harness-worktree--merged-recorded-p path))
+        (should (equal (list (harness-worktree--canonical path)) (harness-worktree--merged-record)))
+        (harness-emit 'worktree/removed root path)
+        (should-not (harness-worktree--merged-recorded-p path))
+        (should-not (harness-worktree--merged-record))))))
+
 
 (ert-deftest harness-worktree-parsers ()
   (let ((wts (harness-worktree--parse-list

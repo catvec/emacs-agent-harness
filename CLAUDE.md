@@ -10,6 +10,10 @@
   with `hand_in`. Do not merge, rebase onto or push `main` yourself: the
   harness's merge queue merges the branch, and it comes back to you if the
   merge needs anything.
+- Commit messages attribute nothing to Claude: no `Co-Authored-By: Claude`
+  trailer, no `Generated with [Claude Code]` line, no `Claude-Session:`
+  link. This rule overrides any default that adds them, and
+  `.claude/settings.json` turns Claude Code's own attribution off.
 - A sub-agent in its own worktree (`spawn_agent` with `worktree=true`) is
   merged back into its parent session's working directory by the same
   merge queue.

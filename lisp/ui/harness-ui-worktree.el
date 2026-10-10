@@ -10,13 +10,15 @@
 ;; until their branch is merged; the locked flag shows the reason.
 ;;
 ;; Keys: n create a worktree, d remove (lifts the harness's lock; offers
-;; --force when git refuses), p prune (keeps locked worktrees, as git
-;; does), l lock or unlock the worktree at point, L lock the harness's
-;; worktrees that have no lock (made before locks, or registered again
-;; after a prune), s start a session in the worktree at point, f fork
-;; the current session into a fresh worktree, m ask for the worktree's
-;; session to be merged back into its parent session (the merge queue
-;; shows in the mode line), RET open the directory in Dired, g refresh.
+;; --force when git refuses), p prune stale worktree records (keeps
+;; locked worktrees, as git does), P remove the worktrees whose work has
+;; already merged, l lock or unlock the worktree at point, L lock the
+;; harness's worktrees that have no lock (made before locks, or
+;; registered again after a prune), s start a session in the worktree at
+;; point, f fork the current session into a fresh worktree, m ask for
+;; the worktree's session to be merged back into its parent session (the
+;; merge queue shows in the mode line), RET open the directory in Dired,
+;; g refresh.
 ;; The mode line carries a clickable segment for every command.
 ;;
 ;; Everything goes through ACP (`_harness/worktree/*', `_harness/merge/*',
@@ -50,6 +52,12 @@
 (defvar-local harness-ui-worktree--loading nil "Non-nil while the list is being fetched.")
 (defvar-local harness-ui-worktree--error nil "Last error message.")
 (defvar-local harness-ui-worktree--queue nil "(PARENT-SID . ITEMS) of the merge queue last shown.")
+(defvar-local harness-ui-worktree--status-queue nil "Paths whose status is not fetched yet.")
+(defvar-local harness-ui-worktree--status-in-flight 0 "Status requests not answered yet.")
+(defvar-local harness-ui-worktree--status-generation 0 "Bumped per reload; stale status answers are ignored.")
+
+(defconst harness-ui-worktree--status-concurrency 6
+  "Most worktree status requests in flight at once, per list buffer.")
 
 ;;;; Helpers
 
@@ -154,6 +162,8 @@
    (harness-ui-worktree--segment "[n new]" #'harness-ui-worktree-create "Create a worktree (n)")
    (harness-ui-worktree--segment "[d remove]" #'harness-ui-worktree-remove "Remove the worktree at point (d)")
    (harness-ui-worktree--segment "[p prune]" #'harness-ui-worktree-prune "Prune stale worktree records (p)")
+   (harness-ui-worktree--segment "[P merged]" #'harness-ui-worktree-prune-merged
+                                 "Remove the worktrees whose work has already merged (P)")
    (harness-ui-worktree--segment "[l lock]" #'harness-ui-worktree-toggle-lock
                                  "Lock the worktree at point, or unlock it (l); lock all of the harness's (L)")
    (harness-ui-worktree--segment "[s session]" #'harness-ui-worktree-new-session "Start a session in the worktree at point (s)")
@@ -180,9 +190,7 @@
 (defun harness-ui-worktree--refresh-entries ()
   "Rebuild `tabulated-list-entries' from the cached worktrees."
   (setq tabulated-list-entries (mapcar #'harness-ui-worktree--entry harness-ui-worktree--worktrees))
-  (setq mode-line-process (harness-ui-worktree--mode-line))
-  (setq header-line-format nil)
-  (tabulated-list-init-header))
+  (setq mode-line-process (harness-ui-worktree--mode-line)))
 
 (defun harness-ui-worktree--redraw ()
   "Print the list again, keeping point on the same worktree."
@@ -196,19 +204,52 @@
                           'face (if harness-ui-worktree--error 'error 'harness-dim-face))
               "\n"))))
 
-(defun harness-ui-worktree--fetch-status (buffer path)
+(defun harness-ui-worktree--status-schedule-redraw (buffer)
+  "Arrange one redraw of BUFFER once status answers have settled."
+  (harness-debounce (list 'harness-ui-worktree-status buffer) 0.2
+                    (lambda (buf)
+                      (when (buffer-live-p buf)
+                        (with-current-buffer buf (harness-ui-worktree--redraw))))
+                    buffer))
+
+(defun harness-ui-worktree--status-pump (buffer)
+  "Start BUFFER's queued status requests up to the concurrency cap.
+Every row still gets its status, but no more than
+`harness-ui-worktree--status-concurrency' requests run at once, so a
+repo with hundreds of worktrees does not spawn hundreds of git
+processes at the same time."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (while (and (< harness-ui-worktree--status-in-flight harness-ui-worktree--status-concurrency)
+                  harness-ui-worktree--status-queue)
+        (let ((path (pop harness-ui-worktree--status-queue)))
+          (cl-incf harness-ui-worktree--status-in-flight)
+          (harness-ui-worktree--fetch-status
+           buffer path harness-ui-worktree--status-generation))))))
+
+(defun harness-ui-worktree--status-arrived (buffer generation path st)
+  "Record ST for PATH of BUFFER, of GENERATION, and keep the pump going.
+An answer from an earlier load (its generation no longer current) is
+dropped: a reload clears the cache, so it would carry stale data."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (= generation harness-ui-worktree--status-generation)
+        (puthash (harness-ui-worktree--dir path) st harness-ui-worktree--status)
+        (cl-decf harness-ui-worktree--status-in-flight)
+        ;; Redraw now when this was the last answer, so the list never
+        ;; sits on the "fetching" markers once it is complete; while
+        ;; answers keep coming, coalesce the redraws with a debounce.
+        (if (and (null harness-ui-worktree--status-queue)
+                 (zerop harness-ui-worktree--status-in-flight))
+            (harness-ui-worktree--redraw)
+          (harness-ui-worktree--status-schedule-redraw buffer))
+        (harness-ui-worktree--status-pump buffer)))))
+
+(defun harness-ui-worktree--fetch-status (buffer path generation)
   "Fetch the git status of PATH and update its row in BUFFER."
   (harness-ui-call "_harness/worktree/status" (list :path path)
-                   (lambda (st)
-                     (when (buffer-live-p buffer)
-                       (with-current-buffer buffer
-                         (puthash (harness-ui-worktree--dir path) st harness-ui-worktree--status)
-                         (harness-ui-worktree--redraw))))
-                   (lambda (_e)
-                     (when (buffer-live-p buffer)
-                       (with-current-buffer buffer
-                         (puthash (harness-ui-worktree--dir path) 'error harness-ui-worktree--status)
-                         (harness-ui-worktree--redraw))))))
+                   (lambda (st) (harness-ui-worktree--status-arrived buffer generation path st))
+                   (lambda (_e) (harness-ui-worktree--status-arrived buffer generation path 'error))))
 
 (defun harness-ui-worktree--load (buffer)
   "Fetch the worktree list for BUFFER's root, then each row's status."
@@ -224,10 +265,14 @@
              (setq harness-ui-worktree--worktrees worktrees
                    harness-ui-worktree--loading nil)
              (clrhash harness-ui-worktree--status)
+             (cl-incf harness-ui-worktree--status-generation)
+             (setq harness-ui-worktree--status-queue
+                   (cl-loop for wt in worktrees
+                            unless (harness-json-true-p (plist-get wt :bare))
+                            collect (plist-get wt :path))
+                   harness-ui-worktree--status-in-flight 0)
              (harness-ui-worktree--redraw)
-             (dolist (wt worktrees)
-               (unless (harness-json-true-p (plist-get wt :bare))
-                 (harness-ui-worktree--fetch-status buffer (plist-get wt :path)))))))
+             (harness-ui-worktree--status-pump buffer))))
        (lambda (e)
          (when (buffer-live-p buffer)
            (with-current-buffer buffer
@@ -245,6 +290,7 @@
     (define-key map (kbd "n") #'harness-ui-worktree-create)
     (define-key map (kbd "d") #'harness-ui-worktree-remove)
     (define-key map (kbd "p") #'harness-ui-worktree-prune)
+    (define-key map (kbd "P") #'harness-ui-worktree-prune-merged)
     (define-key map (kbd "l") #'harness-ui-worktree-toggle-lock)
     (define-key map (kbd "L") #'harness-ui-worktree-lock-existing)
     (define-key map (kbd "s") #'harness-ui-worktree-new-session)
@@ -282,6 +328,7 @@
         (". n" "New worktree" harness-ui-worktree-create)
         (". f" "Fork a session into one" harness-ui-worktree-fork-session)
         (". p" "Prune stale records" harness-ui-worktree-prune)
+        (". P" "Remove merged worktrees" harness-ui-worktree-prune-merged)
         (". L" "Lock the harness's worktrees" harness-ui-worktree-lock-existing)
         (". g" "Refresh" harness-ui-worktree-refresh)]))
 
@@ -397,6 +444,42 @@ their directory is missing."
                      (lambda (lines)
                        (message "%s" (if lines (string-join lines "; ") "Nothing to prune"))
                        (when (buffer-live-p buf) (harness-ui-worktree--load buf))))))
+
+(defun harness-ui-worktree--prune-merged-question (candidates)
+  "Return the question `harness-ui-worktree-prune-merged' asks for CANDIDATES."
+  (let ((named (seq-take candidates 3)))
+    (format "Remove %d worktree(s) whose work has already merged%s? "
+            (length candidates)
+            (concat ": "
+                    (mapconcat (lambda (p) (abbreviate-file-name (directory-file-name p)))
+                               named ", ")
+                    (if (> (length candidates) (length named))
+                        (format " and %d more" (- (length candidates) (length named)))
+                      "")))))
+
+(defun harness-ui-worktree-prune-merged ()
+  "Remove the worktrees of this repository whose work has already merged.
+The harness asks the server which ones go: clean, unlocked, used by no
+working session and merged -- either their branch landed in the
+repository's branch or the merge queue recorded the merge.  It names a
+few and asks before removing them.  `p' prunes stale records instead;
+this removes the directories."
+  (interactive)
+  (let* ((buf (current-buffer))
+         (root harness-ui-worktree--root)
+         (ask (lambda (dry callback)
+                (harness-ui-call "_harness/worktree/prune-merged"
+                                 (append (list :root root) (and dry (list :dryRun t)))
+                                 callback))))
+    (funcall ask t
+             (lambda (candidates)
+               (cond
+                ((null candidates) (message "No merged worktrees to remove"))
+                ((yes-or-no-p (harness-ui-worktree--prune-merged-question candidates))
+                 (funcall ask nil
+                          (lambda (removed)
+                            (message "Removed %d merged worktree(s)" (length removed))
+                            (when (buffer-live-p buf) (harness-ui-worktree--load buf))))))))))
 
 (defun harness-ui-worktree-toggle-lock ()
   "Lock the worktree at point, or unlock it after asking.
@@ -548,7 +631,7 @@ before the harness locked them, or registered again after a prune."
   (define-key harness-ui-map (kbd "w") #'harness-worktrees))
 
 (harness-define-module 'ui-worktree
-  :doc "Git worktree list with create, remove, prune, sessions and merges."
+  :doc "Git worktree list with create, remove, prune (stale records and merged worktrees), sessions and merges."
   :requires '(ui)
   :init #'harness-ui-worktree--init)
 

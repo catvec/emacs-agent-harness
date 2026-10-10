@@ -122,6 +122,57 @@
           (should (keymapp (get-text-property 0 'local-map seg)))
           (should (get-text-property 0 'help-echo seg)))))))
 
+(ert-deftest harness-ui-worktree-status-fanout-bounded-and-coalesced ()
+  "Hundreds of rows fetch their status a few at a time and redraw once."
+  (harness-ui-worktree-test-with
+    ;; The reload/reconnect hooks would fire a second load mid-test; isolate
+    ;; this test to the status fan-out and redraw behaviour it measures.
+    (unwind-protect
+        (progn
+          (remove-hook 'harness-ui-redraw-hook #'harness-ui-worktree--redraw-all)
+          (remove-hook 'harness-ui-event-functions #'harness-ui-worktree--on-event)
+          (let* ((n 200)
+                 (main-path (harness-ui-worktree--dir root))
+                 (paths (cons main-path
+                              (cl-loop for i from 1 below n
+                                       collect (file-name-as-directory (expand-file-name (format "wt-%d" i) dir)))))
+                 (wts (mapcar (lambda (p) (list :path p :branch "wt" :head "deadbeef" :main (equal p main-path)))
+                              paths))
+                 (in-flight 0) (max-inflight 0) (arrived 0) (prints 0)
+                 (orig-print (symbol-function 'tabulated-list-print)))
+            (cl-letf (((symbol-function 'tabulated-list-print)
+                       (lambda (&rest args) (cl-incf prints) (apply orig-print args)))
+                      ((symbol-function 'harness-ui-call)
+                       (lambda (method params callback &optional _on-error)
+                         (pcase method
+                           ("_harness/worktree/root-of" (funcall callback main-path))
+                           ("_harness/worktree/list" (funcall callback wts))
+                           ("_harness/worktree/status"
+                            (cl-incf in-flight)
+                            (setq max-inflight (max max-inflight in-flight))
+                            (run-at-time 0 nil
+                                         (lambda ()
+                                           (cl-decf in-flight)
+                                           (cl-incf arrived)
+                                           (funcall callback (list :dirty nil :ahead 0 :behind 0 :branch "wt")))))
+                           (_ (funcall callback nil))))))
+              (harness-worktrees root)
+              (set-buffer harness-ui-worktree--buffer-name)
+              (harness-test-wait (lambda () (= n (length harness-ui-worktree--worktrees))) 10 "rows")
+              (harness-test-wait
+               (lambda () (and (= n arrived)
+                               (= n (hash-table-count harness-ui-worktree--status))))
+               10 "statuses")
+              (should (= harness-ui-worktree--status-concurrency max-inflight))
+              (should (< prints 10))
+              ;; A stale generation is ignored: a reload's answer must not overwrite.
+              (cl-incf harness-ui-worktree--status-generation)
+              (harness-ui-worktree--status-arrived
+               (current-buffer) 0 main-path (list :dirty t :ahead 1 :behind 0 :branch "wt"))
+              (should-not (plist-get (gethash main-path harness-ui-worktree--status) :dirty)))))
+      (add-hook 'harness-ui-redraw-hook #'harness-ui-worktree--redraw-all)
+      (add-hook 'harness-ui-event-functions #'harness-ui-worktree--on-event))))
+
 (ert-deftest harness-ui-worktree-sessions-create-remove-prune ()
   (harness-ui-worktree-test-with
     (harness-ui-worktree-test-open root 2)
@@ -239,6 +290,43 @@
                                  (split-string (harness-ui-worktree-test--git root "worktree" "list" "--porcelain") "\n"))))
         (harness-ui-worktree-test-goto root)
         (should-error (harness-ui-worktree-toggle-lock) :type 'user-error)))))
+
+(ert-deftest harness-ui-worktree-prune-merged-key ()
+  "P removes the worktrees whose work merged, after asking; a no keeps them."
+  (harness-ui-worktree-test-with
+    (let* ((merged (plist-get (harness-test-await (harness-call 'worktree/create root :branch "task/merged")) :path))
+           (asked nil) (messages nil))
+      ;; Unlocked, as the merge queue leaves a merged worktree, and at the
+      ;; repository's HEAD: git ancestry says it merged.
+      (harness-test-await (harness-call 'worktree/unlock root merged))
+      ;; The other worktree (at the repository's HEAD as well) has local
+      ;; changes, so it is no candidate and the working copy is left alone.
+      (with-temp-file (expand-file-name "scratch" wt) (insert "x\n"))
+      (harness-ui-worktree-test-open root 3)
+      (should (string-match-p "\\[P merged\\]" (harness-ui-worktree-test-mode-line)))
+      (should (eq (lookup-key harness-ui-worktree-mode-map (kbd "P"))
+                  #'harness-ui-worktree-prune-merged))
+      ;; A no leaves the worktree alone.
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (prompt) (setq asked prompt) nil)))
+        (harness-ui-worktree-prune-merged)
+        (harness-test-wait (lambda () asked) 5 "the question"))
+      (should (string-match-p "Remove 1 worktree" asked))
+      (should (string-match-p "task-merged" asked))
+      (should (file-directory-p merged))
+      ;; A yes removes it and reloads the list.
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t))
+                ((symbol-function 'message) (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+        (harness-ui-worktree-prune-merged)
+        (harness-ui-worktree-test-wait-rows 2))
+      (should-not (file-exists-p merged))
+      (should (file-directory-p wt))
+      (should (cl-some (lambda (m) (string-match-p "Removed 1 merged worktree" m)) messages))
+      ;; Nothing merged left to remove: it says so and asks nothing.
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) (error "should not ask")))
+                ((symbol-function 'message) (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+        (harness-ui-worktree-prune-merged)
+        (harness-test-wait (lambda () (cl-some (lambda (m) (string-match-p "No merged worktrees" m)) messages))
+                           5 "the empty message")))))
 
 (ert-deftest harness-ui-worktree-fork-and-merge-queue ()
   (harness-ui-worktree-test-with

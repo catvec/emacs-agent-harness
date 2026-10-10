@@ -148,13 +148,101 @@ Those are tool uses, tool results and the text a stray result becomes."
                            (list 'finished child parent 'merged))
                      (reverse events)))
       (should (file-exists-p (expand-file-name "feature.txt" root)))
-      (should (string-match-p "Merge branch 'child'" (harness-merge-test--git root "log" "-1" "--format=%s")))
+      ;; The branch landed as one commit: the child session's name, a body
+      ;; describing what it brought, and no second parent.
+      (should (equal "fixer" (string-trim (harness-merge-test--git root "log" "-1" "--format=%s"))))
+      (let ((message (harness-merge-test--git root "log" "-1" "--format=%B")))
+        (should (string-match-p "add feature" message))
+        (should (string-match-p "file[s]? changed" message)))
+      (should (= 1 (length (split-string (harness-merge-test--git root "log" "-1" "--format=%P") " " t))))
       (should (null (harness-call 'merge/queue parent)))
       (should (null (harness-call 'merge/status child)))
       (should (cl-some (lambda (h) (string-match-p "Merge from fixer finished: merged" h)) (harness-merge-test--hints parent)))
       (should (cl-some (lambda (h) (string-match-p "Merge into main finished: merged" h)) (harness-merge-test--hints child)))
       ;; The parent stays usable: a new turn is not held.
       (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt parent "hello")) :stop-reason))))))
+
+(ert-deftest harness-merge-again-after-a-squash-adds-no-commit ()
+  "A branch already squash-merged into the target adds no commit the next time.
+Its tip is not an ancestor any more, so the tree comparison is what
+recognises that there is nothing left to bring."
+  (harness-merge-test-with
+    (harness-merge-test--write wt "feature.txt" "new feature\n")
+    (harness-merge-test--commit wt "add feature" "feature.txt")
+    (let ((finished nil))
+      (harness-on 'merge/finished (lambda (c _p s) (push (cons c s) finished)))
+      (harness-call 'merge/enqueue child parent)
+      (harness-test-wait (lambda () finished) 10 "the first merge")
+      (should (equal (cons child 'merged) (car finished)))
+      (let ((count (string-trim (harness-merge-test--git root "rev-list" "--count" "HEAD")))
+            (head (string-trim (harness-merge-test--git root "rev-parse" "HEAD"))))
+        (should-not (zerop (string-to-number count)))
+        ;; Queued again: nothing new, so merged without a commit.
+        (setq finished nil)
+        (harness-call 'merge/enqueue child parent)
+        (harness-test-wait (lambda () finished) 10 "the second merge")
+        (should (equal (cons child 'merged) (car finished)))
+        (should (equal head (string-trim (harness-merge-test--git root "rev-parse" "HEAD"))))
+        (should (equal count (string-trim (harness-merge-test--git root "rev-list" "--count" "HEAD"))))))))
+
+(ert-deftest harness-merge-of-work-already-in-the-target-adds-no-commit ()
+  "When the target already holds the branch's change, the merge adds no commit."
+  (harness-merge-test-with
+    (harness-merge-test--write wt "feature.txt" "same content\n")
+    (harness-merge-test--commit wt "add feature" "feature.txt")
+    (harness-merge-test--write root "feature.txt" "same content\n")
+    (harness-merge-test--commit root "add feature here too" "feature.txt")
+    (let ((finished nil)
+          (count (string-trim (harness-merge-test--git root "rev-list" "--count" "HEAD")))
+          (head (string-trim (harness-merge-test--git root "rev-parse" "HEAD"))))
+      (harness-on 'merge/finished (lambda (c _p s) (push (cons c s) finished)))
+      (harness-call 'merge/enqueue child parent)
+      (harness-test-wait (lambda () finished) 10 "the merge")
+      (should (equal (cons child 'merged) (car finished)))
+      (should (equal head (string-trim (harness-merge-test--git root "rev-parse" "HEAD"))))
+      (should (equal count (string-trim (harness-merge-test--git root "rev-list" "--count" "HEAD"))))
+      (should (equal "same content\n"
+                     (with-temp-buffer (insert-file-contents (expand-file-name "feature.txt" root))
+                                       (buffer-string)))))))
+
+(ert-deftest harness-merge-of-a-branch-that-carried-on-merges-only-the-new-work ()
+  "A branch that works on after it was merged brings only its new commits.
+Its earlier work is one squash commit in the target, so git's own merge
+base would replay it and conflict; the tip it last merged, kept in
+`refs/harness/merged/CHILD', is the base of the next merge instead."
+  (harness-merge-test-with
+    (harness-merge-test--write wt "feature.txt" "one\n")
+    (harness-merge-test--commit wt "add feature" "feature.txt")
+    (let ((finished nil))
+      (harness-on 'merge/finished (lambda (c _p s) (push (cons c s) finished)))
+      (harness-call 'merge/enqueue child parent)
+      (harness-test-wait (lambda () finished) 10 "the first merge")
+      (should (equal (cons child 'merged) (car finished)))
+      (should (equal "one\n"
+                     (with-temp-buffer (insert-file-contents (expand-file-name "feature.txt" root))
+                                       (buffer-string))))
+      (let ((first (string-trim (harness-merge-test--git root "rev-parse" "HEAD"))))
+        ;; The tip it merged is recorded, so the next merge knows the base.
+        (should (equal (string-trim (harness-merge-test--git root "rev-parse" (concat "refs/harness/merged/" "child")))
+                       (string-trim (harness-merge-test--git wt "rev-parse" "HEAD"))))
+        ;; The branch carries on from the work it merged.
+        (harness-merge-test--write wt "feature.txt" "two\n")
+        (harness-merge-test--commit wt "make it two" "feature.txt")
+        (setq finished nil)
+        (harness-call 'merge/enqueue child parent)
+        (harness-test-wait (lambda () finished) 10 "the second merge")
+        (should (equal (cons child 'merged) (car finished)))
+        (should (equal "two\n"
+                       (with-temp-buffer (insert-file-contents (expand-file-name "feature.txt" root))
+                                         (buffer-string))))
+        (should (equal first (string-trim (harness-merge-test--git root "rev-parse" "HEAD^"))))
+        (should (equal "fixer" (string-trim (harness-merge-test--git root "log" "-1" "--format=%s"))))
+        ;; The body describes what this merge brings, not what it landed before.
+        (let ((message (harness-merge-test--git root "log" "-1" "--format=%B")))
+          (should (string-match-p "make it two" message))
+          (should-not (string-match-p "add feature" message)))
+        (should (= 1 (length (split-string (harness-merge-test--git root "log" "-1" "--format=%P") " " t))))
+        (should (equal "3" (string-trim (harness-merge-test--git root "rev-list" "--count" "HEAD"))))))))
 
 (ert-deftest harness-merge-dirty-child-is-told-to-commit ()
   (harness-merge-test-with
@@ -234,7 +322,9 @@ Those are tool uses, tool results and the text a stray result becomes."
       (should (null (gethash parent harness-merge--locks)))
       (should (equal "resolved version\n"
                      (with-temp-buffer (insert-file-contents (expand-file-name "README" root)) (buffer-string))))
-      (should (= 2 (length (split-string (harness-merge-test--git root "log" "-1" "--format=%P") " " t))))))))
+      ;; The conflict was resolved in the child's worktree; what reaches
+      ;; the parent is one commit, with the parent's HEAD as its parent.
+      (should (= 1 (length (split-string (harness-merge-test--git root "log" "-1" "--format=%P") " " t))))))))
 
 (defun harness-merge-test--conflict-setup (wt root)
   "Make the child's branch in WT and ROOT's main change README's one line."
@@ -838,7 +928,19 @@ merge upward waits while the conflict is unresolved."
                     (reverse finished)))
      (should (equal "resolved version\n" (harness-merge-test--text task-wt "README")))
      (should (equal "resolved version\n" (harness-merge-test--text root "README")))
-     (should (= 2 (length (split-string (harness-merge-test--git root "log" "-1" "--format=%P") " " t))))
+     ;; Each level landed as ONE commit on the level above it: the worker's
+     ;; branch as one commit on the task's branch (parent: the task's own
+     ;; HEAD), the task's branch as one on main.
+     (should (= 1 (length (split-string (harness-merge-test--git root "log" "-1" "--format=%P") " " t))))
+     (should (equal "tasker" (string-trim (harness-merge-test--git root "log" "-1" "--format=%s"))))
+     ;; The body lists the task branch's own commits: its edit and the one
+     ;; commit its worker's branch landed as.
+     (let ((message (harness-merge-test--git root "log" "-1" "--format=%B")))
+       (should (string-match-p "^- worker$" message))
+       (should (string-match-p "^- task edit$" message)))
+     (should (= 1 (length (split-string (harness-merge-test--git task-wt "log" "-1" "--format=%P") " " t))))
+     (should (equal "worker" (string-trim (harness-merge-test--git task-wt "log" "-1" "--format=%s"))))
+     (should (equal task-head (string-trim (harness-merge-test--git task-wt "log" "-1" "--format=%P"))))
      (should (null (harness-call 'merge/queue root-key))))))
 
 (ert-deftest harness-merge-view-shows-each-state ()

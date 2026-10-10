@@ -2310,7 +2310,11 @@ commits from call `harness-tasks-test--commit-on-call' on."
       (harness-tasks-test-wait-state id 'done)
       (should (equal "two\n" (harness-tasks-test--main-text root)))
       (should (plist-get (harness-tasks-test-task id) :merged))
-      (should (string-match-p "Merge branch" (harness-tasks-test--git root "log" "-1" "--format=%s")))
+      ;; The task's branch landed as one commit, named for the session
+      ;; (unnamed here, so its branch) rather than "Merge branch ...".
+      (should (string-match-p "task/change-the-shared-file-"
+                              (harness-tasks-test--git root "log" "-1" "--format=%s")))
+      (should (= 1 (length (split-string (harness-tasks-test--git root "log" "-1" "--format=%P") " " t))))
       ;; The merge went into the main checkout itself: no session was made
       ;; to stand behind it, only the task's own.
       (should (equal (list (plist-get task :session))

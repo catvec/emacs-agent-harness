@@ -24,17 +24,45 @@
 ;; either (`merge/pending', which the hand_in tool consults).
 ;;
 ;; A merge is a transaction: the parent's checkout only ever moves by
-;; a fast-forward to a finished merge commit, never through a merge in
+;; a fast-forward to a finished commit, never through a merge in
 ;; progress.  `git merge-tree --write-tree' merges the child's branch
 ;; into the parent's HEAD without touching any working tree or index;
-;; a clean result becomes a merge commit (`git commit-tree'), and
-;; `git merge --ff-only' moves the parent's checkout onto it.  The
-;; fast-forward is all or nothing: git refuses it, changing nothing,
-;; when it would overwrite uncommitted or untracked work in the
-;; parent's checkout, or when a merge or rebase is in progress there.
-;; When the parent's HEAD moved meanwhile, the merge is computed again.
-;; So work someone left in the parent's checkout is never lost, and a
-;; harness that stops mid-merge leaves the checkout as it was.
+;; a clean result becomes ONE commit (`git commit-tree'), whose only
+;; parent is the parent's HEAD, and `git merge --ff-only' moves the
+;; parent's checkout onto it.  So a branch lands as a single readable
+;; commit -- a pull request's worth of work -- rather than carrying
+;; every small commit its agent made into the target's history: the
+;; child's commits are not ancestors of the target afterwards.  The
+;; commit's subject is the child session's name and its body lists the
+;; commits the branch brings and their diffstat
+;; (`harness-merge--message'), which is what makes the history legible
+;; with so many tasks merging.
+;;
+;; A branch whose work is already in the target -- merged before, or
+;; the same change committed here -- leaves nothing to commit: a merge
+;; whose tree equals the target's own tree is done with, without a
+;; commit (`harness-merge--run-git-merge').  The `git merge-base
+;; --is-ancestor' fast path catches a branch that is in history; the
+;; tree comparison catches one that was squashed in.
+;;
+;; A task that carries on after it was merged -- sent back to work, or
+;; prompted again -- needs the tip it last merged as the base of its
+;; next merge.  git cannot find it (a squash commit leaves the branch's
+;; commits out of the target's history), so the merge writes it to
+;; `refs/harness/merged/BRANCH' and passes it to `git merge-tree
+;; --merge-base' (`harness-merge--merge-base'): without it, the merge
+;; would replay the work the target already holds and conflict with its
+;; own squash commit.  A conflict still goes the way below -- the child
+;; merges the target's HEAD into its branch and resolves there -- and
+;; the re-queued branch then merges cleanly.
+;;
+;; The fast-forward is all or nothing: git refuses it, changing
+;; nothing, when it would overwrite uncommitted or untracked work in
+;; the parent's checkout, or when a merge or rebase is in progress
+;; there.  When the parent's HEAD moved meanwhile, the merge is
+;; computed again.  So work someone left in the parent's checkout is
+;; never lost, and a harness that stops mid-merge leaves the checkout
+;; as it was.
 ;;
 ;; A conflict never reaches the target's checkout.  The lock goes at
 ;; once and the target's HEAD has to be merged into the child's branch,
@@ -141,6 +169,22 @@ queued the branch again.")
 (defconst harness-merge--history-limit 10
   "Finished merges of one target its view still shows.")
 
+(defconst harness-merge--message-subject-limit 72
+  "Characters a merge commit's subject line may take.")
+
+(defconst harness-merge--message-commit-limit 20
+  "Branch commits a merge commit's body lists before it summarises the rest.")
+
+(defconst harness-merge--merged-ref-prefix "refs/harness/merged/"
+  "Ref namespace in which the merge queue records the tips it merged.
+A merge lands a branch as one commit, so the branch's commits are not
+ancestors of the target afterwards and git cannot find the base the
+branch's next work grew from.  The ref keeps it: see
+`harness-merge--recorded-base'.  A ref outlives its branch when that is
+deleted; a stale one is ignored unless it is an ancestor of the branch
+tip being merged, and using it as a base can only widen the change set,
+never lose work.")
+
 ;;;; Helpers
 
 (defun harness-merge--session (id)
@@ -209,11 +253,11 @@ id: it simply has no queue."
 
 (defun harness-merge--target (target)
   "Return TARGET as a plist (:key KEY :cwd DIR :session ID).
-TARGET is a session id, a directory (a main checkout), (:root DIR) or
-(:session ID).  `:session' is the target's session id, nil for a main
-checkout.  Signal `harness-error' when TARGET names no session, and
-return a session target whose directory is missing as it is: the merge
-itself refuses it."
+TARGET is a session id, a directory (a main checkout), or a plist --
+`(:root DIR)' or `(:session ID)'.  `:session' is the target's session
+id, nil for a main checkout.  Signal `harness-error' when TARGET names
+no session, and return a session target whose directory is missing as
+it is: the merge itself refuses it."
   (let ((key (harness-merge--key target))
         (id (if (consp target) (plist-get target :session) target)))
     (cond
@@ -481,12 +525,127 @@ An asynchronous step checks this first, so a cancelled merge stops."
   (harness-then (harness-merge--git cwd "rev-parse" "-q" "--verify" (concat rev "^{commit}"))
                 (lambda (r) (and (eql (plist-get r :exit) 0) (string-trim (plist-get r :stdout))))))
 
-(defun harness-merge--message (branch target)
-  "Return the merge commit message of BRANCH into the branch TARGET.
-It is what `git merge' writes: no \"into\" for main or master."
-  (if (member target '("main" "master" "HEAD" ""))
-      (format "Merge branch '%s'" branch)
-    (format "Merge branch '%s' into %s" branch target)))
+(defun harness-merge--tree (cwd rev)
+  "Return a promise of the tree id REV names in CWD, or nil."
+  (harness-then (harness-merge--git cwd "rev-parse" "-q" "--verify" (concat rev "^{tree}"))
+                (lambda (r) (and (eql (plist-get r :exit) 0) (string-trim (plist-get r :stdout))))))
+
+(defun harness-merge--merged-ref (branch)
+  "Return the ref under which the tip of BRANCH last merged is recorded."
+  (concat harness-merge--merged-ref-prefix branch))
+
+(defun harness-merge--last-merged-tip (cwd branch)
+  "Return a promise of the tip of BRANCH the target last merged, or nil.
+CWD is the repository the ref lives in; the tip is what
+`refs/harness/merged/BRANCH' names, written by
+`harness-merge--record-merged-tip'.  It is nil when the branch never
+merged, or when the ref is gone."
+  (harness-then (harness-merge--git cwd "rev-parse" "-q" "--verify"
+                                    (concat (harness-merge--merged-ref branch) "^{commit}"))
+                (lambda (r) (and (eql (plist-get r :exit) 0) (string-trim (plist-get r :stdout))))))
+
+(defun harness-merge--recorded-base (cwd branch tip)
+  "Return a promise of the base BRANCH's merge was last computed from, or nil.
+CWD is the repository the recorded ref lives in.  The base is the tip
+BRANCH last merged as (`refs/harness/merged/BRANCH'), when it is an
+ancestor of TIP: the branch carried on.  Nil otherwise, and the merge
+uses git's own merge base.  A branch that carries on after it was
+squashed in needs its old tip: the target holds its earlier work as one
+commit, not as history, so git's merge base is its old fork point and
+the merge would replay -- and conflict with -- work the target already
+has."
+  (harness-then
+   (harness-merge--last-merged-tip cwd branch)
+   (lambda (recorded)
+     (when recorded
+       (harness-then
+        (harness-merge--git cwd "merge-base" "--is-ancestor" recorded tip)
+        (lambda (r) (and (eql (plist-get r :exit) 0) recorded)))))))
+
+(defun harness-merge--record-merged-tip (cwd branch tip)
+  "Record TIP as the tip of BRANCH the target has now merged.
+CWD is the repository to write in.  `refs/harness/merged/BRANCH' is
+what `harness-merge--merge-base' reads when the branch carries on.  A
+failure is logged, not fatal: the merge itself has landed, only its
+next merge would be computed from git's own base."
+  (harness-catch
+   (harness-then
+    (harness-merge--git cwd "update-ref" (harness-merge--merged-ref branch) tip)
+    (lambda (r)
+      (unless (eql (plist-get r :exit) 0)
+        (harness-log 'warn "merge: could not record the merged tip of %s: %s"
+                     branch (harness-merge--out r)))
+      nil))
+   (lambda (e)
+     (harness-log 'warn "merge: could not record the merged tip of %s: %s"
+                  branch (harness-error-message e))
+     nil)))
+
+(defun harness-merge--message-subject (entry branch)
+  "Return the one-line subject of ENTRY's merge of BRANCH.
+It is the child session's name, so the target's history names the work
+the way its transcript does; an unnamed session takes its branch."
+  (let* ((session (harness-merge--session (plist-get entry :child)))
+         (candidates (list (plist-get session :name)
+                           (and branch (not (string-empty-p branch)) branch)
+                           (harness-merge--label (plist-get entry :child))
+                           "merge"))
+         (name (or (cl-find-if (lambda (s) (and s (not (harness-string-blank-p s)))) candidates)
+                   "merge")))
+    (harness-truncate-end
+     (string-trim (replace-regexp-in-string "[[:space:]\n]+" " " name))
+     harness-merge--message-subject-limit)))
+
+(defun harness-merge--message-body (subjects stat)
+  "Return the body of a merge commit for SUBJECTS and STAT.
+SUBJECTS are the branch's commit subjects and STAT its diffstat line;
+either may be nil.  The body is bounded: at most
+`harness-merge--message-commit-limit' commits are listed, the rest
+summarised."
+  (let* ((shown (seq-take subjects harness-merge--message-commit-limit))
+         (extra (- (length subjects) (length shown)))
+         (listing (and shown
+                       (concat "Changes:\n"
+                               (string-join (mapcar (lambda (s) (concat "- " s)) shown) "\n")
+                               (when (> extra 0)
+                                 (format "\n- … and %d more" extra)))))
+         (parts (delq nil (list listing
+                                (and stat (not (string-empty-p stat)) stat)))))
+    (string-join parts "\n\n")))
+
+(defun harness-merge--message (entry parent-cwd branch head base tip)
+  "Return a promise of the commit message of ENTRY's merge of BRANCH.
+PARENT-CWD is the target's checkout to read the branch from, HEAD the
+commit the merge is computed against, TIP the branch's, and BASE the
+recorded base the merge is computed from (nil when git's own merge base
+is).  The message is a pull request's: a subject naming the child
+session, then a body listing the commits the branch brings, oldest
+first (`git log BASE..TIP', bounded), and their diffstat.  So it
+describes what this merge adds, not work an earlier merge already
+landed.  A branch whose commits are all merges gets the diffstat alone,
+and one whose base is unknown the subject alone.  Only commit subjects
+are read, so nothing an agent wrote as a trailer can reach the target's
+history through it."
+  (harness-then
+   (if base
+       (harness-resolved base)
+     (harness-then (harness-merge--git parent-cwd "merge-base" head tip)
+                   (lambda (r) (and (eql (plist-get r :exit) 0)
+                                    (string-trim (plist-get r :stdout))))))
+   (lambda (base)
+     (harness-then
+      (harness-all
+       (list (and base (harness-merge--git parent-cwd "log" "--no-merges" "--reverse" "--format=%s"
+                                           (concat base ".." tip)))
+             (and base (harness-merge--git parent-cwd "diff" "--shortstat" base tip))))
+      (lambda (results)
+        (let* ((subjects (and (nth 0 results)
+                              (split-string (plist-get (nth 0 results) :stdout) "\n" t)))
+               (stat (and (nth 1 results) (string-trim (plist-get (nth 1 results) :stdout))))
+               (body (harness-merge--message-body subjects stat)))
+          (concat (harness-merge--message-subject entry branch)
+                  (and (not (string-empty-p body)) (concat "\n\n" body))
+                  "\n")))))))
 
 (defun harness-merge--run-git-merge (entry parent-cwd branch retries)
   "Merge BRANCH into PARENT-CWD for ENTRY as one transaction.
@@ -513,27 +672,56 @@ the fresh attempts left when the parent's HEAD moves meanwhile."
                   ;; Nothing to merge: the branch is in already.
                   (when (harness-merge--live-p entry) (harness-merge--finish entry 'merged))
                 (harness-then
-                 (harness-merge--git parent-cwd "merge-tree" "--write-tree" "--name-only" "--no-messages" head tip)
-                 (lambda (tree)
-                   (let ((lines (split-string (plist-get tree :stdout) "\n" t)))
-                     (cond
-                      ((not (harness-merge--live-p entry)) nil)
-                      ((eql (plist-get tree :exit) 1)
-                       (harness-merge--conflict entry parent-cwd branch head (string-trim (plist-get target :stdout))
-                                                (delete-dups (cdr lines))))
-                      ((not (eql (plist-get tree :exit) 0))
-                       (funcall fail (harness-merge--out tree)))
-                      (t
-                       (harness-merge--commit-and-advance
-                        entry parent-cwd branch retries head tip (car lines)
-                        (harness-merge--message branch (string-trim (plist-get target :stdout)))))))))))))))))))
+                 (harness-merge--recorded-base parent-cwd branch tip)
+                 (lambda (base)
+                   (harness-then
+                    (apply #'harness-merge--git parent-cwd
+                           (append (list "merge-tree" "--write-tree" "--name-only" "--no-messages")
+                                   (when base (list (concat "--merge-base=" base)))
+                                   (list head tip)))
+                    (lambda (tree)
+                      (let ((lines (split-string (plist-get tree :stdout) "\n" t)))
+                        (cond
+                         ((not (harness-merge--live-p entry)) nil)
+                         ((eql (plist-get tree :exit) 1)
+                          (harness-merge--conflict entry parent-cwd branch head (string-trim (plist-get target :stdout))
+                                                   (delete-dups (cdr lines))))
+                         ((not (eql (plist-get tree :exit) 0))
+                          (funcall fail (harness-merge--out tree)))
+                         (t
+                          (let ((merged (car lines)))
+                            (harness-then
+                             (harness-merge--tree parent-cwd head)
+                             (lambda (head-tree)
+                               (cond
+                                ((not (harness-merge--live-p entry)) nil)
+                                ((and head-tree (equal head-tree merged))
+                                 ;; Nothing to commit: the branch's work is in
+                                 ;; the checkout already, as a squash merge
+                                 ;; leaves no ancestor behind.
+                                 (harness-then
+                                  (harness-merge--record-merged-tip parent-cwd branch tip)
+                                  (lambda (_)
+                                    (when (harness-merge--live-p entry)
+                                      (harness-merge--finish entry 'merged)))))
+                                (t
+                                 (harness-then
+                                  (harness-merge--message entry parent-cwd branch head base tip)
+                                  (lambda (message)
+                                    (when (harness-merge--live-p entry)
+                                      (harness-merge--commit-and-advance
+                                       entry parent-cwd branch retries head tip merged message))))))))))))))))))))))))))
 
 (defun harness-merge--commit-and-advance (entry parent-cwd branch retries head tip tree message)
-  "Commit TREE as the merge of HEAD and TIP; fast-forward PARENT-CWD to it.
+  "Commit TREE as ENTRY's merge onto HEAD; fast-forward PARENT-CWD to it.
 ENTRY, BRANCH and RETRIES are as for `harness-merge--run-git-merge';
-MESSAGE is the commit message."
+TIP is the branch's tip and MESSAGE the commit message.  HEAD is the
+commit's only parent: the branch's own commits stay where they are and
+the target gains the one commit that carries their work.  TIP is
+recorded (`harness-merge--record-merged-tip') so the branch's next work
+is merged from the right base."
   (harness-then
-   (harness-merge--git parent-cwd "commit-tree" "--no-gpg-sign" tree "-p" head "-p" tip "-m" message)
+   (harness-merge--git parent-cwd "commit-tree" "--no-gpg-sign" tree "-p" head "-m" message)
    (lambda (commit)
      (let ((sha (string-trim (plist-get commit :stdout))))
        (cond
@@ -546,7 +734,12 @@ MESSAGE is the commit message."
           (lambda (ff)
             (cond
              ((not (harness-merge--live-p entry)) nil)
-             ((eql (plist-get ff :exit) 0) (harness-merge--finish entry 'merged))
+             ((eql (plist-get ff :exit) 0)
+              (harness-then
+               (harness-merge--record-merged-tip parent-cwd branch tip)
+               (lambda (_)
+                 (when (harness-merge--live-p entry)
+                   (harness-merge--finish entry 'merged)))))
              (t
               ;; Git changed nothing.  A HEAD that moved is merged again;
               ;; anything else (local changes in the way, a merge in
