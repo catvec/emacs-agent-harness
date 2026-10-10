@@ -108,14 +108,14 @@ directories."
 (defcustom harness-budget nil
   "One budget for all sessions together, as (:amount USD :hard BOOL), or nil.
 It counts everything the harness recorded, every session of every
-project, and applies to every session: a hard one stops the next turn
-of each once it is spent, a soft one only warns.  It has a global
-value only.  Budgets for one project, one session or a calendar period
-are made in the usage dashboard (`harness-usage')."
+project, and applies to every session: a hard one stops the turn of each
+once it is spent, mid-turn included, a soft one only warns.  It has a
+global value only.  Budgets for one project, one session or a calendar
+period are made in the usage dashboard (`harness-usage')."
   :type '(choice (const :tag "No budget" nil)
                  (plist :tag "Budget" :key-type symbol :value-type sexp
                         :options ((:amount (number :tag "Amount (USD)"))
-                                  (:hard (boolean :tag "Hard (stop the next turn once spent)")))))
+                                  (:hard (boolean :tag "Hard (stop the turn once spent)")))))
   :safe (lambda (v) (or (null v) (and (listp v) (numberp (plist-get v :amount)))))
   :group 'harness)
 
