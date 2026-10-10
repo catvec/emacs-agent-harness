@@ -373,7 +373,7 @@ and put back when a test took it off."
                        harness-tool-slots-load-test--started))
         (harness-tool-slots-load-test--settle-all)
         ;; Only once the machine is back under its limit does the next
-        ;; call start, as each slot is given back (`harness-tool-slots--give').
+        ;; call start, as each slot is given back (`harness-slots-admit').
         (should (equal "load-probe" (harness-tool-slots-load-test--content one)))
         (should (equal "load-probe" (harness-tool-slots-load-test--content two)))
         (should (equal "load-probe" (harness-tool-slots-load-test--content three)))

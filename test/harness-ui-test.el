@@ -2001,7 +2001,7 @@ made, newest first, and ASKED, the arguments of each question asked."
         (should (string-match-p (format "^  %s +." (regexp-quote risk)) help)))
       ;; Short, one line each, easy to scan: key, name, what it does.
       (should (string-match-p "^  c  current model summarises[ ]+warm cache; summary from the whole conversation$" help))
-      (should (string-match-p "^  n  new model summarises[ ]+only the first and last messages; small, but lossy$" help))
+      (should (string-match-p "^  n  new model summarises[ ]+the conversation's narrative, tool calls in brief; small, but lossy$" help))
       (should (string-match-p "^  t  full transcript[ ]+whole conversation as a file the new model reads$" help))
       (should (string-match-p "^  s  no handoff[ ]+no context; the new model starts from your next message$" help))
       (should (string-match-p "^  q  cancel[ ]+keep the current model$" help))

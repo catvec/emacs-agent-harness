@@ -74,13 +74,19 @@ Only a request that has not streamed anything yet is retried.")
   "Seconds between reports of how much of a tool call's input has streamed.")
 
 (defcustom harness-bedrock-tiers
-  '(:cheap "haiku" :balanced "sonnet" :frontier "opus")
-  "Model names or id regexps Bedrock names for the common tiers.
-A model of the endpoint's catalogue matching the value is used: the
-cheapest `haiku', say, for `cheap'.  The auto-mode judge runs on the
-`cheap' one.  A tier nothing matches falls back to the catalogue's
-prices."
+  '(:simple "haiku" :medium "sonnet" :hard "opus" :frontier "fable")
+  "Model names or id regexps Bedrock names for the tiers.
+A model of the endpoint's catalogue matching the value is used:
+`haiku', say, for `simple'.  The auto-mode judge runs on the `simple'
+one, and supervisors plan on the `hard' one; the harness never picks
+the `frontier' one on its own (see `harness-model-tiers').  A tier may
+name a thinking level too, as (:model \"sonnet\" :thinking \"high\"),
+or be nil, for no model.  A tier nothing matches falls back to the
+catalogue's prices."
   :type harness-provider-tiers-type :group 'harness)
+
+(harness-renew-default 'harness-bedrock-tiers
+                       '(:cheap "haiku" :balanced "sonnet" :frontier "opus"))
 
 (defconst harness-bedrock--model-defaults-type
   `(repeat
@@ -1835,20 +1841,15 @@ reasoning is left out.  Without TOOLS, calls and results become text."
               (list :toolSpec tool)))
           specs))
 
-(defconst harness-bedrock--levels '("low" "medium" "high" "xhigh" "max")
-  "Thinking levels from weakest to strongest.")
-
 (defun harness-bedrock--clamp-level (level levels)
-  "Return LEVEL when LEVELS offer it, else the strongest of LEVELS below it."
-  (if (or (null levels) (member level levels))
+  "Return LEVEL when LEVELS offer it, else the one of LEVELS that stands for it.
+That is the harness's rule for fitting a thinking level to what a model
+offers (`harness-thinking-level-fit'): the strongest of LEVELS below
+LEVEL, else the weakest of them.  A model that lists no levels, or
+none the rule can use, is asked for LEVEL as it is."
+  (if (null levels)
       level
-    (let ((rank (lambda (l) (or (cl-position l harness-bedrock--levels :test #'equal) -1)))
-          (best nil))
-      (dolist (l levels)
-        (when (and (<= (funcall rank l) (funcall rank level))
-                   (or (null best) (> (funcall rank l) (funcall rank best))))
-          (setq best l)))
-      (or best (car levels)))))
+    (or (harness-thinking-level-fit level levels) level)))
 
 (defun harness-bedrock--thinking (info level max-tokens)
   "Return (FIELDS . MAX-TOKENS) that ask model INFO to think at LEVEL.
@@ -2412,6 +2413,15 @@ at all (`:no-tools')."
                 (harness-http-request
                  url :method "POST" :headers headers :body payload :binary t
                  :timeout harness-bedrock--request-timeout
+                 ;; A completion is worth repeating: a connection lost
+                 ;; before any of the answer reached `:on-chunk' is tried
+                 ;; again by the HTTP layer, with the request as it was
+                 ;; signed (seconds old, well within the minutes AWS
+                 ;; accepts a signature for), as it is for the
+                 ;; OpenAI-compatible providers.  That covers a turn and
+                 ;; the harness's own calls alike.  A throttled or failed
+                 ;; response is `harness-bedrock--maybe-retry''s.
+                 :retry t
                  :on-headers (lambda (status response-headers)
                                (setf (harness-bedrock--stream-status stream) status
                                      (harness-bedrock--stream-content-type stream)

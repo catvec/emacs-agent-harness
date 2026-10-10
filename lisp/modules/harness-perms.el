@@ -288,12 +288,12 @@ take such a rule back (`permission/undo')."
   "Model that judges tool calls, as PROVIDER:NAME, or `auto'.
 It judges in `auto' mode, and in every mode for a non-interactive
 session, deciding what would ask the user while they are away.
-`auto' (the default) asks the session's provider for its `cheap' tier
+`auto' (the default) asks the session's provider for its `simple' tier
 \(see `harness-provider-tier-model'), so the judge runs on a model the
 session's provider can actually serve, falling back to the session's
 own model when the provider names none and its prices are unknown.  A
 PROVIDER:NAME forces that model, and nil uses the session's own model."
-  :type '(choice (const :tag "The session provider's cheap model" auto)
+  :type '(choice (const :tag "The session provider's simple model" auto)
                  (const :tag "The session's own model" nil)
                  (string :tag "Model" :names model))
   :group 'harness)
@@ -1707,7 +1707,7 @@ deny rule also stops it for a path it names inside them."
          (deny (eq (harness-perms--sym (plist-get rule :behavior)) 'deny))
          (pattern (harness-perms--rule-pattern rule (plist-get request :session))))
     (and (or (null tool) (equal tool (plist-get request :tool)))
-         (or (null kind) (eq kind (harness-perms--sym (plist-get request :kind))))
+         (or (null kind) (eq kind (harness-perms--call-kind request)))
          (or (null pattern)
              (let ((paths (if deny (harness-perms--every-path request) (harness-perms--subject-paths request))))
                (and paths
@@ -1805,12 +1805,37 @@ session, and the note says so.  Return RULE."
     (harness-perms--note-recorded session-id (list :scope scope :rule rule) new)
     rule))
 
+(defun harness-perms--settings-read-p (input)
+  "Non-nil when a `session_settings' call with INPUT only reads.
+A read shows a session's settings and changes nothing; a set changes
+harness state.  Anything but an explicit read action is no read: a call
+with no action, or one this module does not know, is left to the chain
+to refuse."
+  (let ((action (and (listp input) (plist-get input :action))))
+    (and (stringp action) (equal (downcase (string-trim action)) "read"))))
+
+(defun harness-perms--call-kind (request)
+  "Return the kind of REQUEST as the mode and the standing rules weigh it.
+A `session_settings' call that only reads is a read: it shows settings
+and changes nothing, so ask mode (and accept-edits) allows it as it
+allows any other read inside the roots, and no judge sees it.  A call
+that changes settings keeps the kind its tool declares (`meta'), so ask
+mode asks the user about it and the judge weighs it -- the same guard
+`session_send' and `session_control' get for another session.  The tool
+is declared `meta' and not `read' on purpose: were this classification
+ever missing, a set would ask rather than pass as a read."
+  (let ((kind (harness-perms--sym (plist-get request :kind))))
+    (if (and (equal (plist-get request :tool) "session_settings")
+             (harness-perms--settings-read-p (plist-get request :input)))
+        'read
+      kind)))
+
 (defun harness-perms--mode-decision (decision request)
   "Return the decision for REQUEST from the mode and the standing rules.
 DECISION is returned unchanged when the mode leaves the question open."
   (let* ((session (plist-get request :session))
          (tool (plist-get request :tool))
-         (kind (harness-perms--sym (plist-get request :kind)))
+         (kind (harness-perms--call-kind request))
          (mode (harness-perms--mode-of session))
          (rule (harness-perms--find-rule request)))
     (cond
@@ -1833,6 +1858,16 @@ DECISION is returned unchanged when the mode leaves the question open."
             :reason "the user's Emacs showed a definition in this file; reading it never needs approval"))
      ((harness-perms--reads-harness-p request)
       (list :behavior 'allow :reason "reading the harness itself never needs approval"))
+     ;; A read-only query of a cloud CLI is ordinary inspection: the
+     ;; judge must not decide it, since it runs on the cheapest model
+     ;; and read a service outside the roots as egress (it denied
+     ;; `gsutil ls' and an uptime-check read).  It is allowed exactly
+     ;; where the judge would decide: in `auto' mode, and for a session
+     ;; the user left non-interactive.  A mode that asks with the user
+     ;; present still asks, as for every other shell command.
+     ((and (harness-perms--read-only-cloud-p request)
+           (or (eq mode 'auto) (harness-perms--non-interactive-p session)))
+      (list :behavior 'allow :reason "read-only cloud commands never need approval"))
      ((eq mode 'yolo) (list :behavior 'allow :reason "yolo mode"))
      ((and (eq mode 'accept-edits) (memq kind '(read write)))
       (list :behavior 'allow :reason (format "%ss inside the allowed directories are accepted" kind)))
@@ -1847,6 +1882,117 @@ DECISION is the current value and NEXT continues the chain."
   (funcall next (if (eq (plist-get decision :behavior) 'ask)
                     (harness-perms--mode-decision decision request)
                   decision)))
+
+;;;; Read-only cloud commands
+;;
+;; A read-only query of a cloud CLI is inspection, not egress: `gsutil
+;; ls' lists the user's own buckets and `gcloud monitoring uptime
+;; list-configs' reads their own uptime checks.  The auto-mode judge is
+;; the wrong reader for it: it runs on the cheapest model, sees the one
+;; call alone, and took a service outside the allowed roots for sending
+;; secrets off the machine, denying both.  The mode stage therefore
+;; allows the read-only queries of a few well-known CLIs before the
+;; judge is asked, in `auto' mode and for a session the user left
+;; non-interactive, exactly where the judge would decide them (see
+;; `harness-perms--mode-decision').  A user who is present and a mode
+;; that asks still get their prompt, as for every other shell command.
+;;
+;; The reading is deliberately narrow, so that a write, a deletion or
+;; an interactive login never takes it: every program of the command
+;; must be a cloud CLI of `harness-perms--cloud-clis', no word of it may
+;; hold a write verb (`harness-perms--cloud-write-words'), and a read
+;; verb must come among its first three words.  Whatever it cannot read
+;; that way falls through to the judge, which is told about read-only
+;; cloud work as well (see `harness-perms--judge-system').
+
+(defconst harness-perms--cloud-clis '("gcloud" "gsutil")
+  "Cloud CLIs whose read-only queries need no approval.
+A command the mode stage allows must run these programs alone.")
+
+(defconst harness-perms--cloud-read-words
+  '("cat" "describe" "du" "get" "hash" "help" "info" "list" "ls"
+    "read" "show" "stat" "version")
+  "Words a read-only cloud query starts its subcommand with.
+A word may continue one with a hyphen, as `get-iam-policy' and
+`list-configs' do.")
+
+(defconst harness-perms--cloud-write-words
+  '("add" "allocate" "apply" "attach" "auth" "authorize" "bind" "cancel"
+    "ch" "clone" "compose" "copy" "cp" "create" "credentials"
+    "deactivate" "decrypt" "delete" "deploy" "detach" "disable"
+    "download" "downgrade" "drain" "enable" "encrypt" "execute" "export"
+    "grant" "impersonate" "import" "init" "insert" "install" "lock"
+    "login" "logout" "mb" "migrate" "mkdir" "move" "mv" "patch"
+    "promote" "publish" "purge" "put" "rb" "reboot" "redeploy" "remove"
+    "replace" "reset" "resize" "restore" "resume" "revoke" "rewrite"
+    "rm" "rollback" "rollout" "rsync" "scale" "schedule" "scp" "send"
+    "set" "sftp" "sign" "signurl" "snapshot" "ssh" "start" "stop"
+    "submit" "suspend" "transfer" "trigger" "truncate" "unbind"
+    "uninstall" "unlock" "unset" "update" "upgrade" "upload" "wipe"
+    "write")
+  "Words that make a cloud command a write, or an authentication.
+A command that holds one of them anywhere, as a word or as one part
+of a hyphenated word, is left to the judge; the list errs on the side
+of leaving it there.")
+
+(defun harness-perms--cloud-parts (word)
+  "Return the words WORD is made of, for the cloud command reader.
+WORD is lowercased, its leading dashes and any =VALUE are taken off,
+and what is left is split at hyphens and underscores: `list-configs'
+is (\"list\" \"configs\") and `--impersonate-service-account' is
+(\"impersonate\" \"service\" \"account\")."
+  (let ((body (replace-regexp-in-string "\\`-+" "" (downcase word))))
+    (when (string-match "=" body)
+      (setq body (substring body 0 (match-beginning 0))))
+    (split-string body "[-_]" t)))
+
+(defun harness-perms--cloud-program-p (word)
+  "Non-nil when WORD runs a cloud CLI of `harness-perms--cloud-clis'."
+  (member (downcase word) harness-perms--cloud-clis))
+
+(defun harness-perms--cloud-group-p (group)
+  "Non-nil when GROUP, a (PROGRAM WORD...) list, is a read-only cloud query.
+The program must be a cloud CLI (`harness-perms--cloud-clis'), no word
+of GROUP's may hold a write verb (`harness-perms--cloud-write-words'),
+and one of its first three words that is no option and no `NAME=VALUE'
+word must start with a read verb (`harness-perms--cloud-read-words')."
+  (and (harness-perms--cloud-program-p (car group))
+       (not (cl-some (lambda (word)
+                       (cl-some (lambda (part)
+                                  (member part harness-perms--cloud-write-words))
+                                (harness-perms--cloud-parts word)))
+                     (cdr group)))
+       (let ((seen 0) (read nil))
+         (catch 'done
+           (dolist (word (cdr group))
+             (when (and (not (string-prefix-p "-" word))
+                        (not (string-match-p "=" word)))
+               (setq seen (1+ seen))
+               (when (and (<= seen 3)
+                          (member (car (harness-perms--cloud-parts word))
+                                  harness-perms--cloud-read-words))
+                 (setq read t))
+               (when (> seen 3) (throw 'done read))))
+           (throw 'done read)))))
+
+(defun harness-perms--read-only-cloud-p (request)
+  "Non-nil when REQUEST runs read-only cloud CLI commands and nothing else.
+That is the case the mode stage allows without the judge: every program
+the shell command runs is a cloud CLI (`harness-perms--cloud-clis'),
+and each command it runs is read-only (see
+`harness-perms--cloud-group-p').  A command that runs anything else,
+or that the reader cannot read as a read-only cloud query, gives nil
+and goes on to the judge."
+  (when-let* ((command (harness-perms--command request)))
+    (let ((groups nil) (group nil) (any nil))
+      (dolist (pair (harness-perms--shell-words command))
+        (if (cdr pair)                   ; a program: a new command
+            (progn (when any (push (nreverse group) groups))
+                   (setq group (list (car pair))
+                         any t))
+          (when any (push (car pair) group))))
+      (when any (push (nreverse group) groups))
+      (and groups (cl-every #'harness-perms--cloud-group-p groups) t))))
 
 ;;;; Auto mode: a cheap model judges
 
@@ -1876,6 +2022,21 @@ things up on the web (documentation, references, issue trackers, package
 registries) as long as the URL carries no secrets or project data.  The
 allowed roots are where the agent's own work lives; reading outside them, or
 creating new files outside them, is fine.
+
+Inspecting a cloud service with its own CLI is ordinary work when the
+command only reads: gcloud monitoring uptime list-configs, gsutil ls
+gs://bucket and kubectl get pods look at resources the user already
+owns, and the CLI signing in to that service with the user's credentials
+is not sending secrets off the machine: the data stays between the user
+and the service the command belongs to, and no third party is involved.
+Reading is no egress for the call naming a service outside the allowed
+roots, and reading an alerting policy, notification channel or uptime
+check is configuration being read, not an email or a notification being
+sent.  Deny a cloud command that writes, changes or deletes a resource
+(set, create, update, delete, rm, cp, mv, mb, rsync, deploy), one that
+logs in or prints a credential (auth login, auth print-access-token), or
+one that sends the user's secrets or private data somewhere other than
+the service the command belongs to.
 
 Deny only what clearly risks serious harm:
 - deleting or overwriting existing data outside the allowed roots (system
@@ -2036,7 +2197,7 @@ one, and quotes the start of TEXT, what the judge replied."
 (defun harness-perms--judge-model (session)
   "Return the model the auto-mode judge uses for SESSION.
 `harness-perms-auto-model' names one, `auto' asks the session's own
-provider for its cheap tier (falling back to the session's model), and
+provider for its simple tier (falling back to the session's model), and
 nil uses the session's model."
   (let* ((session-model (or (plist-get session :model)
                             (harness-perms--config 'harness-model session)))
@@ -2046,7 +2207,7 @@ nil uses the session's model."
     (cond
      (automatic
       (or (and session-model (harness-method-exists-p 'provider/tier-model)
-               (harness-call 'provider/tier-model session-model 'cheap))
+               (harness-call 'provider/tier-model session-model 'simple))
           session-model))
      ((stringp choice) choice)
      (t session-model))))

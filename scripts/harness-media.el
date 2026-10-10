@@ -524,8 +524,20 @@ the development checkout, which no session works in, is configured."
     (setq harness-version-origins
           (list (list :name "local" :location (abbreviate-file-name (plist-get paths :dev)) :branch "main")))))
 
+(defconst harness-media--harness-bodies
+  '(("Show the fallback entries' tiers in the usage dashboard"
+     . "Name each fallback entry's tier beside its model, so the cheapest
+fit for what a session needs is visible before it is chosen.")
+    ("Ask how to hand over in a chat banner, not a wall of text"
+     . "The handoff question is a banner of the choices now: what each
+option keeps, and the box to change it."))
+  "Bodies of the commits in the version picture that have one, by subject.
+A commit's message body shows on the version page as its changelog entry.")
+
 (defun harness-media--harness-commit (subject days-ago)
-  "Commit SUBJECT in the development checkout, dated DAYS-AGO days back."
+  "Commit SUBJECT in the development checkout, dated DAYS-AGO days back.
+A subject in `harness-media--harness-bodies' is committed with that
+body, so the version picture shows a commit as its changelog entry."
   (let* ((dev (plist-get (harness-media--harness-paths) :dev))
          (date (format-time-string "%Y-%m-%dT%H:%M:%S" (- (float-time) (* days-ago 86400))))
          (process-environment (append (list (concat "GIT_AUTHOR_DATE=" date)
@@ -535,7 +547,10 @@ the development checkout, which no session works in, is configured."
       (insert "- " subject "\n")
       (write-region nil nil (expand-file-name "NEWS.md" dev) t 'silent))
     (harness-media--git-in dev "add" "-A")
-    (harness-media--git-in dev "-c" "commit.gpgsign=false" "commit" "-q" "--no-gpg-sign" "-m" subject)))
+    (apply #'harness-media--git-in dev "-c" "commit.gpgsign=false" "commit" "-q" "--no-gpg-sign"
+           "-m" subject
+           (when-let* ((body (cdr (assoc subject harness-media--harness-bodies))))
+             (list "-m" body)))))
 
 (defun harness-media--make-harness-repos ()
   "Make the development checkout, GitHub and straight's clone of the harness.
@@ -1000,14 +1015,15 @@ The orders endpoints only touch a list in memory, and authentication is a set lo
    (harness-media--tool "read_file" :path "tests/test_app.py")
    (harness-media--say "`ORDERS` is module state, so `test_creates_an_order` saw the orders of whichever test ran before it. `setUp` now clears it, and the test passes in any order.")))
 
-(defun harness-media--task-script (todos changes message summary &optional hold evidence)
+(defun harness-media--task-script (todos changes message summary &optional hold evidence problem)
   "A task's turn: TODOS, CHANGES (tool calls), a commit as MESSAGE, SUMMARY.
 TODOS are the item texts.  With HOLD the turn stops working half way
 and never ends, so the task stays in progress, and nothing is committed.
-With EVIDENCE, hand_in's evidence items, the turn hands its work in
-with SUMMARY rather than saying it.  Every finished round should hand
-in, as a task session is told to: one that ends without it puts [No
-report] on the task's card (`harness-tasks--missing-report')."
+With EVIDENCE, hand_in's evidence items and PROBLEM, its required short
+summary of what must be fixed, the turn hands its work in with SUMMARY
+rather than saying it.  Every finished round should hand in, as a task
+session is told to: one that ends without it puts [No report] on the
+task's card (`harness-tasks--missing-report')."
   (let* ((n (length todos))
          (at (lambda (done)
                (apply #'harness-media--todos
@@ -1023,7 +1039,8 @@ report] on the task's card (`harness-tasks--missing-report')."
                   ;; A word first, as models do: a session is named after
                   ;; a first turn that said something.
                   (list (harness-media--say "Done, and the tests pass: handing it in for review.")
-                        (harness-media--tool "hand_in" :summary summary :evidence evidence))
+                        (harness-media--tool "hand_in" :problem (or problem summary) :summary summary
+                                             :evidence evidence))
                 (list (harness-media--say summary)))))))
 
 (defun harness-media--task-constant-time (_request)
@@ -1035,7 +1052,8 @@ report] on the task's card (`harness-tasks--missing-report')."
    "Compare API keys in constant time"
    "`authenticate()` now compares the key with every known key through `hmac.compare_digest`."
    nil
-   (list (list :file "acme/auth.py" :caption "The key check, through hmac.compare_digest"))))
+   (list (list :file "acme/auth.py" :caption "The key check, through hmac.compare_digest"))
+   "API keys are compared with `==`, so a wrong key leaks how much of it matched."))
 
 (defun harness-media--task-python (_request)
   "Task: require Python 3.12."
@@ -1048,7 +1066,8 @@ report] on the task's card (`harness-tasks--missing-report')."
    "Require Python 3.12"
    "pyproject.toml requires Python 3.12 and lists 3.12 and 3.13."
    nil
-   (list (list :file "pyproject.toml" :caption "requires-python and the supported versions"))))
+   (list (list :file "pyproject.toml" :caption "requires-python and the supported versions"))
+   "The package advertises Python 3.11 support that no test covers."))
 
 (defun harness-media--task-pagination (_request)
   "Task: paginate GET /orders, handed in with a chart and the test run."
@@ -1066,7 +1085,8 @@ report] on the task's card (`harness-tasks--missing-report')."
      nil
      (list (list :image "docs/orders-latency.svg"
                  :caption "p95 latency of GET /orders: flat at 11-14 ms with pagination, where it grew to 4.8 s with every order at once")
-           (list :tool_call (plist-get tests :id) :caption "The tests pass, the total included.")))))
+           (list :tool_call (plist-get tests :id) :caption "The tests pass, the total included."))
+     "GET /orders returns every order at once, so a client can only load the whole list.")))
 
 (defun harness-media--task-slow (_request)
   "Task: log slow requests."
@@ -1077,7 +1097,8 @@ report] on the task's card (`harness-tasks--missing-report')."
    "Log slow requests"
    "`acme.timing.timed()` wraps the app and logs every request slower than 500 ms."
    nil
-   (list (list :file "acme/timing.py" :caption "The timing middleware and its threshold"))))
+   (list (list :file "acme/timing.py" :caption "The timing middleware and its threshold"))
+   "Requests slower than 500 ms are invisible in the logs, so slowness is found only by report."))
 
 (defun harness-media--task-slow-again (_request)
   "Task: log slow requests, after review: the round hands its work in again."
@@ -1085,7 +1106,8 @@ report] on the task's card (`harness-tasks--missing-report')."
                              :old_string "SLOW_SECONDS = 0.5" :new_string "SLOW_SECONDS = 0.5  # seconds")
         (harness-media--git-commit "Say the threshold is in seconds")
         (harness-media--say "The threshold says it is in seconds now: handing it in again.")
-        (harness-media--tool "hand_in" :summary "`SLOW_SECONDS`, the threshold of `acme.timing`, says it is in seconds."
+        (harness-media--tool "hand_in" :problem "The threshold constant does not say it is in seconds."
+                             :summary "`SLOW_SECONDS`, the threshold of `acme.timing`, says it is in seconds."
                              :evidence (list (list :file "acme/timing.py" :caption "The threshold, in seconds")))))
 
 (defun harness-media--task-settings (_request)

@@ -449,8 +449,8 @@ an interactive one with nobody able to answer is denied too."
                                     :behavior)))
       (should-not (harness-perms--judge-prompt-reason (list :behavior 'ask))))))
 
-(ert-deftest harness-perms-auto-model-takes-the-providers-cheap-tier ()
-  "`harness-perms-auto-model' `auto' judges with the session provider's cheap tier.
+(ert-deftest harness-perms-auto-model-takes-the-providers-simple-tier ()
+  "`harness-perms-auto-model' `auto' judges with the session provider's simple tier.
 A model named by the provider's `:tiers' is used; an explicit model wins."
   (harness-perms-test--setup :permission-mode 'auto :model "judge2:big")
   (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler #'ignore)
@@ -462,7 +462,7 @@ A model named by the provider's `:tiers' is used; an explicit model wins."
                                 (list :name "small" :pricing '(:input 1.0 :output 5.0))
                                 (list :name "mid" :pricing '(:input 3.0 :output 15.0)))))
       ;; Not the cheapest: the declared tier is what decides.
-      :tiers '(:cheap "mid")
+      :tiers '(:simple "mid")
       :complete (lambda (req)
                   (push req requests)
                   (let ((cb (plist-get req :on-event)))
@@ -707,6 +707,119 @@ weigh what the call would do, never whether a value looks complete."
     (let ((harness-perms-auto-model "judge:x"))
       (should (equal "perms: auto judge gave no verdict for bash (end-turn); it replied: I refuse to answer in JSON"
                      (funcall warning))))))
+
+;;;; Read-only cloud commands
+
+(defun harness-perms-test--exec (command)
+  "Decide COMMAND, a shell command, and return the decision."
+  (harness-perms-test--decide
+   (list :session harness-perms-test--session :tool "bash" :kind 'exec
+         :input (list :command command) :call-id (harness-short-id))))
+
+(ert-deftest harness-perms-read-only-cloud-commands-need-no-judge ()
+  "A read-only cloud query must not reach the auto-mode judge.
+The judge runs on the cheapest model, sees the call alone and read a
+cloud service outside the allowed roots as egress: it denied an
+uptime-check read as sending email to a third party and `gsutil ls' as
+sending credentials off the machine.  The mode stage allows them in
+`auto' mode and for a session the user left non-interactive, before the
+judge would be asked."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (let* ((probe (harness-perms-test--judge-provider
+                 '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"it emails a third party\"}")
+                   (:type done :stop-reason end-turn))))
+         (harness-perms-auto-model "judge:x"))
+    (dolist (command '("gcloud monitoring uptime list-configs"
+                       "gcloud monitoring uptime list-configs --project my-proj"
+                       "gcloud compute instances list --format=json --project=my-proj"
+                       "gcloud projects get-iam-policy my-proj"
+                       "gcloud config get-value project"
+                       "gcloud logging read --limit=10"
+                       "gcloud iam service-accounts list"
+                       "gsutil ls gs://my-bucket"
+                       "gsutil ls -l gs://my-bucket"
+                       "gsutil cat gs://my-bucket/log.txt"
+                       "gsutil stat gs://my-bucket/object"
+                       "gcloud compute instances list && gcloud projects list"))
+      (let ((d (harness-perms-test--exec command)))
+        (should (eq 'allow (plist-get d :behavior)))
+        (should (string-match-p "cloud" (plist-get d :reason)))))
+    ;; The judge never saw any of them.
+    (should (null (funcall probe 'requests)))
+    ;; An interactive auto session allows them too, and the judge still sees nothing.
+    (setq harness-perms-test--session
+          (plist-put harness-perms-test--session :non-interactive nil))
+    (should (eq 'allow (plist-get (harness-perms-test--exec "gsutil ls gs://my-bucket") :behavior)))
+    (should (null (funcall probe 'requests)))))
+
+(ert-deftest harness-perms-cloud-writes-and-logins-still-go-to-the-judge ()
+  "A cloud command that is no obvious read is left to the judge.
+Writes, deletions, rsyncs, interactive logins and a credential printed
+are never allowed by the mode stage, and neither is a read hidden after
+another program, or a write verb that looks like a read operand."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (let* ((probe (harness-perms-test--judge-provider
+                 '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"it changes the cloud\"}")
+                   (:type done :stop-reason end-turn))))
+         (harness-perms-auto-model "judge:x")    ; the judge is consulted
+         (commands '("gcloud config set project my-proj"
+                     "gcloud compute instances delete my-instance"
+                     "gcloud monitoring uptime delete my-check"
+                     "gcloud auth login"
+                     "gcloud auth print-access-token"
+                     "gcloud container clusters get-credentials my-cluster"
+                     "gcloud compute ssh my-instance"
+                     "gsutil rm gs://my-bucket/object"
+                     "gsutil cp gs://my-bucket/object ."
+                     "gsutil rsync -r gs://a gs://b"
+                     "gcloud storage cp list.txt gs://my-bucket/"
+                     "gcloud compute instances clone list-instance src"
+                     "gcloud compute instances simulate-maintenance-event list-instance"
+                     "gsutil ls gs://my-bucket && rm -rf /"
+                     "gcloud compute instances list $(rm -rf /)"
+                     "sudo gcloud compute instances list"
+                     "gcloud compute instances list | jq ."
+                     "gcloud --project p compute instances list"
+                     "gcloud components install"
+                     "gsutil iam ch user:x:objectViewer gs://b")))
+    (dolist (command commands)
+      (let ((request (list :session harness-perms-test--session :tool "bash" :kind 'exec
+                           :input (list :command command) :call-id (harness-short-id))))
+        (should-not (harness-perms--read-only-cloud-p request))
+        (should (eq 'deny (plist-get (harness-perms-test--decide request) :behavior)))))
+    ;; Every command that names no outside path reached the judge.
+    (should (funcall probe 'requests))))
+
+(ert-deftest harness-perms-cloud-reads-still-ask-a-present-user ()
+  "A user who is present and a mode that asks still get their prompt.
+The allow is exactly where the judge would rule (auto mode, or the user
+away); ask mode asks the user, as for every other shell command."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let ((p (harness-run-filter-async
+            'permission/decide (list :behavior 'ask)
+            (list :session harness-perms-test--session :tool "bash" :kind 'exec
+                  :input (list :command "gsutil ls gs://my-bucket") :call-id "c-cloud"))))
+    (harness-test-wait (lambda () harness-perms-test--pending) 2 "the prompt")
+    (should-not (harness-promise-settled-p p))
+    (should (equal "bash" (plist-get (plist-get (car harness-perms-test--pending) :payload) :tool)))
+    (harness-call 'permission/answer "s1" (plist-get (car harness-perms-test--pending) :id) "deny-once")
+    (should (eq 'deny (plist-get (harness-test-await p) :behavior)))))
+
+(ert-deftest harness-perms-judge-prompt-names-read-only-cloud-work ()
+  "The judge is told read-only cloud queries are ordinary work.
+It reads the call alone, so its prompt says that authenticating to a
+service and reading the user's own resources is not egress and names
+the commands it must not deny, along with the writes and logins it
+still must."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (dolist (part '("gcloud monitoring uptime list-configs"
+                  "gsutil ls"
+                  "kubectl get pods"
+                  "not sending secrets off the machine"
+                  "auth print-access-token"
+                  "sending secrets or private data off the machine"))
+    (should (string-search part harness-perms--judge-system))))
 
 ;;;; The rules Claude Code's own auto mode follows
 
@@ -3872,6 +3985,50 @@ grants to the session, and none of them is revoked."
               (should (string-match-p "to this session" (plist-get d :reason)))))
           (should (equal (list fixed) harness-allowed-directories))
           (should-not saved))))))
+
+;;;; session_settings
+
+(defun harness-perms-test--settings-request (input)
+  "Return a permission request for a session_settings call with INPUT."
+  (list :session harness-perms-test--session :tool "session_settings" :kind 'meta
+        :input input :paths nil :call-id (harness-short-id)))
+
+(ert-deftest harness-perms-session-settings-read-needs-no-approval ()
+  "A session_settings read is the read it is: ask mode and accept-edits
+allow it without the user, the judge never sees it, and no prompt is
+made.  A set changes harness state: ask mode asks about it, as it asks
+about session_send and session_control."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (let ((read (harness-perms-test--settings-request '(:action "read"))))
+    (should (eq 'read (harness-perms--call-kind read)))
+    (should (eq 'allow (plist-get (harness-perms-test--decide read) :behavior)))
+    (should-not harness-perms-test--pending))
+  (let* ((set (harness-perms-test--settings-request '(:action "set" :model "demo:x")))
+         (p (harness-run-filter-async 'permission/decide (list :behavior 'ask) set)))
+    (should (eq 'meta (harness-perms--call-kind set)))
+    (harness-test-wait (lambda () harness-perms-test--pending) 2 "the prompt for the set")
+    (let ((pending (car harness-perms-test--pending)))
+      (should (equal "session_settings" (plist-get (plist-get pending :payload) :tool)))
+      (should (equal harness-perms-options (plist-get (plist-get pending :payload) :options)))
+      (harness-call 'permission/answer "s1" (plist-get pending :id) "allow-once"))
+    (should (eq 'allow (plist-get (harness-test-await p) :behavior)))))
+
+(ert-deftest harness-perms-session-settings-in-accept-edits-and-under-a-rule ()
+  "Accept-edits accepts a read and still asks about a set; a standing
+deny rule comes first and denies a read ask mode would allow; an action
+the module does not know is no read."
+  (harness-perms-test--setup :permission-mode 'accept-edits)
+  (let ((read (harness-perms-test--settings-request '(:action "read")))
+        (set (harness-perms-test--settings-request '(:action "set" :thinking "low"))))
+    (should (eq 'allow (plist-get (harness-perms--mode-decision nil read) :behavior)))
+    (should-not (plist-get (harness-perms--mode-decision nil set) :behavior)))
+  (setq harness-perms-rules (list (list :tool "session_settings" :behavior 'deny)))
+  (let ((d (harness-perms-test--decide (harness-perms-test--settings-request '(:action "read")))))
+    (should (eq 'deny (plist-get d :behavior)))
+    (should (string-match-p "standing rule" (plist-get d :reason))))
+  (should (eq 'meta (harness-perms--call-kind
+                     (harness-perms-test--settings-request '(:action "frob"))))))
 
 (provide 'harness-perms-test)
 ;;; harness-perms-test.el ends here

@@ -780,6 +780,60 @@ Two lines would grow the echo area and move the chart under the mouse."
           (should found)
           (should-not offenders))))))
 
+(ert-deftest harness-ui-usage-fallback-tier-text-names-each-tier ()
+  "A provider entry reads as its model per tier, the provider's word left
+off a label that repeats it, and after a model the thinking level its
+tier names.  Tiers that are all one model name it once."
+  (harness-ui-usage-test-with
+    (should (equal "simple→Haiku 4.5 · medium→Sonnet 5 · hard→Opus 5.5 · frontier→Fable 5.1"
+                   (harness-ui-usage--fallback-tier-text
+                    '(:provider "claude" :provider-label "Claude Code"
+                      :tiers ((:tier "simple" :model "claude:claude-haiku-4-5" :label "Claude Haiku 4.5")
+                              (:tier "medium" :model "claude:claude-sonnet-5" :label "Claude Sonnet 5")
+                              (:tier "hard" :model "claude:claude-opus-5-5" :label "Claude Opus 5.5")
+                              (:tier "frontier" :model "claude:claude-fable-5-1" :label "Claude Fable 5.1"))))))
+    ;; DeepSeek's three tiers are one model at three levels.
+    (should (equal "V4.1-Flash: simple low · medium high · hard max"
+                   (harness-ui-usage--fallback-tier-text
+                    '(:provider "deepseek" :provider-label "DeepSeek"
+                      :tiers ((:tier "simple" :model "deepseek:deepseek-flash"
+                               :label "DeepSeek-V4.1-Flash" :thinking "low")
+                              (:tier "medium" :model "deepseek:deepseek-flash"
+                               :label "DeepSeek-V4.1-Flash" :thinking "high")
+                              (:tier "hard" :model "deepseek:deepseek-flash"
+                               :label "DeepSeek-V4.1-Flash" :thinking "max"))))))
+    ;; Tiers on models of their own each name theirs.
+    (should (equal "simple→V4.1-Flash low · hard→V4-Pro"
+                   (harness-ui-usage--fallback-tier-text
+                    '(:provider "deepseek" :provider-label "DeepSeek"
+                      :tiers ((:tier "simple" :model "deepseek:deepseek-flash"
+                               :label "DeepSeek-V4.1-Flash" :thinking "low")
+                              (:tier "hard" :model "deepseek:deepseek-v4-pro"
+                               :label "DeepSeek-V4-Pro"))))))))
+
+(ert-deftest harness-ui-usage-fallback-names-fit-one-column ()
+  "Every fallback entry's name takes one column, as wide as the longest
+up to `harness-ui-usage--fallback-label-width': a provider's four tiers
+are not cut, and the states after the names line up."
+  (harness-ui-usage-test-with
+    (let* ((claude '(:entry "claude" :provider "claude" :provider-label "Claude Code"
+                     :label "Claude Code" :registered t
+                     :tiers ((:tier "simple" :model "claude:claude-haiku-5-5" :label "Claude Haiku 5.5")
+                             (:tier "medium" :model "claude:claude-sonnet-5-5" :label "Claude Sonnet 5.5")
+                             (:tier "hard" :model "claude:claude-opus-5-5" :label "Claude Opus 5.5")
+                             (:tier "frontier" :model "claude:claude-fable-5-1" :label "Claude Fable 5.1"))))
+           (demo '(:entry "demo:scripted" :provider "demo" :provider-label "Demo"
+                   :model "demo:scripted" :label "Scripted" :registered t :known t))
+           (lines (with-temp-buffer
+                    (harness-ui-usage--insert-fallback (list :models (list claude demo)))
+                    (split-string (buffer-string) "\n")))
+           (entries (seq-filter (lambda (line) (string-match-p "available" line)) lines)))
+      (should (> (length "Claude Code  simple→Haiku 5.5 · medium→Sonnet 5.5 · hard→Opus 5.5 · frontier→Fable 5.1")
+                 74))
+      (should (string-match-p (regexp-quote "hard→Opus 5.5 · frontier→Fable 5.1 ") (car entries)))
+      (should (= 2 (length entries)))
+      (should (apply #'= (mapcar (lambda (line) (string-search "available" line)) entries))))))
+
 (ert-deftest harness-ui-usage-fallback-section-shows-and-clears-marks ()
   "The fallback section lists the entries and says what ran out."
   (harness-ui-usage-test-with
