@@ -914,6 +914,10 @@ its cached prefix; a fresh child starts with the prompt alone.
 `worktree=true` gives the child a git worktree and branch of its own, so
 several children can change files at once; each branch merges back into
 the parent's working directory through the merge queue, one at a time.
+`thinking="high"` sets the child's thinking level, one the child's model
+offers (after any `model` override); without it the child thinks at this
+session's level. A level the model does not offer fails the call, naming
+the levels it does, so no child runs at a level its model cannot act on.
 To wait for some other session without blocking, `session_wait`
 registers a wake-up and returns at once: a message of the harness's own
 arrives when the session is done, and the registration outlives the
