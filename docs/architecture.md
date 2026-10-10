@@ -1601,9 +1601,13 @@ fails, the subject is the first line of the first string in INPUT.
 Tool-call nodes, permission prompts, the activity of a running turn and
 ACP `tool_call` titles all carry this title.
 
-CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
-`:report` accepts a string for progress.  RESULT = `(:content "…"
-:is-error BOOL :attachments (…) :meta PLIST)`.
+CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN
+:note FN)`.  `:report` accepts a string for progress, which the
+activity line shows (its last line, `tools/progress'); `:note` accepts
+a line or a few for people to read, which the chat shows under the
+call's own block (`tools/note', see "The note under a running call"
+below).  RESULT = `(:content "…" :is-error BOOL :attachments (…)
+:meta PLIST)`.
 
 - `tools/list &optional SESSION-ID` → TOOL-SPECs `(:name :label
   :description :schema :kind :coalescable)`, filtered through sync
@@ -1613,6 +1617,15 @@ CTX = `(:session-id ID :cwd "/abs/" :host PREFIX :call-id "…" :report FN)`;
   RESULT.  Pipeline: lookup → `permission/decide` (async filter) →
   handler (with `harness-tools--timeout`) → context-bomb guard → sync
   filter `tools/result` → events `tools/started`, `tools/finished`.
+- `tools/note SESSION-ID CALL-ID TEXT` is what a running call says of
+  itself beyond its one progress line: a line, or a few, for people to
+  read, which the agent keeps on the call
+  (`harness-agent--calls` `:note') and the chat draws under the call's
+  block.  The handler emits it with `harness-tools-note' on CTX's
+  `:note'; `harness-tools-watch-session' composes the notes of the
+  calls that show a session (see "The note under a running call"
+  below).  The whole note travels -- it may hold newlines -- where
+  `tools/progress' keeps only its last line for the activity line.
 - `tools/builtin SESSION-ID` returns the names of the harness tools
   that the session's provider runs a tool of its own for, and
   `tools/list` leaves them out.  They must be in the provider's
@@ -2420,9 +2433,12 @@ non-interactive session it stays a denial.
   `:tool` with `:title`, `:checking` until its permission is decided
   (its time then starts again), `:detail` the last line of its
   `tools/progress` (at most every `harness-agent--progress-interval`,
-  0.5 s), and `:count` when several run.  Every change is announced as
-  `agent/activity-changed`, with nil when the turn ends.  The state
-  lives beside the turn records, so a reload keeps it.
+  0.5 s), and `:count` when several run.  A `tool` phase also carries
+  `:calls`, one plist per running call -- the same fields with its
+  `:call-id`, and `:note`, the text of its `tools/note` -- so the chat
+  puts each call's note under that call's own block.  Every change is
+  announced as `agent/activity-changed`, with nil when the turn ends.
+  The state lives beside the turn records, so a reload keeps it.
 
 ### usage
 
@@ -4332,6 +4348,76 @@ plus the context `compaction/estimate` gives the compacted fork
 (`harness-tools-agent-context-limit SUPERVISOR t CONTEXT`), set with
 `session/update` `:silent t`, as the hint that follows says it.
 
+The note under a running call (module `tools`): a call that runs for a
+while says more than the one line of progress the activity line shows,
+under its own block in a chat.  A handler emits it with
+`harness-tools-note' on CTX's `:note', which becomes `tools/note
+SESSION-ID CALL-ID TEXT'; the agent keeps it on the call and announces
+it with the activity as `:calls' (held back as progress is, at most
+every `harness-agent--progress-interval'), and the chat draws it under
+the call's own block, where it goes when the call ends.
+`harness-tools-tail-line' (the last visible line of a chunk of output,
+colour codes and control characters gone, cut to 80 columns) is what
+the note under a bash call and the agent's activity line both use.
+
+The notes of the calls that show a session are made of the session.
+`harness-tools-session-note SESSION-ID &optional OPTIONS' returns up
+to three lines: what the session does now, or last did
+(`harness-tools-session-doing': its `agent/activity' as a phrase, or
+what it waits on when blocked, or the last thing in its transcript --
+"starting" for a prompt with no work after it yet); a recap of it
+("recap: …", `harness-recap-session'); and its facts
+(`harness-tools-session-facts': "12.3k/256k before compact · 2 turns ·
+7 steps · 9 tool calls" -- the tokens its conversation holds against
+the window it compacts at, from `session/usage'; its turns; the steps
+its running turn has made, counted here from `agent/step-started'
+since one model call is one step; and the tool calls counted in its
+transcript).  OPTIONS is `(:title TEXT :recap BOOL)': a wait opens
+each session's note with a title, and a call that shows a session asks
+for its recap.  A session that is gone says "gone".
+
+Nothing polls.  `harness-tools-watch-session SESSION-ID PUSH &optional
+OPTIONS' registers PUSH with `harness-tools--watchers', calls it with
+the session's note at once, and calls it again whenever an event about
+the session arrives -- its activity, steps, tool calls and results,
+its usage, status, pending requests, a recap of it, its end -- and
+only when the text changed; the value it returns stops the watching.
+`spawn_agent' watches its child this way, with `:recap t', so the note
+under its call says what the child does
+(`harness-tools-agent--watch-child'; the call returns as soon as the
+child starts, and `harness-tools-agent--forget-child' stops the
+watching when the child is reported).  `task_wait' watches every
+session it waits on, each note opened by its title
+(`NAME (shortid): ', or the first eight characters of the id alone,
+`harness-tools-sessions--wait-title') and joined into one note
+(`harness-tools-sessions--note-watch'); the watching stops when the
+wait settles.  `session_wait' registers a wake-up and returns at once
+(see below), so it has no call to show a note under.
+
+A recap of a session that is no task's is written here too, by
+`harness-recap-session SESSION-ID &optional FORCE' (harness-recap):
+`(:text TEXT :at FLOAT)', the task card's recap for a session that is
+a task's, since the card shows it and already keeps it fresh, else the
+one kept for the session in `harness-recap--sessions' with the same
+short call a card's is (the `harness-tasks-recap-model' cheap tier, at
+most `harness-tasks-recap-max-tokens' tokens) and the same thresholds
+`harness-tasks-recap-turns', `harness-tasks-recap-seconds' and
+`harness-tasks-recap-tool-calls', measured from the session's start
+until the first recap and from the last one after that (FORCE skips
+them).  Only a sub-agent's session (`harness-recap--session-own-p')
+gets one written; another session's is its card's business, though a
+recap already kept for it is shown, and the one in hand is returned
+while a new one is made.  `recap/session-done' and
+`recap/session-failed' announce it, and a failure waits
+`harness-tasks-recap-retry' seconds before the next try.
+
+A `bash' command still running notes itself under the call from the
+start and then at most every `harness-tools-shell--note-interval'
+(0.25 s) as its output arrives: "still running · 12 lines so far", and
+the latest line under it (`harness-tools-shell--bash-note'; the
+counters come from the chunks, of which only the last 4000 characters
+are kept to find that line).
+
 Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an
 asynchronous process started with `start-file-process` so TRAMP works.
@@ -5056,6 +5142,14 @@ reason rather than as output.  The icons and their words take
 `harness-failure-face`, which inherit the theme's `success`, `warning`
 and `error`.  A summary block counts the failed and denied calls it
 folds, and the tree starts each tool result's row with the same icon.
+A running call's note (`tools/note', see "The note under a running
+call") shows under its block, dim and indented, in
+`harness-chat--note-lines': a line or a few the call says of itself --
+what a sub-agent does, what a wait waits on, how a bash command is
+going.  A chat buffer keeps them per call id (buffer-local
+`harness-chat--notes'), from the `:calls' of the turn's activity;
+`harness-chat--set-notes' redraws only the blocks whose note changed,
+and a call's note goes with its block when the call ends.
 The panel of a question whose options have diagrams shows one diagram
 at a time, in an area under the options; its tabs, `n` and `p` on the
 panel, `C-c C-f` and `C-c C-b`, and point moving onto an option switch

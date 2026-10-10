@@ -413,12 +413,14 @@ Replace the todos of the session in CTX with those in INPUT."
 (defvar harness-tools-agent--children (make-hash-table :test 'equal)
   "Child session id -> what a spawn_agent call knows of a running child.
 A plist (:parent PARENT-ID :name NAME :worktree PATH :branch BRANCH
-:result RESULT).  A child's call has always returned, since it started;
-RESULT is what the child's first turn ended with, nil while it runs.
-The entry stays until the child is done with everything it has going
-on, so a parent counts it as work it still runs
+:result RESULT :unwatch STOP).  A child's call has always returned, since
+it started; RESULT is what the child's first turn ended with, nil while
+it runs.  The entry stays until the child is done with everything it has
+going on, so a parent counts it as work it still runs
 \(`harness-tools-agent--outstanding') and a child that registered a wait
-is not reported as finished when its turn merely ended.")
+is not reported as finished when its turn merely ended; STOP, when
+there is one, stops the note under the child's spawn_agent call
+\(`harness-tools-agent--watch-child').")
 
 (defun harness-tools-agent--short-id (id)
   "Return the first eight characters of session ID."
@@ -472,7 +474,7 @@ child that is still busy is left for the turn that ends its wait, or its
 sub-agent's report."
   (let ((entry (gethash cid harness-tools-agent--children)))
     (when (and entry (not (harness-tools-agent--child-busy-p cid)))
-      (remhash cid harness-tools-agent--children)
+      (harness-tools-agent--forget-child cid)
       (harness-tools-agent--report-child (plist-get entry :parent) cid entry
                                          (or (plist-get entry :result)
                                              (list :stop-reason reason))))))
@@ -495,6 +497,20 @@ such as the wake-up turn of a wait the child registered."
   (let ((entry (gethash session-id harness-tools-agent--children)))
     (when (and entry (plist-get entry :result))
       (harness-tools-agent--settle-child session-id reason))))
+
+(defun harness-tools-agent--watch-child (cid note)
+  "Have the note of child CID show under its spawn_agent call.
+NOTE is the call's note function.  Return the function that stops the
+watching, or nil when the call has no note function."
+  (when (and note (harness-method-exists-p 'session/exists-p))
+    (harness-tools-watch-session cid (lambda (text) (funcall note text)) (list :recap t))))
+
+(defun harness-tools-agent--forget-child (cid)
+  "Stop watching child CID and forget what its call knew of it."
+  (when-let* ((entry (gethash cid harness-tools-agent--children)))
+    (when-let* ((stop (plist-get entry :unwatch)))
+      (funcall stop))
+    (remhash cid harness-tools-agent--children)))
 
 (defun harness-tools-agent--child-summary (child-id)
   "Return the final text of CHILD-ID plus a footer with its tool calls and cost."
@@ -743,7 +759,8 @@ own once its turn ends and nothing of it is outstanding any more."
           (lambda (child)
             (let* ((cid (plist-get child :id))
                    (entry (list :parent sid :name (plist-get child :name)
-                                :worktree worktree :branch branch :result nil)))
+                                :worktree worktree :branch branch :result nil
+                                :unwatch (harness-tools-agent--watch-child cid (plist-get ctx :note)))))
               ;; From here the call itself names its sub-agent, not only its
               ;; result: the chat links it while the call still runs.  A call
               ;; that could not be named still runs; only its link waits.

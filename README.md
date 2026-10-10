@@ -462,6 +462,17 @@ queue gave, the live merges first and the last few finished under them.
 It follows the merges as they happen, and disappears when the queue is
 empty and nothing was merged recently.
 
+A tool call that runs for a while says what it is doing under its own
+header, in dim lines that go when the call ends. `spawn_agent`, which
+returns as soon as its child starts, makes that note of the child as it
+starts it -- what the child does now, a recap of it, made again when it
+goes stale, and its context against the window it compacts at, its
+turns, steps and tool calls; `task_wait` shows the same for every
+session it waits on, a section each; a `bash` command still running
+says how many lines it has written and shows the latest one.
+
+![A session's chat whose spawn_agent call runs, and the sub-agent's own chat beside it: the note under the spawn call says what the child does, with a recap and its context, steps and tool calls, and the note under the child's bash call says it is still running with the latest line](docs/media/notes.png)
+
 A session may use its working directory, its worktree, the directories
 in `harness-allowed-directories` and the ones you grant it. It also has
 a temporary directory of its own, `/tmp/harness-UID/ID/` (under

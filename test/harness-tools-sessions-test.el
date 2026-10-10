@@ -18,6 +18,7 @@
 (defvar harness-tasks-non-interactive)
 (defvar harness-tasks-model)
 (defvar harness-tools-sessions--waiters)
+(defvar harness-tools--watchers)
 
 (defconst harness-tools-sessions-test-script
   '((:type text :delta "Reply from ") (:type text :delta "the other session.") (:type done :stop-reason end-turn)))
@@ -386,6 +387,54 @@ tell it from the user's messages."
         (should (= 2 (cl-count-if (lambda (l) (string-match-p "Reply from the other session" l))
                                   (split-string text "\n")))))
       (should (zerop (hash-table-count harness-tools-sessions--waiters))))))
+
+(ert-deftest harness-tools-sessions-note-watch-shows-what-it-waits-on ()
+  "The note a call that waits on sessions shows says what each waited
+session is doing and what it has done: the status, the last thing seen
+and the counts.  `session_wait' registers a wake-up and returns at
+once, so the note is what `task_wait' shows of the sessions of the
+tasks it waits on (`harness-tools-sessions--note-watch')."
+  (harness-tools-sessions-test-with
+    (let* ((harness-provider-demo--delay 0.15)
+           (me (harness-tools-sessions-test-session))
+           (other (harness-tools-sessions-test-session))
+           (notes nil)
+           (ctx (list :session-id me
+                      :note (lambda (text) (push text notes)))))
+      ;; A tool call and a turn already behind it, so the counts mean
+      ;; something while the wait runs.
+      (harness-call 'session/append other '(:kind user :content "make the widget"))
+      (harness-call 'session/append other '(:kind tool-call :tool "bash" :call-id "c0" :title "Bash: make widget"))
+      (harness-call 'session/usage-add other '(:context 5000 :last-output 0 :turns 1))
+      (let ((unwatch (harness-tools-sessions--note-watch ctx (list other))))
+        ;; Idle: the note says the last thing it did, and its facts.
+        (let ((note (car (last notes))))
+          ;; Named by its id, since it has no name, then what it last did.
+          (should (string-prefix-p (concat (harness-tools-short-id other) ": ") note))
+          (should (string-match-p "last ran Bash: make widget" note)))
+        (should (cl-some (lambda (n) (string-match-p "5\\.0k/8\\.0k before compact" n)) notes))
+        (should (cl-some (lambda (n) (string-match-p "1 turn" n)) notes))
+        (should (cl-some (lambda (n) (string-match-p "1 tool call" n)) notes))
+        ;; Now it runs: the note says so, and keeps the facts.
+        (harness-tools-sessions-test-ok me "session_send" (list :session_id other :message "go"))
+        (harness-test-wait (lambda () (cl-some (lambda (n) (string-match-p "model\\|thinking\\|writing" n)) notes))
+                           5 "the running note")
+        (should (cl-some (lambda (n) (string-match-p "5\\.0k/8\\.0k before compact · 1 turn · 1 tool call" n))
+                         notes))
+        ;; The watching stops when the call it belongs to is over, and
+        ;; the note does not outlive it.
+        (funcall unwatch)
+        (should-not (cl-some (lambda (ws) (cl-some (lambda (e) (equal other (car e))) ws))
+                             (harness-tools-sessions-test-watchers)))
+        (let ((before (length notes)))
+          (harness-emit 'session/usage other (plist-get (harness-call 'session/get other) :usage))
+          (should (= before (length notes))))))))
+
+(defun harness-tools-sessions-test-watchers ()
+  "Return every watcher the notes keep, as (SESSION-ID . ENTRIES)."
+  (let (out)
+    (maphash (lambda (id ws) (push (cons id ws) out)) harness-tools--watchers)
+    out))
 
 (ert-deftest harness-tools-sessions-wait-already-met-and-timeout ()
   "A wait that already holds returns the report; a timeout wakes the session."

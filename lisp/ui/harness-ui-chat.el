@@ -223,6 +223,9 @@ Rendered once one does (`harness-chat--catch-up').")
   "Non-nil when the todo panel shows its title line alone.")
 (defvar-local harness-chat--activity nil
   "What the running turn does, as `agent/activity' last said (wire shape).")
+(defvar-local harness-chat--notes nil
+  "Tool call id -> the note the running turn's activity gives the call.
+The note is drawn under the call's own block (see `harness-chat--note-lines').")
 (defvar-local harness-chat--activity-overlay nil
   "Overlay at the end of the transcript whose `before-string' is the activity line.")
 
@@ -1230,6 +1233,46 @@ spawn_agent call from the moment its child exists."
                 "\n"))
     ""))
 
+(defun harness-chat--note-lines (call)
+  "Return the note under running CALL, dim and indented, or \"\".
+The note is what the running turn's activity carries for the call's id:
+a short report of what the call is doing -- a sub-agent's work, the
+sessions a wait waits on, a long command's output -- which the harness
+makes again as the call goes on (`harness-tools-watch-session')."
+  (let* ((id (plist-get call :call-id))
+         (note (and id harness-chat--notes (gethash id harness-chat--notes))))
+    (if (and (stringp note) (not (string-blank-p note)))
+        (mapconcat (lambda (line)
+                     (concat (propertize "  " 'face 'harness-dim-face)
+                             (propertize line 'face 'harness-dim-face)
+                             "\n"))
+                   (split-string note "\n")
+                   "")
+      "")))
+
+(defun harness-chat--set-notes (activity)
+  "Take the notes ACTIVITY carries and redraw the calls whose note changed.
+The activity of a running `tool' phase carries `:calls', one plist per
+running call, each with its `:note' when it has one (see
+`agent/activity')."
+  (let ((new (make-hash-table :test 'equal))
+        (old (or harness-chat--notes (make-hash-table :test 'equal)))
+        (changed nil))
+    (dolist (call (append (plist-get activity :calls) nil))
+      (let ((id (plist-get call :call-id))
+            (note (plist-get call :note)))
+        (when (and (stringp id) (stringp note) (not (string-blank-p note)))
+          (puthash id note new))))
+    (dolist (id (delete-dups (append (hash-table-keys old) (hash-table-keys new))))
+      (unless (equal (gethash id old) (gethash id new))
+        (push id changed)))
+    (when (or changed (not harness-chat--notes))
+      (setq harness-chat--notes new)
+      (dolist (id changed)
+        (when-let* ((block (gethash (gethash id harness-chat--calls) harness-chat--blocks)))
+          (harness-chat--rerender block)
+          (harness-chat--refresh-group-of block))))))
+
 (defun harness-chat--render-tool (block)
   "Return the body of tool-call BLOCK (its result rendered with it)."
   (let* ((id (harness-chat-block-id block))
@@ -1259,7 +1302,8 @@ spawn_agent call from the moment its child exists."
                          "  " (harness-chat--tool-status result (and call-only node)) "\n"))
          (line (and input (harness-chat--input-summary input title)))
          (summary (concat (if line (concat (propertize (concat "  " line) 'face 'harness-dim-face) "\n") "")
-                          (harness-chat--child-line node result)))
+                          (harness-chat--child-line node result)
+                          (harness-chat--note-lines node)))
          ;; What the user is shown of the result -- an image, a video
          ;; poster, an audio player -- stays above the fold: a folded
          ;; tool call still shows the picture it read.
@@ -3131,6 +3175,7 @@ the end keep showing it."
 (defun harness-chat--on-activity (activity)
   "Note that the running turn now does ACTIVITY (nil once it ended)."
   (setq harness-chat--activity activity)
+  (harness-chat--set-notes activity)
   (when (and activity (equal (plist-get (harness-chat--session) :status) "running"))
     (harness-chat--start-spinner))
   (harness-chat--refresh-activity)
