@@ -935,6 +935,30 @@ A task that already waits in review waits on until the user verifies it."
       (should (equal "high" (plist-get session :thinking)))
       (should-not (plist-get session :non-interactive)))))
 
+(ert-deftest harness-tasks-supervisor-setting-without-the-module ()
+  "The supervisor setting is a task setting even where no module governs it.
+`task/settings' does not carry it, the session gets no `:supervisor' in
+its `:ext', and giving it one all the same does not error."
+  (harness-tasks-test-with
+    (should-not (boundp 'harness-supervisor-tasks))
+    (should-not (plist-member (harness-call 'task/settings default-directory) :supervisor))
+    (let ((harness-tasks-max-running 0))
+      (let ((hands-on (plist-get (harness-call 'task/submit default-directory "hands-on please"
+                                               (list :supervisor :false))
+                                 :id)))
+        (should (eq :false (plist-get (harness-tasks-test-task hands-on) :supervisor)))
+        (harness-call 'task/start hands-on)
+        (should-not (plist-member (plist-get (harness-tasks-test-session hands-on) :ext)
+                                  :supervisor))
+        ;; A bulk change records the setting and reaches no session.
+        (let ((supervising (plist-get (harness-call 'task/submit default-directory "waiting")
+                                      :id)))
+          (should (equal (list supervising)
+                         (harness-call 'task/set-all (list :supervisor t)
+                                       (list :ids (list supervising) :cwd default-directory))))
+          (should (eq t (plist-get (harness-tasks-test-task supervising) :supervisor))))
+        (harness-tasks-test-wait-state hands-on 'done)))))
+
 (ert-deftest harness-tasks-start-interactive-by-default ()
   "Unless the configuration says otherwise, a new task's session is interactive.
 It asks the user for what needs a permission instead of being denied."

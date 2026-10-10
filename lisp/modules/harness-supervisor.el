@@ -544,7 +544,9 @@ event `supervisor/changed' (SESSION-ID ON), with ON t or `:false'.  On
 takes effect at the next tool call, which the permission stage checks
 against the session as it is then; off gives the tools back from the
 next step.  Only the user does this, over ACP as `_harness/supervisor/set'
-with `:sessionId' and `:on'; the agent has no tool for it."
+with `:sessionId' and `:on', or through the task board's bulk edit
+\(`task/set-all', which applies a task's setting to its session); the
+agent has no tool for it."
   (harness-supervisor--set session-id (if (harness-json-true-p on) t :false)))
 
 (harness-defmethod supervisor/set-all (on &optional filter)
@@ -706,16 +708,25 @@ has none."
   (or (eq (plist-get task :state) 'refining)
       (and (eq (plist-get task :state) 'pending) (plist-get task :session) t)))
 
+(defun harness-supervisor--task-value (task)
+  "Return the supervisor value the session of TASK takes: t or `:false'.
+A task submitted with its own setting keeps it (see `task/submit' and
+`task/set-all'); without one it takes `harness-supervisor-tasks'."
+  (if (plist-member task :supervisor)
+      (if (harness-json-true-p (plist-get task :supervisor)) t :false)
+    (if harness-supervisor-tasks t :false)))
+
 (defun harness-supervisor--on-task-changed (task)
   "Set the supervisor setting of the session of TASK, a task view, when it is new.
 A subscriber of `task/changed'.  The tasks module makes the session of a
 task, and the one that writes a backlog task up, as top-level sessions,
 and links them to the task afterwards.  While the session has no
 message yet, the session of a write-up has no setting, as it only reads,
-and the session of the work takes `harness-supervisor-tasks'.  A session
-that wrote a task up takes it when the task starts.  Both act on a
-brand-new session only, once, so a restart never overrides the user's
-switch; a session the user adopted as a task is theirs already."
+and the session of the work takes the task's own setting, else
+`harness-supervisor-tasks'.  A session that wrote a task up takes it
+when the task starts.  Both act on a brand-new session only, once, so a
+restart never overrides the user's switch; a session the user adopted
+as a task is theirs already."
   (condition-case err
       (let ((sid (plist-get task :session)))
         (when (and sid (harness-call 'session/exists-p sid))
@@ -725,7 +736,7 @@ switch; a session the user adopted as a task is theirs already."
              ((and (plist-get (plist-get session :ext) harness-supervisor--write-up-key)
                    (not write-up))
               (unless (harness-supervisor--value session)
-                (harness-supervisor--set-ext sid :supervisor (if harness-supervisor-tasks t :false)))
+                (harness-supervisor--set-ext sid :supervisor (harness-supervisor--task-value task)))
               (harness-supervisor--set-ext sid harness-supervisor--write-up-key nil))
              ((or (plist-get session :head)
                   (plist-get task :adopted)
@@ -736,7 +747,7 @@ switch; a session the user adopted as a task is theirs already."
               (if write-up
                   (progn (harness-supervisor--set-ext sid :supervisor nil)
                          (harness-supervisor--set-ext sid harness-supervisor--write-up-key t))
-                (harness-supervisor--set-ext sid :supervisor (if harness-supervisor-tasks t :false))))))))
+                (harness-supervisor--set-ext sid :supervisor (harness-supervisor--task-value task))))))))
     (error (harness-log 'warn "supervisor: setting up the session of task %s failed: %S"
                         (plist-get task :id) err))))
 

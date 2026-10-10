@@ -693,6 +693,80 @@ session changes, an inactive one too, as `session/set-all' does."
       (should-not (plist-member (harness-supervisor-test-ext sid) :supervisor-write-up))
       (harness-supervisor-test-wait-task id 'done))))
 
+(ert-deftest harness-supervisor-a-task-takes-the-setting-it-was-submitted-with ()
+  "A task's own supervisor setting wins over `harness-supervisor-tasks'.
+The board sends it with the task; a task without one follows the
+default, as before."
+  (harness-supervisor-test-with-tasks
+    ;; Submitted hands-on while tasks supervise by default.
+    (let* ((id (plist-get (harness-call 'task/submit default-directory "fix the parser"
+                                        (list :supervisor :false))
+                          :id))
+           (sid (harness-supervisor-test-task-session id)))
+      (should (eq :false (plist-get (harness-supervisor-test-ext sid) :supervisor)))
+      (should (eq :false (plist-get (harness-supervisor-test-task id) :supervisor)))
+      (harness-supervisor-test-wait-task id 'done))
+    ;; Submitted supervising while tasks work hands-on by default.
+    (let ((harness-supervisor-tasks nil))
+      (let* ((id (plist-get (harness-call 'task/submit default-directory "fix the lexer"
+                                          (list :supervisor t))
+                            :id))
+             (sid (harness-supervisor-test-task-session id)))
+        (should (eq t (plist-get (harness-supervisor-test-ext sid) :supervisor)))
+        (harness-supervisor-test-wait-task id 'done)))))
+
+(ert-deftest harness-supervisor-task-settings-report-the-tasks-default ()
+  "`task/settings' says what a new task's supervisor mode would be.
+The board sets up the next task from it; without the module the setting
+is not there at all (see `harness-tasks-supervisor-setting-without-the-module')."
+  (harness-supervisor-test-with-tasks
+    (should (eq t (plist-get (harness-call 'task/settings default-directory) :supervisor)))
+    (let ((harness-supervisor-tasks nil))
+      (should (eq :false (plist-get (harness-call 'task/settings default-directory) :supervisor))))))
+
+(ert-deftest harness-supervisor-a-bulk-change-reaches-the-sessions ()
+  "`task/set-all' with `:supervisor' changes the task and its session.
+A task that has not started keeps the setting until it does."
+  (harness-supervisor-test-with-tasks
+    (let ((harness-tasks-max-running 0))
+      (let ((id (plist-get (harness-call 'task/submit default-directory "wait for a slot") :id)))
+        ;; No session yet: the setting waits on the task with it.
+        (should (equal (list id) (harness-call 'task/set-all (list :supervisor :false)
+                                               (list :ids (list id) :cwd default-directory))))
+        (should (eq :false (plist-get (harness-supervisor-test-task id) :supervisor)))
+        (harness-call 'task/start id)
+        (let ((sid (harness-supervisor-test-task-session id)))
+          (should (eq :false (plist-get (harness-supervisor-test-ext sid) :supervisor)))
+          ;; A started task's session takes the change at once, as the
+          ;; board's other bulk settings reach a running task's session.
+          (should (equal (list id) (harness-call 'task/set-all (list :supervisor t)
+                                                 (list :ids (list id) :cwd default-directory))))
+          (should (eq t (plist-get (harness-supervisor-test-ext sid) :supervisor)))
+          (should (member "Supervisor mode on" (harness-supervisor-test-hints sid)))
+          (harness-supervisor-test-wait-task id 'done))))))
+
+(ert-deftest harness-supervisor-a-write-up-keeps-its-setting-for-the-start ()
+  "A bulk change leaves a write-up's session alone; the setting waits for the work.
+A write-up only reads, so it never supervises (see
+`harness-supervisor-write-ups-only-read-and-do-not-supervise')."
+  (harness-supervisor-test-with-tasks
+    (let* ((id (plist-get (harness-call 'task/submit default-directory "jot this down"
+                                        (list :refine t :supervisor t))
+                          :id))
+           (sid (harness-supervisor-test-task-session id)))
+      (harness-test-wait (lambda () (eq 'pending (plist-get (harness-supervisor-test-task id) :state))) 30
+                         "the write-up to finish")
+      (harness-call 'task/set-all (list :supervisor :false)
+                    (list :columns '(pending needs-input) :ids (list id) :cwd default-directory))
+      (let ((ext (harness-supervisor-test-ext sid)))
+        (should-not (plist-member ext :supervisor))
+        (should (eq t (plist-get ext :supervisor-write-up))))
+      (should (eq :false (plist-get (harness-supervisor-test-task id) :supervisor)))
+      ;; The task starts in the same session: now it works, hands-on.
+      (harness-call 'task/start id)
+      (should (eq :false (harness-supervisor-test-get sid)))
+      (harness-supervisor-test-wait-task id 'done))))
+
 (ert-deftest harness-supervisor-only-a-new-session-is-set-by-its-task ()
   "The task events never override a switch the user flipped, or a session with a past."
   (harness-supervisor-test-with-tasks

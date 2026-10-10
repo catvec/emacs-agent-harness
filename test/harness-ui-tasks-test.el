@@ -2726,5 +2726,74 @@ q on the board ends it.  C-c C-z does q's job from the compose box."
                 (should (eq 'full (buffer-local-value 'harness-ui-position board))))))
         (mapc (lambda (entry) (kill-buffer (cdr entry))) sessions)))))
 
+(declare-function harness-toggle-supervisor "harness-ui-supervisor")
+(declare-function harness-ui-tasks--supervisor-p "harness-ui-tasks")
+
+(ert-deftest harness-ui-tasks-supervisor-switch ()
+  "The settings line turns supervisor mode for the next task, and in bulk.
+The button appears only while the harness has the supervisor module,
+and a task submitted with the setting keeps it (the session of one that
+starts with it is checked in the supervisor suite)."
+  (harness-ui-tasks-test-with
+    (let ((harness-tasks-max-running 0))
+      ;; Without the supervisor module: no setting, no button.
+      (with-current-buffer board
+        (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the board's settings")
+        (harness-ui-tasks--render-tail)
+        (should-not (plist-member harness-ui-tasks--settings :supervisor))
+        (should-not (harness-ui-tasks--supervisor-p))
+        (should-not (string-match-p "supervisor" (harness-ui-tasks-test--tail-text board))))
+      ;; Loaded, the harness reports the setting and the board shows it,
+      ;; defaulting to supervising.
+      (harness-test-load-module 'supervisor)
+      (harness-test-load-module 'ui-chat)
+      (harness-test-load-module 'ui-supervisor)
+      (with-current-buffer board (harness-ui-tasks-refresh))
+      (harness-test-wait (lambda () (with-current-buffer board
+                                      (and (plist-member harness-ui-tasks--settings :supervisor)
+                                           (harness-ui-tasks--supervisor-p))))
+                         5 "the board to show the supervisor setting")
+      (with-current-buffer board
+        (harness-ui-tasks--render-tail)
+        (should (harness-json-true-p (plist-get harness-ui-tasks--new :supervisor)))
+        (should (string-match-p "· supervisor" (harness-ui-tasks-test--tail-text board)))
+        ;; A click turns the next task's mode off, and on again.
+        (push-button (harness-ui-tasks-test--tail-button board "supervisor"))
+        (should-not (harness-json-true-p (plist-get harness-ui-tasks--new :supervisor)))
+        (should (string-match-p "· hands-on" (harness-ui-tasks-test--tail-text board)))
+        (push-button (harness-ui-tasks-test--tail-button board "hands-on"))
+        (should (harness-json-true-p (plist-get harness-ui-tasks--new :supervisor)))
+        (should (string-match-p "· supervisor" (harness-ui-tasks-test--tail-text board)))
+        ;; Hands-on for the two tasks submitted now.
+        (push-button (harness-ui-tasks-test--tail-button board "supervisor")))
+      (harness-ui-tasks-test--type-and-submit board "Work hands-on")
+      (harness-ui-tasks-test--type-and-submit board "Me too")
+      (harness-ui-tasks-test--wait-text board "Pending  2")
+      (let ((ids (mapcar (lambda (task) (plist-get task :id))
+                         (harness-call 'task/list default-directory))))
+        (should (= 2 (length ids)))
+        (should (cl-every (lambda (id) (eq :false (plist-get (harness-call 'task/get id) :supervisor)))
+                          ids))
+        ;; Bulk editing turns it on for every current task, and for the
+        ;; task submitted next.
+        (with-current-buffer board
+          (harness-ui-tasks-toggle-bulk)
+          (harness-ui-tasks--render-tail)
+          (should (string-match-p "EDITING 2 CURRENT TASKS" (harness-ui-tasks-test--tail-text board)))
+          (should (string-match-p "· hands-on" (harness-ui-tasks-test--tail-text board)))
+          (push-button (harness-ui-tasks-test--tail-button board "hands-on")))
+        (harness-test-wait
+         (lambda ()
+           (cl-every (lambda (id) (eq t (plist-get (harness-call 'task/get id) :supervisor))) ids))
+         5 "the tasks to supervise")
+        ;; The board follows: the button now says supervisor, and the
+        ;; next task keeps the bulk change.
+        (harness-test-wait
+         (lambda () (with-current-buffer board
+                      (harness-ui-tasks--render-tail)
+                      (string-match-p "· supervisor" (harness-ui-tasks-test--tail-text board))))
+         5 "the settings line to say supervisor")
+        (should (harness-json-true-p (plist-get harness-ui-tasks--new :supervisor)))))))
+
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here
