@@ -192,18 +192,29 @@ Then add it to your init file:
 and reloads it in place, keeping running sessions. It updates the git
 checkout the harness runs from: the clone of a manual installation, or
 the clone that straight.el keeps for a Doom Emacs or straight.el
-installation. It fetches the checkout's upstream branch and, when there
-are new commits, first checks the newest one in a separate Emacs,
-outside the checkout: `harness.el` must load, and every file must
-compile with no merge conflict marker in its code. Only then does it
-fast-forward the checkout and run `harness-reload`, which loads the
-update in your Emacs and in the harness process. A commit that fails
-the check is never installed, and a fast-forward cannot conflict, so
-the harness keeps running what it ran until a fixed commit arrives.
-The update also changes nothing when the checkout has local changes or
-commits of its own. Git and the checking Emacs run in the background,
-so Emacs stays responsive. The harness log (`C-c h L`) lists the
-commits an update brought in.
+installation. A checkout straight.el installed is updated with
+straight's own pull (`straight-pull-package`), the way its package
+manager updates it, in an Emacs that loaded straight.el. Any other
+checkout is fast-forwarded to the branch it tracks, or else to the
+same-named branch of `origin` (or of its only remote); a detached
+HEAD, or a checkout with no remote, is refused with a message that
+says so. A checkout with local changes is refused either way, and a
+fast-forward changes nothing when the branch has commits of its own.
+
+When the update brings commits, the newest is checked in a separate
+Emacs, outside the checkout: `harness.el` must load, and every file
+must compile with no merge conflict marker in its code. Only then does
+`harness-reload` load the update in your Emacs and in the harness
+process. A commit that fails the check is never installed -- a
+fast-forward cannot conflict, and a straight.el pull that landed on a
+broken commit is put back where it was -- so the harness keeps running
+what it ran until a fixed commit arrives. Git and the checking Emacs
+run in the background, so Emacs stays responsive.
+
+The commits an update brought are its changelog: each one's subject and
+message body, newest first, never diff or file statistics. The version
+page (`C-c h v`) shows it with what the last update did, and the
+harness log (`C-c h L`) lists the commits by hash and subject.
 
 The harness has no numbered releases: it follows its `main` branch, so
 the commit is the version. `harness-update` names it: the commits it
@@ -213,8 +224,8 @@ Package managers can update the harness too, with `doom sync -u` or
 `M-x straight-pull-package`. The harness loads its files from the
 package manager's git clone rather than from its build directory, so
 an update takes effect at the next `harness-reload` or restart, with no
-rebuild. A Doom package pinned with `:pin` follows no branch:
-`harness-update` refuses it, and you update it by changing the pin.
+rebuild. A Doom package pinned with `:pin` does not follow a branch:
+you update it by changing the pin.
 
 ## Getting started
 
@@ -262,32 +273,37 @@ named by `harness-server-init-file`.
 
 ### Running the latest version
 
-`C-c h v` (`M-x harness-version`) shows the commit the harness runs and
-compares it with the places newer commits come from:
+`C-c h v` (`M-x harness-version`) shows the commit the harness runs,
+compares it with the places newer commits come from, and can update it
+from there:
 
 - the checkout it was loaded from, as that checkout is now: what a pull
   or a merge brought there runs only after a reload (`C-c h R`) or a
   restart;
-- the repository that checkout pulls from, which is the remote its
-  branch tracks. straight.el sets it to the recipe's repository, so an
-  install from GitHub is compared with GitHub and one from sourcehut
-  with sourcehut. Nothing needs configuring where one of them cannot be
-  reached;
+- the repository that checkout pulls from: the remote its branch
+  tracks, else `origin`, else its only remote, and the branch it tracks
+  there, else the same-named one. straight.el sets it to the recipe's
+  repository, so an install from GitHub is compared with GitHub and one
+  from sourcehut with sourcehut. Nothing needs configuring where one of
+  them cannot be reached;
 - the local checkouts of the harness that your sessions work in, such
   as a development checkout;
 - `harness-version-origins`: any others you list, such as a mirror the
   install does not pull from. It is empty by default.
 
 Each origin says whether it has commits the harness lacks, and lists
-them. Nothing is fetched, so the commits are counted only when a local
-repository has them, such as a development checkout. Otherwise the
-page says that the origin has commits the harness lacks, without
-counting them. The page then says what to do: reload, pull into the
-checkout the harness runs from (`M-x straight-pull-package` for a
-straight.el install), or push first. The harness checks by itself, in
-its own process, shortly after it starts or reloads and then every half
-hour. Git never prompts there. The page shows the last result at once,
-and `g` checks again. After a check finds that the harness is behind,
+them as changelog entries: the subject of each and its message body,
+never a diff or file statistics. Nothing is fetched, so the commits are
+counted only when a local repository has them, such as a development
+checkout. Otherwise the page says that the origin has commits the
+harness lacks, without counting them. The page then says what to do:
+reload, update with the `[Update harness]` button (`u`), which runs
+`harness-update` and reloads, or push first. After an update the page
+says what came in, with the same changelog, and, when the reload was
+refused, how to restart Emacs or go back. The harness checks by itself,
+in its own process, shortly after it starts or reloads and then every
+half hour. Git never prompts there. The page shows the last result at
+once, and `g` checks again. After a check finds that the harness is behind,
 the menu's Version entry says so, and a small icon nags until it is not:
 an arrow up in a circle, in the mode line indicator (after its
 "harness", even with no session active), in each chat's header line
@@ -348,7 +364,7 @@ default), or nil for nowhere.
 | `C-c h r` | `harness-record-audio` | Start or stop recording from the microphone |
 | `C-c h c` | `harness-connect-remote` | Connect the UI to a remote harness |
 | `C-c h P` | `harness-remote-control` | Pair phones and other devices, and serve them ACP |
-| `C-c h v` | `harness-version` | Show whether the harness runs the latest commit |
+| `C-c h v` | `harness-version` | Show whether the harness runs the latest commit, and update it |
 | `C-c h R` | `harness-reload` | Reload the harness in place |
 | `C-c h L` | `harness-show-log` | Show the harness log |
 | `C-c h ?` | `harness-menu` | Open the menu of every command |

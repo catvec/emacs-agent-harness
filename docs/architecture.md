@@ -5412,28 +5412,35 @@ Origins, in this order and each once: the loaded checkout as it is now
 sessions' projects belong to (`session/list`,
 `harness-files-owning-checkout`); repositories by URL (kind `remote`,
 read with `git ls-remote`).  The repository the loaded checkout pulls
-from (`:upstream t`) comes first of its kind: the remote its branch
-tracks and the branch it tracks there (`for-each-ref
-%(upstream:remotename)`, the remote's URL from `git config`), or
-`origin` and the branch its HEAD names on a detached HEAD.  straight.el
-and other package managers set that remote to the recipe's repository,
-so an install from GitHub is compared with GitHub and one from sourcehut
-with sourcehut.  It is named after its host (github, sourcehut, gitlab,
-codeberg, bitbucket, else the host, else upstream) and left out when
+from (`:upstream t`) comes first of its kind, as
+`harness-revision-remote` resolves it -- the same function
+`harness-update` fetches by, so the two always agree: the remote its
+branch tracks and the branch it tracks there (`for-each-ref
+%(upstream:remotename)`, the remote's URL from `git config`), else
+`origin`, else its only remote; without a tracked upstream the version
+module compares with the branch the remote's HEAD names, read with
+ls-remote.  straight.el and other package managers set that remote to
+the recipe's repository, so an install from GitHub is compared with
+GitHub and one from sourcehut with sourcehut.  It is named after its
+host (github, sourcehut, gitlab, codeberg, bitbucket, else the host,
+else upstream) and left out when
 `harness-version-origins` names its URL on its branch or on none.  It is
 read in the harness process, which has no straight.el, and from any
 package manager's clone.  Nothing is fetched: the relation (`rev-list
 --left-right --count`) and the newest eight commits each side lacks
-(`log --no-merges`) are worked out in the first local repository
-holding both commits, local checkouts first and the loaded one last,
-as package managers clone shallowly.  When none holds both and the
-loaded checkout lacks the origin's commit (`cat-file -e`), the harness
-lacks it too: the origin is ahead, uncounted.
+(`log -z --no-merges` in `harness-revision-commit-format`, parsed by
+`harness-revision-parse-commits`) are worked out in the first local
+repository holding both commits, local checkouts first and the loaded
+one last, as package managers clone shallowly.  When none holds both
+and the loaded checkout lacks the origin's commit (`cat-file -e`),
+the harness lacks it too: the origin is ahead, uncounted.
 
 `version/check (&optional max-age)` → promise of the report `(:checked
 :version :running :origins :verdict)`, each origin `(:name :kind
 :location :branch :upstream :commit :subject :date :dirty :status
-:missing :extra :missing-commits :extra-commits :error)`, `:status`
+:missing :extra :missing-commits :extra-commits :error)`,
+`:missing-commits` and `:extra-commits` the newest commits, each
+`(:commit :date :subject :body)`; `:status`
 same, newer, older, diverged, ahead (a commit the harness lacks, no
 local repository holding both), unknown (the running commit is in none)
 or error, and `:verdict` behind (an origin is newer, diverged or
@@ -6292,10 +6299,21 @@ when the two differ), each origin with its commit and status (the
 repository the loaded checkout pulls from says so), the commits the
 harness lacks (an origin at the same commit with the same status as one
 listed above says so instead of listing them again; an ahead one has
-none to list), and what to do: reload when the loaded checkout moved
-on, pull into the loaded checkout (`straight-pull-package` under
-straight.el) when a remote has newer commits, push when only a local
-checkout has them.
+none to list), and the update: an `[Update harness]` button (`u`) when
+this Emacs can reload the harness it shows, the last update's outcome
+(`harness--last-update`) and, for one that brought commits, its
+changelog.  A commit is shown as its message, subject and body, never
+its diff or file statistics.  The button runs `harness-update': a
+checkout straight.el installed is pulled with `straight-pull-package',
+the way its package manager updates it, and put back with `git reset
+--keep' when the commit it lands on fails the check; any other checkout
+is fetched by the remote and branch `harness-revision-remote' resolves
+and fast-forwarded to the commit it names, checked first by another
+Emacs; a detached HEAD, or a checkout with no remote, is refused with a
+message that says so.  What to do without updating is said too: reload
+when the loaded checkout moved on, push when only a local checkout has
+them.  The page follows `harness-update-hook', which `harness-update'
+runs with the outcome as it settles, and redraws.
 Opening it shows the last report at once and asks `version/check` with
 a max-age of a minute; `g` asks with 0; `version/checked` redraws it,
 and the menu's Version entry says "not the latest" after a report that
