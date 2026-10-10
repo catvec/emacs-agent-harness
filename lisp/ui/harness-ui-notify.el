@@ -12,6 +12,11 @@
 ;; RET or a click on one switches to its project and opens it there,
 ;; unless it shows there already.  With none waiting the click opens
 ;; the session list.
+;;
+;; Other modules add segments of their own after its "harness"
+;; (`harness-ui-notify-segment-functions'), which show with no session
+;; active too: the version page's icon nags there while the harness is
+;; not the latest.
 
 ;;; Code:
 
@@ -44,6 +49,28 @@
 (defvar harness-ui-notify--flashing nil)
 
 (defconst harness-ui-notify--construct '(:eval harness-ui-notify--string))
+
+(defvar harness-ui-notify-segment-functions nil
+  "Functions adding segments of their own to the mode line notifier.
+Each is called without arguments whenever the notifier works its text
+out again (`harness-ui-notify-refresh') and returns a string, with its
+separator in front, or nil for nothing.  The strings show after the
+notifier's \"harness\", before the session counts, in order, and keep
+the notifier showing while no session is active.  The text is worked
+out when sessions change, so a module calls `harness-ui-notify-refresh'
+when its segment changes.  Add to it with a symbol, so a reload
+redefines it.  The version page's nag icon shows this way.")
+
+(defun harness-ui-notify--extra ()
+  "Return the segments of `harness-ui-notify-segment-functions', joined."
+  (let ((segments nil))
+    (run-hook-wrapped 'harness-ui-notify-segment-functions
+                      (lambda (fn)
+                        (let ((segment (ignore-errors (funcall fn))))
+                          (when (and (stringp segment) (not (string-empty-p segment)))
+                            (push segment segments)))
+                        nil))
+    (apply #'concat (nreverse segments))))
 
 (defun harness-ui-notify--counts ()
   "Return (BLOCKED RUNNING IDLE) over active sessions."
@@ -81,12 +108,14 @@ in `harness-notify-flash-face' while it flashes."
 
 (defun harness-ui-notify-refresh ()
   "Recompute the notifier text and redraw mode lines."
-  (pcase-let ((`(,blocked ,running ,idle) (harness-ui-notify--counts)))
+  (pcase-let ((`(,blocked ,running ,idle) (harness-ui-notify--counts))
+              (extra (harness-ui-notify--extra)))
     (when (> blocked harness-ui-notify--last-blocked)
       (harness-ui-notify--flash))
     (setq harness-ui-notify--last-blocked blocked)
     (setq harness-ui-notify--string
-          (if (and (zerop blocked) (zerop running) (or (zerop idle) (not harness-ui-notify-show-idle)))
+          (if (and (zerop blocked) (zerop running) (or (zerop idle) (not harness-ui-notify-show-idle))
+                   (string-empty-p extra))
               ""
             (concat
              (propertize " harness" 'face 'harness-dim-face
@@ -95,6 +124,7 @@ in `harness-notify-flash-face' while it flashes."
                                       "Agent harness sessions: click for the list")
                          'mouse-face 'mode-line-highlight
                          'local-map (harness-ui-mouse-keymap #'harness-ui-notify-show-waiting))
+             extra
              (harness-ui-notify--segment blocked 'harness-icon-blocked 'harness-notify-blocked-face
                                          "Sessions waiting for you (mouse-1: list them, to answer them)")
              (harness-ui-notify--segment running 'harness-icon-running 'harness-notify-running-face

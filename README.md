@@ -282,7 +282,16 @@ straight.el install), or push first. The harness checks by itself, in
 its own process, shortly after it starts or reloads and then every half
 hour. Git never prompts there. The page shows the last result at once,
 and `g` checks again. After a check finds that the harness is behind,
-the menu's Version entry says so.
+the menu's Version entry says so, and a small icon nags until it is not:
+an arrow up in a circle, in the mode line indicator (after its
+"harness", even with no session active), in each chat's header line
+and in the task board's. Hovering over it names the origins with
+commits the harness lacks, and a click opens the page, which says what
+to do. The icon goes as soon as the harness reloads, and comes back
+only if the check the harness makes a few seconds later finds it
+behind still. `harness-ui-version-nag-places` chooses where it shows:
+any of `mode-line`, `chat-header` and `board-header` (all three by
+default), or nil for nowhere.
 
 ## Usage
 
@@ -437,7 +446,9 @@ the tokens keep their look, and each image has its token over it.
 
 Permission requests and questions from the agent appear inline above
 the compose box. An indicator in the mode line, visible from any buffer,
-shows how many sessions need your attention. Clicking it opens the
+shows how many sessions need your attention, and nags with a small
+icon while the harness is not the latest (see
+[Running the latest version](#running-the-latest-version)). Clicking it opens the
 session list on just the sessions waiting for you, from every project
 (`M-x harness-sessions-waiting`), under a banner that counts them. A
 line under each says what it waits on, with the task board's buttons

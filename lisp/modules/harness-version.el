@@ -35,7 +35,8 @@
 ;; themselves a little after the harness starts or reloads and every half
 ;; hour, and each report is announced with `version/checked', which the
 ;; UI follows.  `version/check' answers from the last report unless asked
-;; for a fresher one.
+;; for a fresher one; `version/report' answers with the last report, or
+;; nil, and never checks.
 ;;
 ;; A report is a plist:
 ;;
@@ -544,6 +545,13 @@ joined.  See harness-version.el for the report's shape."
                  (<= (- (float-time) (plist-get report :checked)) max-age)))
         (harness-resolved report)
       (harness-version--check))))
+
+(harness-defmethod version/report ()
+  "Return the last report, when it is about the revision running now, else nil.
+Unlike `version/check', it never checks.  A UI asks for it as it
+connects, so its nag icon shows at once what the last check found,
+while a harness just starting still checks only when it means to."
+  (harness-version--current-report))
 
 (defun harness-version--background-check ()
   "Check, from the timer; the report is announced, a failure was logged."
