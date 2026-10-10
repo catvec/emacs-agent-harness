@@ -82,6 +82,17 @@ Once two pages of nodes lie above every window, all but one are dropped.")
 (defconst harness-chat--tool-output-limit 3000
   "Characters of tool output shown before a \"show all\" button.")
 
+(defconst harness-chat--message-limit 20000
+  "Characters of a message shown before a \"show more\" button.
+A message longer than this shows its first `harness-chat--message-limit'
+characters and a button that shows as much again, press by press.  A
+message of hundreds of kilobytes -- the plan, a step prompt or a report
+the supervisor sends a worker, or a model's own long answer -- would
+otherwise sit in the buffer whole: redisplay wraps it, `recenter' and
+`harness-ui-text-height' lay it out, and Emacs freezes for seconds
+every time the chat is opened or scrolled.  Tool output has its own,
+smaller, threshold (`harness-chat--tool-output-limit').")
+
 (defconst harness-chat--render-interval 0.3
   "Seconds between Markdown re-renders of a streaming block.")
 
@@ -154,7 +165,7 @@ through." :group 'harness-ui-chat)
 
 (cl-defstruct (harness-chat-block (:constructor harness-chat--make-block) (:copier nil))
   "One rendered node."
-  id kind node result start end fold collapsed show-all content streamed group
+  id kind node result start end fold collapsed show-all shown content streamed group
   head)                                 ; non-nil: first agent block of a turn, carries the sender name
 
 (cl-defstruct (harness-chat-group (:constructor harness-chat--make-group-record) (:copier nil))
@@ -975,6 +986,56 @@ an ask_user option, goes under its key, indented."
                         out)))
     (apply #'concat (nreverse out))))
 
+;;;; Showing long messages
+
+(defun harness-chat--message-text (block)
+  "Return the whole message BLOCK holds, whether or not it is all shown."
+  (let ((text (harness-chat-block-content block)))
+    (if (stringp text)
+        text
+      (or (plist-get (harness-chat-block-node block) :content) ""))))
+
+(defun harness-chat--page-limit (block)
+  "Return how many characters of its message BLOCK shows.
+The default page, or as many pages as `harness-chat--show-more' has
+been asked for."
+  (or (harness-chat-block-shown block) harness-chat--message-limit))
+
+(defun harness-chat--page (block)
+  "Return the part of BLOCK's message it shows now.
+Everything, for a message no longer than `harness-chat--message-limit';
+else its first `harness-chat--page-limit' characters, the rest waiting
+behind the button `harness-chat--more-button' returns."
+  (let* ((text (harness-chat--message-text block))
+         (limit (harness-chat--page-limit block)))
+    (if (> (length text) limit) (substring text 0 limit) text)))
+
+(defun harness-chat--show-more (id)
+  "Show another page of the message of block ID."
+  (when-let* ((block (gethash id harness-chat--blocks)))
+    (setf (harness-chat-block-shown block)
+          (+ (harness-chat--page-limit block) harness-chat--message-limit))
+    (harness-chat--rerender block)))
+
+(defun harness-chat--more-button (block)
+  "Return BLOCK's button for the rest of its message, or nil.
+Nil while the whole message shows."
+  (let* ((text (harness-chat--message-text block))
+         (rest (- (length text) (harness-chat--page-limit block))))
+    (when (> rest 0)
+      (harness-chat--button
+       (format "show %s (%d more chars)"
+               (if (> rest harness-chat--message-limit) "more" "the rest")
+               rest)
+       (lambda () (harness-chat--show-more (harness-chat-block-id block)))
+       :help (format "Show the next %d characters of this message" harness-chat--message-limit)))))
+
+(defun harness-chat--more-line (block)
+  "Return the line holding BLOCK's \"show more\" button, or \"\"."
+  (if-let* ((button (harness-chat--more-button block)))
+      (concat "  " button "\n")
+    ""))
+
 ;;;; Rendering: blocks
 
 (defun harness-chat--sender (text face)
@@ -1039,12 +1100,13 @@ transcript it points the new model at."
          (from (harness-node-sender node))
          (handoff (harness-node-handoff node))
          (face (if from 'harness-system-face 'harness-user-face))
-         (text (harness-chat--mark-image-tokens (harness-chat--plain (plist-get node :content))
+         (text (harness-chat--mark-image-tokens (harness-chat--plain (harness-chat--page block))
                                                 (plist-get node :blocks)))
          (body (concat (if from
                            (harness-chat--from-line from)
                          (harness-chat--sender harness-chat-user-label 'harness-user-label-face))
                        (if (string-blank-p text) "" text)
+                       (harness-chat--more-line block)
                        (if handoff (harness-chat--handoff-line handoff) "")
                        (harness-chat--blocks-string (plist-get node :blocks)))))
     (harness-chat--margin (harness-chat--face body face) face
@@ -1084,25 +1146,28 @@ agent's header would stand."
 
 (defun harness-chat--render-assistant (block)
   "Return the body of assistant BLOCK."
-  (let ((content (or (harness-chat-block-content block) "")))
+  (let ((content (harness-chat--page block)))
     (harness-chat--margin
      (if (string-blank-p content)
          "\n"
-       (harness-chat--face (harness-chat--ensure-newline (harness-ui-markdown-render content))
-                           'harness-agent-face)))))
+       (concat (harness-chat--face (harness-chat--ensure-newline (harness-ui-markdown-render content))
+                                   'harness-agent-face)
+               (harness-chat--more-line block))))))
 
 (defun harness-chat--render-thinking (block)
   "Return the body of thinking BLOCK."
   (let* ((id (harness-chat-block-id block))
-         (content (or (harness-chat-block-content block) ""))
+         (content (harness-chat--page block))
          (header (concat (harness-chat--fold-button (harness-chat-block-collapsed block)
                                                     (lambda () (interactive) (harness-chat-toggle-block id)))
                          " "
                          (propertize (format "%s thinking (%d words)" (harness-ui-icon 'harness-icon-thinking)
-                                             (harness-chat--words content))
+                                             (harness-chat--words (harness-chat--message-text block)))
                                      'face 'harness-thinking-face)
                          "\n"))
-         (body (harness-chat--foldable (harness-chat--face (harness-chat--plain content) 'harness-thinking-face))))
+         (body (harness-chat--foldable
+                (concat (harness-chat--face (harness-chat--plain content) 'harness-thinking-face)
+                        (harness-chat--more-line block)))))
     (harness-chat--margin (concat header body))))
 
 (defun harness-chat--status (level word help)
@@ -1321,33 +1386,39 @@ message met a cold prompt cache (harness-cowboy.el) says that too."
                            "")
                          "\n"))
          (body (harness-chat--foldable
-                (harness-chat--face (harness-chat--ensure-newline (harness-ui-markdown-render content))
-                                    'harness-thinking-face))))
+                (concat (harness-chat--face (harness-chat--ensure-newline
+                                             (harness-ui-markdown-render (harness-chat--page block)))
+                                            'harness-thinking-face)
+                        (harness-chat--more-line block)))))
     (harness-chat--margin (concat header body))))
 
 (defun harness-chat--render-plan (block)
   "Return the body of plan BLOCK."
-  (let* ((content (or (plist-get (harness-chat-block-node block) :content) ""))
-         (body (concat (harness-chat--label 'harness-chat-icon-plan "plan")
-                       (harness-chat--ensure-newline (harness-ui-markdown-render content)))))
+  (let ((body (concat (harness-chat--label 'harness-chat-icon-plan "plan")
+                      (harness-chat--ensure-newline
+                       (harness-ui-markdown-render (harness-chat--page block)))
+                      (harness-chat--more-line block))))
     (harness-chat--margin (harness-chat--face body 'harness-chat-plan-face) 'harness-chat-plan-face)))
 
 (defun harness-chat--render-error (block)
   "Return the body of local error BLOCK."
   (harness-chat--margin
    (propertize (concat (harness-ui-icon 'harness-icon-warning) " "
-                       (or (plist-get (harness-chat-block-node block) :content) "") "\n")
+                       (harness-chat--page block) "\n"
+                       (harness-chat--more-line block))
                'face 'error)))
 
 (defun harness-chat--render-failed (block err)
   "Return the body of BLOCK, whose renderer signalled ERR, as plain text.
 A block that cannot be rendered must not take the rest of the buffer
 down with it: the transcript below it and the compose box still draw."
-  (let ((node (harness-chat-block-node block)))
+  (let* ((node (harness-chat-block-node block))
+         (text (harness-chat--page block)))
     (harness-chat--margin
-     (concat (harness-chat--plain (or (harness-chat-block-content block)
-                                      (plist-get node :content) (plist-get node :title)
-                                      (format "[%s]" (harness-chat-block-kind block))))
+     (concat (harness-chat--plain (if (string-empty-p text)
+                                      (or (plist-get node :title) (format "[%s]" (harness-chat-block-kind block)))
+                                    text))
+             (harness-chat--more-line block)
              (propertize (format "(shown unformatted: rendering failed with %s)\n"
                                  (harness-error-short-message err))
                          'face 'harness-dim-face)))))
@@ -1420,9 +1491,12 @@ It counts the calls by label, then the thinking folded between them."
                       ("compaction" (harness-chat--render-compaction block))
                       ("plan" (harness-chat--render-plan block))
                       ("error" (harness-chat--render-error block))
-                      (_ (harness-chat--margin
-                          (harness-chat--plain (or (plist-get (harness-chat-block-node block) :content)
-                                                   (format "[%s]" kind))))))
+                      (_ (let ((text (harness-chat--page block)))
+                           (harness-chat--margin
+                            (concat (harness-chat--plain (if (string-empty-p text)
+                                                             (format "[%s]" kind)
+                                                           text))
+                                    (harness-chat--more-line block))))))
                   (error (harness-chat--render-failed block err)))))
          (text (concat (cond ((harness-chat-block-group block) "")
                              ((harness-chat--outside-header block))
@@ -1941,11 +2015,20 @@ the thinking before its first call and after its last stays out."
       (let* ((before (or (harness-chat-block-content block) ""))
              (lead (if (and (string-suffix-p "\n" before)
                             (not (eq (char-before (- (marker-position (harness-chat-block-end block)) 2)) ?\n)))
-                       "\n" "")))
+                       "\n" ""))
+             ;; Only the page is drawn: the rest waits behind the block's
+             ;; button (see `harness-chat--message-limit'), which the next
+             ;; re-render draws.  Appending it all would put the enormous
+             ;; message in the buffer regardless.
+             (room (max 0 (- (harness-chat--page-limit block) (length before) (length lead))))
+             (text (if (or (zerop room) (string-empty-p delta))
+                       ""
+                     (concat lead (substring delta 0 (min room (length delta)))))))
         (setf (harness-chat-block-streamed block) t
               (harness-chat-block-content block) (concat before delta))
-        (harness-chat--append-delta block (concat lead delta)
-                                    (if (equal kind "thinking") 'harness-thinking-face 'harness-agent-face))
+        (unless (string-empty-p text)
+          (harness-chat--append-delta block text
+                                      (if (equal kind "thinking") 'harness-thinking-face 'harness-agent-face)))
         (harness-chat--schedule-render block))))))
 
 (defun harness-chat--on-session (session)
