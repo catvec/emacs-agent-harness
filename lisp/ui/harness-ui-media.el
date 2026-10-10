@@ -361,13 +361,13 @@ file is never read: that would block."
 ;;;; Video
 ;;
 ;; A video shows as a poster: its thumbnail, made in the background by
-;; ffmpegthumbnailer or ffmpeg (a dark card until it lands, or for good
-;; when none can be made), under a round play button, with its duration
-;; in a corner.  A caption follows: a Play button, the name, duration
-;; and size.  The poster and the button both play the video, on a
-;; click or RET.  While a player the harness started itself (mpv,
-;; ffplay) plays it, the poster shows a stop button and both stop it;
-;; an opener (xdg-open) hands the video to the desktop's player.  A
+;; ffmpegthumbnailer or ffmpeg (a card saying it is coming until it
+;; lands, or for good when none can be made), under a round play button,
+;; with its duration in a corner.  A caption follows: a Play button, the
+;; name, duration and size.  The poster and the button both play the
+;; video, on a click or RET.  While a player the harness started itself
+;; (mpv, ffplay) plays it, the poster shows a stop button and both stop
+;; it; an opener (xdg-open) hands the video to the desktop's player.  A
 ;; terminal shows the caption alone.
 
 (defcustom harness-ui-media-video-player nil
@@ -563,11 +563,12 @@ one the poster is 16:9."
       (let ((scale (min (/ (float max-w) (car size)) (/ (float max-h) (cdr size)))))
         (cons (max 1 (round (* scale (car size)))) (max 1 (round (* scale (cdr size)))))))))
 
-(defun harness-ui-media--poster-image (thumb width height playing duration)
+(defun harness-ui-media--poster-image (thumb width height playing duration &optional loading)
   "Return the poster of a video, an SVG image WIDTH by HEIGHT pixels.
 THUMB, a PNG file, fills it; without one it is a dark card.  Over it a
 round play button, a stop button while PLAYING, and DURATION, in
-seconds or nil, in the bottom right corner."
+seconds or nil, in the bottom right corner.  LOADING non-nil, with no
+THUMB yet, says under the button that the thumbnail is being made."
   (let* ((svg (svg-create width height))
          (clip (svg-clip-path svg :id "harness-poster"))
          (r (max 14 (round (* 0.14 (min width height)))))
@@ -588,6 +589,12 @@ seconds or nil, in the bottom right corner."
                              (cons (- cx (* 0.32 r)) (+ cy (* 0.5 r)))
                              (cons (+ cx (* 0.56 r)) cy))
                    :fill "#ffffff"))
+    (when (and loading (not thumb))
+      ;; The thumbnail is being made in the background: say so where it
+      ;; will show, rather than leaving a card that looks broken.
+      (svg-text svg "loading…" :x cx :y (min (- height 8) (+ cy r 16))
+                :text-anchor "middle" :font-family "sans-serif" :font-size 12
+                :fill "#9aa0a6"))
     (when duration
       (let* ((label (harness-ui-media--format-time duration))
              (w (+ 12 (* 7 (length label))))
@@ -619,7 +626,7 @@ read, which would block: it has no thumbnail and no duration."
          (help (format "%s %s: mouse-1 or RET" (if proc "Stop" "Play") name))
          (poster (and action (harness-ui-media--graphic-p)
                       (let ((dims (harness-ui-media--poster-size ready)))
-                        (harness-ui-media--poster-image ready (car dims) (cdr dims) proc duration)))))
+                        (harness-ui-media--poster-image ready (car dims) (cdr dims) proc duration making)))))
     (concat
      (if poster
          (concat (harness-ui-media--clickable (propertize (format "[video %s]" name) 'display poster)

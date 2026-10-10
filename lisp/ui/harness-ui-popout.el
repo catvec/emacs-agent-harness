@@ -16,10 +16,14 @@
 ;; The window is a side window at the bottom of the frame
 ;; (`harness-ui-popout-window-parameters'), selected, and fitted to its
 ;; content up to `harness-ui-popout-max-height', or the popout's own
-;; :max-height (a report with images grows taller).  Each item has one
-;; popout, named by a KEY the owner picks, such as (pending SESSION-ID)
-;; or (report TASK-ID): showing the KEY again reuses its buffer, so state
-;; the owner keeps buffer-locally there survives.  The owner calls
+;; :max-height (a report with images grows taller).  An image is not
+;; drawn with the content: decoding one takes long enough that the
+;; popout would open frozen, so a line where it goes says it is loading
+;; and the image comes a moment later, growing the window
+;; (`harness-ui-image-load').  Each item has one popout, named by a
+;; KEY the owner picks, such as (pending SESSION-ID) or (report
+;; TASK-ID): showing the KEY again reuses its buffer, so state the
+;; owner keeps buffer-locally there survives.  The owner calls
 ;; `harness-ui-popout-refresh' when the item changes and
 ;; `harness-ui-popout-close' once there is nothing left to show.
 ;;
@@ -248,8 +252,11 @@ A popout opened from another one, which closing shows again, has a
 (defun harness-ui-popout--render ()
   "Draw this popout again: the content, then the box when there is one.
 Point stays on the same line, or at the same place in the box, whose
-text is kept; every window showing the popout is fitted again."
+text is kept; every window showing the popout is fitted again.  An
+image the draw before waited on goes with the text this erases: the
+loading lines go, and the new draw puts one where each image goes."
   (when (derived-mode-p 'harness-ui-popout-mode)
+    (harness-ui-image-load-cancel)
     (harness-compose-capture)
     (let ((place (harness-ui-popout--place))
           (starts (mapcar (lambda (w) (cons w (with-current-buffer (window-buffer w)
@@ -306,6 +313,13 @@ That is its :max-height of the frame, or `harness-ui-popout-max-height'."
     (let ((max (with-current-buffer (window-buffer window)
                  (harness-ui-popout--max-lines (window-frame window)))))
       (ignore-errors (fit-window-to-buffer window max harness-ui-popout-min-height)))))
+
+(defun harness-ui-popout--refit ()
+  "Fit every window showing this popout to its content.
+For `harness-ui-image-load-reflow': an image drawn after the popout
+opened takes more room than the line that said it was loading."
+  (dolist (window (get-buffer-window-list (current-buffer) nil t))
+    (harness-ui-popout--fit window)))
 
 (defun harness-ui-popout--frame ()
   "Return the frame this popout shows in, or will show in: the selected one."
@@ -427,7 +441,9 @@ PROPS:
             harness-ui-popout--dir (plist-get props :dir)
             harness-ui-popout--max-height (plist-get props :max-height)
             harness-ui-popout--parent (and (not (equal parent key)) parent)
-            harness-ui-popout--on-close (plist-get props :on-close))
+            harness-ui-popout--on-close (plist-get props :on-close)
+            ;; An image drawn after the popout opened grows it.
+            harness-ui-image-load-reflow #'harness-ui-popout--refit)
       (when harness-ui-popout--dir
         (setq default-directory (file-name-as-directory harness-ui-popout--dir)))
       (harness-ui-popout--render)
@@ -565,12 +581,30 @@ PROPS:
 
 (defun harness-ui-popout--insert-image (file)
   "Insert the image FILE as large as this popout shows it, and a line on it.
+Drawing it takes a moment, which a full-size screenshot does, so a line
+where it goes says it is loading and the image comes as soon as the
+popout has shown (`harness-ui-image-load'); `harness-ui-popout--draw-image'
+is what draws it.  A file that cannot be read, or that Emacs cannot
+draw, reads as it does there: a line saying so."
+  (let* ((frame (harness-ui-popout--frame))
+         (readable (and (not (file-remote-p file)) (file-readable-p file))))
+    (if (and readable (display-images-p frame)
+             (not (harness-ui-image-too-large file frame)))
+        (harness-ui-image-load
+         (propertize (format "[image %s] loading…\n" (abbreviate-file-name file))
+                     'face 'harness-dim-face)
+         (lambda () (harness-ui-popout--draw-image file)))
+      (harness-ui-popout--draw-image file))))
+
+(defun harness-ui-popout--draw-image (file)
+  "Insert the image FILE as large as this popout shows it, and a line on it.
 A remote file is never read, which would block: it can be opened."
   (let* ((local (not (file-remote-p file)))
+         (frame (harness-ui-popout--frame))
          (readable (and local (file-readable-p file)))
-         (graphic (display-images-p))
+         (graphic (display-images-p frame))
          ;; Measured from its header: loading it to measure it would fail.
-         (too-large (and readable graphic (harness-ui-image-too-large file)))
+         (too-large (and readable graphic (harness-ui-image-too-large file frame)))
          (natural (and readable graphic (not too-large) (harness-ui-popout--image-size file)))
          (image (and natural
                      (ignore-errors

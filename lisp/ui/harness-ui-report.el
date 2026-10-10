@@ -46,6 +46,11 @@
 ;; own (`harness-ui-popout-image'), which q closes, back to the report.
 ;; Dragging one, from either, drops its file into another application,
 ;; a chat app or a browser, to pass the evidence on (harness-ui-drag.el).
+;; The popout opens before its images are drawn -- a line says each is
+;; loading -- because decoding a screenshot of a whole frame takes a
+;; moment (`harness-ui-image-load').  The report a session's banner
+;; shows is drawn into a string, where nothing can draw later: its
+;; images are drawn with it.
 ;;
 ;; Other modules add to the popout as they add to a chat:
 ;; `harness-ui-report-panel-functions' draws a panel at the end of the
@@ -128,6 +133,15 @@ last: (SUBMIT . PLACEHOLDER), or nil for no box.")
 `harness-ui-report-string' draws in a scratch buffer no window shows;
 its images fit this one instead.")
 
+(defvar harness-ui-report--defer-images t
+  "Non-nil while a report shows its images as they come.
+Its popout draws them that way: a loading line goes where each image
+will be, and the image is drawn a moment later, so the report appears
+at once rather than after Emacs decoded every screenshot it shows
+\(`harness-ui-image-load').  A report drawn into a string, for a view
+that shows it among its own text, draws them straight away instead: a
+string has nowhere to draw an image later.")
+
 (defvar harness-chat--transcript-end)
 
 (defun harness-ui-report--report (task)
@@ -191,19 +205,32 @@ feedback to `:feedback'."
 See `harness-ui-popout-open-file'."
   (harness-ui-popout-open-file path))
 
+(defun harness-ui-report--image-frame ()
+  "Return the frame the report's images are drawn for.
+That is its window's frame (`harness-ui-report--window', the window a
+report drawn away from its buffer is sized for; else the windows showing
+it), or the selected one when it shows nowhere.  Not simply the selected
+frame: an image is drawn a moment after the report showed
+\(`harness-ui-image-load'), with whatever frame happens to be selected
+then, and a screenshot is only drawable where the report shows."
+  (let ((window (or harness-ui-report--window (car (get-buffer-window-list nil nil t)))))
+    (if (window-live-p window) (window-frame window) (selected-frame))))
+
 (defun harness-ui-report--image-width ()
   "Return the most pixels wide an evidence image is: the popout's width.
 Less a column: an image as wide as the window would wrap onto a line of
 its own."
-  (max 1 (- (harness-ui-popout-pixel-width harness-ui-report--window)
-            (frame-char-width))))
+  (let ((frame (harness-ui-report--image-frame)))
+    (max 1 (- (harness-ui-popout-pixel-width harness-ui-report--window)
+              (frame-char-width frame)))))
 
 (defun harness-ui-report--image-max-height ()
   "Return the most pixels high an evidence image is in this popout.
 `harness-ui-report-image-max-height', and never more than shows whole
 in the popout with its caption under it."
-  (let ((max harness-ui-report-image-max-height))
-    (max 1 (min (if (floatp max) (round (* max (frame-inner-height))) max)
+  (let ((max harness-ui-report-image-max-height)
+        (frame (harness-ui-report--image-frame)))
+    (max 1 (min (if (floatp max) (round (* max (frame-inner-height frame))) max)
                 (harness-ui-popout-pixel-height 2)))))
 
 (defun harness-ui-report--view-image (path id title)
@@ -214,6 +241,39 @@ TITLE names the task.  Closing it shows the report again."
 
 (defun harness-ui-report--insert-image (path)
   "Insert the image PATH as large as the popout lets it be.
+Drawing it takes a moment, which a screenshot of a whole frame does, so
+a line where it goes says it is loading and the image comes as soon as
+the popout has shown (`harness-ui-image-load'); `harness-ui-report--draw-image'
+is what draws it.
+
+A report drawn into a string for a view that shows it among its own
+text, which has nowhere to draw later, draws the image straight away."
+  (let* ((label (format "[image %s]" (abbreviate-file-name path)))
+         (frame (harness-ui-report--image-frame))
+         (readable (and (display-images-p frame) (not (file-remote-p path)) (file-readable-p path)))
+         (too-large (and readable (harness-ui-image-too-large path frame))))
+    (if (and harness-ui-report--defer-images readable (not too-large))
+        (harness-ui-image-load (harness-ui-report--image-loading label path)
+                               (lambda () (harness-ui-report--draw-image path label)))
+      (harness-ui-report--draw-image path label))))
+
+(defun harness-ui-report--image-loading (label path)
+  "Return the line standing in for the image LABEL of PATH while it draws.
+It reads where the image goes, says it is loading, and clicking it, or
+RET on it, shows the image larger, as the image does
+\(`harness-ui-report--view-image')."
+  (let* ((task harness-ui-report--task)
+         (view (lambda () (interactive) (harness-ui-report--view-image path (plist-get task :id)
+                                                                       (harness-ui-report--title task)))))
+    (concat (propertize (concat label " loading…") 'face 'harness-dim-face
+                        'pointer 'hand 'follow-link t
+                        'help-echo (format "%s\nloading… mouse-1 or RET: view it larger"
+                                           (abbreviate-file-name path))
+                        'keymap (harness-ui-mouse-keymap view))
+            "\n")))
+
+(defun harness-ui-report--draw-image (path label)
+  "Draw the image PATH, labelled LABEL, as large as the popout lets it be.
 It takes the popout's width and up to `harness-ui-report-image-max-height';
 clicking it, or RET on it, shows it larger still, in a popout of its
 own, and dragging it drops the file into another application
@@ -221,10 +281,10 @@ own, and dragging it drops the file into another application
 file, which reading here would block on, a button opening the file is
 inserted instead; so it is for an image too large for Emacs to draw
 \(`harness-ui-image-too-large'), which says so."
-  (let* ((label (format "[image %s]" (abbreviate-file-name path)))
-         (task harness-ui-report--task)
-         (readable (and (display-images-p) (not (file-remote-p path)) (file-readable-p path)))
-         (too-large (and readable (harness-ui-image-too-large path)))
+  (let* ((task harness-ui-report--task)
+         (frame (harness-ui-report--image-frame))
+         (readable (and (display-images-p frame) (not (file-remote-p path)) (file-readable-p path)))
+         (too-large (and readable (harness-ui-image-too-large path frame)))
          (image (and readable (not too-large)
                      (ignore-errors
                        (apply #'create-image path nil nil
@@ -478,6 +538,9 @@ banner of a task's session does.  Images fit WINDOW, by default the
 selected one.  The buttons work wherever the string is inserted."
   (when (harness-ui-report--report task)
     (let ((harness-ui-report--full t)
+          ;; A string has nowhere to draw an image later: they are drawn
+          ;; into it straight away.
+          (harness-ui-report--defer-images nil)
           (harness-ui-report--window (or window (selected-window))))
       (with-temp-buffer
         (harness-ui-report--insert task)

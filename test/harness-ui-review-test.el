@@ -42,6 +42,9 @@
 (defvar harness-ui-popout--max-height)
 (defvar harness-ui-report-max-height)
 (defvar harness-ui-report--reports)
+(defvar harness-ui-image-loads)
+(declare-function harness-ui-image-load-flush "harness-ui")
+(declare-function harness-ui-popout--render "harness-ui-popout")
 (declare-function harness-ui-popout--header "harness-ui-popout")
 (declare-function harness-ui-popout-pixel-width "harness-ui-popout")
 (declare-function harness-ui-report--placeholder "harness-ui-report")
@@ -604,7 +607,8 @@ report opens anew."
   "An image of a report is as wide as the popout and much of the frame
 high; RET on it shows it larger in a popout of its own, and q goes back.
 It drags its file into other applications (the popout's image does too:
-see harness-ui-drag-test.el)."
+see harness-ui-drag-test.el).  The popout opens before the image is
+drawn: a line where it goes says it is loading."
   (harness-ui-review-test-with
     (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
               ((symbol-function 'harness-ui-drag-available-p) (lambda () t)))
@@ -614,6 +618,15 @@ see harness-ui-drag-test.el)."
         ;; The report grows taller than other popouts, for its images.
         (should (= harness-ui-report-max-height (buffer-local-value 'harness-ui-popout--max-height popout)))
         (with-current-buffer popout
+          ;; Decoding an image is what would hold the popout back: it opens
+          ;; first, saying where the image goes that it is loading.
+          (should (string-match-p "shot.svg.*loading…" (buffer-string)))
+          (should (buffer-local-value 'harness-ui-image-loads popout))
+          (harness-test-wait (lambda ()
+                               (with-current-buffer popout
+                                 (and (null harness-ui-image-loads)
+                                      (not (string-match-p "loading…" (buffer-string))))))
+                             5 "the report's image to be drawn")
           (goto-char (point-min))
           (let ((match (text-property-search-forward 'display nil
                                                      (lambda (_ value) (eq 'image (car-safe value))))))
@@ -641,6 +654,33 @@ see harness-ui-drag-test.el)."
             (execute-kbd-macro (kbd "q")))
           (should-not (buffer-live-p viewer))
           (should (eq popout (window-buffer window))))))))
+
+(ert-deftest harness-ui-review-report-image-load-dropped-by-a-redraw ()
+  "A redraw drops the images the draw before waited on.
+They are not drawn over the text the redraw wrote: the fresh loading
+lines are the ones that draw, each where its image goes."
+  (harness-ui-review-test-with
+    (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))
+      (let ((popout (harness-ui-review-test--report board id))
+            (file (expand-file-name "shot.svg" dir)))
+        (with-current-buffer popout
+          (should (buffer-local-value 'harness-ui-image-loads popout))
+          ;; Drawn again before the image came, as g does.
+          (harness-ui-popout--render)
+          (harness-ui-image-load-flush)
+          (should-not (buffer-local-value 'harness-ui-image-loads popout))
+          (should-not (string-match-p "loading…" (buffer-string)))
+          ;; One image, where the report draws the evidence: the marker of
+          ;; the dropped draw sat at the start of the buffer.
+          (goto-char (point-min))
+          (let ((match (text-property-search-forward 'display nil
+                                                     (lambda (_ value) (eq 'image (car-safe value))))))
+            (should match)
+            (should (< (save-excursion (goto-char (point-min)) (search-forward "Handed in") (point))
+                       (prop-match-beginning match)))
+            (should (equal file (plist-get (cdr (get-text-property (prop-match-beginning match) 'display)) :file)))
+            (should-not (text-property-search-forward 'display nil
+                                                      (lambda (_ value) (eq 'image (car-safe value)))))))))))
 
 (ert-deftest harness-ui-review-verify-closes-the-report ()
   "[Verify] in the session's banner closes the report its [Review] popped out.
