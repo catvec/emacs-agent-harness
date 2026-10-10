@@ -42,6 +42,9 @@ OpenAI-compatible APIs and AWS Bedrock.
   session has no write tools, its shell is read-only and offline, and
   every turn ends on a decision. On by default, and a click on the
   header line (or `C-c h V`) switches a session to working hands-on.
+  Task sessions follow `harness-supervisor-tasks`, and the task board's
+  settings line has the same switch for the task about to be submitted,
+  or, in bulk edit, for every current task.
 - **Notifications.** A desktop notification, and a push to your phone
   through Gotify once you set it up, when a task waits for your review
   or is done. Agents can notify you too.
@@ -880,8 +883,11 @@ call to one anyway, in every permission mode.
   project like the other settings of new sessions (see
   [Configuration](#configuration)). They decide how a session starts;
   from then on each session has its own switch, and changing a setting
-  leaves the sessions that exist as they are. Sub-agents and BTW side
-  conversations never supervise, and a fork starts as its parent is.
+  leaves the sessions that exist as they are. A task can carry a mode
+  of its own, set on the task board's settings line -- the next task, or,
+  in bulk edit (`B`), the current ones: its session then starts with
+  that, whatever the setting says. Sub-agents and BTW side conversations
+  never supervise, and a fork starts as its parent is.
 - **The header button and `C-c h V`.** The header line of a session
   starts with `supervisor`, or with `hands-on` once the mode is off. A
   click on it, or `C-c h V` (`harness-toggle-supervisor`), flips it, and
@@ -1070,7 +1076,11 @@ your checkout itself can be submitted to the **main tree** instead (the
   of the task at point. New tasks run in auto mode and are interactive
   unless your configuration says otherwise, so a request that needs
   you, such as access to another directory, waits for you in *Requires
-  your input* instead of being denied.
+  your input* instead of being denied. While the supervisor module is
+  loaded the settings line also shows a `supervisor` / `hands-on`
+  switch, the same one a session's header has: it sets
+  [supervisor mode](#supervisor-mode) for the task about to be
+  submitted, or, in bulk edit (`B`), for every current task.
 - The `own worktree` / `main tree` switch beside those settings, in a
   git project, picks where the next task works: **own worktree**, on its
   own branch, merged back when it is done, or **main tree**, the

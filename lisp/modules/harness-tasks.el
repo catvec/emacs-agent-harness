@@ -1468,8 +1468,11 @@ so has it compact sooner."
 They are the current work: running, pending and blocked tasks.  Review,
 done and archived tasks are history and are left alone.")
 
-(defconst harness-tasks-pref-keys '(:model :thinking :permission-mode :non-interactive)
-  "Session settings a task carries until its next start.")
+(defconst harness-tasks-pref-keys '(:model :thinking :permission-mode :non-interactive :supervisor)
+  "Session settings a task carries until its next start.
+`:supervisor' is the session `:ext' key of the supervisor module, t or
+`:false'; a harness without that module keeps the setting on the task
+and does nothing with it (see `harness-tasks--apply-supervisor').")
 
 (defun harness-tasks--non-interactive-p (task)
   "Non-nil when TASK starts non-interactive.
@@ -1514,8 +1517,9 @@ adds a hint to it, so a session something else already changed (`all'
 commands change sessions and tasks alike) is not told twice.  A
 setting the policy fixes for every session is refused before anything
 changes (see `harness-session-check-policy').  A `:priority' is the
-task's own, never its session's: it orders the queue.  Return TASK's
-view."
+task's own, never its session's: it orders the queue.  `:supervisor'
+is the session's `:ext' switch, not a `session/update' setting, so it
+is applied by `harness-tasks--apply-supervisor'.  Return TASK's view."
   (let* ((id (plist-get task :id))
          (prefs (cl-loop for k in harness-tasks-pref-keys
                          when (plist-member settings k)
@@ -1530,11 +1534,27 @@ view."
       (let* ((session (harness-tasks--session task))
              (changes (and session
                            (cl-loop for (k v) on prefs by #'cddr
-                                    unless (harness-setting-equal-p k v (plist-get session k))
+                                    unless (or (eq k :supervisor)
+                                               (harness-setting-equal-p k v (plist-get session k)))
                                     append (list k v)))))
         (when (and changes (harness-method-exists-p 'session/update))
-          (apply #'harness-call 'session/update (plist-get session :id) changes))))
+          (apply #'harness-call 'session/update (plist-get session :id) changes)))
+      (harness-tasks--apply-supervisor task settings))
     (harness-call 'task/get id)))
+
+(defun harness-tasks--apply-supervisor (task settings)
+  "Turn the supervisor mode of TASK's session to what SETTINGS names.
+Supervisor mode is per session, in its `:ext' plist, and the module
+that governs sessions is what sets it (`supervisor/set'); without that
+module the task keeps the setting for when a harness that has it starts
+it, and a write-up's session is left alone, as it only reads: the
+setting means how the work runs, not how it is written up."
+  (when (and (plist-member settings :supervisor)
+             (plist-get task :session)
+             (not (harness-tasks--refinement-p task))
+             (harness-method-exists-p 'supervisor/set))
+    (harness-call 'supervisor/set (plist-get task :session)
+                  (if (harness-json-true-p (plist-get settings :supervisor)) t :false))))
 
 (defun harness-tasks--open-session (id cwd worktree)
   "Create task ID's session in CWD (in WORKTREE, when non-nil) and prompt it.
@@ -2258,14 +2278,17 @@ It starts at once when its project has a slot free, otherwise it waits
 as pending: `harness-tasks-max-running' limits each project on its own.
 OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode',
 `:thinking', `:non-interactive' (an explicit false turns it off),
-`:priority' (low, medium or high, as a symbol or a string; medium by
-default: waiting tasks start by priority, see `harness-tasks-priorities')
-and `:main-tree' (work in the project's main checkout, with no worktree,
-no branch and nothing to merge; for work that has to touch the checkout
-itself, such as cleaning up uncommitted changes); missing ones come
-from the `harness-tasks-' defaults, else from what the directory
-configures: a task is interactive unless `harness-tasks-non-interactive'
-or the directory's `harness-non-interactive' is on.  With `:refine'
+`:supervisor' (t to plan and delegate, an explicit false to work
+hands-on; without it the task takes `harness-supervisor-tasks' when it
+starts, and without that module nothing), `:priority' (low, medium or
+high, as a symbol or a string; medium by default: waiting tasks start
+by priority, see `harness-tasks-priorities') and `:main-tree' (work in
+the project's main checkout, with no worktree, no branch and nothing
+to merge; for work that has to touch the checkout itself, such as
+cleaning up uncommitted changes); missing ones come from the
+`harness-tasks-' defaults, else from what the directory configures: a
+task is interactive unless `harness-tasks-non-interactive' or the
+directory's `harness-non-interactive' is on.  With `:refine'
 the task goes to the backlog instead: an agent writes it up (state
 refining), then it waits in pending until `task/start' -- unless the
 agent finds the board has it already, and refuses it as a duplicate.
@@ -2292,6 +2315,9 @@ session takes it."
     (when (plist-member opts :non-interactive)
       (setq task (plist-put task :non-interactive
                             (if (harness-json-true-p (plist-get opts :non-interactive)) t :false))))
+    (when (plist-member opts :supervisor)
+      (setq task (plist-put task :supervisor
+                            (if (harness-json-true-p (plist-get opts :supervisor)) t :false))))
     (when main-tree
       (setq task (append task (list :main-tree t))))
     (when refine
@@ -2410,30 +2436,39 @@ first question."
 Model, thinking and non-interactive are the values a new task would
 really get: the task defaults, else what the project configures.  So
 non-interactive is on only when `harness-tasks-non-interactive' is, or
-`harness-non-interactive' for the project.  `:require-verification'
-is t while finished work waits for the user's review, else false (not
-nil, which JSON could not tell from a harness that does not say):
-`harness-tasks-require-verification'."
+`harness-non-interactive' for the project.  `:supervisor' is there
+only when the supervisor module is loaded, and is what a task without
+a setting of its own would get, `harness-supervisor-tasks';
+`:require-verification' is t while finished work waits for the user's
+review, else false (not nil, which JSON could not tell from a harness
+that does not say): `harness-tasks-require-verification'."
   (let ((root (and cwd (harness-tasks--project cwd))))
-    (list :max-running harness-tasks-max-running
-          :permission-mode harness-tasks-permission-mode
-          :non-interactive (and (or harness-tasks-non-interactive
-                                    (harness-json-true-p (harness-tasks--config 'harness-non-interactive root)))
-                                t)
-          :require-verification (if harness-tasks-require-verification t :false)
-          :model (or harness-tasks-model (harness-tasks--config 'harness-model root))
-          :thinking (or harness-tasks-thinking (harness-tasks--config 'harness-thinking root))
-          :worktrees (and root (harness-tasks--git-p root) t))))
+    (append
+     (list :max-running harness-tasks-max-running
+           :permission-mode harness-tasks-permission-mode
+           :non-interactive (and (or harness-tasks-non-interactive
+                                     (harness-json-true-p (harness-tasks--config 'harness-non-interactive root)))
+                                 t)
+           :require-verification (if harness-tasks-require-verification t :false)
+           :model (or harness-tasks-model (harness-tasks--config 'harness-model root))
+           :thinking (or harness-tasks-thinking (harness-tasks--config 'harness-thinking root))
+           :worktrees (and root (harness-tasks--git-p root) t))
+     ;; A harness without the supervisor module has no such setting to
+     ;; report, and its tasks work as they always did.
+     (and (boundp 'harness-supervisor-tasks)
+          (list :supervisor (if harness-supervisor-tasks t :false))))))
 
 (harness-defmethod task/set-all (settings &optional filter)
   "Apply SETTINGS to every current task FILTER selects; return the ids changed.
 SETTINGS is a plist of `:model', `:thinking', `:permission-mode',
-`:non-interactive' (an explicit false turns it off) and `:priority'
-\(low, medium or high, as `task/set-priority' reads it).  Only the
-settings given change: without `:priority' (or with nil) every task
-keeps its own, so a bulk edit sets priorities only when asked to.  A
-started task's session gets the session settings too, so its next turn
-uses them; a pending task keeps them for when it starts.  A priority is
+`:non-interactive' (an explicit false turns it off), `:supervisor' (t
+supervises, an explicit false works hands-on) and `:priority' (low,
+medium or high, as `task/set-priority' reads it).  Only the settings
+given change: without `:priority' (or with nil) every task keeps its
+own, so a bulk edit sets priorities only when asked to.  A started
+task's session gets the session settings too, so its next turn uses
+them; a pending task keeps them for when it starts, and the session of
+a backlog write-up keeps them until the task starts.  A priority is
 the task's own and orders the queue (it starts nothing).  FILTER:
 `:columns' (default `harness-tasks-bulk-columns', the running, pending
 and blocked tasks), `:ids' to name tasks outright, `:except' ids to

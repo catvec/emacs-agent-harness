@@ -6,7 +6,9 @@
 ;; segment), the click and the V key that toggle the mode through
 ;; `_harness/supervisor/set', what the toggle says when the harness has
 ;; no supervisor module, when a session is not governed or not known,
-;; and the module's key and header hook, added and removed again.
+;; how it takes the task board's setting target (the next task's mode or
+;; every current task's), and the module's key and header hook, added
+;; and removed again.
 
 ;;; Code:
 
@@ -186,14 +188,36 @@ Each toggle sends `_harness/supervisor/set' and says what it changed."
         ;; A session the harness has not sent yet is not known, not ungoverned.
         (should (equal '("Supervisor mode: the harness has not sent this session yet")
                        (harness-ui-supervisor-test-messages (lambda () (harness-toggle-supervisor "nope")))))
-        ;; A task that has not started has no session to supervise.
-        (with-temp-buffer
-          (setq-local harness-ui-setting-target-function
-                      (lambda () (cons '(:model "demo:scripted") #'ignore)))
-          (should (equal '("Supervisor mode applies to a session, not to a task that has not started yet")
-                         (harness-ui-supervisor-test-messages
-                          (lambda () (call-interactively #'harness-toggle-supervisor))))))
         (should-not sent)))))
+
+(ert-deftest harness-ui-supervisor-toggle-takes-the-boards-target ()
+  "On the task board the toggle changes the next task's setting, not a session's.
+The board hands the setting commands a `(VALUES SET-FN CONTEXT)' target
+rather than a session id, as it does for the other settings; the
+command then shows what it changed and who it applies to."
+  (harness-ui-supervisor-test-with
+    (let ((values (list :supervisor :false))
+          (context nil)
+          (set-fn nil))
+      (with-temp-buffer
+        (setq-local harness-ui-setting-target-function (lambda () (list values set-fn context)))
+        (setq set-fn (lambda (key value) (setq values (plist-put values key value))))
+        (should (equal '("Supervisor mode on (for new tasks)")
+                       (harness-ui-supervisor-test-messages
+                        (lambda () (call-interactively #'harness-toggle-supervisor)))))
+        (should (eq t (plist-get values :supervisor)))
+        ;; Off is an explicit false, and the context says who it is for.
+        (setq context "for 2 tasks")
+        (should (equal '("Supervisor mode off (hands-on) (for 2 tasks)")
+                       (harness-ui-supervisor-test-messages
+                        (lambda () (call-interactively #'harness-toggle-supervisor)))))
+        (should (eq :false (plist-get values :supervisor)))
+        ;; A value that differs (`mixed') turns it on.
+        (setq values nil context nil)
+        (should (equal '("Supervisor mode on (for new tasks)")
+                       (harness-ui-supervisor-test-messages
+                        (lambda () (call-interactively #'harness-toggle-supervisor)))))
+        (should (eq t (plist-get values :supervisor)))))))
 
 (ert-deftest harness-ui-supervisor-key-and-hook ()
   "The module binds V in the harness keys and adds its header function once.

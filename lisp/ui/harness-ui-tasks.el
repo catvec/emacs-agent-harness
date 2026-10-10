@@ -161,6 +161,7 @@ show it (see `harness-ui-tasks-toggle-subtitle').")
 (declare-function harness-btw "harness-ui-btw")
 (declare-function harness-ui-popout-at-point "harness-ui-popout")
 (declare-function harness-ui-popout-try-at-point "harness-ui-popout")
+(declare-function harness-toggle-supervisor "harness-ui-supervisor")
 
 (defmacro harness-ui-tasks--with-task (id &rest body)
   "Run BODY with point on task ID's card.
@@ -182,9 +183,10 @@ rather than going up to the card's first line."
 (defvar-local harness-ui-tasks--settings nil "What `task/settings' returned.")
 (defvar-local harness-ui-tasks--new nil
   "Settings the next submitted task starts with.
-A plist of `:model', `:thinking', `:permission-mode' and
-`:non-interactive', seeded from the harness's task defaults and changed
-with the usual session commands.")
+A plist of `:model', `:thinking', `:permission-mode', `:non-interactive'
+and, when the harness has the supervisor module, `:supervisor', seeded
+from the harness's task defaults and changed with the usual session
+commands.")
 (defvar-local harness-ui-tasks--loading t)
 (defvar-local harness-ui-tasks--error nil "Last failure, shown above the compose box.")
 (defvar-local harness-ui-tasks--show-archived nil)
@@ -1589,6 +1591,7 @@ Review, done and archived tasks are history and are left alone.")
           :thinking (harness-ui-tasks--bulk-common tasks :thinking)
           :permission-mode (harness-ui-tasks--bulk-common tasks :permission-mode)
           :non-interactive (harness-ui-tasks--bulk-common tasks :non-interactive)
+          :supervisor (harness-ui-tasks--bulk-common tasks :supervisor)
           :priority (let ((priorities (delete-dups (mapcar #'harness-ui-tasks--priority tasks))))
                       (and (null (cdr priorities)) (car priorities))))))
 
@@ -1600,7 +1603,9 @@ priority included, stays as it is."
   (setq harness-ui-tasks--new (plist-put (copy-sequence harness-ui-tasks--new) key value))
   (let ((ids (mapcar (lambda (task) (plist-get task :id)) (harness-ui-tasks--bulk-tasks))))
     (harness-ui-call "_harness/task/set-all"
-                     (list :settings (list key (if (and (eq key :non-interactive) (not value)) :false value))
+                     (list :settings (list key (if (and (memq key '(:non-interactive :supervisor))
+                                                       (not value))
+                                                  :false value))
                            :filter (list :ids ids :cwd harness-ui-tasks--dir))
                      (lambda (_) (harness-ui-tasks--render-tail))
                      (lambda (e) (message "Bulk update failed: %s" (harness-error-message e))))))
@@ -1679,12 +1684,12 @@ the others'."
 
 (defun harness-ui-tasks-toggle-bulk ()
   "Switch bulk editing of the current tasks on or off.
-While on, the model, effort, permission-mode, non-interactive and
-priority buttons change every running, pending or blocked task, not
-just the new task or the one at point.  Each changes only its own
-setting, when it is used: a task's other settings, its priority among
-them, stay as they are.  Review, done and archived tasks are history
-and are left alone."
+While on, the model, effort, permission-mode, non-interactive,
+supervisor and priority buttons change every running, pending or
+blocked task, not just the new task or the one at point.  Each changes
+only its own setting, when it is used: a task's other settings, its
+priority among them, stay as they are.  Review, done and archived tasks
+are history and are left alone."
   (interactive)
   (setq harness-ui-tasks--bulk (not harness-ui-tasks--bulk))
   (harness-ui-tasks--render-tail)
@@ -1702,6 +1707,23 @@ and are left alone."
      (format "EDITING %d CURRENT TASK%s (running, pending, blocked) — the settings below change all of them"
              n (if (= 1 n) "" "S"))
      'face 'harness-task-attention-face)))
+
+(defun harness-ui-tasks--supervisor-p ()
+  "Non-nil when this board offers the supervisor setting.
+The harness then has the supervisor module, so `task/settings' carries
+`:supervisor' (a harness without it has no such setting to offer), and
+the UI its toggle command (`harness-toggle-supervisor'); otherwise
+there is nothing to show and nothing to run."
+  (and (plist-member harness-ui-tasks--settings :supervisor)
+       (fboundp 'harness-toggle-supervisor)))
+
+(defun harness-ui-tasks--supervisor-label (value)
+  "Return the label of a supervisor setting VALUE.
+t reads \"supervisor\", `:false' \"hands-on\" (the user turned it off)
+and nil \"mixed\": the current tasks differ, or none of them says."
+  (cond ((harness-json-true-p value) "supervisor")
+        (value "hands-on")
+        (t "mixed")))
 
 (defun harness-ui-tasks--new-settings-line ()
   "The settings line: each setting as a button.
@@ -1732,6 +1754,13 @@ new task's."
                     (harness-ui-tasks--setting-button
                      (harness-ui-non-interactive-label (plist-get values :non-interactive))
                      #'harness-toggle-non-interactive (format "Non-interactive mode of %s" scope))
+                    ;; Supervisor mode is the supervisor module's; a
+                    ;; harness without it has no setting to offer.
+                    (and (harness-ui-tasks--supervisor-p)
+                         (harness-ui-tasks--setting-button
+                          (harness-ui-tasks--supervisor-label (plist-get values :supervisor))
+                          #'harness-toggle-supervisor
+                          (format "Supervisor mode of %s: plan and delegate to workers, or work hands-on" scope)))
                     ;; The next task's priority is beside Submit; the
                     ;; current tasks' is here, changed only when clicked.
                     (and (harness-ui-tasks--bulk-priority-p)
@@ -2272,6 +2301,15 @@ QUIET refreshes in the background, without the loading indicator."
                                                        :permission-mode (plist-get s :permission-mode)
                                                        :non-interactive (harness-json-true-p
                                                                          (plist-get s :non-interactive)))))
+                                         ;; The supervisor setting appears with
+                                         ;; its module, without overriding a
+                                         ;; choice already made on the board.
+                                         (when (and (plist-member s :supervisor)
+                                                    (not (plist-member harness-ui-tasks--new :supervisor)))
+                                           (setq harness-ui-tasks--new
+                                                 (plist-put (copy-sequence harness-ui-tasks--new) :supervisor
+                                                            (if (harness-json-true-p (plist-get s :supervisor))
+                                                                t :false))))
                                          (when (and (harness-compose-live-p) (null harness-ui-tasks--target))
                                            (harness-ui-tasks--render-tail)))))
                          #'ignore)
@@ -2834,11 +2872,15 @@ and attachments go along, as in a chat."
              (harness-ui-tasks--send target text expanded atts refine))))))))
 
 (defun harness-ui-tasks--new-opts ()
-  "The new-task settings as `task/submit' options (unset ones are left out)."
+  "The new-task settings as `task/submit' options (unset ones are left out).
+Supervisor mode is sent only when the harness has its module, which
+`task/settings' says by carrying the setting."
   (let ((new harness-ui-tasks--new))
     (append (cl-loop for k in '(:model :thinking :permission-mode)
                      when (plist-get new k) append (list k (plist-get new k)))
             (and new (list :non-interactive (if (harness-json-true-p (plist-get new :non-interactive)) t :false)))
+            (and (plist-member harness-ui-tasks--settings :supervisor)
+                 (list :supervisor (if (harness-json-true-p (plist-get new :supervisor)) t :false)))
             (and (harness-json-true-p (plist-get new :main-tree)) (list :main-tree t))
             (and (plist-get new :priority) (list :priority (harness-ui-tasks--priority new))))))
 
