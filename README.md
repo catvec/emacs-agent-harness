@@ -32,6 +32,14 @@ OpenAI-compatible APIs and AWS Bedrock.
 - **Permissions and sandboxing.** Four permission modes (Ask, Accept
   edits, Auto, YOLO), per-session directory access, and a kernel
   sandbox for tool processes (bubblewrap or `systemd-run`).
+- **Polite with your machine.** The tools that start processes (`bash`,
+  `elisp`, `ssh`, `open_harness`) hold a slot per machine -- one per
+  processor plus a slight burst (`harness-tool-slots-count`), so a task
+  board full of agents cannot start processes without end -- and the
+  calls waiting go by session priority (low, medium or high; `C-c h p`,
+  `harness-set-priority`), so the commands of a task you marked high go
+  before a low one's. The test suites run at idle CPU and I/O priority,
+  yielding to whatever you are doing.
 - **Task board.** Run tasks in parallel, each in its own session and git
   worktree, review the results, and merge them back through a merge
   queue. A per-project limit on running tasks starts the waiting ones
@@ -2258,6 +2266,12 @@ scripts/media.sh [NAME...]                   # take the screenshots in docs/medi
 
 Tests that talk to real models run only when `HARNESS_INTEGRATION=1` is
 set. See [docs/dev-loop.md](docs/dev-loop.md) for the full workflow.
+
+`scripts/test.sh` runs the suites at idle CPU and I/O priority
+(`nice -n 19`, `ionice -c 3`), so a run yields to whatever else you are
+doing -- a game, an editor, a build -- and uses what the machine has
+left, which on an idle machine is all of it. Set `HARNESS_TEST_NICE=0`
+or `HARNESS_TEST_IONICE=0` to run them at the usual priority.
 
 `M-x harness-reload` (`C-c h R`) checks and byte-compiles every source
 file, then reloads the harness in place, keeping running sessions. If

@@ -3205,6 +3205,54 @@ session may itself be a target with a queue of its own.
   a target outside any git repository, and git cannot merge a branch
   another repository does not have.
 
+### priority
+
+A plugin of its own -- a module, not part of tasks or tools-shell --
+that owns the one vocabulary everything that queues work by priority
+shares: tasks waiting for a project's slots, and the calls of the tools
+that start processes waiting for a machine's slots (see tool-slots).
+
+`harness-priority-levels` are the priorities a session may have, lowest
+first: low, medium and high; `harness-priority-default` is medium.
+`harness-priority-read VALUE` reads one (a symbol or a string in any
+case, "med" meaning medium; anything else is refused) and
+`harness-priority-level VALUE` reads a stored one (nil, or a name no
+level has, is the default), which is what a reader wants:
+`harness-priority-rank` gives its place among the levels (0 is low) and
+`harness-priority-above-p A B` says whether one is above another.
+
+A priority is the session's -- any session's, a plain chat's as much as a
+task's.  It lives in the session's `:ext` under `:priority`, as the
+level's name, set with `session/set-ext`, so it is stored with the
+record and comes back after a restart.  `harness-priority-ext LEVEL` is
+the `:ext` a session is created with (`session/create`),
+`harness-priority-set-session ID LEVEL &optional HINT` sets it, and
+`harness-priority-session SESSION` / `harness-priority-of SESSION-ID`
+read it: a session with none of its own takes its parent's
+\(`:parent-id'), up to `harness-priority--parent-depth' levels, so the
+sub-agents and forks working for a task work at the task's priority, and
+a chain with none is the default.
+
+Methods, reachable over ACP as `_harness/priority/get {sessionId}`,
+`.../rank {sessionId}` and `.../set {sessionId, priority}`:
+
+- `priority/get SESSION-ID` -> the priority as "low", "medium" or
+  "high"; the session's own, else its parent's, else the default; the
+  default too for a session nobody knows.
+- `priority/rank SESSION-ID` -> its place among the levels, 0 is low;
+  for callers that order something by priority without knowing the
+  levels, such as the tool slots.
+- `priority/set SESSION-ID PRIORITY` -> the level's name it set;
+  PRIORITY is read as `harness-priority-read' reads it, and a name no
+  level has is refused (`session/set-ext' signals for a session nobody
+  knows).
+
+Tasks keep their own priority in their record -- a task has one before
+it has a session, and the board queues by it -- and give it to their
+session, so the rest of the harness queues that session's work by the
+same thing (see tasks).  `ui-priority' shows and sets it in the chat
+header.
+
 ### tasks
 
 Task mode: one session per task.  TASK =
@@ -3223,14 +3271,22 @@ blocked on a request or the task stopped part way, `merging` while its
 branch holds a place in the merge queue (`:merge-status` is queued,
 merging or conflict; `:merge-queued` is when it joined, which orders the
 board's section), `review` while its finished work waits for the user's
-verdict.  `:priority` is one of `harness-tasks-priorities`, a symbol
-in memory and a string on disk and the wire; every read has it, and a
-record from before priorities reads `medium` without being rewritten.
+verdict.  `:priority` is one of `harness-priority-levels`,
+a symbol in memory and a string on disk and the wire; every read has
+it, and a record from before priorities reads `medium` without being
+rewritten.  The task's priority is given to its session
+\(`harness-tasks--set-session-priority', `harness-tasks--priority-ext'
+at creation), where the rest of the harness reads it: the session's
+`:ext' `:priority' is the same level, and the queues the session's work
+waits in -- the tool slots above all -- are served by it (see
+priority).
 
 - `task/submit CWD PROMPT &optional (:attachments :model :permission-mode
   :thinking :non-interactive :supervisor :refine :main-tree :priority)` → task; it
   starts when one of its project's `harness-tasks-max-running` slots is
-  free.  The limit is per project: every project (a task's `:project`,
+  free.  A `:priority` is read as `harness-priority-read' reads it
+  (medium by default), orders the project's waiting tasks and reaches
+  the session the task gets (see priority).  The limit is per project: every project (a task's `:project`,
   the main checkout, else its `:cwd`) has that many slots of its own,
   and the scheduler (`harness-tasks--schedule`) starts each project's
   queued tasks in start order (`harness-tasks--start-order`: highest
@@ -4676,6 +4732,58 @@ code that signals is an error result, and code the lent Emacs stopped
 (its time limit, the user's key, C-g) is an error result that says it
 ran partway.
 
+### tool-slots
+
+A plugin of its own -- a module, not part of tools-shell or tools-ssh --
+that caps how many calls of the tools that start processes run at once
+on one machine and serves them by session priority (see priority).  Several sessions at work, each with sub-agents, a model
+that tries commands in parallel, and above all a test run, which
+`scripts/test.sh` starts an Emacs per file for, can otherwise take the
+machine over and stop whatever else the user runs, a game first of all.
+Disable the module (`harness-disabled-modules`) to turn the limit off.
+
+Options:
+
+- `harness-tool-slots-count`: slots per machine (nil, the default: one
+  per processor, `num-processors`).
+- `harness-tool-slots-burst` (default 2): calls more than the count that
+  may run at once, so that a limit sized for long commands does not make
+  every short one wait.
+- `harness-tool-slots-tools` (default bash, elisp, ssh and
+  open_harness): the tools whose calls hold a slot.  A tool not named
+  never waits.
+- `harness-tool-slots-machine-function`: the function that says which
+  machine a call runs on, `harness-tool-slots-default-machine` by
+  default.  That keys an ssh call by the host its `:host` names, and any
+  other by the machine of the directory it starts in: the session's cwd
+  or the call's `:cwd`, which is this machine unless it is a TRAMP
+  directory.  This machine's key is its `system-name` after "local:".
+
+A call of a governed tool holds one slot of its machine while its
+handler runs.  It starts at once while that machine has a free slot;
+otherwise it waits until one is given back, and a call only ever waits
+for its own machine's slots.  The calls waiting for a machine go by
+`harness-priority' -- the priority of the session each call serves
+\(`harness-priority-of', re-read as the slots are given back, so raising
+a session's priority moves the calls it already has waiting): the
+highest priority call waiting takes the slot, the oldest of those
+first, and a call with no session waits as medium does.  So the commands
+of a task the user marked high are served before a low one's, and the
+sub-agents of a task work at the task's priority.  The wait
+is not counted against the tool's own timeout, which starts when the
+handler runs, and a call that waited longer than a moment tells its
+session so as progress: "Waited 3.2s for a free slot on this machine
+(tool: bash)".  Tools that only read or write files, and the harness's
+own commands -- the merge queue, worktrees, the grep tool -- are never
+held, so a read_file does not queue behind a test run.
+
+It is around advice on `harness-tools--run-handler`, added once by the
+module's `:init` and removed by its `:shutdown`, which also lets every
+waiting call run at once; a reload therefore never holds a slot twice.
+The slots belong to the harness process that loads the module, so a
+second harness on the same machine has slots of its own (the limit is
+about one harness's own work, not about the machine's load).
+
 ### acp
 
 Server: `acp/start &key host port` (default 127.0.0.1, port from
@@ -5400,6 +5508,25 @@ reports how many sessions changed with `harness-ui--new-work-text` and
 `harness-ui--report-all` (what a project's `.dir-locals.el` still says
 otherwise).  Its failures go to `harness-ui-supervisor--failed`, the
 same plain message for a harness without the module.
+
+Session priority (`harness-ui-priority`, module `ui-priority`, which
+requires `ui` and `ui-chat`): a session whose `:ext' `:priority' is not
+the default, medium, shows it in the chat's header line after the
+supervisor segment, through `harness-chat-header-functions`:
+"priority: high" in `harness-priority-high-face' or "priority: low"
+in `harness-priority-low-face' (dim).  A session at the default, one
+whose priority the harness has not sent, and one whose priority this UI
+does not know, show nothing.  A click on the segment, and `p` in the
+harness keys (`C-c h p', `harness-set-priority'), set the priority -- a
+level is read in the minibuffer, offering the session's own as the
+default -- with `_harness/priority/set {sessionId, priority}', and say
+what it is now ("Priority: high").  The command takes the buffer's
+setting target like the other session settings, so it refuses a task
+with no session yet and a session the harness has not sent; a harness
+without the priority module does not know the method, which is said
+plainly ("Priority is not available") rather than as a failure.  The
+header follows the session as the harness announces it (a priority set
+on the board's task, or by another client, shows up on its own).
 
 Compose box (`harness-ui-compose`): the editable box shared by chat
 buffers and the task board.  A host calls `harness-compose-setup`

@@ -7,6 +7,9 @@
 # Set HARNESS_TEST_TIMEOUT to kill one file after N seconds (default 900).
 # Set HARNESS_TEST_TIMINGS to the run-time cache's path (default
 # scripts/.dev/test-timings), used to start the slowest suites first.
+# Set HARNESS_TEST_NICE to the CPU niceness of the suites (default 19, 0
+# to run at the usual priority) and HARNESS_TEST_IONICE to their I/O class
+# (default 3, idle; 0 to run at the usual one).
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
@@ -22,6 +25,26 @@ TIMEOUT=${HARNESS_TEST_TIMEOUT:-900}
 JOBS=${HARNESS_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}
 [ "$JOBS" -ge 1 ] 2>/dev/null || JOBS=1
 TIMINGS=${HARNESS_TEST_TIMINGS:-$ROOT/scripts/.dev/test-timings}
+
+# A test run is background work: it must not fight whatever the user is
+# doing -- a game above all -- for the machine.  At nice 19 (and idle
+# I/O) the kernel always prefers their programs and the suites use what
+# is left, which on an idle machine is everything: a run then takes as
+# long as it always did.  A run that is starved for a long time can hit
+# HARNESS_TEST_TIMEOUT, which is the price of staying out of the way.
+NICE=${HARNESS_TEST_NICE:-19}
+IONICE=${HARNESS_TEST_IONICE:-3}
+priority=()
+case "$NICE" in
+  ''|0) ;;
+  *[!0-9]*) echo "test.sh: HARNESS_TEST_NICE must be a number, not '$NICE'" >&2 ;;
+  *) command -v nice >/dev/null 2>&1 && priority+=(nice -n "$NICE") ;;
+esac
+case "$IONICE" in
+  ''|0) ;;
+  [1-3]) command -v ionice >/dev/null 2>&1 && priority+=(ionice -c "$IONICE") ;;
+  *) echo "test.sh: HARNESS_TEST_IONICE must be an I/O class (1, 2 or 3), not '$IONICE'" >&2 ;;
+esac
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -46,7 +69,7 @@ run_suite() {
   # where the UI gets an error.  Emacs gives the processes it starts
   # SIGPIPE back, so the harness processes see it as they really do.
   (trap '' PIPE
-   timeout "$TIMEOUT" emacs -Q --batch -L lisp -L lisp/modules -L lisp/ui -L test -L . \
+   timeout "$TIMEOUT" ${priority[@]+"${priority[@]}"} emacs -Q --batch -L lisp -L lisp/modules -L lisp/ui -L test -L . \
      -l test/harness-test-helpers.el -l "$f" \
      --eval "(ert-run-tests-batch-and-exit (quote $selector))" >"$WORK/$base.log" 2>&1)
   echo $? >"$WORK/$base.status"

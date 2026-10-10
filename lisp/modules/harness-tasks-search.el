@@ -169,7 +169,7 @@ title is its prompt's first line."
   (harness-json-true-p (plist-get task :archived)))
 
 (defconst harness-tasks-search--priorities '("low" "medium" "high")
-  "The priorities a task may have, lowest first (see `harness-tasks-priorities').")
+  "The priorities a task may have, lowest first (`harness-priority-levels').")
 
 (defun harness-tasks-search--priority (value)
   "VALUE as a priority, \"low\", \"medium\" or \"high\"; nil when it names none.

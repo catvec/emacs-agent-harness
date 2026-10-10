@@ -83,13 +83,16 @@
 ;; changes, say -- and nothing merges when its turn ends.  A refined
 ;; task keeps the declaration for when it starts.
 ;;
-;; Priority: every task has one of `harness-tasks-priorities', low,
+;; Priority: every task has one of `harness-priority-levels', low,
 ;; medium (the default) or high, given at submission (`:priority') and
 ;; changed at any time (`task/set-priority').  It orders the queue: when
 ;; `harness-tasks-max-running' holds a project's tasks back, a free slot
 ;; goes to the highest priority waiting, the oldest of those first.  It
 ;; never stops a task at work, and backlog tasks still wait for someone
-;; to start them.
+;; to start them.  The levels, and what is above what, are the priority
+;; plugin's (`harness-priority'), which owns the one vocabulary the
+;; board and the tool slots share; the task's own priority is given to
+;; its session, so the harness queues its work by the same thing.
 ;;
 ;; Duplicates: the agent first looks for related tasks on the board
 ;; (task_list).  When one already asks for exactly the same change it
@@ -173,6 +176,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-files)
+(require 'harness-priority)
 
 (defcustom harness-tasks-max-running nil
   "Tasks of each project that may work at once; the rest wait as pending.
@@ -190,13 +194,8 @@ queue's work: a task whose branch is queued, merging or having its
 conflicts resolved holds no slot, even while its own session commits
 or resolves them.  `task/start' starts a task whatever the limit.
 nil (the default) means no limit.  Waiting tasks start by priority,
-then oldest first (see `harness-tasks-priorities')."
+then oldest first (see `harness-priority-levels')."
   :type '(choice (const :tag "No limit" nil) integer) :group 'harness)
-
-(defconst harness-tasks-priorities '(low medium high)
-  "The priorities a task may have, lowest first; `medium' is the default.
-When `harness-tasks-max-running' makes a project's tasks wait, a free
-slot goes to the highest priority waiting, the oldest of those first.")
 
 (defcustom harness-tasks-require-verification t
   "When non-nil, finished work waits for the user to review it.
@@ -538,8 +537,12 @@ that session brings the task back to work, so the session stays."
 (defun harness-tasks--set (id &rest plist)
   "Merge PLIST into task ID and store it.  Return its view.
 A change that names `:state' ends what the task waits for (`:waiting',
-see `harness-tasks--on-turn-ended'), unless it sets a wait itself."
+see `harness-tasks--on-turn-ended'), unless it sets a wait itself.  A
+change that names `:priority' reaches the task's session too, which is
+where the rest of the harness reads its priority from."
   (let ((task (apply #'harness-plist-merge (harness-tasks--get id) (list plist))))
+    (when (plist-member plist :priority)
+      (harness-tasks--set-session-priority task))
     (harness-tasks--put (if (and (plist-member plist :state)
                                  (not (plist-member plist :waiting))
                                  (plist-member task :waiting))
@@ -582,31 +585,23 @@ and nothing merges when its turn ends."
   (harness-json-true-p (plist-get task :main-tree)))
 
 (defun harness-tasks--read-priority (value)
-  "Return VALUE as one of `harness-tasks-priorities', or signal.
-VALUE is a symbol or a string in any case, \"med\" meaning medium, so
-a priority can come from JSON, a tool or a person.  nil is medium."
-  (let ((name (downcase (string-trim (cond ((null value) "medium")
-                                           ((symbolp value) (symbol-name value))
-                                           ((stringp value) value)
-                                           (t (format "%s" value)))))))
-    (or (car (memq (intern (if (equal name "med") "medium" name)) harness-tasks-priorities))
-        (error "Unknown priority %s; it is low, medium or high" value))))
+  "Return VALUE as a priority, reading it as the priority plugin does."
+  (harness-priority-read value))
 
 (defun harness-tasks--priority (task)
-  "Return TASK's priority: one of `harness-tasks-priorities', medium unless set."
-  (let ((value (plist-get task :priority)))
-    (or (car (memq (if (stringp value) (intern value) value) harness-tasks-priorities))
-        'medium)))
+  "Return TASK's priority, a level; `harness-priority-default' unless set."
+  (harness-priority-level (plist-get task :priority)))
 
 (defun harness-tasks--start-order (tasks)
   "Return TASKS in the order they get slots (destructively).
-That is the highest priority first, the oldest first among equals."
+That is the highest priority first (`harness-priority-above-p'), the
+oldest first among equals."
   (sort tasks (lambda (a b)
-                (let ((pa (cl-position (harness-tasks--priority a) harness-tasks-priorities))
-                      (pb (cl-position (harness-tasks--priority b) harness-tasks-priorities)))
-                  (if (= pa pb)
+                (let ((pa (harness-tasks--priority a))
+                      (pb (harness-tasks--priority b)))
+                  (if (eq pa pb)
                       (< (plist-get a :created) (plist-get b :created))
-                    (> pa pb))))))
+                    (harness-priority-above-p pa pb))))))
 
 (defun harness-tasks--refinement-p (task)
   "Non-nil when a turn of TASK's session refines it rather than doing it.
@@ -922,7 +917,7 @@ user, whose answer the queue then waits for too."
 (defun harness-tasks--view (task)
   "Return TASK as methods and events show it: with its `:column'.
 Its `:priority' is always there: a record from before priorities shows
-the default, medium."
+the default, medium (`harness-priority-default')."
   ;; `append' copies TASK, so `plist-put' changes only the view.
   (plist-put (append task (list :column (harness-tasks--column task)))
              :priority (harness-tasks--priority task)))
@@ -1510,9 +1505,11 @@ adds a hint to it, so a session something else already changed (`all'
 commands change sessions and tasks alike) is not told twice.  A
 setting the policy fixes for every session is refused before anything
 changes (see `harness-session-check-policy').  A `:priority' is the
-task's own, never its session's: it orders the queue.  `:supervisor'
-is the session's `:ext' switch, not a `session/update' setting, so it
-is applied by `harness-tasks--apply-supervisor'.  Return TASK's view."
+task's own, never its session's: it orders the board's queue and
+reaches the task's session (`harness-tasks--set-session-priority'),
+where the rest of the harness reads it.  `:supervisor' is the
+session's `:ext' switch, not a `session/update' setting, so it is
+applied by `harness-tasks--apply-supervisor'.  Return TASK's view."
   (let* ((id (plist-get task :id))
          (prefs (cl-loop for k in harness-tasks-pref-keys
                          when (plist-member settings k)
@@ -1549,15 +1546,36 @@ setting means how the work runs, not how it is written up."
     (harness-call 'supervisor/set (plist-get task :session)
                   (if (harness-json-true-p (plist-get settings :supervisor)) t :false))))
 
+(defun harness-tasks--priority-ext (task)
+  "Return the `session/create' `:ext' that gives TASK's session its priority.
+Every task session carries the task's priority, so the queues the
+session's work waits in -- the tool slots above all -- serve it as the
+board's own queue serves the task."
+  (harness-priority-ext (harness-tasks--priority task)))
+
+(defun harness-tasks--set-session-priority (task)
+  "Give TASK's session TASK's priority, when it has a session.
+This is what keeps a session's priority the task's own as the task's
+changes (`task/set-priority', `task/set-all'): the board queues by the
+record, the rest of the harness by the session."
+  (when-let* ((sid (plist-get task :session))
+              ((harness-method-exists-p 'session/set-ext)))
+    (condition-case err
+        (harness-priority-set-session sid (harness-tasks--priority task))
+      (error (harness-log 'warn "task %s: could not set its session's priority: %s"
+                          (plist-get task :id) (harness-error-message err))))))
+
 (defun harness-tasks--open-session (id cwd worktree)
   "Create task ID's session in CWD (in WORKTREE, when non-nil) and prompt it.
 The session is named with the task's title when it has one by now, so
-it is not named again; else the title still on its way names it."
+it is not named again; else the title still on its way names it.  It
+takes the task's priority with it (`harness-tasks--priority-ext')."
   (condition-case err
       (let* ((task (harness-tasks--get id))
              (session (apply #'harness-call 'session/create
                              :cwd cwd
                              (append (and worktree (list :worktree worktree))
+                                     (list :ext (harness-tasks--priority-ext task))
                                      (harness-tasks--name-option task)
                                      (harness-tasks--work-settings task))))
              (sid (plist-get session :id)))
@@ -1754,6 +1772,9 @@ takes the task's title."
                   (list :model model))))
         (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
           (harness-call 'session/resume sid))
+        ;; A session from before the task was reprioritized, or from
+        ;; before this plugin, takes the task's priority now.
+        (harness-tasks--set-session-priority task)
         (harness-call 'session/hint sid
                       (cond
                        (worktree (format "Task started in %s on branch %s"
@@ -1900,7 +1921,8 @@ never received the task, cut short by a restart, gets the task itself."
                ;; write-up (again, or all the same after a duplicate).
                (and begun (harness-string-blank-p text) (harness-tasks--from-harness))))
           (let* ((sid (plist-get (apply #'harness-call 'session/create :cwd (plist-get task :cwd)
-                                        (append (harness-tasks--name-option task)
+                                        (append (list :ext (harness-tasks--priority-ext task))
+                                                (harness-tasks--name-option task)
                                                 (harness-tasks--refine-settings task)))
                                  :id)))
             (harness-tasks--set id :session sid)
@@ -2275,7 +2297,7 @@ OPTS: `:attachments' (ATTACHMENT list), `:model', `:permission-mode',
 hands-on; without it the task takes `harness-supervisor-tasks' when it
 starts, and without that module nothing), `:priority' (low, medium or
 high, as a symbol or a string; medium by default: waiting tasks start
-by priority, see `harness-tasks-priorities') and `:main-tree' (work in
+by priority, see `harness-priority-levels') and `:main-tree' (work in
 the project's main checkout, with no worktree, no branch and nothing
 to merge; for work that has to touch the checkout itself, such as
 cleaning up uncommitted changes); missing ones come from the
@@ -2458,9 +2480,9 @@ medium or high, as `task/set-priority' reads it).  Only the settings
 given change: without `:priority' (or with nil) every task keeps its
 own, so a bulk edit sets priorities only when asked to.  A started
 task's session gets the session settings too, so its next turn uses
-them; a pending task keeps them for when it starts, and the session of
-a backlog write-up keeps them until the task starts.  A priority is
-the task's own and orders the queue (it starts nothing).  FILTER:
+them; a pending task keeps them for when it starts.  A priority is
+the task's own: it orders the queue and reaches the task's session,
+and starts nothing.  FILTER:
 `:columns' (default `harness-tasks-bulk-columns', the running, pending
 and blocked tasks), `:ids' to name tasks outright, `:except' ids to
 leave alone, and `:cwd' to stay inside one project; without it the
@@ -2522,11 +2544,12 @@ the prompt it has), but not one an agent is writing up right now."
   "Give task ID priority PRIORITY: low, medium or high; return the task.
 PRIORITY is a symbol or a string, \"med\" meaning medium.  Priority
 orders the tasks waiting for a slot of their project, highest first
-\(see `harness-tasks-priorities'), so raising a pending task moves it
-up the queue and lowering it lets the others by.  It changes nothing
-else: a task at work keeps its slot, a backlog task still waits for
-`task/start', and a task that waits again later (after a restart)
-waits with its priority."
+\(see `harness-priority-levels'), so raising a pending task moves it
+up the queue and lowering it lets the others by; the task's session
+takes it too, so the commands it runs are served as its task is (see
+the tool-slots module).  It changes nothing else: a task at work keeps
+its slot, a backlog task still waits for `task/start', and a task that
+waits again later (after a restart) waits with its priority."
   (let ((task (harness-tasks--get id))
         (priority (harness-tasks--read-priority priority)))
     (if (eq priority (harness-tasks--priority task))
