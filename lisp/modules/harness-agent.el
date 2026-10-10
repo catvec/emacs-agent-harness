@@ -1055,7 +1055,13 @@ tool asked it to (`:end-turn'), or decides what follows."
                                                             :truncated (plist-get result :truncated))
                                                       ;; The session a spawn_agent call ran.
                                                       (let ((child (plist-get (plist-get result :meta) :child-id)))
-                                                        (and child (list :child-id child)))))))
+                                                        (and child (list :child-id child)))
+                                                      ;; The denied call a rerun_approved call ran again
+                                                      ;; (`rerun_approved'), and the tool it was.
+                                                      (let ((of (plist-get (plist-get result :meta) :rerun-of)))
+                                                        (and of (list :rerun-of of
+                                                                      :rerun-tool (plist-get (plist-get result :meta)
+                                                                                             :rerun-tool))))))))
                     (content (harness-agent--with-steering turn (plist-get result :content))))
                (harness-emit 'agent/tool-result sid rnode)
                (when respond

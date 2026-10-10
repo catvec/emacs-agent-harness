@@ -3873,5 +3873,227 @@ grants to the session, and none of them is revoked."
           (should (equal (list fixed) harness-allowed-directories))
           (should-not saved))))))
 
+;;;; Denied calls the user can approve
+
+(defvar harness-perms-test--ran nil
+  "Inputs the approvable test tool ran with, newest first.")
+
+(defun harness-perms-test--tool ()
+  "Define the call the approval tests deny and the user then approves."
+  (harness-define-tool "t_approved"
+    :label "Approvable test call"
+    :description "A call the tests deny and the user then approves."
+    :kind 'exec
+    :handler (lambda (input _ctx)
+               (push input harness-perms-test--ran)
+               (harness-tool-ok "ran it"))))
+
+(defun harness-perms-test--deny (id &optional tool input)
+  "Have SESSION s1 denied a call TOOL (default t_approved) with INPUT.
+Return the result of the call, the tool being denied by a standing
+rule.  The rule and the call are of this session."
+  (let ((tool (or tool "t_approved"))
+        (input (or input '(:command "x"))))
+    (harness-perms-add-rule "s1" (list :tool tool :behavior 'deny) 'session)
+    (prog1 (harness-test-await (harness-call 'tools/execute "s1" (list :id id :name tool :input input)))
+      (setq harness-perms--session-rules (make-hash-table :test 'equal)))))
+
+(ert-deftest harness-perms-denied-call-gets-a-handle ()
+  "Every denial is kept under the handle of its call id, with the tool
+and the very input it was denied with; the denial the agent reads names
+the handle and how the user can approve it."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--tool)
+  (setq harness-perms-test--ran nil)
+  (let* ((result (harness-perms-test--deny "call-1"))
+         (record (harness-perms--denied-record "s1" "call-1")))
+    (should (plist-get result :denied))
+    (should-not harness-perms-test--ran)
+    (should (string-match-p "\\`Denied: denied by a standing rule" (plist-get result :content)))
+    (should (string-match-p "handle call-1" (plist-get result :content)))
+    (should (string-match-p "rerun_approved" (plist-get result :content)))
+    (should record)
+    (should (equal "t_approved" (plist-get record :tool)))
+    (should (equal '(:command "x") (plist-get record :input)))
+    (should-not (plist-get record :approved))
+    (should-not (plist-get record :used))
+    ;; A handle this session never had, and one of another session, are unknown.
+    (should-not (harness-perms--denied-record "s1" "nope"))
+    (should-not (harness-perms--denied-record "s2" "call-1"))
+    ;; A call the chain allows is no denied call.
+    (harness-perms-test--setup :permission-mode 'yolo)
+    (harness-test-await (harness-call 'tools/execute "s1"
+                                      (list :id "call-2" :name "t_approved" :input '(:command "y"))))
+    (should-not (harness-perms--denied-record "s1" "call-2"))))
+
+(ert-deftest harness-perms-approving-denied-call-tells-the-agent ()
+  "Only the user approves a denied call, and the agent is told to rerun
+it with its handle.  Approving again tells it again; an unknown handle
+is an error, and a blank one is no handle at all."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--tool)
+  (let* ((prompts (harness-perms-test--prompts))
+         (call (lambda (handle)
+                 (harness-call 'permission/approve-denied "s1" handle)))
+         (unapproved (harness-perms-test--deny "call-1")))
+    (should (plist-get unapproved :denied))
+    ;; Nothing was approved: rerunning is refused and runs nothing.
+    (setq harness-perms-test--ran nil)
+    (let ((refused (harness-test-await
+                    (harness-call 'tools/execute "s1"
+                                  (list :id "r0" :name "rerun_approved" :input '(:handle "call-1"))))))
+      (should (plist-get refused :is-error))
+      (should (string-match-p "has not been approved by the user" (plist-get refused :content)))
+      (should-not harness-perms-test--ran))
+    (should-not (funcall prompts))
+    ;; The user approves: the record says so and the agent is told.
+    (let ((answer (funcall call "call-1")))
+      (should (plist-get answer :approved))
+      (should (equal "t_approved" (plist-get answer :tool)))
+      (should (plist-get (harness-perms--denied-record "s1" "call-1") :approved))
+      (should (equal (list (cons "s1" (format harness-perms-approved-text "t_approved" "call-1")))
+                     (funcall prompts)))
+      (should (string-match-p "\\`The user approved" (cdar (funcall prompts)))))
+    ;; Approving it again tells the agent again.
+    (funcall call "call-1")
+    (should (= 2 (length (funcall prompts))))
+    (should (string-match-p "Run it now, unchanged, with rerun_approved"
+                            (cdar (funcall prompts))))
+    ;; An unknown or blank handle is an error.
+    (should-error (funcall call "nope"))
+    (should-error (funcall call ""))
+    (should-error (funcall call nil))
+    (should-error (harness-call 'permission/approve-denied "s2" "call-1"))))
+
+(ert-deftest harness-perms-approved-call-runs-with-no-permission-check ()
+  "Rerunning the approved call runs the stored tool with the stored input
+and asks the permission chain nothing: the rule that denied it still
+stands, and a second permission decision is never made."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--tool)
+  (let* ((prompts (harness-perms-test--prompts))
+         (decisions nil)
+         (harness-perms-test--ran nil))
+    (harness-on 'permission/decided (lambda (_sid request _decision)
+                                      (push (plist-get request :tool) decisions)))
+    (harness-perms-test--deny "call-1")
+    (harness-call 'permission/approve-denied "s1" "call-1")
+    (setq decisions nil)
+    (let* ((result (harness-test-await
+                    (harness-call 'tools/execute "s1"
+                                  (list :id "r1" :name "rerun_approved" :input '(:handle "call-1")))))
+           (record (harness-perms--denied-record "s1" "call-1")))
+      (should-not (plist-get result :is-error))
+      (should (string-match-p "The user approved denied call call-1 (t_approved); it ran as it was denied"
+                              (plist-get result :content)))
+      (should (string-match-p "ran it" (plist-get result :content)))
+      ;; The tool ran with the input it was denied with, once.
+      (should (equal '((:command "x")) harness-perms-test--ran))
+      ;; Nothing decided the stored call again: only rerun_approved went
+      ;; through the chain, and it never needs approval.
+      (should (equal '("rerun_approved") decisions))
+      ;; The handle is used up, and the rerun is linked to the call.
+      (should (plist-get record :used))
+      (should (equal '(:user-approved t :rerun-of "call-1" :rerun-tool "t_approved")
+                     (harness-plist-get-in result '(:meta))))
+      ;; The agent can work on with its output; the user's approval stands.
+      (should (equal "s1" (caar (funcall prompts)))))))
+
+(ert-deftest harness-perms-rerun-refuses-used-and-unknown-handles ()
+  "A handle is used once, and only a denied call of this session can be
+rerun.  An unknown handle, another session's, and a used one are
+refused, and nothing runs."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--tool)
+  (harness-perms-test--prompts)
+  (let ((harness-perms-test--ran nil))
+    (harness-perms-test--deny "call-1")
+    (harness-call 'permission/approve-denied "s1" "call-1")
+    (let ((first (harness-test-await
+                  (harness-call 'tools/execute "s1"
+                                (list :id "r1" :name "rerun_approved" :input '(:handle "call-1"))))))
+      (should-not (plist-get first :is-error)))
+    (setq harness-perms-test--ran nil)
+    (dolist (case '(("call-1" . "already rerun")
+                    ("nope" . "No denied call nope")
+                    ("" . "needs handle")))
+      (let ((result (harness-test-await
+                     (harness-call 'tools/execute "s1"
+                                   (list :id "r2" :name "rerun_approved"
+                                         :input (list :handle (car case)))))))
+        (should (plist-get result :is-error))
+        (should (string-match-p (cdr case) (plist-get result :content)))))
+    (should-not harness-perms-test--ran)
+    ;; A handle of a call another session was denied is not this one's.
+    (harness-perms-add-rule "s1" '(:tool "t_approved" :behavior deny) 'session)
+    (harness-test-await (harness-call 'tools/execute "s2"
+                                      (list :id "other" :name "t_approved" :input '(:command "z"))))
+    (harness-perms-add-rule "s2" '(:tool "t_approved" :behavior deny) 'session)
+    (harness-call 'permission/approve-denied "s2" "other")
+    (let ((result (harness-test-await
+                   (harness-call 'tools/execute "s1"
+                                 (list :id "r3" :name "rerun_approved" :input '(:handle "other"))))))
+      (should (plist-get result :is-error))
+      (should (string-match-p "No denied call other" (plist-get result :content))))
+    (should-not harness-perms-test--ran)))
+
+(ert-deftest harness-perms-rerun-cannot-change-the-call ()
+  "rerun_approved takes the handle alone: the tool and its arguments are
+the stored ones, whatever else the call carries, and the stored call is
+the one that runs."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--tool)
+  (harness-perms-test--prompts)
+  (let ((harness-perms-test--ran nil))
+    (harness-perms-test--deny "call-1" "t_approved" '(:command "harmless"))
+    (harness-perms-add-rule "s1" '(:tool "t_other" :behavior deny) 'session)
+    (harness-define-tool "t_other" :label "Other" :kind 'exec
+                         :handler (lambda (_input _ctx) (harness-tool-ok "the other one")))
+    (harness-call 'permission/approve-denied "s1" "call-1")
+    ;; A call that tries to pass another tool and another input: both are
+    ;; ignored, the stored call runs.
+    (let ((result (harness-test-await
+                   (harness-call 'tools/execute "s1"
+                                 (list :id "r1" :name "rerun_approved"
+                                       :input '(:handle "call-1" :name "t_other"
+                                                :tool "t_other" :input (:command "rm -rf /")))))))
+      (should-not (plist-get result :is-error))
+      (should (equal '((:command "harmless")) harness-perms-test--ran))
+      (should-not (string-match-p "the other one" (plist-get result :content)))
+      (should (string-match-p "the tool and the input are the call's own"
+                              (harness-tool-description (harness-tool-get "rerun_approved")))))))
+
+(ert-deftest harness-perms-a-final-gate-denial-gets-a-handle ()
+  "A denial a gate makes at its own priority, `:final' and before the
+mode, is kept and approvable all the same: the record hangs off
+`permission/decided', so it sees every stage's denials, the write-up
+gate's and the supervisor's included."
+  (harness-perms-test--setup :permission-mode 'yolo)
+  (harness-perms-test--tool)
+  (let ((gate (lambda (_decision next request)
+                (funcall next (if (equal "t_approved" (plist-get request :tool))
+                                  (list :behavior 'deny :final t
+                                        :reason "this session writes a task up rather than doing it, so it only reads"
+                                        :hint "Write it up from what you can read.")
+                                _decision)))))
+    (harness-add-filter 'permission/decide gate 25)
+    (unwind-protect
+        (let ((harness-perms-test--ran nil))
+          ;; yolo would allow it; the gate's denial is final and wins.
+          (let ((result (harness-test-await
+                         (harness-call 'tools/execute "s1"
+                                       (list :id "call-gate" :name "t_approved" :input '(:command "x"))))))
+            (should (plist-get result :denied))
+            (should (string-match-p "handle call-gate" (plist-get result :content)))
+            (should-not harness-perms-test--ran))
+          (harness-perms-test--prompts)
+          (harness-call 'permission/approve-denied "s1" "call-gate")
+          (let ((rerun (harness-test-await
+                        (harness-call 'tools/execute "s1"
+                                      (list :id "r1" :name "rerun_approved" :input '(:handle "call-gate"))))))
+            (should-not (plist-get rerun :is-error))
+            (should (equal '((:command "x")) harness-perms-test--ran))))
+      (harness-remove-filter 'permission/decide gate))))
+
 (provide 'harness-perms-test)
 ;;; harness-perms-test.el ends here

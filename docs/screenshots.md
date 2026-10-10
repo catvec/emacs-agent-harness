@@ -70,6 +70,8 @@ The pictures, by the name `scripts/media.sh` takes:
 | `insights-activity` | The same report further down: the busiest sessions, the tools, the permission decisions and the tasks | `harness-media-shot-insights-activity` |
 | `chat-cowboy` | A chat whose prompt cache went cold yesterday, `orders.py` beside it: another session's message waits while the panel asks what goes first, each choice with its cost | `harness-media-shot-chat-cowboy` |
 | `notes` | A session's chat whose `spawn_agent` call runs, and the sub-agent's chat beside it: the note under the spawn call says what the child does, with a recap of it and its facts, and the note under the child's `bash` call says it is still running | `harness-media-shot-notes` |
+| `chat-denied` | A session's chat whose `bash` call its own rule refuses: the denial names the handle, and the call offers `[Approve]`, the user's yes, which no mode, rule or judge can deny | `harness-media-shot-chat-denied` |
+| `chat-denied-approved` | The same chat after the user approved that call: it reads user-approved, the agent's `rerun_approved` call under it ran the very command, with the handle linking the two | `harness-media-shot-chat-denied-approved` |
 
 ## How the pictures are made
 

@@ -362,13 +362,17 @@ another session or task.")
 (defun harness-supervisor--allowed-tools ()
   "Return the names of the tools a supervising session may use besides bash.
 They are the reading, web and coordination tools, the tool to ask for
-a directory when the permission module defines it, and the tools of
-`harness-supervisor-tools'."
+a directory when the permission module defines it, `rerun_approved'
+\(which runs only a call the user approved by hand, see
+harness-perms.el), and the tools of `harness-supervisor-tools'."
   (append harness-supervisor--read-tools
           harness-supervisor--net-tools
           harness-supervisor--coordination-tools
           (and (boundp 'harness-perms-dir-tool) (stringp harness-perms-dir-tool)
                (list harness-perms-dir-tool))
+          ;; The user's own approval lets a call this gate refused run as
+          ;; it was denied; the tool refuses anything they did not approve.
+          '("rerun_approved")
           harness-supervisor-tools))
 
 (defun harness-supervisor--confined-p (dir)

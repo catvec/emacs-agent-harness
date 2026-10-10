@@ -462,9 +462,12 @@ it before the permission chain, which would allow it."
                                 60)))
           (should (plist-get r :is-error))
           (should (eq t (plist-get r :denied)))
-          (should (equal (concat "Denied: corporate mode: tools that reach other machines are off "
-                                 harness-tools-corporate-hint)
-                         (plist-get r :content))))
+          ;; The reason and the hint; the denial then names the handle the
+          ;; user can approve the call under (harness-perms.el).
+          (should (string-prefix-p (concat "Denied: corporate mode: tools that reach other machines are off "
+                                           harness-tools-corporate-hint)
+                                   (plist-get r :content)))
+          (should (string-match-p "rerun_approved" (plist-get r :content))))
         (let ((d (harness-test-await (harness-call 'tools/authorize id '(:id "c2" :name "ssh"
                                                                           :input (:host "box" :command "true"))))))
           (should (eq 'deny (plist-get d :behavior)))

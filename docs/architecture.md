@@ -1655,6 +1655,15 @@ below).  RESULT = `(:content "…" :is-error BOOL :attachments (…)
   nothing runs.  Emits `permission/decided`.  The `:behavior` is allow
   or deny; a denial carries `:message`, the text `tools/execute` would
   have returned.
+- `tools/execute-approved SESSION-ID CALL` runs CALL with no permission
+  check at all, for a call the user approved by hand after the chain
+  denied it (`rerun_approved` in harness-perms.el): their approval is
+  what the chain would have asked for, and the input CALL carries is the
+  very input it was denied with.  The result is truncated and given to
+  the `tools/result` filter as `tools/execute` gives one, but nothing is
+  announced as `tools/started` or `tools/finished`: the call is no call
+  of the session's own turn, the `rerun_approved` call that runs it is,
+  and its progress and notes show under that call.
 - Corporate mode (`harness-corporate-mode`) turns off the tools of kind
   `net` other than web search (`harness-tools--corporate-net-tools`:
   web_search), and ssh, of kind `exec` but run on another machine
@@ -1688,9 +1697,15 @@ below).  RESULT = `(:content "…" :is-error BOOL :attachments (…)
   connection TRAMP refused because another call was using it is
   reported as busy, to be made again (`:meta` `(:host PREFIX :busy t)`).
 - Denied calls return `(:is-error t :denied t :content "Denied: REASON. HINT")`.
+  Every denial is kept per session under the handle of the call's id,
+  and the reason names the handle and says the user can approve the call
+  in the chat (see the perms section, "Denied calls the user can
+  approve"): the agent can then run it unchanged with `rerun_approved`.
   The agent keeps `:denied t` in the `:meta` of the call's tool-result
   node, so a view can tell a call the permission system refused, which
-  never ran, from one that ran and failed (`harness-ui-tool-outcome`).
+  never ran, from one that ran and failed (`harness-ui-tool-outcome`);
+  the user's approval and the rerun are written there too, where the
+  views show them and a reload keeps them.
 
 ### perms
 
@@ -2007,6 +2022,34 @@ non-interactive session it stays a denial.
   (`permission/dir-revoked`); an entry that still covers it, a parent
   put in its place say, is `changed` and stays; else `gone`.  The
   message says what happened and why.
+- Denied calls the user can approve: every denial is kept, per session,
+  under the handle of the call's id (`harness-perms--remember-denied`, a
+  `permission/decided` subscriber, so a denial is kept whoever made it,
+  the jail, a gate, the judge or an answer), with the tool, the input
+  exactly as it was denied, and the reason and hint the agent was given
+  (`harness-perms--denied-record`).  `permission/approve-denied SESSION-ID
+  HANDLE` → `(:handle :tool :approved :used :message)` is the user's
+  approval of that one call, and only the user gives it: the chat's
+  [Approve] button (`harness-chat-approve-denied-call` approves the call
+  at point), a popout, or the ACP method.  It marks the record and the
+  denied result node's `:meta` (`:approved`, `:approved-at`), which the
+  chat draws and a session reloaded later reads, and prompts the
+  session's agent with a system message: the user approved the call,
+  rerun it unchanged with `rerun_approved`.  `rerun_approved HANDLE`, a
+  tool in `harness-perms--auto-allow-tools` since its own handler is the
+  check, takes the handle alone: the tool and its arguments cannot
+  change.  It refuses a handle this session has no denied call for, one
+  the user has not approved, and one already used (a handle is used
+  once), and else runs the stored call through `tools/execute-approved`,
+  which asks the chain nothing, marks the handle used and the rerun call
+  (`:used`, `:rerun-call-id` under the call), and returns the call's own
+  result with `:meta` `(:user-approved t :rerun-of HANDLE :rerun-tool
+  NAME)`, so the transcript links the rerun to the call it was denied
+  as and the chat marks it user-approved
+  (`harness-chat--rerun-line`).  The record lives in memory for the run
+  and in the session's transcript, where it outlives a reload: the
+  call's node holds the tool and the input, its denied result the
+  approval.
 - Saving `harness-perms-rules` or `harness-allowed-directories` (an
   answer, `permission/allow-dir` with `always`, a revoke, an undo)
   emits `config/changed KEY VALUE global nil`, as the config module
@@ -4482,6 +4525,7 @@ TRAMP prefixes come from the session host):
 | `emacs_messages` | Emacs messages | count | read (needs no approval: `harness-perms--inspection-tools`) |
 | `ask_user` | Question | question, options (strings, or `{label, diagram}` / `{label, image}` objects: every option has a diagram or none does), allow_free_text | meta (answered with `question/answer SID PID ANSWER`; event `question/asked`; the harness asks its own questions the same way, with no tool call, through `question/ask`) |
 | `request_directory_access` | Request access | path, reason | meta (perms module; decided only by the user's answer to a directory prompt, in every mode) |
+| `rerun_approved` | Rerun approved call | handle | meta (perms module; runs the denied call the user approved by hand with `permission/approve-denied`, exactly as it was denied and with no permission check (`tools/execute-approved`); a handle the user has not approved, one this session does not know, and one already rerun are refused) |
 | `session_info` | Session info | — | read (needs no approval: `harness-perms--inspection-tools`) |
 | `plan` | Plan | plan | meta |
 | `todo_write` | Todo list | todos | meta |

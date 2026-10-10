@@ -1274,6 +1274,95 @@ running call, each with its `:note' when it has one (see
           (harness-chat--rerender block)
           (harness-chat--refresh-group-of block))))))
 
+(defconst harness-chat--rerun-tool "rerun_approved"
+  "Name of the tool that runs a denied call the user approved.
+See `rerun_approved' in harness-perms.el.")
+
+(defun harness-chat--denied-state (result)
+  "Return what a refused call's RESULT node says of the user's approval, or nil.
+RESULT is a tool result the permission system refused (`:meta'
+`:denied').  Return (:approved BOOL :used BOOL), the flags the harness
+wrote into its `:meta' when the user approved the call
+\(`permission/approve-denied') and when the agent reran it
+\(`rerun_approved').  nil for a call that ran, and one no harness
+recorded."
+  (let ((meta (and result (plist-get result :meta))))
+    (when (harness-json-true-p (and meta (plist-get meta :denied)))
+      (list :approved (harness-json-true-p (plist-get meta :approved))
+            :used (harness-json-true-p (plist-get meta :used))))))
+
+(defun harness-chat--approval-line (handle result)
+  "Return the line of the user's approval of the denied call HANDLE, or \"\".
+A refused call still waiting offers [Approve], which lets the agent run
+it exactly as it was denied (`rerun_approved'); one the user approved
+says so, and one already rerun says that."
+  (when-let* ((state (harness-chat--denied-state result))
+              (handle (and (stringp handle) (not (string-empty-p handle)) handle)))
+    (concat
+     "  "
+     (cond
+      ((plist-get state :used)
+       (propertize "user-approved · rerun" 'face 'harness-dim-face))
+      ((plist-get state :approved)
+       (propertize "user-approved · the agent can rerun it" 'face 'harness-dim-face))
+      (t (concat (harness-chat--button
+                  "[Approve]"
+                  (lambda () (harness-chat--approve-denied harness-ui-session-id handle))
+                  :help "Let the agent run this call exactly as it was denied (rerun_approved)")
+                 (propertize "  run this call exactly as it was denied" 'face 'harness-dim-face))))
+     "\n")))
+
+(defun harness-chat--approve-denied (session-id handle)
+  "Approve the denied call HANDLE of SESSION-ID, for the user.
+The harness marks the call approved and tells the session's agent to
+rerun it unchanged with `rerun_approved'; the node the call is shown
+from is updated, so the chat redraws it, and the echo area says how it
+went."
+  (harness-ui-call "_harness/permission/approve-denied"
+                   (list :session-id session-id :handle handle)
+                   (lambda (result) (message "%s" (or (plist-get result :message) "Approved")))))
+
+(defun harness-chat--show-call (call-id)
+  "Move point to the block of tool call CALL-ID, when the buffer shows it.
+A run of calls the block was folded into opens, so the block is
+visible.  Return non-nil when point moved."
+  (let* ((node-id (gethash call-id harness-chat--calls))
+         (block (and node-id (gethash node-id harness-chat--blocks))))
+    (cond
+     ((null block) (message "The call %s is not shown in this buffer" call-id) nil)
+     (t (let ((gid (harness-chat-block-group block)))
+          (when-let* ((group (and gid (gethash gid harness-chat--groups))))
+            (unless (harness-chat-group-expanded group)
+              (harness-chat-toggle-group gid))))
+        (when-let* ((start (marker-position (harness-chat-block-start block))))
+          (goto-char start)
+          (ignore-errors (recenter))
+          t)))))
+
+(defun harness-chat--rerun-line (call result)
+  "Return the line linking a rerun-approved CALL to the call it reran, or \"\".
+CALL is the call's node, RESULT its result.  That is the call of
+`rerun_approved' the harness ran in the user's stead: the line names the
+tool the user approved and the handle, from the result's `:meta'
+\(`:rerun-of', `:rerun-tool') or, for a result from before them, from
+the call's own input.  The tool's name is a button that shows the
+denied call's block where the buffer still has it."
+  (let* ((meta (and result (plist-get result :meta)))
+         (tool-name (or (plist-get call :tool) (and result (plist-get result :tool))))
+         (handle (and (equal tool-name harness-chat--rerun-tool)
+                      (or (plist-get meta :rerun-of)
+                          (plist-get (plist-get call :input) :handle))))
+         (denied (and (stringp handle)
+                      (let* ((block (gethash (gethash handle harness-chat--calls) harness-chat--blocks)))
+                        (plist-get (and block (harness-chat-block-node block)) :tool)))))
+    (when (and (stringp handle) (not (string-empty-p handle)))
+      (concat "  " (propertize "user-approved rerun of " 'face 'harness-dim-face)
+              (harness-chat--button (or (plist-get meta :rerun-tool) denied "the denied call")
+                                    (lambda () (harness-chat--show-call handle))
+                                    :help (format "The user approved call %s; show it" handle))
+              (propertize (format " · handle %s" handle) 'face 'harness-dim-face)
+              "\n"))))
+
 (defun harness-chat--render-tool (block)
   "Return the body of tool-call BLOCK (its result rendered with it)."
   (let* ((id (harness-chat-block-id block))
@@ -1304,6 +1393,8 @@ running call, each with its `:note' when it has one (see
          (line (and input (harness-chat--input-summary input title)))
          (summary (concat (if line (concat (propertize (concat "  " line) 'face 'harness-dim-face) "\n") "")
                           (harness-chat--child-line node result)
+                          (harness-chat--rerun-line node result)
+                          (harness-chat--approval-line (plist-get result :call-id) result)
                           (harness-chat--note-lines node)))
          ;; What the user is shown of the result -- an image, a video
          ;; poster, an audio player -- stays above the fold: a folded
@@ -2258,6 +2349,28 @@ pattern, and editing it, belong to the pending module, so a popout
 edits the same request the same way."
   (interactive)
   (harness-ui-pending-edit-pattern pid))
+
+(defun harness-chat-approve-denied-call ()
+  "Approve the denied call whose block point is on.
+The user's approval lets the session's agent run that call exactly as
+it was denied, with `rerun_approved', which the harness tells it; the
+call's block offers the same as its [Approve] button.  A block that is
+no call the permission system refused, or one the user already
+approved, is not something to approve."
+  (interactive)
+  (let* ((id (get-text-property (point) 'harness-chat-node))
+         (block (and id (gethash id harness-chat--blocks)))
+         (node (and block (harness-chat-block-node block)))
+         (result (and block (if (equal (harness-chat-block-kind block) "tool-call")
+                                (harness-chat-block-result block)
+                              node)))
+         (handle (or (plist-get result :call-id) (plist-get node :call-id)))
+         (state (and result (harness-chat--denied-state result))))
+    (unless (and handle state)
+      (user-error "No call the permission system refused is here"))
+    (when (plist-get state :approved)
+      (user-error "The user already approved that call"))
+    (harness-chat--approve-denied harness-ui-session-id handle)))
 
 (defun harness-chat-next-diagram (&optional n)
   "Show the diagram of the next option of the question waiting with diagrams.
