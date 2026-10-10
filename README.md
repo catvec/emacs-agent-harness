@@ -958,13 +958,13 @@ call to one anyway, in every permission mode.
   has nothing to share and is forked directly.
 - **Short context for workers.** A worker is a sub-agent, and
   sub-agents work on a deliberately short context window,
-  `harness-subagent-context-limit` (128000 tokens by default, nil for
+  `harness-subagent-context-limit` (256000 tokens by default, nil for
   no cap): a fresh worker's window is that limit, and a fork gets what
   it inherits plus the limit, never more than the supervisor's own
   limit or its model's window. Calls stay cheap, a worker that
   outgrows its window compacts early, and its report stays short. The
   worker's transcript says so, in a hint at its start ("Context window
-  capped at 128k tokens, as a sub-agent's is
+  capped at 256k tokens, as a sub-agent's is
   (harness-subagent-context-limit)"), as the transcript of any
   sub-agent does. A worker compacted before it starts (see **Retry and
   escalation**) is capped from the summary it starts with, not from
