@@ -12,7 +12,7 @@
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-test-reset-bus)
-     (dolist (m '(store project config provider provider-demo tools session agent tools-agent))
+     (dolist (m '(store project config provider provider-demo tools session agent tools-agent priority))
        (harness-test-load-module m))
      (clrhash harness-sessions)
      (clrhash harness-agent--turns)
@@ -410,6 +410,37 @@ and the caller hears the answer, or that it was dismissed."
            (result (harness-test-await (harness-tools-agent-test-run sid "spawn_agent" '(:prompt "  ")))))
       (should (plist-get result :is-error))
       (should (string-match-p "needs a prompt" (plist-get result :content))))))
+
+(ert-deftest harness-tools-agent-spawn-priority ()
+  "The spawn_agent tool gives the child session a priority of its own.
+A level no level has is refused before any child is made; without the
+option the child works at what it inherits."
+  (harness-tools-agent-test-with
+    (let* ((sid (harness-tools-agent-test-session))
+           (children (lambda () (harness-call 'session/list (list :parent-id sid))))
+           (spawn (lambda (&rest plist)
+                    (plist-get (plist-get (harness-test-await
+                                           (harness-tools-agent-test-run
+                                            sid "spawn_agent"
+                                            (append '(:prompt "hi" :name "kid") plist)))
+                                          :meta)
+                               :child-id))))
+      ;; The parent works at high; a child without a priority of its own
+      ;; inherits it (see `harness-priority-session').
+      (harness-call 'priority/set sid "high")
+      (let ((cid (funcall spawn)))
+        (should (eq 'high (harness-priority-of cid)))
+        (should-not (harness-priority-of-ext (plist-get (harness-call 'session/get cid) :ext))))
+      ;; Its own, whatever the parent works at, in any case.
+      (let ((cid (funcall spawn :priority "LOW")))
+        (should (eq 'low (harness-priority-of cid)))
+        (should (eq 'low (harness-priority-of-ext (plist-get (harness-call 'session/get cid) :ext)))))
+      ;; A level no level has is refused, and no child is made.
+      (let ((r (harness-test-await (harness-tools-agent-test-run sid "spawn_agent"
+                                                                 '(:prompt "hi" :priority "urgent")))))
+        (should (plist-get r :is-error))
+        (should (string-match-p "Unknown priority" (plist-get r :content))))
+      (should (= 2 (length (funcall children)))))))
 
 (ert-deftest harness-tools-agent-session-info ()
   (harness-tools-agent-test-with
