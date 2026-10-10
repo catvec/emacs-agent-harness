@@ -141,9 +141,18 @@ entries /models does not list are listed after its models."
   :set #'harness-deepseek--custom-set :group 'harness)
 
 (defcustom harness-deepseek-tiers
-  '(:cheap "deepseek-flash" :balanced "deepseek-flash" :frontier "deepseek-v4-pro")
-  "DeepSeek models named for the common tiers.
-The auto-mode judge, for one, runs on the `cheap' one."
+  '(:simple (:model "deepseek-flash" :thinking "low")
+    :medium (:model "deepseek-flash" :thinking "high")
+    :hard (:model "deepseek-flash" :thinking "max")
+    :frontier nil)
+  "DeepSeek models named for the tiers, and the thinking each runs at.
+DeepSeek-V4.1-Flash does it all, and the tiers tell its efforts apart:
+simple thinks at low, medium at high, the middle of DeepSeek's ladder of
+low, high and max (DeepSeek takes medium for it too), and hard at max,
+which is what a supervisor plans at and a step it escalates runs at.
+No DeepSeek model is frontier.  See `harness-model-tiers' and
+`harness-provider-tiers-type'.  The auto-mode judge, for one, runs on
+the `simple' one, and asks for no thinking at all."
   :type harness-provider-tiers-type
   :set #'harness-deepseek--custom-set :group 'harness)
 
@@ -437,6 +446,10 @@ new."
                        "(PROVIDER-ID TIER WINDOW) when a provider's rates are higher now.
 TIER is `peak' and WINDOW its (START . END) UTC hours, so a UI can warn
 that a call costs more.")
+
+;; Three tiers once, with Pro for the hardest work; a reload would keep them.
+(harness-renew-default 'harness-deepseek-tiers
+                       '(:cheap "deepseek-flash" :balanced "deepseek-flash" :frontier "deepseek-v4-pro"))
 
 (harness-define-module 'provider-deepseek
   :doc "DeepSeek provider (OpenAI-compatible) with peak and off-peak pricing."

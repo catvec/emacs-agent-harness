@@ -270,13 +270,35 @@ names the harness tools whose stand-ins to turn on.")
 `:builtin-tools' names the harness tools of
 `harness-provider-claude-builtin-tools'.")
 
-(defconst harness-provider-claude-tiers
-  '(:cheap "haiku" :balanced "sonnet" :frontier "opus")
-  "Claude models named for the common tiers, by family.
-Each names the CLI's alias of that name when the CLI lists it, which is
-the newest model of the family, else the first model of the catalogue
-whose name holds it (see `harness-provider-tier-model').  The
-auto-mode judge, for one, runs on the `cheap' one.")
+(defun harness-provider-claude--set-tiers (symbol value)
+  "Set SYMBOL to VALUE, and the tiers of the Claude provider with it.
+SYMBOL is `harness-provider-claude-tiers'.  The change takes effect at
+once: the next model the harness picks by tier is picked from VALUE."
+  (set-default symbol value)
+  (when-let* ((provider (and (fboundp 'harness-provider-get) (harness-provider-get 'claude))))
+    (setf (harness-provider-tiers provider) value)))
+
+(defcustom harness-provider-claude-tiers
+  '(:simple "haiku" :medium "sonnet" :hard "opus" :frontier "fable")
+  "Claude models named for the tiers, by family.
+Haiku is simple, Sonnet medium, Opus hard -- the strongest model the
+harness picks on its own, what a supervisor plans on -- and Fable
+frontier, which the harness never picks on its own: only you do (see
+`harness-model-tiers').  Each names the CLI's alias of that name when
+the CLI lists it, which is the newest model of the family, else the
+first model of the catalogue whose name holds it (see
+`harness-provider-tier-model').  A tier may also name a thinking level,
+as (:model \"sonnet\" :thinking \"high\"): what runs on the tier for the
+harness, a supervisor's worker say, thinks at that level.  Without one
+it thinks at the level it would have.  The auto-mode judge, for one,
+runs on the `simple' one."
+  :type harness-provider-tiers-type
+  :set #'harness-provider-claude--set-tiers
+  :group 'harness)
+
+;; It was a constant of three tiers once, which a reload would keep.
+(harness-renew-default 'harness-provider-claude-tiers
+                       '(:cheap "haiku" :balanced "sonnet" :frontier "opus"))
 
 (defconst harness-provider-claude--api-token-sources '("ANTHROPIC_AUTH_TOKEN" "apiKeyHelper")
   "Token sources the CLI reports for credentials billed per token.")

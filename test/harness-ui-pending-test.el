@@ -306,6 +306,37 @@ Once nothing is left the popout closes itself."
       (harness-test-wait (lambda () (null (harness-ui-popout-buffer key))) 5 "the popout to close")
       (should-not (harness-ui-pending-items sid)))))
 
+(ert-deftest harness-ui-pending-question-is-markdown ()
+  "The question of a panel renders as Markdown, under its own indent.
+A question is often the agent's prose: its emphasis and lists render as
+they do in the transcript, every line indented under \"Question\"."
+  (harness-ui-pending-test-with
+    (let ((harness-ui-session-id "sid")
+          (question "Which **colour** is right?\n\n- red\n- green"))
+      (with-temp-buffer
+        (harness-ui-pending-insert-panel
+         (list :id "q1" :kind "question" :question question :options '("red" "green")))
+        (let* ((text (buffer-string))
+               (plain (substring-no-properties text))
+               (colour (string-match "colour" plain))
+               (which (string-match "Which" plain))
+               (faces (let ((f (get-text-property colour 'face text)))
+                        (if (listp f)
+                            (apply #'append (mapcar (lambda (x) (if (listp x) x (list x))) f))
+                          (list f)))))
+          (should (string-match-p "Which colour is right?" plain))
+          (should-not (string-match-p "\\*\\*" plain))
+          (should (string-match-p "red" plain))
+          (should (string-match-p "green" plain))
+          ;; The panel is still a panel, marked with its own request.
+          (should (equal "q1" (get-text-property (point-min) 'harness-ui-pending)))
+          ;; The question's plain words are bold; the list's bullet is there.
+          (should (memq 'bold faces))
+          (should (string-match-p "• red" plain))
+          ;; Its lines are indented under the panel's label, wrapped too.
+          (should (equal "   " (get-text-property which 'line-prefix text)))
+          (should (equal "   " (get-text-property which 'wrap-prefix text))))))))
+
 (ert-deftest harness-ui-pending-popup-asks-a-question-in-its-box ()
   "A question without options is answered by typing in the popout's box."
   (harness-ui-pending-test-with

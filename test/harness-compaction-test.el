@@ -243,7 +243,7 @@ by default one that answers SUMMARY."
 (ert-deftest harness-compaction-brief-summary ()
   "A brief summary is the cheap model's, of a sample, and ends saying what it lacks.
 It is a handoff's `compact-new' on the session's own provider: the
-cheap tier of the session's provider writes it from the first and last
+simple tier of the session's provider writes it from the first and last
 messages, whatever the session's model is."
   (harness-compaction-test-with
     (let ((requests nil))

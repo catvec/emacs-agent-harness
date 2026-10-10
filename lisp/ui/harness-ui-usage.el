@@ -713,22 +713,39 @@ every label, folded ones too, so unfolding moves no column."
 
 ;;;; Fallback list
 
+(defconst harness-ui-usage--fallback-label-width 96
+  "Most columns the name of a fallback entry, its tiers included, takes.
+The column is as wide as the longest name, up to this; a longer one is
+cut.  A provider's four tiers fit: Claude Code's are some 86 columns.")
+
 (defun harness-ui-usage--fallback-tier-text (entry)
   "Return what provider fallback ENTRY stands for, one per tier.
-Such as \"cheap→Haiku 4.5 · balanced→Sonnet 5 · frontier→Opus 5.5\", the
-provider's word left off a model label it repeats."
+Such as \"simple→Haiku 4.5 · medium→Sonnet 5 · hard→Opus 5.5 ·
+frontier→Fable 5.1\": the provider's word is left off a model label
+that repeats it, and a thinking level the tier names follows its model.
+A provider whose tiers are all one model, as DeepSeek's are, names it
+once: \"V4.1-Flash: simple low · medium high · hard max\"."
   (let* ((provider (or (plist-get entry :provider-label) (plist-get entry :provider) ""))
          (word (car (split-string provider)))
          (tiers (delq nil (mapcar
                            (lambda (tier)
                              (when-let* ((m (plist-get tier :model)))
-                               (let ((label (or (plist-get tier :label) m)))
+                               (let ((label (or (plist-get tier :label) m))
+                                     (level (plist-get tier :thinking)))
                                  (when (and word (not (string-empty-p word))
-                                            (string-prefix-p (concat word " ") label))
+                                            (> (length label) (1+ (length word)))
+                                            (member (substring label 0 (1+ (length word)))
+                                                    (list (concat word " ") (concat word "-"))))
                                    (setq label (substring label (1+ (length word)))))
-                                 (format "%s→%s" (plist-get tier :tier) label))))
-                           (plist-get entry :tiers)))))
-    (string-join tiers " · ")))
+                                 (list (plist-get tier :tier) label (and (stringp level) level)))))
+                           (plist-get entry :tiers))))
+         (level (lambda (tier) (if (nth 2 tier) (concat " " (nth 2 tier)) ""))))
+    (if (and (cdr tiers)
+             (cl-every (lambda (tier) (equal (nth 1 tier) (nth 1 (car tiers)))) tiers))
+        (concat (nth 1 (car tiers)) ": "
+                (mapconcat (lambda (tier) (concat (car tier) (funcall level tier))) tiers " · "))
+      (mapconcat (lambda (tier) (format "%s→%s%s" (car tier) (nth 1 tier) (funcall level tier)))
+                 tiers " · "))))
 
 (defun harness-ui-usage--fallback-entry-label (entry)
   "Return how fallback ENTRY reads: its model, or its provider and tiers."
@@ -775,8 +792,13 @@ absent."
     (insert " ")
     (harness-ui-button "[refresh]" #'harness-ui-usage-refresh :help "Reload the dashboard (g)")
     (insert "\n")
-    (let ((entries (plist-get fallback :models))
-          (number 0))
+    (let* ((entries (plist-get fallback :models))
+           (number 0)
+           ;; One column for every entry's name, so their states line up.
+           (width (min harness-ui-usage--fallback-label-width
+                       (apply #'max 30 (mapcar (lambda (entry)
+                                                 (length (harness-ui-usage--fallback-entry-label entry)))
+                                               entries)))))
       (insert (propertize
                (if entries
                    "  the list is the order of preference, first used to last; sessions move back up it as entries come back\n"
@@ -786,7 +808,9 @@ absent."
         (let* ((start (point))
                (state (harness-ui-usage--fallback-state entry)))
           (insert (format "  %2d. " (cl-incf number)))
-          (insert (format "%-74s " (harness-truncate-end (harness-ui-usage--fallback-entry-label entry) 74)))
+          (insert (string-pad (harness-truncate-end (harness-ui-usage--fallback-entry-label entry) width)
+                              width)
+                  " ")
           (insert (propertize (car state)
                               'face (if (plist-get entry :mark) 'warning 'harness-dim-face)
                               'help-echo (or (cdr state) nil)))
