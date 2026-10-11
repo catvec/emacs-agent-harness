@@ -77,8 +77,11 @@
 ;; prompt cache and a long context, so waking it up to resolve a few
 ;; files would pay for its whole history again.  When that session's
 ;; turn ends without `merge_done' having queued the branch again, the
-;; merge fails.  With `child', the child session itself is steered to
-;; resolve them, as before.
+;; merge fails.  It runs on the child's model capped at the medium tier
+;; of its provider, thinking no harder than that tier
+;; (`harness-merge-resolver-model'): a few conflicting files need no
+;; expensive model.  With `child', the child session itself is steered
+;; to resolve them, as before.
 ;;
 ;; The fresh session shows in the child's transcript as a spawn_agent
 ;; call, as a sub-agent the child started would: the call once its turn
@@ -119,8 +122,23 @@ pay for the child's whole history on a cold prompt cache.
 
 (defcustom harness-merge-resolver-model nil
   "Model of the fresh session that resolves merge conflicts.
-Nil means the child session's model."
-  :type '(choice (const :tag "The child's model" nil) (string :tag "Model" :names model))
+Nil, the default, is the child session's model, capped at the medium
+tier of its provider: a few conflicting files need no expensive model.
+A child whose provider ranks its model above medium (Claude's Opus or
+Fable, say; see `harness-provider-model-tier') has its conflicts
+resolved on that provider's medium model (Sonnet), else on its simple
+one when it names no medium model, else on the child's own after all
+\(see `harness-provider-tier-model'); a child on a medium or simpler
+model, or one whose tier cannot be told, keeps it.  The session thinks
+no harder than the medium tier either: at the child's level when that
+is no stronger than the one the provider runs its medium tier at
+\(\"medium\" when it names none), else at that level, fitted to the
+levels its model offers (see `harness-merge--capped-thinking').
+`child' is the child's own model and thinking level, whatever they
+cost, and a PROVIDER:NAME is that model, at the child's level."
+  :type '(choice (const :tag "The child's model, at most the medium tier" nil)
+                 (const :tag "The child's own model" child)
+                 (string :tag "Model" :names model))
   :group 'harness)
 
 ;;;; Constants
@@ -804,19 +822,23 @@ itself (`harness-merge-conflict-resolver'), and merge_done is called."
 (defun harness-merge--start-resolver (entry child prompt)
   "Start a fresh session resolving ENTRY's conflicts with PROMPT; return its id.
 The session works in the worktree of CHILD (the child's session plist),
-with its settings, as its `subagent' child, and shows in the child's
-transcript as a spawn_agent call (`harness-merge--add-call').  Return
-nil when it cannot start; the child is then steered instead."
+with its settings but the model and thinking level
+`harness-merge-resolver-model' gives it (`harness-merge--resolver-settings':
+by default no stronger than the medium tier), as its `subagent' child,
+and shows in the child's transcript as a spawn_agent call
+\(`harness-merge--add-call').  Return nil when it cannot start; the
+child is then steered instead."
   (when (and (harness-method-exists-p 'session/create) (harness-method-exists-p 'agent/prompt))
     (condition-case err
         (let* ((child-id (plist-get child :id))
+               (settings (harness-merge--resolver-settings child))
                (session (harness-call 'session/create
                                       :cwd (plist-get child :cwd) :kind 'subagent :parent-id child-id
                                       :name (format "Merge %s" (or (plist-get entry :branch) (harness-merge--label child-id)))
-                                      :model (or harness-merge-resolver-model (plist-get child :model))
+                                      :model (car settings)
                                       :host (plist-get child :host)
                                       :permission-mode (plist-get child :permission-mode)
-                                      :thinking (plist-get child :thinking)
+                                      :thinking (cdr settings)
                                       :allowed-dirs (plist-get child :allowed-dirs)
                                       :non-interactive (if (harness-json-true-p (plist-get child :non-interactive)) t :false)))
                (id (plist-get session :id)))
@@ -841,6 +863,75 @@ nil when it cannot start; the child is then steered instead."
           id)
       (error (harness-log 'warn "merge: could not start a conflict resolver: %s" (error-message-string err))
              nil))))
+
+;;;; The resolver's model
+
+(defconst harness-merge--resolver-tiers '(medium simple)
+  "The tiers a conflict resolver's model is taken from, nearest first.
+A child on a model above the medium tier has its conflicts resolved on
+its provider's medium model, else on its simple one (see
+`harness-merge-resolver-model'); the first is also the tier whose
+thinking level caps the resolver's.")
+
+(defun harness-merge--resolver-settings (child)
+  "Return (MODEL . THINKING), what the session resolving CHILD's conflicts runs on.
+CHILD is the child's session plist.  As `harness-merge-resolver-model'
+says: nil caps the child's model and its thinking at the medium tier
+\(`harness-merge--capped-model', `harness-merge--capped-thinking'),
+`child' keeps both, and a PROVIDER:NAME is that model, at the child's
+thinking level."
+  (let ((choice harness-merge-resolver-model)
+        (model (plist-get child :model))
+        (thinking (plist-get child :thinking)))
+    (cond
+     ((or (eq choice 'child) (equal choice "child"))
+      (cons model thinking))
+     ((and (stringp choice) (not (string-blank-p choice)))
+      (cons (string-trim choice) thinking))
+     (t
+      (let ((capped (harness-merge--capped-model model)))
+        (cons capped (harness-merge--capped-thinking thinking capped)))))))
+
+(defun harness-merge--capped-model (model)
+  "Return MODEL, or its provider's model of a tier no stronger than medium.
+MODEL is a model id.  It is kept when its provider ranks it medium or
+below (`provider/model-tier'), and when that cannot be told.  One ranked
+above, hard or frontier, gives way to the provider's model of the first
+tier of `harness-merge--resolver-tiers' it has one for, as its catalogue
+stands (`provider/tier-model'); MODEL is kept when it has none."
+  (if (not (and (stringp model)
+                (harness-method-exists-p 'provider/model-tier)
+                (harness-method-exists-p 'provider/tier-model)
+                (memq (ignore-errors (harness-call 'provider/model-tier model)) '(hard frontier))))
+      model
+    (or (cl-some (lambda (tier)
+                   (let ((found (ignore-errors (harness-call 'provider/tier-model model tier))))
+                     (and (stringp found) (not (string-blank-p found)) found)))
+                 harness-merge--resolver-tiers)
+        model)))
+
+(defun harness-merge--capped-thinking (level model)
+  "Return thinking LEVEL capped at the medium tier, for a resolver on MODEL.
+The cap is the level MODEL's provider runs its medium tier at
+\(`provider/tier-thinking': DeepSeek's thinks at high), else
+\"medium\".  A LEVEL no stronger than the cap is kept.  A stronger one,
+and none -- the model's own default, which may be stronger -- give the
+cap, fitted to the levels the catalogue gives MODEL
+\(`harness-thinking-level-fit': that level, else the strongest below
+it, so never one that thinks harder).  When the catalogue lists MODEL
+no levels, a stronger LEVEL gives the cap as it is, and none stays nil:
+a model that lists no levels may refuse a request that asks for one."
+  (let* ((level (and (stringp level) (not (string-blank-p level)) level))
+         (named (and (stringp model) (harness-method-exists-p 'provider/tier-thinking)
+                     (ignore-errors (harness-call 'provider/tier-thinking model
+                                                  (car harness-merge--resolver-tiers)))))
+         (cap (if (and (stringp named) (not (string-blank-p named))) named "medium"))
+         (levels (and (stringp model) (harness-method-exists-p 'provider/model)
+                      (ignore-errors (append (plist-get (harness-call 'provider/model model) :thinking-levels)
+                                             nil)))))
+    (cond ((and level (<= (harness-thinking-level-rank level) (harness-thinking-level-rank cap))) level)
+          (levels (or (harness-thinking-level-fit cap levels) cap))
+          (level cap))))
 
 ;;;; The resolver's spawn_agent call
 

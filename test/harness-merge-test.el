@@ -13,6 +13,11 @@
 (defvar harness-session-interrupted-output)
 (defvar harness-merge-conflict-resolver)
 (defvar harness-provider-demo-script-override)
+(defvar harness-merge-resolver-model)
+(declare-function harness-define-provider "harness-provider")
+(declare-function harness-provider-unregister "harness-provider")
+(declare-function harness-provider-demo--complete "harness-provider-demo")
+(declare-function harness-merge--resolver-settings "harness-merge")
 
 (defun harness-merge-test--git (dir &rest args)
   "Run git ARGS synchronously in DIR; signal on failure, return stdout."
@@ -595,6 +600,119 @@ as it settles the resolver, though the child itself was not running."
         (should (equal harness-session-interrupted-output (plist-get (car results) :output)))
         (should (equal (car resolvers) (plist-get (plist-get (car results) :meta) :child-id))))
       (should (null (harness-call 'session/messages child))))))
+
+;;;; The resolver's model
+
+(defun harness-merge-test--define-tiered (tiers)
+  "Define provider `test-merge', its tiers TIERS, its turns the demo's.
+Its models, dearest first: big, mid and small, each with the thinking
+levels it offers."
+  (harness-define-provider 'test-merge
+    :complete #'harness-provider-demo--complete
+    :capabilities '(:vision t :thinking t)
+    :tiers tiers
+    :models (lambda ()
+              (harness-resolved
+               (list (list :name "big" :pricing '(:input 10.0 :output 50.0)
+                           :thinking-levels '("low" "medium" "high" "xhigh" "max"))
+                     (list :name "mid" :pricing '(:input 3.0 :output 15.0)
+                           :thinking-levels '("low" "medium" "high"))
+                     (list :name "small" :pricing '(:input 1.0 :output 5.0)
+                           :thinking-levels '("low" "high")))))))
+
+(defmacro harness-merge-test-with-tiers (&rest body)
+  "Run BODY in `harness-merge-test-with' with provider `test-merge' defined.
+Its tiers are small simple, mid medium and big hard; BODY may define it
+again with other tiers (`harness-merge-test--define-tiered')."
+  (declare (indent 0))
+  `(harness-merge-test-with
+     (unwind-protect
+         (progn
+           (harness-merge-test--define-tiered '(:simple "small" :medium "mid" :hard "big"))
+           ,@body)
+       (harness-provider-unregister 'test-merge))))
+
+(ert-deftest harness-merge-resolver-runs-at-most-on-the-medium-tier ()
+  "By default the resolver runs on the child's model capped at the medium tier.
+A child on a hard model has its conflicts resolved on its provider's
+medium model, thinking no harder than medium; a child on a medium or
+simple model keeps its model, and a level no stronger than medium."
+  (harness-merge-test-with-tiers
+    (let ((harness-merge-resolver-model nil))
+      (cl-flet ((settings (model &optional thinking)
+                  (harness-merge--resolver-settings (list :model model :thinking thinking))))
+        ;; Above medium: the medium model, thinking at medium at most.
+        (should (equal '("test-merge:mid" . "medium") (settings "test-merge:big" "max")))
+        (should (equal '("test-merge:mid" . "medium") (settings "test-merge:big" "high")))
+        (should (equal '("test-merge:mid" . "low") (settings "test-merge:big" "low")))
+        ;; No level of its own: its model's default may think harder.
+        (should (equal '("test-merge:mid" . "medium") (settings "test-merge:big")))
+        ;; Medium or below: the child's own model.
+        (should (equal '("test-merge:mid" . "medium") (settings "test-merge:mid" "xhigh")))
+        (should (equal '("test-merge:small" . "low") (settings "test-merge:small" "low")))
+        ;; A model without medium thinks at the strongest level below it.
+        (should (equal '("test-merge:small" . "low") (settings "test-merge:small" "high")))
+        ;; A provider's only model ranks medium, so it is kept: the demo's.
+        (should (equal "demo:scripted" (car (settings "demo:scripted" "high"))))))))
+
+(ert-deftest harness-merge-resolver-without-a-medium-model ()
+  "A provider with no medium model has the resolver on its simple one.
+One with neither keeps the child's own model; the thinking is capped
+all the same."
+  (harness-merge-test-with-tiers
+    (let ((harness-merge-resolver-model nil))
+      (harness-merge-test--define-tiered '(:simple "small" :medium nil :hard "big"))
+      (should (equal '("test-merge:small" . "low")
+                     (harness-merge--resolver-settings '(:model "test-merge:big" :thinking "max"))))
+      (harness-merge-test--define-tiered '(:simple nil :medium nil :hard "big"))
+      (should (equal '("test-merge:big" . "medium")
+                     (harness-merge--resolver-settings '(:model "test-merge:big" :thinking "max")))))))
+
+(ert-deftest harness-merge-resolver-thinks-at-the-medium-tier-level ()
+  "A provider whose medium tier names a thinking level caps the resolver's there.
+As DeepSeek's medium tier thinks at high."
+  (harness-merge-test-with-tiers
+    (let ((harness-merge-resolver-model nil))
+      (harness-merge-test--define-tiered '(:simple "small" :medium (:model "mid" :thinking "high") :hard "big"))
+      (should (equal '("test-merge:mid" . "high")
+                     (harness-merge--resolver-settings '(:model "test-merge:big" :thinking "max"))))
+      (should (equal '("test-merge:mid" . "medium")
+                     (harness-merge--resolver-settings '(:model "test-merge:big" :thinking "medium")))))))
+
+(ert-deftest harness-merge-resolver-model-setting-wins ()
+  "A model the setting names wins, at the child's level; `child' keeps both."
+  (harness-merge-test-with-tiers
+    (let ((harness-merge-resolver-model "test-merge:big"))
+      (should (equal '("test-merge:big" . "max")
+                     (harness-merge--resolver-settings '(:model "test-merge:small" :thinking "max")))))
+    (let ((harness-merge-resolver-model 'child))
+      (should (equal '("test-merge:big" . "max")
+                     (harness-merge--resolver-settings '(:model "test-merge:big" :thinking "max"))))
+      (should (equal '("test-merge:big")
+                     (harness-merge--resolver-settings '(:model "test-merge:big")))))))
+
+(ert-deftest harness-merge-fresh-resolver-runs-on-the-medium-tier ()
+  "The merge queue starts the resolver of a child on a hard model on the medium one.
+It is created on the medium model of the child's provider, thinking at
+medium rather than at the child's max; the child keeps its own."
+  (harness-merge-test-with-tiers
+    (harness-merge-test--conflict-setup wt root)
+    (harness-call 'session/update child :model "test-merge:big" :thinking "max" :silent t)
+    (let ((finished nil) (resolvers nil)
+          (harness-merge-resolver-model nil)
+          (harness-provider-demo-script-override
+           '((:type text :delta "I cannot resolve this.") (:type done :stop-reason end-turn))))
+      (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
+      (harness-on 'merge/resolver (lambda (_c _p r) (push r resolvers)))
+      (harness-call 'merge/enqueue child parent)
+      (harness-test-wait (lambda () finished) 15 "finished")
+      (should (= 1 (length resolvers)))
+      (let ((resolver (harness-call 'session/get (car resolvers)))
+            (own (harness-call 'session/get child)))
+        (should (equal "test-merge:mid" (plist-get resolver :model)))
+        (should (equal "medium" (plist-get resolver :thinking)))
+        (should (equal "test-merge:big" (plist-get own :model)))
+        (should (equal "max" (plist-get own :thinking)))))))
 
 (ert-deftest harness-merge-keeps-local-work-in-the-parent ()
   "Uncommitted work in the parent's checkout in the merge's way is never touched."

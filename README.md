@@ -1772,8 +1772,11 @@ your checkout itself can be submitted to the **main tree** instead (the
   merge queue: queued for the queue's turn, merging, or, when the merge
   conflicts, a fresh session the harness starts in its worktree
   resolving them (`harness-merge-conflict-resolver`; it spares the
-  task's long, long-cold session). The card says where it stands;
-  the task moves to *Completed* once the branch is in.
+  task's long, long-cold session). That session runs on a model no
+  stronger than the medium tier -- Sonnet for a task on Opus or Fable --
+  and thinks no harder than the level its provider's medium tier names,
+  else at medium (`harness-merge-resolver-model`). The card says
+  where it stands; the task moves to *Completed* once the branch is in.
 - A task's session finishes by *handing its work in* (`hand_in`): the
   agent gives a final summary and the evidence for it -- an image or a
   video of what it built whenever there is anything to see, a file, a

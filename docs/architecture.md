@@ -3606,8 +3606,15 @@ session may itself be a target with a queue of its own.
   commit is to be `git merge`d into the child's branch, in its own
   worktree.  By default (`harness-merge-conflict-resolver` `fresh`) the
   harness starts a fresh `subagent` session for it -- a child of the
-  child session, in its worktree, with its settings and
-  `harness-merge-resolver-model` or its model -- prompted (from
+  child session, in its worktree, with its settings but a model no
+  stronger than the medium tier (`harness-merge-resolver-model`, by
+  default nil: the child's model when its provider ranks it medium or
+  below (or its tier is unknown), else that provider's medium model,
+  else its simple one, else the child's own; thinking no harder than
+  the level the provider's medium tier names, else medium;
+  `harness-merge--resolver-settings` has the rule; `child` keeps the
+  child's model and level, a `PROVIDER:NAME` is that model, at the
+  child's level) -- prompted (from
   `harness-sender-system "merge queue"`) with only the files, both
   sides' commits and what to do: a child that waited long in the queue
   would pay for its whole history on a cold prompt cache.  Its turn
