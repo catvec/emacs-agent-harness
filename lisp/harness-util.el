@@ -80,8 +80,17 @@ so `harness-json-encode' among them.")
 (defun harness--valid-text-repair (string)
   "Replace every raw byte of multibyte STRING with U+FFFD.
 See `harness-valid-text'."
+  ;; Not `replace-regexp-in-string': on a multibyte string each match
+  ;; from an index converts characters to bytes from the start, so a
+  ;; long string with many raw bytes took time quadratic in its length
+  ;; (a few megabytes of transcript wedged the server for good).
   (if (string-match-p harness--raw-byte-re string)
-      (replace-regexp-in-string harness--raw-byte-re "�" string)
+      (with-temp-buffer
+        (insert string)
+        (goto-char (point-min))
+        (while (re-search-forward harness--raw-byte-re nil t)
+          (replace-match "�" t t))
+        (buffer-string))
     string))
 
 (defun harness-valid-text (string)

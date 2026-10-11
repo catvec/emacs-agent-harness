@@ -227,6 +227,18 @@ the same literal would be read as part of the same character instead."
   (should (equal (concat "ab" "\N{U+FFFD}" "\N{U+FFFD}")
                  (harness-valid-text (unibyte-string ?a ?b 255 254)))))
 
+(ert-deftest harness-util-valid-text-linear ()
+  "`harness-valid-text' repairs a long string with many raw bytes quickly.
+With `replace-regexp-in-string' this took time quadratic in the length:
+a transcript of a few megabytes wedged the server at startup."
+  (let* ((raw (harness-core-test--raw-bytes))
+         (s (apply #'concat (make-list 50000 raw)))
+         (start (float-time))
+         (fixed (harness-valid-text s)))
+    (should (< (- (float-time) start) 5))
+    (should (= (length fixed) (length s)))
+    (should (stringp (json-serialize fixed)))))
+
 (ert-deftest harness-util-json-encode-repairs-raw-bytes ()
   "`harness-json-encode' repairs a raw byte instead of signalling.
 `json-serialize' refuses a string with one, `wrong-type-argument'
