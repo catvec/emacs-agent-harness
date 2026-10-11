@@ -295,6 +295,31 @@ its parent's, off as well as on; and the hint of a change says which."
       (should (equal '(:limit-check t) '(:limit-check t)))
       (should (= 1 (length (harness-call 'session/nodes id '(:limit 1))))))))
 
+(ert-deftest harness-session-append-leaves-the-session-as-it-was-when-the-log-cannot-be-written ()
+  "A node that cannot be written to the node log never becomes the head.
+Kept in memory only, it would parent the nodes appended after it; a
+reload would find that parent missing in the log, cutting the
+transcript there (see `harness-session--persist-node',
+`session/append').  The failing append signals, and nothing it did not
+finish shows up: not the head, not the node, not a stray row for a
+tool call with no result to answer it."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (first (harness-call 'session/append id '(:kind user :content "q1")))
+           (head-before (plist-get (harness-call 'session/get id) :head)))
+      (should (equal (plist-get first :id) head-before))
+      (cl-letf (((symbol-function 'harness-method/store/append)
+                 (lambda (&rest _) (error "disk full"))))
+        (should-error (harness-call 'session/append id '(:kind user :content "q2"))))
+      (should (equal head-before (plist-get (harness-call 'session/get id) :head)))
+      (should (= 1 (length (harness-call 'session/nodes id))))
+      ;; Not even after a reload: it was never on disk to load back.
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (= 1 (length (harness-call 'session/nodes id))))
+      (should (equal head-before (plist-get (harness-call 'session/get id) :head))))))
+
 (ert-deftest harness-session-fork-shares-history-and-tree ()
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :name "main") :id)))

@@ -16,6 +16,16 @@
 ;;   inside other JSON as a string value comes from
 ;;   `harness-json-encode-text': the bytes would turn into raw-byte
 ;;   characters there, which the next `json-serialize' rejects.
+;; - A string can hold a raw byte: binary data read as if it were
+;;   text -- `cat' of a JPEG into a tool result, say -- which looks
+;;   like ordinary Lisp text until `json-serialize' refuses the whole
+;;   value for it.  `harness-json-encode' repairs that rather than
+;;   fail (see `harness-valid-text'), since nothing downstream given
+;;   no answer at all can tell that from a provider or a UI that will
+;;   never get one and waits forever; a tool result is also cleaned at
+;;   the source (`harness-tools--normalise-result'), so the repair
+;;   mostly shows up only where that cannot reach: a title, a prompt,
+;;   a transcript already holding one.
 ;;
 ;; Everything else here is plumbing: ids, time, paths and formatting.
 
@@ -59,12 +69,79 @@
       (apply #'vector (nreverse items))))
    (t (format "%s" obj))))
 
+(defconst harness--raw-byte-re "[\x3fff80-\x3fffff]"
+  "Regexp matching one raw byte: a byte read as text that is not real text.
+A buffer or a string in Emacs holds such a byte, outside ASCII, as one
+character in this range rather than refuse it (Info node `(elisp) Text
+Representations'); it looks like an ordinary character until something
+checks the text is valid Unicode and refuses it, `json-serialize' and
+so `harness-json-encode' among them.")
+
+(defun harness--valid-text-repair (string)
+  "Replace every raw byte of multibyte STRING with U+FFFD.
+See `harness-valid-text'."
+  (if (string-match-p harness--raw-byte-re string)
+      (replace-regexp-in-string harness--raw-byte-re "�" string)
+    string))
+
+(defun harness-valid-text (string)
+  "Return STRING as valid Unicode text, repairing any raw byte in it.
+A tool, a buffer or a process can hand back raw bytes that only look
+like text -- `cat' of a binary file, say, or a transcript that already
+holds some -- which is ordinary Lisp text until something, such as
+`json-serialize', checks it is valid Unicode and refuses the whole
+value for it.  A unibyte STRING outside ASCII is decoded as UTF-8
+first, recovering the real characters of any well-formed run in it;
+what is left invalid, in STRING or after that, is one raw byte per
+character, each replaced with the replacement character, U+FFFD.
+Return STRING itself, without copying, when it already is valid: a
+multibyte string with no raw byte, or a unibyte one that is plain
+ASCII, which is both already and needs no decoding."
+  (cond
+   ((multibyte-string-p string) (harness--valid-text-repair string))
+   ((string-match-p "[^[:ascii:]]" string) (harness--valid-text-repair (decode-coding-string string 'utf-8)))
+   (t string)))
+
+(defun harness--json-clean (value)
+  "Return VALUE, already in `json-serialize' form, with every string repaired.
+VALUE is what `harness--json-prepare' gives: a hash table, a vector, a
+string, or something else `json-serialize' already takes as it is.
+Walked recursively, with `harness-valid-text' applied to each string;
+see `harness-json-encode'."
+  (cond
+   ((stringp value) (harness-valid-text value))
+   ((hash-table-p value)
+    (let ((h (make-hash-table :test 'equal :size (hash-table-count value))))
+      (maphash (lambda (k v) (puthash k (harness--json-clean v) h)) value)
+      h))
+   ((vectorp value) (apply #'vector (mapcar #'harness--json-clean (append value nil))))
+   (t value)))
+
 (defun harness-json-encode (obj)
   "Encode OBJ (plist/list convention, see Commentary) as a JSON string.
 Since Emacs 30 the string is unibyte, the UTF-8 bytes, ready for a
 process, a file or an HTTP body.  Use `harness-json-encode-text' for
-JSON that goes inside other text or inside other JSON."
-  (json-serialize (harness--json-prepare obj)))
+JSON that goes inside other text or inside other JSON.
+
+Never fails on a raw byte: a string of OBJ can hold one -- binary data
+read as if it were text, somewhere upstream that could not clean it at
+the source -- which makes `json-serialize' refuse the whole value,
+signalling `wrong-type-argument' with `json-value-p' naming it.  OBJ is
+then repaired with `harness-valid-text' (see `harness--json-clean') and
+encoded again: logged, short, rather than left to signal, since a
+provider or a UI given no answer at all because of one bad string deep
+inside OBJ waits for it for good.  Any other failure to encode still
+signals."
+  (let ((prepared (harness--json-prepare obj)))
+    (condition-case err
+        (json-serialize prepared)
+      (wrong-type-argument
+       (if (eq (nth 1 err) 'json-value-p)
+           (progn
+             (when (fboundp 'harness-log)
+               (harness-log 'warn "json: a value had a raw byte invalid as UTF-8; repaired it to encode"))
+             (json-serialize (harness--json-clean prepared)))
+         (signal (car err) (cdr err)))))))
 
 (defun harness-json-encode-text (obj)
   "Encode OBJ like `harness-json-encode', as text rather than bytes.

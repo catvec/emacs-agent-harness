@@ -702,6 +702,30 @@ module."
                                                    :test #'equal)
                                           :state)))))))
 
+(ert-deftest harness-acp-handle-request-always-answers ()
+  "A request always gets an answer, even when sending the real one fails.
+`harness-acp--client-send' can fail -- JSON encoding rejects a value it
+cannot represent, such as a raw byte deep in a session's transcript, or
+the transport itself breaks -- which used to leave the caller's request
+waiting on its id for good, with no answer ever coming (see
+`harness-acp--handle-request').  A short error replaces it instead,
+rather than nothing at all."
+  (harness-acp-test-with
+    (let ((conn (harness-acp-test-connect))
+          (orig (symbol-function 'harness-acp--client-send)))
+      ;; The real reply (a `:result') fails to send, as a broken
+      ;; transport or an unencodable value would; the fallback (an
+      ;; `:error') goes out as it always did.
+      (cl-letf (((symbol-function 'harness-acp--client-send)
+                 (lambda (client msg)
+                   (if (plist-member msg :result)
+                       (error "pipe closed")
+                     (funcall orig client msg)))))
+        (let ((err (harness-acp-test-error conn "_harness/harness/version" nil)))
+          (should err)
+          (should (= harness-acp-error-method (car err)))
+          (should (string-match-p "could not send the answer" (cadr err))))))))
+
 (defvar harness-provider-demo-script-override)
 
 (ert-deftest harness-acp-local-queue-while-running ()

@@ -634,8 +634,25 @@ lisp/harness-emacs-endpoint.el for the methods.  Not callable over ACP."
          client (harness-acp--message nil nil (list harness-acp-error-invalid-request "Invalid request" nil)))))))
 
 (defun harness-acp--handle-request (client id method params)
-  "Run METHOD with PARAMS for CLIENT and answer request ID."
-  (let ((reply (lambda (result error) (harness-acp--client-send client (harness-acp--message id result error)))))
+  "Run METHOD with PARAMS for CLIENT and answer request ID.
+CLIENT always gets an answer to ID: when even that cannot be sent --
+JSON encoding rejects text it cannot represent, such as the raw bytes
+of a binary file a tool read into a session's transcript, or a socket
+problem -- a short error replaces it, since CLIENT would otherwise
+wait on ID for good, its own request showing no answer ever came."
+  (let ((reply
+         (lambda (result error)
+           (condition-case err
+               (harness-acp--client-send client (harness-acp--message id result error))
+             (error
+              (let ((why (harness-error-short-message err)))
+                (harness-log 'warn "acp: could not answer request %S (%s): %s" id method why)
+                (ignore-errors
+                  (harness-acp--client-send
+                   client (harness-acp--message
+                           id nil (list harness-acp-error-method
+                                       (format "The harness could not send the answer: %s" why)
+                                       nil))))))))))
     (condition-case err
         (harness-then (harness-as-promise (harness-acp--invoke client method params))
                       (lambda (result) (funcall reply result nil))

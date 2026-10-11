@@ -92,6 +92,21 @@ one worked, without filling its context; the oldest go first.")
   "Non-nil while SESSION-ID has a running turn."
   (and (gethash session-id harness-agent--turns) t))
 
+(defmacro harness-agent--try (what &rest body)
+  "Run BODY; when it signals, log that WHAT failed, short, and return nil.
+WHAT, a text such as \"recording result of bash\", is evaluated only
+then.  The error is quoted short (`harness-error-short-message'): it can
+carry the whole text that failed, a tool's output of megabytes among
+it, which must not be repeated in the log.  For the steps of a turn
+that must not hold up the ones after them -- recording a tool result
+before the provider is sent it, say."
+  (declare (indent 1) (debug (form body)))
+  (let ((err (make-symbol "err")))
+    `(condition-case ,err
+         (progn ,@body)
+       (error (harness-log 'error "agent: %s failed: %s" ,what (harness-error-short-message ,err))
+              nil))))
+
 ;;;; Activity
 ;;
 ;; What a running turn is doing right now, so a UI can say so while
@@ -982,58 +997,148 @@ before a tool call never becomes an empty message."
 
 (defun harness-agent--finalize (turn kind)
   "Write the live node of KIND (assistant or thinking) of TURN for good.
-Whitespace held back for a node that never got visible text is dropped."
+Whitespace held back for a node that never got visible text is dropped.
+The turn lets go of the node whether or not it could be written."
   (let* ((sid (harness-agent-turn-session-id turn))
          (thinking (eq kind 'thinking))
          (node-id (if thinking (harness-agent-turn-think-node turn) (harness-agent-turn-text-node turn)))
          (buf (if thinking (harness-agent-turn-think-buf turn) (harness-agent-turn-text-buf turn))))
-    (when node-id
-      (harness-call 'session/update-node sid node-id :content (or buf "")
-                    :meta (list :model (or (gethash sid harness-agent--step-models)
-                                           (plist-get (harness-call 'session/get sid) :model))
-                                :usage (and (not thinking) (harness-agent-turn-last-usage turn)))))
-    (if thinking
-        (setf (harness-agent-turn-think-node turn) nil (harness-agent-turn-think-buf turn) nil)
-      (setf (harness-agent-turn-text-node turn) nil (harness-agent-turn-text-buf turn) nil))))
+    (unwind-protect
+        (when node-id
+          (harness-call 'session/update-node sid node-id :content (or buf "")
+                        :meta (list :model (or (gethash sid harness-agent--step-models)
+                                               (plist-get (harness-call 'session/get sid) :model))
+                                    :usage (and (not thinking) (harness-agent-turn-last-usage turn)))))
+      (if thinking
+          (setf (harness-agent-turn-think-node turn) nil (harness-agent-turn-think-buf turn) nil)
+        (setf (harness-agent-turn-text-node turn) nil (harness-agent-turn-text-buf turn) nil)))))
 
 (defun harness-agent--finalize-live (turn)
-  "Write the live thinking and assistant nodes of TURN for good."
-  (harness-agent--finalize turn 'thinking)
-  (harness-agent--finalize turn 'assistant))
+  "Write the live thinking and assistant nodes of TURN for good.
+Never signals: a node that cannot be written is logged, short, and let
+go of.  The callers are on their way to answering the provider, or to
+ending the turn, and neither may wait on it."
+  (dolist (kind '(thinking assistant))
+    (harness-agent--try (format "writing the %s node of %s" kind (harness-agent-turn-session-id turn))
+      (harness-agent--finalize turn kind))))
 
 (defun harness-agent--with-steering (turn content)
   "Return tool result CONTENT carrying the pending steering of TURN.
 The result is a step boundary, so this delivers that steering: a hosted
-loop reads it in the content, a native one with its next request."
-  (let ((steer (harness-agent--take-steering turn)))
-    (if steer
-        (concat content "\n\n<user_message>\n" steer "\n</user_message>")
-      content)))
+loop reads it in the content, a native one with its next request.
+Never signals: should the steering not be added, CONTENT goes out as it
+is, for the result must reach the provider."
+  (or (harness-agent--try "adding steering to a tool result"
+        (let ((steer (harness-agent--take-steering turn)))
+          (if steer
+              (concat content "\n\n<user_message>\n" steer "\n</user_message>")
+            content)))
+      content))
+
+(defun harness-agent--respond-with-fallback (respond what message fallback)
+  "Give the provider MESSAGE, about WHAT, through RESPOND; never signal.
+RESPOND is the `:respond' of a provider event that waits for an answer:
+a hosted loop's tool call, or its request for a permission.  Taking the
+answer can fail -- the provider encodes it, and text it cannot encode
+makes it signal -- and a provider that never gets its answer waits for
+it for good, with the turn behind it.  So the failure is logged, short
+\(the error can carry the whole text that failed), and RESPOND is called
+once more with \(funcall FALLBACK WHY), WHY being that short text: a few
+words, which the provider can always take.  Should that fail too, it is
+logged and given up.  Return non-nil when MESSAGE itself went out."
+  (condition-case err
+      (progn (funcall respond message) t)
+    (error
+     (let ((why (harness-error-short-message err)))
+       (harness-log 'error "agent: sending %s failed: %s" what why)
+       (condition-case err2
+           (funcall respond (funcall fallback why))
+         (error (harness-log 'error "agent: sending %s failed again: %s"
+                             what (harness-error-short-message err2))))
+       nil))))
+
+(defun harness-agent--respond (respond name content is-error)
+  "Send CONTENT, the result of the call of tool NAME, through RESPOND.
+IS-ERROR marks a failed call.  Never signals: a result the provider
+cannot take is answered with one saying that the harness could not send
+it, so that the model hears of the call all the same (see
+`harness-agent--respond-with-fallback')."
+  (harness-agent--respond-with-fallback
+   respond (format "the result of %s" name)
+   (list :content content :is-error is-error)
+   (lambda (why)
+     (list :content (format "The harness could not send the result of %s: %s" name why)
+           :is-error t))))
+
+(defun harness-agent--call-title (name input)
+  "Return the title of a call of tool NAME with INPUT, for people to read.
+NAME itself when the title cannot be made: no reason to drop the call."
+  (or (harness-agent--try (format "titling the call of %s" name)
+        (if (fboundp 'harness-tool-title) (harness-tool-title name input) name))
+      name))
+
+(defun harness-agent--record-result (sid name call-id result started)
+  "Record RESULT, what the call CALL-ID of tool NAME returned, in session SID.
+STARTED is when the call began.  Return the node, or nil when it could
+not be recorded: the store may refuse the output, or the disk be full.
+That is logged, short, and the result goes on to the provider all the
+same: a result the transcript refuses must not leave the model waiting."
+  (harness-agent--try (format "recording result of %s" name)
+    (harness-call 'session/append sid
+                  (list :kind 'tool-result :call-id call-id
+                        :output (plist-get result :content)
+                        :is-error (plist-get result :is-error)
+                        :attachments (plist-get result :attachments)
+                        :meta (append
+                               (list :duration (- (float-time) started)
+                                     :denied (plist-get result :denied)
+                                     :truncated (plist-get result :truncated))
+                               ;; What the tool recorded on its
+                               ;; result -- the child session a
+                               ;; spawn_agent call ran, the report a
+                               ;; hand_in handed in, the denied call a
+                               ;; rerun_approved call ran again and
+                               ;; the tool it was -- rides the node,
+                               ;; so the transcript can draw it later.
+                               ;; Its `:child-id', `:rerun-of' and
+                               ;; `:rerun-tool' are among it.
+                               (plist-get result :meta))))))
 
 (defun harness-agent--tool-call (turn ev)
   "Run the call EV of a harness tool for TURN; record it and its result.
 The result, with any steering waiting, goes back to the provider through
 EV's `:respond' when it runs a hosted loop.  Then the turn ends, if the
-tool asked it to (`:end-turn'), or decides what follows."
+tool asked it to (`:end-turn'), or decides what follows.
+
+The call is over, and the turn decides what follows, whatever happens to
+the result on the way: a transcript that refuses it, a provider that
+cannot take it.  The turn waits for each of its calls and a hosted loop
+for the result of each, so a failure here that skipped the rest would
+leave the session waiting for the model for good.  A step that fails is
+logged, short, and the ones after it still run."
   (let* ((sid (harness-agent-turn-session-id turn))
          (name (plist-get ev :name)) (input (plist-get ev :input))
          (call-id (or (plist-get ev :id) (harness-short-id)))
          (respond (plist-get ev :respond))
+         (title (harness-agent--call-title name input))
          (started (float-time)))
     (harness-agent--finalize-live turn)
     (setf (harness-agent-turn-hosted turn) (and respond t))
     (cl-incf (harness-agent-turn-pending turn))
     (remhash sid harness-agent--open-nodes)
-    (let ((node (harness-call 'session/append sid
-                              (append (list :kind 'tool-call :tool name :call-id call-id :input input
-                                            :title (if (fboundp 'harness-tool-title) (harness-tool-title name input) name)
-                                            :meta (list :model (plist-get (harness-call 'session/get sid) :model)))
-                                      (and (plist-get ev :checkpoint)
-                                           (list :checkpoint (plist-get ev :checkpoint))))))
+    ;; The model asked for the call and waits for its result: the call
+    ;; runs even when the transcript refuses to record it.
+    (let ((node (harness-agent--try (format "recording the call of %s" name)
+                  (harness-call 'session/append sid
+                                (append (list :kind 'tool-call :tool name :call-id call-id :input input
+                                              :title title
+                                              :meta (list :model (plist-get (harness-call 'session/get sid) :model)))
+                                        (and (plist-get ev :checkpoint)
+                                             (list :checkpoint (plist-get ev :checkpoint)))))))
           (execution nil))
-      (harness-emit 'agent/tool-call sid node)
+      (when node (harness-emit 'agent/tool-call sid node))
       ;; Recorded before it starts, so its permission decision finds it.
-      (harness-agent--add-call sid call-id name (plist-get node :title))
+      (harness-agent--add-call sid call-id name title)
       (setq execution (harness-call-async 'tools/execute sid (list :id call-id :name name :input input)))
       (harness-agent--update-activity sid)
       (harness-then
@@ -1043,48 +1148,30 @@ tool asked it to (`:end-turn'), or decides what follows."
          ;; process filter, whose news must not hide behind this call.
          (harness-agent--remove-call sid call-id)
          (harness-agent--update-activity sid)
-         (condition-case err
-             (let* ((rnode (harness-call 'session/append sid
-                                         (list :kind 'tool-result :call-id call-id
-                                               :output (plist-get result :content)
-                                               :is-error (plist-get result :is-error)
-                                               :attachments (plist-get result :attachments)
-                                               :meta (append
-                                                      (list :duration (- (float-time) started)
-                                                            :denied (plist-get result :denied)
-                                                            :truncated (plist-get result :truncated))
-                                                      ;; What the tool recorded on its
-                                                      ;; result -- the child session a
-                                                      ;; spawn_agent call ran, the report a
-                                                      ;; hand_in handed in, the denied call a
-                                                      ;; rerun_approved call ran again and
-                                                      ;; the tool it was -- rides the node,
-                                                      ;; so the transcript can draw it later.
-                                                      ;; Its `:child-id', `:rerun-of' and
-                                                      ;; `:rerun-tool' are among it.
-                                                      (plist-get result :meta)))))
-                    (content (harness-agent--with-steering turn (plist-get result :content))))
-               (harness-emit 'agent/tool-result sid rnode)
+         (unwind-protect
+             (let ((rnode (harness-agent--record-result sid name call-id result started))
+                   (content (harness-agent--with-steering turn (plist-get result :content))))
+               (when rnode
+                 (harness-agent--try (format "announcing the result of %s" name)
+                   (harness-emit 'agent/tool-result sid rnode)))
                (when respond
-                 (funcall respond (list :content content :is-error (plist-get result :is-error)))))
-           (error
-            (harness-log 'error "agent: recording result of %s failed: %S" name err)
-            (when respond
-              (funcall respond (list :content (plist-get result :content)
-                                     :is-error (plist-get result :is-error))))))
-         (cl-decf (harness-agent-turn-pending turn))
-         (if (plist-get result :end-turn)
-             ;; A tool finished the work (`hand_in'): no step may follow.
-             (harness-agent--finish-turn turn)
-           (harness-agent--maybe-continue turn)))
+                 (harness-agent--respond respond name content (plist-get result :is-error))))
+           ;; Whatever went wrong above, the call is over.
+           (cl-decf (harness-agent-turn-pending turn))
+           (if (plist-get result :end-turn)
+               ;; A tool finished the work (`hand_in'): no step may follow.
+               (harness-agent--finish-turn turn)
+             (harness-agent--maybe-continue turn))))
        (lambda (err)
          (harness-agent--remove-call sid call-id)
          (harness-agent--update-activity sid)
-         (let ((msg (format "Tool %s failed: %s" name (harness-error-message err))))
-           (ignore-errors
-             (harness-call 'session/append sid (list :kind 'tool-result :call-id call-id :output msg :is-error t)))
-           (let ((content (harness-agent--with-steering turn msg)))
-             (when respond (funcall respond (list :content content :is-error t))))
+         (unwind-protect
+             (let ((msg (format "Tool %s failed: %s" name (harness-error-short-message err))))
+               (harness-agent--try (format "recording the failure of %s" name)
+                 (harness-call 'session/append sid
+                               (list :kind 'tool-result :call-id call-id :output msg :is-error t)))
+               (let ((content (harness-agent--with-steering turn msg)))
+                 (when respond (harness-agent--respond respond name content t))))
            (cl-decf (harness-agent-turn-pending turn))
            (harness-agent--maybe-continue turn)))))))
 
@@ -1137,15 +1224,20 @@ or is done."
                (not (assoc call-id (gethash sid harness-agent--calls))))
       (harness-agent--finalize-live turn)
       (remhash sid harness-agent--open-nodes)
-      (let ((node (harness-call 'session/append sid
-                                (append (list :kind 'tool-call :tool name :call-id call-id :input input
-                                              :title (if (fboundp 'harness-tool-title) (harness-tool-title name input) name)
-                                              :meta (list :builtin t
-                                                          :model (plist-get (harness-call 'session/get sid) :model)))
-                                        (and (plist-get ev :checkpoint)
-                                             (list :checkpoint (plist-get ev :checkpoint)))))))
-        (harness-emit 'agent/tool-call sid node)
-        (harness-agent--add-call sid call-id name (plist-get node :title))
+      ;; The provider runs the call, and may be waiting for the harness's
+      ;; permission (`harness-agent--tool-permission'): it goes on, and is
+      ;; tracked, even when the transcript refuses to record it.
+      (let* ((title (harness-agent--call-title name input))
+             (node (harness-agent--try (format "recording the call of %s" name)
+                     (harness-call 'session/append sid
+                                   (append (list :kind 'tool-call :tool name :call-id call-id :input input
+                                                 :title title
+                                                 :meta (list :builtin t
+                                                             :model (plist-get (harness-call 'session/get sid) :model)))
+                                           (and (plist-get ev :checkpoint)
+                                                (list :checkpoint (plist-get ev :checkpoint))))))))
+        (when node (harness-emit 'agent/tool-call sid node))
+        (harness-agent--add-call sid call-id name title)
         ;; Nothing checks its permission until the provider asks.
         (harness-agent--set-call sid call-id :checking nil :builtin t :started (float-time))
         (harness-agent--update-activity sid)))))
@@ -1156,16 +1248,21 @@ The harness's permission chain decides it as a call of the harness tool
 it stands in for (`tools/authorize'), and EV's `:respond' gets the
 DECISION: (:behavior allow ...), or (:behavior deny :message TEXT ...)
 where TEXT is what the model is told.  A call EV the turn has not
-recorded yet is recorded first."
+recorded yet is recorded first.
+
+The provider waits for the answer, so it always gets one: should it
+not take the DECISION, it is told that the call is denied because the
+harness could not send it (see `harness-agent--respond-with-fallback')."
   (let* ((sid (harness-agent-turn-session-id turn))
          (call-id (plist-get ev :id))
          (respond (plist-get ev :respond))
          (answer (lambda (decision)
                    (when respond
-                     (condition-case err
-                         (funcall respond decision)
-                       (error (harness-log 'error "agent: answering the permission of %s failed: %S"
-                                           call-id err))))))
+                     (harness-agent--respond-with-fallback
+                      respond (format "the permission decision about %s" call-id) decision
+                      (lambda (why)
+                        (list :behavior 'deny :reason why
+                              :message (format "Denied: the harness could not send its decision: %s" why)))))))
          (refuse (lambda (reason)
                    (funcall answer (list :behavior 'deny :reason reason :message (concat "Denied: " reason))))))
     (cond
@@ -1188,22 +1285,25 @@ recorded yet is recorded first."
        (lambda (err)
          (harness-agent--set-call sid call-id :checking nil :denied t)
          (harness-agent--update-activity sid)
-         (funcall refuse (format "the permission check failed: %s" (harness-error-message err)))))))))
+         (funcall refuse (format "the permission check failed: %s" (harness-error-short-message err)))))))))
 
 (defun harness-agent--record-builtin-result (sid call output is-error &optional meta)
   "Record OUTPUT as the result of SID's running built-in CALL and end it.
-IS-ERROR marks a failed call; META is added to the node's meta."
+IS-ERROR marks a failed call; META is added to the node's meta.  Return
+the node, or nil when it could not be recorded: that is logged, short,
+and the call is over all the same."
   (harness-agent--remove-call sid (car call))
-  (let ((node (harness-call 'session/append sid
-                            (list :kind 'tool-result :call-id (car call)
-                                  :output (if (stringp output) output (format "%s" (or output "")))
-                                  :is-error (and is-error t)
-                                  :meta (append (list :builtin t
-                                                      :duration (- (float-time)
-                                                                   (or (plist-get (cdr call) :started) (float-time))))
-                                                (and (plist-get (cdr call) :denied) (list :denied t))
-                                                meta)))))
-    (harness-emit 'agent/tool-result sid node)
+  (let ((node (harness-agent--try (format "recording result of %s" (or (plist-get (cdr call) :tool) (car call)))
+                (harness-call 'session/append sid
+                              (list :kind 'tool-result :call-id (car call)
+                                    :output (if (stringp output) output (format "%s" (or output "")))
+                                    :is-error (and is-error t)
+                                    :meta (append (list :builtin t
+                                                        :duration (- (float-time)
+                                                                     (or (plist-get (cdr call) :started) (float-time))))
+                                                  (and (plist-get (cdr call) :denied) (list :denied t))
+                                                  meta))))))
+    (when node (harness-emit 'agent/tool-result sid node))
     (harness-agent--update-activity sid)
     node))
 

@@ -284,16 +284,33 @@ unresponsive UI."
      (or seconds harness-tools--emacs-timeout)
      "the user's Emacs")))
 
+(defun harness-tools--clean-content (result)
+  "Return RESULT with any raw byte in its `:content' repaired.
+A raw byte is binary data read as if it were text -- `cat' of a JPEG,
+say, or a stuck transcript already holding one read back by
+session_read or emacs_buffer -- which stays ordinary Lisp text until
+something downstream checks it is valid Unicode and refuses the whole
+value for it: the provider's wire protocol among them, with the model
+left waiting for an answer that never comes.  Cleaned here, at the
+source, before RESULT is truncated, saved, recorded or sent, so nothing
+after this has to guard against it again (see `harness-valid-text')."
+  (let ((content (plist-get result :content)))
+    (if (stringp content)
+        (plist-put (copy-sequence result) :content (harness-valid-text content))
+      result)))
+
 (defun harness-tools--normalise-result (value)
   "Return VALUE, what a tool handler gave, as a RESULT.
 A RESULT plist has its `:is-error' made t or nil; a string becomes the
 content of a successful result, nil an empty one, and anything else its
-printed form."
-  (cond ((and (listp value) (plist-member value :content))
-         (plist-put (copy-sequence value) :is-error (and (plist-get value :is-error) t)))
-        ((stringp value) (harness-tool-ok value))
-        ((null value) (harness-tool-ok ""))
-        (t (harness-tool-ok (format "%S" value)))))
+printed form.  Its `:content' is cleaned of any raw byte (see
+`harness-tools--clean-content')."
+  (harness-tools--clean-content
+   (cond ((and (listp value) (plist-member value :content))
+          (plist-put (copy-sequence value) :is-error (and (plist-get value :is-error) t)))
+         ((stringp value) (harness-tool-ok value))
+         ((null value) (harness-tool-ok ""))
+         (t (harness-tool-ok (format "%S" value))))))
 
 (defun harness-tools--guard-size (result call-id)
   "Truncate an oversized RESULT, saving the full text for range reads.

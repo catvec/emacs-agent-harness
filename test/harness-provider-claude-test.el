@@ -51,6 +51,7 @@
 (declare-function harness-provider-claude--spawn-key "harness-provider-claude")
 (declare-function harness-provider-claude-session-active "harness-provider-claude")
 (declare-function harness-provider-claude-session-baseline-id "harness-provider-claude")
+(declare-function harness-provider-claude--tools-call "harness-provider-claude")
 (declare-function harness-define-tool "harness-tools")
 (defvar harness-provider-demo-script-override)
 (defvar harness-brave-api-key)
@@ -509,6 +510,47 @@ sub-agent's stream is left out."
     ;; The end of the turn forgets the count.
     (harness-provider-claude--finish entry '(:type done :stop-reason end-turn))
     (should-not (gethash "s-call-usage" harness-provider-claude--call-output))))
+
+(ert-deftest harness-provider-claude-tools-call-answers-even-when-sending-fails ()
+  "The CLI's tools/call always gets an answer, even when sending it fails.
+`harness-provider-claude--send' writes JSON over the CLI's pipe, which
+can fail -- `json-serialize' can refuse what it is given, so can a
+broken pipe -- and used to leave the CLI's tools/call waiting for
+good, the turn stuck on \"Waiting for the model\" with no error ever
+shown.  A send that fails is answered with a second one, saying the
+harness could not send the real result, instead of none at all (see
+`harness-provider-claude--answer-or-explain')."
+  (harness-provider-claude-test--setup)
+  (let* ((events nil)
+         (wire nil)
+         (fail-next t)
+         (entry (harness-provider-claude--make-session
+                 :id "s-answers" :active t
+                 :on-event (lambda (ev) (push ev events)))))
+    (cl-letf (((symbol-function 'harness-provider-claude--send)
+               (lambda (_entry object)
+                 (push object wire)
+                 (when fail-next
+                   (setq fail-next nil)
+                   (signal 'wrong-type-argument (list 'json-value-p "binary"))))))
+      (harness-provider-claude--tools-call
+       entry "req-1" (list :id 7 :params (list :name "mcp__harness__bash" :arguments '(:command "x"))))
+      (let* ((call (car events))
+             (respond (plist-get call :respond)))
+        (should (eq 'tool-call (plist-get call :type)))
+        (should (functionp respond))
+        (should-not wire)
+        ;; The provider delivers the tool's real result; the stub fails
+        ;; to send it once, as a broken pipe or a bad encoding would.
+        (funcall respond (list :content "some result" :is-error nil))))
+    ;; Two sends: the attempt that failed, then the fallback that said so.
+    (should (= 2 (length wire)))
+    (cl-destructuring-bind (first second) (reverse wire)
+      (let ((reply (lambda (sent) (harness-plist-get-in sent '(:response :response :mcp_response :result)))))
+        (should (equal "some result" (plist-get (car (plist-get (funcall reply first) :content)) :text)))
+        (should-not (harness-json-true-p (plist-get (funcall reply first) :isError)))
+        (should (string-match-p "could not send" (plist-get (car (plist-get (funcall reply second) :content)) :text)))
+        (should (harness-json-true-p (plist-get (funcall reply second) :isError)))))))
 
 (ert-deftest harness-provider-claude-turn-with-hosted-tool-call ()
   (harness-provider-claude-test--setup)

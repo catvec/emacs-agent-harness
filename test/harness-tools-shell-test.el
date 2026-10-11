@@ -70,6 +70,23 @@ overwrote the user's saved agent details with a dead one."
     (should (equal '("sub") (funcall (harness-tool-paths-fn (harness-tool-get "bash")) '(:command "x" :cwd "sub"))))
     (should (equal '(".") (funcall (harness-tool-paths-fn (harness-tool-get "bash")) '(:command "x"))))))
 
+(ert-deftest harness-tools-shell-bash-output-with-raw-bytes-is-cleaned ()
+  "Binary output -- `cat' of a JPEG, say -- is cleaned, not left to raise.
+The call comes back as an ordinary RESULT with readable, valid text
+and no raw byte left in it, so neither the transcript nor a provider's
+wire protocol is ever asked to swallow one and left with no answer to
+give (see `harness-valid-text', `harness-tools--clean-content')."
+  (harness-tools-shell-test--setup)
+  (harness-tools-shell-test-in-dir
+    (let* ((r (harness-tools-shell-test--call "bash" :command "printf 'abc\\xff\\xfedef'"))
+           (content (plist-get r :content)))
+      (should-not (plist-get r :is-error))
+      (should (string-match-p "\\`abc.*def" content))
+      ;; No raw byte is left...
+      (should-not (cl-some (lambda (c) (eq (char-charset c) 'eight-bit)) content))
+      ;; ... so it is safe wherever the result goes next.
+      (should (stringp (harness-json-encode (list :content content)))))))
+
 (ert-deftest harness-tools-shell-bash-timeout ()
   (harness-tools-shell-test--setup)
   (harness-tools-shell-test-in-dir

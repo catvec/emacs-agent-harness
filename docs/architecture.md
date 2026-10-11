@@ -1741,7 +1741,13 @@ activity line shows (its last line, `tools/progress'); `:note` accepts
 a line or a few for people to read, which the chat shows under the
 call's own block (`tools/note', see "The note under a running call"
 below).  RESULT = `(:content "…" :is-error BOOL :attachments (…)
-:meta PLIST)`.
+:meta PLIST)`.  A handler can hand back a raw byte in `:content` --
+`cat` of a binary file, say, or a stuck transcript `session_read` or
+`emacs_buffer` read back -- which `harness-tools--normalise-result`
+repairs with `harness-valid-text` before anything truncates, saves,
+records or sends it: a provider's wire protocol, and `json-serialize`
+under it, refuses the whole message for one raw byte anywhere in it,
+which otherwise leaves the model with no answer to its call at all.
 
 - `tools/list &optional SESSION-ID` → TOOL-SPECs `(:name :label
   :description :schema :kind :coalescable)`, filtered through sync
@@ -6240,6 +6246,16 @@ What is sent while a TCP connection connects waits and goes out once
 the socket is up, so a client keeps a connection while `harness-acp-open-p`
 holds rather than connecting again, which would drop it along with
 every request it carries.
+
+A request a client sends the harness (`harness-acp--handle-request`)
+always gets an answer to its id: when the real one cannot be sent --
+`json-serialize` refuses a raw byte, deep in a session's transcript a
+tool once read as if it were text, say, or the transport itself breaks
+-- a short error replaces it, so the promise of `harness-acp-request`
+settles rather than wait on an answer that would otherwise never come.
+It still waits for good when the fallback cannot be sent either, which
+only a transport beyond use should ever cause; the connection closing
+then rejects it, as it does everything else still pending on it.
 
 `harness-acp-current-connection` is the connection whose request or
 notification a handler (`harness-acp-set-handler`) is given, bound while

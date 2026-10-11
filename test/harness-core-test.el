@@ -193,6 +193,72 @@ and `:final' stops it as it stops the whole chain."
       (should (equal outer (plist-get (harness-json-parse (harness-json-encode (list :text outer))) :text)))))
   (should (equal "{\"a\":[1,\"b\"]}" (harness-json-encode-text '(:a (1 "b"))))))
 
+(defun harness-core-test--raw-bytes ()
+  "Return \"abc\" + two raw bytes (FF, FE) + \"def\", read into a buffer.
+Built in a unibyte buffer, as a process or `cat' of a binary file would
+leave it, then switched to multibyte: the two bad bytes come out as
+`eight-bit' characters, which `harness-valid-text' repairs.  Two
+separate string literals for the two bytes: Lisp's \\=\\x escape takes
+as many following hex digits as it can, so a `def' right after it in
+the same literal would be read as part of the same character instead."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert "abc\xff\xfe" "def")
+    (set-buffer-multibyte t)
+    (buffer-string)))
+
+(ert-deftest harness-util-valid-text ()
+  "`harness-valid-text' repairs a raw byte and leaves good text alone."
+  ;; Multibyte text with no raw byte: unchanged, not even copied.
+  (let ((s "caf\N{U+E9} naive unicode \N{U+2717}"))
+    (should (eq s (harness-valid-text s))))
+  ;; A unibyte string that is plain ASCII: unchanged too.
+  (let ((s (string-to-unibyte "plain ascii")))
+    (should (eq s (harness-valid-text s))))
+  ;; A multibyte string with a raw byte -- binary read as if it were
+  ;; text -- loses just that byte, one U+FFFD (\N{U+FFFD}) each, the
+  ;; rest intact.
+  (should (equal (concat "abc" "\N{U+FFFD}" "\N{U+FFFD}" "def")
+                 (harness-valid-text (harness-core-test--raw-bytes))))
+  ;; A unibyte string outside ASCII is decoded as UTF-8 first: a
+  ;; well-formed run comes back as its real characters...
+  (should (equal "a\N{U+E9}" (harness-valid-text (unibyte-string ?a 195 169))))
+  ;; ... and what still is not valid becomes U+FFFD, same as above.
+  (should (equal (concat "ab" "\N{U+FFFD}" "\N{U+FFFD}")
+                 (harness-valid-text (unibyte-string ?a ?b 255 254)))))
+
+(ert-deftest harness-util-json-encode-repairs-raw-bytes ()
+  "`harness-json-encode' repairs a raw byte instead of signalling.
+`json-serialize' refuses a string with one, `wrong-type-argument'
+naming `json-value-p': the whole call would otherwise fail on a value
+deep inside OBJ, such as a tool result that read a binary file as if
+it were text, leaving whoever asked for the encoding with no answer at
+all (see `harness-valid-text')."
+  (let* ((raw (harness-core-test--raw-bytes))
+         (cleaned (concat "abc" "\N{U+FFFD}" "\N{U+FFFD}" "def"))
+         (logged nil)
+         (harness-log-hook (list (lambda (_level msg) (push msg logged))))
+         (encoded (harness-json-encode (list :content raw :n 1 :nested (list (list :x raw))))))
+    (should (stringp encoded))
+    (should (equal (list :content cleaned :n 1 :nested (list (list :x cleaned)))
+                   (harness-json-parse encoded)))
+    ;; Logged, short, so the repair is not silent, but carries none of
+    ;; the raw text itself.
+    (should (cl-some (lambda (m) (string-match-p "raw byte" m)) logged))
+    (should-not (cl-some (lambda (m) (string-match-p "abc" m)) logged)))
+  ;; A unibyte string is repaired the same way.
+  (should (equal (concat "{\"m\":\"a" "\N{U+FFFD}" "\"}")
+                 (harness-json-encode-text (list :m (unibyte-string ?a 255)))))
+  ;; Nothing to repair: round-trips as plain JSON, as before.
+  (should (equal "{\"a\":1}" (harness-json-encode '(:a 1))))
+  ;; A `wrong-type-argument' about something other than `json-value-p'
+  ;; still signals rather than being treated as a raw byte to repair.
+  (should-error
+   (cl-letf (((symbol-function 'json-serialize)
+              (lambda (&rest _) (signal 'wrong-type-argument '(sequencep 3)))))
+     (harness-json-encode '(:a 1)))
+   :type 'wrong-type-argument))
+
 (ert-deftest harness-util-json-parse-long-whitespace ()
   "Parsing takes time linear in a long run of spaces inside the JSON.
 The check for empty input used `string-trim', whose time is quadratic in

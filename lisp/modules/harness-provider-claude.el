@@ -778,6 +778,29 @@ RESUME, FORK and RESUME-AT are passed to `harness-provider-claude--command'."
    entry (list :type "control_response"
                :response (list :subtype "error" :request_id request-id :error message))))
 
+(defun harness-provider-claude--answer-or-explain (entry what answer explain)
+  "Answer a request of the CLI on ENTRY with ANSWER, or with EXPLAIN if that fails.
+ANSWER is a function of no arguments that writes the answer to the CLI.
+It can signal: JSON encoding rejects text it cannot represent, such as
+the raw bytes of a binary file a tool read.  The CLI waits for the
+answer for as long as it lives, with the turn showing \"Waiting for the
+model\", so a failure is not left to propagate: it is logged, short, as
+WHAT, naming the answer, and EXPLAIN, a function of the error's short
+message, writes another answer saying that the first could not be
+sent.  EXPLAIN is guarded too, so this never signals."
+  (condition-case err
+      (funcall answer)
+    (error
+     (let ((why (harness-error-short-message err)))
+       (harness-log 'warn "provider-claude: could not send %s to the CLI of %s: %s"
+                    what (harness-provider-claude-session-id entry) why)
+       (condition-case second
+           (funcall explain why)
+         (error
+          (harness-log 'warn "provider-claude: nor could it say so for %s of %s: %s"
+                       what (harness-provider-claude-session-id entry)
+                       (harness-error-short-message second))))))))
+
 ;;;; MCP server
 
 (defun harness-provider-claude--tool-list (entry)
@@ -813,13 +836,25 @@ every later turn without tools."
                   (list (cons id (harness-provider-claude--strip-prefix name)))))))
 
 (defun harness-provider-claude--tools-call (entry request-id message)
-  "Serve a tools/call MESSAGE under control request REQUEST-ID on ENTRY."
+  "Serve a tools/call MESSAGE under control request REQUEST-ID on ENTRY.
+The CLI always gets an answer.  When the result cannot be written --
+JSON encoding rejects text it cannot represent, such as the raw bytes
+of a binary file -- it gets an error result saying so instead (see
+`harness-provider-claude--answer-or-explain'), since the model would
+otherwise wait for the tool for good.  `:respond' answers once."
   (let* ((rpc-id (plist-get message :id))
          (params (plist-get message :params))
          (name (harness-provider-claude--strip-prefix (plist-get params :name)))
          (input (plist-get params :arguments))
          (tool-id (harness-provider-claude--take-tool-id entry name))
          (answered nil)
+         (reply
+          (lambda (text is-error)
+            (harness-provider-claude--control-response
+             entry request-id
+             (list :jsonrpc "2.0" :id rpc-id
+                   :result (list :content (list (list :type "text" :text text))
+                                 :isError (if is-error t :false))))))
          (respond
           (lambda (result)
             (unless answered
@@ -827,13 +862,14 @@ every later turn without tools."
               (let ((content (plist-get result :content))
                     (is-error (harness-json-true-p (plist-get result :is-error))))
                 (push tool-id (harness-provider-claude-session-own-results entry))
-                (harness-provider-claude--control-response
-                 entry request-id
-                 (list :jsonrpc "2.0" :id rpc-id
-                       :result (list :content (list (list :type "text"
-                                                          :text (if (stringp content) content
-                                                                  (format "%s" (or content "")))))
-                                     :isError (if is-error t :false)))))))))
+                (harness-provider-claude--answer-or-explain
+                 entry (format "the result of %s" name)
+                 (lambda ()
+                   (funcall reply (if (stringp content) content (format "%s" (or content "")))
+                            is-error))
+                 (lambda (why)
+                   (funcall reply (format "The harness could not send this tool's result: %s" why)
+                            t))))))))
     (if (harness-provider-claude-session-active entry)
         (harness-provider-claude--emit
          entry (append (list :type 'tool-call :id tool-id :name name :input input :respond respond)
@@ -874,10 +910,22 @@ every later turn without tools."
           entry request-id '(:jsonrpc "2.0" :id 0 :result :empty)))))))
 
 (defun harness-provider-claude--answer-permission (entry request-id answer)
-  "Answer the CLI's permission prompt REQUEST-ID on ENTRY with ANSWER."
-  (harness-provider-claude--send
-   entry (list :type "control_response"
-               :response (list :subtype "success" :request_id request-id :response answer))))
+  "Answer the CLI's permission prompt REQUEST-ID on ENTRY with ANSWER.
+The CLI waits for each prompt to be answered, so an ANSWER that cannot
+be written -- its text or input holds what JSON cannot encode -- is
+replaced by a denial saying so (see
+`harness-provider-claude--answer-or-explain')."
+  (let ((send (lambda (response)
+                (harness-provider-claude--send
+                 entry (list :type "control_response"
+                             :response (list :subtype "success" :request_id request-id
+                                             :response response))))))
+    (harness-provider-claude--answer-or-explain
+     entry "a permission decision"
+     (lambda () (funcall send answer))
+     (lambda (why)
+       (funcall send (list :behavior "deny"
+                           :message (format "The harness could not send its decision: %s" why)))))))
 
 (defun harness-provider-claude--can-use-tool (entry request-id request)
   "Answer the CLI's permission prompt REQUEST under REQUEST-ID on ENTRY.

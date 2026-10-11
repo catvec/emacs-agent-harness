@@ -1739,7 +1739,12 @@ strictly before that node."
     (gethash node-id (harness-session-nodes s))))
 
 (harness-defmethod session/append (id node)
-  "Append NODE to session ID after the current head; return the stored node."
+  "Append NODE to session ID after the current head; return the stored node.
+The node is written to the node log before it becomes the head.  A
+write that fails (a node the log cannot encode, a full disk) signals
+and leaves the session as it was: a node kept in memory only would
+parent the nodes written after it, and when the session is loaded again
+their parent would be missing, which cuts the transcript there."
   (let* ((s (harness-session--get id))
          (n (copy-sequence node)))
     (harness-session--load-nodes s)
@@ -1747,9 +1752,9 @@ strictly before that node."
     (setq n (plist-put n :session id))
     (setq n (plist-put n :ts (or (plist-get n :ts) (float-time))))
     (setq n (plist-put n :parent (harness-session-head s)))
+    (harness-session--persist-node s n)
     (puthash (plist-get n :id) n (harness-session-nodes s))
     (setf (harness-session-head s) (plist-get n :id))
-    (harness-session--persist-node s n)
     (harness-emit 'session/node-added id n)
     (harness-session--touch s)
     n))
