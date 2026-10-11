@@ -1229,15 +1229,15 @@ session or a task if it likes, and says in a prompt what it looks for
 and what it may do about it (`wake` unless it names other actions); each
 event that matches is put to a cheap model with that prompt, which
 decides whether the event calls for one of those actions or can be
-ignored. Like `session_wait`, the call returns at once, and a decision
-arrives as a message of the harness's own (**System · event watch**)
-whose first line is the decision as JSON, so the agent can restart work,
-tell another session or leave it; with `wait` the call returns the first
-decision instead. A watch asks the model about one event at a time and
-at most `harness-tools-events-max-calls-per-minute` (12) times a minute,
-ends after its first decision unless the agent asks for more, and ends
-too with `unwatch_events`, at its timeout, or when you cancel the
-session's turn.
+ignored. Like `session_wait`, the call never blocks: it registers the
+watch and returns at once, and a decision arrives as a message of the
+harness's own (**System · event watch**) whose first line is the
+decision as JSON, so the agent can restart work, tell another session or
+leave it. A watch asks the model about one event at a time and at most
+`harness-tools-events-max-calls-per-minute` (12) times a minute, ends
+after its first decision unless the agent asks for more, and ends too
+with `unwatch_events`, at its timeout, or when you cancel the session's
+turn.
 
 ### Supervisor mode
 

@@ -10,23 +10,19 @@
 ;; that matches is put to a classifier, a cheap model asked through the
 ;; shared judge (lisp/modules/harness-judge.el), which answers one of
 ;; the actions the session named -- "wake" unless it named others -- or
-;; "ignore".  A decision other than ignore reaches the session:
+;; "ignore".  A decision other than ignore reaches the session.
 ;;
-;; - A registration, the default, returns at once, as session_wait's
-;;   does, and outlives the turn that made it.  The session is woken
-;;   with a message of the harness's own, sent as session_wait sends
-;;   its (`harness-tools-sessions--wake'), from "event watch": an idle
-;;   session starts a turn on it, a running one is steered.  Its first
-;;   line is the decision as JSON, so the session acts on it without
-;;   reading prose; decisions for one session that come within a second
-;;   of each other come in one message.  A registration ends with its
-;;   first decision (`once', the default), its timeout, unwatch_events,
-;;   the end of its session, or a turn of its session the user
-;;   cancelled, as a registered session_wait does.
-;; - With `wait' the call itself waits for the first decision and
-;;   returns it, as task_wait returns: the decision is the result, and
-;;   its `:meta' the decision as a plist.  The watch ends then, at its
-;;   timeout, or with the turn.
+;; The call never blocks.  It registers the watch and returns at once,
+;; as session_wait's does, and the watch outlives the turn that made
+;; it.  The session is woken with a message of the harness's own, sent
+;; as session_wait sends its (`harness-tools-sessions--wake'), from
+;; "event watch": an idle session starts a turn on it, a running one is
+;; steered.  Its first line is the decision as JSON, so the session
+;; acts on it without reading prose; decisions for one session that
+;; come within a second of each other come in one message.  A watch
+;; ends with its first decision (`once', the default), its timeout,
+;; unwatch_events, the end of its session, or a turn of its session the
+;; user cancelled, as a registered session_wait does.
 ;;
 ;; The events come from the bus.  One subscriber per event of
 ;; `harness-tools-events-kinds' only looks whether a watch wants it and
@@ -56,8 +52,8 @@
 ;; that does not work never fails silently.
 ;;
 ;; Watches live in memory (`harness-tools-events--watches'): a harness
-;; that restarts has none.  While a registration lives it is reported
-;; to `agent/outstanding', as a registered session_wait is, so a task
+;; that restarts has none.  While a watch lives it is reported to
+;; `agent/outstanding', as a registered session_wait is, so a task
 ;; whose session watches stays active.  So is a decision still waiting
 ;; to wake the session (it waits a second for others, see
 ;; `harness-tools-events--send'), though its watch has ended: a turn of
@@ -137,12 +133,6 @@ what to look for, which seldom takes more.")
 (defconst harness-tools-events--detail-chars 300
   "Most characters of a text an event's record keeps: a reply, a result.")
 
-(defconst harness-tools-events--wait-default 600
-  "Seconds a watch_events call with wait waits when it gives no timeout.")
-
-(defconst harness-tools-events--wait-max 3600
-  "Longest wait, in seconds, a watch_events call with wait may ask for.")
-
 (defconst harness-tools-events--sender "event watch"
   "The part of the harness the messages of event watches come from.")
 
@@ -157,7 +147,7 @@ what to look for, which seldom takes more.")
   ;; The session and the task it narrows events to, the task's session
   ;; once known, and its project's root when it narrows them to that.
   target task task-session root all-projects
-  once wait resolve started timeout timer
+  once started timeout timer
   ;; Its classifier: the events waiting for it, whether it is asking,
   ;; when it asked lately, and the timer that asks again after a pause.
   queue busy calls pump
@@ -799,31 +789,22 @@ goes on."
                        (harness-tools-events--name watch) (plist-get decision :action)
                        (plist-get record :summary))
                (harness-tools-events--counts-text watch)
-               (cond ((harness-tools-events--watch-wait watch) "The watch has ended.")
-                     (ends "The watch has ended: it was for one decision. Call watch_events again to keep watching.")
-                     (t "The watch goes on; end it with unwatch_events."))))
+               (if ends
+                   "The watch has ended: it was for one decision. Call watch_events again to keep watching."
+                 "The watch goes on; end it with unwatch_events.")))
    "\n"))
 
 (defun harness-tools-events--deliver (watch record value)
   "Bring VALUE, the decision of WATCH's classifier on RECORD, to WATCH's session.
-A call that waits returns it; a registration wakes the session with it.
-The watch ends when it waits or was for one decision, else it asks on."
+The session is woken with it (`harness-tools-events--send').  The watch
+ends when it was for one decision, else it asks on."
   (let* ((decision (harness-tools-events--decision watch record value))
-         (ends (or (harness-tools-events--watch-wait watch) (harness-tools-events--watch-once watch)))
+         (ends (harness-tools-events--watch-once watch))
          (text (harness-tools-events--decision-text watch record decision ends)))
-    (if (harness-tools-events--watch-wait watch)
-        (harness-tools-events--settle watch (harness-tool-ok text :meta decision))
-      (harness-tools-events--send (harness-tools-events--watch-session watch) text))
+    (harness-tools-events--send (harness-tools-events--watch-session watch) text)
     (if ends
         (harness-tools-events--end watch 'decided)
       (harness-tools-events--pump watch))))
-
-(defun harness-tools-events--settle (watch result)
-  "Return RESULT for WATCH's waiting call, once."
-  (let ((resolve (harness-tools-events--watch-resolve watch)))
-    (when resolve
-      (setf (harness-tools-events--watch-resolve watch) nil)
-      (funcall resolve result))))
 
 (defun harness-tools-events--send (session-id text)
   "Wake SESSION-ID with TEXT, with whatever else comes for it within a second.
@@ -873,34 +854,26 @@ session_wait sends its (`harness-tools-sessions--wake')."
 (defun harness-tools-events--end-text (watch why detail)
   "Return what WATCH's session is told of its end for WHY, or nil for nothing.
 DETAIL says more, such as which session was deleted."
-  (let ((name (harness-tools-events--name watch))
-        (wait (harness-tools-events--watch-wait watch)))
+  (let ((name (harness-tools-events--name watch)))
     (pcase why
       ('timeout
-       (if wait
-           (format "No decision within %ss from event watch %s: %s. The watch has ended; call watch_events again to keep waiting."
-                   (harness-tools-events--watch-timeout watch) name (harness-tools-events--tally watch))
-         (format "Event watch %s ended after %ss without a decision other than ignore: %s. Call watch_events again to keep watching."
-                 name (harness-tools-events--watch-timeout watch) (harness-tools-events--tally watch))))
+       (format "Event watch %s ended after %ss without a decision other than ignore: %s. Call watch_events again to keep watching."
+               name (harness-tools-events--watch-timeout watch) (harness-tools-events--tally watch)))
       ('failed
        (format "Event watch %s ended: its classifier gave no decision %d times in a row (the last time %s), so the events it could not classify were skipped. Call watch_events again to watch once more, or wait on the sessions or tasks with session_wait or task_wait instead."
                name harness-tools-events--max-failures
                (or (harness-tools-events--watch-last-failure watch) "it gave no answer")))
       ('gone (format "Event watch %s ended: %s." name detail))
-      ('unwatched (and wait (format "Event watch %s was stopped with unwatch_events." name)))
-      ('interrupted (and wait "The wait was interrupted."))
       (_ nil))))
 
 (defun harness-tools-events--end (watch why &optional detail)
   "End WATCH for WHY, and tell its session when it should hear of it.
 WHY is `decided' (its decision was delivered already), `timeout',
 `failed' (its classifier failed too often), `gone' (what it watched is
-gone, DETAIL says which), `unwatched', `deleted' (its session is gone),
-`cancelled' (the user cancelled its session's turn) or `interrupted'
-\(the turn of a call that waits ended).  A call that waits returns the
-text; a registration wakes its session at a timeout, a failure or a
-gone target, and quietly ends otherwise.  Return non-nil when WATCH
-lived."
+gone, DETAIL says which), `unwatched', `deleted' (its session is gone)
+or `cancelled' (the user cancelled its session's turn).  A watch wakes
+its session at a timeout, a failure or a gone target, and quietly ends
+otherwise.  Return non-nil when WATCH lived."
   (when (harness-tools-events--live-p watch)
     (remhash (harness-tools-events--watch-id watch) harness-tools-events--watches)
     (dolist (timer (list (harness-tools-events--watch-timer watch) (harness-tools-events--watch-pump watch)))
@@ -910,15 +883,9 @@ lived."
           (harness-tools-events--watch-queue watch) nil)
     (let ((text (harness-tools-events--end-text watch why detail))
           (ended (list :watch (harness-tools-events--watch-id watch) :ended (symbol-name why))))
-      (cond
-       ((harness-tools-events--watch-wait watch)
-        (harness-tools-events--settle
-         watch (if (eq why 'failed)
-                   (harness-tool-error (or text "The watch ended.") :meta ended)
-                 (harness-tool-ok (or text "The watch ended.") :meta ended))))
-       ((and text (memq why '(timeout failed gone)))
+      (when (and text (memq why '(timeout failed gone)))
         (harness-tools-events--send (harness-tools-events--watch-session watch)
-                                    (concat (harness-json-encode-text ended) "\n" text)))))
+                                    (concat (harness-json-encode-text ended) "\n" text))))
     t))
 
 (defun harness-tools-events--time-out (watch)
@@ -928,15 +895,13 @@ lived."
 
 (defun harness-tools-events--on-turn-ended (session-id reason &rest _)
   "End what SESSION-ID's turn, which ended for REASON, takes with it.
-A call that waits goes with the turn it is in.  A registration
-outlives it, except after a turn the user cancelled, when it goes too,
-with the decisions still waiting to wake the session: a turn the user
-stopped is not one to start another on (as
-`harness-tools-sessions--on-turn-ended' has it)."
-  (dolist (w (harness-tools-events--watches-of session-id))
-    (cond ((harness-tools-events--watch-wait w) (harness-tools-events--end w 'interrupted))
-          ((eq reason 'cancelled) (harness-tools-events--end w 'cancelled))))
+A watch outlives the turn that made it, except after a turn the user
+cancelled, when it goes too, with the decisions still waiting to wake
+the session: a turn the user stopped is not one to start another on
+\(as `harness-tools-sessions--on-turn-ended' has it)."
   (when (eq reason 'cancelled)
+    (dolist (w (harness-tools-events--watches-of session-id))
+      (harness-tools-events--end w 'cancelled))
     (harness-tools-events--drop-outbox session-id)))
 
 (defun harness-tools-events--on-session-deleted (session-id &rest _)
@@ -960,19 +925,18 @@ stopped is not one to start another on (as
 
 (defun harness-tools-events--outstanding (value session-id)
   "Add what SESSION-ID's event watches leave running to VALUE.
-See `agent/outstanding'.  That is every registration SESSION-ID made,
-which outlives the turn that made it, and a message of a watch still
-waiting to wake it (`harness-tools-events--send'), whose watch may
-have ended already.  A task whose session watches events, or is about
-to be woken by a watch, stays active while this says something; the
-turn the message starts carries the task on."
-  (let* ((registered (cl-remove-if #'harness-tools-events--watch-wait
-                                   (harness-tools-events--watches-of session-id)))
+See `agent/outstanding'.  That is every watch SESSION-ID made, which
+outlives the turn that made it, and a message of a watch still waiting
+to wake it (`harness-tools-events--send'), whose watch may have ended
+already.  A task whose session watches events, or is about to be woken
+by a watch, stays active while this says something; the turn the
+message starts carries the task on."
+  (let* ((watches (harness-tools-events--watches-of session-id))
          (text (string-join
                 (delq nil
-                      (list (and registered
+                      (list (and watches
                                  (concat "Watching events: "
-                                         (mapconcat #'harness-tools-events--name registered ", ")))
+                                         (mapconcat #'harness-tools-events--name watches ", ")))
                             (and (gethash session-id harness-tools-events--outbox)
                                  "A message from an event watch waits to be sent")))
                 "; ")))
@@ -1026,14 +990,8 @@ Signal when one is not a short lowercase word, or none is left."
                                                 harness-tools-events--max-prompt-chars))))
           (t (string-trim prompt)))))
 
-(defun harness-tools-events--wait-timeout (input)
-  "Return the seconds a call with wait waits, as INPUT asks, clamped."
-  (let ((v (plist-get input :timeout_seconds)))
-    (max 1 (min harness-tools-events--wait-max
-                (if (and (numberp v) (> v 0)) v harness-tools-events--wait-default)))))
-
 (defun harness-tools-events--register-timeout (input)
-  "Return the seconds after which a registration ends, as INPUT asks, or nil."
+  "Return the seconds after which a watch ends, as INPUT asks, or nil."
   (let ((v (plist-get input :timeout_seconds)))
     (and (numberp v) (> v 0) v)))
 
@@ -1072,8 +1030,8 @@ Signal when one is not a short lowercase word, or none is left."
 (defun harness-tools-events--watch-events-handler (input ctx)
   "Handler of watch_events: register an event watch for the session in CTX.
 INPUT names the kinds of event, the prompt, the actions and the
-filters.  A registration returns at once; with wait, the call returns
-a promise of the first decision, or of the timeout."
+filters.  The call registers the watch and returns at once; it never
+waits for an event."
   (let* ((owner (plist-get ctx :session-id))
          (events (harness-tools-events--input-events input))
          (prompt (harness-tools-events--input-prompt input))
@@ -1086,8 +1044,7 @@ a promise of the first decision, or of the timeout."
                       (progn (harness-tools-sessions--tasks-p)
                              (harness-tools-sessions--task ref)))))
          (all (harness-json-true-p (plist-get input :all_projects)))
-         (wait (harness-json-true-p (plist-get input :wait)))
-         (once (or wait (not (plist-member input :once)) (harness-json-true-p (plist-get input :once))))
+         (once (or (not (plist-member input :once)) (harness-json-true-p (plist-get input :once))))
          (self (and owner (harness-tools-events--session owner))))
     (unless self
       (signal 'harness-error (list "watch_events needs a session to report to: call it from a session")))
@@ -1106,25 +1063,16 @@ a promise of the first decision, or of the timeout."
                    :id id :session owner :call (plist-get ctx :call-id)
                    :events events :prompt prompt :actions actions
                    :target target :task (plist-get task :id) :task-session (plist-get task :session)
-                   :root root :all-projects all :once once :wait wait
+                   :root root :all-projects all :once once
                    :started (float-time)
-                   :timeout (if wait
-                                (harness-tools-events--wait-timeout input)
-                              (harness-tools-events--register-timeout input)))))
-      (if wait
-          (harness-with-promise (resolve reject)
-            (setf (harness-tools-events--watch-resolve watch) resolve)
-            (puthash id watch harness-tools-events--watches)
-            (setf (harness-tools-events--watch-timer watch)
-                  (run-at-time (harness-tools-events--watch-timeout watch) nil
-                               #'harness-tools-events--time-out watch)))
-        (puthash id watch harness-tools-events--watches)
-        (when (harness-tools-events--watch-timeout watch)
-          (setf (harness-tools-events--watch-timer watch)
-                (run-at-time (harness-tools-events--watch-timeout watch) nil
-                             #'harness-tools-events--time-out watch)))
-        (harness-tool-ok (harness-tools-events--registered-text watch)
-                         :meta (list :watch id :events events :actions actions))))))
+                   :timeout (harness-tools-events--register-timeout input))))
+      (puthash id watch harness-tools-events--watches)
+      (when (harness-tools-events--watch-timeout watch)
+        (setf (harness-tools-events--watch-timer watch)
+              (run-at-time (harness-tools-events--watch-timeout watch) nil
+                           #'harness-tools-events--time-out watch)))
+      (harness-tool-ok (harness-tools-events--registered-text watch)
+                       :meta (list :watch id :events events :actions actions)))))
 
 (harness-define-tool "watch_events"
   :label "Watch events"
@@ -1132,9 +1080,8 @@ a promise of the first decision, or of the timeout."
   (concat
    "Watch harness events, and have a cheap model decide which matter to you: like waiting for an event, but you say what to look for. "
    "Name the kinds of event (events) and say in prompt what you look for and when each of your actions applies; every event of those kinds that matches is put to a classifier with your prompt, and it answers one of your actions (default [\"wake\"]) or ignore. "
-   "By default the call registers the watch and returns at once: when the classifier decides anything but ignore, you are sent a message of the harness's own whose first line is JSON {\"watch\",\"action\",\"note\",\"event\",\"kind\",\"session\",\"task\",\"time\"}, so you can act on it -- restart work, coordinate, or whatever the action means to you. "
+   "The call registers the watch and returns at once, and never waits for an event: when the classifier decides anything but ignore, you are sent a message of the harness's own whose first line is JSON {\"watch\",\"action\",\"note\",\"event\",\"kind\",\"session\",\"task\",\"time\"}, so you can act on it -- restart work, coordinate, or whatever the action means to you. "
    "The watch ends after that first decision unless once is false; it also ends after timeout_seconds when given, with unwatch_events, or when the user cancels this session's turn. "
-   "With wait=true the call itself waits for the first decision and returns it (timeout_seconds: default 600, at most 3600), as task_wait does. "
    "Events come from this project's sessions and tasks, or from every project with all_projects; session_id or task_id narrows them to one session, or one task and its session. This session's own events are left out unless session_id names it. "
    "A watch asks the model about one event at a time, at most a few a minute: meanwhile a newer event about the same session or task replaces an older one, and a full queue drops its oldest, which the next decision counts. "
    "The kinds: "
@@ -1157,13 +1104,10 @@ a promise of the first decision, or of the timeout."
                                         :description "Events of every project, not just this one's (default false); session_id and task_id narrow the events whatever their project.")
                          :once (:type "boolean"
                                 :description "End the watch after its first decision other than ignore (default true).")
-                         :wait (:type "boolean"
-                                :description "Wait for the first decision and return it, instead of registering and returning at once (default false).")
                          :timeout_seconds (:type "number"
-                                           :description "With wait, give up after this long (default 600, at most 3600). Otherwise end the watch after this long, and be woken to say so (default: no timeout)."))
+                                           :description "End the watch after this long, and be woken to say so (default: no timeout)."))
             :required ("events" "prompt"))
   :kind 'read
-  :timeout 3700
   :subject (lambda (input)
              (let ((events (plist-get input :events)))
                (string-join (mapcar (lambda (e) (format "%s" e))

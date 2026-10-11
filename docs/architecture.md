@@ -5239,7 +5239,7 @@ TRAMP prefixes come from the session host):
 | `set_non_interactive` | Non-interactive mode | enabled, session_id (default: this session) or all (every current session and task of every project), reason | meta (perms module's away-request stage: turning it on is decided only by the user's answer, in every mode, and denied at once in a non-interactive session; turning it off is allowed at once) |
 | `set_priority` | Set priority | priority (low/medium/high), session_id (default: this session) or all (every current session and task of every project) | meta (a priority is the session's, and every input here is a session id; a task's priority is set through its session) |
 | `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds (optional: wake anyway after this long) | read (registers a wake-up prompt and returns at once; needs no approval: `harness-perms--inspection-tools`) |
-| `watch_events` | Watch events | events (kinds), prompt, actions (default `["wake"]`), session_id, task_id, all_projects, once (default true), wait, timeout_seconds | read (tools-events; registers a watch and returns at once, or with `wait` returns the first decision; needs no approval: `harness-perms--inspection-tools`) |
+| `watch_events` | Watch events | events (kinds), prompt, actions (default `["wake"]`), session_id, task_id, all_projects, once (default true), timeout_seconds | read (tools-events; registers a watch and returns at once, never waiting; needs no approval: `harness-perms--inspection-tools`) |
 | `unwatch_events` | Stop watching events | watch_id (default: every watch of the session) | read (tools-events; needs no approval: `harness-perms--inspection-tools`) |
 | `task_list` | List tasks | column (pending/backlog/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: given to the session the task is submitted with, and the order waiting tasks start in) | meta |
@@ -5840,26 +5840,21 @@ other action is a decision, `(:watch :action :note :event :kind :session
 is the decision as JSON, `{watch, action, note, event, kind, session,
 task, time}` (the time in ISO 8601), so the session acts on it without
 reading prose; then come the event's summary, how many events were
-dropped or coalesced since the last decision, and whether the watch goes
-on.  How it reaches the session is the call's choice:
+dropped or coalesced since the last decision, and whether the watch
+goes on.
 
-- A registration, the default, returns at once, with `:meta` `(:watch ID
-  :events :actions)`, and blocks nothing; it outlives the turn that made
-  it.  The session is woken with the message as one of the harness's own
-  from "event watch" (`harness-tools-sessions--wake`, which
-  `session_wait` wakes with too, through `agent/prompt`: an idle session
-  starts a turn on it, a running one is steered).  Decisions for one
-  session that come within a second of each other
-  (`harness-tools-events--batch-delay`) come in one message.  The watch
-  is for one decision unless `once` is false.  `timeout_seconds` ends it
-  after that long, waking the session with `{watch, ended: "timeout"}`
-  and a sentence to say so.
-- With `wait` the call itself waits for the first decision and returns
-  it, as `task_wait` returns: the message is the result and the decision
-  its `:meta`.  `timeout_seconds` (default 600, at most 3600) bounds the
-  wait, which then ends with a report (`:meta` `{watch, ended:
-  "timeout"}`), as it does with the end of the turn the call is in.  A
-  watch that waits is always for one decision.
+The call never blocks.  It registers the watch and returns at once, with
+`:meta` `(:watch ID :events :actions)`, and the watch outlives the turn
+that made it; there is no mode in which the call waits for an event, as
+`task_wait` does.  The session is woken with the message as one of the
+harness's own from "event watch" (`harness-tools-sessions--wake`, which
+`session_wait` wakes with too, through `agent/prompt`: an idle session
+starts a turn on it, a running one is steered).  Decisions for one
+session that come within a second of each other
+(`harness-tools-events--batch-delay`) come in one message.  The watch is
+for one decision unless `once` is false.  `timeout_seconds` ends it
+after that long, waking the session with `{watch, ended: "timeout"}` and
+a sentence to say so.
 
 A flood of events is bounded.  A watch asks its classifier one question
 at a time, and the events that match meanwhile wait in its queue, in the
@@ -5880,22 +5875,22 @@ A session has at most ten watches, which live in memory
 watch ends with its decision (when it is for one), its timeout,
 `unwatch_events` (the `watch_id` it names, else every watch of the
 session), the deletion of its session, a turn of its session that the
-user cancelled (a registration goes quietly then, and with it the
-decisions still waiting to wake the session: a turn the user stopped is
-not one to start another on, as for `session_wait`), three questions in a
-row without a decision, or the deletion of the session or task it
-watches (the session is woken, `{watch, ended: "gone"}`).  While a
-registration lives it counts for `agent/outstanding` as "Watching events:
-w-ID (KINDS)" (`harness-tools-events--outstanding`), so a task whose
-session watches stays active, as one that waits with `session_wait`
-does.  A message still waiting to wake the session (it waits the batch
-delay, a second, in the outbox) counts too, as "A message from an event
-watch waits to be sent", though its watch has ended: a turn of the
-session that ends meanwhile leaves its task active, and the wake-up
-carries it on, instead of the task going to review just before the
-wake-up reopens it.  Both tools are of kind `read`, in
-`harness-perms--inspection-tools` and in the supervisor's allowlist: a
-watch only watches the harness and wakes no session but its own.
+user cancelled (a watch goes quietly then, and with it the decisions
+still waiting to wake the session: a turn the user stopped is not one to
+start another on, as for `session_wait`), three questions in a row
+without a decision, or the deletion of the session or task it watches
+(the session is woken, `{watch, ended: "gone"}`).  While a watch lives
+it counts for `agent/outstanding` as "Watching events: w-ID (KINDS)"
+(`harness-tools-events--outstanding`), so a task whose session watches
+stays active, as one that waits with `session_wait` does.  A message
+still waiting to wake the session (it waits the batch delay, a second,
+in the outbox) counts too, as "A message from an event watch waits to be
+sent", though its watch has ended: a turn of the session that ends
+meanwhile leaves its task active, and the wake-up carries it on, instead
+of the task going to review just before the wake-up reopens it.  Both
+tools are of kind `read`, in `harness-perms--inspection-tools` and in
+the supervisor's allowlist: a watch only watches the harness and wakes
+no session but its own.
 
 `notify` (`tools-notify`) sends a notification through
 `notification/send` with `:source "agent"`, `:kind "agent"` and the

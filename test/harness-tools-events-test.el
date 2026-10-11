@@ -36,6 +36,8 @@
 (defvar harness-tools-events-kinds)
 (declare-function harness-define-provider "harness-provider")
 (declare-function harness-provider--forget "harness-provider")
+(declare-function harness-tool-get "harness-tools" (name))
+(declare-function harness-tool-timeout "harness-tools" (tool))
 (declare-function harness-tools-events--watch-timer "harness-tools-events")
 (declare-function harness-tools-events--watch-pump "harness-tools-events")
 (declare-function harness-tools-events--watch-classified "harness-tools-events")
@@ -237,6 +239,28 @@ second could fire before the test had looked."
       (should (equal '("events" "prompt") (append (plist-get (plist-get spec :schema) :required) nil)))
       (dolist (kind (mapcar #'car harness-tools-events-kinds))
         (should (string-match-p (regexp-quote kind) (plist-get spec :description)))))))
+
+(ert-deftest harness-tools-events-never-blocks ()
+  "watch_events never waits for an event: it has no wait input and no
+long allowance, and a call that asks for a wait anyway registers its
+watch and returns at once."
+  (harness-tools-events-test-with
+    (let* ((spec (harness-call 'tools/get "watch_events"))
+           (properties (plist-get (plist-get spec :schema) :properties)))
+      (should-not (plist-member properties :wait))
+      (should (string-match-p "never waits for an event" (plist-get spec :description)))
+      (should-not (string-match-p "wait=true" (plist-get spec :description)))
+      (should-not (harness-tool-timeout (harness-tool-get "watch_events"))))
+    (let* ((me (harness-tools-events-test--session))
+           (result (harness-test-await
+                    (harness-tools-events-test--call
+                     me "watch_events" '(:events ("task/done") :prompt "x" :wait t :timeout_seconds 600))
+                    5)))
+      (should-not (plist-get result :is-error))
+      (should (string-match-p "Watching in the background" (plist-get result :content)))
+      (should (= 1 (hash-table-count harness-tools-events--watches)))
+      ;; A watch the session left running, outstanding once the call is over.
+      (should (string-prefix-p "Watching events: " (harness-call 'agent/outstanding me))))))
 
 (ert-deftest harness-tools-events-refuses-a-watch-it-cannot-keep ()
   "A watch needs known kinds, a prompt, short lowercase actions, and room."
@@ -525,50 +549,7 @@ session itself."
         (should (string-match-p "error: no rule" question))
         (should-not (string-match-p "and more" question))))))
 
-;;;; Waiting
-
-(ert-deftest harness-tools-events-wait-returns-the-decision ()
-  "With wait, the call returns the first decision, with the decision as
-its `:meta'; the watch ends with it, and no message is sent."
-  (harness-tools-events-test-with
-    (let* ((me (harness-tools-events-test--session))
-           (worker (harness-tools-events-test--session))
-           (promise (harness-tools-events-test--call
-                     me "watch_events" (list :events '("merge/finished") :prompt "Tell me when it merged."
-                                             :session_id worker :wait t :timeout_seconds 5))))
-      (harness-test-wait (lambda () (= 1 (hash-table-count harness-tools-events--watches))) 5 "the watch")
-      ;; Waiting in the call is not something left to do after the turn.
-      (should-not (harness-call 'agent/outstanding me))
-      (harness-emit 'merge/finished worker default-directory 'merged)
-      (let* ((result (harness-test-await promise 5))
-             (meta (plist-get result :meta)))
-        (should-not (plist-get result :is-error))
-        (should (equal "wake" (plist-get meta :action)))
-        (should (equal "merge/finished" (plist-get meta :kind)))
-        (should (equal worker (plist-get meta :session)))
-        (should (equal meta (harness-tools-events-test--json (plist-get result :content))))
-        (should (string-match-p "finished: merged" (plist-get result :content)))
-        (should (string-match-p "The watch has ended\\." (plist-get result :content))))
-      (should (zerop (hash-table-count harness-tools-events--watches)))
-      (harness-tools-events-test--settle)
-      (should-not (harness-tools-events-test--wakes me)))))
-
-(ert-deftest harness-tools-events-wait-times-out ()
-  "With wait, a call that sees no decision in time says so, and ends."
-  (harness-tools-events-test-with
-    (harness-tools-events-test--always (harness-tools-events-test--decide "ignore"))
-    (let* ((me (harness-tools-events-test--session))
-           (worker (harness-tools-events-test--session))
-           (promise (harness-tools-events-test--call
-                     me "watch_events" (list :events '("session/status") :prompt "x"
-                                             :wait t :timeout_seconds 1))))
-      (harness-emit 'session/status worker 'idle)
-      (let ((result (harness-test-await promise 5)))
-        (should-not (plist-get result :is-error))
-        (should (equal "timeout" (plist-get (plist-get result :meta) :ended)))
-        (should (string-match-p "No decision within 1s from event watch w-" (plist-get result :content)))
-        (should (string-match-p "1 event seen, 1 classified, 0 decisions (1 ignored)" (plist-get result :content))))
-      (should (zerop (hash-table-count harness-tools-events--watches))))))
+;;;; Timing out
 
 (ert-deftest harness-tools-events-registration-times-out-with-a-wake ()
   "A registration with a timeout ends then, and wakes its session to say so."
@@ -756,21 +737,33 @@ the wake-up reopens it."
 
 (ert-deftest harness-tools-events-a-cancelled-turn-drops-registrations ()
   "A registration outlives the turn that made it, but not a turn the user
-cancelled; a call that waits goes with any end of its turn."
+cancelled."
   (harness-tools-events-test-with
     (let ((me (harness-tools-events-test--session)))
       (harness-tools-events-test--watch me :events '("task/done") :prompt "x")
       (harness-emit 'agent/turn-ended me 'end-turn)
+      (harness-emit 'agent/turn-ended me 'error)
       (should (= 1 (hash-table-count harness-tools-events--watches)))
       (harness-emit 'agent/turn-ended me 'cancelled)
       (should (zerop (hash-table-count harness-tools-events--watches)))
+      (should-not (harness-call 'agent/outstanding me)))))
+
+(ert-deftest harness-tools-events-a-cancelled-turn-drops-what-waits-to-wake-it ()
+  "A decision still waiting to wake the session goes with a turn the user
+cancelled: a turn the user stopped is not one to start another on."
+  (harness-tools-events-test-with
+    (let* ((harness-tools-events--batch-delay 30)
+           (me (harness-tools-events-test--session))
+           (worker (harness-tools-events-test--session)))
+      (harness-tools-events-test--watch me :events '("session/status") :prompt "x" :once :false)
+      (harness-emit 'session/status worker 'blocked)
+      (harness-test-wait (lambda () (gethash me harness-tools-events--outbox)) 5 "the decision")
+      (harness-emit 'agent/turn-ended me 'cancelled)
+      (should-not (gethash me harness-tools-events--outbox))
+      (should (zerop (hash-table-count harness-tools-events--watches)))
       (should-not (harness-call 'agent/outstanding me))
-      (let ((promise (harness-tools-events-test--call me "watch_events"
-                                                      '(:events ("task/done") :prompt "x" :wait t))))
-        (harness-test-wait (lambda () (= 1 (hash-table-count harness-tools-events--watches))) 5 "the watch")
-        (harness-emit 'agent/turn-ended me 'error)
-        (should (string-match-p "interrupted" (plist-get (harness-test-await promise 5) :content)))
-        (should (zerop (hash-table-count harness-tools-events--watches)))))))
+      (harness-tools-events-test--settle)
+      (should-not (harness-tools-events-test--wakes me)))))
 
 (ert-deftest harness-tools-events-a-deleted-session-ends-its-watches ()
   "A session's watches end with it, quietly; a watch of a deleted
