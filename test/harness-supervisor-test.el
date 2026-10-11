@@ -1331,6 +1331,7 @@ selected by `:active' alone; the active sessions change as ever."
     "session_list" "session_read" "session_search" "session_wait" "task_list" "task_wait"
     "skill_search" "skill_load" "notification_providers" "emacs_buffers" "emacs_windows"
     "emacs_buffer" "emacs_describe" "emacs_find_definition" "emacs_messages" "emacs_open"
+    "watch_events" "unwatch_events"
     "request_directory_access"
     ;; Runs only a call the user approved by hand, so a supervising
     ;; session may use it; see harness-supervisor--allowed-tools.
@@ -1348,7 +1349,7 @@ selected by `:active' alone; the active sessions change as ever."
 
 (defconst harness-supervisor-test-tool-modules
   '(tools-fs tools-shell tools-ssh tools-emacs tools-emacs-eval tools-web tools-sessions
-    tools-notify tools-handin tools-dev skills merge perms tasks)
+    tools-events tools-notify tools-handin tools-dev skills merge perms tasks)
   "The modules that define the tools of the harness.")
 
 (defun harness-supervisor-test-sorted (names)
@@ -1358,8 +1359,8 @@ selected by `:active' alone; the active sessions change as ever."
 (ert-deftest harness-supervisor-a-supervisor-is-offered-the-allowlist-only ()
   "A supervising session gets reading, the web and coordination, and no way to write."
   (harness-supervisor-test-with-modules (tools-fs tools-shell tools-ssh tools-emacs tools-emacs-eval
-                                         tools-web tools-sessions tools-notify tools-handin tools-dev
-                                         skills merge perms tasks)
+                                         tools-web tools-sessions tools-events tools-notify tools-handin
+                                         tools-dev skills merge perms tasks)
     (harness-supervisor-test-confined nil)
     (let ((sid (harness-supervisor-test-session))
           (catalogue (mapcar (lambda (spec) (plist-get spec :name)) (harness-call 'tools/list))))

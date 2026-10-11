@@ -93,6 +93,11 @@
       (should (= 1 (plist-get r :protocolVersion)))
       (should (equal "emacs-agent-harness" (plist-get (plist-get r :agentInfo) :name)))
       (should (eq t (plist-get (plist-get r :agentCapabilities) :loadSession)))
+      ;; ACP's own session/list is offered: `list' is there, an empty
+      ;; object on the wire and so nil in-process.
+      (let ((capabilities (plist-get (plist-get r :agentCapabilities) :sessionCapabilities)))
+        (should (plist-member capabilities :list))
+        (should (null (plist-get capabilities :list))))
       (let ((methods (plist-get (plist-get r :_harness) :methods)))
         (should (member "session/list" methods))
         (should (member "agent/prompt" methods))
@@ -303,6 +308,290 @@ extension data, for a client that reads chunks rather than nodes."
           (let ((chunk (nth 4 (harness-acp-test-updates seen))))
             (should (string-match-p "look at the project" (plist-get (plist-get chunk :content) :text)))))
         (harness-acp-close other)))))
+
+;;;; ACP's session/list
+
+;; The standard method, which a client written for ACP calls; the harness's
+;; own `_harness/session/list' is tested with the extension methods.
+
+(defvar harness-sessions)
+
+(defun harness-acp-test-make-session (updated &rest props)
+  "Make a session from PROPS, as `session/create' takes them; return its id.
+It last changed at UPDATED, a time in seconds: sessions made one after
+the other differ only by the microseconds between them, and a test of
+their order says which is newer."
+  (let ((sid (plist-get (apply #'harness-call 'session/create :model "demo:scripted" props) :id)))
+    ;; The record is a struct this file cannot name while it loads: the
+    ;; session module is not loaded then.
+    (aset (gethash sid harness-sessions) (cl-struct-slot-offset 'harness-session 'updated) updated)
+    sid))
+
+(defun harness-acp-test-list (conn &optional params)
+  "Return the answer to ACP's `session/list' with PARAMS over CONN."
+  (harness-acp-test-request conn "session/list" params))
+
+(defun harness-acp-test-all-listed (result)
+  "Return the ids of every session RESULT, an answer to `session/list', lists."
+  (mapcar (lambda (info) (plist-get info :sessionId)) (plist-get result :sessions)))
+
+(defun harness-acp-test-listed (result)
+  "Return the ids of the real sessions RESULT, an answer to `session/list', lists.
+The virtual sessions a first page ends with are left out."
+  (cl-remove-if #'harness-acp--virtual-session-p (harness-acp-test-all-listed result)))
+
+(ert-deftest harness-acp-session-list-empty ()
+  "With no session the answer lists only the virtual sessions, as an array,
+and has no next page; a page past the last session lists none."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (result (harness-acp-test-list conn))
+           (virtual (mapcar #'car harness-acp--virtual-sessions))
+           (other (harness-test-temp-dir)))
+      (should (plist-member result :sessions))
+      (should (null (harness-acp-test-listed result)))
+      (should (equal virtual (harness-acp-test-all-listed result)))
+      (should-not (plist-member result :nextCursor))
+      ;; The virtual sessions are in the directory a client asks about.
+      (should (equal (list other other)
+                     (mapcar (lambda (info) (plist-get info :cwd))
+                             (plist-get (harness-acp-test-list conn (list :cwd (directory-file-name other)))
+                                        :sessions))))
+      ;; Parameters it does not know are ignored.
+      (should-not (plist-member (harness-acp-test-list conn '(:_meta (:x 1) :other t)) :nextCursor))
+      ;; On the wire an empty list is [], not null, which a client would
+      ;; take for no list: a page past the last session, which the
+      ;; virtual sessions are not on either, is one.
+      (should (equal "{\"sessions\":[]}"
+                     (harness-json-encode
+                      (funcall (gethash "session/list" harness-acp--standard-methods) nil
+                               (list :cursor (harness-acp--list-cursor '(0 . "s"))))))))))
+
+(ert-deftest harness-acp-session-list-describes-the-sessions-newest-first ()
+  "Each session is a SessionInfo, the newest first; the rest is in `_meta'."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (dir (harness-test-temp-dir))
+           (other (harness-test-temp-dir))
+           (old (harness-acp-test-make-session 1790000000 :cwd dir :name "Old one"))
+           (new (harness-acp-test-make-session 1790003600 :cwd other))
+           (child (harness-acp-test-make-session 1790001800 :cwd dir :name "  "
+                                                 :kind 'subagent :parent-id old))
+           (result (harness-acp-test-list conn))
+           (infos (plist-get result :sessions)))
+      (should (equal (list new child old) (harness-acp-test-listed result)))
+      (should-not (plist-member result :nextCursor))
+      (let ((info (nth 2 infos)))
+        (should (equal dir (plist-get info :cwd)))
+        (should (equal "Old one" (plist-get info :title)))
+        ;; ISO 8601, in UTC.
+        (should (equal "2026-09-21T14:13:20Z" (plist-get info :updatedAt)))
+        (should (equal "idle" (plist-get (plist-get info :_meta) :status)))
+        (should (equal "main" (plist-get (plist-get info :_meta) :kind)))
+        (should (equal "demo:scripted" (plist-get (plist-get info :_meta) :model)))
+        (should (equal (plist-get (harness-call 'session/get old) :project)
+                       (plist-get (plist-get info :_meta) :project)))
+        (should-not (plist-member (plist-get info :_meta) :parentId)))
+      ;; A session with no name (a blank one is none) has no title; one a
+      ;; session made names it.
+      (let ((info (nth 1 infos)))
+        (should-not (plist-member info :title))
+        (should (equal "2026-09-21T14:43:20Z" (plist-get info :updatedAt)))
+        (should (equal "subagent" (plist-get (plist-get info :_meta) :kind)))
+        (should (equal old (plist-get (plist-get info :_meta) :parentId))))
+      (should (equal other (plist-get (car infos) :cwd)))
+      (should (equal "2026-09-21T15:13:20Z" (plist-get (car infos) :updatedAt)))
+      (should (equal '(:sessionId :cwd :updatedAt :_meta) (harness-plist-keys (car infos)))))))
+
+(ert-deftest harness-acp-session-list-includes-the-inactive-and-loading-one-wakes-it ()
+  "A session that is not open anywhere is listed, for `session/load' to resume."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-make-session 100 :cwd (harness-test-temp-dir)))
+           (status (lambda ()
+                     (plist-get (plist-get (car (plist-get (harness-acp-test-list conn) :sessions)) :_meta)
+                                :status))))
+      (harness-call 'session/deactivate sid)
+      (should (equal sid (car (harness-acp-test-listed (harness-acp-test-list conn)))))
+      (should (equal "inactive" (funcall status)))
+      (harness-acp-test-request conn "session/load" (list :sessionId sid))
+      (should (equal "idle" (funcall status))))))
+
+(ert-deftest harness-acp-session-list-filters-by-cwd ()
+  "Only the sessions of the directory `cwd' names are listed, slash or not."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (dir (harness-test-temp-dir))
+           (other (harness-test-temp-dir))
+           (a (harness-acp-test-make-session 300 :cwd dir))
+           (b (harness-acp-test-make-session 200 :cwd other))
+           (c (harness-acp-test-make-session 100 :cwd dir))
+           (listed (lambda (cwd) (harness-acp-test-listed (harness-acp-test-list conn (list :cwd cwd))))))
+      (should (equal (list a b c) (harness-acp-test-listed (harness-acp-test-list conn))))
+      (should (equal (list a c) (funcall listed dir)))
+      ;; Clients mostly name a directory without its slash.
+      (should (equal (list a c) (funcall listed (directory-file-name dir))))
+      (should (equal (list b) (funcall listed (directory-file-name other))))
+      ;; The same directory under another name.
+      (should (equal (list b) (funcall listed (concat (directory-file-name other) "/./"))))
+      ;; The directory holding theirs is not theirs.
+      (should (null (funcall listed (file-name-directory (directory-file-name dir)))))
+      (should (null (funcall listed (expand-file-name "nothing-here" dir))))
+      ;; An empty cwd filters by nothing, as none does.
+      (should (equal (list a b c) (funcall listed "")))
+      (should (equal (list a c) (harness-acp-test-listed
+                                 (harness-acp-test-list conn (list :cwd dir :_meta '(:x 1) :other 2))))))))
+
+(ert-deftest harness-acp-session-list-refuses-a-cwd-that-is-not-absolute ()
+  (harness-acp-test-with
+    (let ((conn (harness-acp-test-connect)))
+      (dolist (cwd '("relative/dir" "./here" ".." "~/project" "~"))
+        (let ((e (harness-acp-test-error conn "session/list" (list :cwd cwd))))
+          (should (= -32602 (car e)))
+          (should (equal "Invalid params: cwd must be an absolute path" (cadr e)))))
+      (let ((e (harness-acp-test-error conn "session/list" (list :cwd 42))))
+        (should (= -32602 (car e)))
+        (should (equal "Invalid params: cwd must be a string" (cadr e)))))))
+
+(ert-deftest harness-acp-session-list-pages ()
+  "A page holds `harness-acp-session-list-page-size' sessions, and `nextCursor' is there while more are left."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (dir (harness-test-temp-dir))
+           (ids (cl-loop for n from 5 downto 1
+                         collect (harness-acp-test-make-session (* n 100) :cwd dir)))
+           (harness-acp-session-list-page-size 2)
+           (one (harness-acp-test-list conn))
+           (two (harness-acp-test-list conn (list :cursor (plist-get one :nextCursor))))
+           (three (harness-acp-test-list conn (list :cursor (plist-get two :nextCursor)))))
+      (should (equal (seq-subseq ids 0 2) (harness-acp-test-listed one)))
+      (should (stringp (plist-get one :nextCursor)))
+      (should (equal (seq-subseq ids 2 4) (harness-acp-test-listed two)))
+      (should (stringp (plist-get two :nextCursor)))
+      ;; The last page has what is left, and no cursor.
+      (should (equal (seq-subseq ids 4) (harness-acp-test-listed three)))
+      (should-not (plist-member three :nextCursor))
+      ;; The virtual sessions end the first page, and only that one.
+      (should (equal (append (seq-subseq ids 0 2) (mapcar #'car harness-acp--virtual-sessions))
+                     (harness-acp-test-all-listed one)))
+      (should (equal (seq-subseq ids 2 4) (harness-acp-test-all-listed two)))
+      (should (equal (seq-subseq ids 4) (harness-acp-test-all-listed three)))
+      ;; A cursor is text a client can carry: opaque, and plain.
+      (should (string-match-p "\\`[A-Za-z0-9_-]+\\'" (plist-get one :nextCursor)))
+      (should-not (equal (plist-get one :nextCursor) (plist-get two :nextCursor)))
+      ;; A page that ends where the list does has none either, and a
+      ;; larger one holds everything.
+      (let ((harness-acp-session-list-page-size 5))
+        (should (equal ids (harness-acp-test-listed (harness-acp-test-list conn))))
+        (should-not (plist-member (harness-acp-test-list conn) :nextCursor)))
+      (let* ((harness-acp-session-list-page-size 3)
+             (head (harness-acp-test-list conn))
+             (tail (harness-acp-test-list conn (list :cursor (plist-get head :nextCursor)))))
+        (should (equal (seq-subseq ids 3) (harness-acp-test-listed tail)))
+        (should-not (plist-member tail :nextCursor))))))
+
+(ert-deftest harness-acp-session-list-pages-of-a-directory ()
+  "The filter holds for every page: the cursor only says where the page begins."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (dir (harness-test-temp-dir))
+           (other (harness-test-temp-dir))
+           (mine (cl-loop for n in '(600 400 200)
+                          collect (harness-acp-test-make-session n :cwd dir)))
+           (harness-acp-session-list-page-size 2))
+      (dolist (n '(500 300 100)) (harness-acp-test-make-session n :cwd other))
+      (let* ((one (harness-acp-test-list conn (list :cwd dir)))
+             (two (harness-acp-test-list conn (list :cwd (directory-file-name dir)
+                                                    :cursor (plist-get one :nextCursor)))))
+        (should (equal (seq-subseq mine 0 2) (harness-acp-test-listed one)))
+        (should (equal (seq-subseq mine 2) (harness-acp-test-listed two)))
+        (should-not (plist-member two :nextCursor))))))
+
+(ert-deftest harness-acp-session-list-orders-the-same-time-by-id ()
+  "Sessions that last changed together are listed by id, so pages of them repeat and skip none."
+  (harness-acp-test-with
+    (let ((conn (harness-acp-test-connect))
+          (dir (harness-test-temp-dir))
+          (harness-acp-session-list-page-size 2)
+          (seen nil) (cursor nil))
+      (dolist (id '("s-c" "s-a" "s-e" "s-b" "s-d"))
+        (harness-acp-test-make-session 1000 :cwd dir :id id))
+      (dotimes (_ 3)
+        (let ((page (harness-acp-test-list conn (and cursor (list :cursor cursor)))))
+          (setq seen (append seen (harness-acp-test-listed page))
+                cursor (plist-get page :nextCursor))))
+      (should (equal '("s-a" "s-b" "s-c" "s-d" "s-e") seen))
+      (should-not cursor))))
+
+(ert-deftest harness-acp-session-list-pages-keep-their-place ()
+  "A cursor is a place in the list, not a count: sessions that come or go between two pages repeat and skip none."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (dir (harness-test-temp-dir))
+           (ids (cl-loop for n from 5 downto 1
+                         collect (harness-acp-test-make-session (* n 100) :cwd dir)))
+           (harness-acp-session-list-page-size 2)
+           (one (harness-acp-test-list conn)))
+      (should (equal (seq-subseq ids 0 2) (harness-acp-test-listed one)))
+      ;; The session the first page ended with goes, and a newer one than
+      ;; any comes: neither moves the second page.
+      (harness-call 'session/delete (cadr ids))
+      (let* ((fresh (harness-acp-test-make-session 900 :cwd dir))
+             (two (harness-acp-test-list conn (list :cursor (plist-get one :nextCursor))))
+             (three (harness-acp-test-list conn (list :cursor (plist-get two :nextCursor)))))
+        (should (equal (seq-subseq ids 2 4) (harness-acp-test-listed two)))
+        (should (equal (seq-subseq ids 4) (harness-acp-test-listed three)))
+        (should-not (plist-member three :nextCursor))
+        ;; Listing again begins again, with what is there now.
+        (should (equal (list fresh (car ids)) (harness-acp-test-listed (harness-acp-test-list conn))))))))
+
+(ert-deftest harness-acp-session-list-refuses-a-cursor-it-did-not-make ()
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-make-session 100 :cwd (harness-test-temp-dir))))
+      (dolist (cursor (list "not a cursor!"                       ; not base64url
+                            "bm9wZQ"                              ; "nope": no time and no id
+                            (base64url-encode-string "abc def" t) ; the time is no number
+                            (base64url-encode-string "12 " t)     ; no id
+                            (base64url-encode-string "12" t)
+                            42))
+        (let ((e (harness-acp-test-error conn "session/list" (list :cursor cursor))))
+          (should (= -32602 (car e)))
+          (should (equal "Invalid params: invalid cursor" (cadr e)))))
+      ;; An empty one is none.
+      (should (equal (list sid) (harness-acp-test-listed (harness-acp-test-list conn (list :cursor ""))))))))
+
+(ert-deftest harness-acp-session-list-needs-the-session-module ()
+  "Without a bus method `session/list' ACP's is not offered, and not found."
+  (harness-acp-test-with
+    (harness-unregister-method 'session/list)
+    (let* ((conn (harness-acp-test-connect))
+           (r (harness-test-await (harness-acp-initialize conn))))
+      (should (eq t (plist-get (plist-get r :agentCapabilities) :loadSession)))
+      (should-not (plist-member (plist-get r :agentCapabilities) :sessionCapabilities))
+      (let ((e (harness-acp-test-error conn "session/list" nil)))
+        (should (= -32601 (car e)))
+        (should (equal "Method not found: No such harness method: session/list" (cadr e)))))))
+
+(ert-deftest harness-acp-bare-bus-method-says-it-is-under-_harness ()
+  "A bus method a client calls by its bare name is not an ACP method, and the error says where it is."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn)))
+      (dolist (name '("session/get" "agent/prompt" "tools/list"))
+        (let ((e (harness-acp-test-error conn name (list :id sid))))
+          (should (= -32601 (car e)))
+          (should (equal (format "Method not found: No such ACP method %s; the harness's own method is _harness/%s"
+                                 name name)
+                         (cadr e)))))
+      ;; A bus method no client may call, one that does not exist, and a
+      ;; name nothing has: not found, with nothing to point to.
+      (dolist (name '("store/save" "session/not-a-method" "nope/x"))
+        (let ((e (harness-acp-test-error conn name nil)))
+          (should (= -32601 (car e)))
+          (should (equal (format "Method not found: No such harness method: %S" name) (cadr e)))))
+      ;; Where it points to is there.
+      (should (equal sid (plist-get (harness-acp-test-request conn "_harness/session/get" (list :id sid)) :id))))))
 
 ;;;; Extension methods
 

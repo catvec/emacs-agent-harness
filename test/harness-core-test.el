@@ -13,6 +13,33 @@
   (should (equal '(:name test/add :doc "add" :module nil :params nil)
                  (car (harness-methods)))))
 
+(ert-deftest harness-core-call-fallback-answers-missing-methods ()
+  (harness-test-reset-bus)
+  (harness-register-method 'test/here (lambda (x) (list 'here x)))
+  (let (seen)
+    (let ((harness-call-fallback-function
+           (lambda (name &rest args) (push (cons name args) seen)
+             (list 'far name args))))
+      ;; A method registered here is still called here.
+      (should (equal '(here 1) (harness-call 'test/here 1)))
+      (should-not seen)
+      ;; A missing one goes to the fallback, with its arguments.
+      (should (equal '(far test/away (1 :k v))
+                     (harness-call 'test/away 1 :k 'v)))
+      (should (equal '((test/away 1 :k v)) seen))
+      ;; The async wrapper goes through it too, errors included.
+      (should (equal '(far test/async nil)
+                     (harness-await (harness-call-async 'test/async))))
+      ;; Existence still means registered here.
+      (should-not (harness-method-exists-p 'test/away)))
+    (let ((harness-call-fallback-function
+           (lambda (name &rest _) (signal 'harness-no-such-method (list name)))))
+      (should-error (harness-call 'test/away) :type 'harness-no-such-method)
+      (should-error (harness-await (harness-call-async 'test/away))
+                    :type 'harness-no-such-method)))
+  ;; Unbound again, a missing method signals as before.
+  (should-error (harness-call 'test/away) :type 'harness-no-such-method))
+
 (ert-deftest harness-core-call-async-wraps-values-and-errors ()
   (harness-test-reset-bus)
   (harness-register-method 'test/val (lambda () 42))

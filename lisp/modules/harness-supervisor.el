@@ -375,7 +375,8 @@ directory.")
   '("read_file" "grep" "glob" "list_dir" "file_info" "session_info" "session_history"
     "session_list" "session_read" "session_search" "session_wait" "task_list" "task_wait"
     "skill_search" "skill_load" "notification_providers" "emacs_buffers" "emacs_windows"
-    "emacs_buffer" "emacs_describe" "emacs_find_definition" "emacs_messages" "emacs_open")
+    "emacs_buffer" "emacs_describe" "emacs_find_definition" "emacs_messages" "emacs_open"
+    "watch_events" "unwatch_events")
   "Tools a supervising session uses to look at things.  None changes a file.")
 
 (defconst harness-supervisor--net-tools '("web_fetch" "web_search")

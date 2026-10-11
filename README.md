@@ -29,9 +29,11 @@ OpenAI-compatible APIs and AWS Bedrock.
   and variables), Emacs Lisp
   evaluation in a separate background Emacs (and in your own Emacs,
   for code a judge model expects to return at once, unless you turn
-  `harness-emacs-eval` off), web search and fetch,
-  sub-agents and skills, plus tools that let an agent inspect and
-  drive other sessions and tasks.
+  `harness-emacs-eval` off; the judge may look up the functions and
+  variables it does not know before it rules, and the code can read and
+  change the harness's own state with `harness-call`), web search and
+  fetch, sub-agents and skills, plus tools that let an agent inspect and
+  drive other sessions and tasks and watch the harness's events.
 - **Remote hosts.** Agents work on other machines through TRAMP: a
   session in a remote directory, the `ssh` tool, and TRAMP paths given
   to any tool.
@@ -1218,6 +1220,24 @@ To wait for some other session without blocking, `session_wait`
 registers a wake-up and returns at once: a message of the harness's own
 arrives when the session is done, and the registration outlives the
 turn that made it.
+
+To react to what happens in the harness rather than wait on one
+session, `watch_events` hooks a session into its events: a task done, a
+merge that conflicts, a session that began waiting on you, a tool call
+that failed. The agent names the kinds of event, narrows them to a
+session or a task if it likes, and says in a prompt what it looks for
+and what it may do about it (`wake` unless it names other actions); each
+event that matches is put to a cheap model with that prompt, which
+decides whether the event calls for one of those actions or can be
+ignored. Like `session_wait`, the call returns at once, and a decision
+arrives as a message of the harness's own (**System · event watch**)
+whose first line is the decision as JSON, so the agent can restart work,
+tell another session or leave it; with `wait` the call returns the first
+decision instead. A watch asks the model about one event at a time and
+at most `harness-tools-events-max-calls-per-minute` (12) times a minute,
+ends after its first decision unless the agent asks for more, and ends
+too with `unwatch_events`, at its timeout, or when you cancel the
+session's turn.
 
 ### Supervisor mode
 
@@ -2759,6 +2779,18 @@ shows could open one. Clients can authenticate with
 `harness-acp-token` instead, as the subprotocol `bearer.TOKEN`, an
 `Authorization: Bearer TOKEN` header or `?token=TOKEN` in the address.
 
+Once it is let in, the phone's ACP client can list the harness's
+sessions with ACP's `session/list`: newest first, a page at a time, for
+one directory when the client asks, each with its title, its directory
+and when it last changed, the closed ones included. It then opens one
+with `session/load` and carries on in it. The harness announces the
+method in its answer to `initialize` (`sessionCapabilities.list`),
+which is where clients look before they call it. A phone is offered what
+a client in Emacs is: the harness's own methods, which go beyond ACP's,
+are under `_harness/` (`_harness/session/list` takes the harness's own
+filters), and a client that asks for one by its plain name is told where
+it is.
+
 The connection is not encrypted. Pair on a network you trust, or over a
 VPN such as Tailscale, whose addresses also stay fixed per device. The
 page shows the address of this machine that QR codes carry, chosen
@@ -2783,9 +2815,9 @@ ACP, so it works the same with a local or a remote harness.
 
 | Area | Modules |
 |---|---|
-| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `cowboy` `handoff` `naming` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `supervisor` `seed` `acp` `acp-remote` |
+| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `cowboy` `handoff` `naming` `judge` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `supervisor` `seed` `acp` `acp-remote` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
-| Tools | `tools` `tools-fs` `tools-shell` `tools-ssh` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-notify` |
+| Tools | `tools` `tools-fs` `tools-shell` `tools-ssh` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-events` `tools-notify` |
 | User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-merge` `ui-children` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` `ui-supervisor` |
 
 ### Modules of your own

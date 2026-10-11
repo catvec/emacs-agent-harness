@@ -7,7 +7,9 @@
 ;; allowed the call and a judge model expects the code to return at
 ;; once.  The judge here is a stub provider, `judge', that replies what
 ;; each test scripts; the Emacs lent to the harness is this one, through
-;; an in-process client, as in harness-emacs-endpoint-test.el.
+;; an in-process client, as in harness-emacs-endpoint-test.el.  The
+;; judge's lookups (emacs_describe, emacs_find_definition) exist only in
+;; the tests that load tools-emacs.
 
 ;;; Code:
 
@@ -18,8 +20,10 @@
 (defvar harness-acp--clients)
 (defvar harness-model)
 (defvar harness-emacs-eval)
+(defvar harness-tools)
 (defvar harness-tools--ui-notice-at)
 (defvar harness-tools-emacs-eval--judge-timeout)
+(defvar harness-tools-emacs-eval--judge-lookups)
 (defvar harness-tools-emacs-eval--judge-max-tokens)
 (defvar harness-tools-emacs-eval--judge-retry-max-tokens)
 (defvar harness-tools-emacs-eval--max-code-chars)
@@ -55,11 +59,21 @@
 (defvar harness-tools-emacs-eval-test--cancelled nil
   "Non-nil once a request to the judge stub was cancelled.")
 
+(defvar harness-tools-emacs-eval-test--responses nil
+  "What the judge's hosted tool calls were answered with, newest first.
+Each is (ID . RESULT).")
+
 (defvar harness-tools-emacs-eval-test--progress nil
   "What the tool reported as its progress, newest first.")
 
 (defvar harness-tools-emacs-eval-test--model "judge:big"
   "The model of the session the tests call the tool in.")
+
+(defun harness-tools-emacs-eval-test--mystery ()
+  "Count one more run of code the tests sent, and return the count.
+It returns at once: it only adds one to a number.  No judge knows it,
+so one that is to rule on code calling it looks it up."
+  (cl-incf harness-tools-emacs-eval-test--ran))
 
 ;;;; The judge, a stub
 
@@ -78,7 +92,28 @@
 Each is a list of events; a request past the last gets no reply."
   (setq harness-tools-emacs-eval-test--replies replies
         harness-tools-emacs-eval-test--requests nil
+        harness-tools-emacs-eval-test--responses nil
         harness-tools-emacs-eval-test--cancelled nil))
+
+(defun harness-tools-emacs-eval-test--play (events on-event)
+  "Deliver EVENTS to ON-EVENT in order, as a provider's events come.
+A `tool-call' marked `:hosted' is sent with a `:respond' that records
+the result it gets and then delivers the events after it, as a
+provider that runs the tool loop itself waits for each result."
+  (catch 'wait
+    (while events
+      (let ((ev (pop events)))
+        (if (not (plist-get ev :hosted))
+            (funcall on-event ev)
+          (let ((rest events) (id (plist-get ev :id)))
+            (funcall on-event
+                     (append (harness-plist-remove ev :hosted)
+                             (list :respond
+                                   (lambda (result)
+                                     (push (cons id result) harness-tools-emacs-eval-test--responses)
+                                     (run-at-time 0.01 nil #'harness-tools-emacs-eval-test--play
+                                                  rest on-event)))))
+            (throw 'wait nil)))))))
 
 (defun harness-tools-emacs-eval-test--define-judge ()
   "Define the provider `judge', whose simple tier is judge:small.
@@ -94,7 +129,7 @@ from a timer, as a provider's events come."
                 (let ((events (pop harness-tools-emacs-eval-test--replies))
                       (on-event (plist-get req :on-event)))
                   (when events
-                    (run-at-time 0.01 nil (lambda () (dolist (ev events) (funcall on-event ev))))))
+                    (run-at-time 0.01 nil #'harness-tools-emacs-eval-test--play events on-event)))
                 (list :cancel (lambda () (setq harness-tools-emacs-eval-test--cancelled t))))))
 
 ;;;; Setting up
@@ -108,10 +143,18 @@ from a timer, as a provider's events come."
   (dolist (client (copy-sequence harness-acp--clients))
     (harness-acp-drop-client client)))
 
+(defun harness-tools-emacs-eval-test--forget-lookups ()
+  "Forget the tools the judge looks symbols up with, as if never loaded.
+Tools stay registered when the bus is reset, so a test that loads
+tools-emacs would otherwise lend them to the judges of the tests after."
+  (dolist (name '("emacs_describe" "emacs_find_definition"))
+    (remhash name harness-tools)))
+
 (defmacro harness-tools-emacs-eval-test--with (&rest body)
   "Run BODY as session \"s1\", on judge:big, with emacs_eval on.
 Every call is allowed, this Emacs is the one lent to the harness, and
-the judge stub replies nothing until told; all is put back after."
+the judge stub replies nothing until told; all is put back after.  The
+judge has no lookups unless BODY loads tools-emacs."
   (declare (indent 0))
   (let ((old (make-symbol "old")) (conn (make-symbol "conn")) (cwd (make-symbol "cwd")))
     `(progn
@@ -119,6 +162,7 @@ the judge stub replies nothing until told; all is put back after."
        (setq harness-acp--server-enabled nil)
        (dolist (m '(project config tools provider acp tools-emacs-eval))
          (harness-test-load-module m))
+       (harness-tools-emacs-eval-test--forget-lookups)
        (harness-tools-emacs-eval-test--drop-clients)
        (harness-add-filter 'permission/decide #'harness-tools-emacs-eval-test--allow 10)
        (harness-test-with-temp-state
@@ -140,6 +184,7 @@ the judge stub replies nothing until told; all is put back after."
                       ,@body)
              (setq-default harness-emacs-eval ,old)
              (when ,conn (ignore-errors (harness-acp-close ,conn)))
+             (harness-tools-emacs-eval-test--forget-lookups)
              (remhash 'judge harness-providers)
              (harness-provider--forget 'judge)
              (ignore-errors (delete-directory ,cwd t))))))))
@@ -185,7 +230,9 @@ without tools or thinking, about the very code that runs."
       (should (equal "judge:small" (plist-get req :model)))
       (should (eq t (plist-get req :ephemeral)))
       (should (eq t (plist-get req :no-thinking)))
+      ;; Without tools-emacs, nothing to look symbols up with.
       (should-not (plist-get req :tools))
+      (should-not (string-search "Before you decide, you may look up" (plist-get req :system)))
       (should (equal harness-tools-emacs-eval--judge-max-tokens (plist-get req :max-tokens)))
       (should (equal "s1-emacs-eval" (plist-get (plist-get req :session) :id)))
       (should (string-search "\"fast\"|\"slow\"|\"blocking\"|\"unsure\"" (plist-get req :system)))
@@ -315,6 +362,67 @@ lets the code run only when they all say fast."
     (let ((tag (match-string 1 a)))
       (should (string-match "\n<\\(code-[^>\n]+\\)>\n(foo)\n</\\1>\n" b))
       (should-not (equal tag (match-string 1 b))))))
+
+;;;; What the judge looks up
+
+(ert-deftest harness-tools-emacs-eval-judge-looks-up-what-it-does-not-know ()
+  "A judge may look up a function the code calls that it does not know,
+as the user's Emacs has it, before it rules: with tools-emacs loaded its
+request offers emacs_describe and emacs_find_definition, its system
+prompt says so, and a provider that stops for tool calls is asked again
+with what the lookup found."
+  (harness-tools-emacs-eval-test--with
+    (harness-test-load-module 'tools-emacs)
+    (harness-tools-emacs-eval-test--judge-says
+     (list '(:type tool-call :id "l1" :name "emacs_describe"
+                   :input (:symbol "harness-tools-emacs-eval-test--mystery"))
+           '(:type done :stop-reason tool-use))
+     (harness-tools-emacs-eval-test--verdict "fast" "It only adds one."))
+    (let ((r (harness-tools-emacs-eval-test--call "(harness-tools-emacs-eval-test--mystery)")))
+      (should-not (plist-get r :is-error))
+      (should (equal "=> 1" (plist-get r :content)))
+      (should (equal "fast" (plist-get (plist-get r :meta) :verdict))))
+    (should (= 1 harness-tools-emacs-eval-test--ran))
+    (should (= 2 (length harness-tools-emacs-eval-test--requests)))
+    (pcase-let ((`(,again ,asked) harness-tools-emacs-eval-test--requests))
+      (should (equal '("emacs_describe" "emacs_find_definition")
+                     (mapcar (lambda (spec) (plist-get spec :name)) (plist-get asked :tools))))
+      (should (string-search "Before you decide, you may look up" (plist-get asked :system)))
+      (should (string-search (format "most %d lookups" harness-tools-emacs-eval--judge-lookups)
+                             (plist-get asked :system)))
+      (should (equal (plist-get asked :system) (plist-get again :system)))
+      (should (equal (plist-get asked :tools) (plist-get again :tools)))
+      (let ((result (car (plist-get (car (last (plist-get again :messages))) :content))))
+        (should (equal "tool_result" (plist-get result :type)))
+        (should (equal "l1" (plist-get result :tool_use_id)))
+        (should-not (plist-get result :is_error))
+        (should (string-search "It returns at once: it only adds one to a number."
+                               (plist-get result :content)))))))
+
+(ert-deftest harness-tools-emacs-eval-judge-looks-up-in-a-hosted-loop ()
+  "A provider that runs the tool loop itself gets the lookup's result
+through the call, and the judge rules in the same request.  The source
+it is shown grants no session its file."
+  (harness-tools-emacs-eval-test--with
+    (harness-test-load-module 'tools-emacs)
+    (let ((revealed nil))
+      (harness-register-method 'permission/reveal-file
+                               (lambda (sid file) (push (list sid file) revealed) file))
+      (harness-tools-emacs-eval-test--judge-says
+       (list '(:type tool-call :id "l1" :name "emacs_find_definition"
+                     :input (:symbol "harness-tools-emacs-eval-test--mystery") :hosted t)
+             '(:type text :delta "{\"verdict\":\"fast\",\"reason\":\"It adds one.\"}")
+             '(:type done :stop-reason end-turn)))
+      (let ((r (harness-tools-emacs-eval-test--call "(harness-tools-emacs-eval-test--mystery)")))
+        (should-not (plist-get r :is-error))
+        (should (equal "=> 1" (plist-get r :content))))
+      (should (= 1 (length harness-tools-emacs-eval-test--requests)))
+      (let* ((result (cdr (assoc "l1" harness-tools-emacs-eval-test--responses)))
+             (content (plist-get result :content)))
+        (should-not (plist-get result :is-error))
+        (should (string-search "harness-tools-emacs-eval-test.el, lines " content))
+        (should (string-search "(defun harness-tools-emacs-eval-test--mystery ()" content)))
+      (should-not revealed))))
 
 ;;;; Before the judge
 

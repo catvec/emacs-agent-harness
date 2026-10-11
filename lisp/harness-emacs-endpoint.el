@@ -87,6 +87,19 @@
 ;;   its own that no `catch' in the code can take for its own.
 ;; - Its value, output and messages come back cut at `maxChars'.
 ;;
+;; The code reads and changes the harness's state as code in the
+;; harness does, with `harness-call'.  A method this Emacs has none of
+;; its own for -- every harness method, when the harness runs in its
+;; own process (lisp/harness-server.el) -- is called in the harness,
+;; over the connection the request came on (`harness-acp-call-lisp',
+;; `_harness/harness/call'), its arguments and result printed as Lisp
+;; so symbols and keywords stay what they are, and the code waits for
+;; the answer until its own time is up (`harness-call-fallback-function').
+;; The wait reads process output only, under the guards above, and what
+;; else comes meanwhile, such as another request, is handled once it is
+;; over: a method that needs this Emacs to answer first, as a tool about
+;; it does, gets no answer in time.
+;;
 ;; Code that neither waits nor reads input, a loop that runs on, can
 ;; still hold this Emacs until it returns or the user stops it: keeping
 ;; such code out is the judge's work, the elisp tool evaluates in a
@@ -110,7 +123,10 @@
 (require 'harness-elisp)
 
 (defvar harness-acp-error-method)
+(defvar harness-acp-current-connection)
 (declare-function harness-acp-respond-error "harness-acp" (respond code message &optional data))
+(declare-function harness-acp-open-p "harness-acp" (conn))
+(declare-function harness-acp-call-lisp "harness-acp" (conn name args &optional timeout))
 
 ;; trace.el and cl-print.el load when the harness first traces.
 (defvar trace-advice-name)
@@ -1487,14 +1503,37 @@ clock, which `:host' says by naming this machine as the function
       (buffer-substring-no-properties (point-min) (min (point-max) (+ (point-min) max 1))))
      max)))
 
-(defun harness-emacs-endpoint--eval-run (forms limit max)
+(defconst harness-emacs-endpoint--forward-min-wait 0.1
+  "Fewest seconds a `harness-call' the code makes waits for the harness.
+Code that calls one just before its time is up still gets this long;
+the evaluation's own timer stops it if it has to.")
+
+(defun harness-emacs-endpoint--forwarder (conn end)
+  "Return what answers the `harness-call's of code evaluated for CONN, or nil.
+CONN is the connection the request to evaluate came on.  While it is
+open, the function returned calls a method this Emacs has none of in
+the harness at CONN's other end, as `harness-call-fallback-function'
+says, and waits for the answer until END, when the code's time is up,
+or `harness-emacs-endpoint--forward-min-wait' seconds when that is
+later.  Nil without such a connection: such a call signals then, as
+in any Emacs."
+  (when (and conn (fboundp 'harness-acp-call-lisp) (fboundp 'harness-acp-open-p)
+             (harness-acp-open-p conn))
+    (lambda (name &rest args)
+      (harness-acp-call-lisp conn name args
+                             (max harness-emacs-endpoint--forward-min-wait (- end (float-time)))))))
+
+(defun harness-emacs-endpoint--eval-run (forms limit max &optional conn)
   "Evaluate FORMS here, guarded, and return what `eval' answers.
 FORMS may wait LIMIT seconds before they are stopped; the value, the
 output and the messages are each cut at MAX characters.  Nil when the
 user was typing as the evaluation was to start, so nothing ran.  The
 guards are those of the Commentary: the user's next key, \\[keyboard-quit]
 included, stops the code, it may not prompt or enter the debugger, and
-a timer of its own stops it once it has waited LIMIT seconds."
+a timer of its own stops it once it has waited LIMIT seconds.  CONN is
+the connection the request came on: the code's `harness-call's of
+methods this Emacs lacks go to the harness over it
+\(`harness-emacs-endpoint--forwarder')."
   (let ((out (generate-new-buffer " *harness-eval-output*" t))
         (messages-start (harness-elisp--messages-end))
         (tag (make-symbol "harness-eval-timeout"))
@@ -1513,6 +1552,9 @@ a timer of its own stops it once it has waited LIMIT seconds."
                        (when (eq tag
                                  (catch tag
                                    (let ((timer (run-with-timer limit nil (lambda () (throw tag tag))))
+                                         (harness-call-fallback-function
+                                          (or (harness-emacs-endpoint--forwarder conn (+ (float-time) limit))
+                                              harness-call-fallback-function))
                                          (standard-output out)
                                          (message-log-max t)
                                          (inhibit-message t)
@@ -1554,7 +1596,8 @@ a timer of its own stops it once it has waited LIMIT seconds."
       (setq harness-emacs-endpoint--evaluating nil)
       (kill-buffer out))))
 
-(defun harness-emacs-endpoint--eval-start (forms timeout max deadline waited answer fail)
+(defun harness-emacs-endpoint--eval-start (forms timeout max deadline waited answer fail
+                                                  &optional conn)
   "Run FORMS for `eval' once this Emacs is free, by DEADLINE at the latest.
 Free means the user is not typing and no other evaluation runs; until
 then this looks again every `harness-emacs-endpoint--eval-retry'
@@ -1562,7 +1605,8 @@ seconds, and WAITED says it has.  The code may wait TIMEOUT seconds,
 and no longer than DEADLINE leaves; MAX bounds what comes back.
 ANSWER gets the report, FAIL a message when the code does not run, or
 when it leaves the evaluation by a non-local exit, such as a call of
-the function `top-level'."
+the function `top-level'.  CONN is the connection the request came on,
+which the code's `harness-call's reach the harness over."
   (let ((now (float-time)))
     (cond
      ((> (+ now harness-emacs-endpoint--eval-min-time) deadline)
@@ -1576,7 +1620,7 @@ the function `top-level'."
      ((or harness-emacs-endpoint--evaluating (harness-emacs-endpoint--input-pending-p))
       (run-at-time harness-emacs-endpoint--eval-retry nil
                    #'harness-emacs-endpoint--eval-start forms timeout max deadline
-                   (if harness-emacs-endpoint--evaluating 'busy 'typing) answer fail))
+                   (if harness-emacs-endpoint--evaluating 'busy 'typing) answer fail conn))
      (t
       (let ((report nil) (failure nil) (exited t))
         (unwind-protect
@@ -1585,7 +1629,8 @@ the function `top-level'."
               ;; for one of the evaluation's, which would leave the
               ;; request unanswered from a timer.
               (condition-case err
-                  (setq report (harness-emacs-endpoint--eval-run forms (min timeout (- deadline now)) max))
+                  (setq report (harness-emacs-endpoint--eval-run forms (min timeout (- deadline now)) max
+                                                                 conn))
                 (error (setq failure (error-message-string err))))
               (setq exited nil))
           (when exited
@@ -1597,7 +1642,7 @@ the function `top-level'."
          ;; The user typed just as it was to start: nothing ran yet.
          (t (run-at-time harness-emacs-endpoint--eval-retry nil
                          #'harness-emacs-endpoint--eval-start forms timeout max deadline
-                         'typing answer fail))))))))
+                         'typing answer fail conn))))))))
 
 (defun harness-emacs-endpoint--eval (params answer fail)
   "Evaluate the `:code' of PARAMS in this Emacs: what `eval' answers.
@@ -1607,7 +1652,9 @@ runs as the Commentary says, once this Emacs is free, and ANSWER gets
 the report: the printed value, the output, the messages, the error
 the code signalled and why it was stopped (`timeout', `input' or
 `quit'), each nil when there is none, and the seconds it took.  FAIL
-gets a message when the code does not run."
+gets a message when the code does not run.  The connection the
+request came on, `harness-acp-current-connection', is where the code's
+`harness-call's of the harness's methods go."
   (unless (harness-emacs-eval-p)
     ;; Verbatim, not through `format-message', which would curl the
     ;; apostrophe and quotes of a message the model reads.
@@ -1625,8 +1672,9 @@ gets a message when the code does not run."
                                                      harness-emacs-endpoint--eval-max-timeout))
            (max (harness-emacs-endpoint--int (plist-get params :maxChars)
                                              harness-emacs-endpoint--eval-default-max-chars 100))
-           (deadline (harness-emacs-endpoint--eval-deadline params (float-time) timeout)))
-      (harness-emacs-endpoint--eval-start forms timeout max deadline nil answer fail))))
+           (deadline (harness-emacs-endpoint--eval-deadline params (float-time) timeout))
+           (conn (and (boundp 'harness-acp-current-connection) harness-acp-current-connection)))
+      (harness-emacs-endpoint--eval-start forms timeout max deadline nil answer fail conn))))
 
 ;;;; Answering the harness
 

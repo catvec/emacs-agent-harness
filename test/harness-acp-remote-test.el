@@ -496,6 +496,149 @@ PROTOCOLS are offered; HEADERS, an alist, are sent besides."
                                                   :address))))
         (harness-acp-close conn)))))
 
+;;;; Sessions over a device's connection
+
+;; A device calls the same methods as a client in this Emacs: its
+;; connection goes through the same dispatch, and what it may call is
+;; what the bus has, so a method the bus gains (`session/list' once the
+;; session module is there) is on offer to it at once.
+
+(defvar harness-sessions)
+
+(defun harness-acp-remote-test-load-sessions ()
+  "Load the session module, and what it needs, next to acp and acp-remote.
+No session is known then.  Only the tests of the session list need it,
+and loading it costs a compile in each."
+  (dolist (m '(store project session)) (harness-test-load-module m))
+  (clrhash harness-sessions))
+
+(defun harness-acp-remote-test-pair (c id)
+  "Pair the device behind C; ID is the id its `authenticate' request is sent with."
+  (harness-acp-remote-test-send
+   c (list :jsonrpc "2.0" :id id :method "authenticate" :params '(:methodId "pair")))
+  (accept-process-output nil 0.1)
+  (should (= 200 (car (harness-acp-remote-test-get (harness-acp-remote-test-pair-path)))))
+  (harness-test-wait (lambda () (harness-acp-remote-test-answer c id)) 5 "authenticate")
+  (should-not (plist-get (harness-acp-remote-test-answer c id) :error)))
+
+(defun harness-acp-remote-test-raw (c id)
+  "Return the JSON text C received as the answer to request ID, or nil.
+It is the text as it came, to see what a parsed answer cannot tell: an
+empty array from null, an empty object from nothing."
+  (cl-some (lambda (event)
+             (and (eq (car event) 'text)
+                  (string-prefix-p (format "{\"jsonrpc\":\"2.0\",\"id\":%d," id) (cdr event))
+                  (cdr event)))
+           (harness-acp-remote-test-ws-events c)))
+
+(ert-deftest harness-acp-remote-offers-what-a-local-client-is-offered ()
+  "A device's `initialize' lists the methods and capabilities a client here gets.
+Both come from the one registry: ACP's `session/list' is offered over
+the network because the bus has it, not because a table of the
+device's names it."
+  (harness-acp-remote-test-with
+    (harness-acp-remote-test-load-sessions)
+    (let ((c (harness-acp-remote-test-connect :protocols '("acp.v1")))
+          (local (harness-acp-connect nil)))
+      (unwind-protect
+          (let* ((init (plist-get (harness-acp-remote-test-call c 1 "initialize" '(:protocolVersion 1)) :result))
+                 (here (harness-test-await (harness-acp-initialize local)))
+                 (methods (plist-get (plist-get init :_harness) :methods)))
+            ;; `list' is an empty object: the capability ACP's page shows.
+            (should (plist-member (plist-get (plist-get init :agentCapabilities) :sessionCapabilities) :list))
+            (should (string-search "\"sessionCapabilities\":{\"list\":{}}" (harness-acp-remote-test-raw c 1)))
+            (should (equal (plist-get (plist-get here :agentCapabilities) :sessionCapabilities)
+                           (plist-get (plist-get init :agentCapabilities) :sessionCapabilities)))
+            ;; The same methods, in the same order, as a client here is
+            ;; offered, and as the bus has them to offer.
+            (should (member "session/list" methods))
+            (should (equal (plist-get (plist-get here :_harness) :methods) methods))
+            (should (equal (harness-acp--extension-methods) methods))
+            ;; A method the bus gains is offered to the device the next time it asks.
+            (harness-register-method 'session/offered-at-once (lambda () t))
+            (should (member "session/offered-at-once"
+                            (plist-get (plist-get (plist-get (harness-acp-remote-test-call c 2 "initialize" '(:protocolVersion 1))
+                                                             :result)
+                                                  :_harness)
+                                       :methods)))
+            (harness-unregister-method 'session/offered-at-once)
+            ;; And one it loses, the next time.
+            (harness-unregister-method 'session/list)
+            (let ((init (plist-get (harness-acp-remote-test-call c 3 "initialize" '(:protocolVersion 1)) :result)))
+              (should-not (member "session/list" (plist-get (plist-get init :_harness) :methods)))
+              (should-not (plist-member (plist-get init :agentCapabilities) :sessionCapabilities))))
+        (harness-acp-close local)))))
+
+(ert-deftest harness-acp-remote-lists-sessions ()
+  "A paired device lists sessions with ACP's `session/list' and the harness's own.
+Before it pairs it lists nothing."
+  (harness-acp-remote-test-with
+    (harness-acp-remote-test-load-sessions)
+    (let* ((dir (harness-test-temp-dir))
+           (session (harness-call 'session/create :cwd dir :name "From the desk" :model "demo:scripted"))
+           (sid (plist-get session :id))
+           (c (harness-acp-remote-test-connect :protocols '("acp.v1")))
+           (ids (lambda (result key) (mapcar (lambda (s) (plist-get s key)) result))))
+      (unwind-protect
+          (progn
+            (harness-acp-remote-test-call c 1 "initialize" '(:protocolVersion 1))
+            ;; Not before it pairs, whichever name it asks by.
+            (should (= -32000 (harness-acp-remote-test-code (harness-acp-remote-test-call c 2 "session/list"))))
+            (should (= -32000 (harness-acp-remote-test-code
+                               (harness-acp-remote-test-call c 3 "_harness/session/list"))))
+            (harness-acp-remote-test-pair c 4)
+            ;; ACP's: SessionInfo of every session, over JSON, and the
+            ;; virtual sessions after them.
+            (let* ((result (plist-get (harness-acp-remote-test-call c 5 "session/list") :result))
+                   (info (car (plist-get result :sessions))))
+              (should (equal (cons sid (mapcar #'car harness-acp--virtual-sessions))
+                             (funcall ids (plist-get result :sessions) :sessionId)))
+              (should (equal dir (plist-get info :cwd)))
+              (should (equal "From the desk" (plist-get info :title)))
+              (should (equal (harness-iso-time (plist-get (harness-call 'session/get sid) :updated))
+                             (plist-get info :updatedAt)))
+              (should (equal "idle" (plist-get (plist-get info :_meta) :status)))
+              (should-not (plist-member result :nextCursor)))
+            ;; Its cwd filter, with or without the slash, and an answer of
+            ;; no sessions, a page past the last one: an array, not null.
+            (should (equal (cons sid (mapcar #'car harness-acp--virtual-sessions))
+                           (funcall ids (plist-get (plist-get (harness-acp-remote-test-call
+                                                               c 6 "session/list" (list :cwd (directory-file-name dir)))
+                                                              :result)
+                                                   :sessions)
+                                    :sessionId)))
+            (let ((result (plist-get (harness-acp-remote-test-call
+                                      c 7 "session/list" (list :cwd (harness-test-temp-dir)
+                                                               :cursor (harness-acp--list-cursor '(0 . "s"))))
+                                     :result)))
+              (should (plist-member result :sessions))
+              (should (null (plist-get result :sessions)))
+              (should (string-search "\"result\":{\"sessions\":[]}" (harness-acp-remote-test-raw c 7))))
+            ;; Mistakes in the request are the device's to read.
+            (should (= -32602 (harness-acp-remote-test-code
+                               (harness-acp-remote-test-call c 8 "session/list" '(:cwd "relative")))))
+            (should (= -32602 (harness-acp-remote-test-code
+                               (harness-acp-remote-test-call c 9 "session/list" '(:cursor "not a cursor!")))))
+            ;; The harness's own, with its filter.
+            (should (equal (list sid)
+                           (funcall ids (plist-get (harness-acp-remote-test-call
+                                                    c 10 "_harness/session/list" '(:filter (:status "idle")))
+                                                   :result)
+                                    :id)))
+            (should (null (plist-get (harness-acp-remote-test-call
+                                      c 11 "_harness/session/list" '(:filter (:status "running")))
+                                     :result)))
+            ;; A bus method asked for by its bare name says where it is.
+            (let ((e (plist-get (harness-acp-remote-test-call c 12 "session/get" (list :id sid)) :error)))
+              (should (= -32601 (plist-get e :code)))
+              (should (equal "Method not found: No such ACP method session/get; the harness's own method is _harness/session/get"
+                             (plist-get e :message))))
+            (should (equal sid (plist-get (plist-get (harness-acp-remote-test-call
+                                                      c 13 "_harness/session/get" (list :id sid))
+                                                     :result)
+                                          :id))))
+        (clrhash harness-sessions)))))
+
 (ert-deftest harness-acp-remote-start-and-stop ()
   (harness-acp-remote-test-with
     (harness-acp-remote--stop)

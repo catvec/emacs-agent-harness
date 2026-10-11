@@ -13,13 +13,13 @@ module needs something more, add it here first.
  ------------------------------- ACP (JSON-RPC over loopback TCP; in-process lisp objects
                                  when `harness-process' is nil)
  State          session, agent, config, project, store, usage, insights, fallback,
-                retry, naming, compaction, handoff, worktree, merge, tasks, tasks-notify,
-                supervisor, seed, skills, perms, sandbox, notifications
+                retry, naming, judge, compaction, handoff, worktree, merge, tasks,
+                tasks-notify, supervisor, seed, skills, perms, sandbox, notifications
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval,
-                tools-web, tools-agent, tools-sessions, tools-notify, tools-handin,
-                tools-compact, tools-dev
+                tools-web, tools-agent, tools-sessions, tools-events, tools-notify,
+                tools-handin, tools-compact, tools-dev
  ------------------------------- bus (lisp/harness-core.el)
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths, the thinking-level
@@ -107,7 +107,11 @@ default) the layers above are split across two Emacs processes:
   chain must allow the call as it would a bash command, and the lent
   Emacs runs it guarded (the user's next key or C-g stops it; it may
   not prompt; it is stopped once it has waited two seconds).  The lent
-  Emacs checks the setting itself, so it has the last word.
+  Emacs checks the setting itself, so it has the last word.  The
+  harness's methods are in the harness process, not in this Emacs, so
+  the code's `harness-call` of one goes there over the connection the
+  request came on (`harness-call-fallback-function`, `harness/call`;
+  see the bus and acp).
 - Chores of the UI, which any client may do, are asked for with
   `client/request` (below): saving user options to `custom-file`
   (`harness-save-user-option`), reverting buffers after a tool
@@ -146,6 +150,19 @@ local connection.
 (harness-run-filter 'agent/system-prompt "" session)
 (harness-run-filter-async 'permission/decide decision request) ; async decision chain
 ```
+
+`harness-call-fallback-function` (nil) answers `harness-call` for a
+method this Emacs does not have: while it is non-nil and no method NAME
+is registered here, `harness-call` (and so `harness-call-async`)
+returns what `(funcall FN NAME ARGS…)` returns instead of signalling
+`harness-no-such-method`.  A method registered here is still called
+here, and `harness-method-exists-p` and `harness-methods` do not look at
+the function, so a module that asks whether a method exists before it
+uses one sees what it always saw.  The variable is let-bound around code
+that runs away from the bus it calls, never set: the Emacs endpoint
+binds it while it evaluates the code of `emacs_eval`, so that code
+reaches the harness process over the connection its request came on
+(see acp, `harness/call`).
 
 Async filter gotcha: `harness-run-filter-async` adopts any promise a
 handler returns and calls NEXT with its value.  A handler that stores
@@ -2194,7 +2211,9 @@ non-interactive session it stays a denial.
   `emacs_buffer`, `emacs_windows`, `emacs_describe`,
   `emacs_find_definition`, `emacs_messages`, `session_info`,
   `session_list`, `session_read`, `session_search`, `session_history`,
-  `session_wait`, `task_list`, `task_wait` and `notification_providers`.
+  `session_wait`, `task_list`, `task_wait`, `notification_providers`,
+  `watch_events` and `unwatch_events` (a watch only watches the
+  harness's events, and wakes no session but its own).
   The model provider's own search, standing in for `web_search` (see
   `tools/builtin`), is decided as `web_search` too, so the same rules
   and the same auto-allow apply to it.
@@ -3333,6 +3352,85 @@ so switching to either loses nothing.
 - Sync filter `naming/auto-p` (value the verdict, args session) can hold
   the automatic naming of a session off: tasks do while the title of the
   session's task is on its way, which then names the session.
+
+### judge
+
+One-off questions to a cheap model, whose short reply the asker reads
+as a decision.  emacs_eval's speed judge (tools-emacs-eval) and an
+event watch's classifier (tools-events) both ask through this library,
+so the request, its retry, its time limit and the lookups a judge may
+make before it answers are written once, and a judge differs from
+another only in its prompt, its parser and its tools.  The module keeps
+no state and starts nothing: its callers `require` `harness-judge` and
+do not list `judge` among their modules' requirements, so each of them
+loads on its own.
+
+- `harness-judge-model SESSION &optional MODEL` → the model a judge for
+  SESSION asks, or nil when none is known: the `:simple` tier of MODEL's
+  provider (`provider/tier-model`), else MODEL itself.  MODEL defaults to
+  SESSION's `:model`, else to `harness-model` as `config/get` has it for
+  SESSION's directory.  SESSION is a session's record, as `session/get`
+  gives it, or its id.
+- `harness-judge-ask &key session model system prompt tools max-lookups
+  max-tokens retry-max-tokens timeout parse label suffix` → promise of
+  the answer, which never rejects: `(:value V :text TEXT :lookups N)`
+  when PARSE, a function of the reply's text, returns a non-nil V
+  (without PARSE, V is the reply trimmed, when it is not blank), else
+  `(:value nil :reason WHY :text TEXT :lookups N)`.  WHY is "no model
+  could be asked", "it failed: …", "it stopped: …", "it gave no
+  answer", "its answer held no verdict: …", "it kept asking for lookups
+  past its budget of N" or "it took longer than Ns".  TEXT is the reply
+  PARSE read, which is what the judge wrote after its last lookup, and
+  N the lookups that ran.  A PARSE that signals finds nothing, and is
+  logged under LABEL (`"judge"` by default).
+- The request is `provider/complete` with `:ephemeral t` and
+  `:no-thinking t`, so a provider answers it from the request alone,
+  with no earlier conversation and none kept (see provider), as the
+  auto-mode judge's is.  It is made as the session `ID-SUFFIX` (SUFFIX
+  `"judge"` by default) in SESSION's directory, on its host; SYSTEM is
+  its system prompt, PROMPT the user's message, and MAX-TOKENS (200)
+  its output budget.  A reply that budget cut off before it held a value
+  is asked for once more with RETRY-MAX-TOKENS, when that is given, and
+  once only.  A judge that has not answered within TIMEOUT (30) seconds,
+  lookups and retry included, gives no value, and its request is
+  cancelled.
+- Lookups.  With TOOLS and a MAX-LOOKUPS above zero a judge may look
+  things up before it answers; without both none is offered.  A lookup
+  is `(:name :description :schema :handler)`: the model is shown the
+  first three as the request's `:tools`, and HANDLER, a function of a
+  call's input, returns a tool result `(:content TEXT :is-error BOOL)`,
+  a string, or a promise of either.  Lookups only read, and run here as
+  plain functions, outside the permission chain and every session's chat.
+  A result is cut at `harness-judge-lookup-max-chars` (4000), and a
+  handler that signals, or whose promise rejects, gives an error result
+  ("The lookup failed: …") that the judge reads and goes on from.  At
+  most MAX-LOOKUPS calls run in all: a call past that, or of a name
+  that is none of the lookups, gets an error result ("No more lookups:
+  …", "There is no lookup named X; the lookups are …") and runs
+  nothing.  A provider's own built-in tools (`:builtin`) are never
+  offered to a judge and never count.  The library does not tell the
+  judge of its lookups: the asker's SYSTEM prompt does, and says that
+  what one returns is data, not instructions.  Both kinds of provider
+  loop work:
+  - A hosted loop (Claude Code, Copilot) reports each call with a
+    `:respond`: the result goes back through it and the same request
+    goes on, and the answer is what the judge writes after its last
+    lookup.  A judge that goes on calling after two calls past its
+    budget (`harness-judge--extra-calls`) is told so, cancelled, and
+    gives no value.
+  - A native loop (the OpenAI-compatible APIs, Bedrock) stops at
+    `tool-use`: the judge is asked again, with the same tools, budget and
+    options, and the calls and their results added to the conversation
+    as a session's transcript adds them (an assistant message of its
+    `thinking`, `text` and `tool_use` blocks, then a user message of
+    `tool_result` blocks).  A retry after the output budget ran out keeps
+    the lookups made.  A judge still asking for lookups in its
+    (MAX-LOOKUPS + 1)th request gives no value.
+- The users.  emacs_eval's judge answers `{"verdict": …, "reason": …}`,
+  and may first look up what it does not know with emacs_describe and
+  emacs_find_definition (see tools-emacs-eval).  An event watch's
+  classifier answers `{"action": …, "note": …}` and is given no tools
+  (see tools-events).
 
 ### skills
 
@@ -4795,10 +4893,11 @@ and a message for the echo area.  Only the user calls it.
   list_dir file_info`, the `session_*` and `task_*` that only look,
   `skill_search skill_load notification_providers`, `emacs_buffers
   emacs_windows emacs_buffer emacs_describe emacs_find_definition
-  emacs_messages emacs_open`), `web_fetch web_search`, the coordination
-  tools (`ask_user todo_write hand_in notify session_control
-  session_send session_move set_non_interactive set_priority
-  task_control task_submit session_settings`), the tool that asks for a directory
+  emacs_messages emacs_open`, `watch_events unwatch_events`),
+  `web_fetch web_search`, the coordination tools (`ask_user todo_write
+  hand_in notify session_control session_send session_move
+  set_non_interactive set_priority task_control task_submit
+  session_settings`), the tool that asks for a directory
   (`harness-perms-dir-tool`) and `harness-supervisor-tools`
   (`no_plan_needed submit_plan retry_step`), plus `bash` when
   `sandbox/confined-p` says its directory is confined.  Any other
@@ -5092,7 +5191,7 @@ names its own working and temporary directories.
   (the header's link to the parent, `harness-open-latest-session`, the
   session pickers).  The supervisor module forks its workers this way.
 
-### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval, tools-web, tools-agent, tools-sessions, tools-notify, tools-handin, tools-compact
+### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval, tools-web, tools-agent, tools-sessions, tools-events, tools-notify, tools-handin, tools-compact
 
 Tool names, labels and inputs (all paths relative to cwd or absolute;
 TRAMP prefixes come from the session host):
@@ -5117,7 +5216,7 @@ TRAMP prefixes come from the session host):
 | `emacs_describe` | Describe symbol | symbol, buffer | read (needs no approval: `harness-perms--inspection-tools`) |
 | `emacs_find_definition` | Find definition | symbol, type (function/variable/face) | read (needs no approval: `harness-perms--inspection-tools`; the file of a definition it shows becomes readable, `permission/reveal-file`) |
 | `emacs_trace` | Trace symbol | action (start/stop/list), symbol, type (function/variable), callers, limit | write |
-| `emacs_eval` | Evaluate in Emacs | code | exec (tools-emacs-eval; offered only while `harness-emacs-eval` is on, as it is by default; a judge model must call the code fast first) |
+| `emacs_eval` | Evaluate in Emacs | code | exec (tools-emacs-eval; offered only while `harness-emacs-eval` is on, as it is by default; a judge model, which may look up what it does not know first, must call the code fast first; the code reaches the harness's methods with `harness-call`) |
 | `web_search` | Web search | query, count | net |
 | `web_fetch` | Fetch page | url, max_chars | net |
 | `emacs_messages` | Emacs messages | count | read (needs no approval: `harness-perms--inspection-tools`) |
@@ -5140,6 +5239,8 @@ TRAMP prefixes come from the session host):
 | `set_non_interactive` | Non-interactive mode | enabled, session_id (default: this session) or all (every current session and task of every project), reason | meta (perms module's away-request stage: turning it on is decided only by the user's answer, in every mode, and denied at once in a non-interactive session; turning it off is allowed at once) |
 | `set_priority` | Set priority | priority (low/medium/high), session_id (default: this session) or all (every current session and task of every project) | meta (a priority is the session's, and every input here is a session id; a task's priority is set through its session) |
 | `session_wait` | Wait for sessions | session_id / session_ids, until (stopped/idle/blocked/running/changed), mode (all/any), timeout_seconds (optional: wake anyway after this long) | read (registers a wake-up prompt and returns at once; needs no approval: `harness-perms--inspection-tools`) |
+| `watch_events` | Watch events | events (kinds), prompt, actions (default `["wake"]`), session_id, task_id, all_projects, once (default true), wait, timeout_seconds | read (tools-events; registers a watch and returns at once, or with `wait` returns the first decision; needs no approval: `harness-perms--inspection-tools`) |
+| `unwatch_events` | Stop watching events | watch_id (default: every watch of the session) | read (tools-events; needs no approval: `harness-perms--inspection-tools`) |
 | `task_list` | List tasks | column (pending/backlog/needs-input/active/review/merging/done), include_archived, all_projects, limit (the most recent) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `task_submit` | Submit task | prompt, cwd, model, thinking, refine (for the backlog), main_tree (no worktree: the project's main checkout), priority (low/medium/high: given to the session the task is submitted with, and the order waiting tasks start in) | meta |
 | `task_control` | Control task | task_id, action (start/queue/message/cancel/merge/verify/reject/complete/archive/restore/delete/priority), message (the feedback, for reject), priority (low/medium/high, for priority: given to the task's session, where a task's priority lives) | meta |
@@ -5678,6 +5779,124 @@ state (see perms).  It is a tool of its own rather than more actions of
 `session_control`, whose every action is about another session (it
 refuses the calling session itself) and is `meta`.
 
+Event watches (`tools-events`) hook a session into the harness's own
+events, as Claude Code's wait for an event does, with a cheap model
+deciding which events matter to it.  `watch_events` names the kinds of
+event to watch (`events`) and says in a `prompt` what to look for and
+when each of its `actions` applies (short lowercase words, at most eight
+besides `ignore`; `wake` by default).  Every event of those kinds that
+matches is put to a classifier, which answers one of the actions or
+`ignore`.  A small, documented set of kinds is offered rather than the
+whole bus (`harness-tools-events-kinds`); a kind is the name of the bus
+event it comes from:
+
+| kind | the event |
+|---|---|
+| `session/status` | a session's status changed: idle, running, blocked (waiting on the user) or inactive (closed) |
+| `agent/turn-ended` | a session's turn ended, with why (`end-turn`, `cancelled`, `error` …) and the start of its last reply |
+| `question/asked` | a session asked the user a question (`ask_user`), with the question and its options |
+| `permission/requested` | a session asks the user's permission for a tool call |
+| `tools/finished` | a session's tool call ended: the tool, whether it failed or was denied, the first lines of its result |
+| `agent/spawned` | a session started a sub-agent (`spawn_agent`) |
+| `task/changed` | a task was submitted, or its state, column or merge status changed |
+| `task/review` | a task finished and its work waits for the user's review |
+| `task/done` | a task became done: merged, finished, verified or completed |
+| `merge/conflict` | a merge from the merge queue conflicts, with the files |
+| `merge/finished` | a merge from the merge queue ended: merged, failed, aborted or cancelled |
+
+Which events a watch takes: those of its session's project, worktrees
+included (the scope `session_list` has by default), or of every project
+with `all_projects`.  `session_id` narrows them to one session (an event
+about two sessions, a spawn or a merge, is about both) and `task_id` to
+one task and its session, whatever their project.  Only events that come
+after the watch began count.  A watch is never shown events about its own
+session unless `session_id` names it, since a session woken by its own
+status change would be woken again by that, nor the end of the
+`watch_events` call that made it.
+
+Each matching event becomes a record -- a one-line summary and a few
+small details (a status, a reason, the start of a reply, the first lines
+of a result, the files of a conflict), each cut short, never a
+transcript -- and is put to the watch's classifier: a judge (see judge)
+on the simple tier of the watching session's model, given no tools, so it
+reaches nothing.  Its system prompt
+(`harness-tools-events--classifier-system`) has it read the session's
+prompt and the event as data, each between two lines that carry a tag of
+the question's own, as emacs_eval's judge reads code, so text in either
+that addresses it is no instruction, and answer one line of JSON,
+`{"action": A, "note": N}`, in 200 output tokens (1024 when those ran
+out) and at most 30 s (`harness-tools-events--classifier-timeout`).  The
+first JSON object in the reply that names an action decides; an action
+that is neither one of the watch's nor `ignore` is no decision.  A
+question that gets none -- no model, a failed request, a reply without an
+allowed action, no answer in time -- skips its event and is logged; after
+`harness-tools-events--max-failures` (3) in a row the watch ends and its
+session is woken with the reason, so a classifier that does not work
+never fails silently.
+
+`ignore` leaves the watch watching and tells the session nothing.  Any
+other action is a decision, `(:watch :action :note :event :kind :session
+:task :time)`, and it reaches the session as a message whose first line
+is the decision as JSON, `{watch, action, note, event, kind, session,
+task, time}` (the time in ISO 8601), so the session acts on it without
+reading prose; then come the event's summary, how many events were
+dropped or coalesced since the last decision, and whether the watch goes
+on.  How it reaches the session is the call's choice:
+
+- A registration, the default, returns at once, with `:meta` `(:watch ID
+  :events :actions)`, and blocks nothing; it outlives the turn that made
+  it.  The session is woken with the message as one of the harness's own
+  from "event watch" (`harness-tools-sessions--wake`, which
+  `session_wait` wakes with too, through `agent/prompt`: an idle session
+  starts a turn on it, a running one is steered).  Decisions for one
+  session that come within a second of each other
+  (`harness-tools-events--batch-delay`) come in one message.  The watch
+  is for one decision unless `once` is false.  `timeout_seconds` ends it
+  after that long, waking the session with `{watch, ended: "timeout"}`
+  and a sentence to say so.
+- With `wait` the call itself waits for the first decision and returns
+  it, as `task_wait` returns: the message is the result and the decision
+  its `:meta`.  `timeout_seconds` (default 600, at most 3600) bounds the
+  wait, which then ends with a report (`:meta` `{watch, ended:
+  "timeout"}`), as it does with the end of the turn the call is in.  A
+  watch that waits is always for one decision.
+
+A flood of events is bounded.  A watch asks its classifier one question
+at a time, and the events that match meanwhile wait in its queue, in the
+order they came.  A newer event of the same kind about the same task or
+session replaces the older one still waiting (coalesced); the queue holds
+at most `harness-tools-events--queue-max` (20) events and drops the
+oldest past that; and a watch asks at most
+`harness-tools-events-max-calls-per-minute` (12) questions a minute, the
+rest waiting for their turn.  The bus subscribers, one per event, only
+look whether a watch wants it and hand it on from the command loop
+(`harness-run-soon`), never in the emitter's frame.  The next decision
+says how many events were dropped or coalesced meanwhile, and
+`unwatch_events` says what each watch it stops saw: events matched,
+classified, decided on, ignored, dropped and coalesced.
+
+A session has at most ten watches, which live in memory
+(`harness-tools-events--watches`): a harness that restarts has none.  A
+watch ends with its decision (when it is for one), its timeout,
+`unwatch_events` (the `watch_id` it names, else every watch of the
+session), the deletion of its session, a turn of its session that the
+user cancelled (a registration goes quietly then, and with it the
+decisions still waiting to wake the session: a turn the user stopped is
+not one to start another on, as for `session_wait`), three questions in a
+row without a decision, or the deletion of the session or task it
+watches (the session is woken, `{watch, ended: "gone"}`).  While a
+registration lives it counts for `agent/outstanding` as "Watching events:
+w-ID (KINDS)" (`harness-tools-events--outstanding`), so a task whose
+session watches stays active, as one that waits with `session_wait`
+does.  A message still waiting to wake the session (it waits the batch
+delay, a second, in the outbox) counts too, as "A message from an event
+watch waits to be sent", though its watch has ended: a turn of the
+session that ends meanwhile leaves its task active, and the wake-up
+carries it on, instead of the task going to review just before the
+wake-up reopens it.  Both tools are of kind `read`, in
+`harness-perms--inspection-tools` and in the supervisor's allowlist: a
+watch only watches the harness and wakes no session but its own.
+
 `notify` (`tools-notify`) sends a notification through
 `notification/send` with `:source "agent"`, `:kind "agent"` and the
 calling session's `:session` and `:project`, so a click opens the
@@ -5752,20 +5971,39 @@ three gates before its code runs, in order:
 
 1. The permission chain decides it as any call of kind exec, in every
    mode (the same approval as bash).
-2. The handler asks a judge model, as the auto-mode permission judge
-   is asked: one `:ephemeral` `provider/complete` on the simple tier of
-   the session's model (`provider/tier-model MODEL 'simple`, else the
-   model itself), no tools, no thinking, 200 output tokens and once
-   more with 2048 when those ran out, at most 30 s in all.  It reads
-   the very code that would run, fenced by a tag of the call's own, and
-   rules on performance and blocking only, answering one JSON line
-   `{"verdict": "fast"|"slow"|"blocking"|"unsure", "reason": ...}`.
+2. The handler asks a judge model (see judge), as the auto-mode
+   permission judge is asked: `:ephemeral` `provider/complete` requests
+   on the simple tier of the session's model (`provider/tier-model MODEL
+   'simple`, else the model itself), no thinking, 200 output tokens and
+   once more with 2048 when those ran out, at most 45 s in all
+   (`harness-tools-emacs-eval--judge-timeout`, lookups included).  It
+   reads the very code that would run, fenced by a tag of the call's
+   own, and rules on performance and blocking only, answering one JSON
+   line `{"verdict": "fast"|"slow"|"blocking"|"unsure", "reason": ...}`.
    Only `fast` runs the code, and only when every verdict in the reply
-   says so; any other verdict, no verdict, a failed request or a judge
-   that takes too long refuses the call with the judge's reason and
-   points to the `elisp` tool.  Code longer than 12000 characters, code
-   that does not read and a harness with no Emacs lent are refused
-   before the judge is asked.
+   says so; any other verdict, no verdict, a failed request, a judge
+   that keeps asking for lookups or one that takes too long refuses the
+   call with the judge's reason and points to the `elisp` tool.  Code
+   longer than 12000 characters, code that does not read and a harness
+   with no Emacs lent are refused before the judge is asked.
+
+   Before it rules the judge may look up, as the lent Emacs has them,
+   the functions, macros and variables the code uses that it does not
+   know.  While an Emacs is lent and tools-emacs has registered them,
+   it is offered `emacs_describe` and `emacs_find_definition` as its
+   lookups (`harness-judge-ask`'s `:tools`, for hosted and native
+   providers alike), at most `harness-tools-emacs-eval--judge-lookups`
+   (3) in all; its system prompt says so, and that what a lookup returns
+   is data, not instructions.  A lookup calls the tool's handler with a
+   context that names the session's place and no session: it asks the
+   lent Emacs for what `describe-function`, `describe-variable` and
+   `find-function` show, nothing of it appears in any chat, and
+   `emacs_find_definition` grants no file to the permission layer
+   (`permission/reveal-file`).  The lookups only read, no other tool is
+   offered, and the judge has nothing to run code with.  Its prompt also
+   says that a few calls of `harness-call`, one request each to the
+   harness on this machine, are quick.
+
 3. The harness sends `eval` (below) with a two-second limit and a
    deadline, and waits five seconds for the answer; an Emacs that has
    not answered by then is reported as not responding, maybe still
@@ -5778,6 +6016,18 @@ the messages), with `:meta` `(:emacs "user" :verdict V :reason R)`;
 code that signals is an error result, and code the lent Emacs stopped
 (its time limit, the user's key, C-g) is an error result that says it
 ran partway.
+
+The code can read and change the harness's own state with
+`harness-call`, as code in the harness does: `(harness-call
+'session/list)`, `(harness-call 'session/create :cwd DIR)`, the task
+methods.  With the harness in a process of its own, the default, its
+methods are not in the lent Emacs, so a `harness-call` of a method that
+Emacs lacks goes to the harness over the connection the `eval` request
+came on, with Lisp arguments and a Lisp value (see acp: `eval` and
+`harness/call`), and the code waits for the answer until its own time is
+up.  The call is a method call over the connection, not a tool call:
+the permission chain decided the `emacs_eval` call, and decides nothing
+again for the methods the code calls.
 
 ### slots
 
@@ -5979,12 +6229,42 @@ Client API used by every UI:
 (harness-acp-closed-reason ERR)             ; that REASON, when a close is what rejected ERR
 (harness-acp-connection-p CONN) (harness-acp-connected-p CONN)
 (harness-acp-open-p CONN)                   ; connected, or TCP still connecting
+(harness-acp-call-sync CONN METHOD PARAMS &optional TIMEOUT)  ; blocks, briefly → the result, or signals
+(harness-acp-call-lisp CONN NAME ARGS &optional TIMEOUT)      ; `harness-call' of NAME in the harness at CONN's end
+harness-acp-current-connection              ; the connection a handler's message came on
 ```
 
 What is sent while a TCP connection connects waits and goes out once
 the socket is up, so a client keeps a connection while `harness-acp-open-p`
 holds rather than connecting again, which would drop it along with
 every request it carries.
+
+`harness-acp-current-connection` is the connection whose request or
+notification a handler (`harness-acp-set-handler`) is given, bound while
+the handler runs and for what it calls before it returns, so code the
+handler starts can tell which connection the harness spoke on.  The
+Emacs endpoint reads it when `eval` arrives, and keeps it for the code it
+evaluates (see `eval` below).
+
+`harness-acp-call-sync` is the one call of this API that blocks, for
+code that must have an answer before it returns and cannot wait for
+input, such as the Lisp the lent Emacs evaluates under
+`inhibit-interaction` and `while-no-input`.  It sends the request, then
+reads process output in slices of at most `harness-acp--call-sync-slice`
+(0.02 s), running timers as it goes -- a server in the same Emacs
+answers from them, and the evaluation's own timer, or input under
+`while-no-input`, still stops the wait -- until the answer comes or
+TIMEOUT seconds pass (`harness-acp-call-sync-timeout`, 2).  It never
+waits for input: no `sit-for`, `read-event` or `harness-await`.  It
+returns the result, and signals an error answer, or a connection that
+closes, as the `(acp-error CODE MESSAGE DATA)` the promise of
+`harness-acp-request` rejects with; no answer in time signals
+`harness-error` ("The harness did not answer METHOD within Ns"), and an
+answer that comes later is dropped.  What else arrives meanwhile is
+queued but not handled (`harness-acp--inbox-held`), but for this answer:
+handling it inside the wait would run the UI's handlers in the middle of
+somebody's code, under its bindings.  It is handled once the wait ends,
+however it ends, in the order it came.
 
 RESPOND returns non-nil when the answer went out and nil when it could
 not: its connection closed since the request came, or it was answered
@@ -5998,9 +6278,10 @@ the request came goes through the bus method that answers it
 Wire: JSON-RPC 2.0, one message per line.  Standard ACP methods:
 `initialize` (advertises `sessionCapabilities.list`), `authenticate`,
 `session/new {cwd}` → `{sessionId}`,
-`session/list {cwd}` → `{sessions:[{sessionId,cwd,title}]}` (the real
-sessions plus the virtual ones below),
 `session/load {sessionId}` (replays the transcript as updates),
+`session/list {cwd?, cursor?}` → `{sessions:[{sessionId, cwd, title,
+updatedAt, _meta}], nextCursor?}` (the real sessions, and on the first
+page the virtual ones; below),
 `session/prompt {sessionId, prompt:[blocks]}` → `{stopReason}`,
 `session/cancel`, `session/set_mode {sessionId, modeId}`,
 `session/set_model {sessionId, modelId}`.  Agent → client:
@@ -6037,7 +6318,51 @@ read by the harness, for a question still pending; an error when there
 is none, or the file is gone or larger than
 `harness-tools-agent-image-max-bytes`, 16 MiB).
 
-Two sessions the harness advertises are not backed by real sessions:
+`initialize` answers `protocolVersion`, `agentCapabilities`
+(`loadSession`, `promptCapabilities` and, while the bus has
+`session/list`, `sessionCapabilities.list`, an empty object, which ACP
+has a client check before it calls `session/list`), `agentInfo`,
+`authMethods` and `_harness` (`methods`, the extension methods a client
+may call, and `events`, the bus events).
+
+`session/list` is how a client that did not make a session finds it to
+`session/load`: the harness's sessions, newest first, in pages.  It is
+ACP's form of the bus method `session/list`, which clients reach as
+`_harness/session/list` with the harness's own filter (`:project
+:status :kind :parent-id :active`) and every session's whole plist.
+Both `cwd` and `cursor` are optional, other params are ignored.  The
+answer is `{sessions, nextCursor}`, `sessions` always an array (empty
+for a page with no session left), of every session the bus lists, the
+inactive ones too since `session/load` resumes them, newest first by
+when they last changed, and those that changed together by id.  The
+first page, the one asked for without a cursor, ends with the two
+virtual sessions (below), in the directory `cwd` names, else the
+harness's own: a client that reads no further page still shows them,
+and one that pages gets them once.  They are not counted in the page
+size, and no cursor names them.  Each real session is a
+SessionInfo: `sessionId`; `cwd`, as the harness holds it, ending in a
+slash; `title`, the session's name, left out when it has none;
+`updatedAt`, when it last changed, ISO 8601 in UTC; and `_meta`, for
+what ACP has no field for: `status`, `kind`, `model`, `project` and,
+for a session another made, `parentId`.  `cwd` keeps the sessions of
+one directory: an absolute path, with or without its trailing slash,
+compared as a name (no file name handler is asked, so a TRAMP name is
+compared as it reads and nothing connects); a relative path, one
+starting with `~` or one that is no string is -32602, and an empty one
+filters by nothing.  A page holds `harness-acp-session-list-page-size`
+(100) sessions, and `nextCursor` is there only while more are left.  A
+cursor is opaque to a client (the last session's time and id, in
+base64url): it is a place in the list and not a count, so a session that
+appears, goes or changes between two pages neither repeats nor skips
+another.  One this server did not make, or that is no string, is -32602
+"invalid cursor", as ACP asks of an agent; an empty one is none.  Every
+client gets the one list, those on other devices too once they are let
+in (see acp-remote); without a bus method `session/list` the method is
+not offered, in `initialize` or otherwise, and is not found.
+
+Two sessions the harness advertises, on the first page of
+`session/list` (above), are not backed by real sessions, and the bus's
+`_harness/session/list` leaves them out:
 `harness:projects` (title "Projects") renders the project list, and
 `harness:new-task` (title "New task") submits what its chat input sends
 as a task.  `session/load` renders a virtual session as a single
@@ -6049,12 +6374,24 @@ naming the new task (`_harness.taskId`).  Virtual sessions send only
 standard update kinds, never `_harness/*` ones, so a third-party ACP
 client shows them.
 
+A method name that is neither an ACP method of this server nor under
+`_harness/` is method-not-found (-32601), the code ACP clients take for
+"not supported".  When the name is a bus method a client may call as
+`_harness/NAME` (`session/get` is `_harness/session/get`), the message
+says so -- "Method not found: No such ACP method session/get; the
+harness's own method is _harness/session/get" -- because a client
+written for another agent calls the bare name and, told only "No such
+harness method", could not tell a method this harness lacks from one it
+keeps under its own prefix.  Any other name is "Method not found: No
+such harness method: NAME".
+
 Extension methods: any bus method whose name starts with `session/`,
 `agent/`, `provider/`, `tools/list`, `usage/`, `fallback/`, `worktree/`, `merge/`,
 `config/`, `skills/`, `permission/`, `question/`, `compaction/`, `handoff/`, `naming/`,
 `project/`, `task/`, `search/`, `notification/`, `sandbox/status`, `harness-dev/`, `harness/api`,
-`harness/modules`, `harness/version`, `harness/reload`, `acp/remote-`, `pet/`, `version/`,
-`insights/`, `supervisor/`, `seed/` (`harness-acp-extension-prefixes`), or with one of
+`harness/modules`, `harness/version`, `harness/reload`, `harness/call`, `acp/remote-`,
+`pet/`, `version/`, `insights/`, `supervisor/`, `seed/`, `priority/`
+(`harness-acp-extension-prefixes`), or with one of
 `harness-acp-extra-method-prefixes`, which modules of the user's own
 add to (see Modules of your own), is callable as `_harness/NAME` with a
 params object whose keys become the plist arguments (`{"id": …}` →
@@ -6067,6 +6404,41 @@ supervisor module's methods are `_harness/supervisor/set {sessionId, on}`
 UI's `harness-set-supervisor-all`, the menu's V, for every governed
 session at once), `.../get` and `.../active-p`,
 and the seed module's `_harness/seed/fork` and `.../list`.
+
+`harness/call {method, args}` → `{value}` is `_harness/METHOD` for a
+client that speaks Lisp, which is only the Emacs on this machine (the
+code `emacs_eval` runs there calls it through
+`harness-call-fallback-function`; see `eval` below).  JSON has no
+symbols: what an Emacs sends to `_harness/NAME` arrives with strings
+where it had symbols, but for the values of the keys of
+`harness-acp--enum-keys` (`:status`, `:kind` …), which are made symbols
+again, and the result comes back with its symbols as strings.
+`method` is the name of a bus method a client may call as
+`_harness/METHOD` -- the same prefixes and the same registry, so this
+is no way round either -- and never `harness/call` itself (-32602);
+another is method-not-found.  `args` is a string holding the printed
+list of the method's arguments, in order, as `harness-call` takes them.
+It is read as data and never run: nothing may follow the list, `#N=`
+syntax is refused, and only text, numbers, symbols, and lists and
+vectors of them are accepted, with no function object and no list that
+starts with `lambda` or `closure` at any depth (-32602 otherwise).  The
+method's result, or the value of the promise it returns, comes back
+printed as Lisp in `value`, nothing elided, so symbols, keywords and
+nested plists stay what they were; a result that does not print
+readably, such as one holding a buffer, comes back as `{wire: OBJ}`,
+OBJ in the wire shape the JSON methods give.  A client on another
+device is refused (-32603): Lisp arguments can name any function, and
+only the Emacs on this machine needs them; such a client calls
+`_harness/METHOD`.
+
+`harness-acp-call-lisp CONN NAME ARGS &optional TIMEOUT` is the client's
+side of `harness/call`: it prints ARGS (data that prints readably,
+nothing elided), calls `_harness/harness/call` with
+`harness-acp-call-sync` and reads the value back.  It signals as
+`harness-call` would: `harness-no-such-method` when the harness has no
+method NAME a client may call, `harness-error` with "NAME: MESSAGE",
+the harness's own message, when the method fails, and `harness-error`
+when no answer comes in time.
 
 The bus events of `harness-acp--forwarded-events` and
 `harness-acp-extra-events` reach every client as `_harness/event
@@ -6142,6 +6514,39 @@ counts, a buffer-local one does not).  It is answered once the code ran
 - It may not prompt (`inhibit-interaction`) or enter the debugger, and
   its messages are logged, not shown.  The value, the output and the
   messages are each cut at `maxChars`.
+
+The code's `harness-call`s reach the harness that sent the request.
+The endpoint reads `harness-acp-current-connection` when the request
+arrives and keeps it for the evaluation; while the code runs,
+`harness-call-fallback-function` is a function
+(`harness-emacs-endpoint--forwarder`) that sends a call of a method this
+Emacs has none of to the harness at the other end of that connection,
+with `harness-acp-call-lisp`.  A method this Emacs has is called here,
+as ever, and the call is no tool call: the permission chain does not
+decide it again.
+
+- Values: the arguments go as printed Lisp and the value comes back as
+  such (`harness/call`), so symbols, keywords and nested plists stay
+  what they are where `_harness/NAME`'s JSON would make them strings; a
+  value that does not print readably comes back in wire shape, and
+  arguments must be data, with no function.
+- Time: the code waits for the answer until its own time is up, but at
+  least `harness-emacs-endpoint--forward-min-wait` (0.1 s) for a call it
+  makes at the last moment.  The wait is `harness-acp-call-sync`'s: it
+  reads process output only, under the guards above (the user's key, C-g
+  and the evaluation's own timer still stop the code), and what else
+  arrives meanwhile, such as another request, is handled once it is
+  over.  A method that needs this Emacs to answer first, as the tools
+  about it do (`emacs/request`), therefore gets no answer in time.
+- Errors are signalled in the code as `harness-call` signals them, for
+  it to handle: `harness-no-such-method` for a method the harness has
+  none of that a client may call, and `harness-error` when the method
+  fails ("NAME: MESSAGE", the harness's own message) or gives no answer
+  in time.
+- With no connection to forward over -- the evaluation was started for
+  none, or the connection closed -- nothing is forwarded, and a call of
+  a method this Emacs lacks signals `harness-no-such-method` as in any
+  Emacs.
 
 Code that never waits (a loop that does not yield) can still hold the
 Emacs until it returns or the user stops it: nothing preempts Lisp on
@@ -6220,6 +6625,16 @@ app's own), `harness-acp-auth-methods-functions` offers `pair`, and
 promise settled by the pairing or rejected (-32000) after the code
 lifetime.  A bearer token equal to `harness-acp-token` (subprotocol
 `bearer.T`, `Authorization: Bearer T`, `?token=T`) authenticates too.
+
+What a device may call is what a client in this Emacs may.  Its
+connection goes through the same dispatch (`harness-acp--invoke`), with
+no table of methods of its own: `initialize` lists for it the same
+extension methods (`harness-acp--extension-methods`) and the same
+capabilities as for a local client, ACP's `session/list` among them
+while the bus has it, and a method the bus gains is on offer to it the
+next time it asks.  Until it is let in it may call `initialize` and
+`authenticate` and nothing else (-32000); `harness/call` is refused it
+once it is, however it was paired.
 
 Methods (callable as `_harness/acp/remote-*`): `acp/remote-status` →
 `(:running :enabled :corporate :host :port :address :address-set

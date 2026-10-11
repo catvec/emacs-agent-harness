@@ -2861,7 +2861,8 @@ judge denying them cannot stop the agent looking at its own harness."
 else: each such tool is of kind read and takes no path for the jail."
   (harness-perms-test--setup)
   (let ((harness-tools (make-hash-table :test 'equal)))
-    (dolist (library '("harness-tools-emacs" "harness-tools-agent" "harness-tools-sessions" "harness-tools-notify"))
+    (dolist (library '("harness-tools-emacs" "harness-tools-agent" "harness-tools-sessions" "harness-tools-notify"
+                       "harness-tools-events"))
       (load library nil t))
     (dolist (name harness-perms--inspection-tools)
       (ert-info (name)

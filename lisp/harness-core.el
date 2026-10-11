@@ -417,12 +417,28 @@ implementation (this is what makes hot reloading safe)."
   "Non-nil when a method NAME is registered."
   (and (gethash name harness--methods) t))
 
+(defvar harness-call-fallback-function nil
+  "Function that answers `harness-call' for methods this Emacs lacks, or nil.
+When non-nil and no method NAME is registered, `harness-call' returns
+what this function returns when called with NAME and the call's
+arguments, instead of signalling `harness-no-such-method'.  It is
+meant to be let-bound around code that runs in an Emacs which talks
+to the harness from a distance: the Emacs endpoint binds it while it
+evaluates code for `emacs_eval', so that code reaches the harness
+process over the connection the request came on.  Methods registered
+here are still called here, and `harness-method-exists-p' does not
+look at it.")
+
 (defun harness-call (name &rest args)
   "Call method NAME with ARGS and return its result.
-Signals `harness-no-such-method' when nothing implements NAME."
+Signals `harness-no-such-method' when nothing implements NAME, unless
+`harness-call-fallback-function' answers for it."
   (let ((m (gethash name harness--methods)))
-    (unless m (signal 'harness-no-such-method (list name)))
-    (apply (harness-method-fn m) args)))
+    (cond
+     (m (apply (harness-method-fn m) args))
+     (harness-call-fallback-function
+      (apply harness-call-fallback-function name args))
+     (t (signal 'harness-no-such-method (list name))))))
 
 (defun harness-call-async (name &rest args)
   "Call method NAME with ARGS and always return a promise.

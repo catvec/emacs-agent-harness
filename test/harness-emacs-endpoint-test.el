@@ -340,16 +340,20 @@ quitting is inhibited."
       (harness-test-await (harness-call 'emacs/request "eval" (append (list :code code) params)) 20)
     (error (list 'failed (harness-tools-reason err)))))
 
+(defvar harness-emacs-endpoint-test--conn nil
+  "The connection `harness-emacs-endpoint-test--with-eval' lends this Emacs on.")
+
 (defmacro harness-emacs-endpoint-test--with-eval (&rest body)
   "Run BODY with this Emacs lent to the harness, letting agents evaluate in it.
 `harness-emacs-eval' is set globally, as the settings page sets it,
-and put back after."
+and put back after.  The connection it is lent on is
+`harness-emacs-endpoint-test--conn' meanwhile."
   (declare (indent 0))
-  (let ((conn (make-symbol "conn")) (old (make-symbol "old")))
+  (let ((old (make-symbol "old")))
     `(progn
        (harness-emacs-endpoint-test--setup)
        (harness-test-with-temp-state
-         (let ((,conn (harness-test-connect-ui-client))
+         (let ((harness-emacs-endpoint-test--conn (harness-test-connect-ui-client))
                (,old (default-value 'harness-emacs-eval)))
            (setq harness-emacs-endpoint-test--evaluations 0
                  harness-emacs-endpoint-test--after nil
@@ -357,7 +361,7 @@ and put back after."
            (setq-default harness-emacs-eval t)
            (unwind-protect (progn ,@body)
              (setq-default harness-emacs-eval ,old)
-             (harness-acp-close ,conn)))))))
+             (harness-acp-close harness-emacs-endpoint-test--conn)))))))
 
 (ert-deftest harness-emacs-endpoint-eval-is-refused-unless-the-user-lets-agents ()
   "On by default; turned off, the lent Emacs evaluates nothing, whatever
@@ -559,6 +563,103 @@ and leaves this Emacs free for the next one."
     (should (harness-emacs-endpoint-answer "_harness/emacs/twice" nil
                                            (lambda (r) (push r responses) t)))
     (should (equal '((:first t)) responses))))
+
+;;;; The code's calls of the harness
+
+(defvar harness-acp-current-connection)
+(defvar harness-acp--inbox-held)
+(defvar harness-emacs-endpoint--forward-min-wait)
+(declare-function harness-acp-call-sync "harness-acp" (conn method params &optional timeout))
+(declare-function harness-emacs-endpoint--forwarder "harness-emacs-endpoint" (conn end))
+
+(ert-deftest harness-emacs-endpoint-eval-calls-the-harness-for-what-it-lacks ()
+  "The code's `harness-call' of a method this Emacs has none of goes to
+the harness over the connection the request came on, its arguments
+printed as Lisp, and waits no longer than the code may; the value comes
+back as it went, and errors as `harness-call' signals them.  A method
+this Emacs has is called here, as ever."
+  (harness-emacs-endpoint-test--with-eval
+    (let ((calls nil)
+          (answer (lambda () '(:value "(:answer 42 :status idle)"))))
+      (cl-letf (((symbol-function 'harness-acp-call-sync)
+                 (lambda (conn method params &optional timeout)
+                   (push (list conn method params timeout) calls)
+                   (funcall answer))))
+        (let ((r (harness-emacs-endpoint-test--eval
+                  "(harness-call 'session/test-forwarded '(:status idle) \"x\")" :timeout 2)))
+          (should (equal "(:answer 42 :status idle)" (plist-get r :value)))
+          (should-not (plist-get r :error)))
+        (should (= 1 (length calls)))
+        (pcase-let ((`(,conn ,method ,params ,timeout) (car calls)))
+          (should (eq harness-emacs-endpoint-test--conn conn))
+          (should (equal "_harness/harness/call" method))
+          (should (equal '(:method "session/test-forwarded" :args "((:status idle) \"x\")") params))
+          (should (< 1 timeout))
+          (should (<= timeout 2)))
+        ;; A call made as the code's time runs out still waits a little.
+        (funcall (harness-emacs-endpoint--forwarder harness-emacs-endpoint-test--conn (- (float-time) 5))
+                 'session/test-forwarded)
+        (should (= harness-emacs-endpoint--forward-min-wait (nth 3 (car calls))))
+        ;; Errors are signalled as `harness-call' signals them, for the
+        ;; code to handle.
+        (setq answer (lambda () (signal 'acp-error (list -32601 "Method not found: session/test-forwarded" nil))))
+        (should (equal "(none session/test-forwarded)"
+                       (plist-get (harness-emacs-endpoint-test--eval
+                                   (concat "(condition-case err (harness-call 'session/test-forwarded)"
+                                           "  (harness-no-such-method (list 'none (cadr err))))"))
+                                  :value)))
+        (setq answer (lambda () (signal 'acp-error (list -32603 "Harness error: \"No session x\"" nil))))
+        (should (equal "Harness error: \"session/test-forwarded: No session x\""
+                       (plist-get (harness-emacs-endpoint-test--eval "(harness-call 'session/test-forwarded)")
+                                  :error)))
+        ;; What this Emacs has, it calls itself.
+        (setq calls nil)
+        (unwind-protect
+            (progn
+              (harness-register-method 'session/test-here (lambda () 'here))
+              (should (equal "here" (plist-get (harness-emacs-endpoint-test--eval "(harness-call 'session/test-here)")
+                                               :value))))
+          (harness-unregister-method 'session/test-here))
+        (should-not calls)))))
+
+(ert-deftest harness-emacs-endpoint-eval-asks-the-harness-it-came-from ()
+  "A real round trip, to the harness in this Emacs: a method neither has
+signals `harness-no-such-method' in the code, which can handle it."
+  (harness-emacs-endpoint-test--with-eval
+    (let* ((calls nil)
+           (real (symbol-function 'harness-acp-call-sync)))
+      (cl-letf (((symbol-function 'harness-acp-call-sync)
+                 (lambda (&rest args) (push args calls) (apply real args))))
+        (let ((r (harness-emacs-endpoint-test--eval
+                  (concat "(condition-case err (harness-call 'session/test-nowhere 1)"
+                          "  (harness-no-such-method (list 'none (cadr err))))"))))
+          (should (equal "(none session/test-nowhere)" (plist-get r :value)))
+          (should-not (plist-get r :stopped))))
+      (should (= 1 (length calls)))
+      (should (equal "_harness/harness/call" (nth 1 (car calls))))
+      (should (equal '(:method "session/test-nowhere" :args "(1)") (nth 2 (car calls))))
+      (should-not harness-acp--inbox-held))))
+
+(ert-deftest harness-emacs-endpoint-eval-without-a-connection-calls-nothing-away ()
+  "Code evaluated for no connection, or one that closed, calls methods
+here only: one this Emacs lacks signals as it always did."
+  (harness-emacs-endpoint-test--setup)
+  (let ((harness-emacs-eval t) (harness-acp-current-connection nil)
+        (answered nil) (failed nil) (calls nil))
+    (cl-letf (((symbol-function 'harness-acp-call-sync)
+               (lambda (&rest args) (push args calls) '(:value "forwarded"))))
+      (harness-emacs-endpoint--eval
+       '(:code "(condition-case err (harness-call 'session/test-nowhere) (harness-no-such-method (list 'none (cadr err))))")
+       (lambda (r) (setq answered r))
+       (lambda (m) (setq failed m)))
+      (harness-test-wait (lambda () (or answered failed)) 5 "the evaluation")
+      (should-not failed)
+      (should (equal "(none session/test-nowhere)" (plist-get answered :value)))
+      (should-not calls))
+    (should-not (harness-emacs-endpoint--forwarder nil (+ (float-time) 5)))
+    (let ((conn (harness-acp-connect nil)))
+      (harness-acp-close conn)
+      (should-not (harness-emacs-endpoint--forwarder conn (+ (float-time) 5))))))
 
 ;;;; Chores of the UI
 

@@ -100,8 +100,8 @@ is never used for any other failure.")
 (defconst harness-acp-extension-prefixes
   '("session/" "agent/" "provider/" "tools/list" "usage/" "fallback/" "worktree/" "merge/"
     "config/" "skills/" "permission/" "compaction/" "handoff/" "naming/" "sandbox/status"
-    "harness/api" "harness/modules" "harness/version" "harness/reload" "harness-dev/" "question/"
-    "project/" "task/" "search/"
+    "harness/api" "harness/modules" "harness/version" "harness/reload" "harness/call"
+    "harness-dev/" "question/" "project/" "task/" "search/"
     "notification/" "acp/remote-" "pet/" "version/" "insights/" "supervisor/" "seed/" "priority/")
   "Bus method name prefixes callable as `_harness/NAME'.
 Modules of the user's own add theirs to
@@ -674,10 +674,17 @@ must when `harness-acp-token' is set."
        (or harness-acp-token (harness-acp-client-remote-info client))
        (not (run-hook-with-args-until-success 'harness-acp-authorize-functions client))))
 
+(defvar harness-acp--calling-client nil
+  "The client whose message `harness-acp--invoke' is dispatching, or nil.
+Bound while the method called for it runs, up to the promise it may
+return, so a method that is not for every client can tell who asks:
+`harness/call' refuses clients on other devices.")
+
 (defun harness-acp--invoke (client method params)
   "Return the value or promise of calling METHOD with PARAMS for CLIENT."
   (let ((params (harness-acp--intern-enums params))
-        (standard (gethash method harness-acp--standard-methods)))
+        (standard (gethash method harness-acp--standard-methods))
+        (harness-acp--calling-client client))
     (cond
      ((and (harness-acp-client-remote-info client) (harness-corporate-p))
       (signal 'acp-error (list harness-acp-error-unauthenticated
@@ -689,7 +696,7 @@ must when `harness-acp-token' is set."
      (standard (funcall standard client params))
      ((string-prefix-p "_harness/" method)
       (harness-acp--call-extension (substring method (length "_harness/")) params))
-     (t (signal 'harness-no-such-method (list method))))))
+     (t (harness-acp--unknown-method method)))))
 
 ;;;; Extension methods: bus methods by name
 
@@ -697,6 +704,23 @@ must when `harness-acp-token' is set."
   "Non-nil when bus method NAME (a string) may be called over ACP."
   (cl-some (lambda (p) (string-prefix-p p name))
            (append harness-acp-extension-prefixes harness-acp-extra-method-prefixes)))
+
+(defun harness-acp--unknown-method (method)
+  "Signal that METHOD, which no ACP method of this server is named, is not found.
+When METHOD is a bus method a client may call as `_harness/METHOD'
+\(`session/get' is `_harness/session/get'), the message says so: a
+client written for another agent calls the bare name and, told only
+\"No such harness method\", could not tell a method this harness lacks
+from one it keeps under its own prefix.  The code is method-not-found
+\(-32601) either way, the one clients take for \"not supported\"."
+  (let ((sym (intern-soft method)))
+    (if (and sym (harness-acp--extension-allowed-p method) (harness-method-exists-p sym))
+        (signal 'acp-error
+                (list harness-acp-error-method-not-found
+                      (format "Method not found: No such ACP method %s; the harness's own method is _harness/%s"
+                              method method)
+                      nil))
+      (signal 'harness-no-such-method (list method)))))
 
 (defun harness-acp--extension-methods ()
   "Return the names of every callable extension method, sorted."
@@ -875,13 +899,6 @@ a third-party ACP client shows them.")
           (list :stopReason "end_turn"
                 :_harness (list :virtual t :taskId id)))))))
 
-(defun harness-acp--session-info (session)
-  "Return the ACP SessionInfo plist for real SESSION."
-  (list :sessionId (plist-get session :id)
-        :cwd (file-name-as-directory
-              (expand-file-name (or (plist-get session :project) default-directory)))
-        :title (plist-get session :name)))
-
 (defun harness-acp--virtual-session-infos (cwd)
   "Return the ACP SessionInfo plists of the virtual sessions for CWD."
   (mapcar (lambda (pair)
@@ -895,9 +912,15 @@ a third-party ACP client shows them.")
     (harness-log 'info "acp: a %s client lends its Emacs (pid %s on %s)"
                  (harness-acp-client-kind client) (plist-get emacs :pid) (plist-get emacs :host)))
   (list :protocolVersion harness-acp-protocol-version
-        :agentCapabilities (list :loadSession t
-                                 :sessionCapabilities (list :list :empty)
-                                 :promptCapabilities (list :image t :audio t :embeddedContext t))
+        :agentCapabilities (append
+                            (list :loadSession t
+                                  :promptCapabilities (list :image t :audio t :embeddedContext t))
+                            ;; ACP's `session/list' (below) is there once the
+                            ;; session module is: `{}' says it, as ACP's page
+                            ;; on listing shows.  A client must not call it
+                            ;; otherwise.
+                            (and (harness-method-exists-p 'session/list)
+                                 (list :sessionCapabilities (list :list :empty))))
         :agentInfo (list :name "emacs-agent-harness" :version (harness-acp--version))
         :authMethods (harness-json-array (harness-acp--auth-methods client))
         :_harness (list :methods (harness-acp--extension-methods)
@@ -963,14 +986,143 @@ shared secret when `harness-acp-token' is set."
                                           :update (list :sessionUpdate "_harness/session" :session session)))
         :empty))))
 
+;; ACP's `session/list' (https://agentclientprotocol.com/protocol/v1/session-list)
+;; is how a client that did not make a session finds it to load: the
+;; list of sessions the harness knows, newest first, in pages.  It is
+;; the standard method of what the bus offers as `session/list', which
+;; clients reach as `_harness/session/list' with the harness's own
+;; filter and every session's whole plist.  Every client gets the one
+;; list, those on other devices too: what a remote client may call is
+;; what the bus has (see `harness-acp--extension-methods'), not a table
+;; of its own.  Its first page also lists the virtual sessions
+;; (`harness-acp--virtual-sessions'), which the bus's list does not.
+
+(defvar harness-acp-session-list-page-size 100
+  "Most sessions one page of ACP's `session/list' holds, a positive integer.
+When more are left the result carries a `nextCursor' for the next page.")
+
+(defun harness-acp--list-key (session)
+  "Return where SESSION, a public plist, stands in the listing: (STAMP . ID).
+STAMP is when it last changed, in whole microseconds (0 when it never
+did), so the key is made of an integer and a string and two sessions
+compare the same way on every run.  The listing is ordered by it, newer
+STAMP first and the same STAMP by ID (`harness-acp--list-key-before-p')."
+  (let ((updated (plist-get session :updated)))
+    (cons (if (numberp updated) (round (* updated 1000000)) 0)
+          (format "%s" (plist-get session :id)))))
+
+(defun harness-acp--list-key-before-p (a b)
+  "Non-nil when the listing key A comes before B (see `harness-acp--list-key')."
+  (or (> (car a) (car b))
+      (and (= (car a) (car b)) (string< (cdr a) (cdr b)))))
+
+(defun harness-acp--list-cursor (key)
+  "Return the cursor that resumes the listing after the session KEY names.
+It is opaque to a client (ACP: they must not parse, change or keep
+one), the key in base64url, and holds a place in the listing rather than
+a count of sessions: a session that appears, goes or changes between two
+pages neither repeats nor skips another one."
+  (base64url-encode-string
+   (encode-coding-string (format "%d %s" (car key) (cdr key)) 'utf-8) t))
+
+(defun harness-acp--list-position (cursor)
+  "Return the listing key CURSOR names, or nil for no cursor.
+Signal `harness-acp-invalid-params' for a cursor this server did not
+make; ACP asks agents to refuse one.  An empty string is no cursor."
+  (unless (or (null cursor) (equal cursor ""))
+    (let* ((text (and (stringp cursor)
+                      (condition-case nil
+                          (decode-coding-string (base64-decode-string cursor t) 'utf-8)
+                        (error nil))))
+           (space (and text (string-search " " text))))
+      (if (and space (> space 0) (< (1+ space) (length text))
+               (string-match-p "\\`-?[0-9]+\\'" (substring text 0 space)))
+          (cons (string-to-number (substring text 0 space)) (substring text (1+ space)))
+        (signal 'harness-acp-invalid-params (list "invalid cursor"))))))
+
+(defun harness-acp--list-directory (dir)
+  "Return DIR as a name to compare with another's: expanded, ending in a slash.
+Nil when DIR is no string.  Only the name is worked on, no file name
+handler asked, so a TRAMP name is compared as it reads and nothing
+connects."
+  (and (stringp dir)
+       (let ((file-name-handler-alist nil))
+         (file-name-as-directory (expand-file-name dir "/")))))
+
+(defun harness-acp--list-cwd (cwd)
+  "Return the directory the CWD of a `session/list' request filters by, or nil.
+ACP wants an absolute path; a trailing slash does not matter (see
+`harness-acp--list-directory').  A name that is not one, or not a
+string, signals `harness-acp-invalid-params'.  An empty string filters
+by nothing, as absent does."
+  (cond ((or (null cwd) (equal cwd "")) nil)
+        ((not (stringp cwd))
+         (signal 'harness-acp-invalid-params (list "cwd must be a string")))
+        ;; `~' is absolute to Emacs, but whose home is it?
+        ((or (not (file-name-absolute-p cwd)) (string-prefix-p "~" cwd))
+         (signal 'harness-acp-invalid-params (list "cwd must be an absolute path")))
+        (t (harness-acp--list-directory cwd))))
+
+(defun harness-acp--session-info (session)
+  "Return ACP's SessionInfo for SESSION, a public session plist.
+`title' is the session's name, left out when it has none, and
+`updatedAt' when it last changed, in ISO 8601 UTC.  What ACP has no
+field for is under `_meta': `status', `kind', `model', `project' and,
+for a session made by another, its `parentId'.  `cwd' is the
+directory as the harness holds it, ending in a slash."
+  (let ((name (plist-get session :name))
+        (updated (plist-get session :updated))
+        meta)
+    (cl-loop for (key value) on (list :status (plist-get session :status)
+                                      :kind (plist-get session :kind)
+                                      :model (plist-get session :model)
+                                      :project (plist-get session :project)
+                                      :parentId (plist-get session :parent-id))
+             by #'cddr
+             when value do (setq meta (append meta (list key value))))
+    (append (list :sessionId (plist-get session :id)
+                  :cwd (plist-get session :cwd))
+            (and (stringp name) (not (harness-string-blank-p name)) (list :title name))
+            (and (numberp updated) (list :updatedAt (harness-iso-time updated)))
+            (and meta (list :_meta meta)))))
+
 (harness-acp--define-standard "session/list" (_client params)
-  "Return the real sessions and the virtual sessions as ACP SessionInfo."
-  (let* ((cwd (expand-file-name (or (plist-get params :cwd) default-directory)))
-         (real (if (harness-method-exists-p 'session/list)
-                   (mapcar #'harness-acp--session-info (harness-call 'session/list))
-                 nil)))
-    (list :sessions (harness-json-array
-                     (append real (harness-acp--virtual-session-infos cwd))))))
+  ;; params: `cwd' (an absolute path: only the sessions of that directory)
+  ;; and `cursor' (a `nextCursor' of an earlier answer: the page after
+  ;; it), both optional; anything else is ignored.  Result: `sessions'
+  ;; (always an array), newest first, inactive ones too since
+  ;; `session/load' resumes them, and `nextCursor' only while more are
+  ;; left.  The first page, the one asked for without a cursor, ends
+  ;; with the virtual sessions, in the directory `cwd' names, else the
+  ;; harness's own: a client that reads no further page still shows
+  ;; them, and one that pages gets them once.  They are not counted in
+  ;; the page size, and no cursor names them.
+  (unless (harness-method-exists-p 'session/list)
+    (signal 'harness-no-such-method (list 'session/list)))
+  (let* ((cwd (harness-acp--list-cwd (plist-get params :cwd)))
+         (after (harness-acp--list-position (plist-get params :cursor)))
+         (size (if (and (integerp harness-acp-session-list-page-size)
+                        (> harness-acp-session-list-page-size 0))
+                   harness-acp-session-list-page-size
+                 100))
+         ;; (KEY . SESSION) of the sessions this page may hold, in order.
+         (entries (sort (delq nil
+                              (mapcar (lambda (session)
+                                        (let ((key (harness-acp--list-key session)))
+                                          (and (or (null cwd)
+                                                   (equal cwd (harness-acp--list-directory (plist-get session :cwd))))
+                                               (or (null after) (harness-acp--list-key-before-p after key))
+                                               (cons key session))))
+                                      (harness-call 'session/list)))
+                        (lambda (a b) (harness-acp--list-key-before-p (car a) (car b)))))
+         (page (take size entries)))
+    (append (list :sessions (harness-json-array
+                             (append (mapcar (lambda (entry) (harness-acp--session-info (cdr entry))) page)
+                                     (and (null after)
+                                          (harness-acp--virtual-session-infos
+                                           (or cwd (harness-acp--list-directory default-directory)))))))
+            (and (> (length entries) size)
+                 (list :nextCursor (harness-acp--list-cursor (car (car (last page)))))))))
 
 (defun harness-acp--block-from-acp (block)
   "Turn an ACP prompt content BLOCK into a harness content block.
@@ -1053,6 +1205,122 @@ runs in another Emacs, such as its own process."
   "Return the harness and Emacs versions."
   (list :version (harness-acp--version) :emacs emacs-version
         :protocolVersion harness-acp-protocol-version))
+
+;;;; Calling bus methods with Lisp arguments
+
+;; `_harness/NAME' passes a method its arguments as JSON, which has no
+;; symbols: every one becomes a string, but for the values of
+;; `harness-acp--enum-keys', which are made symbols again.  An Emacs
+;; that calls the harness's methods as `harness-call' would has
+;; symbols, keywords and nested plists to pass, and wants them back as
+;; they were: code that emacs_eval runs in the user's Emacs calls
+;; `harness-call', and lisp/harness-emacs-endpoint.el forwards what that
+;; Emacs has no method for to `harness/call', arguments and result
+;; printed as Lisp.
+
+(defun harness-acp--with-standard-io (fn)
+  "Call FN with the printer and reader set to give back what they get.
+Nothing is elided (`print-length', `print-level'), shared and
+circular structure prints as #N= (`print-circle'), and no file's
+symbol shorthands apply."
+  (let ((print-length nil) (print-level nil) (print-circle t)
+        (print-escape-nonascii t) (print-escape-newlines nil)
+        (print-quoted t) (print-gensym nil) (float-output-format nil)
+        (print-integers-as-characters nil)
+        (read-symbol-shorthands nil))
+    (funcall fn)))
+
+(defun harness-acp--print-readably (value)
+  "Return VALUE printed so that `read' gives it back, or nil when it cannot be.
+A value holding an object without a read syntax, such as a buffer,
+prints as #<...>, which does not read."
+  (harness-acp--with-standard-io
+   (lambda ()
+     (let* ((printed (prin1-to-string value))
+            (back (condition-case nil (read-from-string printed) (error nil))))
+       (and back (string-blank-p (substring printed (cdr back))) printed)))))
+
+(defun harness-acp--inert-p (obj)
+  "Non-nil when OBJ is data that cannot run as code.
+That is text, numbers, symbols, and lists and vectors of them, with no
+function object and no list that starts with `lambda' or `closure' at
+any depth: a function would run in this Emacs, away from the variables
+it was made with."
+  (let ((stack (list obj)) (ok t))
+    (while (and ok stack)
+      (let ((x (pop stack)))
+        (cond
+         ((consp x)
+          (if (memq (car x) '(lambda closure))
+              (setq ok nil)
+            (push (car x) stack)
+            (push (cdr x) stack)))
+         ((or (stringp x) (numberp x) (symbolp x)))
+         ((vectorp x) (setq stack (append x stack)))
+         (t (setq ok nil)))))
+    ok))
+
+(defun harness-acp--read-call-args (printed)
+  "Return the arguments PRINTED holds for `harness/call', a list.
+PRINTED is a string holding one printed Lisp list and nothing more.
+It is read as data: #N= syntax is refused, and so is anything else
+`harness-acp--inert-p' refuses.  Signal `harness-acp-invalid-params'
+otherwise."
+  (unless (stringp printed)
+    (signal 'harness-acp-invalid-params (list "args must be a string holding a printed Lisp list")))
+  (let* ((read (condition-case err
+                   (let ((read-circle nil))
+                     (harness-acp--with-standard-io (lambda () (read-from-string printed))))
+                 (error (signal 'harness-acp-invalid-params
+                                (list (format "args do not read: %s" (error-message-string err)))))))
+         (args (car read)))
+    (cond
+     ((not (string-blank-p (substring printed (cdr read))))
+      (signal 'harness-acp-invalid-params (list "args must hold one list and nothing after it")))
+     ((not (proper-list-p args))
+      (signal 'harness-acp-invalid-params (list "args must be a list of the arguments")))
+     ((not (harness-acp--inert-p args))
+      (signal 'harness-acp-invalid-params
+              (list "args must be data: text, numbers, symbols, lists and vectors, no functions")))
+     (t args))))
+
+(defun harness-acp--call-answer (value)
+  "Return what `harness/call' answers for VALUE, the method's result."
+  (let ((printed (harness-acp--print-readably value)))
+    (if printed
+        (list :value printed)
+      (list :wire (harness-acp--normalise value)))))
+
+(harness-defmethod harness/call (method args)
+  "Call bus METHOD with the arguments printed in ARGS; return (:value PRINTED).
+It is `_harness/METHOD' for a client that speaks Lisp: code emacs_eval
+evaluates in the user's Emacs calls the harness's methods with
+`harness-call', which that Emacs forwards here when it has no method of
+the name (lisp/harness-emacs-endpoint.el).  METHOD is the method's name,
+a string, one a client may call as `_harness/METHOD', never this one.
+ARGS is a string holding the printed list of its arguments, read as
+data (`harness-acp--read-call-args').  The result, or the value of the
+promise the method returns, comes back printed as Lisp in PRINTED, so
+symbols, keywords and nested lists stay as they were, which the JSON of
+`_harness/METHOD' turns into strings; one that does not print readably,
+such as a buffer, comes back as (:wire OBJ), OBJ in wire shape.  A
+client on another device is refused: Lisp arguments can name any
+function, and only the Emacs on this machine needs them."
+  (let ((client harness-acp--calling-client))
+    (when (and client (harness-acp-client-remote-info client))
+      (signal 'harness-error
+              (list "harness/call is for an Emacs on this machine, not a client on another device: call _harness/METHOD instead"))))
+  (unless (stringp method)
+    (signal 'harness-acp-invalid-params (list "method must be the name of a method, a string")))
+  (when (equal method "harness/call")
+    (signal 'harness-acp-invalid-params (list "harness/call does not call itself")))
+  (let ((sym (intern-soft method)))
+    (unless (and sym (harness-acp--extension-allowed-p method) (harness-method-exists-p sym))
+      (signal 'harness-no-such-method (list method)))
+    (let ((value (apply #'harness-call sym (harness-acp--read-call-args args))))
+      (if (harness-promise-p value)
+          (harness-then value #'harness-acp--call-answer)
+        (harness-acp--call-answer value)))))
 
 ;;;; Bus events -> notifications
 
@@ -1530,23 +1798,31 @@ Return what RESPOND does: non-nil when the answer went out."
                (append (harness-acp-connection-outbox conn) (list line))))
         (t (process-send-string proc line)))))))
 
-(defun harness-acp-request (conn method params)
-  "Call METHOD with PARAMS over CONN; return a promise of the result plist.
-The promise is rejected with (acp-error CODE MESSAGE DATA) on a
-JSON-RPC error or when the transport fails."
-  (let ((promise (harness-make-promise)))
+(defun harness-acp--send-request (conn method params)
+  "Send request METHOD with PARAMS over CONN; return (ID . PROMISE).
+PROMISE is what `harness-acp-request' returns; ID is the request's id,
+nil when it could not go out, its promise rejected already."
+  (let ((promise (harness-make-promise)) (sent nil))
     (if (not (harness-acp-connection-open conn))
         (harness-reject promise (list 'acp-error harness-acp-error-transport "connection closed" nil))
       (let ((id (cl-incf (harness-acp-connection-next-id conn))))
         (puthash id promise (harness-acp-connection-pending conn))
         (condition-case err
-            (harness-acp--conn-send conn (list :jsonrpc "2.0" :id id :method method :params params))
+            (progn
+              (harness-acp--conn-send conn (list :jsonrpc "2.0" :id id :method method :params params))
+              (setq sent id))
           (error
            (remhash id (harness-acp-connection-pending conn))
            (harness-reject promise (if (eq (car-safe err) 'acp-error) err
                                      (list 'acp-error harness-acp-error-transport
                                            (harness-error-message err) nil)))))))
-    promise))
+    (cons sent promise)))
+
+(defun harness-acp-request (conn method params)
+  "Call METHOD with PARAMS over CONN; return a promise of the result plist.
+The promise is rejected with (acp-error CODE MESSAGE DATA) on a
+JSON-RPC error or when the transport fails."
+  (cdr (harness-acp--send-request conn method params)))
 
 (defun harness-acp-notify (conn method params)
   "Send notification METHOD with PARAMS over CONN; no answer is expected."
@@ -1629,6 +1905,19 @@ Each is (CONN . MESSAGE), MESSAGE a line still to parse or a plist.")
 
 (defvar harness-acp--inbox-timer nil "The timer of the next slice, or nil.")
 
+(defvar harness-acp--inbox-held nil
+  "Non-nil while `harness-acp-call-sync' waits for an answer.
+What arrives meanwhile waits in `harness-acp--inbox', in order, and
+`harness-acp--drain' leaves it there; it is handled once the wait ends.")
+
+(defvar harness-acp-current-connection nil
+  "The connection whose request or notification a handler is given, or nil.
+Bound around the call of a connection's handler (see
+`harness-acp-set-handler'), so the handler, and what it calls before it
+returns, knows the connection a message came on: the Emacs endpoint
+sends the `harness-call's of the code it evaluates for the harness back
+over it (lisp/harness-emacs-endpoint.el).")
+
 (defvar harness-acp-receiving nil
   "Non-nil while received messages are handled, a slice at a time.
 Work a handler would repeat for every message of a burst, such as
@@ -1685,43 +1974,46 @@ the slice waiting moves behind it, and handles all of them."
   "Handle queued messages for up to `harness-acp-receive-slice' seconds.
 What is left goes on after Emacs redisplays and reads input: from a
 timer started now, which a timer round that is under way leaves to the
-next one, after the redisplay."
+next one, after the redisplay.  While `harness-acp-call-sync' waits
+\(`harness-acp--inbox-held'), nothing is handled and no timer started:
+the wait wakes the inbox again as it ends."
   (setq harness-acp--inbox-timer nil)
-  (let ((deadline (+ (float-time) harness-acp-receive-slice))
-        (handled nil))
-    (unwind-protect
-        (progn
-          (let ((harness-acp-receiving t))
-            (while (and harness-acp--inbox (< (float-time) deadline))
-              (setq handled t)
-              (pcase-let ((`(,conn . ,message) (pop harness-acp--inbox)))
-                (when (harness-acp-connection-open conn)
-                  (let ((msg (if (stringp message) (harness-acp--parse message) message)))
-                    (if (null msg)
-                        (harness-log 'warn "acp: unparsable line from server: %s"
-                                     (harness-truncate-end message 120))
-                      ;; As a timer of its own would: errors are reported, and
-                      ;; the buffer a handler leaves current is not the next one's.
-                      (condition-case-unless-debug err
-                          (save-current-buffer (harness-acp--conn-receive conn msg))
-                        (error (harness-log 'error "acp: handling a message failed: %S" err)))))))))
-          ;; What the slice's handlers left for its end; no longer receiving,
-          ;; so whatever this does in turn is done now.
-          (when handled
-            (let ((harness-acp-receiving nil)
-                  (once (nreverse harness-acp--once-received)))
-              (setq harness-acp--once-received nil)
-              (dolist (fn once)
+  (unless harness-acp--inbox-held
+    (let ((deadline (+ (float-time) harness-acp-receive-slice))
+          (handled nil))
+      (unwind-protect
+          (progn
+            (let ((harness-acp-receiving t))
+              (while (and harness-acp--inbox (< (float-time) deadline))
+                (setq handled t)
+                (pcase-let ((`(,conn . ,message) (pop harness-acp--inbox)))
+                  (when (harness-acp-connection-open conn)
+                    (let ((msg (if (stringp message) (harness-acp--parse message) message)))
+                      (if (null msg)
+                          (harness-log 'warn "acp: unparsable line from server: %s"
+                                       (harness-truncate-end message 120))
+                        ;; As a timer of its own would: errors are reported, and
+                        ;; the buffer a handler leaves current is not the next one's.
+                        (condition-case-unless-debug err
+                            (save-current-buffer (harness-acp--conn-receive conn msg))
+                          (error (harness-log 'error "acp: handling a message failed: %S" err)))))))))
+            ;; What the slice's handlers left for its end; no longer receiving,
+            ;; so whatever this does in turn is done now.
+            (when handled
+              (let ((harness-acp-receiving nil)
+                    (once (nreverse harness-acp--once-received)))
+                (setq harness-acp--once-received nil)
+                (dolist (fn once)
+                  (condition-case-unless-debug err
+                      (save-current-buffer (funcall fn))
+                    (error (harness-log 'error "acp: %S, at the end of a slice, failed: %S" fn err))))
                 (condition-case-unless-debug err
-                    (save-current-buffer (funcall fn))
-                  (error (harness-log 'error "acp: %S, at the end of a slice, failed: %S" fn err))))
-              (condition-case-unless-debug err
-                  (save-current-buffer (run-hooks 'harness-acp-received-hook))
-                (error (harness-log 'error "acp: `harness-acp-received-hook' failed: %S" err))))))
-      (if (null harness-acp--inbox)
-          (setq harness-acp--inbox-tail nil)
-        (unless (and harness-acp--inbox-timer (memq harness-acp--inbox-timer timer-list))
-          (setq harness-acp--inbox-timer (run-at-time 0 nil #'harness-acp--drain)))))))
+                    (save-current-buffer (run-hooks 'harness-acp-received-hook))
+                  (error (harness-log 'error "acp: `harness-acp-received-hook' failed: %S" err))))))
+        (if (null harness-acp--inbox)
+            (setq harness-acp--inbox-tail nil)
+          (unless (and harness-acp--inbox-timer (memq harness-acp--inbox-timer timer-list))
+            (setq harness-acp--inbox-timer (run-at-time 0 nil #'harness-acp--drain))))))))
 
 (defun harness-acp--conn-filter (proc chunk)
   "Buffer CHUNK from the server socket PROC and queue complete messages.
@@ -1794,11 +2086,151 @@ They are parsed as they are handled, a slice at a time."
         (harness-acp-respond-error respond harness-acp-error-method-not-found
                                    (format "No handler on this client for %s" method))))
      (t (condition-case err
-            (funcall handler method params respond)
+            (let ((harness-acp-current-connection conn))
+              (funcall handler method params respond))
           (error
            (harness-log 'error "acp: client handler failed on %s: %S" method err)
            (when respond
              (harness-acp-respond-error respond harness-acp-error-method (harness-error-message err)))))))))
+
+;;;; Client: waiting for an answer
+
+;; Everything above answers from the command loop.  Code that must have
+;; an answer before it returns -- Lisp evaluated for the harness in the
+;; user's Emacs, which calls `harness-call' and goes on with the value
+;; -- waits with `harness-acp-call-sync', briefly, for that one answer.
+;; It runs where nothing may wait for input (`inhibit-interaction',
+;; `while-no-input'), so it reads process output only, timers allowed:
+;; a server in the same Emacs answers from them, and the evaluation's
+;; own timer still stops the code.  What else arrives meanwhile is
+;; queued as usual but handled only once the wait is over, in order:
+;; handling it inside the wait would run the UI's handlers in the
+;; middle of somebody's code, under its bindings.
+
+(defconst harness-acp-call-sync-timeout 2
+  "Seconds `harness-acp-call-sync' waits when its caller names no limit.")
+
+(defconst harness-acp--call-sync-slice 0.02
+  "Longest wait, in seconds, of one turn of `harness-acp-call-sync'.")
+
+(defun harness-acp--take-response (conn id)
+  "Take the response to request ID of CONN out of the inbox; return it, or nil.
+Only CONN's messages are looked at, and of its lines only those that
+can be that response are parsed: one that holds the id, as a member."
+  (let ((pattern (format "\"id\" *: *%s *[,}]" id))
+        (prev nil) (cell harness-acp--inbox) (found nil))
+    (while (and cell (not found))
+      (let ((entry (car cell)))
+        (when (eq (car entry) conn)
+          (let* ((message (cdr entry))
+                 (msg (if (stringp message)
+                          (and (string-match-p pattern message) (harness-acp--parse message))
+                        message)))
+            (when (and (consp msg) (not (plist-get msg :method))
+                       (plist-member msg :id) (equal (plist-get msg :id) id))
+              (setq found msg)))))
+      (unless found (setq prev cell cell (cdr cell))))
+    (when found
+      (if prev
+          (setcdr prev (cdr cell))
+        (setq harness-acp--inbox (cdr cell)))
+      (when (eq cell harness-acp--inbox-tail)
+        (setq harness-acp--inbox-tail prev)))
+    found))
+
+(defun harness-acp--seconds-text (seconds)
+  "Return SECONDS as short text, such as \"2s\" or \"0.5s\"."
+  (format "%gs" (/ (round (* 10 seconds)) 10.0)))
+
+(defun harness-acp-call-sync (conn method params &optional timeout)
+  "Call METHOD with PARAMS over CONN and wait for its answer; return its result.
+Wait TIMEOUT seconds at most (`harness-acp-call-sync-timeout' by
+default).  An error answer is signalled as the (acp-error CODE MESSAGE
+DATA) the promise of `harness-acp-request' rejects with, a connection
+that closes too; no answer in time signals `harness-error', and an
+answer that comes later is dropped.
+
+This blocks, unlike the rest of the client API: it is for code that
+must have the answer before it returns and cannot wait for input, such
+as code evaluated for the harness under `inhibit-interaction' and
+`while-no-input'.  It reads process output in short slices, running
+timers as it goes, so a timer such as an evaluation's own timeout can
+stop it, and so can input under `while-no-input'.  It never waits for
+input: no `sit-for', `read-event' or `harness-await'.  Meanwhile the
+messages that arrive are queued but not handled, but for this answer:
+they are handled once the wait ends, however it ends, in the order
+they came."
+  (let* ((timeout (or timeout harness-acp-call-sync-timeout))
+         (deadline (+ (float-time) timeout))
+         (proc (and (eq (harness-acp-connection-kind conn) 'tcp)
+                    (harness-acp-connection-process conn))))
+    (unwind-protect
+        (let* ((harness-acp--inbox-held t)
+               (sent (harness-acp--send-request conn method params))
+               (id (car sent))
+               (promise (cdr sent)))
+          (while (not (harness-promise-settled-p promise))
+            (let ((msg (and id (harness-acp--take-response conn id))))
+              (cond
+               (msg (harness-acp--conn-receive conn msg))
+               ((>= (float-time) deadline)
+                (remhash id (harness-acp-connection-pending conn))
+                (signal 'harness-error
+                        (list (format "The harness did not answer %s within %s"
+                                      method (harness-acp--seconds-text timeout)))))
+               (t (accept-process-output (and proc (process-live-p proc) proc)
+                                         (max 0.001 (min harness-acp--call-sync-slice
+                                                         (- deadline (float-time)))))))))
+          (let ((value (harness-promise-value promise)))
+            (cond
+             ((eq (harness-promise-state promise) 'resolved) value)
+             ((and (consp value) (symbolp (car value)) (get (car value) 'error-conditions))
+              (signal (car value) (cdr value)))
+             (t (signal 'harness-error (list (format "%s failed: %S" method value)))))))
+      ;; What came meanwhile, now; an outer wait wakes it as it ends.
+      (when (and harness-acp--inbox (not harness-acp--inbox-held))
+        (harness-acp--wake)))))
+
+(defun harness-acp--error-text (message)
+  "Return MESSAGE, of an error answer, as the error it tells of would say it.
+A `harness-error' of the harness's is sent printed, as
+\"Harness error: \\\"No session x\\\"\": that reads \"No session x\"."
+  (let ((text (format "%s" (or message "")))
+        (prefix "Harness error: "))
+    (or (and (string-prefix-p (concat prefix "\"") text)
+             (condition-case nil
+                 (let ((read (read-from-string text (length prefix))))
+                   (and (stringp (car read)) (= (cdr read) (length text)) (car read)))
+               (error nil)))
+        (string-remove-prefix prefix text))))
+
+(defun harness-acp-call-lisp (conn name args &optional timeout)
+  "Call bus method NAME with ARGS in the harness CONN reaches; return its result.
+As `harness-call' would there: ARGS go, and the result comes back,
+printed as Lisp (`harness/call'), so symbols, keywords and nested
+plists stay as they are, which `_harness/NAME''s JSON makes strings.
+It waits as `harness-acp-call-sync' does, TIMEOUT seconds at most, and
+signals as `harness-call' would: `harness-no-such-method' when the
+harness has no method NAME a client may call, `harness-error' with the
+harness's message when the method fails or no answer comes in time.
+ARGS must be data that prints readably, with no functions."
+  (let* ((printed (let ((print-length nil) (print-level nil) (print-circle nil)
+                        (print-escape-nonascii t) (print-quoted t))
+                    (prin1-to-string args)))
+         (answer (condition-case err
+                     (harness-acp-call-sync conn "_harness/harness/call"
+                                            (list :method (if (symbolp name) (symbol-name name) (format "%s" name))
+                                                  :args printed)
+                                            timeout)
+                   (acp-error
+                    (if (eql (nth 1 err) harness-acp-error-method-not-found)
+                        (signal 'harness-no-such-method (list name))
+                      (signal 'harness-error
+                              (list (format "%s: %s" name (harness-acp--error-text (nth 2 err))))))))))
+    (if (plist-member answer :value)
+        (let ((read-symbol-shorthands nil))
+          (car (read-from-string (plist-get answer :value))))
+      (plist-get answer :wire))))
 
 ;;;; Corporate mode
 

@@ -395,5 +395,149 @@ SENT-CELL's car collects the parsed messages the server writes, newest first."
           (harness-acp--on-corporate-mode)
           (should-not (memq client harness-acp--clients)))))))
 
+;;;; Waiting for one answer, and calling with Lisp arguments
+
+(defun harness-acp-tcp-test-notes ()
+  "Return the N of each `_test/note' the connection's handler got, oldest first."
+  (let (out)
+    (dolist (m harness-acp-tcp-test-messages out)
+      (when (equal (car m) "_test/note")
+        (push (plist-get (cadr m) :n) out)))))
+
+(ert-deftest harness-acp-tcp-call-sync-waits-for-its-answer ()
+  "`harness-acp-call-sync' returns the answer before it returns, also where
+nothing may wait for input, as for code emacs_eval runs; it signals an
+error answer as the request's promise rejects, and gives up in time."
+  (harness-acp-tcp-test-with
+    (let* ((conn (harness-acp-tcp-test-connect port))
+           (session (progn (harness-test-await (harness-acp-initialize conn))
+                           (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                         :name "Listed" :model "demo:scripted"))))
+      (should (equal (list (plist-get session :id))
+                     (mapcar (lambda (s) (plist-get s :id))
+                             (harness-acp-call-sync conn "_harness/session/list" nil))))
+      (let ((inhibit-interaction t))
+        (should (equal "Listed" (plist-get (car (harness-acp-call-sync conn "_harness/session/list" nil))
+                                           :name))))
+      (let ((err (should-error (harness-acp-call-sync conn "_harness/nope/x" nil) :type 'acp-error)))
+        (should (= -32601 (nth 1 err))))
+      ;; A method that never answers: the wait ends on time, and the
+      ;; request is forgotten.
+      (harness-register-method 'session/test-never (lambda () (harness-make-promise)))
+      (let* ((start (float-time))
+             (err (should-error (harness-acp-call-sync conn "_harness/session/test-never" nil 0.3)
+                                :type 'harness-error)))
+        (should (equal "The harness did not answer _harness/session/test-never within 0.3s" (cadr err)))
+        (should (< (- (float-time) start) 2)))
+      (should (zerop (hash-table-count (harness-acp-connection-pending conn))))
+      (should-not harness-acp--inbox-held)
+      (harness-acp-close conn))))
+
+(ert-deftest harness-acp-tcp-call-sync-handles-the-rest-after ()
+  "What arrives while `harness-acp-call-sync' waits is handled once the
+wait is over, in the order it came, and none of it before."
+  (harness-acp-tcp-test-with
+    (let ((conn (harness-acp-tcp-test-connect port)))
+      (harness-test-await (harness-acp-initialize conn))
+      ;; Two notes before the answer is under way, one as it goes out.
+      (harness-register-method
+       'session/test-notify
+       (lambda ()
+         (harness-acp--broadcast "_test/note" (list :n 1))
+         (harness-acp--broadcast "_test/note" (list :n 2))
+         (harness-with-promise (resolve reject)
+           (run-at-time 0.1 nil (lambda ()
+                                  (harness-acp--broadcast "_test/note" (list :n 3))
+                                  (funcall resolve (list :done t)))))))
+      (should (equal '(:done t) (harness-acp-call-sync conn "_harness/session/test-notify" nil)))
+      (should-not (harness-acp-tcp-test-notes))
+      (should harness-acp--inbox)
+      (harness-test-wait (lambda () (= 3 (length (harness-acp-tcp-test-notes)))) 5 "the notes")
+      (should (equal '(1 2 3) (harness-acp-tcp-test-notes)))
+      ;; A wait left by a throw, as an evaluation's timer stops one, leaves
+      ;; what came meanwhile to be handled all the same.
+      (setq harness-acp-tcp-test-messages nil)
+      (harness-register-method
+       'session/test-late
+       (lambda ()
+         (harness-acp--broadcast "_test/note" (list :n 4))
+         (harness-with-promise (resolve reject)
+           (run-at-time 0.5 nil resolve t))))
+      (should (eq 'stopped (catch 'stop
+                             (run-at-time 0.2 nil (lambda () (throw 'stop 'stopped)))
+                             (harness-acp-call-sync conn "_harness/session/test-late" nil))))
+      (should-not harness-acp--inbox-held)
+      (harness-test-wait (lambda () (equal '(4) (harness-acp-tcp-test-notes))) 5 "the note after the throw")
+      (harness-acp-close conn))))
+
+(ert-deftest harness-acp-tcp-harness-call-keeps-lisp-as-it-is ()
+  "`_harness/harness/call' takes the arguments and gives the result as
+printed Lisp, so symbols, keywords and nested plists arrive as they are,
+where `_harness/NAME''s JSON makes them strings."
+  (harness-acp-tcp-test-with
+    (let* ((conn (harness-acp-tcp-test-connect port))
+           (dir (harness-test-temp-dir))
+           (idle (progn (harness-test-await (harness-acp-initialize conn))
+                        (harness-call 'session/create :cwd dir :name "Idle" :model "demo:scripted")))
+           (gone (harness-call 'session/create :cwd dir :name "Gone" :model "demo:scripted")))
+      (harness-call 'session/deactivate (plist-get gone :id))
+      ;; A filter of symbols, as the method takes it.
+      (let ((listed (harness-acp-call-lisp conn 'session/list '((:status idle)))))
+        (should (equal (list (plist-get idle :id)) (mapcar (lambda (s) (plist-get s :id)) listed)))
+        (should (eq 'idle (plist-get (car listed) :status)))
+        (should (eq 'main (plist-get (car listed) :kind))))
+      (should (equal "idle" (plist-get (car (harness-acp-call-sync conn "_harness/session/list"
+                                                                    '(:filter (:status "idle"))))
+                                       :status)))
+      ;; Whatever the arguments hold comes back as it went.
+      (harness-register-method 'session/test-echo (lambda (&rest args) (list :args args)))
+      (let ((args (list 'sym :key '(:nested (a "b" 1.5) :t t :nil nil) [vec 1] "text")))
+        (should (equal (list :args args) (harness-acp-call-lisp conn 'session/test-echo args))))
+      (should (equal '(:value "(:args (a :b))")
+                     (harness-acp-call-sync conn "_harness/harness/call"
+                                            '(:method "session/test-echo" :args "(a :b)"))))
+      ;; A result that does not print readably comes in wire shape.
+      (harness-register-method 'session/test-buffer
+                               (lambda () (list :buffer (get-buffer-create " harness-acp-tcp-test") :n 1)))
+      (should (equal '(:buffer " harness-acp-tcp-test" :n 1) (harness-acp-call-lisp conn 'session/test-buffer nil)))
+      ;; A method a client may not call is none, as for `_harness/NAME'.
+      (should-error (harness-acp-call-lisp conn 'store/save '("x" "y")) :type 'harness-no-such-method)
+      (should-error (harness-acp-call-lisp conn 'session/test-missing nil) :type 'harness-no-such-method)
+      (let ((err (should-error (harness-acp-call-lisp conn 'session/get '("no-such-session"))
+                               :type 'harness-error)))
+        (should (equal "session/get: No session no-such-session" (cadr err))))
+      (should (equal "\"a\", \"b\"" (harness-acp--error-text "Harness error: \"a\", \"b\"")))
+      (should (equal "Boom" (harness-acp--error-text "Boom")))
+      ;; Not itself, and data only.
+      (dolist (params '((:method "harness/call" :args "(\"session/list\" \"()\")")
+                        (:method "session/test-echo" :args "5")
+                        (:method "session/test-echo" :args "(a) b")
+                        (:method "session/test-echo" :args "#1=(a . #1#)")
+                        (:method "session/test-echo" :args "((lambda (x) x))")
+                        (:method "session/test-echo" :args "(#[(x) (x) (t)])")
+                        (:method "session/test-echo" :args "(#<buffer x>)")))
+        (let ((err (should-error (harness-acp-call-sync conn "_harness/harness/call" params) :type 'acp-error)))
+          (should (= -32602 (nth 1 err)))))
+      (let ((err (should-error (harness-acp-call-lisp conn 'session/test-echo (list (lambda (x) x)))
+                               :type 'harness-error)))
+        (should (string-search "no functions" (cadr err))))
+      (harness-acp-close conn))))
+
+(ert-deftest harness-acp-harness-call-is-for-this-machine ()
+  "A client on another device is refused `_harness/harness/call', though
+it may call `_harness/NAME': Lisp arguments can name any function."
+  (harness-acp-tcp-test-with
+    (pcase-let ((`(,client . ,sent) (harness-acp-tcp-test-add-client "192.0.2.9"))
+                (harness-acp-authorize-functions nil))
+      (let ((harness-acp-authorize-functions (list (lambda (c) (eq c client)))))
+        (harness-acp-tcp-test-answer sent client 1 "initialize" '(:protocolVersion 1))
+        (should (listp (plist-get (harness-acp-tcp-test-answer sent client 2 "_harness/session/list") :result)))
+        (let ((e (plist-get (harness-acp-tcp-test-answer sent client 3 "_harness/harness/call"
+                                                         '(:method "session/list" :args "()"))
+                            :error)))
+          (should (= -32603 (plist-get e :code)))
+          (should (string-search "not a client on another device" (plist-get e :message))))
+        (should-not harness-acp--calling-client)))))
+
 (provide 'harness-acp-tcp-test)
 ;;; harness-acp-tcp-test.el ends here

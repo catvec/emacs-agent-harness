@@ -1741,21 +1741,23 @@ model reads it the same either way."
           "\n\n"
           (mapconcat (lambda (sid) (harness-tools-sessions--describe sid)) ids "\n\n")))
 
-(defun harness-tools-sessions--wake (session-id text)
+(defun harness-tools-sessions--wake (session-id text &optional source)
   "Wake SESSION-ID with TEXT, a message of the harness's own, sent soon.
 An idle session starts a turn on it and a running one is steered, as a
 supervisor's report arrives; a session that is gone is left alone.  The
-message is from the harness (\"session wait\"), so transcripts do not
-show it as the user's."
+message is from the harness, from SOURCE, the part of it that sends it
+\(\"session wait\" unless given, \"event watch\" for watch_events), so
+transcripts do not show it as the user's."
   (when (harness-call 'session/exists-p session-id)
-    (harness-run-soon
-     (lambda ()
-       (when (harness-call 'session/exists-p session-id)
-         (harness-catch
-          (harness-call-async 'agent/prompt session-id text (list :from (harness-sender-system "session wait")))
-          (lambda (err)
-            (harness-log 'warn "tools-sessions: waking %s failed: %s"
-                         session-id (harness-error-message err)))))))))
+    (let ((from (harness-sender-system (or source "session wait"))))
+      (harness-run-soon
+       (lambda ()
+         (when (harness-call 'session/exists-p session-id)
+           (harness-catch
+            (harness-call-async 'agent/prompt session-id text (list :from from))
+            (lambda (err)
+              (harness-log 'warn "tools-sessions: waking %s failed: %s"
+                           session-id (harness-error-message err))))))))))
 
 (defun harness-tools-sessions--watch (ctx input ids until any check report)
   "Register a wake-up for the session in CTX and return its tool result.
