@@ -6,8 +6,11 @@
 ;; expired: when it shows (a session waiting past its cache's lifetime,
 ;; never a new one or one that used no cache), what it says, and that it
 ;; comes on its own, drawn by its timer, and goes once a request is sent.
-;; The unit tests fix the clock; the others run the state layer and the
-;; demo provider with a cache that lasts a second or two.
+;; A cache a redaction dropped shows from the drop on, headed so, with no
+;; cached price to compare with; the other caches' words stay as they
+;; were.  The unit tests fix the clock; the others run the state layer
+;; and the demo provider with a cache that lasts a second or two, or,
+;; for the redaction, a fake hosted loop (Claude Code, Copilot).
 
 ;;; Code:
 
@@ -17,6 +20,7 @@
 
 (defvar harness-provider-demo-script-override)
 (defvar harness-provider-demo--delay)
+(defvar harness-providers)
 (defvar harness-naming-auto)
 (defvar harness-sessions)
 (defvar harness-tools)
@@ -38,6 +42,8 @@
 (declare-function harness-chat-buffer "harness-ui-chat")
 (declare-function harness-chat-send "harness-ui-chat")
 (declare-function harness-acp--drop-client "harness-acp")
+(declare-function harness-define-provider "harness-provider")
+(declare-function harness-provider--forget "harness-provider" (id))
 
 ;;;; What the panel shows, the clock fixed
 
@@ -194,6 +200,147 @@ first request costs uncached against cached, at its own list prices."
       (should (string-match-p "for one model only"
                               (get-text-property 0 'help-echo (harness-ui-cache--banner
                                                                (harness-ui-cache--state s 1100.0) 1100.0)))))))
+
+;;;; A cache a redaction dropped
+
+(defun harness-ui-cache-test--dropped (&rest overrides)
+  "Return an idle session whose cache a redaction dropped at 1100, with OVERRIDES.
+Its stamp, at 1000, would have kept the cache until 1300.  The cache is
+as `session/get' reports it then: its `:expires' is the drop, and
+`:dropped' says why."
+  (apply #'harness-ui-cache-test--session
+         :cache '(:at 1000.0 :ttl 300 :expires 1100.0 :model "test:m" :dropped 1100.0)
+         overrides))
+
+(ert-deftest harness-ui-cache-state-shows-a-dropped-cache-from-the-drop-on ()
+  "A cache a redaction dropped has lapsed from the moment of the drop, 200
+seconds before the clock of its stamp ran out, and the state says why
+\(`:dropped').  The panel waits for the user as it does for a lapsed
+cache.  States that read the same are `equal', whenever they are asked."
+  (let ((s (harness-ui-cache-test--dropped)))
+    (should-not (harness-ui-cache--state s 1099.9))
+    (should (equal '(:at 1000.0 :ttl 300 :expires 1100.0 :context 84000 :model "test:m" :from nil
+                         :dropped 1100.0)
+                   (harness-ui-cache--state s 1100.0)))
+    (should (= 1100.0 (plist-get (harness-ui-cache--state s 1200.0) :dropped)))
+    (should (equal (harness-ui-cache--state s 1200.0) (harness-ui-cache--state s 90000.0)))
+    ;; Closed, or waiting on the user, it shows; mid-turn, or blocked on an answer, it does not.
+    (should (harness-ui-cache--state (harness-ui-cache-test--dropped :status "inactive") 2000.0))
+    (should-not (harness-ui-cache--state (harness-ui-cache-test--dropped :status "running") 2000.0))
+    (should-not (harness-ui-cache--state (harness-ui-cache-test--dropped :status "blocked") 2000.0))
+    ;; A cache that lapsed by itself names no drop, and a drop that is no time is not read.
+    (dolist (cache (list '(:at 1000.0 :ttl 300 :expires 1300.0 :model "test:m")
+                         '(:at 1000.0 :ttl 300 :expires 1300.0 :model "test:m" :dropped nil)
+                         '(:at 1000.0 :ttl 300 :expires 1300.0 :model "test:m" :dropped :null)
+                         '(:at 1000.0 :ttl 300 :expires 1300.0 :model "test:m" :dropped :false)
+                         '(:at 1000.0 :ttl 300 :expires 1300.0 :model "test:m" :dropped "later")))
+      (let ((state (harness-ui-cache--state (harness-ui-cache-test--session :cache cache) 2000.0)))
+        (should state)
+        (should-not (plist-member state :dropped))))))
+
+(ert-deftest harness-ui-cache-banner-says-a-redaction-dropped-the-cache ()
+  "A cache a redaction dropped is headed so, with the clock time of the drop
+and no lifetime or age: it did not lapse.  The line under it names what
+the next message costs uncached, and compares it with no cached price,
+as none can be had; the tooltip says what the redaction did and what the
+next message does.  Clock times only, with the day when it is not today's."
+  (let ((harness-ui--models (make-hash-table :test 'equal))
+        (dropped (harness-ui-cache-test--local 14 3))
+        (icon (harness-ui-icon 'harness-icon-clock)))
+    (puthash "test:m" '(:id "test:m" :pricing (:input 3.0 :output 15.0 :cache-read 0.3 :cache-write 3.75))
+             harness-ui--models)
+    (puthash "test:plain" '(:id "test:plain" :pricing (:input 2.0 :output 8.0 :cache-read 0.5))
+             harness-ui--models)
+    ;; Stamped at 14:02, the cache had until 14:07: the redaction took it at 14:03.
+    (let* ((cache (list :at (- dropped 60) :ttl 300 :expires dropped :model "test:m" :dropped dropped))
+           (s (harness-ui-cache-test--session :cache cache))
+           (now (+ dropped 600))
+           (banner (harness-ui-cache--banner (harness-ui-cache--state s now) now)))
+      ;; 84000 tokens written to the cache again at 3.75: what carrying on costs.
+      (should (equal (concat " " icon " Prompt cache dropped  at 14:03, by a redaction\n"
+                             "   Your next message re-sends ~84.0k tokens uncached: about $0.315, at list prices.\n")
+                     (substring-no-properties banner)))
+      (should (equal (concat "A redaction took a secret out of this conversation at "
+                             (format-time-string "%H:%M:%S" dropped)
+                             " and dropped the provider's copy of it, and its prompt cache with it.\n"
+                             "Your next message sends the whole context, 84.0k tokens, at the uncached rate,"
+                             " and caches it again.")
+                     (get-text-property 0 'help-echo banner)))
+      (should (get-text-property 0 'harness-ui-cache-panel banner))
+      ;; Nothing of the lapsed cache's words, nor of a price to compare with.
+      (should-not (string-match-p "expired\\|lapsed\\|instead of\\|after its last use"
+                                  (concat banner (get-text-property 0 'help-echo banner))))
+      ;; Drawn on a later day, the time says its day.
+      (should (string-match-p "dropped  at Oct 7, 14:03, by a redaction$"
+                              (harness-ui-cache-test--banner s (harness-ui-cache-test--local 9 0 8))))
+      ;; A model priced without cache writes sends it again at its input price.
+      (should (string-match-p "tokens uncached: about \\$0\\.168, at list prices\\.$"
+                              (harness-ui-cache-test--banner
+                               (harness-ui-cache-test--session
+                                :model "test:plain" :cache (list :at (- dropped 60) :ttl 300 :expires dropped
+                                                                 :dropped dropped))
+                               now)))
+      ;; A model the catalogue does not price: no cost.
+      (should (string-match-p "re-sends ~84\\.0k tokens uncached\\.$"
+                              (harness-ui-cache-test--banner
+                               (harness-ui-cache-test--session
+                                :model "nobody:m" :cache (list :at (- dropped 60) :ttl 300 :expires dropped
+                                                               :dropped dropped))
+                               now))))))
+
+(ert-deftest harness-ui-cache-banner-keeps-the-words-of-the-other-caches ()
+  "A cache that lapsed by itself, and one held for another model, are told
+in the words they always were, a cost compared with the cached price
+included: a drop is a cache of its own kind, and changes nothing here.
+A cache dropped and held for another model reads as the other model's,
+as the new model has none of it either way."
+  (let ((harness-ui--models (make-hash-table :test 'equal))
+        (expires (harness-ui-cache-test--local 14 7))
+        (icon (harness-ui-icon 'harness-icon-clock)))
+    (puthash "test:m" '(:id "test:m" :label "Model M" :provider-label "Test"
+                        :pricing (:input 3.0 :output 15.0 :cache-read 0.3 :cache-write 3.75))
+             harness-ui--models)
+    (puthash "test:other" '(:id "test:other" :label "Model O" :provider-label "Test"
+                            :pricing (:input 1.0 :output 5.0 :cache-read 0.1 :cache-write 1.25))
+             harness-ui--models)
+    ;; Lapsed: the heading, the cost against the cached price, the tooltip, the state.
+    (let* ((now (+ expires 600))
+           (cache (list :at (- expires 300) :ttl 300 :expires expires :model "test:m"))
+           (state (harness-ui-cache--state (harness-ui-cache-test--session :cache cache) now))
+           (banner (harness-ui-cache--banner state now)))
+      (should (equal (list :at (- expires 300) :ttl 300 :expires expires :context 84000 :model "test:m" :from nil)
+                     state))
+      (should (equal (concat " " icon " Prompt cache expired  at 14:07, 5 minutes after its last use\n"
+                             "   Your next message re-sends ~84.0k tokens uncached:"
+                             " about $0.315 instead of $0.025, at list prices.\n")
+                     (substring-no-properties banner)))
+      (should (equal (concat "The provider keeps the start of a conversation cached for 5 minutes"
+                             " after a request uses it.\n"
+                             "This session's requests last used the cache at "
+                             (format-time-string "%H:%M:%S" (- expires 300)) ", so it lapsed at "
+                             (format-time-string "%H:%M:%S" expires) ".\n"
+                             "Your next message sends the whole context, 84.0k tokens, at the uncached rate,"
+                             " and caches it again.")
+                     (get-text-property 0 'help-echo banner))))
+    ;; Another model's: the same, whether or not the redaction dropped it as well.
+    (dolist (cache '((:at 1000.0 :ttl 300 :expires 1300.0 :model "test:m")
+                     (:at 1000.0 :ttl 300 :expires 1100.0 :model "test:m" :dropped 1100.0)))
+      (let* ((state (harness-ui-cache--state (harness-ui-cache-test--session :model "test:other" :cache cache)
+                                             1200.0))
+             (banner (harness-ui-cache--banner state 1200.0))
+             (model-m (harness-ui-model-label "test:m"))
+             (model-o (harness-ui-model-label "test:other")))
+        (should (equal "test:m" (plist-get state :from)))
+        (should (equal (concat " " icon " Prompt cache cold  cached for " model-m ", not " model-o "\n"
+                               "   Your next message re-sends ~84.0k tokens uncached:"
+                               " about $0.105 instead of $0.0084, at list prices.\n")
+                       (substring-no-properties banner)))
+        (should (equal (concat "A provider caches a conversation for one model only.\n"
+                               "This session's requests last used the cache of " model-m ", at "
+                               (format-time-string "%H:%M:%S" 1000.0) "; " model-o " has none of it.\n"
+                               "Your next message sends the whole context, 84.0k tokens, at the uncached rate,"
+                               " and caches it again.")
+                       (get-text-property 0 'help-echo banner)))))))
 
 (ert-deftest harness-ui-cache-stays-away-while-the-switch-banner-asks ()
   "While the switch banner asks how to hand over, the panel does not show:
@@ -476,6 +623,86 @@ for it, and the panel goes for good."
       (harness-ui-cache-test--send buffer "on the other model")
       (should-not (harness-ui-cache-test--shows-p buffer))
       (should (equal "demo:other" (plist-get (plist-get (harness-ui-session sid) :cache) :model))))))
+
+(defun harness-ui-cache-test--define-hosted ()
+  "Define `hosted', a fake hosted loop, and wait for the UI to list its model.
+A hosted loop (Claude Code, Copilot) keeps the conversation itself.  It
+answers every request with a conversation state, a reply and usage that
+wrote 400 tokens of cache, and its model is priced in the catalogue."
+  (harness-define-provider 'hosted
+    :label "Hosted"
+    :models (lambda ()
+              (harness-resolved
+               (list (list :name "m" :label "Hosted M" :context-window 200000
+                           :pricing '(:input 4.0 :output 20.0 :cache-read 0.4 :cache-write 5.0)))))
+    :complete (lambda (req)
+                (let ((on-event (plist-get req :on-event)))
+                  (run-at-time 0.005 nil
+                               (lambda ()
+                                 (funcall on-event '(:type provider-state :state (:conv "c1")))
+                                 (funcall on-event '(:type text :delta "ok"))
+                                 (funcall on-event '(:type usage :input 30 :output 5
+                                                           :cache-write 400 :context 430))
+                                 (funcall on-event '(:type done :stop-reason end-turn)))))
+                (list :cancel #'ignore))
+    :capabilities '(:hosted-loop t :resume t :fork t))
+  (harness-test-wait (lambda () (gethash "hosted:m" harness-ui--models)) 5 "the UI to list the hosted model"))
+
+(ert-deftest harness-ui-cache-panel-comes-at-once-when-a-redaction-drops-the-cache ()
+  "A redaction resets a hosted session's provider conversation, and the
+provider's cache of it goes with it.  The cache would have lasted ten
+minutes more, but the panel shows at once, headed so, with no timer
+waiting for a lapse and no cached price to compare with, and keeps
+offering to compact.  The next message opens a new conversation whose
+first request writes a cache of its own: the panel goes, and a timer
+is set for the new lapse."
+  (harness-ui-cache-test-with
+    (harness-ui-cache-test--define-hosted)
+    (unwind-protect
+        (let* ((harness-cache-ttl 600)
+               (sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "hosted:m")
+                               :id))
+               (buffer (harness-ui-cache-test--open sid)))
+          (harness-ui-cache-test--send buffer "first")
+          ;; Warm for ten minutes: no panel, a timer for the lapse.
+          (let ((cache (plist-get (harness-ui-session sid) :cache)))
+            (should (= 600 (plist-get cache :ttl)))
+            (should-not (plist-get cache :dropped))
+            (should-not (harness-ui-cache-test--shows-p buffer))
+            (with-current-buffer buffer
+              (should (timerp harness-ui-cache--timer))
+              (should (= (plist-get cache :expires) harness-ui-cache--due))))
+          ;; The redaction drops the provider conversation, and the cache with it.
+          (should (equal '(:checkpoints 0 :cache-dropped t) (harness-call 'session/reset-provider sid)))
+          (harness-test-wait (lambda () (harness-ui-cache-test--shows-p buffer)) 5 "the cache panel")
+          (let ((cache (plist-get (harness-ui-session sid) :cache)))
+            (should (numberp (plist-get cache :dropped)))
+            (should (= (plist-get cache :dropped) (plist-get cache :expires)))
+            (should (< (plist-get cache :dropped) (+ (plist-get cache :at) 600)))
+            (with-current-buffer buffer (should-not harness-ui-cache--timer)))
+          (let ((text (harness-ui-cache-test--text buffer)))
+            (should (string-match-p "Prompt cache dropped  at [0-9:]+, by a redaction\n" text))
+            (should (string-match-p (concat "\n   Your next message re-sends ~430 tokens uncached:"
+                                            " about \\$[0-9.]+, at list prices\\.\n")
+                                    text))
+            (should-not (string-match-p "Prompt cache expired\\|instead of" text))
+            (should (string-match-p "\n   Compact it first   b  Brief summary" text)))
+          (with-current-buffer buffer
+            (let ((help (get-text-property (harness-ui-cache-test--shows-p buffer) 'help-echo)))
+              (should (string-match-p "\\`A redaction took a secret out of this conversation at [0-9:]+ and dropped the provider's copy of it, and its prompt cache with it\\.\n"
+                                      help))
+              (should (string-suffix-p "caches it again." help))))
+          ;; The next message's request writes the new conversation's cache.
+          (harness-ui-cache-test--send buffer "carry on")
+          (should-not (plist-get (plist-get (harness-ui-session sid) :cache) :dropped))
+          (harness-test-wait (lambda () (not (harness-ui-cache-test--shows-p buffer))) 5 "the panel to go")
+          (with-current-buffer buffer (should (timerp harness-ui-cache--timer)))
+          (should-not (string-match-p "Prompt cache dropped" (harness-ui-cache-test--text buffer)))
+          ;; A buffer opened later does not show the old drop either.
+          (kill-buffer buffer)
+          (should-not (harness-ui-cache-test--shows-p (harness-ui-cache-test--open sid))))
+      (remhash 'hosted harness-providers)
+      (harness-provider--forget 'hosted))))
 
 (ert-deftest harness-ui-cache-panel-compacts-the-conversation ()
   "Once the cache lapsed, the panel offers to compact the conversation,

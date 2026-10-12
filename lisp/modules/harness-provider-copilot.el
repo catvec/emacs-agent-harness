@@ -76,8 +76,24 @@
 ;; short-lived probe process when no session process runs.  Before
 ;; `copilot login' the CLI's built-in list of model ids stands in.
 ;;
-;; Nothing here blocks: output is handled in a process filter, death in
-;; a sentinel, timeouts by timers, and every answer by a callback.  A
+;; Session state.  The CLI keeps what each of its sessions said and did
+;; in a directory of its own, STATE/ID/ (events.jsonl and the files
+;; beside it), and resumes a session from it; ID is the Copilot session,
+;; `:copilot-session-id' of the provider state.  STATE is
+;; `harness-provider-copilot-state-directory': by default `session-state'
+;; in $COPILOT_HOME, else in ~/.copilot.  `provider/copilot-redact-logs'
+;; (SECRETS &optional IDS DRY-RUN) takes secrets (plists, see
+;; lisp/harness-redaction.el) out of those files, as
+;; `provider/claude-redact-logs' does out of Claude Code's (see
+;; harness-provider-claude.el): the files whose path holds one of the
+;; session ids IDS, or every file for t; a file whose session runs a
+;; turn is left alone (`deferred'), the CLI process of an idle one is
+;; closed before its files are written, and a file that no session owns
+;; and was written in the last minute is left alone (`busy').
+;;
+;; Nothing here blocks, but for that method, which runs to the end before
+;; it answers: output is handled in a process filter, death in a
+;; sentinel, timeouts by timers, and every answer by a callback.  A
 ;; request the CLI leaves unanswered fails after
 ;; `harness-provider-copilot--startup-timeout' instead of hanging.
 
@@ -89,6 +105,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-provider)
+(require 'harness-redaction)
 
 ;;;; Customisation
 
@@ -127,6 +144,20 @@ catalogue's prices."
 (defcustom harness-provider-copilot-extra-args nil
   "Extra command line arguments appended to every `copilot' invocation."
   :type '(repeat string) :group 'harness)
+
+(defcustom harness-provider-copilot-state-directory nil
+  "Directory where the Copilot CLI keeps the state of its sessions, or nil.
+The CLI writes what each session said and did to a directory of its own
+there, named after the session (ID/events.jsonl and the files beside
+it), and resumes the session from it.
+
+Nil (the default) is `session-state' in the CLI's home directory:
+$COPILOT_HOME when it is set, else ~/.copilot.  Set it when the CLI
+keeps its state elsewhere than this process's environment says.
+`provider/copilot-redact-logs' takes secrets out of the files in it."
+  :type '(choice (const :tag "The CLI's own (COPILOT_HOME, else ~/.copilot)" nil)
+                 (directory :tag "Directory"))
+  :group 'harness)
 
 (defconst harness-provider-copilot--interrupt-timeout 3
   "Seconds to wait after an abort before killing the CLI process.")
@@ -2210,6 +2241,193 @@ permission judge's (SESSION-ID-perms), lose theirs too."
     (dolist (id (hash-table-keys harness-provider-copilot--sessions))
       (when (string-prefix-p prefix id)
         (harness-provider-copilot-close id)))))
+
+;;;; Redacting the CLI's session state
+;;
+;; See "Session state" in the commentary above.
+
+(defconst harness-provider-copilot--quiet-seconds 60
+  "Seconds a state file that no session here owns has to be left alone.
+A file written more recently may have a `copilot' that the user started
+outside the harness at work in it.")
+
+(defun harness-provider-copilot--state-directory ()
+  "Return the directory of the CLI's session state, expanded.
+That is `harness-provider-copilot-state-directory', else `session-state'
+in $COPILOT_HOME, or in ~/.copilot when that is not set.  A blank
+setting counts as none: it would name the current directory.  The name
+ends in a slash."
+  (let ((set harness-provider-copilot-state-directory)
+        (env (getenv "COPILOT_HOME")))
+    (file-name-as-directory
+     (expand-file-name
+      (if (and (stringp set) (not (harness-string-blank-p set)))
+          set
+        (expand-file-name "session-state" (if (harness-string-blank-p env) "~/.copilot" env)))))))
+
+(defun harness-provider-copilot--session-ids (ids)
+  "Return IDS, session ids as a list of strings or one, as t or a list of ids.
+Anything that cannot name a session, an empty string say, is left out."
+  (if (eq ids t)
+      t
+    (cl-remove-if-not (lambda (id) (and (stringp id) (not (string-empty-p id))))
+                      (cond ((stringp ids) (list ids))
+                            ((or (listp ids) (vectorp ids)) (append ids nil))))))
+
+(defun harness-provider-copilot--state-files (root ids)
+  "Return the files under ROOT, the state directory, that belong to IDS, sorted.
+IDS is t, for every regular file, or a list of Copilot session ids: a
+file belongs to one when its path under ROOT holds it."
+  (when (file-directory-p root)
+    (sort (cl-remove-if-not
+           (lambda (file)
+             (and (file-regular-p file)
+                  (or (eq ids t)
+                      (let ((rel (file-relative-name file root)))
+                        (cl-some (lambda (id) (string-search id rel)) ids)))))
+           (directory-files-recursively root ""))
+          #'string<)))
+
+(defun harness-provider-copilot--file-session (root file ids)
+  "Return the Copilot session that the state FILE under ROOT belongs to.
+With a list IDS that is the first of them FILE's path holds.  With t it
+is the name of the directory FILE is in, or FILE's own name without its
+extension when it lies directly in ROOT."
+  (let ((rel (file-relative-name file root)))
+    (if (eq ids t)
+        (let ((parts (split-string rel "/" t)))
+          (if (cdr parts) (car parts) (file-name-sans-extension (car parts))))
+      (cl-find-if (lambda (id) (string-search id rel)) ids))))
+
+(defun harness-provider-copilot--holders ()
+  "Return a table of Copilot session id -> the harness sessions that hold it.
+A harness session holds a Copilot session when its provider state names
+it (a fork's does, until its first turn forks it), or its CLI process
+has it open.  The values are lists of keys of
+`harness-provider-copilot--sessions', which are session ids."
+  (let ((table (make-hash-table :test 'equal)))
+    (cl-flet ((hold (id key)
+                (when (and (stringp id) (stringp key))
+                  (cl-pushnew key (gethash id table) :test #'equal))))
+      (when (harness-method-exists-p 'session/list)
+        (dolist (s (harness-call 'session/list))
+          (let ((state (plist-get s :provider-state)))
+            (hold (and (consp state) (plist-get state :copilot-session-id)) (plist-get s :id)))))
+      (maphash (lambda (key entry)
+                 (hold (harness-provider-copilot-session-main entry) key)
+                 (dolist (open (harness-provider-copilot-session-opened entry))
+                   (hold (car open) key)))
+               harness-provider-copilot--sessions))
+    table))
+
+(defun harness-provider-copilot--running-p (key)
+  "Non-nil when the harness session KEY runs a turn.
+The agent says so (`agent/running'), and so does the session's CLI
+process with a turn in flight in any Copilot session it has open: its
+side requests run in throwaway sessions of the same process, which
+closing it would end.  KEY need not be a session of the harness."
+  (or (and (harness-method-exists-p 'agent/running) (harness-call 'agent/running key) t)
+      (when-let* ((entry (gethash key harness-provider-copilot--sessions)))
+        (and (harness-provider-copilot-session-busy entry) t))))
+
+(defun harness-provider-copilot--written-lately-p (file)
+  "Non-nil when FILE was written less than a quiet period ago.
+That period is `harness-provider-copilot--quiet-seconds'."
+  (let ((time (file-attribute-modification-time (file-attributes (file-truename file)))))
+    (and time (< (float-time (time-since time)) harness-provider-copilot--quiet-seconds))))
+
+(defun harness-provider-copilot--redact-file (file root ids secrets holders closed dry-run)
+  "Take SECRETS out of the state FILE under ROOT; return its entry.
+The entry is nil for a file that holds none.  IDS are the sessions asked
+for (see `harness-provider-copilot--session-ids') and HOLDERS is
+`harness-provider-copilot--holders'; CLOSED is a table of the sessions
+whose process this run closed already, which it fills in.  The entry and
+its status are described at `provider/copilot-redact-logs'."
+  (let* ((id (harness-provider-copilot--file-session root file ids))
+         (owners (and id (reverse (gethash id holders))))
+         (style (cond ((string-suffix-p ".jsonl" file) 'jsonl)
+                      ((string-suffix-p ".json" file) 'json)
+                      (t 'text)))
+         (count 0) (status nil) (problem nil))
+    (condition-case err
+        ;; The raw bytes first: they clear most files at once, undecoded.
+        (when (> (harness-redaction-file-count file secrets) 0)
+          (let ((found (harness-redaction-file file secrets :style style :dry-run t)))
+            (setq count (plist-get found :count))
+            (when (> count 0)
+              (setq status
+                    (cond
+                     ((plist-get found :binary) 'binary)
+                     ((cl-some #'harness-provider-copilot--running-p owners) 'deferred)
+                     ((and (null owners) (harness-provider-copilot--written-lately-p file)) 'busy)
+                     (dry-run 'found)
+                     (t
+                      ;; None of them writes into the file it is about to replace.
+                      (dolist (owner owners)
+                        (unless (gethash owner closed)
+                          (puthash owner t closed)
+                          (harness-provider-copilot-close owner)))
+                      (let ((done (harness-redaction-file file secrets :style style)))
+                        (setq count (plist-get done :count))
+                        (if (plist-get done :changed) 'redacted 'clean))))))))
+      ;; A file that kept changing while it was processed has a writer.
+      (harness-redaction-changed (setq status 'busy))
+      (error (setq status 'error
+                   problem (if (or (memq 'harness-error (get (car err) 'error-conditions))
+                                   (memq 'file-error (get (car err) 'error-conditions)))
+                               (harness-error-message err)
+                             (symbol-name (car err))))))
+    (when status
+      (append (list :file file :cli-session id :owners owners :count count :status status)
+              (and problem (list :error problem))))))
+
+(harness-defmethod provider/copilot-redact-logs (secrets &optional ids dry-run)
+  "Take SECRETS out of the session state of the GitHub Copilot CLI.
+SECRETS is a list of secrets, plists (:value :label :fingerprint
+:source) as lisp/harness-redaction.el makes them.  IDS names the Copilot
+sessions whose files are looked at: those whose path under
+`harness-provider-copilot-state-directory' holds one of them.  It is t
+for every file there.  With DRY-RUN non-nil nothing is changed and no
+process is closed: the files are only counted.
+
+Return (:directory DIR :count N :scanned S :files FILES), as
+`provider/claude-redact-logs' does, with the Copilot session of a file
+as its :cli-session.  FILES lists the files that hold a secret, each
+\(:file FILE :cli-session ID :owners SESSION-IDS :count N :status STATUS);
+:error TEXT says why for the status `error'.  STATUS is `redacted',
+`found' (a dry run: it would be), `deferred' (an owner runs a turn, or
+its process has one in flight, so the file is left alone), `busy' (no
+session owns it and it was written in the last minute, or it kept
+changing: someone else is writing it), `binary', `clean' or `error'.
+A directory that does not exist gives (:directory DIR :count 0
+:scanned 0 :files nil).  Before a file is written, the CLI processes of
+its owners are closed.  Nothing is logged or returned that quotes a
+value or the text around one."
+  (let* ((root (harness-provider-copilot--state-directory))
+         (dry-run (harness-json-true-p dry-run))
+         (ids (harness-provider-copilot--session-ids ids))
+         (files (and (harness-redaction-pairs secrets) ids
+                     (harness-provider-copilot--state-files root ids)))
+         (holders (and files (harness-provider-copilot--holders)))
+         (closed (make-hash-table :test 'equal))
+         (entries (delq nil (mapcar (lambda (file)
+                                      (harness-provider-copilot--redact-file
+                                       file root ids secrets holders closed dry-run))
+                                    files)))
+         (status (lambda (e) (plist-get e :status)))
+         (redacted (cl-count 'redacted entries :key status))
+         (left (cl-count-if (lambda (e) (memq (funcall status e) '(deferred busy binary error)))
+                            entries)))
+    (when (> redacted 0)
+      (harness-log 'info "provider-copilot: took secrets out of %d CLI state file%s"
+                   redacted (if (= redacted 1) "" "s")))
+    (when (and (> left 0) (not dry-run))
+      (harness-log 'warn "provider-copilot: secrets remain in %d CLI state file%s (deferred, busy, binary or unreadable)"
+                   left (if (= left 1) "" "s")))
+    (list :directory root
+          :count (apply #'+ (mapcar (lambda (e) (plist-get e :count)) entries))
+          :scanned (length files)
+          :files entries)))
 
 (defun harness-provider-copilot--init ()
   "Subscribe to session lifecycle events."

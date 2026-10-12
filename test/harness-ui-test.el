@@ -2211,6 +2211,48 @@ ever; the other choices always do."
                               help))
       (should-not (string-match-p "warm cache" help)))))
 
+(ert-deftest harness-ui-handoff-choices-say-when-a-redaction-dropped-the-cache ()
+  "A cache a redaction dropped (the check's `:cache' has `:dropped') is not one that lapsed.
+Asked about one session, the choice says when the redaction dropped it, as
+the cache panel does, and that it re-reads everything uncached.  Every
+other case reads as it did: a lapsed cache, another model's cache -- the
+cache a redaction dropped of a model the session left is that, first --
+a batch, and a cache that still lasts."
+  (let* ((now (+ 10000.0 86400.0))
+         (dropped '(:from "a:m" :cache (:at 9000.0 :ttl 300 :expires 10100.0 :model "a:m" :dropped 10100.0)))
+         (lapsed '(:from "a:m" :cache (:at 9000.0 :ttl 300 :expires 9300.0 :model "a:m")))
+         (other '(:from "a:m" :cache (:at 9000.0 :ttl 300 :expires 10100.0 :model "b:m" :dropped 10100.0)))
+         (warm (list :from "a:m" :cache (list :at (- now 10) :ttl 300 :expires (+ now 290) :model "a:m")))
+         (describe (lambda (&rest checks) (harness-ui--handoff-compact-text checks now)))
+         (clock (harness-ui-format-clock 10100.0 now)))
+    ;; The drop is said with its moment, which is the cache's `:expires', and by whom.
+    (should (equal (format "cache dropped at %s by a redaction: re-reads it all uncached" clock)
+                   (funcall describe dropped)))
+    (should (equal (format "cache dropped at %s by a redaction: re-reads it all uncached"
+                           (harness-ui-format-clock 10100.0 10200.0))
+                   (harness-ui--handoff-compact-text (list dropped) 10200.0)))
+    ;; Not the words for a cache that lapsed by itself, which read as they did.
+    (should (equal (format "cache expired at %s: re-reads it all uncached" (harness-ui-format-clock 9300.0 now))
+                   (funcall describe lapsed)))
+    (should (equal "cache cold: re-reads it all uncached" (funcall describe other)))
+    ;; A batch says only how many lapsed, as ever.
+    (should (equal "caches expired: re-reads them all uncached" (funcall describe dropped lapsed)))
+    (should (equal "caches expired: re-reads them all uncached" (funcall describe dropped dropped)))
+    (should (equal "re-reads it all uncached where the cache lapsed (1 of 2)" (funcall describe warm dropped)))
+    (should-not (funcall describe warm))
+    ;; The choice and the minibuffer question carry it; the other choices do not change.
+    (should (equal (format "cache dropped at %s by a redaction: re-reads it all uncached" clock)
+                   (nth 3 (assq ?c (harness-ui--handoff-choices-for (list dropped) now)))))
+    (dolist (key '(?n ?t ?s ?q))
+      (should (equal (assq key harness-ui--handoff-choices)
+                     (assq key (harness-ui--handoff-choices-for (list dropped) now)))))
+    (let ((help (harness-ui--handoff-text (list (append (list :id "s1" :name "Fix it") dropped))
+                                          "Hosted M" 1)))
+      (should (string-match-p (format "^  c  current model summarises +cache dropped at %s by a redaction: re-reads it all uncached$"
+                                      (regexp-quote (harness-ui-format-clock 10100.0)))
+                              help))
+      (should-not (string-match-p "warm cache\\|cache expired" help)))))
+
 (ert-deftest harness-ui-set-model-compacts-with-the-new-model ()
   "The advanced choice has the new model summarise a limited context."
   (harness-ui-test-with-switch

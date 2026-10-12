@@ -102,7 +102,8 @@ is never used for any other failure.")
     "config/" "skills/" "permission/" "compaction/" "handoff/" "naming/" "sandbox/status"
     "harness/api" "harness/modules" "harness/version" "harness/reload" "harness/call"
     "harness-dev/" "question/" "project/" "task/" "search/"
-    "notification/" "acp/remote-" "pet/" "version/" "insights/" "supervisor/" "seed/" "priority/")
+    "notification/" "acp/remote-" "pet/" "version/" "insights/" "supervisor/" "seed/" "priority/"
+    "secrets/")
   "Bus method name prefixes callable as `_harness/NAME'.
 Modules of the user's own add theirs to
 `harness-acp-extra-method-prefixes'.")
@@ -167,7 +168,7 @@ it can answer for another one.")
     fallback/changed fallback/switched
     merge/queued merge/started merge/conflict merge/finished
     worktree/created worktree/removed worktree/locked worktree/unlocked session/forked session/head-moved
-    session/nodes-removed
+    session/nodes-removed session/redacted secrets/redacted
     session/moved session/ext-changed supervisor/changed
     question/answered task/changed task/deleted task/review task/done task/queue permission/dir-allowed permission/dir-revoked
     config/changed harness/reloaded tools/file-written acp/remote-changed pet/changed pet/said version/checked)
@@ -356,18 +357,68 @@ For example :sessionId becomes :session-id."
    (and tool-name (harness-method-exists-p 'tools/get)
         (plist-get (ignore-errors (harness-call 'tools/get tool-name)) :kind))))
 
-(defun harness-acp--error-triplet (err)
-  "Return (CODE MESSAGE DATA) for ERR, an error object or rejection value."
-  (pcase err
-    (`(acp-error ,code ,message . ,rest) (list code message (car rest)))
-    (`(harness-no-such-method . ,_)
-     (list harness-acp-error-method-not-found (format "Method not found: %s" (harness-error-message err)) nil))
-    (`(harness-acp-invalid-params ,detail . ,_)
-     (list harness-acp-error-invalid-params (format "Invalid params: %s" detail) nil))
-    (`(wrong-number-of-arguments . ,_)
-     (list harness-acp-error-invalid-params (format "Invalid params: %s" (harness-error-message err)) nil))
-    (_ (list harness-acp-error-method (harness-error-message err)
-             (and (consp err) (symbolp (car err)) (list :type (symbol-name (car err))))))))
+(defun harness-acp--secret-method-p (method &optional params)
+  "Non-nil when METHOD, a method a client names, takes a secret in its params.
+That is every method under secrets/ (`_harness/secrets/redact'): a
+reference to a secret, or, from the Emacs on this machine, its text.  It
+is `harness/call' too when PARAMS, the params of the request, name such a
+method: the Emacs on this machine calls the harness's methods with Lisp
+arguments through it (`harness-acp-call-lisp'), and a secret typed in it
+travels in `:args'.  The params of such a method are never logged, and
+the errors of its handling never quote them (`harness-acp--safe-error-text')."
+  (and (stringp method)
+       (let ((name (string-remove-prefix "_harness/" method)))
+         (or (string-prefix-p "secrets/" name)
+             (and (equal name "harness/call")
+                  (consp params)
+                  (let ((target (plist-get params :method)))
+                    (and (stringp target) (string-prefix-p "secrets/" target))))))))
+
+(defun harness-acp--safe-error-text (err)
+  "Describe ERR, signalled while a secret's method was handled, without its data.
+The data of a Lisp error can quote what the request was given.  The
+message of a `harness-error' that holds nothing but a message is kept:
+the harness writes it to say what is wrong, and a value never goes in one."
+  (cond ((and (consp err) (symbolp (car err))
+              (memq 'harness-error (get (car err) 'error-conditions))
+              (stringp (cadr err)) (null (cddr err)))
+         (cadr err))
+        ((and (consp err) (symbolp (car err))) (format "The request failed (%s)" (car err)))
+        (t "The request failed")))
+
+(defun harness-acp--loggable-error (method err &optional params)
+  "Return ERR, signalled while METHOD was handled, as text a log may keep.
+For a method that takes a secret (`harness-acp--secret-method-p', which
+looks at PARAMS, the params of the request, too) that is
+`harness-acp--safe-error-text'; for any other the printed error."
+  (if (harness-acp--secret-method-p method params)
+      (harness-acp--safe-error-text err)
+    (format "%S" err)))
+
+(defun harness-acp--error-triplet (err &optional method params)
+  "Return (CODE MESSAGE DATA) for ERR, an error object or rejection value.
+METHOD and PARAMS are the method and params of the request that failed.
+When it takes a secret (`harness-acp--secret-method-p'), a Lisp error
+answers with its kind and not its data, which can quote what the request
+was given."
+  (let ((secret (harness-acp--secret-method-p method params)))
+    (pcase err
+      (`(acp-error ,code ,message . ,rest) (list code message (car rest)))
+      (`(harness-no-such-method . ,_)
+       (list harness-acp-error-method-not-found (format "Method not found: %s" (harness-error-message err)) nil))
+      (`(harness-acp-invalid-params ,detail . ,_)
+       (list harness-acp-error-invalid-params (format "Invalid params: %s" detail) nil))
+      (`(wrong-number-of-arguments . ,_)
+       (list harness-acp-error-invalid-params
+             (format "Invalid params: %s" (if secret
+                                              (harness-acp--safe-error-text err)
+                                            (harness-error-message err)))
+             nil))
+      (_ (list harness-acp-error-method
+               (if secret
+                   (harness-acp--safe-error-text err)
+                 (harness-error-message err))
+               (and (consp err) (symbolp (car err)) (list :type (symbol-name (car err)))))))))
 
 (defun harness-acp--message (id &optional result error)
   "Build a JSON-RPC response plist for ID with RESULT or ERROR (CODE MESSAGE DATA)."
@@ -656,8 +707,8 @@ wait on ID for good, its own request showing no answer ever came."
     (condition-case err
         (harness-then (harness-as-promise (harness-acp--invoke client method params))
                       (lambda (result) (funcall reply result nil))
-                      (lambda (e) (funcall reply nil (harness-acp--error-triplet e))))
-      (error (funcall reply nil (harness-acp--error-triplet err))))))
+                      (lambda (e) (funcall reply nil (harness-acp--error-triplet e method params))))
+      (error (funcall reply nil (harness-acp--error-triplet err method params))))))
 
 (defun harness-acp--handle-notification (client method params)
   "Run METHOD with PARAMS for CLIENT; failures are only logged.
@@ -668,8 +719,11 @@ some mobile clients send to keep their connection open."
     (condition-case err
         (let ((v (harness-acp--invoke client method params)))
           (when (harness-promise-p v)
-            (harness-catch v (lambda (e) (harness-log 'warn "acp: notification %s failed: %S" method e)))))
-      (error (harness-log 'warn "acp: notification %s failed: %S" method err)))))
+            (harness-catch v (lambda (e)
+                               (harness-log 'warn "acp: notification %s failed: %s" method
+                                            (harness-acp--loggable-error method e params))))))
+      (error (harness-log 'warn "acp: notification %s failed: %s" method
+                          (harness-acp--loggable-error method err params))))))
 
 (defun harness-acp--handle-response (client id msg)
   "Route MSG, CLIENT's answer to the request ID, to the waiting callback."
@@ -785,11 +839,55 @@ list PARAMS, or {\"args\": [...]}, is taken as positional arguments."
                                            (harness-plist-keys remaining) ", ")))))
         (append (nreverse positional) rest))))))
 
+(defconst harness-acp--secret-text-keys '("literal" "command" "allow-unsafe-sources")
+  "Keys, in kebab case, that give a secret as text or a command, or allow it.
+The methods under secrets/ take them from the Emacs on this machine
+only (`harness-acp--refuse-secret-text').")
+
+(defun harness-acp--secret-text-key-p (key)
+  "Non-nil when KEY, a key of a client's params, gives a secret's text.
+That is, or allows, the text itself or a command printing it.  The key is
+one of `harness-acp--secret-text-keys', spelled with underscores or in
+camel case too, as the methods read it."
+  (and (keywordp key)
+       (let* ((case-fold-search nil)
+              (name (replace-regexp-in-string "\\([a-z0-9]\\)\\([A-Z]\\)" "\\1-\\2"
+                                              (substring (symbol-name key) 1) t))
+              (name (downcase (string-replace "_" "-" name))))
+         (and (member name harness-acp--secret-text-keys) t))))
+
+(defun harness-acp--holds-secret-text-p (value)
+  "Non-nil when VALUE, the params of a client, has a key of a secret's text.
+That is a key of `harness-acp--secret-text-keys', looked for at any depth:
+in objects, and in arrays of them."
+  (cond ((not (consp value)) nil)
+        ((and (keywordp (car value)) (proper-list-p value) (cl-evenp (length value)))
+         (cl-loop for (k v) on value by #'cddr
+                  thereis (or (harness-acp--secret-text-key-p k)
+                              (harness-acp--holds-secret-text-p v))))
+        ((proper-list-p value) (cl-some #'harness-acp--holds-secret-text-p value))))
+
+(defun harness-acp--refuse-secret-text (name params)
+  "Signal when a client on another device gives bus method NAME a secret's text.
+That is the text itself, or a command that prints it, in PARAMS.  Only
+methods under secrets/ are looked at.  A reference to where a
+secret can be read is for every client, but a secret's text, a command
+that prints it or the leave to accept them is for the Emacs on this
+machine, as `harness/call' is: a command runs here, outside the
+permission system."
+  (when (and (harness-acp--secret-method-p name)
+             harness-acp--calling-client
+             (harness-acp-client-remote-info harness-acp--calling-client)
+             (harness-acp--holds-secret-text-p params))
+    (signal 'harness-error
+            (list "A secret given as its text or as a command is accepted only from the Emacs on this machine: name where it can be read instead (a file with a JSON path or a regexp, or an environment variable)"))))
+
 (defun harness-acp--call-extension (name params)
   "Call bus method NAME (a string) with PARAMS mapped onto its arguments."
   (let ((sym (intern-soft name)))
     (unless (and sym (harness-acp--extension-allowed-p name) (harness-method-exists-p sym))
       (signal 'harness-no-such-method (list name)))
+    (harness-acp--refuse-secret-text name params)
     (let ((m (gethash sym harness--methods)))
       (apply #'harness-call sym (harness-acp--map-params (harness-method-fn m) params)))))
 

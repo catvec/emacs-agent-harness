@@ -3867,7 +3867,11 @@ That reads each conversation back from the model's prompt cache, cheap
 while the cache lasts; once it lapsed, or is another model's, the whole
 conversation is paid for again uncached.  Return the description when
 a cache is cold at NOW (default the current time), else nil: the usual
-one holds."
+one holds.  A single session whose cache lapsed is told when; when a
+redaction dropped that cache (its `:cache' has `:dropped', see
+`session/reset-provider') it is told that, with the moment of the
+drop, as the cache panel says it.  The other cases read the same
+either way."
   (let* ((now (or now (float-time)))
          (states (mapcar (lambda (c) (harness-ui--handoff-cache c now)) checks))
          (cold (cl-count-if (lambda (s) (memq s '(expired other))) states))
@@ -3877,8 +3881,11 @@ one holds."
      ((< cold n) (format "re-reads it all uncached where the cache lapsed (%d of %d)" cold n))
      ((> n 1) "caches expired: re-reads them all uncached")
      ((eq (car states) 'other) "cache cold: re-reads it all uncached")
-     (t (format "cache expired at %s: re-reads it all uncached"
-                (harness-ui-format-clock (plist-get (plist-get (car checks) :cache) :expires) now))))))
+     (t (let* ((cache (plist-get (car checks) :cache))
+               (clock (harness-ui-format-clock (plist-get cache :expires) now)))
+          (if (plist-get cache :dropped)
+              (format "cache dropped at %s by a redaction: re-reads it all uncached" clock)
+            (format "cache expired at %s: re-reads it all uncached" clock)))))))
 
 (defun harness-ui--handoff-choices-for (checks &optional now)
   "Return `harness-ui--handoff-choices' as they read for CHECKS at NOW.

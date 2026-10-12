@@ -69,6 +69,47 @@
 ;; the model's provider, which is why it is the user's choice; the
 ;; allowed models of the policy hold for it (`harness-allowed-models'),
 ;; and in corporate mode only a server on this machine embeds.
+;;
+;; Secrets.  The index holds a copy of the readable text of every
+;; transcript, so a secret that got into one is in it too: in the rows, in
+;; the full-text index built over them, and in the vectors of the chunks
+;; that held it.  Deleting or changing a row does not take its text out
+;; of the file.  FTS5 keeps the words of a deleted row until its segments
+;; are merged; SQLite keeps the pages it freed, and the write-ahead log
+;; the older versions of pages, until they are reused or the file is
+;; written again.  Three methods deal with that, for the redaction of the
+;; harness (see harness-redaction.el), which redacts the logs themselves:
+;;
+;; - `session/search-redact' scans the rows for secrets, counting and
+;;   naming no text; or, once the logs were redacted, forgets the rows of
+;;   the sessions it is given and reads their logs again from their start.
+;;   The index is never edited in place: a row's text is only ever what
+;;   its log says.  A secret is a bound parameter of the queries, never
+;;   part of their text, and nothing here logs it.
+;; - `session/search-purge' then takes the old text out of the file: it
+;;   drops the rows of sessions that no longer exist and the vectors no
+;;   chunk uses any more (a vector is derived from the text of its chunk),
+;;   merges the FTS5 segments (the `optimize' command, which drops deleted
+;;   terms), VACUUMs the database and empties the write-ahead log
+;;   (`wal_checkpoint(TRUNCATE)').  Given the secrets, it counts their
+;;   bytes in the three files of the index, and the terms FTS5 makes of
+;;   them (it stores words lowercased and split at punctuation, so a
+;;   secret with capitals is never in its pages as it was written), none
+;;   of which is there when it worked.  The merge is what removes the
+;;   dead terms from the live pages of the index: a VACUUM only copies
+;;   them.
+;; - `session/search-rebuild' drops the tables and makes them again, then
+;;   VACUUMs and empties the log too, so an index built anew does not
+;;   leave the old text in the file it was dropped from.
+;;
+;; A VACUUM writes the whole database again.  For a large search.db it
+;; blocks the harness process, which does nothing else meanwhile, for a
+;; while (seconds to minutes), and it needs free disk space for a copy of
+;; the database in the temporary directory and the same again in the
+;; write-ahead log.  Rebuilding is much cheaper than purging a large
+;; index, as the VACUUM then finds nothing to copy, but it indexes every
+;; log again in the background, and embeds it again when there is an
+;; embedding model.
 
 ;;; Code:
 
@@ -77,6 +118,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-files)
+(require 'harness-redaction)
 
 (defvar harness-state-directory)
 
@@ -157,6 +199,14 @@ search falls back to grep, and the background goes on building.")
 
 (defconst harness-session-search--max-sql-ids 5000
   "Most session ids a query names; with more, its results are filtered after.")
+
+(defconst harness-session-search--tokenizer "porter unicode61 remove_diacritics 2"
+  "The tokenizer of the full-text index, as its table names it.
+A secret is kept in the index as the terms this makes of it.")
+
+(defconst harness-session-search--min-term 8
+  "Shortest term of a secret that a purge looks for in the files.
+Shorter terms are in too much text to say anything.")
 
 (defconst harness-session-search--grep-program "grep"
   "Program that searches the logs for literal and regexp search.")
@@ -248,6 +298,12 @@ its first half, or quarter, embeds it near enough.")
 (defvar harness-session-search--query-vectors nil
   "Recent query embeddings: ((KEY . VECTOR) ...), newest first.")
 
+(defvar harness-session-search--epoch 0
+  "How many times the index was emptied of text it must not keep.
+A rebuild, a redaction and a purge each add one.  An embedding request
+notes it when it starts and drops its vectors if it changed by the time
+they arrive: they are of text the index no longer holds.")
+
 ;;;; Small helpers
 
 (defun harness-session-search--message (err)
@@ -317,6 +373,7 @@ triggers are off), which would leave its words in the full-text index.")
 
 (defun harness-session-search--reset ()
   "Forget what the background knew of the database it used before."
+  (cl-incf harness-session-search--epoch)
   (clrhash harness-session-search--dirty)
   (setq harness-session-search--doomed nil
         harness-session-search--queue t
@@ -373,6 +430,46 @@ which FTS5 missing from SQLite does; `session/search-status' says why."
        (unwind-protect
            (prog1 (progn ,@body) (setq ,ok t))
          (if ,ok (sqlite-commit ,d) (ignore-errors (sqlite-rollback ,d)))))))
+
+(defun harness-session-search--files ()
+  "Return the files of the index: the database, its log and its shared memory.
+The log (-wal) holds the versions of pages not yet moved into the
+database, and the shared memory (-shm) the table that finds them."
+  (let ((file (expand-file-name (concat harness-session-search--db-name ".db")
+                                harness-state-directory)))
+    (list file (concat file "-wal") (concat file "-shm"))))
+
+(defun harness-session-search--bytes ()
+  "Return the bytes the index takes on disk: its database and its write-ahead log."
+  (cl-loop for file in (butlast (harness-session-search--files))
+           sum (or (file-attribute-size (file-attributes file)) 0)))
+
+(defun harness-session-search--checkpoint (db)
+  "Move the write-ahead log of DB into the database and empty it.
+Return non-nil when the log is empty afterwards.  A reader of the
+database that is still open holds the log back (SQLite then answers
+busy), so it is tried three times, a tenth of a second apart."
+  (let ((tries 0) (busy t))
+    (while (and busy (< tries 3))
+      (when (> tries 0) (sleep-for 0.1))
+      (cl-incf tries)
+      (setq busy (let ((row (car (sqlite-select db "PRAGMA wal_checkpoint(TRUNCATE)"))))
+                   (and row (not (eql (car row) 0))))))
+    (not busy)))
+
+(defun harness-session-search--vacuum (db)
+  "Write DB again without the pages it freed, then empty its write-ahead log.
+Deleting rows, and dropping tables, leaves their text in the file: in
+the pages SQLite freed and in the log's older versions of pages.  A
+VACUUM builds the database anew in a temporary file and copies it back,
+and the checkpoint empties the log, so nothing of the old text is left.
+Signal a `harness-error' when the VACUUM fails; return non-nil when the
+log is empty afterwards.  See the commentary for what it costs."
+  (condition-case err
+      (sqlite-execute db "VACUUM")
+    (error (harness-session-search--fail "Cannot vacuum the index: %s"
+                                         (harness-session-search--message err))))
+  (harness-session-search--checkpoint db))
 
 ;;;; Text of a node
 
@@ -1211,6 +1308,7 @@ vectors; a chunk met before is not embedded again."
 (defun harness-session-search--embed-request (missing taken)
   "Embed MISSING, ((HASH . TEXT) …), then record the chunks of nodes TAKEN."
   (let* ((dir (expand-file-name harness-state-directory))
+         (epoch harness-session-search--epoch)
          (shrink harness-session-search--embed-shrink)
          (texts (mapcar (lambda (m)
                           (let ((text (cdr m)))
@@ -1248,20 +1346,25 @@ vectors; a chunk met before is not embedded again."
            (if (/= (length vectors) (length missing))
                (funcall failed (list 'error (format "%d vectors for %d texts" (length vectors) (length missing))))
              (setq harness-session-search--embedding nil)
-             (when-let* ((db (funcall here)))
-               (harness-session-search--transaction db
-                 (cl-loop for (hash . _) in missing
-                          for vector in vectors
-                          for (scale . bytes) = (harness-session-search--quantize vector)
-                          do (sqlite-execute db "INSERT OR IGNORE INTO vectors (hash, scale, vec) VALUES (?, ?, ?)"
-                                             (list hash scale (propertize bytes 'coding-system 'binary)))))
-               (harness-session-search--finish db taken)
-               (setq harness-session-search--embed-failure nil
-                     harness-session-search--embed-backoff 0
-                     harness-session-search--embed-shrink 0
-                     harness-session-search--embed-size (min harness-session-search--embed-batch
-                                                             (* 2 harness-session-search--embed-size)))
-               (harness-session-search--schedule))
+             (if (not (eql epoch harness-session-search--epoch))
+                 ;; The index was emptied, redacted or purged since the request
+                 ;; went out: these vectors are of text it no longer holds, and
+                 ;; must not come back into it.  The nodes are embedded again.
+                 (when (funcall here) (harness-session-search--schedule))
+               (when-let* ((db (funcall here)))
+                 (harness-session-search--transaction db
+                   (cl-loop for (hash . _) in missing
+                            for vector in vectors
+                            for (scale . bytes) = (harness-session-search--quantize vector)
+                            do (sqlite-execute db "INSERT OR IGNORE INTO vectors (hash, scale, vec) VALUES (?, ?, ?)"
+                                               (list hash scale (propertize bytes 'coding-system 'binary)))))
+                 (harness-session-search--finish db taken)
+                 (setq harness-session-search--embed-failure nil
+                       harness-session-search--embed-backoff 0
+                       harness-session-search--embed-shrink 0
+                       harness-session-search--embed-size (min harness-session-search--embed-batch
+                                                               (* 2 harness-session-search--embed-size)))
+                 (harness-session-search--schedule)))
              nil)
          (error (funcall failed err))))
      failed)))
@@ -1776,7 +1879,15 @@ last request failed, while the next has not succeeded."
 
 (harness-defmethod session/search-rebuild ()
   "Drop the search index and build it again from the logs, in the background.
-Return the status, as `session/search-status' does."
+Dropping the tables frees their pages without erasing them, and the
+write-ahead log keeps older versions of them, so the old text would stay
+in the files.  The database is therefore vacuumed and the log emptied
+before the background starts (`harness-session-search--vacuum'); on a
+dropped index that has next to nothing to copy.  A VACUUM that fails
+is logged, and the rebuild goes on without it.
+Return the status, as `session/search-status' does, with `:vacuumed'
+non-nil when the files no longer hold the old text: the VACUUM worked and
+the log is empty."
   (when (equal (car harness-session-search--failure) (expand-file-name harness-state-directory))
     (setq harness-session-search--failure nil))
   (let ((db (harness-session-search--db)))
@@ -1785,8 +1896,234 @@ Return the status, as `session/search-status' does."
     (harness-session-search--drop db)
     (harness-session-search--ensure-schema db)
     (harness-session-search--reset)
-    (harness-session-search--schedule 0)
-    (harness-call 'session/search-status)))
+    (let ((vacuumed (condition-case err
+                        (harness-session-search--vacuum db)
+                      (error (harness-log 'warn "session-search: the dropped index was not vacuumed: %s"
+                                          (harness-session-search--message err))
+                             nil))))
+      (harness-session-search--schedule 0)
+      (append (harness-call 'session/search-status) (list :vacuumed (and vacuumed t))))))
+
+;;;; Secrets
+
+(defun harness-session-search--check-secrets (secrets)
+  "Signal a `harness-error' unless SECRETS is a list of secrets.
+A secret is a plist with a string `:value' (see harness-redaction.el).
+The message names no value."
+  (unless (and (listp secrets)
+               (cl-every (lambda (secret) (and (consp secret) (stringp (plist-get secret :value))))
+                         secrets))
+    (harness-session-search--fail "The secrets are a list of plists, each with a string :value")))
+
+(defun harness-session-search--secret-needles (secrets)
+  "Return the strings that stand for SECRETS in the index's text.
+They are the needles of each secret (`harness-redaction-needles'), without
+duplicates: its value, and the value as JSON writes it, which is how the
+input of a tool call is kept in the text of its node."
+  (let (out)
+    (dolist (secret secrets)
+      (dolist (needle (harness-redaction-needles secret))
+        (cl-pushnew needle out :test #'equal)))
+    (nreverse out)))
+
+(defun harness-session-search--secret-terms (secrets)
+  "Return the terms the full-text index makes of the values of SECRETS.
+FTS5 keeps a text as its words, lowercased, split where punctuation is,
+and stemmed, so a secret with capitals or punctuation is never in the
+index's pages as it was written, but its words are.  They are found by
+having FTS5 index the values in a database of memory, which no file ever
+holds, and listing the terms it made.  Only terms of at least
+`harness-session-search--min-term' characters count.  Nil when SQLite
+cannot say."
+  (let ((mem (ignore-errors (sqlite-open)))
+        terms)
+    (when mem
+      (unwind-protect
+          (condition-case nil
+              (progn
+                (sqlite-execute mem (format "CREATE VIRTUAL TABLE t USING fts5(text, tokenize='%s')"
+                                            harness-session-search--tokenizer))
+                (sqlite-execute mem "CREATE VIRTUAL TABLE v USING fts5vocab(t, 'row')")
+                (dolist (secret secrets)
+                  (sqlite-execute mem "INSERT INTO t (text) VALUES (?)" (list (plist-get secret :value))))
+                (dolist (row (sqlite-select mem "SELECT term FROM v"))
+                  (when (>= (length (car row)) harness-session-search--min-term)
+                    (push (car row) terms))))
+            (error nil))
+        (ignore-errors (sqlite-close mem))))
+    (nreverse terms)))
+
+(defun harness-session-search--holding (db needles ids)
+  "Return the rows of DB whose text holds any of NEEDLES, counted by session.
+The value is ((SESSION . ROWS) …), sorted by session, of the sessions
+in IDS that have such a row, or of every session when IDS is t.  The
+needles are bound parameters, never part of the SQL text.  With more
+than `harness-session-search--max-sql-ids' ids the query names none of
+them, and the rows of the other sessions are left out afterwards."
+  (when (and needles ids)
+    (let* ((narrow (and (consp ids) (<= (length ids) harness-session-search--max-sql-ids)))
+           (only (and (consp ids) (not narrow) (harness-session-search--set ids)))
+           (rows (sqlite-select
+                  db (concat "SELECT session, count(*) FROM nodes WHERE ("
+                             (mapconcat (lambda (_) "instr(text, ?) > 0") needles " OR ")
+                             ")"
+                             (and narrow (format " AND session IN (%s)"
+                                                 (harness-session-search--placeholders ids)))
+                             " GROUP BY session ORDER BY session")
+                  (append needles (and narrow ids)))))
+      (cl-loop for (sid n) in rows
+               when (or (null only) (gethash sid only))
+               collect (cons sid n)))))
+
+(defun harness-session-search--attach-vectors (db sid)
+  "Give the nodes of session SID in DB the vectors DB has for their chunks.
+A node read again after a redaction waits for vectors like a new one,
+but the chunks of its text that did not change have theirs in DB still.
+Recording them keeps those vectors from being dropped as unused, and
+from being made again; the vectors of the text that changed are left to
+go.  Nothing is done unless the vectors are of the embedding model set."
+  (when (and harness-session-search-embedding-model
+             (equal (harness-session-search--embedding-key)
+                    (caar (sqlite-select db "SELECT value FROM meta WHERE key = 'embedding'"))))
+    (harness-session-search--finish
+     db (mapcar #'car (sqlite-select db "SELECT id FROM nodes WHERE session = ? AND embedded IS NULL"
+                                     (list sid))))))
+
+(defun harness-session-search--reindex (db ids)
+  "Read the logs of sessions IDS into DB again, each from its start.
+A session's rows and its place in its log go, then the whole log is
+indexed, with no deadline: the log has been rewritten, so the offset
+the index recorded for it is of no use.  The background is told it has
+nothing left to do for the session.  Return (DONE . FAILED): the ids
+done, and (ID . REASON) for each session whose log could not be read.
+Such a session has no rows left, and is marked for the background."
+  (let (done failed)
+    (dolist (sid (delete-dups (copy-sequence ids)))
+      (condition-case err
+          (progn
+            (harness-session-search--forget db sid)
+            (harness-session-search--sync db sid)
+            (harness-session-search--attach-vectors db sid)
+            (remhash sid harness-session-search--dirty)
+            (when (consp harness-session-search--queue)
+              (setq harness-session-search--queue (delete sid harness-session-search--queue)))
+            (push sid done))
+        (error
+         (push (cons sid (harness-session-search--message err)) failed)
+         (puthash sid t harness-session-search--dirty)
+         (harness-session-search--schedule)
+         (harness-log 'warn "session-search: indexing %s again failed: %s"
+                      sid (harness-session-search--message err)))))
+    (cons (nreverse done) (nreverse failed))))
+
+(harness-defmethod session/search-redact (ids secrets &optional dry-run)
+  "Find SECRETS in the search index, or index again after they left the logs.
+SECRETS are plists with a `:value' (see harness-redaction.el), held in
+memory only.  IDS names the sessions: a list of session ids, or t for
+every session the index holds.  Return a plist.  With no index it is
+\(:available nil :reason WHY).
+
+With DRY-RUN the index is only read.  The value is (:available t :rows
+ROWS :sessions ((SESSION . ROWS) …)): how many nodes the index holds
+with a secret in their text (the value as it is, or as JSON writes it),
+and in which of the sessions in IDS.  It has ids and counts, never a
+snippet.  The index may be behind the logs, and counts what it has.
+
+Otherwise the logs were redacted already, and the index catches up:
+each session in IDS has its rows dropped and its log read again from
+the start, which blocks until the logs are read.  The index is never
+edited; a row's text is what its log says.  Give the sessions whose
+logs were rewritten: the offset the index recorded for a log is wrong
+once it changed, and a log it had not read yet would be read from the
+middle.  With t the sessions are the ones the scan found a secret in.
+The value is the scan's, as it was before, with :reindexed, the ids
+done, and :failed, ((ID . REASON) …), for the sessions whose log could
+not be read: they have no rows left, and the background reads their
+logs later.  The vectors of the old text, and the pages that held it,
+are still in the file; `session/search-purge' takes them out.
+Embedding requests in flight are dropped when they return, as they
+are of the old text.
+
+A secret is a bound parameter of the queries, never part of their text,
+and nothing here logs it."
+  (harness-session-search--check-secrets secrets)
+  (unless (or (eq ids t) (and (listp ids) (cl-every #'stringp ids)))
+    (harness-session-search--fail "IDS is a list of session ids, or t"))
+  (let ((db (harness-session-search--db)))
+    (if (not db)
+        (list :available nil :reason (harness-session-search--unavailable))
+      (let* ((found (harness-session-search--holding
+                     db (harness-session-search--secret-needles secrets) ids))
+             (result (list :available t :rows (apply #'+ (mapcar #'cdr found)) :sessions found)))
+        (if (harness-json-true-p dry-run)
+            result
+          (cl-incf harness-session-search--epoch)
+          (pcase-let ((`(,done . ,failed)
+                       (harness-session-search--reindex db (if (eq ids t) (mapcar #'car found) ids))))
+            (append result (list :reindexed done) (and failed (list :failed failed)))))))))
+
+(defun harness-session-search--drop-deleted (db)
+  "Drop at once the rows in DB of the sessions that no longer exist.
+The background does it too, a slice at a time, but a purge cannot wait."
+  (harness-session-search--gc db)
+  (while harness-session-search--doomed
+    (harness-session-search--forget db (car harness-session-search--doomed))
+    (remhash (car harness-session-search--doomed) harness-session-search--dirty)
+    (pop harness-session-search--doomed)))
+
+(harness-defmethod session/search-purge (&optional secrets)
+  "Take the text the index dropped out of its files, and return a plist.
+Rows deleted from the index leave their text behind: in the full-text
+index until its segments are merged, in the pages SQLite freed, and in
+the older versions of pages the write-ahead log keeps.  This drops the
+rows of sessions that no longer exist, and the vectors no chunk uses,
+which were made from text that changed; merges the FTS5 segments (the
+`optimize' command, which drops deleted terms); VACUUMs the database;
+and empties the write-ahead log.  It blocks the harness process while
+it works, and needs free disk space for a copy of the database (see
+harness-session-search.el).  Run it after `session/search-redact'.
+
+With SECRETS, plists with a `:value' (see `session/search-redact'), it
+counts their bytes in the files afterwards.  The value is (:available t
+:seconds S :bytes-before B :bytes-after A :wal-truncated BOOL
+:file-counts ((FILE . N) …) :term-counts ((FILE . N) …)): the time it
+took, the bytes of the database and its log before and after, whether
+the log is empty, and for the database, its log and its shared memory
+the number of times a secret occurs in the file, which is none when it
+worked.  The full-text index keeps the words of a secret, not the
+secret, so `:term-counts' counts those too (see
+`harness-session-search--secret-terms'), and there should be none of
+them either.  Without an index it is (:available nil :reason WHY).
+Only times and sizes are logged."
+  (harness-session-search--check-secrets secrets)
+  (let ((db (harness-session-search--db)))
+    (if (not db)
+        (list :available nil :reason (harness-session-search--unavailable))
+      (let ((started (float-time))
+            (before (harness-session-search--bytes)))
+        (cl-incf harness-session-search--epoch)
+        (harness-session-search--drop-deleted db)
+        (sqlite-execute db "DELETE FROM vectors WHERE hash NOT IN (SELECT hash FROM chunks)")
+        (sqlite-execute db "INSERT INTO nodes_fts(nodes_fts) VALUES('optimize')")
+        (let ((emptied (harness-session-search--vacuum db)))
+          (setq harness-session-search--vectors nil
+                harness-session-search--query-vectors nil)
+          (let ((seconds (- (float-time) started))
+                (after (harness-session-search--bytes)))
+            (harness-log 'info "session-search: purged the index in %.1fs, %d bytes before and %d after"
+                         seconds before after)
+            (list :available t :seconds seconds :bytes-before before :bytes-after after
+                  :wal-truncated (and emptied t)
+                  :file-counts (and secrets
+                                    (mapcar (lambda (file)
+                                              (cons file (harness-redaction-file-count file secrets)))
+                                            (harness-session-search--files)))
+                  :term-counts (and secrets
+                                    (let ((terms (mapcar (lambda (term) (list :value term))
+                                                         (harness-session-search--secret-terms secrets))))
+                                      (mapcar (lambda (file)
+                                                (cons file (if terms (harness-redaction-file-count file terms) 0)))
+                                              (harness-session-search--files)))))))))))
 
 ;;;; Module
 

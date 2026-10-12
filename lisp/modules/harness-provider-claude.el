@@ -132,8 +132,35 @@
 ;; none runs, once they are older than `harness-provider-claude--quota-ttl';
 ;; every change is announced as `provider/quota-updated'.
 ;;
-;; Nothing here blocks: output is handled in a process filter, death in
-;; a sentinel, and cancellation by an interrupt request plus a timer.
+;; Conversation logs.  The CLI keeps each conversation in a file of its
+;; own, PROJECTS/SLUG/ID.jsonl, and what belongs to it (the output of a
+;; long tool call, a sub-agent's log) in PROJECTS/SLUG/ID/; ID is the CLI
+;; session, `:cli-session-id' of the provider state, and SLUG names the
+;; directory the CLI ran in.  Those files hold all the model was ever
+;; told, and `--resume' replays them, so a secret that got into a
+;; conversation stays in them after the harness's own copies are clean.
+;; PROJECTS is `harness-provider-claude-projects-directory': by default
+;; the `projects' directory of $CLAUDE_CONFIG_DIR, else of ~/.claude.
+;;
+;; `provider/claude-redact-logs' (SECRETS &optional CLI-IDS DRY-RUN)
+;; takes secrets (plists, see lisp/harness-redaction.el) out of those
+;; files: the logs of the CLI sessions CLI-IDS, or t for every file under
+;; PROJECTS (`harness-provider-claude-log-files').  JSON lines are parsed
+;; only where they hold the secret and every other line is kept byte for
+;; byte; a file is written again atomically.  The sessions of the harness
+;; that hold the file's CLI session, its owners, decide what happens to
+;; it.  While one of them runs a turn the file is left alone (status
+;; `deferred'); otherwise their CLI processes are closed first, so that
+;; none goes on writing into the old file, and the next turn resumes the
+;; cleaned conversation.  A file with no owner that was written in the
+;; last minute may have a `claude' of the user's own at work in it, and
+;; is left alone too (`busy').  A dry run (DRY-RUN non-nil) only counts
+;; and closes nothing.  The answer holds counts, session ids and file
+;; names, never a value.
+;;
+;; Nothing here blocks, but for that method, which runs to the end before
+;; it answers: output is handled in a process filter, death in a
+;; sentinel, and cancellation by an interrupt request plus a timer.
 
 ;;; Code:
 
@@ -145,6 +172,7 @@
 (require 'harness-util)
 (require 'harness-http)
 (require 'harness-provider)
+(require 'harness-redaction)
 
 (defvar harness-state-directory)
 
@@ -213,6 +241,22 @@ way.  A change reaches each session at its next turn: its CLI process
 restarts in the same conversation."
   :type '(choice (const :tag "Off: the CLI loads no auto memory" nil)
                  (const :tag "On: the CLI loads its auto memory" t))
+  :group 'harness)
+
+(defcustom harness-provider-claude-projects-directory nil
+  "Directory where Claude Code keeps its conversation logs, or nil.
+The `claude' CLI writes each conversation to PROJECTS/SLUG/ID.jsonl, ID
+being its session and SLUG naming the directory it ran in, and keeps
+what belongs to the session in PROJECTS/SLUG/ID/.  `--resume' replays
+those files, so they hold whatever the conversation held.
+
+Nil (the default) is the `projects' directory of the configuration
+directory the CLI uses: $CLAUDE_CONFIG_DIR when it is set, else
+~/.claude.  Set it when the CLI keeps its logs elsewhere than this
+process's environment says.  `provider/claude-redact-logs' takes secrets
+out of the files in it."
+  :type '(choice (const :tag "The CLI's own (CLAUDE_CONFIG_DIR, else ~/.claude)" nil)
+                 (directory :tag "Directory"))
   :group 'harness)
 
 (defconst harness-provider-claude--quota-ttl 60
@@ -3014,6 +3058,225 @@ start announces, keeps it, and so does a turn in flight."
                             (harness-provider-claude-session-cli-session-id entry))))
       (harness-log 'info "provider-claude: the conversation of %s changed; closing its process" session-id)
       (harness-provider-claude-close session-id))))
+
+;;;; Redacting the CLI's conversation logs
+;;
+;; See "Conversation logs" in the commentary above.
+
+(defconst harness-provider-claude--quiet-seconds 60
+  "Seconds a log that no session here owns has to be left alone to be rewritten.
+A file written more recently may have a `claude' that the user started
+outside the harness at work in it.")
+
+(defconst harness-provider-claude--other-directories '("memory")
+  "Directories of a project's logs that hold no CLI session's files.
+Claude Code's auto memory notes are kept in PROJECTS/SLUG/memory/.")
+
+(defun harness-provider-claude--projects-directory ()
+  "Return the directory of the CLI's conversation logs, expanded.
+That is `harness-provider-claude-projects-directory', else the
+`projects' directory of $CLAUDE_CONFIG_DIR, or of ~/.claude when that is
+not set.  A blank setting counts as none: it would name the current
+directory.  The name ends in a slash."
+  (let ((set harness-provider-claude-projects-directory)
+        (env (getenv "CLAUDE_CONFIG_DIR")))
+    (file-name-as-directory
+     (expand-file-name
+      (if (and (stringp set) (not (harness-string-blank-p set)))
+          set
+        (expand-file-name "projects" (if (harness-string-blank-p env) "~/.claude" env)))))))
+
+(defun harness-provider-claude--plain-name-p (name)
+  "Non-nil when NAME is one file name, as a CLI session id is."
+  (and (stringp name) (not (string-empty-p name))
+       (not (member name '("." "..")))
+       (equal name (file-name-nondirectory name))))
+
+(defun harness-provider-claude--regular-files (dir)
+  "Return the regular files under DIR, however deep, links to files included."
+  (cl-remove-if-not #'file-regular-p (directory-files-recursively dir "")))
+
+(defun harness-provider-claude-log-files (cli-ids)
+  "Return the files of the CLI's conversation logs that belong to CLI-IDS, sorted.
+CLI-IDS lists CLI session ids.  An id has the file PROJECTS/SLUG/ID.jsonl
+in each project SLUG that holds one, and every regular file under
+PROJECTS/SLUG/ID/.  CLI-IDS may also be t, for every regular file under
+the projects directory (`harness-provider-claude-projects-directory'),
+or a single id as a string.  An id that is not a plain file name, one
+with a slash in it, names nothing.  The result is nil when the directory
+does not exist."
+  (let ((root (harness-provider-claude--projects-directory))
+        (ids (cond ((stringp cli-ids) (list cli-ids))
+                   ((eq cli-ids t) t)
+                   ((or (listp cli-ids) (vectorp cli-ids)) (append cli-ids nil))))
+        (files nil))
+    (when (file-directory-p root)
+      (if (eq ids t)
+          (setq files (harness-provider-claude--regular-files root))
+        (dolist (slug (directory-files root t directory-files-no-dot-files-regexp))
+          (when (file-directory-p slug)
+            (dolist (id (cl-remove-if-not #'harness-provider-claude--plain-name-p ids))
+              (let ((log (expand-file-name (concat id ".jsonl") slug))
+                    (dir (expand-file-name id slug)))
+                (when (file-regular-p log) (push log files))
+                (when (file-directory-p dir)
+                  (setq files (nconc (harness-provider-claude--regular-files dir) files))))))))
+      (sort (delete-dups files) #'string<))))
+
+(defun harness-provider-claude--file-cli-session (root file)
+  "Return the CLI session that FILE under the projects directory ROOT belongs to.
+That is ID for PROJECTS/SLUG/ID.jsonl and for any file under
+PROJECTS/SLUG/ID/; nil for a file kept elsewhere, such as the project's
+auto memory."
+  (let ((parts (split-string (file-relative-name file root) "/" t)))
+    (cond ((>= (length parts) 3)
+           (let ((dir (nth 1 parts)))
+             (unless (member dir harness-provider-claude--other-directories) dir)))
+          ((and (= (length parts) 2) (string-suffix-p ".jsonl" (nth 1 parts)))
+           (file-name-sans-extension (nth 1 parts))))))
+
+(defun harness-provider-claude--log-style (file)
+  "Return how FILE is read for redaction: `jsonl', `json' or `text'."
+  (cond ((string-suffix-p ".jsonl" file) 'jsonl)
+        ((string-suffix-p ".json" file) 'json)
+        (t 'text)))
+
+(defun harness-provider-claude--holders ()
+  "Return a table of CLI session id -> the harness sessions that hold it.
+A harness session holds a CLI session when its provider state names it
+\(a fork's does, until its first turn forks it) or its CLI process is in
+it.  The values are lists of keys of `harness-provider-claude--sessions',
+which are session ids.  A side request's process (SESSION-ID#side-N) is
+in a CLI session of its own, and holds none that a session does."
+  (let ((table (make-hash-table :test 'equal)))
+    (cl-flet ((hold (cli key)
+                (when (and (stringp cli) (stringp key))
+                  (cl-pushnew key (gethash cli table) :test #'equal))))
+      (when (harness-method-exists-p 'session/list)
+        (dolist (s (harness-call 'session/list))
+          (let ((state (plist-get s :provider-state)))
+            (hold (and (consp state) (plist-get state :cli-session-id)) (plist-get s :id)))))
+      (maphash (lambda (key entry)
+                 (unless (string-search "#side-" key)
+                   (hold (harness-provider-claude-session-cli-session-id entry) key)))
+               harness-provider-claude--sessions))
+    table))
+
+(defun harness-provider-claude--running-p (key)
+  "Non-nil when the harness session KEY runs a turn.
+The agent says so (`agent/running'), and so does a CLI process of KEY
+with a turn in flight."
+  (or (and (harness-method-exists-p 'agent/running) (harness-call 'agent/running key) t)
+      (when-let* ((entry (gethash key harness-provider-claude--sessions)))
+        (and (harness-provider-claude-session-active entry) t))))
+
+(defun harness-provider-claude--written-lately-p (file)
+  "Non-nil when FILE was written less than a quiet period ago.
+That period is `harness-provider-claude--quiet-seconds'."
+  (let ((time (file-attribute-modification-time (file-attributes (file-truename file)))))
+    (and time (< (float-time (time-since time)) harness-provider-claude--quiet-seconds))))
+
+(defun harness-provider-claude--error-text (err)
+  "Describe ERR without the data it carries, which could quote a file's text.
+Only the errors of the harness and of files, whose data are messages and
+names, are described in full."
+  (if (or (memq 'harness-error (get (car err) 'error-conditions))
+          (memq 'file-error (get (car err) 'error-conditions)))
+      (harness-error-message err)
+    (symbol-name (car err))))
+
+(defun harness-provider-claude--redact-log (file root secrets holders closed dry-run)
+  "Take SECRETS out of the log FILE under ROOT; return its entry.
+The entry is nil for a file that holds none.  HOLDERS is
+`harness-provider-claude--holders'; CLOSED is a table of the sessions
+whose process this run closed already, which it fills in.  The entry and
+its status are described at `provider/claude-redact-logs'."
+  (let* ((cli (harness-provider-claude--file-cli-session root file))
+         (owners (and cli (reverse (gethash cli holders))))
+         (style (harness-provider-claude--log-style file))
+         (count 0) (status nil) (problem nil))
+    (condition-case err
+        ;; The raw bytes first: they clear most files at once, undecoded.
+        (when (> (harness-redaction-file-count file secrets) 0)
+          (let ((found (harness-redaction-file file secrets :style style :dry-run t)))
+            (setq count (plist-get found :count))
+            (when (> count 0)
+              (setq status
+                    (cond
+                     ((plist-get found :binary) 'binary)
+                     ((cl-some #'harness-provider-claude--running-p owners) 'deferred)
+                     ((and (null owners) (harness-provider-claude--written-lately-p file)) 'busy)
+                     (dry-run 'found)
+                     (t
+                      ;; None of them writes into the file it is about to replace.
+                      (dolist (owner owners)
+                        (unless (gethash owner closed)
+                          (puthash owner t closed)
+                          (harness-provider-claude-close owner)))
+                      (let ((done (harness-redaction-file file secrets :style style)))
+                        (setq count (plist-get done :count))
+                        (if (plist-get done :changed) 'redacted 'clean))))))))
+      ;; A file that kept changing while it was processed has a writer.
+      (harness-redaction-changed (setq status 'busy))
+      (error (setq status 'error
+                   problem (harness-provider-claude--error-text err))))
+    (when status
+      (append (list :file file :cli-session cli :owners owners :count count :status status)
+              (and problem (list :error problem))))))
+
+(harness-defmethod provider/claude-redact-logs (secrets &optional cli-ids dry-run)
+  "Take SECRETS out of the conversation logs of the Claude Code CLI.
+SECRETS is a list of secrets, plists (:value :label :fingerprint
+:source) as lisp/harness-redaction.el makes them.  CLI-IDS names the CLI
+sessions whose logs are looked at (`harness-provider-claude-log-files'),
+or is t for every file under `harness-provider-claude-projects-directory'.
+With DRY-RUN non-nil nothing is changed and no process is closed: the
+files are only counted.
+
+Return (:directory DIR :count N :scanned S :files FILES).  DIR is the
+projects directory and S the number of files looked at.  FILES lists
+those that hold a secret, each (:file FILE :cli-session ID :owners
+SESSION-IDS :count N :status STATUS), with :error TEXT for the status
+`error'.  ID is the CLI session the file belongs to (nil for a file that
+belongs to none) and SESSION-IDS are the sessions of the harness that
+hold it.  The :count of a file is the number of occurrences in it, and
+that of the answer is the sum over FILES.  STATUS is
+  redacted  the file was written again with the placeholders in it;
+  found     a dry run: the file would be;
+  deferred  an owner runs a turn, so the file is left alone: the caller
+            goes over it again once the turn is over;
+  busy      no session owns the file and it was written in the last
+            minute, or it kept changing while it was processed: someone
+            else is writing it, so it is left alone;
+  binary    the file is binary, counted and never changed;
+  clean     the secret was gone by the time the file was written again;
+  error     the file could not be read or written.
+Before a file is written, the CLI processes of its owners are closed; a
+turn they start next resumes the cleaned conversation.  Nothing is
+logged or returned that quotes a value or the text around one."
+  (let* ((root (harness-provider-claude--projects-directory))
+         (dry-run (harness-json-true-p dry-run))
+         (files (and (harness-redaction-pairs secrets) (harness-provider-claude-log-files cli-ids)))
+         (holders (and files (harness-provider-claude--holders)))
+         (closed (make-hash-table :test 'equal))
+         (entries (delq nil (mapcar (lambda (file)
+                                      (harness-provider-claude--redact-log
+                                       file root secrets holders closed dry-run))
+                                    files)))
+         (status (lambda (e) (plist-get e :status)))
+         (redacted (cl-count 'redacted entries :key status))
+         (left (cl-count-if (lambda (e) (memq (funcall status e) '(deferred busy binary error)))
+                            entries)))
+    (when (> redacted 0)
+      (harness-log 'info "provider-claude: took secrets out of %d CLI log file%s"
+                   redacted (if (= redacted 1) "" "s")))
+    (when (and (> left 0) (not dry-run))
+      (harness-log 'warn "provider-claude: secrets remain in %d CLI log file%s (deferred, busy, binary or unreadable)"
+                   left (if (= left 1) "" "s")))
+    (list :directory root
+          :count (apply #'+ (mapcar (lambda (e) (plist-get e :count)) entries))
+          :scanned (length files)
+          :files entries)))
 
 (defun harness-provider-claude--drop-judge-conversations ()
   "Stop the idle CLI processes the permission judge kept per session.

@@ -365,11 +365,18 @@ query and mode: a literal search's text is what RET puts point on."
       (harness-ui-search-test-search "needle")
       (with-current-buffer harness-ui-search--buffer-name
         (should (equal sid (get-text-property (point) 'harness-ui-search-session))))
-      (let ((buf (harness-ui-search-test-open-here)))
-        (with-current-buffer buf
-          ;; Every page back to the first message is loaded, and no more.
-          (should (= 46 (length harness-chat--order)))
-          (should (harness-ui-search-test-looking-at buf "needle")))))))
+      ;; The chat's history timer, 50 ms after a page, drops the oldest pages
+      ;; that lie far above its windows (`harness-chat--drop-earlier'), by
+      ;; their start -- which a batch Emacs, never redisplaying, does not move
+      ;; to the match.  It would race the checks below (which look in every
+      ;; 25 ms) and drop the match itself: a pause of the process, a collection
+      ;; of its garbage, decides.  Paging to the match is the test, not dropping.
+      (cl-letf (((symbol-function 'harness-chat--manage-history) #'ignore))
+        (let ((buf (harness-ui-search-test-open-here)))
+          (with-current-buffer buf
+            ;; Every page back to the first message is loaded, and no more.
+            (should (= 46 (length harness-chat--order)))
+            (should (harness-ui-search-test-looking-at buf "needle"))))))))
 
 (ert-deftest harness-ui-search-opens-what-is-folded ()
   "A match in a folded run of calls opens the run; one in a long output shows it all."

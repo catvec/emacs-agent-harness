@@ -1831,6 +1831,21 @@ to refuse."
   (let ((action (and (listp input) (plist-get input :action))))
     (and (stringp action) (equal (downcase (string-trim action)) "read"))))
 
+(defun harness-perms--redact-read-p (input)
+  "Non-nil when a `redact_secret' call with INPUT only looks.
+A scan counts where a secret is stored and a shape lists the keys and
+types of a file, and neither changes anything or shows a value, so a call
+whose mode is `scan' or `shape' is a read, and so is one with no mode,
+which scans.  Anything else is not: a redaction changes every store, and
+a mode this module does not know, spelled any way, a non-string or
+something the tool will refuse is left to the chain, as an
+action `session_settings' does not know is (`harness-perms--settings-read-p')."
+  (and (listp input)
+       (let ((mode (plist-get input :mode)))
+         (cond ((null mode) t)
+               ((stringp mode) (and (member (downcase (string-trim mode)) '("scan" "shape")) t))
+               ((symbolp mode) (and (memq mode '(scan shape)) t))))))
+
 (defun harness-perms--call-kind (request)
   "Return the kind of REQUEST as the mode and the standing rules weigh it.
 A `session_settings' call that only reads is a read: it shows settings
@@ -1840,12 +1855,22 @@ that changes settings keeps the kind its tool declares (`meta'), so ask
 mode asks the user about it and the judge weighs it -- the same guard
 `session_send' and `session_control' get for another session.  The tool
 is declared `meta' and not `read' on purpose: were this classification
-ever missing, a set would ask rather than pass as a read."
-  (let ((kind (harness-perms--sym (plist-get request :kind))))
-    (if (and (equal (plist-get request :tool) "session_settings")
-             (harness-perms--settings-read-p (plist-get request :input)))
-        'read
-      kind)))
+ever missing, a set would ask rather than pass as a read.
+
+A `redact_secret' call is weighed the same way (`harness-perms--redact-read-p'):
+a scan, a look at the shape of a file, and a call that names no mode, which
+scans, are reads -- they report counts and keys, never a value -- and the
+jail still checks the file of the source; a redaction keeps `meta', so ask
+mode asks the user and the judge weighs it in auto mode."
+  (let ((kind (harness-perms--sym (plist-get request :kind)))
+        (tool (plist-get request :tool)))
+    (cond ((and (equal tool "session_settings")
+                (harness-perms--settings-read-p (plist-get request :input)))
+           'read)
+          ((and (equal tool "redact_secret")
+                (harness-perms--redact-read-p (plist-get request :input)))
+           'read)
+          (t kind))))
 
 (defun harness-perms--mode-decision (decision request)
   "Return the decision for REQUEST from the mode and the standing rules.

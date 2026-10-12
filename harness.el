@@ -129,6 +129,7 @@ They define the macros modules expand, so a change to one recompiles
 every file (see `harness--compiled-fresh-p').")
 
 (defconst harness--library-files '("lisp/harness-policy.el" "lisp/harness-files.el"
+                                  "lisp/harness-redaction.el"
                                   "lisp/harness-emacs-endpoint.el"
                                   "lisp/harness-notifications-desktop.el" "lisp/harness-server.el"
                                   "lisp/harness-revision.el" "lisp/harness-slots.el")
@@ -136,6 +137,8 @@ every file (see `harness--compiled-fresh-p').")
 Both sides of the process split use them: the UI requires them all, and
 the harness process's modules require harness-policy (the settings an
 administrator fixes, which each side reads for itself), harness-files,
+harness-redaction (how a secret is named and taken out of text, which
+the harness process's modules and the commands of the UI share),
 harness-notifications-desktop, harness-revision (which notes, on each
 side, the commit the harness was loaded from) and harness-emacs-endpoint
 \(whose `harness-emacs-eval' each side reads for itself).  Only the

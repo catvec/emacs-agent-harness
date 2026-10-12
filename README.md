@@ -92,6 +92,14 @@ OpenAI-compatible APIs and AWS Bedrock.
   the exact text, a regular expression, or, with an embedding model,
   meaning. A match opens its session right where it was said. Agents
   search the same way, and so does the quick search.
+- **Secret masking and redaction.** What a tool returns is searched for
+  secrets before it is stored or sent to the model, and each one is
+  replaced by a placeholder. A secret that got into the transcripts
+  anyway is taken out of every copy the harness keeps -- node logs, the
+  search index, the conversation logs of Claude Code and Copilot, task
+  records, files and buffers -- by naming where it can be read, never by
+  typing it, and the sessions it was taken out of say so (see [Secrets
+  and redaction](#secrets-and-redaction)).
 - **Cost tracking.** Cost per turn, subscription quotas, budgets and a
   usage dashboard.
 - **Insights.** A report on how a day, a week or a month of work with
@@ -401,6 +409,8 @@ default), or nil for nowhere.
 | `C-c h v` | `harness-version` | Show whether the harness runs the latest commit, and update it |
 | `C-c h R` | `harness-reload` | Reload the harness in place |
 | `C-c h L` | `harness-show-log` | Show the harness log |
+| menu `x` | `harness-redact-secret` | In the `C-c h ?` menu, take a secret out of everything the harness stored (see [Secrets and redaction](#secrets-and-redaction)) |
+| menu `E` | `harness-secrets-list-sources` | In the `C-c h ?` menu, list the sources of the secrets that tool output is masked of; `a` adds one |
 | `C-c h ?` | `harness-menu` | Open the menu of every command |
 
 The menu (`C-c h ?`) also renames the session (`r`). A session you
@@ -1011,12 +1021,16 @@ minutes or an hour for Claude, hours for DeepSeek (see
 `harness-cache-ttl`). Once it expires, the next message re-sends the
 whole conversation uncached, at the full input price. A panel above
 the message box says when the cache expired and what the next message
-will cost instead of what it would have cost cached. It never shows
-while the session's turn is running — a session waiting on a tool
-approval included, whose next request is that turn's own — only once
-the session is waiting for you. Its last line offers
-to compact the conversation first, a button and a key per kind with
-what each costs:
+will cost instead of what it would have cost cached. After a redaction
+took a secret out of a session and started its provider conversation
+over (see [Secrets and redaction](#secrets-and-redaction)), the panel
+reads "Prompt cache dropped at HH:MM, by a redaction" in place of when
+the cache expired, and names the uncached price alone: there is no
+cached one to compare it with. It never shows while the session's turn
+is running — a session waiting on a tool approval included, whose next
+request is that turn's own — only once the session is waiting for you.
+Its last line offers to compact the conversation first, a button and a
+key per kind with what each costs:
 
 ```
 Compact it first   b  Brief summary (~$0.011)   s  Summary (~$0.463)   t  Transcript file (free)   f  Fresh start (free)   c  Cut old context (free)
@@ -1074,6 +1088,16 @@ leaves the model a summary to go on. A summary that cannot be made gives
 way to the transcript file, and that to carrying on: the message always
 goes, unless you hold it. `harness-cowboy-min-context` leaves smaller
 conversations to go uncached without asking.
+
+A cache can go cold before its time. When a redaction takes a secret out
+of a session on Claude Code or Copilot, the session's provider
+conversation is dropped with it, and the next message would start a new
+one with the whole transcript as its first message, uncached (see
+[Secrets and redaction](#secrets-and-redaction)). So that message meets
+the question whatever the clock of the cache says. The question reads
+"a redaction dropped this session's provider conversation at HH:MM, so
+no prompt cache holds it", and compares no cached price, as there is
+none to be had.
 
 ### Searching sessions
 
@@ -1136,6 +1160,336 @@ which is why this is off until you set it. In corporate mode only a
 server on this machine embeds.
 `harness-session-search-embedding-dimensions` asks a model that can
 shorten its vectors for fewer dimensions.
+
+### Secrets and redaction
+
+A secret that a tool prints does not stay where it was printed. It goes
+into the transcript, the node log on disk, the search index and its
+embeddings, the conversation log that the `claude` CLI keeps and replays
+with `--resume`, the chat buffer and the harness log. The model's
+provider has received it too. The harness works on both ends. It masks
+secrets in what tools return, so that exact secret text is not recorded
+in the first place. When one got in anyway, it takes the secret out of
+every copy it keeps and records that it did.
+
+#### Masking
+
+What a tool returns is searched for secrets before anything stores it,
+shows it or sends it to the model. Each secret found is replaced by a
+placeholder:
+
+```
+[redacted: spaces-key sha256:9c4e1f07]
+```
+
+The label says which source or detector found it. The digits are the
+first 8 hex digits of the secret's SHA-256: the same value always gets
+the same digits, and they tell nothing else about it. Masking applies to
+
+- the result of every tool: the shell, the file tools, the search tools,
+  what the `emacs_*` tools read from your Emacs, and the rest;
+- the progress lines and notes that a running tool reports, and the
+  message of a tool that failed;
+- the output of a provider's own tool that the harness records (the web
+  search of Claude Code or Copilot);
+- the harness log (`C-c h L`).
+
+A result is masked before the size guard cuts it, so the file that holds
+the whole of an oversized result is masked too. A result that had
+something masked says so on its node in the transcript: the labels,
+fingerprints and counts, never the text around them. A result that
+masking cannot check is withheld instead of let through.
+
+Two things find secrets:
+
+- **Sources** are secrets you name by where they can be read: a string
+  in a JSON file, the group of a regexp in a file, an environment
+  variable of the harness, or the output of a command. The harness
+  reads the value itself, keeps it in memory only, and masks it wherever
+  it shows up, as written and as JSON escapes it, with the source's
+  label. A file is read again when it changes, and a variable when its
+  value does. A source that cannot be read is skipped, the list of
+  sources says why, and the values it had when it last could be read stay
+  masked. A value shorter than `harness-redaction-min-length` (8
+  characters) is not treated as a secret.
+- **Detectors** look for what is shaped like a secret, and label it with
+  their name:
+
+| Detector | Finds | Default |
+|---|---|---|
+| `digitalocean-token` | A DigitalOcean token: `dop_v1_`, `doo_v1_` or `dor_v1_` and 64 hex digits | on |
+| `aws-access-key-id` | An AWS access key id: `AKIA`, `ASIA`, `ABIA` or `ACCA` and 16 capitals or digits | on |
+| `spaces-access-key-id` | A DigitalOcean Spaces access key id: `DO` and 18 capitals or digits, two of them digits at least | on |
+| `github-token` | A GitHub token: `ghp_`, `gho_`, `ghu_`, `ghs_` or `ghr_` and 36 letters or digits, or `github_pat_` and 22 more | on |
+| `anthropic-key` | An Anthropic API key, `sk-ant-` and 20 characters or more | on |
+| `openai-key` | An OpenAI API key: `sk-proj-`, `sk-svcacct-` or `sk-admin-` and 20 characters or more | on |
+| `slack-token` | A Slack token: `xoxa-`, `xoxb-`, `xoxp-`, `xoxo-`, `xoxs-` or `xoxr-` and 10 characters or more | on |
+| `google-api-key` | A Google API key, `AIza` and 35 characters | on |
+| `stripe-key` | A live Stripe key, `sk_live_` or `rk_live_` and 16 characters or more | on |
+| `private-key` | A PEM private key, the whole block from its BEGIN line to its END line | on |
+| `secret-assignment` | The value of a name such as `secret`, `secret_key`, `client_secret`, `api_key`, `auth_token`, `access_token`, `private_key`, `password` or `token`, after `:` or `=`, quoted or not: 16 characters or more, with a letter and a digit | on |
+| `jwt` | A JSON Web Token: three dot-separated parts, the first two starting `eyJ` | off |
+
+Masking is on by default, with the detectors marked on, and no source is
+registered until you add one. `jwt` is off because a JWT is mostly a
+session credential that expires. There is no generic detector for
+high-entropy strings: commit ids, content hashes, build ids, UUIDs and
+base64 data look as random as a secret, and masking them would hide what
+the model has to read. A secret in no known format is protected by a
+source.
+
+The price of masking:
+
+- **False positives.** A detector masks what looks like a secret,
+  whatever it is. `secret-assignment` now and then masks a long
+  identifier that follows a name such as `token`. An agent that reads a
+  file with an example key in it sees a placeholder in its place, and may
+  describe the file wrongly, or fail to edit around it.
+- **The write guard.** A call of a tool that writes (`write_file`,
+  `edit_file`, `emacs_insert` and the like) whose input holds a
+  placeholder is refused: the placeholder stands where a secret was, and
+  writing it would put it in a file in the secret's place. The refusal
+  says what to do instead, and you can approve the call from the chat, for
+  a document about placeholders, say. A shell command is not checked.
+- **Time.** Every result and every log line goes through a few regexp
+  passes and one exact search for each registered value: tens of
+  milliseconds for a megabyte of output with the default detectors, a
+  fraction of a millisecond for a log line. Nothing is skipped for its
+  size, as a result left unchecked because it was big would leak.
+
+Masking does not cover
+
+- what you type and what the model writes: a secret in a message of
+  either is stored as it is;
+- a copy that a tool transformed: a value that was base64 encoded,
+  hashed or cut in pieces is not the value any more. Progress lines are
+  masked a chunk at a time, so a secret split between two chunks shows as
+  two halves in the live progress line, though the result is masked
+  whole;
+- what a provider's own tool already returned to its CLI. The harness
+  masks the record it keeps of the web search of Claude Code or Copilot,
+  but the CLI got the text first, and its log holds it;
+- anything a model provider received before the secret was named (see
+  [What redaction cannot do](#what-redaction-cannot-do)).
+
+#### Adding sources
+
+`M-x harness-secrets-add-source` (`a` in the list of sources) asks where
+the secret is -- a JSON path in a file, a regexp with one group around the
+secret in a file, an environment variable of the harness, or a command
+that prints it -- and what to call it. The harness reads the value to
+prove that the source names one, and keeps the source in
+`secret-sources.json` in the state directory: where the value is, never
+the value. A secret cannot be typed here, as that would put it on disk.
+
+`M-x harness-secrets-list-sources` (`E` in the `C-c h ?` menu) lists the
+sources: the label, where the value is read, how many values it holds,
+the fingerprint of each, whether it comes from the option or was added
+by hand, and why it cannot be read, if it cannot. `d` stops masking the
+source at point (only one added by hand), `g` reads them again and `l`
+lists the redactions that were run. There is never a value in the list.
+
+The option `harness-secrets-sources` names sources in your init file. It
+takes the same references, and `:literal` too, the value itself, which is
+then in your init file and in the harness process's configuration file:
+prefer a file or a variable. For example:
+
+```elisp
+(setq harness-secrets-sources
+      '((:file "~/infra/terraform.tfstate"
+         :json-path "outputs.spaces_keys.value" :label "spaces-keys")
+        (:env "DO_TOKEN" :label "do-token")
+        (:file "~/.netrc" :regexp "password \\([^ \n]+\\)" :label "netrc")))
+```
+
+A `:json-path` is dot-separated keys (`outputs.keys.value`), with `*`
+for every key or element and `["a.b"]` for a key with dots; a path that
+selects an object or an array stands for every string in it. A command
+runs once, when the source is first read. `harness-secrets-detectors`
+chooses the built-in detectors: `default` (the ones marked on), `t` for
+all of them, `nil` for none, or a list of names.
+`harness-secrets-extra-detectors` adds patterns of your own, each `(NAME
+REGEXP [GROUP])`: NAME labels the placeholder, REGEXP is an Emacs regexp
+and GROUP the group that is masked (the whole match by default).
+
+#### Redacting a secret
+
+`M-x harness-redact-secret` (`x` in the `C-c h ?` menu) takes a secret
+out of everything the harness stored. It asks
+
+1. where the secret is: a JSON path in a file, chosen from the keys and
+   types of the file, which the harness reads for you, never from its
+   values; a regexp with one group around the secret in a file; an
+   environment variable of the harness; a command that prints it, which
+   the harness runs and whose output is not recorded; or the value
+   itself, typed with `read-passwd`. A typed secret is never echoed or
+   kept in a history or a message, goes only to a harness on this
+   machine, and is cleared from memory when the request is done;
+2. what to call it, the label of its placeholder;
+3. which sessions to clean: all of them, the project's, the current
+   session and its forks, or sessions you name;
+4. why. The reason is kept in the records, and may stay empty.
+
+The harness scans first, and the buffer `*harness redaction*` shows what
+it found: counts and session ids, never a snippet of the text around a
+secret. Nothing changes until you answer yes, and the question says what
+the redaction costs in prompt cache, if it costs any (below). The report
+that follows says what is left, if anything.
+
+An agent redacts with the `redact_secret` tool, whose input names where
+the secret is and never the secret:
+
+```json
+{"mode": "scan",
+ "source": {"file": "terraform.tfstate",
+            "json_path": "outputs.spaces_keys.value"},
+ "scope": "all"}
+```
+
+- `source` is `{file, json_path}`, `{file, regexp}` (group 1 of each
+  match is the secret) or `{env}`. The tool takes no literal and no
+  command, and refuses a key it does not know without quoting it. The
+  file has to be one the session may read.
+- `mode` is `scan` (the default: counts by session, changes nothing),
+  `redact` (needs a `reason`), or `shape`, which lists the keys and types
+  of `source.file` with the `json_path` to each, so that the agent can
+  pick a path without seeing a value or the length of one.
+- `scope` is `self` (this session and its forks, the default),
+  `sessions` (the ids in `sessions`), `project` (the sessions of the
+  directory in `project`) or `all`. `include_forks` (default true) adds
+  the forks of the sessions named.
+
+To the permission system a scan and a shape are reads; a redaction is
+not, so it asks in ask mode and the judge weighs it in auto mode. The
+call and the result hold no secret, by construction: the call says where
+the secret is, and the result is made of counts, session ids, labels and
+fingerprints. So the session that redacts never has to be redacted
+itself. A model that puts the value in the call anyway, in a regexp, say,
+has its own session added to the scope.
+
+A redaction takes the secret out of
+
+- the node logs of the sessions: every field of every line, node
+  updates included. A log is read, cleaned and replaced by a rename in
+  one step that never yields, so no append is lost and no log is torn,
+  and the lines without the secret stay byte for byte. The nodes in
+  memory and the text of the session record are cleaned too;
+- the search index: the rows, the full-text index and the vectors of the
+  chunks that held it. The logs are indexed again, then the index is
+  merged and vacuumed and its write-ahead log emptied, so the old text
+  is gone from `search.db` itself;
+- the conversation logs of the CLIs: Claude Code's under
+  `~/.claude/projects` (`$CLAUDE_CONFIG_DIR/projects`, or
+  `harness-provider-claude-projects-directory`) and Copilot's under
+  `~/.copilot/session-state` (`$COPILOT_HOME`, or
+  `harness-provider-copilot-state-directory`). A log that no session of
+  the harness owns and that was written in the last minute may have a
+  CLI of your own at work in it, and is left alone and listed;
+- the task records, with the scopes all and project, and the copy
+  `tasks.json.bak`;
+- the transcript files that compaction and handoff write, the files that
+  hold cut tool outputs whole, the sessions' temporary directories and,
+  for the scope all, the other files of the state directory. A file that
+  is binary, a database or over 64 MiB is counted and reported as found,
+  not redacted, and a link is never followed;
+- the log buffers: `*harness-log*`, `*Messages*` and the other
+  `*harness...` buffers that visit no file, in the harness process. Your
+  Emacs cleans its own too when it can read the secret as the harness
+  did (a typed secret, a command's output, the same file or variable)
+  and the fingerprint is one the harness redacted; it leaves them alone
+  for a harness on another machine. The chat of a session that changed
+  loads its transcript again.
+
+The vacuum rewrites the whole index. With a large `search.db` it takes a
+while, the harness process does nothing else meanwhile, and it needs free
+disk space of at least the size of the index: a copy in the temporary
+directory, and as much again in the state directory for the write-ahead
+log.
+
+A session whose provider conversation held the secret does not resume
+it. Claude Code and Copilot keep the conversation themselves, so besides
+cleaning their logs the harness drops the session's provider state and
+the checkpoints on its nodes. The next turn starts a new conversation,
+which gets the redacted transcript. A session starts over when its
+nodes held the secret, or its provider's own log did. A hit only in the
+session's record, such as its queue, name or todos, resets nothing: no
+provider conversation was sent those, and a new one is made from the
+nodes anyway.
+
+The reset costs the prompt cache. The provider caches the conversation
+it keeps, and the new conversation opens with the transcript as text, a
+different start from the one the cache holds. The old cache could not be
+used again in any case: it holds the secret. So the harness marks the
+cache as dropped at the moment of the reset, rather than letting it
+count as warm for the minutes it would have lasted. The next message to
+the session meets the cold-cache question (see [A message to a session
+whose cache went cold](#a-message-to-a-session-whose-cache-went-cold)):
+what goes first, before the whole conversation is sent again, as one
+message, uncached. A session that is never asked, a non-interactive task
+say, goes the way `harness-cowboy-default` says: a brief summary, unless
+you chose another. A session on a provider that is sent the whole
+transcript with every request (an API provider) loses nothing this way.
+Its next request is built from the redacted transcript and still reads
+the cache up to the first redacted spot, so its cache is not marked.
+
+The scan and the question say what the reset will cost, before anything
+changes. The report of a scan lists the sessions whose provider
+conversation would start over, and those whose cache would go, with the
+tokens it holds. The question before the redaction ends with it: "2
+provider conversations start over, dropping ~126k tokens of prompt
+cache". After the redaction the report names the sessions whose cache
+went with the reset.
+
+A session that runs a turn has its log, nodes and record cleaned at
+once. Its provider conversation cannot be dropped under it, and what the
+turn writes next can bring the secret back, so the rest waits for the
+turn to end. The report lists the session as waiting, and the harness
+goes on by itself then. Tool output is masked of the pending secrets
+meanwhile. The session keeps its cache until the turn ends and loses it
+with the reset then, so its next message meets the cold-cache question,
+or `harness-cowboy-default`, from the end of the turn on. The wait is
+kept in memory only: a harness that stops before the turn ends has lost
+the secret, and says so in a hint when it starts. Run the redaction again
+then.
+
+Each session that a redaction changed records it. A hint in its
+transcript says what was redacted, where, at whose request and why, and
+an entry in its record (`:redactions`, the last 50) holds the time, who
+asked (the session or you), the reason, the label, fingerprint and
+source of each secret, the nodes, fields and files that changed, the
+counts, what became of the provider conversation and whether its prompt
+cache went with it. The harness adds a line for each redaction to
+`redactions.jsonl` in the state directory, and `M-x harness-redactions`
+lists them (`RET` shows one whole). None of it holds a value.
+
+A redaction ends by scanning the same scope and stores again, and by
+counting the secret in the files of the search index. A copy that was
+left, or that something wrote back, is listed, and the redaction is not
+reported as complete.
+
+After a leak, add the secret as a source first, so that it is masked
+from now on, then scan, then redact, and rotate the secret.
+
+#### What redaction cannot do
+
+It cannot recall what a model provider already received, nor what an
+embedding provider got if you use one
+(`harness-session-search-embedding-model`). Whoever has the secret still
+has it: rotate it. Copies outside the harness's own stores are not
+touched: shell history, terminal scrollback, git, the kill ring,
+screenshots, and the file the secret was read from.
+
+#### Options
+
+| Option | Default | Meaning |
+|---|---|---|
+| `harness-secrets-mask` | `t` | Mask secrets in tool output, progress and the harness log, and refuse writes of placeholders |
+| `harness-secrets-sources` | `nil` | References to the secrets to mask, besides those added by hand |
+| `harness-secrets-detectors` | `default` | The built-in detectors that run: `default`, `t`, `nil` or a list of names |
+| `harness-secrets-extra-detectors` | `nil` | Patterns of your own, `(NAME REGEXP [GROUP])` |
+| `harness-redaction-min-length` | `8` | Shortest value, in characters, treated as a secret |
+| `harness-provider-claude-projects-directory` | `nil` (the CLI's own) | Where the `claude` CLI keeps its conversation logs |
+| `harness-provider-copilot-state-directory` | `nil` (the CLI's own) | Where the `copilot` CLI keeps its session state |
 
 ### Forks and side conversations
 
@@ -2469,6 +2823,13 @@ access. To give sessions that memory anyway, turn on
 the settings page). Reading a note then asks for its directory: answer
 Always allow and no session asks again.
 
+The CLI keeps every conversation in a log under `~/.claude/projects/`
+(`$CLAUDE_CONFIG_DIR/projects/` when that is set, or
+`harness-provider-claude-projects-directory`) and replays it with
+`--resume`. A secret that got into a conversation is in that log too, and
+a redaction takes it out of there; see [Secrets and
+redaction](#secrets-and-redaction).
+
 ### GitHub Copilot
 
 Install GitHub Copilot CLI 1.0 or later with
@@ -2485,6 +2846,12 @@ month's allowance is shown with the plan's quota, and turns past the
 allowance are billed when additional usage is enabled. If `copilot` is
 not installed or not logged in, the turn reports it and explains how to
 fix it.
+
+The CLI keeps what each session said and did under
+`~/.copilot/session-state/` (`$COPILOT_HOME/session-state/`, or
+`harness-provider-copilot-state-directory`), and resumes the session from
+it. A redaction takes a secret out of those files as it does out of
+Claude Code's logs (see [Secrets and redaction](#secrets-and-redaction)).
 
 ### OpenAI-compatible APIs
 
@@ -2901,6 +3268,12 @@ of the harness process.
   wait, and tasks that were working carry on by themselves. Set
   `harness-tasks-resume-interrupted` to nil to make them wait for you
   instead.
+- `secret-sources.json` holds the sources added with
+  `harness-secrets-add-source`: where each secret can be read, never the
+  value. `redactions.jsonl` has a line for each redaction that was run:
+  when, who asked, why, the secrets by label and fingerprint, what was
+  found where, and what the check afterwards found; no value, and no
+  snippet of text (see [Secrets and redaction](#secrets-and-redaction)).
 
 ### Task storage in git projects
 
@@ -3004,10 +3377,10 @@ ACP, so it works the same with a local or a remote harness.
 
 | Area | Modules |
 |---|---|
-| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `usage` `compaction` `cowboy` `handoff` `naming` `judge` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `supervisor` `seed` `acp` `acp-remote` |
+| Core | `config` `project` `store` `session` `agent` `perms` `sandbox` `secrets` `redact` `usage` `compaction` `cowboy` `handoff` `naming` `judge` `skills` `worktree` `merge` `tasks` `notifications` `tasks-notify` `supervisor` `seed` `acp` `acp-remote` |
 | Providers | `provider` `provider-claude` `provider-copilot` `provider-openai` `provider-deepseek` `provider-bedrock` `provider-demo` |
 | Tools | `tools` `tools-fs` `tools-shell` `tools-ssh` `tools-emacs` `tools-web` `tools-agent` `tools-sessions` `tools-events` `tools-notify` |
-| User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-merge` `ui-children` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` `ui-supervisor` |
+| User interface | `ui` `ui-chat` `ui-compose` `ui-compact` `ui-cowboy` `ui-sessions` `ui-tasks` `ui-tree` `ui-notify` `ui-usage` `ui-worktree` `ui-merge` `ui-children` `ui-btw` `ui-media` `ui-dirs` `ui-config` `ui-qr` `ui-remote` `ui-supervisor` `ui-secrets` |
 
 ### Modules of your own
 

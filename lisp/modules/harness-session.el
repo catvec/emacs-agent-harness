@@ -12,6 +12,22 @@
 ;; is an append-only log of nodes and node updates.  Node logs are
 ;; loaded lazily so listing a thousand sessions stays instant.
 ;;
+;; Redaction: a secret that got into a transcript is taken out of the
+;; stored text by `session/redact-text'.  The node log is then the one
+;; file here that is not only appended to: it is read, cleaned and
+;; replaced whole, atomically, in one step that never yields, so no
+;; append of this single-threaded process falls between the read and the
+;; rename, and every line that holds no secret stays byte for byte as it
+;; was.  The nodes in memory and the text of the record are cleaned too.
+;; A hosted provider's own conversation may hold the secret as well,
+;; where the harness cannot reach it: `session/reset-provider' drops its
+;; state and the checkpoints that name it (rewriting the log again), so
+;; the next turn starts a new conversation from the redacted transcript.
+;; The provider's prompt cache of the old conversation goes with it, and
+;; the session's cache says so (see The prompt cache below).
+;; The secrets are given to `session/redact-text' in memory by its caller,
+;; and what it reports is node ids, field names and counts, never a value.
+;;
 ;; Every session loads closed (`inactive'); opening one resumes it.  A
 ;; session saved `running' or `blocked' belonged to a harness that
 ;; stopped mid-turn (Emacs quit, `harness-restart', a crash), so loading
@@ -97,6 +113,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-policy)
+(require 'harness-redaction)
 
 (defvar harness-state-directory)
 (defvar harness-provider-fallback-context-window)
@@ -680,6 +697,26 @@ for the session, by the user or through `session/update'."
 ;; compaction drops the stamp (`:cache-reset'); the switch is told by
 ;; the provider state the session holds for the model, and the session
 ;; reports no cache while it holds none.
+;;
+;; A redaction drops a cache too.  A hosted loop's conversation, and the
+;; cache the provider keeps of it, may hold a secret the harness cannot
+;; reach, so `session/reset-provider' drops that conversation, and the
+;; next turn opens a new one with the redacted transcript as text, a
+;; different prefix that reads none of the old cache.  The stamp does not
+;; say so: it still names the last request and its lifetime.  So the
+;; reset marks the usage with the moment of the drop (`:cache-dropped')
+;; when it drops a cache -- the session reports one (a stamp and a
+;; context), and its model is a hosted loop -- and, while the stamp has
+;; not lapsed by itself, the session's `:cache' says it is gone, from the
+;; drop on: `:expires' is the drop and `:dropped' the same time.  The
+;; cold-cache gate (harness-cowboy.el), the seeds' warmth check and the
+;; UI then see a cold cache without any logic of their own, instead of
+;; one that is warm for five more minutes.  Every change of the stamp
+;; clears the mark: a request that stamps or drops it, or a compaction.
+;; A record without tokens (a turn counted) leaves it.  A session on a
+;; provider that is sent the whole transcript is not marked: its next
+;; request is rebuilt from the redacted transcript, and still reads the
+;; cache up to the first spot that was redacted.
 
 (defun harness-session--tokens (value)
   "Return VALUE when it is a number of tokens, else 0."
@@ -699,10 +736,14 @@ when that was (its `:cache-at', else now), the model it was sent to
 `:cache-ttl', else none); one that was the first after a `:cache-reset'
 stamps the same way.  A record without tokens, a turn counted, leaves
 it.  A record of a request that used no cache and follows no reset
-drops the stamp: nothing is cached to lose."
+drops the stamp: nothing is cached to lose.  Whatever changes the
+stamp clears the moment a redaction dropped the cache
+\(`:cache-dropped', see `session/reset-provider'): a new stamp is a new
+cache, and a dropped stamp has nothing left to say was dropped.  A
+record that leaves the stamp leaves the mark too."
   (cond
    ((harness-json-true-p (plist-get record :cache-reset))
-    (let ((u (harness-plist-remove usage :cache-at :cache-ttl :cache-model)))
+    (let ((u (harness-plist-remove usage :cache-at :cache-ttl :cache-model :cache-dropped)))
       (if (numberp (plist-get usage :cache-at))
           (plist-put u :cache-pending t)
         u)))
@@ -714,13 +755,13 @@ drops the stamp: nothing is cached to lose."
         (harness-json-true-p (plist-get usage :cache-pending)))
     (let* ((at (plist-get record :cache-at))
            (ttl (plist-get record :cache-ttl))
-           (u (harness-plist-remove usage :cache-pending))
+           (u (harness-plist-remove usage :cache-pending :cache-dropped))
            (u (plist-put u :cache-at (if (numberp at) (float at) (float-time))))
            (u (plist-put u :cache-model (or (plist-get record :model) model))))
       (if (and (numberp ttl) (> ttl 0))
           (plist-put u :cache-ttl ttl)
         (harness-plist-remove u :cache-ttl))))
-   (t (harness-plist-remove usage :cache-at :cache-ttl :cache-model))))
+   (t (harness-plist-remove usage :cache-at :cache-ttl :cache-model :cache-dropped))))
 
 (defun harness-session--cache-ttl (model reported)
   "Return the seconds MODEL's provider keeps a prompt cache after its use.
@@ -736,6 +777,19 @@ is a positive number, else `harness-cache-ttl'."
       (bound-and-true-p harness-cache-ttl)
       300))
 
+(defun harness-session--hosted-loop-p (model)
+  "Non-nil when MODEL's provider keeps the conversation itself.
+That is a hosted loop (Claude Code, Copilot): its provider capabilities
+say `:hosted-loop'.  Nil without a provider module, and for a model
+whose capabilities cannot be had (logged)."
+  (and (harness-method-exists-p 'provider/capabilities)
+       (harness-json-true-p
+        (plist-get (condition-case err
+                       (harness-call 'provider/capabilities model)
+                     (error (harness-log 'debug "session: no capabilities for %s: %S" model err)
+                            nil))
+                   :hosted-loop))))
+
 (defun harness-session--new-conversation-p (s model)
   "Non-nil when S's next request on MODEL starts a conversation of its own.
 That is a model whose provider keeps the conversation itself (a hosted
@@ -743,15 +797,33 @@ loop) and holds none of S's: it is sent only the newest messages, so
 none of the old conversation is sent to it again.  Only the provider a
 state names counts: a state written before states named theirs would
 take reading the transcript to place."
-  (and (harness-method-exists-p 'provider/capabilities)
-       (harness-json-true-p
-        (plist-get (condition-case err
-                       (harness-call 'provider/capabilities model)
-                     (error (harness-log 'debug "session: no capabilities for %s: %S" model err)
-                            nil))
-                   :hosted-loop))
+  (and (harness-session--hosted-loop-p model)
        (not (eq (harness-provider-state-owner (harness-session-provider-state s))
                 (harness-model-provider model)))))
+
+(defun harness-session--reset-drops-cache-p (s)
+  "Non-nil when `session/reset-provider' on S would mark its prompt cache dropped.
+That is when S has a cache (its usage holds a cache stamp, `:cache-at',
+and a context, and the stamp is a cache its next request would read:
+see `harness-session--cache'), S's model is a hosted loop
+\(`harness-session--hosted-loop-p'), and the cache was not marked
+dropped before.  The provider of a hosted loop keeps the conversation,
+and the cache of it; the reset drops the conversation, and S's next turn
+opens a new one that is sent the whole transcript as text, a prefix the
+old cache does not hold, so nothing of it is read back.  A session on a
+provider that is sent the whole transcript with every request is not
+marked: its next request is built from the redacted transcript and
+still reads the cache up to the first spot that was redacted.  Neither
+is one that reports no cache -- the stamp is an earlier model's, and the
+next request starts a conversation of its own -- nor one the reset
+dropped the cache of already, as long as no request has stamped a cache
+since: the first drop stays the one that counts.  The clock of the stamp
+does not matter: a cache that lapsed by itself is marked all the same,
+and `harness-session--cache' goes on reporting it as it was."
+  (and (harness-session--hosted-loop-p (harness-session-model s))
+       (not (numberp (plist-get (harness-session-usage s) :cache-dropped)))
+       (harness-session--cache s)
+       t))
 
 (defun harness-session--cache (s)
   "Return what is known of the prompt cache of session S, or nil.
@@ -766,15 +838,26 @@ which, when the conversation had a cache, leaves `:cache-pending'
 until the first request that follows stamps the new cache -- and while
 S's next request starts a conversation of its own on its new model
 (`harness-session--new-conversation-p'), which sends none of the old
-one."
+one.
+
+A cache a redaction dropped (`session/reset-provider', which marks the
+usage `:cache-dropped' with the moment) while it still held is gone from
+then on, not at the end of its lifetime: `:expires' is that moment, and
+the list ends with `:dropped', the same time, which says why.  So the
+cold-cache gate, the seeds and the UI, which read `:expires', find it
+cold at once.  A cache that had lapsed by itself before the drop is
+reported as it was: nothing was left to drop."
   (let* ((u (harness-session-usage s))
          (at (plist-get u :cache-at))
          (model (or (plist-get u :cache-model) (harness-session-model s))))
     (when (and (numberp at) (> (harness-session--tokens (plist-get u :context)) 0)
                (or (equal model (harness-session-model s))
                    (not (harness-session--new-conversation-p s (harness-session-model s)))))
-      (let ((ttl (harness-session--cache-ttl model (plist-get u :cache-ttl))))
-        (list :at at :ttl ttl :expires (+ at ttl) :model model)))))
+      (let ((ttl (harness-session--cache-ttl model (plist-get u :cache-ttl)))
+            (dropped (plist-get u :cache-dropped)))
+        (if (and (numberp dropped) (< dropped (+ at ttl)))
+            (list :at at :ttl ttl :expires dropped :model model :dropped dropped)
+          (list :at at :ttl ttl :expires (+ at ttl) :model model))))))
 
 (defun harness-session--model-levels (model)
   "Return the thinking levels the provider catalogue gives MODEL, or nil."
@@ -2169,6 +2252,10 @@ next one sends back (`harness-session--last-output'), so the
 conversation holds about `:context' plus `:last-output' tokens.  A
 request that read or wrote the cache stamps the totals' `:cache-at',
 `:cache-model' and `:cache-ttl' (see `harness-session--cache-stamp').
+Whatever changes that stamp -- such a request, one that used no cache,
+`:cache-reset' -- also clears `:cache-dropped', the moment a redaction
+dropped the cache (see `session/reset-provider'); a record of a turn
+counted leaves both.
 A missing `:cost' is priced from the model catalogue; a missing
 `:list-cost', the call at API prices, is the cost, or priced when a
 subscription paid.  The totals may also hold `:stream-output' and
@@ -2459,6 +2546,424 @@ into a transcript both write theirs here."
     (harness-write-file-atomically file text)
     (list :file file :lines (1+ (cl-count ?\n text)))))
 
+;;;; Redaction
+;;
+;; A secret that got into a transcript has to come out of every copy the
+;; session keeps.  `session/redact-text' takes it out of the node log,
+;; the nodes in memory and the text of the record; `session/reset-provider'
+;; drops the hosted provider's conversation, which may hold it too.  What
+;; drives them, and cleans the stores that are not the session's (the
+;; search index, the provider's own logs, buffers), is the redaction
+;; engine.
+;;
+;; The secrets are plists that the caller holds in memory (see
+;; harness-redaction.el).  Nothing here logs one, returns one or puts one
+;; in an error: what comes back is node ids, kinds, field names, file
+;; names and counts.
+
+(defconst harness-session--redact-slots '(name queue pending todos plan ext move)
+  "Slots of the record whose text `session/redact-text' cleans.
+`name' is what a rename put there, `queue' and `pending' hold the
+messages and requests that wait, `todos' and `plan' what the model
+wrote, `ext' what other modules keep for the session -- a supervisor's
+plans, with the prompts, results and errors of their steps -- and `move'
+a directory a move waits to make.")
+
+(defun harness-session--log-path (id)
+  "Return the file name of the node log of session ID."
+  (expand-file-name (harness-session--nodes-name id) harness-state-directory))
+
+(defun harness-session--changed-keys (old new)
+  "Return the keys whose values differ between the plists OLD and NEW.
+They are a node, or a line of its log, before and after a redaction.
+The `:_op' that marks an update line is no part of a node."
+  (let (keys)
+    (dolist (plist (list old new))
+      (when (and (consp plist) (keywordp (car plist)))
+        (cl-loop for (k _) on plist by #'cddr
+                 when (and (keywordp k) (not (eq k :_op)) (not (memq k keys))
+                           (not (equal (plist-get old k) (plist-get new k))))
+                 do (push k keys))))
+    (nreverse keys)))
+
+(defun harness-session--line-kind (s node-id line)
+  "Return the kind, a symbol, of the node a log LINE of session S is about.
+NODE-ID is its id.  A node's own line says its kind, an update line does
+not: the node in memory does, loaded for the purpose when it is not
+\(`session/redact-text' lets go of it afterwards).  Nil when it is gone."
+  (let ((kind (plist-get line :kind)))
+    (cond ((and kind (symbolp kind)) kind)
+          ((and (stringp kind) (not (string-empty-p kind))) (intern kind))
+          ((stringp node-id)
+           (harness-session--load-nodes s)
+           (let ((known (plist-get (gethash node-id (harness-session-nodes s)) :kind)))
+             (and known (symbolp known) known))))))
+
+(defun harness-session--redact-log (s secrets dry-run note)
+  "Take SECRETS out of the node log of session S, unless DRY-RUN; count them.
+A log without a secret in it is not even read as lines: counting its
+bytes comes first (`harness-redaction-file-count'), so looking through
+hundreds of sessions is quick.  Otherwise the lines that hold one are
+parsed and written again as the harness writes them, the rest kept byte
+for byte, and the file is replaced atomically
+\(`harness-redaction-file'), the read and the write with nothing between
+that can yield.  NOTE is called with the id, the kind and the changed
+keys of each node a secret was in; for an update line the keys are those
+the update set."
+  (let ((path (harness-session--log-path (harness-session-id s))))
+    (if (not (and (file-regular-p path)
+                  (> (harness-redaction-file-count path secrets) 0)))
+        0
+      (let ((result (harness-redaction-file
+                     path secrets :style 'jsonl :json-style 'harness :dry-run dry-run
+                     :on-line (lambda (old new _count)
+                                (when (and (consp old) (keywordp (car old)))
+                                  (let ((node-id (plist-get old :id)))
+                                    (funcall note node-id
+                                             (harness-session--line-kind s node-id old)
+                                             (harness-session--changed-keys old new))))))))
+        ;; A log that is not text cannot be cleaned: say so rather than
+        ;; report a count of what is still there.
+        (when (and (plist-get result :binary) (not dry-run))
+          (signal 'harness-error
+                  (list (format "The node log of session %s is not text; it was left as it was"
+                                (harness-session-id s)))))
+        (plist-get result :count)))))
+
+(defun harness-session--redact-memory (s secrets dry-run note)
+  "Take SECRETS out of the nodes of session S held in memory, unless DRY-RUN.
+Return how many there were.  The nodes held are the log's as it was
+loaded, and what has come since: a reply still streaming has its text in
+memory only until the final update is written.  NOTE is called as for
+`harness-session--redact-log'."
+  (let ((table (harness-session-nodes s))
+        (count 0) (changed nil))
+    (maphash (lambda (node-id node)
+               (pcase-let ((`(,new . ,n) (harness-redaction-value node secrets)))
+                 (when (> n 0)
+                   (cl-incf count n)
+                   (push (cons node-id new) changed)
+                   (funcall note node-id (plist-get node :kind)
+                            (harness-session--changed-keys node new)))))
+             table)
+    (unless dry-run
+      (dolist (c changed) (puthash (car c) (cdr c) table)))
+    count))
+
+(defun harness-session--redact-record (s secrets dry-run)
+  "Take SECRETS out of the text slots of the record of session S, unless DRY-RUN.
+Return (COUNT . SLOTS): how many there were, and the keywords of the
+slots they were in (`harness-session--redact-slots').  A record that
+changed is written at once, not after the delay of a save, and announced."
+  (let ((count 0) (slots nil) (changes nil))
+    (dolist (slot harness-session--redact-slots)
+      (pcase-let ((`(,new . ,n) (harness-redaction-value
+                                 (cl-struct-slot-value 'harness-session slot s) secrets)))
+        (when (> n 0)
+          (cl-incf count n)
+          (push (intern (format ":%s" slot)) slots)
+          (push (cons slot new) changes))))
+    (when (and changes (not dry-run))
+      (dolist (c changes)
+        (setf (cl-struct-slot-value 'harness-session (car c) s) (cdr c)))
+      (harness-session--save (harness-session-id s))
+      (harness-session--announce s))
+    (cons count (nreverse slots))))
+
+(defun harness-session--spill-paths (node)
+  "Return the files that hold the whole output of NODE, a cut tool result.
+An output longer than `harness-tools-max-output-chars' is cut, the whole
+of it saved in a file; the node's `:meta' names it (`:truncated'), and so
+does the note that ends the cut output, which stays when a later update
+has replaced the meta."
+  (let ((paths nil)
+        (meta-path (let ((truncated (plist-get (plist-get node :meta) :truncated)))
+                     (and (consp truncated) (plist-get truncated :path))))
+        (output (plist-get node :output)))
+    (when (stringp meta-path) (push meta-path paths))
+    (when (and (stringp output) (string-search "The full output was saved to " output))
+      (let ((start 0))
+        (while (string-match "The full output was saved to \\(.+?\\)\\. Read it in ranges" output start)
+          (cl-pushnew (match-string 1 output) paths :test #'equal)
+          (setq start (match-end 0)))))
+    (nreverse paths)))
+
+(defun harness-session--spill-and-checkpoints (s)
+  "Return (SPILL-FILES . CHECKPOINTS) of the nodes of session S.
+The files are those of `harness-session--spill-paths' for its tool
+results; the checkpoints are the distinct provider checkpoints on its
+nodes, in the order the nodes came.  The nodes are loaded when they are
+not yet."
+  (harness-session--load-nodes s)
+  (let (spill checkpoints)
+    (maphash (lambda (_ node)
+               (when-let* ((checkpoint (plist-get node :checkpoint)))
+                 (cl-pushnew checkpoint checkpoints :test #'equal))
+               (when (eq (plist-get node :kind) 'tool-result)
+                 (dolist (path (harness-session--spill-paths node))
+                   (cl-pushnew path spill :test #'equal))))
+             (harness-session-nodes s))
+    (cons (nreverse spill) (nreverse checkpoints))))
+
+(defun harness-session--by-name (symbols)
+  "Return the SYMBOLS sorted by name."
+  (sort (copy-sequence symbols)
+        (lambda (a b) (string< (format "%s" a) (format "%s" b)))))
+
+(harness-defmethod session/redact-text (id secrets &optional dry-run)
+  "Take SECRETS out of the stored text of session ID, or count them (DRY-RUN).
+SECRETS is a list of secrets, plists (:value :label :fingerprint :source)
+that the caller holds in memory (see harness-redaction.el); each
+occurrence is replaced by a placeholder naming the secret by its label
+and fingerprint.  The method is meant for the harness process: a secret
+given by a client over the wire is on the wire.  Three copies are
+cleaned:
+
+  - the node log, every field of every line, the lines of node updates
+    included: the lines that hold no secret are kept byte for byte, the
+    rest are written again as the harness writes them, and the file is
+    replaced atomically.  The read and the write have nothing between
+    them that can yield, so no append of this process falls in between
+    and none is lost; a log that another process changes meanwhile is
+    read again, and left as it was and signalled if it keeps changing.
+    A log without a secret is not read beyond a count of its bytes;
+  - the nodes of the session held in memory, when they are loaded:
+    including text that is in memory only, such as a streamed reply that
+    no update has written yet;
+  - the text of the record -- `harness-session--redact-slots' -- which
+    is written at once and announced (`session/changed') when it changed.
+
+With DRY-RUN nothing changes and nothing is loaded for good: the result
+is what a run would find.  The result is a plist, never a value of a
+secret or a snippet of text:
+
+  :id            ID
+  :hit           non-nil when a secret was found anywhere, memory included
+  :count         the secrets found in the stores of the session: the node
+                 log's plus the record's (the nodes in memory overlap
+                 the log, so they are reported apart)
+  :log-count     how many in the node log
+  :memory-count  how many in the nodes held in memory (0: not loaded)
+  :record-count  how many in the record
+  :nodes         the ids of the nodes a secret was in, in the order of the
+                 log, those only in memory last
+  :kinds         the kinds of those nodes (`tool-result', `user', ...)
+  :fields        the keys of the nodes that changed (`:content', `:output',
+                 `:input', `:blocks', `:meta', ...)
+  :record-fields the slots of the record that changed (`:name', `:queue', ...)
+  :file          the node log, when it held a secret
+  :running       non-nil while the session runs a turn: it may write more
+                 of the secret, and a reply streamed since is not final
+
+and, when something was found, what else holds copies: `:spill-files',
+the files in which the whole of the cut tool outputs are kept,
+`:checkpoints', the provider checkpoints of the nodes (for Claude Code,
+the CLI sessions and entries that hold the conversation), and
+`:provider-state', the state of the provider conversation (see
+`session/reset-provider')."
+  (let* ((s (harness-session--get id))
+         (was-loaded (harness-session-loaded s))
+         (seen (make-hash-table :test 'equal))
+         (nodes nil) (kinds nil) (fields nil)
+         (note (lambda (node-id kind keys)
+                 (when (and (stringp node-id) (not (gethash node-id seen)))
+                   (puthash node-id t seen)
+                   (push node-id nodes))
+                 (when kind (cl-pushnew (if (stringp kind) (intern kind) kind) kinds))
+                 (dolist (key keys) (cl-pushnew key fields))))
+         (log-count 0) (memory-count 0) (record-count 0) (record-fields nil)
+         (spill nil) (checkpoints nil))
+    (unwind-protect
+        (progn
+          (setq log-count (harness-session--redact-log s secrets dry-run note))
+          ;; The nodes a session had loaded before: loading them here, for
+          ;; the kind of an update line, they would be the log's own.
+          (when was-loaded
+            (setq memory-count (harness-session--redact-memory s secrets dry-run note)))
+          (pcase-let ((`(,n . ,slots) (harness-session--redact-record s secrets dry-run)))
+            (setq record-count n record-fields slots))
+          (when (> (+ log-count memory-count record-count) 0)
+            (pcase-let ((`(,files . ,cps) (harness-session--spill-and-checkpoints s)))
+              (setq spill files checkpoints cps))))
+      ;; A session nobody had open is as it was: its nodes, loaded to
+      ;; look, go again rather than pile up while hundreds are looked at.
+      (unless was-loaded
+        (clrhash (harness-session-nodes s))
+        (setf (harness-session-loaded s) nil)))
+    (let ((hit (> (+ log-count memory-count record-count) 0)))
+      (append
+       (list :id id :hit hit
+             :count (+ log-count record-count)
+             :log-count log-count :memory-count memory-count :record-count record-count
+             :nodes (nreverse nodes)
+             :kinds (harness-session--by-name kinds)
+             :fields (harness-session--by-name fields)
+             :record-fields record-fields
+             :file (and (> log-count 0) (harness-session--log-path id))
+             :running (and (harness-method-exists-p 'agent/running)
+                           (harness-call 'agent/running id)
+                           t))
+       (and hit (list :spill-files spill :checkpoints checkpoints
+                      :provider-state (harness-session-provider-state s)))))))
+
+(defun harness-session--without-checkpoint (line)
+  "Return (NEW-LINE . NODE-ID) for LINE, a log line, without its checkpoint.
+Nil when LINE is no node or update that has one, or does not read back
+as the same without it."
+  (let ((object (condition-case nil (harness-json-parse line) (error nil))))
+    (when (and (consp object) (keywordp (car object))
+               (stringp (plist-get object :id))
+               (plist-get object :checkpoint))
+      (let* ((new (harness-plist-remove object :checkpoint))
+             (text (condition-case nil (harness-json-encode-text new) (error nil))))
+        (when (and text
+                   (equal (condition-case nil (harness-json-parse text) (error nil)) new))
+          (cons text (plist-get object :id)))))))
+
+(defun harness-session--strip-log-checkpoints (path)
+  "Rewrite the node log PATH without the provider checkpoints of its lines.
+Return the ids of the nodes that had one.  Only a line that has one is
+written again; the file is replaced atomically, and left as it was when
+another process changed it meanwhile (`harness-redaction-rewrite-file')."
+  (let ((ids nil))
+    (when (file-regular-p path)
+      (let ((signature (harness-redaction--signature (file-truename path))))
+        (with-temp-buffer
+          (let ((coding-system-for-read 'utf-8-unix))
+            (insert-file-contents path))
+          (goto-char (point-min))
+          (let ((changed nil))
+            (while (not (eobp))
+              (let ((beg (pos-bol)) (end (pos-eol)))
+                (when (search-forward "checkpoint" end t)
+                  (when-let* ((stripped (harness-session--without-checkpoint
+                                         (buffer-substring-no-properties beg end))))
+                    (push (cdr stripped) ids)
+                    (setq changed t)
+                    (delete-region beg end)
+                    (goto-char beg)
+                    (insert (car stripped))))
+                (goto-char beg)
+                (forward-line 1)))
+            (when changed
+              (harness-redaction-rewrite-file path (buffer-string) signature))))))
+    (nreverse ids)))
+
+(harness-defmethod session/reset-provider (id)
+  "Drop the provider conversation of session ID: its next turn starts a new one.
+A hosted provider (Claude Code, Copilot) keeps the conversation itself,
+and it may hold what the transcript no longer does -- a secret taken out
+of it by `session/redact-text'.  So the provider state goes
+\(`session/set-provider-state', which announces it: the Claude provider
+closes its CLI process), and so does the node the conversation reached
+\(`provider-node'), and the `:checkpoint' of every node, the CLI session
+and entry a fork or a checkout at an earlier node could cut the
+conversation at: from memory, and from the node log, which is replaced
+atomically, only the lines that had one written again.
+
+Then `session/provider-continuation' never leads back to the old
+conversation (`harness-session--continuation').  At the head it says
+\(:mode current) -- the session has no state and no node its conversation
+reached -- and the provider, having no state to resume, starts a new
+conversation that gets the transcript as text, the redacted one
+\(`session/messages', `harness-provider-history-text').  A head off the
+conversation, a fork taken at an earlier node or a head moved back, has
+no checkpoint to cut at either, and says (:mode fresh): the same.  A
+fork made later at an earlier node starts afresh too, rather than
+resuming the old CLI session.
+
+The provider's prompt cache of the conversation goes with it: the new
+conversation opens with the transcript as text, which is not the prefix
+the cache holds, so its first request is sent whole and uncached.  The
+reset says so when it drops a cache, which the stamp alone cannot: when
+the session reports a cache (a stamp and a context in its usage) and its
+model is a hosted loop (`session/reset-drops-cache-p'), it marks the
+usage `:cache-dropped' with the moment.  The session's `:cache' then reports
+the cache gone from that moment (`:expires', and `:dropped'), however
+long its provider would have kept it, so the cold-cache question
+\(harness-cowboy.el) is asked before the next message sends everything
+uncached.  The next request that stamps a cache, or a compaction,
+clears the mark (`harness-session--cache-stamp').  A session whose
+provider is sent the whole transcript with every request is not marked.
+
+Signal a `harness-error' when the session runs a turn: its provider
+holds the state it is writing, and the nodes it writes are not final.
+Return (:checkpoints N), the number of nodes that had a checkpoint, and
+`:cache-dropped' t when the reset marked a cache dropped.  The record
+is written at once and announced."
+  (let ((s (harness-session--get id))
+        (stripped (make-hash-table :test 'equal))
+        (drops-cache nil))
+    (when (and (harness-method-exists-p 'agent/running) (harness-call 'agent/running id))
+      (signal 'harness-error
+              (list (format "Session %s is running a turn; stop it before dropping its provider conversation"
+                            id))))
+    ;; First, so that what the reset announces below already says the
+    ;; cache is gone.  A new usage plist: whoever holds the old one
+    ;; (`session/get', the last `session/usage') keeps what it saw.
+    (when (harness-session--reset-drops-cache-p s)
+      (setq drops-cache t)
+      (setf (harness-session-usage s)
+            (plist-put (copy-sequence (harness-session-usage s)) :cache-dropped (float-time))))
+    (let ((had-state (harness-session-provider-state s)))
+      (harness-call 'session/set-provider-state id nil)
+      ;; A process may hold the old conversation even when the record
+      ;; had none: tell the provider either way.
+      (unless had-state
+        (harness-emit 'session/provider-state-changed id nil)))
+    (harness-call 'session/set-provider-node id nil)
+    (when (harness-session-loaded s)
+      (let ((table (harness-session-nodes s)) (marked nil))
+        (maphash (lambda (node-id node)
+                   (when (plist-get node :checkpoint) (push (cons node-id node) marked)))
+                 table)
+        (dolist (c marked)
+          (puthash (car c) t stripped)
+          (puthash (car c) (harness-plist-remove (cdr c) :checkpoint) table))))
+    (dolist (node-id (harness-session--strip-log-checkpoints (harness-session--log-path id)))
+      (puthash node-id t stripped))
+    (harness-session--save id)
+    (harness-session--announce s)
+    (append (list :checkpoints (hash-table-count stripped))
+            (and drops-cache (list :cache-dropped t)))))
+
+(harness-defmethod session/reset-drops-cache-p (id)
+  "Non-nil when `session/reset-provider' on session ID would drop its prompt cache.
+That is when the reset would mark the usage `:cache-dropped': the
+session reports a prompt cache (its usage has a stamp and a context),
+its model is a hosted loop (its provider keeps the conversation and the
+cache of it, and the new conversation the reset makes is sent the whole
+transcript as text, which reads none of it), and no reset marked it
+already since the last request that stamped a cache.  Nothing changes;
+a redaction asks it to say whose cache a reset would cost.  Signal a
+`harness-error' for a session that does not exist."
+  (harness-session--reset-drops-cache-p (harness-session--get id)))
+
+(harness-defmethod session/family-ids (id)
+  "Return ID followed by the ids of the sessions descended from it.
+A session is descended from ID when its parent chain reaches ID, of any
+kind -- a fork, a sub-agent, a BTW -- so a fork of a fork is.  They copy
+the transcript of the session they came from (a fork), or have lived in
+its shadow, so what is taken out of one has to be taken out of them.
+Only the sessions the harness holds a record of count.  The others come
+oldest first."
+  (harness-session--get id)
+  (let (family)
+    (maphash (lambda (sid s)
+               (unless (equal sid id)
+                 (let ((current s) (hops 0) (reached nil))
+                   (while (and current (not reached) (< hops 1000))
+                     (let ((parent (harness-session-parent-id current)))
+                       (cond ((null parent) (setq current nil))
+                             ((equal parent id) (setq reached t))
+                             (t (setq current (gethash parent harness-sessions)
+                                      hops (1+ hops))))))
+                   (when reached (push s family)))))
+             harness-sessions)
+    (cons id (mapcar #'harness-session-id
+                     (sort family (lambda (a b) (< (harness-session-created a)
+                                                   (harness-session-created b))))))))
+
 ;;;; Init and reload
 
 (defconst harness-session-interrupted-output
@@ -2632,6 +3137,7 @@ its turn ends, and write every record when Emacs exits."
               (session/forked . "(PARENT-ID CHILD-ID)")
               (session/ext-changed . "(ID KEY VALUE) when a module's setting of the session changed (`session/set-ext'); VALUE nil once removed")
               (session/provider-state-changed . "(ID STATE) when the provider state is replaced by another")
+              (session/redacted . "(ID RECORD) after a secret was redacted from the session's stores; RECORD is the redaction record: labels, fingerprints and counts, never the secret")
               (session/node-added . "(ID NODE)") (session/node-updated . "(ID NODE TRANSIENT)")
               (session/nodes-removed . "(ID NODE-IDS) after nodes were dropped from the transcript (`session/discard-nodes')")
               (session/head-moved . "(ID NODE-ID)")

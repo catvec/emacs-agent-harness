@@ -27,6 +27,17 @@
 ;; buttons' keys work while point is on their line.  A session blocked
 ;; on an answer is in the middle of a turn, so it shows no panel at all.
 ;;
+;; A cache can be dropped before its clock says so.  A redaction
+;; (harness-redact.el) takes a secret out of a conversation and resets a
+;; hosted session's provider conversation (Claude Code, Copilot), which
+;; may hold the secret where the harness cannot reach it; the cache the
+;; provider kept of that conversation goes with it, and the next message
+;; opens a new one that is sent the redacted transcript as text, whole
+;; and uncached.  The session's `:cache' then carries `:dropped', the
+;; moment of the reset, which is its `:expires' too, so the panel shows
+;; from then on, headed "dropped" and saying a redaction did it.  It
+;; compares no cached price with the uncached one: none can be had.
+;;
 ;; A cache serves one model, so a session switched to another model
 ;; finds nothing cached for it: the panel says so at once, with what the
 ;; new model's first request costs, and goes when that request caches the
@@ -82,8 +93,9 @@
   '((((background light)) :background "#f8e6f4" :extend t)
     (((background dark)) :background "#3a2237" :extend t))
   "Background of the cache panel: the session's prompt cache has expired.
-An orchid of its own, apart from the activity line's lavender, which
-shows in the same place while the session runs."
+It shows when a redaction dropped the cache too.  An orchid of its own,
+apart from the activity line's lavender, which shows in the same place
+while the session runs."
   :group 'harness-ui-cache)
 
 (harness-ui-define-icon harness-icon-clock "clock" "◷" "cache" "Time: a cache that lapsed.")
@@ -135,24 +147,37 @@ non-nil exactly while its turn runs (`harness-ui-session-live')."
 NOW is the current time by default.  The panel shows once the cache
 SESSION's requests last used has lapsed (its `:cache' `:expires' is
 past), and at once when that cache is of a model SESSION no longer uses
-\(`:from'), while SESSION waits for the user: idle or closed.  A session
-whose turn is still running shows nothing: a session blocked on an
-answer is in the middle of a turn, and the panel speaks of the user's
-next message, which only a session that is not running has.  States
-that read the same are `equal', so a session update that changes
-nothing the panel says does not draw it again."
+\(`:from'), while SESSION waits for the user: idle or closed.  A cache a
+redaction dropped (its `:dropped', the moment, which is its `:expires'
+too) has lapsed from then on, however long its provider would have
+kept it; the state carries `:dropped' for the panel to say so.  A
+session whose turn is still running shows nothing: a session blocked on
+an answer is in the middle of a turn, and the panel speaks of the
+user's next message, which only a session that is not running has.
+States that read the same are `equal', so a session update that
+changes nothing the panel says does not draw it again."
   (let* ((cache (plist-get session :cache))
          (expires (plist-get cache :expires))
+         (dropped (plist-get cache :dropped))
          (from (harness-ui-cache--other-model session))
          (status (format "%s" (plist-get session :status))))
     (when (and (numberp expires)
                (member status '("idle" "inactive"))
                (not (harness-ui-cache--running-p session))
                (or from (>= (or now (float-time)) expires)))
-      (list :at (plist-get cache :at) :ttl (plist-get cache :ttl) :expires expires
-            :context (plist-get (plist-get session :usage) :context)
-            :model (plist-get session :model)
-            :from from))))
+      (append (list :at (plist-get cache :at) :ttl (plist-get cache :ttl) :expires expires
+                    :context (plist-get (plist-get session :usage) :context)
+                    :model (plist-get session :model)
+                    :from from)
+              (and (numberp dropped) (list :dropped dropped))))))
+
+(defun harness-ui-cache--dropped (state)
+  "Return when a redaction dropped the cache STATE speaks of, or nil.
+That is STATE's `:dropped'.  A cache held for another model (`:from')
+is cold for that reason, whatever became of it: the model the session
+uses now has none of it either way, so it reads as that."
+  (let ((dropped (plist-get state :dropped)))
+    (and (numberp dropped) (not (plist-get state :from)) dropped)))
 
 (defun harness-ui-cache--asked-p (session)
   "Non-nil while SESSION waits on the question about its cold cache.
@@ -190,64 +215,99 @@ The price, in US dollars per million tokens, is the catalogue's."
     (and (numberp tokens) (> tokens 0) (numberp price) (>= price 0)
          (/ (* tokens price) 1e6))))
 
-(defun harness-ui-cache--cost (state)
-  "Return what the context of STATE costs uncached and cached, or nil.
-A cons (UNCACHED . CACHED) at the model's list prices: written to the
-cache again against read back from it.  Writing costs the higher of the
-cache-write and the input price: a provider that does not charge for
-writes (DeepSeek, whose catalogue says 0) still charges the input.  Nil
-when the catalogue does not price both."
+(defun harness-ui-cache--uncached-cost (state)
+  "Return what the context of STATE costs sent uncached, or nil.
+That is writing it to the cache at the model's list price: the higher
+of the cache-write and the input price, as a provider that does not
+charge for writes (DeepSeek, whose catalogue says 0) still charges the
+input.  Nil when the catalogue prices neither."
   (let* ((tokens (plist-get state :context))
          (model (plist-get state :model))
          (written (harness-ui-cache--price tokens model :cache-write))
-         (input (harness-ui-cache--price tokens model :input))
-         (uncached (if (and written input) (max written input) (or written input)))
-         (cached (harness-ui-cache--price tokens model :cache-read)))
+         (input (harness-ui-cache--price tokens model :input)))
+    (if (and written input) (max written input) (or written input))))
+
+(defun harness-ui-cache--cost (state)
+  "Return what the context of STATE costs uncached and cached, or nil.
+A cons (UNCACHED . CACHED) at the model's list prices: written to the
+cache again against read back from it (`harness-ui-cache--uncached-cost').
+Nil when the catalogue does not price both."
+  (let ((uncached (harness-ui-cache--uncached-cost state))
+        (cached (harness-ui-cache--price (plist-get state :context) (plist-get state :model) :cache-read)))
     (and uncached cached (> uncached cached) (cons uncached cached))))
 
 (defun harness-ui-cache--help (state)
-  "Return the tooltip of the cache panel for STATE."
-  (concat
-   (if-let* ((from (plist-get state :from)))
+  "Return the tooltip of the cache panel for STATE.
+It says why nothing is cached: the cache of the model the session used
+before, a cache a redaction dropped, or one that lapsed."
+  (let ((dropped (harness-ui-cache--dropped state)))
+    (concat
+     (cond
+      ((plist-get state :from)
        (format (concat "A provider caches a conversation for one model only.\n"
                        "This session's requests last used the cache of %s, at %s; %s has none of it.\n")
-               (harness-ui-model-label from)
+               (harness-ui-model-label (plist-get state :from))
                (format-time-string "%H:%M:%S" (plist-get state :at))
-               (harness-ui-model-label (plist-get state :model)))
-     (format (concat "The provider keeps the start of a conversation cached for %s after a request uses it.\n"
-                     "This session's requests last used the cache at %s, so it lapsed at %s.\n")
-             (harness-ui-cache--duration (plist-get state :ttl))
-             (format-time-string "%H:%M:%S" (plist-get state :at))
-             (format-time-string "%H:%M:%S" (plist-get state :expires))))
-   (format "Your next message sends the whole context, %s tokens, at the uncached rate, and caches it again."
-           (harness-format-tokens (plist-get state :context)))))
+               (harness-ui-model-label (plist-get state :model))))
+      (dropped
+       (format (concat "A redaction took a secret out of this conversation at %s"
+                       " and dropped the provider's copy of it, and its prompt cache with it.\n")
+               (format-time-string "%H:%M:%S" dropped)))
+      (t
+       (format (concat "The provider keeps the start of a conversation cached for %s after a request uses it.\n"
+                       "This session's requests last used the cache at %s, so it lapsed at %s.\n")
+               (harness-ui-cache--duration (plist-get state :ttl))
+               (format-time-string "%H:%M:%S" (plist-get state :at))
+               (format-time-string "%H:%M:%S" (plist-get state :expires)))))
+     (format "Your next message sends the whole context, %s tokens, at the uncached rate, and caches it again."
+             (harness-format-tokens (plist-get state :context))))))
 
 (defun harness-ui-cache--heading (state now)
   "Return the first line of the cache panel for STATE, drawn at NOW.
-It says why nothing is cached: the cache lapsed, and when, or it is
-the cache of the model the session used before."
-  (let ((from (plist-get state :from)))
+It says why nothing is cached: the cache lapsed, and when; a redaction
+dropped it, and when; or it is the cache of the model the session used
+before."
+  (let ((from (plist-get state :from))
+        (dropped (harness-ui-cache--dropped state)))
     (concat
      " " (propertize (concat (harness-ui-icon 'harness-icon-clock)
-                             (if from " Prompt cache cold" " Prompt cache expired"))
+                             (cond (from " Prompt cache cold")
+                                   (dropped " Prompt cache dropped")
+                                   (t " Prompt cache expired")))
                      'face 'harness-label-face)
      "  "
-     (propertize (if from
-                     (format "cached for %s, not %s"
-                             (harness-ui-model-label from)
-                             (harness-ui-model-label (plist-get state :model)))
-                   (format "at %s, %s after its last use"
-                           (harness-ui-format-clock (plist-get state :expires) now)
-                           (harness-ui-cache--duration (plist-get state :ttl))))
+     (propertize (cond (from
+                        (format "cached for %s, not %s"
+                                (harness-ui-model-label from)
+                                (harness-ui-model-label (plist-get state :model))))
+                       (dropped
+                        (format "at %s, by a redaction" (harness-ui-format-clock dropped now)))
+                       (t
+                        (format "at %s, %s after its last use"
+                                (harness-ui-format-clock (plist-get state :expires) now)
+                                (harness-ui-cache--duration (plist-get state :ttl)))))
                  'face 'harness-dim-face)
      "\n")))
+
+(defun harness-ui-cache--cost-text (state)
+  "Return how the line under the heading ends for STATE: a cost, or a period.
+A lapsed cache, or a model's, compares the uncached price with the
+cached one it would have cost.  A cache a redaction dropped cannot be
+had, so it names the uncached price only."
+  (if (harness-ui-cache--dropped state)
+      (if-let* ((uncached (harness-ui-cache--uncached-cost state)))
+          (format ": about %s, at list prices." (harness-format-cost uncached))
+        ".")
+    (if-let* ((cost (harness-ui-cache--cost state)))
+        (format ": about %s instead of %s, at list prices."
+                (harness-format-cost (car cost)) (harness-format-cost (cdr cost)))
+      ".")))
 
 (defun harness-ui-cache--banner (state now &optional offer)
   "Return the cache panel for STATE, drawn at NOW.
 OFFER, when given, is the line offering to compact the conversation
 first (`harness-ui-cache--offer'), which goes last."
-  (let* ((cost (harness-ui-cache--cost state))
-         (tokens (plist-get state :context))
+  (let* ((tokens (plist-get state :context))
          (string
           (concat
            (harness-ui-cache--heading state now)
@@ -255,10 +315,7 @@ first (`harness-ui-cache--offer'), which goes last."
                                (if (and (numberp tokens) (> tokens 0))
                                    (format " re-sends ~%s tokens uncached" (harness-format-tokens tokens))
                                  " re-sends the conversation uncached")
-                               (if cost
-                                   (format ": about %s instead of %s, at list prices."
-                                           (harness-format-cost (car cost)) (harness-format-cost (cdr cost)))
-                                 "."))
+                               (harness-ui-cache--cost-text state))
                        'wrap-prefix "   ")
            "\n")))
     (add-text-properties 0 (length string) (list 'help-echo (harness-ui-cache--help state)) string)
@@ -446,7 +503,7 @@ On `harness-ui-update-functions', after the chat has taken it in."
   (add-hook 'harness-ui-update-functions #'harness-ui-cache--on-update t))
 
 (harness-define-module 'ui-cache
-  :doc "Warns above a session's compose box once its prompt cache has expired, offering to compact."
+  :doc "Warns above a session's compose box once its prompt cache has expired or been dropped, offering to compact."
   :requires '(ui ui-chat)
   :init #'harness-ui-cache--init)
 

@@ -75,6 +75,51 @@
   (harness-add-filter 'test/f (lambda (v ctx) (+ v ctx)) 10)
   (should (= 8 (harness-run-filter 'test/f 1 3))))
 
+(defun harness-core-test--log-text ()
+  "Return the harness log buffer's text."
+  (with-current-buffer harness-log-buffer-name (buffer-string)))
+
+(ert-deftest harness-core-log-filter-changes-what-the-log-keeps ()
+  "`harness-log-filter-function' filters a message before it is kept or hooked.
+Both the buffer and the hook get the filtered text, and the message
+`harness-log' returns is that text."
+  (let ((harness-log-level 'info)
+        (hooked nil)
+        (harness-log-filter-function (lambda (msg) (string-replace "hunter2" "[gone]" msg))))
+    (with-current-buffer (get-buffer-create harness-log-buffer-name)
+      (let ((inhibit-read-only t)) (erase-buffer)))
+    (let ((harness-log-hook (list (lambda (_level msg) (push msg hooked)))))
+      (should (equal "the password is [gone]" (harness-log 'info "the password is %s" "hunter2"))))
+    (should (equal '("the password is [gone]") hooked))
+    (should (string-search "INFO  the password is [gone]" (harness-core-test--log-text)))
+    (should-not (string-search "hunter2" (harness-core-test--log-text)))
+    ;; No filter, no change.
+    (let ((harness-log-filter-function nil))
+      (should (equal "kept hunter2" (harness-log 'info "kept %s" "hunter2"))))))
+
+(ert-deftest harness-core-log-filter-failing-or-logging-is-harmless ()
+  "A filter that signals or answers with no string leaves the message as it was.
+One that logs does not filter that message again, so it cannot recurse."
+  (let ((harness-log-level 'info))
+    (let ((harness-log-filter-function (lambda (_msg) (error "Boom"))))
+      (should (equal "still logged" (harness-log 'info "still logged"))))
+    (let ((harness-log-filter-function (lambda (_msg) 42)))
+      (should (equal "as it was" (harness-log 'info "as it was"))))
+    (let* ((calls 0)
+           (harness-log-filter-function
+            (lambda (msg)
+              (cl-incf calls)
+              (harness-log 'info "inner %s" msg)
+              (concat "filtered " msg))))
+      (should (equal "filtered outer" (harness-log 'info "outer")))
+      ;; Once for the outer message; the inner one passed unfiltered.
+      (should (= 1 calls))
+      (should (string-search "INFO  inner outer" (harness-core-test--log-text)))
+      (should (string-search "INFO  filtered outer" (harness-core-test--log-text))))
+    ;; The guard is released again afterwards.
+    (let ((harness-log-filter-function #'upcase))
+      (should (equal "AGAIN" (harness-log 'info "again"))))))
+
 (ert-deftest harness-core-async-filter-chain-and-final ()
   (harness-test-reset-bus)
   (harness-add-filter 'test/af (lambda (v next) (run-at-time 0.01 nil next (plist-put v :a t))) 10)

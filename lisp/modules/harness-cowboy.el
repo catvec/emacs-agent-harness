@@ -36,6 +36,18 @@
 ;; (harness-tools-sessions.el), which searches and reads what it
 ;; replaced, so nothing left out is out of the model's reach.
 ;;
+;; A cache can go cold before its clock says so.  A redaction
+;; (harness-redact.el) takes a secret out of a conversation, and the
+;; hosted provider's own copy of it (Claude Code, Copilot) may hold the
+;; secret where the harness cannot reach it, so the redaction drops that
+;; conversation (`session/reset-provider'): the next message opens a new
+;; one that gets the redacted transcript as text, a prefix the old cache
+;; does not hold, and the whole of it is sent uncached.  The session's
+;; `:cache' then says the cache is gone from the drop on (`:dropped',
+;; which is its `:expires' too), so the gate finds it cold and asks at
+;; once, in words that say why and with no cached price to compare with:
+;; there is none to be had.
+;;
 ;; The question is the harness's own (`question/ask'): pending on the
 ;; session, which is blocked on it, and answered like any question -- the
 ;; chat's cold-cache panel (harness-ui-cowboy.el), a popout, an ACP
@@ -175,18 +187,31 @@ cache is SESSION's model's, or SESSION has none."
            (plist-get (ignore-errors (harness-call 'provider/model model)) :label))
       model))
 
+(defun harness-cowboy--dropped (session)
+  "Return when a redaction dropped SESSION's prompt cache, or nil.
+SESSION is a session plist.  That is its `:cache' `:dropped': the
+moment `session/reset-provider' dropped the provider conversation the
+cache held, which the cache's clock would have kept warm for longer."
+  (let ((dropped (plist-get (plist-get session :cache) :dropped)))
+    (and (numberp dropped) dropped)))
+
 (defun harness-cowboy-cold-p (session &optional now)
   "Non-nil when SESSION's next message sends its conversation uncached.
 SESSION is a session plist.  That is when the prompt cache its
 requests last used lapsed by NOW (the current time by default), or
 serves a model SESSION no longer uses -- a cache holds nothing for
 another model, whatever its clock says -- and its context is at least
-`harness-cowboy-min-context'.  A session with no `:cache' never is: it
-has no conversation yet, or it started over (a compaction, a new
-conversation on a provider of its own), and nothing of it is cached to
-lose.  A switch to a provider that keeps its own conversation drops the
-cache outright, so only a switch between models that read the same
-conversation reaches here (`harness-session--cache')."
+`harness-cowboy-min-context'.  A cache a redaction dropped has lapsed
+from that moment (`harness-session--cache' reports its `:expires' as
+the drop, and `:dropped'): the provider conversation that held it went
+with the secret it may have held, and the next message opens a new one
+with the whole transcript as text, so it asks as for any cold cache,
+though the provider would have kept the old one longer.  A session with
+no `:cache' never is: it has no conversation yet, or it started over (a
+compaction, a new conversation on a provider of its own), and nothing of
+it is cached to lose.  A switch to a provider that keeps its own
+conversation drops the cache outright, so only a switch between models
+that read the same conversation reaches here (`harness-session--cache')."
   (let* ((cache (plist-get session :cache))
          (expires (plist-get cache :expires))
          (context (plist-get (plist-get session :usage) :context)))
@@ -288,28 +313,39 @@ a person reads the question."
   "Return the question about SESSION's cold cache.
 ESTIMATE is `compaction/estimate''s answer, or nil; FROM who sent the
 waiting message; NOTE, when given, opens the question (why it is asked
-again)."
+again).  A cache held for another model than SESSION's says so.  One a
+redaction dropped (`harness-cowboy--dropped') says that instead of
+when it lapsed, and names no cost of a cached request to compare with:
+the new conversation the redaction made has no cache to be had."
   (let* ((cache (plist-get session :cache))
          (expires (plist-get cache :expires))
          (stale (harness-cowboy--cache-model session))
+         (dropped (and (not stale) (harness-cowboy--dropped session)))
          (context (or (plist-get estimate :context) (plist-get (plist-get session :usage) :context)))
          (carry (plist-get estimate :carry-on))
          (cached (plist-get estimate :carry-on-cached)))
     (concat
      (if note (concat note "  ") "")
-     (if stale
-         (format (concat "%s waits: this session's prompt cache is cold.  It is held for %s,"
-                         " which this session no longer uses, so %s has none of it.")
-                 (harness-cowboy--sender-text from)
-                 (harness-cowboy--model-label stale)
-                 (harness-cowboy--model-label (plist-get session :model)))
+     (cond
+      (stale
+       (format (concat "%s waits: this session's prompt cache is cold.  It is held for %s,"
+                       " which this session no longer uses, so %s has none of it.")
+               (harness-cowboy--sender-text from)
+               (harness-cowboy--model-label stale)
+               (harness-cowboy--model-label (plist-get session :model))))
+      (dropped
+       (format (concat "%s waits: a redaction dropped this session's provider conversation at %s,"
+                       " so no prompt cache holds it.")
+               (harness-cowboy--sender-text from)
+               (harness-cowboy--clock dropped)))
+      (t
        (format "%s waits: this session's prompt cache lapsed at %s, %s ago."
                (harness-cowboy--sender-text from)
                (harness-cowboy--clock expires)
-               (harness-cowboy--duration (- (float-time) expires))))
+               (harness-cowboy--duration (- (float-time) expires)))))
      (format "  Carrying on sends the whole conversation%s uncached%s."
              (if (and (numberp context) (> context 0)) (format ", ~%s tokens," (harness-format-tokens context)) "")
-             (if (and (numberp carry) (numberp cached) (> carry cached))
+             (if (and (not dropped) (numberp carry) (numberp cached) (> carry cached))
                  (format ": about %s instead of %s" (harness-format-cost carry) (harness-format-cost cached))
                ""))
      "  What goes first?  Answer \"always\" with a choice to make it the default and stop asking.")))
@@ -345,10 +381,15 @@ carrying on costs, and per choice its cost, the model doing it and the
 context after it.  `:cache-model', when it is not SESSION's `:model',
 says the cache is held for a model the session no longer uses: its
 `:cache-model-label' names it for people, and it holds nothing for
-SESSION's own model however warm its clock says it is."
+SESSION's own model however warm its clock says it is.  `:dropped',
+when a redaction dropped the cache (the moment, which is `:expires'
+too), says its provider conversation went with a secret taken out of
+it, so no cache holds the session's conversation, whatever its clock
+would have said; nil otherwise."
   (let ((cache (plist-get session :cache))
         (stale (harness-cowboy--cache-model session)))
     (list :at (plist-get cache :at) :ttl (plist-get cache :ttl) :expires (plist-get cache :expires)
+          :dropped (harness-cowboy--dropped session)
           :cache-model (plist-get cache :model)
           :cache-model-label (and stale (harness-cowboy--model-label stale))
           :model (plist-get session :model)
@@ -524,15 +565,21 @@ CONTEXT, a number of tokens or nil, is what carrying on sends again."
   "Return the hint saying CHOICE goes first in SESSION, as BY decided.
 ESTIMATE is `compaction/estimate''s answer, or nil.  WHY, a string,
 opens the hint in place of the time the prompt cache went cold: a
-session with no cache of its own has none to date."
+session with no cache of its own has none to date.  Without it, the
+hint opens with the cache held for another model than SESSION's, else
+the redaction that dropped the cache and when (`harness-cowboy--dropped'),
+else when the cache went cold."
   (let ((context (or (plist-get estimate :context) (plist-get (plist-get session :usage) :context)))
         (expires (plist-get (plist-get session :cache) :expires))
-        (stale (harness-cowboy--cache-model session)))
+        (stale (harness-cowboy--cache-model session))
+        (dropped (harness-cowboy--dropped session)))
     (format "%s: %s, %s"
             (cond ((and (stringp why) (not (string-blank-p why))) (string-trim why))
                   (stale (format "Prompt cache cold: held for %s, not %s"
                                  (harness-cowboy--model-label stale)
                                  (harness-cowboy--model-label (plist-get session :model))))
+                  (dropped (format "Prompt cache dropped at %s by a redaction"
+                                   (harness-cowboy--clock dropped)))
                   ((numberp expires) (format "Prompt cache cold since %s" (harness-cowboy--clock expires)))
                   (t "No warm prompt cache holds this conversation"))
             (harness-cowboy--choice-text choice context)

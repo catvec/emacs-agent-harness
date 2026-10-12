@@ -14,7 +14,8 @@ module needs something more, add it here first.
                                  when `harness-process' is nil)
  State          session, agent, config, project, store, usage, insights, fallback,
                 retry, naming, judge, compaction, handoff, worktree, merge, tasks,
-                tasks-notify, supervisor, seed, skills, perms, sandbox, notifications
+                tasks-notify, supervisor, seed, skills, perms, sandbox, notifications,
+                secrets, redact
  Completion     provider, provider-openai, provider-deepseek, provider-claude,
                 provider-bedrock, provider-copilot
  Tool calls     tools, tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval,
@@ -24,7 +25,8 @@ module needs something more, add it here first.
  Core           harness.el (loader, reload), harness-core (methods, events, filters,
                 promises, modules), harness-util (json, ids, paths, the thinking-level
                 order), harness-http (curl, SSE, binary bodies), harness-policy (settings
-                an administrator fixes), harness-slots (pools: at most so many at once)
+                an administrator fixes), harness-slots (pools: at most so many at once),
+                harness-redaction (naming a secret, finding it, taking it out of text)
 ```
 
 The core never shows UI and never calls a model.  UI modules never
@@ -121,6 +123,10 @@ default) the layers above are split across two Emacs processes:
 - Project roots and file lists (lisp/harness-files.el) are computed on
   both sides with the same code; the UI lists files itself so `@`
   completion uses the user's projectile cache.
+- The redaction library (lisp/harness-redaction.el, see
+  harness-redaction below) is loaded on both sides.  The harness process
+  redacts the stores with it; the UI uses it to take a secret out of the
+  buffers of the user's Emacs, which the harness cannot reach.
 - Each side notes the commit it loaded the harness from
   (lisp/harness-revision.el, see version): the two load their files
   separately, so a restart of the process alone can leave them on
@@ -193,10 +199,11 @@ Reload safety: keep state in `defvar`s (never re-initialised), register
 subscribers with named functions, and make `:init` idempotent.
 `harness-reload` compiles every file first and refuses to load anything
 if one fails.  It loads harness.el, the core files, the libraries of
-lisp/ (`harness--library-files`: files, the Emacs endpoint, desktop
-notifications, server, revision, slots) and the modules, so a module never runs against
-a library as it was before an update; a file added to lisp/ that both
-sides load belongs in one of those lists.  Records made before a reload
+lisp/ (`harness--library-files`: policy, files, redaction, the Emacs
+endpoint, desktop notifications, server, revision, slots) and the
+modules, so a module never runs against a library as it was before an
+update; a file added to lisp/ that both sides load belongs in one of
+those lists.  Records made before a reload
 keep their layout: a slot added to a struct goes last and is read in a
 way that tolerates records without it (see `harness-acp--client-get`),
 or the module drops its stale records (see
@@ -340,8 +347,9 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
          :last-output N                                         ; the output of the request :context sizes
          :stream-output N :stream-seconds F                     ; what its timed calls streamed: output tokens, seconds
          :billing api|subscription|extra-usage :plan "max"     ; billing and plan of the latest call
-         :cache-at FLOAT :cache-model "ID" :cache-ttl N)  ; the last request that used the prompt cache
- :cache nil|(:at FLOAT :ttl N :expires FLOAT :model "ID")  ; derived: when the prompt cache lapses, whose it is
+         :cache-at FLOAT :cache-model "ID" :cache-ttl N         ; the last request that used the prompt cache
+         :cache-dropped FLOAT)                                  ; when a redaction dropped that cache, if it did
+ :cache nil|(:at FLOAT :ttl N :expires FLOAT :model "ID" [:dropped FLOAT])  ; derived: when the prompt cache lapses, whose it is
  :context-window N                  ; in effect: the override, else the model's
  :context-window-override nil|N     ; a window set for the session
  :budget nil|(:amount F :hard BOOL)    ; given to the session; the Budget setting is not copied
@@ -368,7 +376,10 @@ value must come back from the record's JSON as it went in (`t`, `:false`
 for an explicit off, a string, a number, or a list or plist of those) to
 survive a restart.  It is stored with the record and never copied to a
 fork: each module sets up its own forks.  Every change is announced as
-`session/ext-changed`.
+`session/ext-changed`.  The redact module keeps `:redactions` there,
+the records of the redactions that changed the session (the last 50; see
+redact), and `:redaction-pending`, the labels and fingerprints of those
+that wait for its running turn to end.
 
 `:usage :context` is the input size of the last request (prompt tokens
 incl. cache) and `:last-output` what that request wrote, which the next
@@ -443,6 +454,28 @@ newest messages and what a handoff gives it.  `:cache` is also nil for a session
 context (a new one never warns), before any request used a cache, and
 after one that did not.
 
+A redaction drops a cache too.  A hosted loop's provider keeps the
+conversation and caches it; `session/reset-provider` drops that
+conversation, and the next turn opens a new one with the redacted
+transcript as text, a start the old cache does not hold (and could not
+be used again if it did: it holds the secret).  The stamp cannot say so,
+as it still names the last request and its lifetime, so the reset marks
+the session's `:usage` with `:cache-dropped`, the moment (a float time),
+when the session reports a cache (a stamp, and a context above 0), its
+model is a hosted loop and no reset marked it since the last request
+that stamped a cache (`session/reset-drops-cache-p` says whether a reset
+would).  Then, while the stamp has not lapsed by itself, `:cache` ends
+with `:dropped`, the same time, and its `:expires` is that time too: the
+cold-cache gate (see cowboy), the seeds and the UI, which read
+`:expires`, find the cache gone from the drop on, and `:dropped` tells
+them why.  A cache that had lapsed before the drop is reported as it
+was.  A session on a provider that is sent the whole transcript with
+every request is not marked: its next request is built from the redacted
+transcript and still reads the cache up to the first spot that was
+redacted.  A request that stamps a cache, one that used none, and a
+compaction (`:cache-reset`) clear `:cache-dropped`; a record without
+tokens leaves it.
+
 `:context-window` is looked up in the model catalogue (`provider/model`)
 each time the session is described, so it follows the catalogue; only
 `:context-window-override` is stored.  A copy of the catalogue's window
@@ -510,6 +543,14 @@ means the answer recorded nothing new.  Read it with
 (harness-util), which tolerate the symbols that travelled as strings.
 The chat shows the note's text with an [Undo] that calls
 `permission/undo` (see perms) while `:undo` is `offered`.
+
+A tool-result node whose output had secrets masked (see secrets) says so
+in its `:meta` `:masked`, a list of `(:label LABEL :fingerprint F
+:count N)`: which secret, by the first 8 hex digits of its SHA-256, and
+how often, never the text around it.  A hint the redact module writes
+after taking a secret out of a session (see redact) is plain text in
+`:content`: the labels and fingerprints, where the secret was found, at
+whose request and why.
 
 A session's transcript is the path root → `:head`.  A fork copies the
 ancestor chain (same node ids) into the new session and records
@@ -582,7 +623,10 @@ ATTACHMENT = `(:path "/abs" :size N :mime "…" :name "display")`.
   step that ends after a switch tells from the session's; the cache the
   request used is that model's.  `:cache-reset`, optional, says the
   conversation starts over (a compaction's summary replaces it): the
-  record drops the session's cache stamp instead of setting it.
+  record drops the session's cache stamp instead of setting it.  Any
+  record that changes the stamp also clears the session's
+  `:cache-dropped`, the moment a redaction dropped the cache, which is
+  not a key of a record (see "Session").
 - `:context`, optional, is the prompt size of the record's last
   request, which replaces the session's.  With it the session's
   `:last-output` becomes the output of that request: the record's
@@ -760,6 +804,10 @@ gone.  A message one held back from a turn that had not started (its
 payload's `:waiting-message` `(:text :from)`: the cowboy module's
 question about a cold cache) goes back in the session's queue, with
 its sender, and the hint says so (`harness-session--requeue`).
+
+The node log is only ever appended to, but for a redaction, which
+replaces it whole (`session/redact-text`, `session/reset-provider`; see
+redact).
 
 - `session/create &rest PLIST` — `:cwd` required; `:name :model
   :permission-mode :thinking :kind :parent-id :host :worktree`,
@@ -1037,8 +1085,10 @@ its sender, and the hint says so (`harness-session--requeue`).
   A record of a request that read or wrote the prompt cache stamps the
   totals' `:cache-at`, `:cache-model` and `:cache-ttl`; one that used
   none, or one with `:cache-reset` (a compaction), clears them (see
-  "Session").  Event `session/usage ID USAGE-TOTAL RECORD`.  It keeps
-  the totals' `:stream-output` and `:stream-seconds` as it finds them.
+  "Session").  Each also clears `:cache-dropped`, which a redaction set
+  (`session/reset-provider`).  Event `session/usage ID USAGE-TOTAL
+  RECORD`.  It keeps the totals' `:stream-output` and `:stream-seconds`
+  as it finds them.
 - `session/usage-note ID RECORD` → the totals (nil for a session that is
   gone): adds RECORD's `:stream-output` and `:stream-seconds`, the
   output tokens of model calls whose streaming was timed and the
@@ -1084,6 +1134,11 @@ its sender, and the hint says so (`harness-session--requeue`).
   `.gitignore` of `*` there keeps git out.  Signals when the directory
   does not exist.  A handoff (`.harness/handoff/`) and a compaction
   into a transcript write theirs with it.
+- `session/redact-text`, `session/reset-provider`,
+  `session/reset-drops-cache-p` and `session/family-ids` are this
+  module's part of taking a secret out of the stores, and the event
+  `session/redacted ID RECORD` says it happened; see redact for all
+  five.
 - Event `session/changed ID SESSION` fires after any of the above (for UIs
   that just want to redraw).
 
@@ -1635,6 +1690,16 @@ conversation per session, started in the project, each verdict saw the
 earlier ones (whether the work had been handed in, say) and the
 project's CLAUDE.md, and judged by them.
 
+The CLI keeps each conversation in `PROJECTS/SLUG/ID.jsonl`, and what
+belongs to it (a long tool output, a sub-agent's log) in
+`PROJECTS/SLUG/ID/`: ID is the CLI session (`:cli-session-id` of the
+provider state), SLUG names the directory the CLI ran in, and PROJECTS is
+`harness-provider-claude-projects-directory`, by default the `projects`
+directory of `$CLAUDE_CONFIG_DIR`, else of `~/.claude`.  `--resume`
+replays those files, so a secret that got into a conversation stays in
+them after the harness's own copies are clean.
+`provider/claude-redact-logs` takes secrets out of them (see redact).
+
 The Bedrock provider (`provider-bedrock`) is a native loop over the
 Converse API: one ConverseStream request per call, its binary event
 stream decoded into `text`, `thinking`, `usage` and `tool-call` events.
@@ -1781,6 +1846,12 @@ version 3 or newer.  Per harness session one CLI process:
   could use), so a fork or a checkout at an earlier node starts a new
   Copilot session.  The first message to a session created for a
   transcript with messages carries them (see "Replay").
+- The CLI keeps each session in `STATE/ID/` (`events.jsonl` and the
+  files beside it) and resumes it from there: ID is `:copilot-session-id`
+  and STATE is `harness-provider-copilot-state-directory`, by default
+  `session-state` in `$COPILOT_HOME`, else in `~/.copilot`.
+  `provider/copilot-redact-logs` takes secrets out of those files (see
+  redact).
 - Side requests are one-off questions: naming, compaction and the
   permission judge.  A request is one when it sets `:ephemeral` (the
   judge's, and naming a session from its first message) or
@@ -1864,8 +1935,22 @@ which otherwise leaves the model with no answer to its call at all.
   SESSION-ID every registered tool: how UIs learn the labels.
 - `tools/execute SESSION-ID CALL` (CALL = `(:id :name :input)`) → promise of
   RESULT.  Pipeline: lookup → `permission/decide` (async filter) →
-  handler (with `harness-tools--timeout`) → context-bomb guard → sync
-  filter `tools/result` → events `tools/started`, `tools/finished`.
+  handler (with `harness-tools--timeout`) → sync filter `tools/output`
+  → context-bomb guard → sync filter `tools/result` → events
+  `tools/started`, `tools/finished`.
+- Sync filter `tools/output` (value: the RESULT; args: session id, CALL)
+  is what a tool returned, before anything keeps it, and it runs ahead
+  of the size guard so that the file an oversized result is saved to
+  holds what the filter let through.  Sync filter `tools/output-text`
+  (value: a string; args: session id) is every other text a tool or
+  the agent hands on from a call: what `:report` and `:note` announce
+  (`tools/progress`, `tools/note`), the message of a tool that failed,
+  and the output of a call a provider ran itself
+  (`harness-agent--record-builtin-result`).  The secrets module is the
+  filter on both, and masks secrets in them (see secrets).
+  `tools/execute-approved` runs both as well.  A filter that signals is
+  skipped by `harness-run-filter`, so a filter that has to hold text
+  back catches its own errors and returns something safe in its place.
 - `tools/note SESSION-ID CALL-ID TEXT` is what a running call says of
   itself beyond its one progress line: a line, or a few, for people to
   read, which the agent keeps on the call
@@ -1917,8 +2002,9 @@ which otherwise leaves the model with no answer to its call at all.
   web_search stays, and so does a provider's own search standing in
   for it (`tools/builtin`); their calls go to the chain as in any mode.
 - Context bomb: outputs over `harness-tools-max-output-chars` (30000) are
-  saved to `harness-state-directory/outputs/CALL-ID.txt` and replaced
-  by the head plus an instruction to range-read that file.
+  saved, as `tools/output` left them, to
+  `harness-state-directory/outputs/CALL-ID.txt` and replaced by the head
+  plus an instruction to range-read that file.
 - A handler that signals, or whose promise rejects, fails the call
   with "Tool NAME failed: MESSAGE" -- unless TRAMP could not reach the
   host the call is about (the first of its `:paths` on another host,
@@ -3312,7 +3398,13 @@ as it is, all of the conversation uncached, without a decision.
   the session again and goes on untouched unless `harness-cowboy-cold-p`:
   the `:cache` (see "Session") expired, the session has a head, and its
   context is at least `harness-cowboy-min-context` (0).  A session with
-  no `:cache` never is.
+  no `:cache` never is.  A cache a redaction dropped has expired from the
+  drop on (`:expires` is `:dropped`, see "Session"), though its provider
+  would have kept it longer: the session's provider conversation went
+  with the secret, and its next message would send the whole transcript
+  as a new conversation's first message, uncached.  So the gate asks
+  right after a redaction, or takes the default for a session nobody is
+  asked about, as for any cold cache.
 - The choices (`harness-cowboy-choices`): `brief`, `summary`,
   `transcript` and `fresh` compact as `compaction/compact` does, with
   `:meta (:cowboy (:choice C :by BY))`, before the message; `carry-on`
@@ -3332,10 +3424,15 @@ as it is, all of the conversation uncached, without a decision.
   blocked on it.  Its payload holds the question, the options with
   their costs (`compaction/estimate`), `:allow-free-text`, the message
   waiting as `:waiting-message` `(:text :from)`, and `:cowboy`: `(:at
-  :ttl :expires :cache-model :model :model-label :context :messages
-  :carry-on :carry-on-cached :from :preview :default :history
+  :ttl :expires :dropped :cache-model :model :model-label :context
+  :messages :carry-on :carry-on-cached :from :preview :default :history
   :choices)`, each choice `(:choice :label :what :cost :cost-text :by
-  :after)`.  Clients that know it draw it (ui-cowboy); the others show
+  :after)`.  `:dropped`, when a redaction dropped the cache, is the
+  moment, and then the question says so ("a redaction dropped this
+  session's provider conversation at HH:MM, so no prompt cache holds
+  it") and names no cached price to compare with: none can be had; the
+  hint after the choice opens "Prompt cache dropped at HH:MM by a
+  redaction".  Clients that know it draw it (ui-cowboy); the others show
   an ordinary question.  The answer is read by
   `harness-cowboy-parse-answer`: a choice's name, label, option as
   offered, number, key or words naming it, and "always" with any but
@@ -4390,6 +4487,12 @@ priority).
   already done emits nothing).  Records are written
   shortly after a change and on exit (`harness-tasks-flush`), each into
   its project's store; a store whose text would not change is skipped.
+- `task/redact SECRETS &optional PROJECT DRY-RUN` takes secrets out of
+  every string of every task record -- the prompt, the report with its
+  evidence, the rounds of feedback, errors, the recap -- and out of
+  `tasks.json.bak`, the copy of the global store that no save writes
+  again; see redact for what it answers.  It is the task module's store
+  of the redaction engine.
 - Stores: a git project's records go to `harness/tasks.json` in the
   repository's common git directory (`harness-files-git-common-dir`,
   read from `.git` and `commondir` files, no git process):
@@ -4504,8 +4607,14 @@ lisp/ui/harness-ui-search.el).
   session.
 - `session/search-status` → `(:index BOOL :file :size :sessions :nodes
   :pending :progress :embedding (:model :chunks :pending :error))`, or
-  `(:index nil :reason …)`; `session/search-rebuild` drops the index
-  and builds it again from the logs.
+  `(:index nil :reason …)`; `session/search-rebuild` drops the index,
+  vacuums the file and empties its write-ahead log, so that the dropped
+  text is gone from `search.db` too (the status it returns has
+  `:vacuumed`), and builds it again from the logs.  A secret in a
+  transcript is in the index as well, in the rows, in the full-text
+  index and in the vectors of the chunks that held it, and deleting a
+  row leaves its text in the file: `session/search-redact` and
+  `session/search-purge` deal with that (see redact).
 - The UI's results buffer (`harness-ui-search-mode`) lists the sessions
   found, each with its best matches, what was found highlighted.  `m`
   cycles the mode, `a` narrows to the project the search started from
@@ -4701,6 +4810,422 @@ text, and by nothing else.
   words of the sessions the transcripts' search listed, the sessions'
   names and the commands' lines), so the dev daemon and the tests work
   offline; the screenshots script answers them from a script of its own.
+
+### harness-redaction
+
+The library (lisp/harness-redaction.el) that names a secret without
+having it in a call, finds it, and takes it out of text.  It is loaded
+on both sides (it is one of `harness--library-files`): the secrets and
+redact modules use it in the harness process, and the UI uses it to
+clean the buffers of the user's Emacs.  It stores, emits and logs
+nothing, and the errors it signals name labels, fingerprints, paths and
+counts, never a value.
+
+- A secret is a plist `(:value V :label L :fingerprint F :source S)`,
+  made by `harness-redaction-secret VALUE LABEL &optional SOURCE`.  It
+  lives in memory only: it is never stored, logged, emitted, returned to
+  a model or put in an error message.  F is the first 8 hex digits of
+  the SHA-256 of V (`harness-redaction-fingerprint`), and what takes V's
+  place in text is the placeholder `[redacted: L sha256:F]`
+  (`harness-redaction-placeholder`).  L is made fit for a placeholder:
+  control characters become spaces, `]` becomes `)`, at most 80
+  characters are kept, and an empty one is `secret`.  `S` says where V
+  was read (`harness-redaction-describe-source`): a file and the path or
+  regexp, a variable, "typed by the user" or "command output", never a
+  value.
+- A reference names a secret by where it can be read:
+
+  ```elisp
+  (:file PATH :json-path P [:label L])  ; a string in a JSON file; an object or
+                                        ; array selected stands for every string under it
+  (:file PATH :regexp RE [:label L])    ; group 1 of each match in a file
+  (:env NAME [:label L])                ; an environment variable of the process
+  (:literal STRING [:label L])          ; a value typed by the user
+  (:command STRING [:label L])          ; the output of a shell command
+  ```
+
+  `harness-redaction-resolve REF` → `(:secrets SECRETS :skipped N
+  :source DESCRIPTION)`.  SECRETS have no duplicates, the longest value
+  first.  A value shorter than `harness-redaction-min-length` (8) is
+  skipped and counted in N: a word such as `prod` would be taken out of
+  everything.  It signals a `harness-error` when no value is left to
+  redact -- the file is missing or holds nothing there, the regexp
+  matches nothing or has no group 1 that matched, the variable is unset,
+  the command fails or prints nothing, every value is short -- with a
+  message that names no value.  Without a `:label` a JSON path labels
+  each secret by its path from the root; with one a single secret has it
+  and several have `LABEL.` and the path below the part of the path
+  before the first `*`; a regexp's secrets are labelled by the file name
+  (or the `:label`) and a number when there are several.  A JSON path is
+  dot-separated keys, indices and `*`, with `["a.b"]` for a key that has
+  dots, brackets or spaces (`harness-redaction-json-path-parse`).
+  `:json_path` spells `:json-path` as well, as a tool call does.
+- `harness-redaction-shape FILE &optional JSON-PATH` → `(:path P :type
+  T)` for every node under what JSON-PATH selects (the whole document by
+  default), depth first, the selected node first: the keys and types of
+  a JSON file, so that a path can be written without reading the file.
+  P reads as a `:json-path`, T is `object`, `array`, `string`, `number`,
+  `boolean` or `null`.  Neither a value nor the length of a string is in
+  it.  After 1000 entries a last one, `(:truncated t)`, says so.
+- JSON stores a string with escapes (a quote as `\"`, and some writers
+  escape `/` as `\/`), so a secret has up to three needles
+  (`harness-redaction-needles`): its value, its value as JSON escapes it,
+  and that with `/` escaped.  `harness-redaction-pairs SECRETS` →
+  `(NEEDLE . REPLACEMENT)` pairs, the longest needle first; an escaped
+  needle is paired with the placeholder escaped the same way, so that
+  replacing in JSON text leaves valid JSON.  Text is scanned once, left
+  to right, taking the longest needle at a position and going on after
+  it: a placeholder is never searched and a position never counts twice.
+- On strings and Lisp values: `harness-redaction-count STRING SECRETS`;
+  `harness-redaction-string STRING SECRETS` → `(NEW . COUNT)`, the raw
+  values only; `harness-redaction-value VALUE SECRETS` → `(NEW . COUNT)`,
+  walking conses and vectors and sharing what did not change.
+- On JSON lines: `harness-redaction-jsonl TEXT SECRETS &rest OPTIONS` →
+  `(NEW-TEXT :count N :lines L)`.  Only a line that holds a needle is
+  parsed and written again; every other line is kept byte for byte, and
+  a line that does not parse is cleaned as text.  `:style` is `foreign`
+  (the default: objects as alists) or `harness` (as the node logs are
+  read and written), `:dry-run` only counts, and `:on-line` is called
+  with the old and new object of each line that changed.
+- On files: `harness-redaction-file-count PATH SECRETS` counts the
+  needles as UTF-8 bytes in any file, text or not, a SQLite database
+  included, reading it in chunks.  `harness-redaction-file PATH SECRETS
+  &rest OPTIONS` → `(:file :count :changed)`, with `:style` `text` (the
+  default), `jsonl` or `json` (one document, written again whole),
+  `:json-style` as above, `:dry-run` and `:on-line`.  A file with a NUL
+  byte among its first bytes is binary: counted, never changed, and
+  `:binary t` is added.  Text is written back atomically with its modes
+  (`harness-redaction-rewrite-file PATH TEXT &optional EXPECT`: a new
+  file in the same directory, then a rename), so a reader sees the old
+  file or the new one.  A file that changed while it was processed is
+  processed again, up to three times, and then
+  `harness-redaction-changed` is signalled.
+- On buffers: `harness-redaction-buffer BUFFER SECRETS &optional
+  DRY-RUN` → the count.  A read-only buffer is changed too, the
+  placeholder takes the text properties of the text it replaces, and
+  undo information that held a secret is dropped.
+
+### secrets
+
+Keeps secrets out of what the harness stores
+(lisp/modules/harness-secrets.el; requires store): a registry of the
+values of the sources the user named, detectors for what is shaped like
+a secret, and the masking that uses both.  It is what the user's
+`harness-secrets-*` options and the UI's `harness-secrets-add-source`
+act on.
+
+- `secrets/shape FILE &optional JSON-PATH` → `(:file FILE :paths PATHS
+  :truncated BOOL)`, PATHS a vector of `(:path P :type T)`: the shape of
+  a JSON file by `harness-redaction-shape`, never a value.  It is how a
+  client picks the path of a reference without reading the secret.
+- `secrets/sources` → a list of `(:id ID :label LABEL :source
+  DESCRIPTION :origin ORIGIN :values N :fingerprints (F…) :error
+  MESSAGE)`, one for each source in force, never a value.  ORIGIN is
+  `config` for a reference of `harness-secrets-sources` (its ID is
+  `config-N`) and `stored` for one added by `secrets/add-source`; N is
+  how many values the source holds and each F the first 8 hex digits of
+  the SHA-256 of one; MESSAGE, when there is one, says why the source
+  cannot be read now.  Files and variables are looked at again first.
+- `secrets/add-source REF` → the new source as `secrets/sources` lists
+  it.  REF is `(:file PATH :json-path P)`, `(:file PATH :regexp RE)`,
+  `(:env NAME)` or `(:command STRING)`, with an optional `:label`.  The
+  source is read now, which proves it names a value, and kept in
+  `secret-sources.json` of the state directory, `{"sources": [{"id",
+  "ref", "added"}]}`: the reference, never a value.  A `:literal` is
+  refused, as it would put the secret on disk, and so is a reference
+  that spells out a value it names (a regexp that quotes the secret).
+  Adding what is there already changes nothing.
+- `secrets/remove-source ID` → `(:id ID :removed t)` for a stored
+  source.  A `config-N` source is the option's to change, and says so.
+- Registry.  One entry for each source, the option's first, with the
+  values in memory only.  A file is read again when its modification time
+  or size changes and a variable when its value does, looked at every 5
+  seconds at most.  A source that cannot be read is skipped, its error is
+  kept for `secrets/sources` and logged once, it is tried again when its
+  file changes or after a minute, and the values it had when it last
+  could be read stay in force.  A command runs when its source is first
+  read, under `timeout` where that is installed, and again only if the
+  reference changes.  The module reads the sources 2 seconds after it
+  starts, so a command has run before the first result.
+- Detectors.  `harness-secrets-builtin-detectors` maps a name to a
+  plist: `:regexp`, `:group` (the part that is masked), `:default`, `:doc`,
+  and optionally `:predicate`, `:bounded`, `:case-fold`, `:before` (what
+  the text before a match has to end in), `:end` (the regexp that closes
+  a block, for a PEM key) and `:late` (tried after the others).  They
+  are `digitalocean-token`, `aws-access-key-id`, `spaces-access-key-id`,
+  `github-token`, `anthropic-key`, `openai-key`, `slack-token`,
+  `google-api-key`, `stripe-key`, `private-key` and `secret-assignment`,
+  which run by default, and `jwt`, which does not.
+  `harness-secrets-detectors` is `default`, `t`, nil or a list of names,
+  and `harness-secrets-extra-detectors` adds `(NAME REGEXP [GROUP])`.
+  There is no detector of high-entropy strings: commit ids, hashes, ids
+  and base64 data would be masked, and the model could not read them.
+- `harness-secrets-mask-text TEXT` → `(MASKED . HITS)`.  The values of
+  the registry come first, as written and as JSON escapes them, the
+  longest first and labelled by their source; the detectors follow,
+  labelled by their name; a text that two find goes to the first.  HITS
+  is a list of `(:label LABEL :fingerprint F :count N)` in the order they
+  first appear, nil when nothing was masked (MASKED is then TEXT).
+  Nothing is masked inside a placeholder, so masking text again changes
+  nothing, and a text in which masking uncovered another secret (one
+  glued to the first) is gone over again, four passes in all.  The result
+  holds neither a secret nor a snippet.
+- Filter `tools/output` at priority 5 masks the `:content` of a RESULT
+  and adds HITS to its `:meta` as `:masked`.  Filter `tools/output-text`
+  at priority 5 masks a string.  Text that masking fails on is replaced
+  by "[output withheld: it could not be checked for secrets]" (a result
+  also becomes an error), not let through.
+- `harness-log-filter-function` (harness-core) is set to a function that
+  masks the log.  `harness-log` passes each formatted message through
+  it before the log buffer and `harness-log-hook` see it.  A filter that
+  signals, or returns what is not a string, leaves the message as it was,
+  and a message logged while the filter runs is not filtered again.
+- A `permission/decide` stage at priority 3 refuses a call of kind
+  `write` whose input holds something that reads like a placeholder
+  (final, with a hint on what to do instead).  A placeholder stands where
+  a secret was masked in what the model read, and writing it into a file
+  puts it where the secret is.  A denied call can be approved by the user
+  (see perms).
+- `harness-secrets-mask` nil turns all four hooks off.  On is the
+  default, with the default detectors and no source.  What it costs:
+  a few regexp passes and one exact search per registered value over
+  every result and log line, tens of milliseconds for a megabyte of
+  output and a fraction of a millisecond for a log line; nothing is
+  skipped for its size, as skipping would be a hole.  The price is false
+  positives: `secret-assignment` now and then masks a long identifier,
+  and the model sees a placeholder where the text was.
+- Masking cannot recall what a model provider already received, and
+  it does not touch what the user types or the model writes.  The redact
+  module takes a secret out of what was stored before.
+
+### redact
+
+Takes a secret out of everything the harness stored, and records that it
+did (lisp/modules/harness-redact.el; requires secrets, session, store).
+The request names the secret by where it can be read, never by its
+value, and everything the engine writes, emits or returns is made of
+labels, fingerprints (the first 8 hex digits of the SHA-256 of the
+value), session ids, paths and counts, and is checked for the values
+before it leaves; a label or a reason that holds one is replaced first.
+So the call and its answer hold no secret, and the session that redacts
+never has to be redacted itself.  The one exception is a call that
+carried the secret in its input anyway (`:input-text`): the session that
+made it is added to the scope.
+
+- `secrets/redact PARAMS` → a report.  PARAMS is a plist; a key it does
+  not know is refused.
+  - `:source REF` (required): `(:file PATH :json-path P)`, `(:file PATH
+    :regexp RE)` or `(:env NAME)`; a `(:literal TEXT)` or `(:command
+    STRING)` only with `:allow-unsafe-sources`, which the UI and Lisp on
+    this machine may pass and a client on another device may not (see
+    acp).  `:label` names the secret in its placeholder.
+  - `:scope` (required): `session`, the `:sessions` (ids, or the starts
+    of ids); `project`, the sessions of the directory `:project` (a
+    session belongs to it when its project, or the main checkout of that
+    project, is it, or its cwd lies under it); or `all`, every session of
+    every project and kind.  `:include-forks` (default t) adds the
+    sessions descended from those named (`session/family-ids`).
+  - `:mode`: `scan` (the default) counts and changes nothing; `redact`
+    takes the secret out.  `:reason` is kept in the records.  `:origin`
+    is who asks, `(:kind user)` (the default) or `(:kind session :id
+    ID)`.  `:input-text` is the JSON of the tool call that asks.
+  - The report is `(:mode :secrets ((:label :fingerprint :source)…)
+    :skipped N :scope TEXT :sessions SESSIONS :stores STORES :total N
+    :deferred IDS :errors STRINGS :remaining STRINGS :complete BOOL
+    :verification V :text TEXT)`.  Each of SESSIONS, those with
+    something found or changed, is `(:id :name :project :count :log
+    :memory :record :search :claude :copilot :tasks :transcripts :spill
+    :temp :nodes :fields :record-fields :files :running :out-of-scope
+    :provider :would-reset :cache-dropped :cache-would-drop :context
+    :error)`: the occurrences in its node log and record
+    (`:count`), in the log, the nodes in memory, the record, the index's
+    rows, the CLI logs, the task records and the files, and the node ids
+    and field names they were in.  `:provider` is `reset`, `deferred`,
+    `failed`, or `kept` for a session outside the scope that shares a
+    provider conversation with one in it and whose own transcript still
+    holds the secret: the conversation is left as it is, the log they
+    share being clean.  A reset also costs the prompt cache of a hosted
+    loop's conversation, and the report says whose.  `:cache-dropped` is
+    t on a session whose reset dropped its cache (see "Session").  A
+    scan has no `:provider`: it gives `:would-reset` t to each session
+    whose conversation a redaction would start over (not one it would
+    leave `failed` or `kept`) and `:cache-would-drop` t to those whose
+    cache it would drop with it (`session/reset-drops-cache-p`).
+    `:context` is the tokens that cache holds, on those sessions only.
+    STORES lists the stores that are not a session's, each `(:store NAME
+    …)`.  ERRORS are the stages that failed, REMAINING what a redaction
+    left, and COMPLETE is t when it was a redaction, nothing failed,
+    nothing remains and no session waits for a turn to end.  V is
+    `(:total N :explained N :unexplained N :ok BOOL :stores ROWS)`, what
+    the scan after a redaction found; EXPLAINED are the occurrences in
+    files left alone for a stated reason (deferred, busy, binary, too
+    large) and, in the files of the search index, in the rows of sessions
+    outside the scope.  TEXT says all of it for a person or a model to
+    read, the sessions whose conversation starts over, or in a scan
+    would, and whose prompt cache goes with it, with the tokens it held.
+- `secrets/log &optional LIMIT` → the last redactions (50 by default),
+  newest first, from `redactions.jsonl` in the state directory.  The
+  engine adds a line there when a redaction ends: `(:ts :time :origin
+  :reason :mode :scope :scope-kind :after-turn :secrets :skipped :total
+  :totals :sessions :files :deferred :errors :remaining :complete
+  :verification)`.  The secrets are named by label, fingerprint and
+  source, the totals by store.
+- Stores.  A request goes through `harness-redact--store-functions` in
+  turn, in either mode (a scan only counts): the sessions' node logs,
+  nodes in memory and records (`session/redact-text`); the search index
+  (`session/search-redact`); the logs of Claude Code and Copilot; the
+  task records, for the scopes all and project (`task/redact`); the
+  transcript files that compaction and handoff wrote in the sessions'
+  directories (`.harness/transcripts/`, `.harness/handoff/`); the files
+  that hold cut tool outputs whole (`outputs/` of the state directory);
+  the sessions' temporary directories; for the scope all, every other
+  file of the state directory; and the log buffers of the process
+  (`*harness-log*`, `*Messages*`, `*harness…` buffers that visit no
+  file).  A redaction then resets the provider conversations
+  (`session/reset-provider`), has the index read the rewritten logs again
+  and purges its files (`session/search-purge`), writes the records,
+  scans everything again, announces itself and logs.  Files are counted
+  by their bytes first and rewritten only when they hold a copy; one
+  that is binary, a database or over 64 MiB is counted and reported as
+  found, not redacted; a link is never followed, nor the file the secret
+  was read from; a file in a session's temporary directory written in
+  the last minute is left alone (`busy`).
+- The store methods.  Each takes SECRETS, plists with a `:value` that the
+  caller holds in memory (the engine hands them over in the harness
+  process: a secret given by a client over the wire is on the wire), and
+  answers with ids, kinds, field names, file names and counts, never a
+  value, a snippet or an error that quotes one.
+
+  | Method | Does |
+  |---|---|
+  | `session/redact-text ID SECRETS &optional DRY-RUN` | cleans the node log, the nodes in memory and the text of the record (`name queue pending todos plan ext move`); → `(:id :hit :count :log-count :memory-count :record-count :nodes :kinds :fields :record-fields :file :running)`, and when something was found `:spill-files`, `:checkpoints` and `:provider-state` |
+  | `session/reset-provider ID` | drops the provider state, `provider-node` and the `:checkpoint` of every node, in memory and in the log; signals while ID runs a turn; when `session/reset-drops-cache-p` is true it first marks the usage `:cache-dropped` with the moment, so what the reset announces already says the cache is gone; → `(:checkpoints N)`, and `:cache-dropped t` when it marked one |
+  | `session/reset-drops-cache-p ID` | non-nil when `session/reset-provider` on ID would mark its prompt cache dropped now: the session reports a cache (a stamp and a context above 0), its model is a hosted loop (`provider/capabilities` says `:hosted-loop`) and no reset marked it since the last request that stamped one; changes nothing; signals for a session that does not exist |
+  | `session/family-ids ID` | ID and the sessions whose parent chain reaches it, oldest first |
+  | `session/search-redact IDS SECRETS &optional DRY-RUN` | IDS is a list of ids or t; with DRY-RUN → `(:available t :rows N :sessions ((SID . ROWS)…))`, else drops the rows of those sessions and reads their logs again → also `:reindexed`, `:failed`; `(:available nil :reason WHY)` without an index |
+  | `session/search-purge &optional SECRETS` | drops the rows of deleted sessions and the vectors no chunk uses, merges the FTS5 segments (`optimize`), VACUUMs and empties the write-ahead log; → `(:available t :seconds :bytes-before :bytes-after :wal-truncated :file-counts :term-counts)`, the counts being the secret's occurrences, and the terms FTS5 makes of it, in `search.db`, its `-wal` and `-shm` |
+  | `provider/claude-redact-logs SECRETS &optional CLI-IDS DRY-RUN` | cleans `PROJECTS/SLUG/ID.jsonl` and `PROJECTS/SLUG/ID/` for the CLI sessions CLI-IDS, or every file for t; → `(:directory :count :scanned :files)`, each file `(:file :cli-session :owners :count :status)`, `:status` being `redacted`, `found` (a dry run), `deferred`, `busy`, `binary`, `clean` or `error` |
+  | `provider/copilot-redact-logs SECRETS &optional IDS DRY-RUN` | the same for `STATE/ID/` of the Copilot sessions IDS |
+  | `task/redact SECRETS &optional PROJECT DRY-RUN` | cleans every string of every task record, writes the stores again at once and redacts `tasks.json.bak`; → `(:count :tasks ((:id :count :fields)…) :files :stores)` |
+
+  Before a CLI log is written, the CLI processes of the sessions that own
+  it are closed, so none goes on writing into the old file; the next turn
+  resumes the cleaned conversation.  A log whose owner runs a turn is
+  `deferred`.  The node log is read, cleaned and replaced in one step
+  that never yields: the harness process has one thread, so no append of
+  its own falls between the read and the write, no append is lost and no
+  log is torn; a log that another process changes meanwhile is read
+  again, and left as it was if it keeps changing.  The index is never
+  edited in place: a row's text is what its log says, so the logs are
+  read again.  Embedding requests that were out are dropped when they
+  return, as their vectors are of the old text.
+- Provider conversations.  A session whose nodes (the node log or the
+  nodes in memory) held the secret, or whose CLI log did, has
+  `session/reset-provider` called: its next turn starts a new
+  conversation that gets the redacted transcript
+  (`session/provider-continuation` says `current` at the head, or
+  `fresh`), and does not resume the old one.  A hit only in the record
+  (`name queue pending todos plan ext move`) resets nothing: no provider
+  conversation was sent those, and a new one is made from the nodes.
+  The reset drops the prompt cache of a hosted loop's conversation
+  with it, and marks that (`:cache-dropped`, see "Session"): the old
+  cache holds the secret, and the new conversation opens with the
+  transcript as text, a start the old cache does not hold.  A session on
+  a provider that is sent the whole transcript with every request keeps
+  its cache up to the first spot that was redacted, and is not marked.
+  The session's next message then meets the cold-cache question (see
+  cowboy), or `harness-cowboy-default` when nobody is asked.  A scan
+  says it beforehand: `harness-redact--stage-scan-providers` decides
+  for each session as `harness-redact--stage-providers` would whether
+  its conversation is reset (not when its stores failed or it is
+  `kept`), asks `session/reset-drops-cache-p`, and gives the report
+  `:would-reset`, `:cache-would-drop` and `:context`; the UI's question
+  says what the reset costs (ui-secrets).
+- Running sessions.  A session that runs a turn is cleaned at once, but
+  its provider conversation is not dropped under it and what the turn
+  writes next could bring the secret back.  The redaction is kept in
+  `harness-redact--pending`, in memory only (the session's `ext` says
+  `:redaction-pending`, by label and fingerprint), tool output is masked
+  of the pending secrets meanwhile (filters `tools/output` and
+  `tools/output-text` at priority 4), and when `agent/turn-ended` says
+  the turn is over the stores of that session are gone over again, its
+  provider reset and a second record and hint, "after its turn ended",
+  written.  Its prompt cache is dropped with that reset, not before, so
+  the session's next message meets the cold-cache question from the end
+  of the turn on.  A harness that stops first loses the secret from
+  memory; when it starts, a flagged session has its provider
+  conversation dropped and a hint says to run the redaction again.
+- Records.  Each session that changed gets a hint in its transcript
+  (labels, fingerprints, where, at whose request, why, and what became
+  of its provider conversation) and a record in its `ext`,
+  `:redactions`, a list of the last 50: `(:ts :by :reason :secrets
+  ((:label :fingerprint :source :count)…) :nodes :fields :record-fields
+  :files :counts (:log :memory :record :search :cli :tasks :transcripts
+  :spill :temp) :provider :cache-dropped :after-turn)`.  `:by` is "user",
+  or "session " and the first 8 characters of its id; `:nodes` has 200
+  ids at most; `:cache-dropped` is t, and only there, when the reset
+  dropped the session's prompt cache.
+  Events: `session/redacted ID RECORD` for each such session, and
+  `secrets/redacted SUMMARY` once per redaction (not for the second part
+  of one that waited for a turn), SUMMARY being `(:source REF :secrets
+  ((:label :fingerprint)…) :sessions IDS)`, REF the reference without
+  the value of a literal or the text of a command.  The UI follows both
+  (see ui-secrets).
+- Tool `redact_secret` (kind `meta`, label "Redact secret", a timeout of
+  30 minutes) is `secrets/redact` for an agent.  Its input is `mode`
+  (`scan`, the default; `redact`, which needs a `reason`; or `shape`,
+  the keys and types of `source.file` with the `json_path` to each),
+  `source` (`{file, json_path}`, `{file, regexp}` or `{env}`, never a
+  literal or a command), `label`, `scope` (`self`, the default: this
+  session and its forks; `sessions`; `project`; `all`), `sessions`,
+  `project`, `include_forks` and `reason`.  A key the tool does not know
+  is refused without being quoted, in the input and in `source` alike: it
+  could be the secret in the wrong place.  Its call and its result are
+  kept in the transcript like any other, so the result is made from the
+  report: the text of the report, the same for an error, and in `:meta`
+  `:redaction` the counts, session ids, labels and fingerprints.  A
+  redaction that failed in a store or left a copy behind is an error
+  result.  A scan and a shape are reads to the permission chain, a
+  redaction is not (`harness-perms--call-kind`), and the jail checks the
+  file of the source (`:paths`).
+- Adding a store.  A module of your own whose files may hold a copy adds
+  a function of the run to `harness-redact--store-functions`.  It finds
+  its copies with `(harness-redact-run-secrets RUN)`, only counts when
+  `(harness-redact-run-dry-p RUN)`, reports with `(harness-redact-add-store
+  RUN (:store NAME :count N …) LINES)`, and credits the sessions it can
+  attribute its copies to with `harness-redact-entry-incr` and
+  `harness-redact-entry-add` on their entries (the counts the report
+  knows are `:log :memory :record :search :claude :copilot :tasks
+  :transcripts :spill :temp`; `:files` lists the files changed;
+  `:provider-target` t has the session's provider conversation start
+  over, and its prompt cache go with it; a store sets it when its copies
+  sat in what a provider conversation was sent, as the CLI logs did, and
+  the sessions' own store when the nodes held one, not when only the
+  record did).  A store that leaves a copy says so in `:left`, a list of
+  strings, which the report lists under `:remaining`; a file it leaves
+  alone for a reason has the status `deferred`, `busy`, `binary` or
+  `not-redacted`, which the verification does not count as lost.
+  `harness-redact--verify-functions` take the run after the records are
+  written, and `harness-redact--finish-functions` the run and its report
+  once it is made, for a redaction only.  The verification runs the store
+  functions again on a scan of the same scope.  A reload resets these
+  lists to the harness's own, and loads modules of your own after it, so
+  the module adds its function at the top level of its file:
+
+  ```elisp
+  (defun my-redact-stage (run)
+    "Take the secrets of RUN out of my files."
+    (let ((secrets (harness-redact-run-secrets run))
+          (dry (harness-redact-run-dry-p run))
+          (count 0))
+      (dolist (file (my-files))
+        (cl-incf count (plist-get (harness-redaction-file file secrets :dry-run dry) :count)))
+      (harness-redact-add-store run (list :store "my files" :count count)
+                                (list (format "My files: %d occurrences." count)))))
+
+  (with-eval-after-load 'harness-redact
+    (add-to-list 'harness-redact--store-functions #'my-redact-stage t))
+  ```
 
 ### pet
 
@@ -6668,8 +7193,8 @@ Extension methods: any bus method whose name starts with `session/`,
 `config/`, `skills/`, `permission/`, `question/`, `compaction/`, `handoff/`, `naming/`,
 `project/`, `task/`, `search/`, `notification/`, `sandbox/status`, `harness-dev/`, `harness/api`,
 `harness/modules`, `harness/version`, `harness/reload`, `harness/call`, `acp/remote-`,
-`pet/`, `version/`, `insights/`, `supervisor/`, `seed/`, `priority/`
-(`harness-acp-extension-prefixes`), or with one of
+`pet/`, `version/`, `insights/`, `supervisor/`, `seed/`, `priority/`,
+`secrets/` (`harness-acp-extension-prefixes`), or with one of
 `harness-acp-extra-method-prefixes`, which modules of the user's own
 add to (see Modules of your own), is callable as `_harness/NAME` with a
 params object whose keys become the plist arguments (`{"id": …}` →
@@ -6682,6 +7207,19 @@ supervisor module's methods are `_harness/supervisor/set {sessionId, on}`
 UI's `harness-set-supervisor-all`, the menu's V, for every governed
 session at once), `.../get` and `.../active-p`,
 and the seed module's `_harness/seed/fork` and `.../list`.
+
+The methods under `secrets/` (see secrets and redact) take secrets: as
+references to where they can be read, which any client may send, or as
+text, which only the Emacs on this machine may.  So their params are
+never logged, the error of handling one answers with its message and
+not its data (`harness-acp--safe-error-text`), and a client on another
+device that sends a param giving a secret as text or as a command
+(`literal`, `command` or `allow-unsafe-sources`, spelled any way and at
+any depth) is refused (-32603): a command would run here, outside the
+permission system, and a text is a secret on the wire
+(`harness-acp--refuse-secret-text`).  A `harness/call` of a `secrets/`
+method is not logged and not quoted either: its `args` can carry the
+secret, which is how the Emacs on this machine sends one it was typed.
 
 `harness/call {method, args}` → `{value}` is `_harness/METHOD` for a
 client that speaks Lisp, which is only the Emacs on this machine (the
@@ -6722,9 +7260,11 @@ The bus events of `harness-acp--forwarded-events` and
 `harness-acp-extra-events` reach every client as `_harness/event
 {event, args}` notifications (the UI runs `harness-ui-event-functions`
 with them); among them `session/ext-changed` (a setting a module keeps
-on a session changed, each change of a plan's step included) and
-`supervisor/changed` (the user switched supervisor mode); see session
-and supervisor.
+on a session changed, each change of a plan's step included),
+`supervisor/changed` (the user switched supervisor mode), and
+`session/redacted` and `secrets/redacted` (a secret was taken out of a
+session's stores, or out of the stores at all); see session,
+supervisor and redact.
 
 Harness → UI requests for chores any client may do go through the bus
 method `client/request METHOD PARAMS` → promise of the first client's
@@ -7242,9 +7782,12 @@ non-nil, so the ordinary panel is not drawn too;
 Cold-cache question (`harness-ui-cowboy`, module `ui-cowboy`): the
 harness's question about a cold prompt cache (see cowboy) as a panel of
 its own, in the switch banner's amber (`harness-ui-cowboy-face`): a
-heading with the clock time the cache lapsed, the model and the
-context; who sent the message that waits, with its first line; what
-carrying on costs against the cache it lost; a row per choice with its
+heading with the clock time the cache lapsed (or, when `:cowboy`
+has `:dropped`, "dropped by a redaction at 14:07"; a cache held for
+another model reads as that model's, whatever became of it), the model
+and the context; who sent the message that waits, with its first line;
+what carrying on costs against the cache it lost (against none for a
+dropped cache: no cached price can be had); a row per choice with its
 key, a button, its cost and what it does, the default marked, the
 tooltip naming the writer and the context after it; and a footer with
 the capitals that answer "always", a line about session_history when
@@ -7272,7 +7815,18 @@ DeepSeek V4"), with the same cost: the new model reads nothing of
 that cache.  Switched back while the cache lasts, the panel goes; the
 new model's first request stamps a cache of its own, and a switch or
 compaction that starts the conversation over reports none, so no panel
-(see "Session").  While the switch banner (`ui-switch`) asks how to
+(see "Session").  A cache a redaction dropped (`:cache :dropped`, see
+"Session") shows the panel at once too, whatever the time, headed
+"Prompt cache dropped  at 14:07, by a redaction" with the moment of the
+drop, and with a tooltip saying a redaction took a secret out of the
+conversation and dropped the provider's copy of it, and its prompt
+cache with it.  Its cost line names the uncached price alone ("about
+$0.315, at list prices"): no cached one can be had, so there is none to
+compare it with.  The model switch wins when both apply: a cache held
+for another model reads as that model's, dropped or not.  The first
+request that stamps a cache after a redaction clears the dropped mark,
+and so does a compaction, so the panel goes then as well.  While the
+switch banner (`ui-switch`) asks how to
 hand over, or the cold-cache question waits (`harness-ui-cache--asked-p`),
 the panel stays away: the banner's options, or the question's, say what
 the cache means for each.  The panel needs no input and no polling: each
@@ -7898,7 +8452,10 @@ Summarising on the current model is cheap while its prompt cache lasts
 another model, the choice says so instead ("cache expired at 14:07:
 re-reads it all uncached", "cache cold: …", and for a batch how many
 lapsed), in the banner and the minibuffer alike
-(`harness-ui--handoff-choices-for`).  Its
+(`harness-ui--handoff-choices-for`).  For one session whose cache a
+redaction dropped (`:cache` has `:dropped`, see `session/reset-provider`)
+it says so, as the cache panel does: "cache dropped at 14:07 by a
+redaction: re-reads it all uncached".  Its
 keys answer while point is on the banner and a click answers from
 anywhere; the banner says the handoff is lossy and the new model is told
 to re-investigate.  Without a chat buffer to show it in (a switch asked
@@ -7946,6 +8503,45 @@ code expires, and when hidden, which drops the code
 :level :mask :modules)`, byte mode, versions 1–40; `harness-qr-image`
 one SVG path, black on white; `harness-qr-insert`, half blocks without
 images).  In corporate mode the page shows a notice only.
+
+Secrets and redactions (`harness-ui-secrets`, module `ui-secrets`, menu
+`x` and `E` after Log in the Tools column): `harness-redact-secret`
+asks where the secret is -- a JSON path in a file, chosen from the keys
+and types `_harness/secrets/shape` gives and never from values; a file
+and a regexp with one capture group; a variable of the harness; a
+command whose output it is; or the value itself, typed with
+`read-passwd` and sent only to a harness on this machine
+(`harness-ui-secrets--local-p`: this Emacs's own, its child process, or
+a loopback address), then cleared with `clear-string` once the last
+answer is in -- a label (by default from the path), the sessions (all,
+the project's, this session and its forks, or ids) and a reason.  It
+asks `_harness/secrets/redact` with `:mode "scan"` and `:origin (:kind
+"user")`, shows the report in `*harness redaction*`
+(`harness-ui-secrets-report-mode`: counts and ids, never a snippet), asks
+`yes-or-no-p`, and asks again with `:mode "redact"`.  The question ends
+with what the reset costs in prompt cache when the scan says some would
+go (`harness-ui-secrets--cache-cost`): "; 2 provider conversations start
+over, dropping ~126k tokens of prompt cache", from the sessions with
+`:cache-would-drop` and their `:context`.  The requests have
+no deadline: the harness vacuums a large search index before it
+answers.  `harness-secrets-add-source` asks `_harness/secrets/add-source`
+for the same kinds of source but the typed value (that would put it on
+disk), `harness-secrets-list-sources` shows `_harness/secrets/sources` in
+`*harness secrets*` (`a` adds, `d` stops masking the source at point,
+`g` reads again, `l` lists redactions), and `harness-redactions` shows
+`_harness/secrets/log` in `*harness redactions*` (`RET` shows one
+whole).  The module follows two events.  `session/redacted` loads the
+chat of that session again, which draws the nodes as they are stored now
+and the hint the redaction wrote.  `secrets/redacted` is for the
+buffers the harness cannot reach: `*harness-log*` (the harness's log
+lines are copied into it), `*Messages*` and every `*harness…` buffer
+that visits no file (`harness-ui-secrets--log-buffers`).  A typed value
+and a command's output (run again here, for a harness on this machine)
+are cleaned at once; for a file or a variable this Emacs reads the
+secret itself (`harness-redaction-resolve`), and cleans only when each
+secret it reads has a fingerprint the harness redacted
+(`harness-ui-secrets--matching`).  A harness on another machine reads
+other files, so it is not followed.
 
 Version page (`harness-ui-version`, `C-c h v`, `harness-version`): the
 verdict, the commit running (with, when the harness runs in its own

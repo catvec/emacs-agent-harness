@@ -23,6 +23,19 @@
 ;; The calls the provider runs still need a permission decision, which
 ;; `tools/authorize' gives without running anything.
 ;;
+;; What a tool prints is filtered before anything keeps it.  The result
+;; goes through the `tools/output' filter first (value: the RESULT, then
+;; the session id and the call), ahead of the size guard, so that the
+;; file an oversized result is saved to holds what the filter let
+;; through, not the raw text; then through the guard, then the
+;; `tools/result' filter.  The secrets module is the `tools/output'
+;; filter that takes secrets out of `:content' (and says so in the
+;; result's `:meta').  The text a tool reports as progress or as a note
+;; goes through `tools/output-text' (value: the text, then the session
+;; id) before it is announced, and so does the output the harness
+;; records for a call a provider ran itself, so every route a tool's
+;; text takes to a transcript, a UI or a model passes a filter.
+;;
 ;; Corporate mode (`harness-corporate-mode') turns off the tools of kind
 ;; net other than web search (`harness-tools--corporate-net-tools'),
 ;; and ssh, which runs commands on other machines
@@ -971,13 +984,20 @@ call with a result that says why (`harness-tools--failure')."
               (funcall finish value)))
         (error (funcall fail err))))))
 
+(defun harness-tools--output-text (text session-id)
+  "Return TEXT, from a tool of SESSION-ID, as `tools/output-text' lets it stand."
+  (harness-run-filter 'tools/output-text text session-id))
+
 (defun harness-tools--finish-call (session-id call call-id result)
-  "Truncate RESULT of CALL (id CALL-ID) of SESSION-ID and filter it; return it.
-An oversized result is truncated and the `tools/result' filter gets it,
-so a call ends the same way however it was decided.  `tools/execute'
+  "Filter RESULT of CALL (id CALL-ID) of SESSION-ID and truncate it; return it.
+The `tools/output' filter sees the result first, before the size guard,
+so the text an oversized result is saved to is the filtered one; an
+oversized result is then truncated and the `tools/result' filter gets
+it, so a call ends the same way however it was decided.  `tools/execute'
 announces the result as `tools/finished' after this;
 `tools/execute-approved' does not, that call being another's."
-  (let* ((result (harness-tools--guard-size result call-id))
+  (let* ((result (harness-run-filter 'tools/output result session-id call))
+         (result (harness-tools--guard-size result call-id))
          (result (harness-run-filter 'tools/result result session-id call)))
     result))
 
@@ -985,7 +1005,12 @@ announces the result as `tools/finished' after this;
   "Execute CALL (:id :name :input) for SESSION-ID; return a promise of a RESULT.
 The `permission/decide' chain decides first; in corporate mode a call of
 a tool of kind net is denied without asking it, unless it is a web
-search, and so is a call of ssh (`harness-tools--corporate-refusal')."
+search, and so is a call of ssh (`harness-tools--corporate-refusal').
+What the tool returns goes through the `tools/output' filter (before
+the size guard) and then the `tools/result' filter; the text it reports
+as progress or as a note goes through `tools/output-text' before it is
+announced as `tools/progress' or `tools/note'.  The secrets module masks
+secrets in all three."
   (let* ((name (plist-get call :name))
          (call-id (or (plist-get call :id) (harness-short-id)))
          (input (plist-get call :input))
@@ -994,9 +1019,11 @@ search, and so is a call of ssh (`harness-tools--corporate-refusal')."
          (ctx (list :session-id session-id :cwd (plist-get session :cwd)
                     :host (plist-get session :host) :call-id call-id
                     :report (lambda (text)
-                              (harness-emit 'tools/progress session-id call-id text))
+                              (harness-emit 'tools/progress session-id call-id
+                                            (harness-tools--output-text text session-id)))
                     :note (lambda (text)
-                            (harness-emit 'tools/note session-id call-id text)))))
+                            (harness-emit 'tools/note session-id call-id
+                                          (harness-tools--output-text text session-id))))))
     (harness-emit 'tools/started session-id call)
     (cond
      ((null tool)
@@ -1033,8 +1060,10 @@ For a call the user approved by hand after the `permission/decide' chain
 denied it (see `rerun_approved' in harness-perms.el): their approval is
 what the chain would have asked for, so nothing decides the call again,
 and the input it carries is the very input it was denied with.  The
-result is truncated and given to the `tools/result' filter as
-`tools/execute' gives one, but nothing is announced as `tools/started'
+result goes through the `tools/output' filter, is truncated and is
+given to the `tools/result' filter as `tools/execute' gives one, and
+the text it reports goes through `tools/output-text' as there, but
+nothing is announced as `tools/started'
 or `tools/finished': the call is no call of the session's own turn, the
 `rerun_approved' call that runs it is, and CALL-ID is that call's id,
 which its progress and notes (`tools/progress', `tools/note') show
@@ -1047,9 +1076,11 @@ under.  Return a promise of the result."
          (ctx (list :session-id session-id :cwd (plist-get session :cwd)
                     :host (plist-get session :host) :call-id call-id
                     :report (lambda (text)
-                              (harness-emit 'tools/progress session-id call-id text))
+                              (harness-emit 'tools/progress session-id call-id
+                                            (harness-tools--output-text text session-id)))
                     :note (lambda (text)
-                            (harness-emit 'tools/note session-id call-id text)))))
+                            (harness-emit 'tools/note session-id call-id
+                                          (harness-tools--output-text text session-id))))))
     (if (null tool)
         (harness-resolved
          (harness-tool-error (format "Unknown tool %s: the call was denied when it was there, and is not now"

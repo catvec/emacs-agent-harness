@@ -7,8 +7,10 @@
 ;; summary, a transcript file, a fresh start, the whole conversation as
 ;; it is, or not now.  The question is a pending question like any
 ;; other; its payload's `:cowboy' says when the cache lapsed (or that it
-;; is held for a model the session no longer uses), what carrying on
-;; costs and what each choice costs.  This module draws it
+;; is held for a model the session no longer uses, or that a redaction
+;; dropped it, and when), what carrying on costs and what each choice
+;; costs, a dropped cache being compared with no cached price, as none
+;; can be had.  This module draws it
 ;; as a panel of its own, in place of the ordinary question panel
 ;; (`harness-ui-pending-panel-functions'), in the chat and in a popout
 ;; of it: who sent the message that waits, what carrying on costs
@@ -92,6 +94,17 @@ then."
           :by (harness-ui-cowboy--text (plist-get entry :by))
           :after (and (numberp (plist-get entry :after)) (plist-get entry :after)))))
 
+(defun harness-ui-cowboy--dropped (info)
+  "Return when a redaction dropped the cache INFO speaks of, or nil.
+That is INFO's `:dropped', a moment.  A cache held for another model
+\(`:cache-model-label') is cold for that reason, whatever became of it:
+the model the session uses now has none of it either way, so it reads
+as that."
+  (let ((dropped (plist-get info :dropped)))
+    (and (numberp dropped)
+         (not (harness-ui-cowboy--text (plist-get info :cache-model-label)))
+         dropped)))
+
 (defun harness-ui-cowboy-waiting-p (session-id)
   "Non-nil while SESSION-ID waits on the question about its cold cache.
 Either the requests this UI knows of say so, or the session's own
@@ -153,8 +166,12 @@ it (now, else when it wrote, else a short id): a session link
 
 (defun harness-ui-cowboy--heading (info now)
   "Return the heading of the panel for INFO, drawn at NOW.
-Clock times only, never ages, so it stays true while it shows."
+It says why the cache is cold: it is held for another model, a
+redaction dropped it (`:dropped'), or it lapsed (`:expires'), with the
+time of the last two.  Clock times only, never ages, so it stays true
+while it shows."
   (let* ((expires (plist-get info :expires))
+         (dropped (harness-ui-cowboy--dropped info))
          (context (plist-get info :context))
          (stale (harness-ui-cowboy--text (plist-get info :cache-model-label)))
          (model (or (harness-ui-cowboy--text (plist-get info :model-label))
@@ -166,6 +183,9 @@ Clock times only, never ages, so it stays true while it shows."
      (propertize (string-join
                   (delq nil (append
                              (list (cond (stale (format "held for %s, not %s" stale model))
+                                         (dropped
+                                          (format "dropped by a redaction at %s"
+                                                  (harness-ui-format-clock dropped now)))
                                          ((numberp expires)
                                           (format "since %s" (harness-ui-format-clock expires now)))))
                              (unless stale (list model))
@@ -185,12 +205,16 @@ Clock times only, never ages, so it stays true while it shows."
      'wrap-prefix "   ")))
 
 (defun harness-ui-cowboy--carry-on (info)
-  "Return the line saying what carrying on costs, as INFO says."
+  "Return the line saying what carrying on costs, as INFO says.
+Where a lapsed cache is compared with the price it would have cost
+cached, a cache a redaction dropped is not: none can be had.  The
+price of carrying on is on its row below."
   (let ((carry (plist-get info :carry-on))
-        (cached (plist-get info :carry-on-cached)))
+        (cached (plist-get info :carry-on-cached))
+        (dropped (harness-ui-cowboy--dropped info)))
     (propertize
      (concat "   Carrying on sends the whole conversation again, uncached"
-             (if (and (numberp carry) (numberp cached) (> carry cached))
+             (if (and (not dropped) (numberp carry) (numberp cached) (> carry cached))
                  (format ": about %s instead of the %s it would cost cached."
                          (harness-format-cost carry) (harness-format-cost cached))
                ".")

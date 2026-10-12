@@ -232,6 +232,15 @@
 ;; session to list it under, it has no parent, and it works at the
 ;; project root.  `harness-tasks--btw-prompt' tells it to answer from the
 ;; task and session tools.
+;;
+;; Redaction: what a task keeps -- its prompt, the report it handed in
+;; (whose evidence can copy the output of a tool call), the rounds of
+;; feedback, its errors and recap -- can hold a secret that got into the
+;; session's transcript.  `task/redact' (see Redaction below) takes it
+;; out of every record and of the files that keep the records, for the
+;; redaction engine (harness-redact.el), which hands it the secrets it
+;; resolved from a reference: they exist in memory only, and nothing
+;; here logs, emits or returns one.
 
 ;;; Code:
 
@@ -241,6 +250,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-files)
+(require 'harness-redaction)
 (require 'harness-priority)
 (require 'harness-slots)
 
@@ -4018,6 +4028,155 @@ task's priority and nothing else."
       (when (harness-method-exists-p 'agent/cancel) (harness-call 'agent/cancel sid))
       (harness-call 'session/delete sid))
     t))
+
+;;;; Redaction
+;;
+;; The records are redacted in the table and written again at once: a
+;; store is a function of the records, so none keeps a copy of what was
+;; taken out of them.  What no save writes again is redacted as a file,
+;; which is the one copy of the global store kept from before records
+;; moved into their repositories (`harness-tasks--backup-suffix').
+
+(defun harness-tasks--redaction-fields (old new)
+  "Return the keys of the record NEW whose values are not those of OLD.
+NEW is OLD as `harness-redaction-value' returned it, which shares with
+OLD what it did not change: the values that are not `eq' are the ones it
+replaced."
+  (cl-loop for (key value) on new by #'cddr
+           unless (eq value (plist-get old key))
+           collect key))
+
+(defun harness-tasks--redact-records (secrets root)
+  "Return what redacting SECRETS in the task records of project ROOT would change.
+Every project's records when ROOT is nil.  The value lists, for each task
+that holds a secret, oldest first, a plist of `:id', `:count' (how many
+occurrences), `:fields' (the keys of the record that hold them) and
+`:record' (the record redacted).  Nothing is changed here."
+  (let (found)
+    (dolist (task (harness-tasks--sorted
+                   (lambda (task) (or (null root) (equal root (plist-get task :project))))))
+      (let* ((id (plist-get task :id))
+             ;; The error of a failed walk could print the record, secret and all.
+             (result (condition-case err
+                         (harness-redaction-value task secrets)
+                       (error (signal 'harness-error
+                                      (list (format "Task %s could not be searched for the secret (%s)"
+                                                    id (car err))))))))
+        (when (> (cdr result) 0)
+          (push (list :id id :count (cdr result)
+                      :fields (harness-tasks--redaction-fields task (car result))
+                      :record (car result))
+                found))))
+    (nreverse found)))
+
+(defun harness-tasks--redact-backup (secrets dry-run)
+  "Redact SECRETS in the copy of the global store kept from before the move.
+That is tasks.json.bak (`harness-tasks--backup-global'), a file no save
+writes again, redacted whole as JSON, with DRY-RUN only counted.  Return
+its (:file FILE :count N) when it held a secret, else nil."
+  (let ((backup (concat (harness-tasks--global-store) harness-tasks--backup-suffix)))
+    (when (file-regular-p backup)
+      (let ((result (harness-redaction-file backup secrets :style 'json :dry-run dry-run)))
+        (when (> (plist-get result :count) 0)
+          (list :file backup :count (plist-get result :count)))))))
+
+(defun harness-tasks--store-counts (secrets)
+  "Return how many times SECRETS occur in each task store file.
+These are the global store and the repository stores this process has
+opened, as plists of `:file' and `:count' (nil when the file cannot be
+read); a store of another harness, which this one may not write, is
+marked `:foreign' t.  The needles are looked for as bytes in the file,
+the JSON escapes of a secret included."
+  (let ((stores nil))
+    (maphash (lambda (path state) (push (cons path (eq state 'mine)) stores))
+             harness-tasks--stores)
+    (cl-loop for (path . mine) in (cons (cons (harness-tasks--global-store) t)
+                                        (sort stores (lambda (a b) (string< (car a) (car b)))))
+             when (file-regular-p path)
+             collect (append (list :file path
+                                   :count (condition-case nil
+                                              (harness-redaction-file-count path secrets)
+                                            (error nil)))
+                             (and (not mine) (list :foreign t))))))
+
+(harness-defmethod task/redact (secrets &optional project dry-run)
+  "Take SECRETS out of the task records and the files that keep them.
+SECRETS are secrets as harness-redaction.el has them, plists of `:value',
+`:label' and `:fingerprint', held in memory only: nothing here logs,
+emits or returns a value, and an error says nothing of one.  Every
+string of every task record is searched, whichever field holds it --
+the prompt, the title, the report handed in with its evidence, the
+rounds of feedback, errors, recaps.  PROJECT, a directory taken as
+`task/list' takes its CWD, limits it to the tasks of that project;
+nil (or false) is every task.  No task is stopped, restarted or
+deleted, and no session is touched.
+
+Unless DRY-RUN the changed records are put back, every store is written
+again from them at once (not the write a change schedules for later),
+and `task/changed' is emitted for each task that held a secret.  The
+copy of the global store kept from before records moved into their
+repositories, tasks.json.bak, is a file nothing writes again: it is
+redacted whole, as JSON, whichever project is asked for.  With DRY-RUN
+it only counts, and nothing changes.
+
+Return (:count N :tasks TASKS :files FILES :stores STORES).  TASKS holds
+a plist (:id ID :count N :fields KEYS) for each task that held a secret,
+oldest first: N occurrences, in the fields KEYS (keywords) of its
+record.  FILES holds (:file FILE :count N) for the backup copy when it
+held one.  N, the COUNT, is the total of the counts of TASKS and FILES:
+the occurrences redacted, or in a dry run found.  STORES says what is
+left: for each store file the tasks are kept in -- the global store and
+the repository stores this harness has opened -- (:file FILE :count N),
+the occurrences it holds when the call returns, which is 0 after a
+redaction but for the tasks of other projects when PROJECT limited it.
+A store of another harness, which this one may not write, is counted
+too and marked `:foreign' t.  Values, snippets and the names of tasks
+are never returned."
+  ;; Before anything touches them: an error that names a malformed
+  ;; secret would print it.
+  (unless (and (proper-list-p secrets)
+               (cl-every (lambda (secret)
+                           (and (proper-list-p secret) (stringp (plist-get secret :value))))
+                         secrets))
+    (signal 'harness-error (list "SECRETS must be a list of secrets, each a plist with a :value string")))
+  (harness-tasks--load)
+  (let* ((root (cond ((memq project '(nil :false :null)) nil)
+                     ((and (stringp project) (not (string-blank-p project)))
+                      (harness-tasks--project project))
+                     (t (signal 'harness-error (list "PROJECT must be the name of a directory")))))
+         (dry-run (harness-json-true-p dry-run))
+         (found (progn (when root (harness-tasks--open-project root))
+                       (harness-tasks--redact-records secrets root)))
+         (files nil))
+    (unless dry-run
+      ;; Put back, then written at once: nothing keeps the old text.
+      (dolist (entry found)
+        (let ((id (plist-get entry :id)))
+          (puthash id (plist-get entry :record) harness-tasks--table)
+          ;; The text a title request is out for is a copy of the prompt.
+          ;; Its answer is dropped, and the task named again, as for any
+          ;; prompt that changed meanwhile (`harness-tasks--named').
+          (when-let* ((text (gethash id harness-tasks--naming))
+                      ((stringp text)))
+            (puthash id (car (harness-redaction-string text secrets)) harness-tasks--naming))))
+      ;; So a save that fails is tried again, the records being changed.
+      (harness-tasks--save-soon)
+      (unwind-protect (harness-tasks--save)
+        (dolist (entry found)
+          (when-let* ((task (gethash (plist-get entry :id) harness-tasks--table)))
+            (harness-emit 'task/changed (harness-tasks--view task))))))
+    ;; After the save, which may have copied the global store aside.
+    (when-let* ((backup (harness-tasks--redact-backup secrets dry-run)))
+      (push backup files))
+    (let ((tasks (mapcar (lambda (entry) (harness-plist-remove entry :record)) found)))
+      (when (and (not dry-run) (or tasks files))
+        (harness-log 'info "tasks: took a secret out of %d task record%s and %d file%s"
+                     (length tasks) (if (cdr tasks) "s" "") (length files) (if (cdr files) "s" "")))
+      (list :count (+ (apply #'+ (mapcar (lambda (entry) (plist-get entry :count)) tasks))
+                      (apply #'+ (mapcar (lambda (entry) (plist-get entry :count)) files)))
+            :tasks tasks
+            :files files
+            :stores (harness-tasks--store-counts secrets)))))
 
 ;;;; Module
 

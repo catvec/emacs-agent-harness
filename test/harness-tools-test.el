@@ -286,5 +286,62 @@ array), as OpenAI did for hand_in, whose evidence item requires no key."
       (harness-emit 'agent/activity-changed sid (gethash sid harness-agent--activities))
       (should (equal '("thinking" "starting") seen)))))
 
+;;;; What a tool prints is filtered before anything keeps it
+
+(defvar harness-tools-max-output-chars)
+
+(defun harness-tools-test--run (name &rest input)
+  "Run the tool NAME with INPUT, everything allowed, and return its result."
+  (harness-add-filter 'permission/decide (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
+  (harness-await (harness-call 'tools/execute nil (list :id "c1" :name name :input input)) 10))
+
+(ert-deftest harness-tools-output-filter-runs-before-the-size-guard ()
+  "The `tools/output' filter sees the result before it is truncated and saved.
+So the file an oversized result is saved to holds the filtered text, and
+the filter gets the session and the call it filters for."
+  (harness-tools-test-with
+    (harness-define-tool "t_loud" :label "Loud" :kind 'read
+                         :handler (lambda (input _ctx) (harness-tool-ok (plist-get input :text))))
+    (let ((harness-tools-max-output-chars 100)
+          (seen nil))
+      (harness-add-filter 'tools/output
+                          (lambda (result session-id call)
+                            (push (list session-id (plist-get call :name)) seen)
+                            (plist-put (copy-sequence result) :content
+                                       (string-replace "secret" "[x]" (plist-get result :content)))))
+      (let* ((text (concat (make-string 300 ?a) " secret " (make-string 300 ?b)))
+             (result (harness-tools-test--run "t_loud" :text text))
+             (path (plist-get (plist-get result :truncated) :path)))
+        (should path)
+        (should (equal '((nil "t_loud")) seen))
+        (should-not (string-search "secret" (with-temp-buffer (insert-file-contents path) (buffer-string))))
+        (should (string-search " [x] " (with-temp-buffer (insert-file-contents path) (buffer-string))))
+        ;; The filter ran once; a small result is filtered the same way.
+        (should (equal "a [x] b" (plist-get (harness-tools-test--run "t_loud" :text "a secret b") :content)))))))
+
+(ert-deftest harness-tools-output-text-filter-runs-on-progress-and-notes ()
+  "The text a tool reports as progress or as a note goes through `tools/output-text'."
+  (harness-tools-test-with
+    (harness-define-tool "t_chatty" :label "Chatty" :kind 'read
+                         :handler (lambda (input ctx)
+                                    (funcall (plist-get ctx :report) (plist-get input :text))
+                                    (funcall (plist-get ctx :note) (plist-get input :text))
+                                    (harness-tool-ok "done")))
+    (let ((progress nil) (notes nil) (filtered nil))
+      (harness-on 'tools/progress (lambda (sid cid text) (push (list sid cid text) progress)))
+      (harness-on 'tools/note (lambda (sid cid text) (push (list sid cid text) notes)))
+      (harness-add-filter 'tools/output-text
+                          (lambda (text session-id) (push session-id filtered) (upcase text)))
+      (harness-tools-test--run "t_chatty" :text "quiet words")
+      (should (equal '((nil "c1" "QUIET WORDS")) progress))
+      (should (equal '((nil "c1" "QUIET WORDS")) notes))
+      (should (equal '(nil nil) filtered))
+      ;; A call the user approved by hand reports through the filter too.
+      (setq progress nil)
+      (harness-await (harness-call 'tools/execute-approved nil
+                                   (list :id "c2" :name "t_chatty" :input (list :text "again")))
+                     10)
+      (should (equal '((nil "c2" "AGAIN")) progress)))))
+
 (provide 'harness-tools-test)
 ;;; harness-tools-test.el ends here

@@ -69,11 +69,37 @@ is cut rather than repeated in *Messages* and the log buffer.")
 (defvar harness-log-hook nil
   "Functions called with (LEVEL MESSAGE) for every log entry.")
 
+(defvar harness-log-filter-function nil
+  "Function that filters every log message before it is kept, or nil.
+It is called with the formatted message and returns the text to log
+instead, a string; `harness-log' keeps that in the log buffer and hands
+it to `harness-log-hook', which forwards it to the UI.  The secrets
+module sets it to take secrets out of what the log keeps.  A filter
+that signals, or returns anything but a string, leaves the message as
+it was, and a message logged while the filter runs (by the filter, or
+by something it calls) is not filtered again, so a filter that logs
+cannot recurse.")
+
+(defvar harness--log-filtering nil
+  "Non-nil while `harness-log-filter-function' runs.")
+
+(defun harness--log-filtered (msg)
+  "Return MSG, a formatted log message, as the log filter lets it stand.
+See `harness-log-filter-function'."
+  (if (or (null harness-log-filter-function) harness--log-filtering)
+      msg
+    (let ((harness--log-filtering t))
+      (condition-case nil
+          (let ((new (funcall harness-log-filter-function msg)))
+            (if (stringp new) new msg))
+        (error msg)))))
+
 (defun harness-log (level fmt &rest args)
-  "Log FMT formatted with ARGS at LEVEL (debug, info, warn or error)."
+  "Log FMT formatted with ARGS at LEVEL (debug, info, warn or error).
+The message goes through `harness-log-filter-function' first."
   (when (>= (or (alist-get level harness--log-levels) 1)
             (or (alist-get harness-log-level harness--log-levels) 1))
-    (let ((msg (apply #'format-message fmt args)))
+    (let ((msg (harness--log-filtered (apply #'format-message fmt args))))
       (with-current-buffer (get-buffer-create harness-log-buffer-name)
         (let ((inhibit-read-only t))
           (goto-char (point-max))

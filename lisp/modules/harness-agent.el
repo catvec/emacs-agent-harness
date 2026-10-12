@@ -1173,7 +1173,10 @@ logged, short, and the ones after it still run."
          (harness-agent--remove-call sid call-id)
          (harness-agent--update-activity sid)
          (unwind-protect
-             (let ((msg (format "Tool %s failed: %s" name (harness-error-short-message err))))
+             (let ((msg (harness-run-filter
+                         'tools/output-text
+                         (format "Tool %s failed: %s" name (harness-error-short-message err))
+                         sid)))
                (harness-agent--try (format "recording the failure of %s" name)
                  (harness-call 'session/append sid
                                (list :kind 'tool-result :call-id call-id :output msg :is-error t)))
@@ -1298,12 +1301,17 @@ harness could not send it (see `harness-agent--respond-with-fallback')."
   "Record OUTPUT as the result of SID's running built-in CALL and end it.
 IS-ERROR marks a failed call; META is added to the node's meta.  Return
 the node, or nil when it could not be recorded: that is logged, short,
-and the call is over all the same."
+and the call is over all the same.  The output goes through the
+`tools/output-text' filter first, as the text of a harness tool does, so
+the secrets module masks it here too."
   (harness-agent--remove-call sid (car call))
   (let ((node (harness-agent--try (format "recording result of %s" (or (plist-get (cdr call) :tool) (car call)))
                 (harness-call 'session/append sid
                               (list :kind 'tool-result :call-id (car call)
-                                    :output (if (stringp output) output (format "%s" (or output "")))
+                                    :output (harness-run-filter
+                                             'tools/output-text
+                                             (if (stringp output) output (format "%s" (or output "")))
+                                             sid)
                                     :is-error (and is-error t)
                                     :meta (append (list :builtin t
                                                         :duration (- (float-time)

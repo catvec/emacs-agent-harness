@@ -8,7 +8,11 @@
 ;; that question, and, end to end against the state layer, the demo
 ;; provider and the in-process ACP connection, that a message sent from
 ;; the compose box of a cold session waits on it, the cache panel
-;; giving way, and goes once a key answers it.
+;; giving way, and goes once a key answers it.  A cache a redaction
+;; dropped is headed so and compared with no cached price, in a panel
+;; made from a record and, against a fake hosted loop (Claude Code,
+;; Copilot), from the question the harness asks; the words for a lapsed
+;; cache and for a cache of another model stay as they were.
 
 ;;; Code:
 
@@ -18,6 +22,7 @@
 
 (defvar harness-provider-demo-script-override)
 (defvar harness-provider-demo--delay)
+(defvar harness-providers)
 (defvar harness-naming-auto)
 (defvar harness-sessions)
 (defvar harness-tools)
@@ -42,6 +47,9 @@
 (declare-function harness-chat-buffer "harness-ui-chat")
 (declare-function harness-chat-send "harness-ui-chat")
 (declare-function harness-acp--drop-client "harness-acp")
+(declare-function harness-cowboy-cold-p "harness-cowboy" (session &optional now))
+(declare-function harness-define-provider "harness-provider")
+(declare-function harness-provider--forget "harness-provider" (id))
 
 ;;;; The panel, from a record
 
@@ -134,6 +142,72 @@ place of the clock time it lapsed at, which is not why it is asked about."
                  (harness-ui-cowboy-panel-string "s1" (harness-ui-cowboy-test--record :cowboy cowboy) 1400.0))))
     (should (string-match-p "\\` .*Prompt cache cold  held for Claude Opus 5\\.5, not Demo scripted · ~84\\.0k tokens\\'"
                             (nth 0 lines)))))
+
+(ert-deftest harness-ui-cowboy-panel-heads-a-cache-a-redaction-dropped ()
+  "A cache a redaction dropped is headed with the moment of the drop, in
+place of the clock time it would have lapsed at, and says it was a
+redaction.  The line under the waiting message compares the price of
+carrying on with no cached price, as none can be had; everything else is
+the panel of a lapsed cache, the choices and their prices included."
+  (harness-test-reset-bus)
+  (harness-test-load-module 'ui)
+  (let* ((lapsed (harness-ui-cowboy-panel-string "s1" (harness-ui-cowboy-test--record) 1400.0))
+         (cowboy (plist-put (plist-put (copy-sequence (plist-get (harness-ui-cowboy-test--record) :cowboy))
+                                       :expires 1100.0)
+                            :dropped 1100.0))
+         (dropped (harness-ui-cowboy-panel-string "s1" (harness-ui-cowboy-test--record :cowboy cowboy) 1400.0))
+         (lines (harness-ui-cowboy-test--lines dropped))
+         (lapsed-lines (harness-ui-cowboy-test--lines lapsed)))
+    (should (string-match-p (format "\\` .*Prompt cache cold  dropped by a redaction at %s · Demo scripted · ~84\\.0k tokens\\'"
+                                    (regexp-quote (format-time-string "%H:%M" 1100.0)))
+                            (nth 0 lines)))
+    (should-not (string-match-p "since" (nth 0 lines)))
+    (should (equal "   Your message waits: “now add tests for the parser”" (nth 1 lines)))
+    ;; No "about $0.315 instead of the $0.025 it would cost cached": the cached price is not to be had.
+    (should (equal "   Carrying on sends the whole conversation again, uncached.  What goes first?" (nth 2 lines)))
+    (should-not (string-match-p "instead of\\|cost cached" dropped))
+    ;; The rest is the panel of a lapsed cache, the price of carrying on on its row.
+    (should (equal (seq-subseq lapsed-lines 3) (seq-subseq lines 3)))
+    (should (member "    c  Carry on         ~$0.315 uncached  the whole conversation goes again, uncached" lines))
+    (should (equal "p1" (get-text-property (1- (length dropped)) 'harness-ui-cowboy-panel dropped)))
+    ;; Drawn on a later day, the time says its day.
+    (should (string-match-p "dropped by a redaction at [A-Z][a-z]+ [0-9]+, [0-9:]+ ·"
+                            (nth 0 (harness-ui-cowboy-test--lines
+                                    (harness-ui-cowboy-panel-string "s1" (harness-ui-cowboy-test--record :cowboy cowboy)
+                                                                    (+ 1100.0 (* 3 86400)))))))))
+
+(ert-deftest harness-ui-cowboy-panel-keeps-the-words-of-the-other-caches ()
+  "A cache that lapsed by itself, one held for another model, and a `:dropped'
+that is no moment are told in the words they always were, the cached
+price compared included: only a drop of a cache the session's own model
+holds is told as one.  A cache dropped and held for another model reads
+as the other model's, as the new model has none of it either way."
+  (harness-test-reset-bus)
+  (harness-test-load-module 'ui)
+  (let* ((cowboy (plist-get (harness-ui-cowboy-test--record) :cowboy))
+         (compare (concat "   Carrying on sends the whole conversation again, uncached: about $0.315 instead of"
+                          " the $0.025 it would cost cached.  What goes first?"))
+         (lines (lambda (info)
+                  (harness-ui-cowboy-test--lines
+                   (harness-ui-cowboy-panel-string "s1" (harness-ui-cowboy-test--record :cowboy info) 1400.0))))
+         (since (format "\\` .*Prompt cache cold  since %s · Demo scripted · ~84\\.0k tokens\\'"
+                        (regexp-quote (format-time-string "%H:%M" 1300.0)))))
+    ;; A lapsed cache, with the drop absent (an old harness), nil, or as the wire says nil.
+    (dolist (info (list cowboy
+                        (plist-put (copy-sequence cowboy) :dropped nil)
+                        (plist-put (copy-sequence cowboy) :dropped :null)
+                        (plist-put (copy-sequence cowboy) :dropped :false)))
+      (let ((got (funcall lines info)))
+        (should (string-match-p since (nth 0 got)))
+        (should (equal compare (nth 2 got)))))
+    ;; Held for another model, whether or not the redaction dropped it as well.
+    (dolist (info (list (plist-put (copy-sequence cowboy) :cache-model-label "Claude Opus 5.5")
+                        (plist-put (plist-put (copy-sequence cowboy) :cache-model-label "Claude Opus 5.5")
+                                   :dropped 1100.0)))
+      (let ((got (funcall lines info)))
+        (should (string-match-p "\\` .*Prompt cache cold  held for Claude Opus 5\\.5, not Demo scripted · ~84\\.0k tokens\\'"
+                                (nth 0 got)))
+        (should (equal compare (nth 2 got)))))))
 
 (ert-deftest harness-ui-cowboy-panel-for-another-sender-and-sparse-info ()
   "A message another session sent says so; a question that brings less
@@ -287,6 +361,86 @@ goes."
                                                       (buffer-substring-no-properties (point-min) (point-max)))))
                          5 "the compaction in the chat")
       (should-not (harness-ui-cowboy-waiting-p sid)))))
+
+(defun harness-ui-cowboy-test--define-hosted ()
+  "Define `hosted', a fake hosted loop (Claude Code, Copilot).
+It keeps the conversation itself and answers every request with a
+conversation state, a reply and usage that wrote 400 tokens of cache."
+  (harness-define-provider 'hosted
+    :label "Hosted"
+    :models (lambda ()
+              (harness-resolved
+               (list (list :name "m" :label "Hosted M" :context-window 200000
+                           :pricing '(:input 4.0 :output 20.0 :cache-read 0.4 :cache-write 5.0)))))
+    :complete (lambda (req)
+                (let ((on-event (plist-get req :on-event)))
+                  (run-at-time 0.005 nil
+                               (lambda ()
+                                 (funcall on-event '(:type provider-state :state (:conv "c1")))
+                                 (funcall on-event '(:type text :delta "ok"))
+                                 (funcall on-event '(:type usage :input 30 :output 5
+                                                           :cache-write 400 :context 430))
+                                 (funcall on-event '(:type done :stop-reason end-turn)))))
+                (list :cancel #'ignore))
+    :capabilities '(:hosted-loop t :resume t :fork t)))
+
+(ert-deftest harness-ui-cowboy-chat-asks-after-a-redaction-dropped-the-cache ()
+  "A message to a hosted session whose provider conversation a redaction
+dropped waits on the panel, though the clock of its cache has minutes to
+run.  The panel says a redaction dropped the cache, and when, and
+compares no cached price; carrying on answers it, the message goes in
+the new conversation, whose first request writes a cache of its own."
+  (harness-ui-cowboy-test-with
+    (harness-ui-cowboy-test--define-hosted)
+    (unwind-protect
+        (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "hosted:m") :id))
+               (buffer nil))
+          (harness-call 'session/append sid '(:kind user :content "please refactor the parser"))
+          (harness-call 'session/append sid '(:kind assistant :content "Done: parser.el rewritten"))
+          ;; The last request read 3000 tokens of cache, just now: warm for five minutes.
+          (harness-call 'session/usage-add sid (list :input 10 :output 10 :cache-read 3000 :context 3020
+                                                     :cache-at (float-time)))
+          (should-not (harness-cowboy-cold-p (harness-call 'session/get sid)))
+          (setq buffer (harness-chat-buffer sid))
+          (set-window-buffer (selected-window) buffer)
+          (harness-test-wait (lambda () (with-current-buffer buffer (and (not harness-chat--loading) harness-compose-end)))
+                             5 "the session to load")
+          (should-not (harness-ui-cowboy-test--cache-panel-p buffer))
+          ;; The redaction drops the provider conversation, and its cache with it.
+          (should (equal '(:checkpoints 0 :cache-dropped t) (harness-call 'session/reset-provider sid)))
+          (harness-test-wait (lambda () (harness-ui-cowboy-test--cache-panel-p buffer)) 5 "the cache panel")
+          (with-current-buffer buffer
+            (goto-char harness-compose-end)
+            (insert "now add tests")
+            (harness-chat-send))
+          (harness-test-wait (lambda () (harness-ui-cowboy-test--panel buffer)) 5 "the cold-cache panel")
+          (harness-test-wait (lambda () (not (harness-ui-cowboy-test--cache-panel-p buffer))) 5 "the cache panel to go")
+          (with-current-buffer buffer
+            (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+              (should (string-match-p (concat "Prompt cache cold  dropped by a redaction at [0-9:]+"
+                                              " · Hosted M · ~3\\.0k tokens\n")
+                                      text))
+              (should (string-match-p "Your message waits: “now add tests”" text))
+              (should (string-match-p
+                       "Carrying on sends the whole conversation again, uncached\\.  What goes first\\?\n" text))
+              (should-not (string-match-p "instead of the\\|since [0-9]" text))
+              (should (string-match-p " c  Carry on  +~\\$[0-9.]+ uncached" text)))
+            ;; c, with point on the panel.
+            (let ((at (harness-ui-cowboy-test--panel buffer)))
+              (call-interactively (lookup-key (get-text-property at 'keymap) "c"))))
+          (harness-test-wait (lambda () (and (not (harness-call 'agent/running sid))
+                                             (eq 'idle (plist-get (harness-call 'session/get sid) :status))
+                                             (equal "ok" (plist-get (car (last (harness-call 'session/nodes sid)))
+                                                                    :content))))
+                             10 "the turn to end")
+          (harness-test-wait (lambda () (not (harness-ui-cowboy-test--panel buffer))) 5 "the panel to go")
+          (should-not (harness-ui-cowboy-waiting-p sid))
+          ;; The new conversation's first request wrote a cache of its own: nothing is dropped any more.
+          (let ((cache (plist-get (harness-call 'session/get sid) :cache)))
+            (should cache)
+            (should-not (plist-get cache :dropped))))
+      (remhash 'hosted harness-providers)
+      (harness-provider--forget 'hosted))))
 
 (provide 'harness-ui-cowboy-test)
 ;;; harness-ui-cowboy-test.el ends here
