@@ -13,7 +13,14 @@
 ;; the compose box says so, with how much context the next message sends
 ;; uncached and what that costs at list prices.  A session whose turn is
 ;; still running shows no panel, blocked on an answer included: its next
-;; request is part of that turn, not the next message.
+;; request is part of that turn, not the next message.  Nor does a
+;; session this UI sent a message that has no answer yet
+;; (`harness-ui-prompt-in-flight-p'; the answer to a prompt comes when
+;; its turn ends).  The UI can be behind the harness -- an Emacs that
+;; reads its socket late still holds the session idle, with the cache
+;; stamp of the turn before -- and a panel saying the cache expired a
+;; minute after the user's message would be false: the turn is running
+;; and has just used the cache.
 ;;
 ;; It offers to compact the conversation first, so the next message sends
 ;; only what stands in for it (harness-ui-compact.el): a button for each
@@ -60,7 +67,11 @@
 ;; polls.  A session update moves the timer, as a new request keeps the
 ;; cache longer, and the panel goes while the session runs -- a turn
 ;; waiting on an answer included -- to come back when the turn ends with
-;; the cache lapsed.  The panel names clock times, never ages, so it
+;; the cache lapsed.  So does a message sent: the panel goes as it is
+;; sent, and comes back with its answer (or its failure) when the cache
+;; lapsed (`harness-ui-prompt-functions').  The record the panel reads is
+;; the newest the UI took in (`harness-ui-session'), the session list and
+;; fetches included.  The panel names clock times, never ages, so it
 ;; stays true for as long as it shows without being drawn again.  A
 ;; session that never used a cache, a new one included, has no `:cache'
 ;; and never shows it.
@@ -122,16 +133,24 @@ answer, `pending' while it is asked, or `failed'.")
 ;;;; What the panel shows
 
 (defun harness-ui-cache--session ()
-  "Return the session of this chat buffer, as last heard."
-  (or (bound-and-true-p harness-chat--session)
-      (and harness-ui-session-id (harness-ui-session harness-ui-session-id))))
+  "Return the session of this chat buffer, as last heard.
+That is the newest record the UI took in (`harness-ui-session'): the
+session list and a fetch land there as well as every `_harness/session'
+update, whereas this buffer's own copy (`harness-chat--session') is only
+what the chat last took in from an update, and can be older.  It serves
+once the session is gone from the cache, as the chat has it."
+  (or (and harness-ui-session-id (harness-ui-session harness-ui-session-id))
+      (bound-and-true-p harness-chat--session)))
 
 (defun harness-ui-cache--other-model (session)
   "Return the model of SESSION's cache when it is not SESSION's model, else nil.
 A cache serves the model that wrote it, so SESSION, switched since,
-has nothing cached for its own."
-  (let ((cached (plist-get (plist-get session :cache) :model)))
-    (and cached (not (equal cached (plist-get session :model))) cached)))
+has nothing cached for its own.  Nil when either model is unknown: a
+record without its model says nothing of a switch, as the server's
+`harness-cowboy--cache-model' holds too."
+  (let ((cached (plist-get (plist-get session :cache) :model))
+        (model (plist-get session :model)))
+    (and (stringp cached) (stringp model) (not (equal cached model)) cached)))
 
 (defun harness-ui-cache--running-p (session)
   "Non-nil when SESSION's turn is still running, whatever its status reads.
@@ -139,8 +158,14 @@ A session waiting on an answer -- a tool approval, say -- reads
 `blocked', but it is in the middle of a turn: its next request is part
 of that turn, not the user's next message, which is what the panel
 speaks of.  The live token figures the UI keeps for a session are
-non-nil exactly while its turn runs (`harness-ui-session-live')."
-  (and (harness-ui-session-live (plist-get session :id)) t))
+non-nil exactly while its turn runs (`harness-ui-session-live').  So is
+a prompt this UI sent it that has no answer yet
+\(`harness-ui-prompt-in-flight-p'): the answer comes when the turn ends.
+The record of SESSION may be behind the harness, an Emacs that reads
+its socket late having it idle still, with the cache stamp of the turn
+before; the prompt is not."
+  (let ((id (plist-get session :id)))
+    (and (or (harness-ui-session-live id) (harness-ui-prompt-in-flight-p id)) t)))
 
 (defun harness-ui-cache--state (session &optional now)
   "Return what the cache panel shows of SESSION at NOW, or nil for nothing.
@@ -153,9 +178,11 @@ too) has lapsed from then on, however long its provider would have
 kept it; the state carries `:dropped' for the panel to say so.  A
 session whose turn is still running shows nothing: a session blocked on
 an answer is in the middle of a turn, and the panel speaks of the
-user's next message, which only a session that is not running has.
-States that read the same are `equal', so a session update that
-changes nothing the panel says does not draw it again."
+user's next message, which only a session that is not running has.  So does a
+session this UI sent a prompt that has no answer yet
+\(`harness-ui-cache--running-p'), whatever its record reads.  States
+that read the same are `equal', so a session update that changes
+nothing the panel says does not draw it again."
   (let* ((cache (plist-get session :cache))
          (expires (plist-get cache :expires))
          (dropped (plist-get cache :dropped))
@@ -476,14 +503,28 @@ the cache lapses too, so a buffer that just opened shows it on time."
     (harness-ui-cache--schedule session)
     (and state (harness-ui-cache--banner state now (harness-ui-cache--offer state)))))
 
+(defun harness-ui-cache--sync-session (sid)
+  "Bring the cache timer and panel of session SID's chat buffer up to date.
+Nothing happens without a chat buffer for SID that shows the panel."
+  (when-let* ((buffer (and (fboundp 'harness-chat--buffer-for) (harness-chat--buffer-for sid))))
+    (with-current-buffer buffer
+      (when (memq #'harness-ui-cache--panel harness-chat-panel-functions)
+        (harness-ui-cache--sync)))))
+
 (defun harness-ui-cache--on-update (sid update)
   "Follow the record of session SID, which UPDATE may bring.
 On `harness-ui-update-functions', after the chat has taken it in."
   (when (equal (plist-get update :sessionUpdate) "_harness/session")
-    (when-let* ((buffer (and (fboundp 'harness-chat--buffer-for) (harness-chat--buffer-for sid))))
-      (with-current-buffer buffer
-        (when (memq #'harness-ui-cache--panel harness-chat-panel-functions)
-          (harness-ui-cache--sync))))))
+    (harness-ui-cache--sync-session sid)))
+
+(defun harness-ui-cache--on-prompt (sid)
+  "Follow the prompts in flight to session SID, which just changed.
+On `harness-ui-prompt-functions'.  A message sent takes the panel away
+at once, without waiting for the news that the session runs.  The
+answer to the last prompt brings it back, the turn having ended with the
+cache lapsed, or its failure: the panel speaks of the next message, and
+the record the UI holds says whether the cache lapsed."
+  (harness-ui-cache--sync-session sid))
 
 ;;;; Setup
 
@@ -491,6 +532,12 @@ On `harness-ui-update-functions', after the chat has taken it in."
   "Show the cache panel in this chat buffer."
   (add-hook 'harness-chat-panel-functions #'harness-ui-cache--panel t t)
   (add-hook 'kill-buffer-hook #'harness-ui-cache--cancel nil t))
+
+(defun harness-ui-cache--init-hooks ()
+  "Add the hooks that came after the module's first version.
+A reload does not initialise a running module again, so the file adds
+them itself when the module is ready (below)."
+  (add-hook 'harness-ui-prompt-functions #'harness-ui-cache--on-prompt t))
 
 (defun harness-ui-cache--init ()
   "Add the cache panel to every chat buffer, those open already included."
@@ -500,12 +547,16 @@ On `harness-ui-update-functions', after the chat has taken it in."
       (with-current-buffer buffer
         (when (derived-mode-p 'harness-chat-mode)
           (harness-ui-cache--setup)))))
-  (add-hook 'harness-ui-update-functions #'harness-ui-cache--on-update t))
+  (add-hook 'harness-ui-update-functions #'harness-ui-cache--on-update t)
+  (harness-ui-cache--init-hooks))
 
 (harness-define-module 'ui-cache
   :doc "Warns above a session's compose box once its prompt cache has expired or been dropped, offering to compact."
   :requires '(ui ui-chat)
   :init #'harness-ui-cache--init)
+
+(when (harness-module-ready-p 'ui-cache)
+  (harness-ui-cache--init-hooks))
 
 (provide 'harness-ui-cache)
 ;;; harness-ui-cache.el ends here

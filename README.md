@@ -304,6 +304,16 @@ named by `harness-server-init-file`.
   settings.
 - `M-x harness-show-log` (`C-c h L`) shows its log.
 
+Your Emacs reads what the process sends over a local socket. On macOS,
+GUI Emacs can leave that socket unread until the next click or key
+press, so a chat would show nothing new until you touched the
+keyboard. `harness-acp-client-poll-interval` guards against that: a
+timer reads the socket that many seconds apart, 0.1 on macOS and nil
+(off) elsewhere. Set it to a number on another system that shows the
+same symptom, or to nil on a Mac that does not need it; `setopt` takes
+effect at once. The log (`C-c h L`) notes the first time a poll read
+something Emacs had not delivered.
+
 ### Running the latest version
 
 `C-c h v` (`M-x harness-version`) shows the commit the harness runs,
@@ -1028,9 +1038,11 @@ reads "Prompt cache dropped at HH:MM, by a redaction" in place of when
 the cache expired, and names the uncached price alone: there is no
 cached one to compare it with. It never shows while the session's turn
 is running — a session waiting on a tool approval included, whose next
-request is that turn's own — only once the session is waiting for you.
-Its last line offers to compact the conversation first, a button and a
-key per kind with what each costs:
+request is that turn's own — nor while a message you sent has no answer
+yet, even when the chat has not caught up with the turn: only once the
+session is waiting for you. Its last line offers
+to compact the conversation first, a button and a key per kind with
+what each costs:
 
 ```
 Compact it first   b  Brief summary (~$0.011)   s  Summary (~$0.463)   t  Transcript file (free)   f  Fresh start (free)   c  Cut old context (free)

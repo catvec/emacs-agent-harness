@@ -188,6 +188,29 @@ one finds nothing of: the next request sends the conversation uncached."
         (should (equal '(:at 1000.0 :ttl 3600 :expires 4600.0 :model "hosted:loop")
                        (plist-get s :cache)))))))
 
+(ert-deftest harness-agent-usage-stamps-the-model-as-the-session-names-it ()
+  "A cache is stamped with the session's model as the session spells it.
+An alias, a context suffix and a gateway's id are each a model of its
+own to the harness, so what the step was sent to and what the session
+names are one string, and the stamp's model is both: the session finds
+nothing cached for another model, and neither the gate nor the panel
+calls the cache cold before its time."
+  (harness-agent-test-with
+    (harness-agent-test-define-hosted
+     (lambda (_prompt) (list '(:type text :delta "hi")
+                             (list :type 'usage :input 10 :output 5 :cache-read 900 :cache-write 0
+                                   :context 915 :cache-at (float-time) :cache-ttl 300)
+                             '(:type done :stop-reason end-turn))))
+    (dolist (model '("hosted:loop[1m]" "hosted:default"
+                     "hosted:us.anthropic.claude-sonnet-4-5-20250929-v1:0"))
+      (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model model) :id)))
+        (harness-await (harness-call 'agent/prompt id "hello"))
+        (let* ((s (harness-call 'session/get id))
+               (cache (plist-get s :cache)))
+          (should (equal model (plist-get s :model)))
+          (should (equal model (plist-get cache :model)))
+          (should (> (plist-get cache :expires) (float-time))))))))
+
 (ert-deftest harness-agent-step-writes-under-its-own-model ()
   "What a step reports belongs to the model it went to, though the session switched meanwhile.
 A switch applies from the next step: the reply names the model that

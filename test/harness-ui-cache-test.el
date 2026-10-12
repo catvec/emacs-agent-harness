@@ -6,6 +6,9 @@
 ;; expired: when it shows (a session waiting past its cache's lifetime,
 ;; never a new one or one that used no cache), what it says, and that it
 ;; comes on its own, drawn by its timer, and goes once a request is sent.
+;; It stays away while a prompt the UI sent has no answer yet, whatever
+;; the record of the session reads -- the UI may be behind the harness --
+;; and comes back with the answer, or the failure, once the cache lapsed.
 ;; A cache a redaction dropped shows from the drop on, headed so, with no
 ;; cached price to compare with; the other caches' words stay as they
 ;; were.  The unit tests fix the clock; the others run the state layer
@@ -31,6 +34,10 @@
 (defvar harness-ui--sessions)
 (defvar harness-ui--models)
 (defvar harness-ui--live)
+(defvar harness-ui--prompts)
+(defvar harness-ui-prompt-functions)
+(defvar harness-ui-session-id)
+(defvar harness-chat-panel-functions)
 (defvar harness-ui-default-position)
 (defvar harness-chat--loading)
 (defvar harness-chat--buffers)
@@ -118,6 +125,300 @@ stays away while they are there and comes back once they go."
       (remhash "s-live" harness-ui--live))
     (should (harness-ui-cache--state s 2000.0))))
 
+;;;; A prompt in flight
+
+(defun harness-ui-cache-test--prompt (sid &optional on-error)
+  "Send SID a prompt that nothing answers yet; return the promise of its answer.
+The request goes nowhere: it is the promise the test settles, resolving it
+as the harness does when the turn ends, rejecting it as a failure.
+ON-ERROR handles the failure, as the sender of the prompt would."
+  (let ((answer (harness-make-promise)))
+    (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) answer)))
+      (harness-ui-call-turn sid "session/prompt" (list :sessionId sid :prompt nil) #'ignore on-error))
+    answer))
+
+(ert-deftest harness-ui-cache-state-while-a-prompt-is-in-flight ()
+  "A prompt the UI sent that has no answer yet keeps the panel away,
+whatever the record of the session reads: idle, with the cache stamp of
+the turn before, lapsed.  The UI may be behind the harness, which runs
+the turn that prompt started, and the cache panel must not say the cache
+expired about a session the user just messaged.  Once the answer came
+and the record still says lapsed, the panel is back."
+  (let ((harness-ui--prompts (make-hash-table :test 'equal))
+        (s (harness-ui-cache-test--session :id "s-sent")))
+    (should (harness-ui-cache--state s 2000.0))
+    (let ((answer (harness-ui-cache-test--prompt "s-sent")))
+      (should (harness-ui-prompt-in-flight-p "s-sent"))
+      (should-not (harness-ui-cache--state s 2000.0))
+      (should-not (harness-ui-cache--current s 2000.0))
+      ;; However late it is.
+      (should-not (harness-ui-cache--state s 90000.0))
+      ;; A session it was not sent to waits for the user as it did.
+      (should-not (harness-ui-prompt-in-flight-p "s-other"))
+      (should (harness-ui-cache--state (harness-ui-cache-test--session :id "s-other") 2000.0))
+      (harness-resolve answer '(:stopReason "end_turn")))
+    (should-not (harness-ui-prompt-in-flight-p "s-sent"))
+    (should (harness-ui-cache--state s 2000.0))))
+
+(ert-deftest harness-ui-cache-state-counts-every-prompt-in-flight ()
+  "A message sent while a turn runs steers it, and is answered when the
+turn ends, as the message that started it: the session runs until the
+last of its prompts is answered."
+  (let ((harness-ui--prompts (make-hash-table :test 'equal))
+        (s (harness-ui-cache-test--session :id "s-two")))
+    (let ((first (harness-ui-cache-test--prompt "s-two"))
+          (second (harness-ui-cache-test--prompt "s-two")))
+      (harness-resolve second '(:stopReason "end_turn"))
+      (should (harness-ui-prompt-in-flight-p "s-two"))
+      (should-not (harness-ui-cache--state s 2000.0))
+      (harness-resolve first '(:stopReason "end_turn"))
+      ;; An answer counts once: the promise settled already.
+      (harness-resolve first '(:stopReason "end_turn")))
+    (should-not (harness-ui-prompt-in-flight-p "s-two"))
+    (should (harness-ui-cache--state s 2000.0))))
+
+(ert-deftest harness-ui-cache-state-after-a-prompt-failed ()
+  "A prompt that failed is none in flight: the session is not counted as
+running for good.  The failure goes to whoever sent the prompt, or else
+to the echo area, but for that of a connection the UI let go of on
+purpose, which is none."
+  (let ((harness-ui--prompts (make-hash-table :test 'equal))
+        (s (harness-ui-cache-test--session :id "s-fail"))
+        (failures nil)
+        (messages nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (format-string &rest args) (push (apply #'format format-string args) messages))))
+      ;; The sender handles it.
+      (let ((answer (harness-ui-cache-test--prompt "s-fail" (lambda (err) (push err failures)))))
+        (should-not (harness-ui-cache--state s 2000.0))
+        (harness-reject answer '(acp-error -32603 "no model" nil)))
+      (should-not (harness-ui-prompt-in-flight-p "s-fail"))
+      (should (equal '((acp-error -32603 "no model" nil)) failures))
+      (should-not messages)
+      (should (harness-ui-cache--state s 2000.0))
+      ;; Nobody does: the echo area says so, as for any request.
+      (harness-reject (harness-ui-cache-test--prompt "s-fail") '(acp-error -32603 "no model" nil))
+      (should (equal '("Harness: session/prompt failed: no model") messages))
+      (should-not (harness-ui-prompt-in-flight-p "s-fail"))
+      (should (harness-ui-cache--state s 2000.0))
+      ;; The connection was replaced on purpose: the prompt is no longer
+      ;; waiting on an answer, and nothing failed.
+      (setq messages nil)
+      (harness-reject (harness-ui-cache-test--prompt "s-fail")
+                      (list 'acp-error -32003 "connection replaced" (list :closed "replaced")))
+      (should-not messages)
+      (should-not (harness-ui-prompt-in-flight-p "s-fail"))
+      (should (harness-ui-cache--state s 2000.0)))))
+
+(ert-deftest harness-ui-cache-state-callbacks-run-once-the-prompt-settled ()
+  "The answer and the failure of a prompt reach their callbacks after the
+UI let the prompt go, so what they draw is drawn without it."
+  (let ((harness-ui--prompts (make-hash-table :test 'equal))
+        (seen nil))
+    (let ((answer (harness-make-promise)))
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) answer)))
+        (harness-ui-call-turn "s-cb" "session/prompt" nil
+                              (lambda (value) (push (list 'answered value (harness-ui-prompt-in-flight-p "s-cb")) seen))
+                              (lambda (err) (push (list 'failed err (harness-ui-prompt-in-flight-p "s-cb")) seen))))
+      (should (harness-ui-prompt-in-flight-p "s-cb"))
+      (harness-resolve answer '(:stopReason "end_turn")))
+    (let ((answer (harness-make-promise)))
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) answer)))
+        (harness-ui-call-turn "s-cb" "session/prompt" nil
+                              (lambda (value) (push (list 'answered value (harness-ui-prompt-in-flight-p "s-cb")) seen))
+                              (lambda (err) (push (list 'failed err (harness-ui-prompt-in-flight-p "s-cb")) seen))))
+      (harness-reject answer '(acp-error -32603 "no model" nil)))
+    (should (equal '((failed (acp-error -32603 "no model" nil) nil)
+                     (answered (:stopReason "end_turn") nil))
+                   seen))))
+
+(ert-deftest harness-ui-cache-state-after-the-session-was-deleted ()
+  "A session that was deleted answers no prompt: the UI forgets the
+prompts in flight to it with the session, and an answer that comes later
+changes nothing."
+  (let* ((harness-ui--prompts (make-hash-table :test 'equal))
+         (harness-ui--sessions (make-hash-table :test 'equal))
+         (harness-ui--live (make-hash-table :test 'equal))
+         (other (harness-ui-cache-test--prompt "s-other")))
+    (let ((answer (harness-ui-cache-test--prompt "s-gone")))
+      (should (harness-ui-prompt-in-flight-p "s-gone"))
+      (harness-ui--forget-session "s-gone")
+      (should-not (harness-ui-prompt-in-flight-p "s-gone"))
+      ;; Another session keeps its own.
+      (should (harness-ui-prompt-in-flight-p "s-other"))
+      (harness-resolve answer '(:stopReason "end_turn"))
+      (should-not (harness-ui-prompt-in-flight-p "s-gone")))
+    (harness-resolve other '(:stopReason "end_turn"))
+    (should-not (harness-ui-prompt-in-flight-p "s-other"))))
+
+(ert-deftest harness-ui-cache-every-request-for-a-turn-is-tracked ()
+  "The UI sends a prompt, or the queue, only through `harness-ui-call-turn',
+which keeps it in flight until it is answered.  Sent any other way, the
+panel would go by the record of a UI that may be behind the harness."
+  (let ((found 0))
+    (dolist (file (directory-files (expand-file-name "lisp/ui" harness-test-root) t "\\`harness-.*\\.el\\'"))
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (while (re-search-forward "\"\\(?:session/prompt\\|_harness/agent/send-queue\\)\"" nil t)
+          (cl-incf found)
+          (should (string-match-p "(harness-ui-call-turn "
+                                  (buffer-substring-no-properties (line-beginning-position) (point)))))))
+    ;; The chat sends and sends the queue, the BTW asks.
+    (should (>= found 3))))
+
+(ert-deftest harness-ui-cache-reads-the-newest-record ()
+  "The panel reads the newest record the UI took in -- the UI's cache,
+which the session list and a fetch fill as well as every update -- not
+the chat buffer's own copy of the last update, which can be older.  Once
+the cache has forgotten the session, that copy serves."
+  (let ((harness-ui--sessions (make-hash-table :test 'equal))
+        (old (harness-ui-cache-test--session :id "s-rec"))
+        (new (harness-ui-cache-test--session
+              :id "s-rec" :cache '(:at 5000.0 :ttl 300 :expires 5300.0 :model "test:m"))))
+    (with-temp-buffer
+      (setq-local harness-ui-session-id "s-rec")
+      (setq-local harness-chat--session old)
+      (should (eq old (harness-ui-cache--session)))
+      (should (harness-ui-cache--state (harness-ui-cache--session) 5100.0))
+      ;; The session list brought a newer record, which the chat did not take in.
+      (puthash "s-rec" new harness-ui--sessions)
+      (should (eq new (harness-ui-cache--session)))
+      (should-not (harness-ui-cache--state (harness-ui-cache--session) 5100.0))
+      (should (harness-ui-cache--state (harness-ui-cache--session) 5300.0))
+      ;; Deleted: the copy is what is left of it.
+      (remhash "s-rec" harness-ui--sessions)
+      (should (eq old (harness-ui-cache--session))))))
+
+;;;; The panel of a chat buffer, followed
+
+(defvar harness-ui-cache-test--drawn nil
+  "What each drawing of the stand-in chat buffer's tail showed, newest first.
+The panel's text, or nil for none.")
+
+(defmacro harness-ui-cache-test-with-chat (sid &rest body)
+  "Run BODY in a buffer that stands in for the chat buffer of session SID.
+The buffer shows the cache panel.  Drawing its tail asks the panel and
+puts what it answered on `harness-ui-cache-test--drawn'.  The UI's
+sessions, live figures and prompts in flight are empty, and a prompt
+sent or answered tells the panel (`harness-ui-prompt-functions').  Nobody
+is asked what compacting costs."
+  (declare (indent 1))
+  `(progn
+     (require 'harness-ui-chat)
+     (let ((harness-ui--sessions (make-hash-table :test 'equal))
+           (harness-ui--live (make-hash-table :test 'equal))
+           (harness-ui--prompts (make-hash-table :test 'equal))
+           (harness-chat--buffers (make-hash-table :test 'equal))
+           (harness-ui-prompt-functions (list #'harness-ui-cache--on-prompt))
+           (harness-ui-cache-test--drawn nil))
+       (cl-letf (((symbol-function 'harness-ui-cache--estimate) #'ignore))
+         (with-temp-buffer
+           (setq-local harness-ui-session-id ,sid)
+           (setq-local harness-chat-panel-functions nil)
+           (harness-ui-cache--setup)
+           (setq-local harness-compose-redraw-function
+                       (lambda () (push (harness-ui-cache--panel) harness-ui-cache-test--drawn)))
+           (puthash ,sid (current-buffer) harness-chat--buffers)
+           (unwind-protect (progn ,@body)
+             (harness-ui-cache--cancel)))))))
+
+(defun harness-ui-cache-test--drawings ()
+  "Return whether each drawing of the stand-in chat buffer's tail showed a panel.
+A list of t and nil, newest first."
+  (mapcar (lambda (drawing) (and drawing t)) harness-ui-cache-test--drawn))
+
+(ert-deftest harness-ui-cache-newer-record-takes-the-panel-away-and-moves-the-timer ()
+  "A `_harness/session' update that brings a newer cache stamp replaces
+what the panel reads: the panel goes, and the buffer's timer is set for
+the moment the new cache lapses -- moved when it lapses at another one,
+left alone when the update changes nothing the panel says."
+  (harness-ui-cache-test-with-chat "s-upd"
+    (let* ((now (float-time))
+           (stamp (lambda (at) (list :at at :ttl 300 :expires (+ at 300) :model "test:m")))
+           (record (lambda (at) (harness-ui-cache-test--session :id "s-upd" :cache (funcall stamp at))))
+           (update (lambda (session)
+                     (puthash "s-upd" session harness-ui--sessions)
+                     (harness-ui-cache--on-update
+                      "s-upd" (list :sessionUpdate "_harness/session" :session session)))))
+      ;; Lapsed a while ago: the panel shows, and there is no timer to set.
+      (puthash "s-upd" (funcall record (- now 1000)) harness-ui--sessions)
+      (harness-ui-cache--sync)
+      (should (equal '(t) (harness-ui-cache-test--drawings)))
+      (should-not harness-ui-cache--timer)
+      ;; A request used the cache: the update goes, the timer is set.
+      (funcall update (funcall record now))
+      (should (equal '(nil t) (harness-ui-cache-test--drawings)))
+      (should-not harness-ui-cache--shown)
+      (should (= (+ now 300) harness-ui-cache--due))
+      (let ((first harness-ui-cache--timer))
+        (should (memq first timer-list))
+        ;; A later one: the timer moves with it.
+        (funcall update (funcall record (+ now 100)))
+        (should (= (+ now 400) harness-ui-cache--due))
+        (should (memq harness-ui-cache--timer timer-list))
+        (should-not (memq first timer-list))
+        (should-not (eq first harness-ui-cache--timer)))
+      ;; Nothing the panel says changed: not drawn again, nor is the timer set again.
+      (let ((drawn (length harness-ui-cache-test--drawn))
+            (timer harness-ui-cache--timer))
+        (funcall update (funcall record (+ now 100)))
+        (harness-ui-cache--on-update "s-upd" '(:sessionUpdate "plan"))
+        (should (= drawn (length harness-ui-cache-test--drawn)))
+        (should (eq timer harness-ui-cache--timer)))
+      ;; And the next one lapsed again: the update brings the panel back, with no timer.
+      (funcall update (funcall record (- now 1000)))
+      (should (equal '(t nil t) (harness-ui-cache-test--drawings)))
+      (should-not harness-ui-cache--timer))))
+
+(ert-deftest harness-ui-cache-panel-follows-the-prompts-in-flight ()
+  "The panel goes as a message is sent, without waiting for the news that
+the session runs, and is back with the answer once the cache lapsed,
+which the record says; a message that failed brings it back as well.  A
+turn that used the cache leaves nothing to draw again."
+  (harness-ui-cache-test-with-chat "s-msg"
+    (puthash "s-msg" (harness-ui-cache-test--session :id "s-msg") harness-ui--sessions)
+    (harness-ui-cache--sync)
+    (should (equal '(t) (harness-ui-cache-test--drawings)))
+    ;; Sent: the record still says idle, and the panel is gone.
+    (let ((answer (harness-ui-cache-test--prompt "s-msg")))
+      (should (equal '(nil t) (harness-ui-cache-test--drawings)))
+      (should-not harness-ui-cache--shown)
+      ;; The turn ended with the cache lapsed still: the panel is back.
+      (harness-resolve answer '(:stopReason "end_turn"))
+      (should (equal '(t nil t) (harness-ui-cache-test--drawings)))
+      (should harness-ui-cache--shown))
+    ;; A message that failed.
+    (let ((answer (harness-ui-cache-test--prompt "s-msg" #'ignore)))
+      (should (equal '(nil t nil t) (harness-ui-cache-test--drawings)))
+      (harness-reject answer '(acp-error -32603 "no model" nil))
+      (should (equal '(t nil t nil t) (harness-ui-cache-test--drawings))))
+    ;; A turn that used the cache: its record is in before its answer, and
+    ;; the panel, away while it ran, has nothing to say.
+    (let ((answer (harness-ui-cache-test--prompt "s-msg"))
+          (now (float-time)))
+      (puthash "s-msg" (harness-ui-cache-test--session
+                        :id "s-msg" :cache (list :at now :ttl 300 :expires (+ now 300) :model "test:m"))
+               harness-ui--sessions)
+      (harness-resolve answer '(:stopReason "end_turn"))
+      (should (equal '(nil t nil t nil t) (harness-ui-cache-test--drawings)))
+      (should-not harness-ui-cache--shown))))
+
+(ert-deftest harness-ui-cache-prompts-of-a-session-without-a-chat-draw-nothing ()
+  "A prompt to a session no chat buffer shows draws nothing, and a hook
+function that signals does not stop the prompt from being kept or let go."
+  (harness-ui-cache-test-with-chat "s-here"
+    (puthash "s-there" (harness-ui-cache-test--session :id "s-there") harness-ui--sessions)
+    (let ((answer (harness-ui-cache-test--prompt "s-there")))
+      (harness-resolve answer '(:stopReason "end_turn")))
+    (should-not harness-ui-cache-test--drawn)
+    ;; A hook function that signals does not stop the prompt.
+    (let ((harness-ui-prompt-functions (list (lambda (_sid) (error "Broken hook")))))
+      (let ((answer (harness-ui-cache-test--prompt "s-there")))
+        (should (harness-ui-prompt-in-flight-p "s-there"))
+        (harness-resolve answer '(:stopReason "end_turn"))
+        (should-not (harness-ui-prompt-in-flight-p "s-there"))))))
+
 (ert-deftest harness-ui-cache-banner-says-what-the-next-message-costs ()
   "The panel says when the cache lapsed, how long it lasts, how much
 context the next message sends uncached and what that costs against
@@ -177,6 +478,24 @@ session switches back while the old cache lasts."
     (should-not (harness-ui-cache--state (harness-ui-cache-test--session
                                           :model "test:other" :cache '(:at 1000.0 :ttl 300 :expires 1300.0))
                                          1000.0))))
+
+(ert-deftest harness-ui-cache-no-other-model-without-the-session-model ()
+  "A record that lacks its model says nothing of a switch, as the server's
+cache model does: no other model's cache is named for it, so its panel
+waits for the cache to lapse, as for a session on the cache's own model."
+  (should-not (harness-ui-cache--other-model '(:cache (:model "claude:opus" :at 1.0 :ttl 300 :expires 301.0))))
+  (should-not (harness-ui-cache--other-model '(:model nil :cache (:model "claude:opus"))))
+  (should-not (harness-ui-cache--other-model '(:model "claude:opus" :cache (:model "claude:opus"))))
+  (should (equal "claude:opus"
+                 (harness-ui-cache--other-model '(:model "claude:sonnet" :cache (:model "claude:opus")))))
+  ;; Idle, its cache still warm, and no model: nothing yet, and the panel
+  ;; shows once the cache lapses, as it does for any session.
+  (let ((s (harness-plist-remove
+            (harness-ui-cache-test--session
+             :cache '(:at 1000.0 :ttl 300 :expires 99000.0 :model "test:m"))
+            :model)))
+    (should-not (harness-ui-cache--state s 2000.0))
+    (should (harness-ui-cache--state s 99000.0))))
 
 (ert-deftest harness-ui-cache-banner-after-a-switch ()
   "Switched, the panel says whose cache it was, and what the new model's
@@ -551,14 +870,16 @@ cache lapses again."
       (should (string-match-p "Your next message re-sends ~84\\.5k tokens uncached"
                               (harness-ui-cache-test--text buffer)))
       (with-current-buffer buffer (should-not harness-ui-cache--timer))
-      ;; Sent again, it goes while the request runs.
+      ;; Sent again, it goes with the message, before the UI has heard the
+      ;; session runs, and stays away while the request runs.
       (let ((harness-provider-demo--delay 0.4))
         (with-current-buffer buffer
           (goto-char harness-compose-end)
           (insert "again")
           (harness-chat-send))
-        (harness-test-wait (lambda () (not (harness-ui-cache-test--shows-p buffer))) 5 "the panel to go")
-        (should (equal "running" (harness-ui-cache-test--status sid)))
+        (should-not (harness-ui-cache-test--shows-p buffer))
+        (harness-test-wait (lambda () (equal "running" (harness-ui-cache-test--status sid))) 5 "the session to run")
+        (should-not (harness-ui-cache-test--shows-p buffer))
         (harness-test-wait (lambda () (equal "idle" (harness-ui-cache-test--status sid))) 10 "the turn to end"))
       ;; The request kept the cache: no panel until it lapses again.
       (harness-test-wait (lambda () (with-current-buffer buffer (timerp harness-ui-cache--timer)))
@@ -753,6 +1074,115 @@ the conversation is compacted, as nothing of it is cached any more."
         (should (memq timer timer-list))
         (kill-buffer buffer)
         (should-not (memq timer timer-list))))))
+
+;;;; A UI behind the harness
+
+(defconst harness-ui-cache-test--held
+  '((:type wait :seconds 60)
+    (:type text :delta "Never said.")
+    (:type done :stop-reason end-turn))
+  "A reply that waits a minute before it says a word: a turn the test holds.
+The test ends it by cancelling the turn (`harness-ui-cache-test--end-turn').")
+
+(defun harness-ui-cache-test--submit (buffer text)
+  "Type TEXT in BUFFER's compose box and send it, without waiting for the turn."
+  (with-current-buffer buffer
+    (goto-char harness-compose-end)
+    (insert text)
+    (harness-chat-send)))
+
+(defun harness-ui-cache-test--end-turn (sid)
+  "Cancel the turn running in session SID, and wait for it to be over."
+  (harness-call 'agent/cancel sid)
+  (harness-test-wait (lambda () (not (harness-agent-running-p sid))) 10 "the held turn to end"))
+
+(ert-deftest harness-ui-cache-panel-stays-away-while-a-prompt-is-in-flight ()
+  "A UI that is behind the harness -- it reads its socket when input
+comes -- still holds the session idle, with the cache stamp of the turn
+before, while the turn the user's message started runs.  The panel
+must not say the cache expired about a session the user just messaged:
+it goes with the message, and stays away, whatever the record reads and
+whenever its timer fires, until the answer comes; then, the cache having
+lapsed, it is back."
+  (harness-ui-cache-test-with
+    (let* ((harness-cache-ttl 1)
+           (sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted")
+                           :id))
+           (buffer (harness-ui-cache-test--open sid)))
+      (harness-ui-cache-test--send buffer "first")
+      (harness-test-wait (lambda () (harness-ui-cache-test--shows-p buffer)) 10 "the cache panel")
+      (let ((stale (harness-ui-session sid))
+            (harness-provider-demo-script-override harness-ui-cache-test--held))
+        (should (equal "idle" (harness-ui-cache-test--status sid)))
+        ;; The message goes out, and the panel goes with it: the UI has
+        ;; not heard a word of the harness since.
+        (harness-ui-cache-test--submit buffer "again")
+        (should (harness-ui-prompt-in-flight-p sid))
+        (should-not (harness-ui-cache-test--shows-p buffer))
+        ;; The record the UI holds is still the old one: idle, lapsed.  Its
+        ;; timer fires, the tail is drawn, and the panel does not show.
+        (harness-ui-cache-session stale)
+        (should (equal "idle" (harness-ui-cache-test--status sid)))
+        (harness-ui-cache--lapse buffer)
+        (should-not (harness-ui-cache-test--shows-p buffer))
+        (with-current-buffer buffer (harness-ui-cache--sync))
+        (should-not (harness-ui-cache-test--shows-p buffer))
+        ;; The harness catches up: the session runs, and the panel is away.
+        (harness-test-wait (lambda () (equal "running" (harness-ui-cache-test--status sid))) 5
+                           "the session to run")
+        (harness-ui-cache-test--idle 0.2)
+        (should-not (harness-ui-cache-test--shows-p buffer))
+        (should (harness-ui-prompt-in-flight-p sid))
+        ;; The turn ends: the answer comes, and the cache, lapsed since
+        ;; the turn before, makes the panel return.
+        (harness-ui-cache-test--end-turn sid)
+        (harness-test-wait (lambda () (not (harness-ui-prompt-in-flight-p sid))) 10 "the prompt's answer")
+        (harness-test-wait (lambda () (harness-ui-cache-test--shows-p buffer)) 10 "the cache panel again")
+        (should (string-match-p "Prompt cache expired" (harness-ui-cache-test--text buffer)))))))
+
+(ert-deftest harness-ui-cache-prompt-ends-with-its-connection ()
+  "A connection that closes rejects the requests pending on it: a prompt
+in flight on it is none any more, and the session is not counted as
+running for good.  The failure is reported in the chat, as that of any
+message that did not go through."
+  (harness-ui-cache-test-with
+    (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted")
+                           :id))
+           (buffer (harness-ui-cache-test--open sid))
+           (harness-provider-demo-script-override harness-ui-cache-test--held))
+      (harness-ui-cache-test--submit buffer "hold on")
+      (should (harness-ui-prompt-in-flight-p sid))
+      (harness-acp-close harness-ui-connection)
+      (harness-test-wait (lambda () (not (harness-ui-prompt-in-flight-p sid))) 5
+                         "the prompt to end with its connection")
+      (harness-test-wait (lambda () (string-match-p "send failed: connection closed"
+                                                    (harness-ui-cache-test--text buffer)))
+                         5 "the failure in the chat")
+      ;; The harness still runs the turn.
+      (harness-ui-cache-test--end-turn sid))))
+
+(ert-deftest harness-ui-cache-prompt-ends-when-the-ui-connects-again ()
+  "A UI that connects again lets go of its connection on purpose: the
+requests pending on it are rejected as replaced, so the prompt in flight
+on it is none any more -- the UI hears the session's status from the
+harness afresh -- and nothing is reported as failed: the message went,
+and its turn runs."
+  (harness-ui-cache-test-with
+    (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted")
+                           :id))
+           (buffer (harness-ui-cache-test--open sid))
+           (harness-provider-demo-script-override harness-ui-cache-test--held))
+      (harness-ui-cache-test--submit buffer "hold on")
+      (should (harness-ui-prompt-in-flight-p sid))
+      (harness-ui-connect harness-ui-connection-address)
+      (harness-test-wait (lambda () (not (harness-ui-prompt-in-flight-p sid))) 5
+                         "the prompt to end with its connection")
+      ;; The UI asks the harness what the session does, and is told.
+      (harness-test-wait (lambda () (equal "running" (harness-ui-cache-test--status sid))) 5
+                         "the session to run")
+      (harness-ui-cache-test--idle 0.2)
+      (should-not (string-match-p "failed" (harness-ui-cache-test--text buffer)))
+      (harness-ui-cache-test--end-turn sid))))
 
 (provide 'harness-ui-cache-test)
 ;;; harness-ui-cache-test.el ends here

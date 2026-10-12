@@ -446,12 +446,23 @@ What the turn's last message wrote goes out with its `usage' event, as
 `harness-provider-claude--blocks' is.")
 
 (defvar harness-provider-claude--cache-at (make-hash-table :test 'equal)
-  "Harness session id -> when the turn's main conversation last used the cache.
-That is the time of the `message_start' of its last request that read
-or wrote the prompt cache, which keeps the cache from then on; it goes
-out with the turn's `usage' event as `:cache-at'.  A sub-agent's
-requests use a cache of their own and leave it.  Kept beside the
+  "Harness session id -> when the turn's main conversation last made a request.
+That is the time of the `message_start' of its last request, else of
+the first assistant message that reports one (a CLI that streams no
+partial messages prints only those): a request keeps the prompt cache
+from then on, and the turn's usage says whether it used one at all.
+It goes out with the turn's `usage' event as `:cache-at'.  A sub-agent's
+requests use a cache of their own and leave it, and so do the CLI's
+requests outside a turn.  A turn starts without one.  Kept beside the
 session records, as `harness-provider-claude--blocks' is.")
+
+(defvar harness-provider-claude--cache-request (make-hash-table :test 'equal)
+  "Harness session id -> the id of the message of the turn's last noted request.
+The assistant messages of a request that streamed are printed as its
+blocks end, after the `message_start' that gave the time
+\(`harness-provider-claude--cache-at'): the id tells them from the
+messages of a request that was not streamed.  Kept beside the session
+records, as `harness-provider-claude--blocks' is.")
 
 (defvar harness-provider-claude--cache-ttl (make-hash-table :test 'equal)
   "Harness session id -> the lifetime its cache writes last asked for.
@@ -514,6 +525,7 @@ resumes the CLI session in a new one."
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--call-checkpoints)
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--call-output)
     (remhash (harness-provider-claude-session-id entry) harness-provider-claude--cache-at)
+    (remhash (harness-provider-claude-session-id entry) harness-provider-claude--cache-request)
     (let ((fn (harness-provider-claude-session-on-event entry)))
       (setf (harness-provider-claude-session-active entry) nil
             (harness-provider-claude-session-cancel-timer entry) nil
@@ -1160,23 +1172,51 @@ five-minute one, nil when it wrote nothing or does not say."
           ((> (harness-provider-claude--tokens (plist-get creation :ephemeral_1h_input_tokens)) 0) 3600)
           ((> (harness-provider-claude--tokens (plist-get creation :ephemeral_5m_input_tokens)) 0) 300))))
 
-(defun harness-provider-claude--note-cache (entry usage)
-  "Note what a request of ENTRY's main conversation, with USAGE, did to the cache.
-USAGE is its `message_start''s: a request that read or wrote the cache
-keeps it from now on, for the lifetime its writes asked for."
+(defun harness-provider-claude--note-cache (entry usage &optional id)
+  "Note that ENTRY's main conversation made a request just now.
+The request is message ID, with USAGE: its `message_start''s, or its
+assistant message's.  A request keeps the prompt cache it reads or
+writes from the moment it is made, for the lifetime its writes asked
+for, which USAGE says when it breaks them down.  The time is noted
+whatever USAGE says of the cache: Bedrock and gateways stream the cache
+fields later, or not at all, and an earlier request's time would leave
+the cache looking older than it is.  The turn's usage, at its end, says
+whether it used the cache (see `session/usage-add').  The time is noted
+only in a turn: a request the CLI makes between turns belongs to none,
+and would be the next turn's."
   (let ((sid (harness-provider-claude-session-id entry)))
-    (when (> (+ (harness-provider-claude--tokens (plist-get usage :cache_read_input_tokens))
-                (harness-provider-claude--tokens (plist-get usage :cache_creation_input_tokens)))
-             0)
-      (puthash sid (float-time) harness-provider-claude--cache-at))
+    (when (harness-provider-claude-session-active entry)
+      (puthash sid (float-time) harness-provider-claude--cache-at)
+      (puthash sid id harness-provider-claude--cache-request))
     (when-let* ((ttl (harness-provider-claude--cache-ttl-of usage)))
       (puthash sid ttl harness-provider-claude--cache-ttl))))
+
+(defun harness-provider-claude--note-assistant (entry message)
+  "Note the request assistant MESSAGE of ENTRY's main conversation reports.
+The CLI prints one for each block of a request's response, as the
+block ends, with the usage of the request.  That is the only word of a
+request when the CLI streams no partial messages, and of one whose
+`message_start' did not come; one of a request that streamed (the same
+message id, or in a message without an id any request noted this turn)
+is printed after the start that gave its time, and moves nothing.  A
+synthetic message, which reports a request that failed, is no request."
+  (let* ((sid (harness-provider-claude-session-id entry))
+         (id (plist-get message :id))
+         (named (and (stringp id) (not (string-empty-p id)))))
+    (unless (or (plist-get message :error)
+                (equal (plist-get message :model) "<synthetic>")
+                (if named
+                    (equal id (gethash sid harness-provider-claude--cache-request))
+                  (gethash sid harness-provider-claude--cache-at)))
+      (harness-provider-claude--note-cache entry (plist-get message :usage) (and named id)))))
 
 (defun harness-provider-claude--cache-fields (entry usage)
   "Return the prompt cache fields of the `usage' event ENTRY's turn ends with.
 USAGE is the result's.  `:cache-at' is when the turn's main
-conversation last used the cache, if a request said so as it started;
-`:cache-ttl' the lifetime its last writes asked for, else the one the
+conversation last made a request, as it started when the CLI printed
+that (see `harness-provider-claude--note-cache'); the session stamps
+its cache with it when the turn's usage says the cache was used.
+`:cache-ttl' is the lifetime its last writes asked for, else the one the
 turn's writes did (see `harness-provider-claude--cache-ttl-of')."
   (let* ((sid (harness-provider-claude-session-id entry))
          (at (gethash sid harness-provider-claude--cache-at))
@@ -1196,7 +1236,8 @@ leaves out, as its cache does."
                  (plist-get (plist-get event :message) :usage))))
        (unless sub-agent
          (remhash (harness-provider-claude-session-id entry) harness-provider-claude--call-output)
-         (harness-provider-claude--note-cache entry (plist-get (plist-get event :message) :usage))
+         (harness-provider-claude--note-cache entry (plist-get (plist-get event :message) :usage)
+                                              (plist-get (plist-get event :message) :id))
          ;; The size of the prompt is known as the call starts: the live
          ;; token count follows it from now, not from the turn's end.
          (when ctx
@@ -1254,7 +1295,7 @@ is not in the session's chain, and a CLI that sends no uuid gives none."
          (not (plist-get msg :parent_tool_use_id))
          (list :cli-session-id id :uuid uuid))))
 
-(defun harness-provider-claude--handle-assistant (entry message &optional checkpoint)
+(defun harness-provider-claude--handle-assistant (entry message &optional checkpoint sub-agent)
   "Remember tool_use ids from the authoritative assistant MESSAGE on ENTRY.
 A call of the CLI's own tools that stands in for a harness tool is
 reported to the turn here, where its input is complete.  An assistant
@@ -1263,7 +1304,12 @@ refused login) is remembered for the turn's `done' event.  CHECKPOINT is
 the message's (see `harness-provider-claude--checkpoint'): it goes out
 with the message's tool calls when it has any, which the turn records
 later, and else at once, for the text or thinking the turn has just
-recorded from it."
+recorded from it.  The request it reports is noted for the turn's
+prompt cache time (`harness-provider-claude--note-assistant'), unless
+SUB-AGENT, the tool call whose sub-agent wrote it, is non-nil: a
+sub-agent's requests use a cache of their own."
+  (unless sub-agent
+    (harness-provider-claude--note-assistant entry message))
   (when-let* ((error (plist-get message :error)))
     (let* ((old (gethash (harness-provider-claude-session-id entry)
                          harness-provider-claude--turn-failure))
@@ -2005,7 +2051,8 @@ It is no longer the probe: whoever needs one next starts another."
       ("assistant"
        (setf (harness-provider-claude-session-seen-output entry) t)
        (harness-provider-claude--handle-assistant entry (plist-get msg :message)
-                                                  (harness-provider-claude--checkpoint entry msg)))
+                                                  (harness-provider-claude--checkpoint entry msg)
+                                                  (plist-get msg :parent_tool_use_id)))
       ("user" (harness-provider-claude--handle-user-echo entry (plist-get msg :message)
                                                          (harness-provider-claude--checkpoint entry msg)))
       ("rate_limit_event"
@@ -2185,6 +2232,11 @@ new one gets them first, as text (`harness-provider-claude--with-history')."
           (harness-provider-claude-session-context entry) nil)
     (remhash id harness-provider-claude--builtin-calls)
     (remhash id harness-provider-claude--call-checkpoints)
+    ;; A turn that ended without `harness-provider-claude--finish' (the
+    ;; provider was reloaded during it, say) left its time behind: this
+    ;; turn's requests give its own.
+    (remhash id harness-provider-claude--cache-at)
+    (remhash id harness-provider-claude--cache-request)
     (harness-provider-claude--emit entry '(:type start))
     (if (null blocks)
         (harness-provider-claude--finish
@@ -3017,6 +3069,8 @@ session's (`harness-provider-claude--complete')."
     (remhash session-id harness-provider-claude--sessions)
     (remhash session-id harness-provider-claude--spawns)
     (remhash session-id harness-provider-claude--call-checkpoints)
+    (remhash session-id harness-provider-claude--cache-at)
+    (remhash session-id harness-provider-claude--cache-request)
     (remhash session-id harness-provider-claude--cache-ttl)
     t))
 

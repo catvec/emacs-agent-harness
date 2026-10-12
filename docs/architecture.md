@@ -89,6 +89,18 @@ default) the layers above are split across two Emacs processes:
   `harness-run-soon` of a request handler, the next step of a turn --
   would otherwise wait for an unrelated timer or process output, seconds
   later.
+- The UI reads the child's socket when its event loop reports it
+  readable, and handles what it read from a timer, a slice at a time
+  (`harness-acp-receive-slice`; see acp).  GUI Emacs on macOS can fail
+  to report it: timers keep firing and the screen keeps updating, but
+  the socket's filter is not called until the next click or key, so the
+  chat shows what the harness did only then.  Its select hands the file
+  descriptors to a helper thread and waits for that thread's wake-up;
+  the symptom is that of a wake-up lost.  A select with a zero timeout
+  waits for no one, and does read them.  So
+  `harness-acp-client-poll-interval` (0.1 s on macOS, nil elsewhere)
+  has one repeating timer read every open TCP client connection that
+  often (see acp).
 - Every tool runs in the harness process; no client runs one, so an
   ACP client that is not an Emacs (a phone) loses nothing, and the
   harness works headless.  The user's Emacs is a resource some tools
@@ -427,8 +439,14 @@ to (`:cache-model`, the record's `:model`, else the session's) and the
 lifetime the provider reported for it, if any (`:cache-ttl`); a request
 that used no cache drops them, and a record without tokens (`:turns`)
 leaves them.  They persist with the session, so a reloaded or resumed
-session still knows.  `:cache` is derived from them each time the
-session is described, like `:context-window`: `:ttl` from
+session still knows.  Whether a request used the cache is for the
+record's tokens to say (`:cache-read` or `:cache-write` above 0):
+`:cache-at` is only when, so a record that names a time and counts no
+cache token stamps nothing.  A hosted loop's turn is one record that
+covers several requests, and its `:cache-at` is the time of the last of
+them, the one that kept the cache longest: an older time would have a
+cache that was just renewed look lapsed.  `:cache` is derived from them
+each time the session is described, like `:context-window`: `:ttl` from
 `provider/cache-ttl` for the stamp's model (the reported lifetime, else
 the configured one), `:expires` = `:at` + `:ttl` and `:model` the
 stamp's model.  Past `:expires` the next request sends the whole
@@ -612,13 +630,22 @@ ATTACHMENT = `(:path "/abs" :size N :mime "…" :name "display")`.
   - nil: the provider did not say; it reads as per-token billing.
 - `:plan` is the subscription's id, such as "max".
 - `:cache-at` and `:cache-ttl` are optional: when the request that read
-  or wrote the prompt cache was made (a float time) and the seconds the
-  provider said it keeps that cache.  Claude Code gives both: the time
-  of the turn's last main-conversation `message_start` that used the
-  cache, and 3600 or 300 by whether the request wrote to the one-hour
-  or the five-minute cache.  Without them the record's own arrival
-  stands for the time, and the configured lifetime for the TTL (see
-  "Session" and `provider/cache-ttl`).
+  or wrote the prompt cache was made (a float time; the last request's,
+  for a record that covers several) and the seconds the provider said
+  it keeps that cache.  Claude Code gives both: the time of the turn's
+  last main-conversation request -- its `message_start`, else its first
+  assistant message when the CLI prints no partial messages -- whatever
+  that request's own usage says of the cache (Bedrock and gateways
+  stream the cache fields late or not at all, and the time of an earlier
+  request that said more would make a warm cache look old), and 3600 or
+  300 by whether the request wrote to the one-hour or the five-minute
+  cache.  A sub-agent's requests use a cache of their own and a request
+  the CLI makes between turns belongs to no turn: neither counts, and a
+  turn starts without a time.  Whether the record used the cache is for
+  its tokens to say, not for `:cache-at`: the session stamps only a
+  record with `:cache-read` or `:cache-write`.  Without them the
+  record's own arrival stands for the time, and the configured lifetime
+  for the TTL (see "Session" and `provider/cache-ttl`).
 - `:model`, optional, is the model the request was sent to, which a
   step that ends after a switch tells from the session's; the cache the
   request used is that model's.  `:cache-reset`, optional, says the
@@ -1082,13 +1109,14 @@ redact).
   `session/pending ID`.  Event `session/pending-changed ID ITEMS`.
   Status becomes `blocked` while anything is pending.
 - `session/usage-add ID USAGE &optional CONTEXT` → accumulated usage.
-  A record of a request that read or wrote the prompt cache stamps the
-  totals' `:cache-at`, `:cache-model` and `:cache-ttl`; one that used
-  none, or one with `:cache-reset` (a compaction), clears them (see
-  "Session").  Each also clears `:cache-dropped`, which a redaction set
-  (`session/reset-provider`).  Event `session/usage ID USAGE-TOTAL
-  RECORD`.  It keeps the totals' `:stream-output` and `:stream-seconds`
-  as it finds them.
+  A record of a request that read or wrote the prompt cache (its
+  `:cache-read` or `:cache-write` above 0) stamps the totals'
+  `:cache-at`, `:cache-model` and `:cache-ttl`, the record's `:cache-at`
+  being only when; one that used none, or one with `:cache-reset` (a
+  compaction), clears them (see "Session").  Each also clears
+  `:cache-dropped`, which a redaction set (`session/reset-provider`).
+  Event `session/usage ID USAGE-TOTAL RECORD`.  It keeps
+  the totals' `:stream-output` and `:stream-seconds` as it finds them.
 - `session/usage-note ID RECORD` → the totals (nil for a session that is
   gone): adds RECORD's `:stream-output` and `:stream-seconds`, the
   output tokens of model calls whose streaming was timed and the
@@ -7032,6 +7060,30 @@ the socket is up, so a client keeps a connection while `harness-acp-open-p`
 holds rather than connecting again, which would drop it along with
 every request it carries.
 
+A TCP connection's socket filter only queues the lines it receives; a
+timer handles them a slice at a time (`harness-acp-receive-slice`,
+0.05 s), so a burst of messages leaves Emacs time to redisplay and read
+input.  The filter is called when Emacs's event loop reports the socket
+readable, which GUI Emacs on macOS can fail to do until the next input
+event (see Processes).  `harness-acp-client-poll-interval`, seconds or
+nil, covers that; it is `(and (eq system-type 'darwin) 0.1)` by
+default, so nil wherever the event loop reads sockets reliably.  While
+it is a positive number and a TCP client connection is open, one
+repeating timer (`harness-acp--poll`) reads every open connection with
+`(accept-process-output PROC 0 nil 1)`: a select of its own, with a zero
+timeout, on that socket alone, which runs no timer, for at most
+`harness-acp--poll-budget` (0.02 s) a poll.  A poll only reads: the
+filter queues the lines as ever and the inbox's timer handles them.  A
+connection still connecting is not polled, since reading one socket
+leaves out the write side of the select that completes a non-blocking
+connect.  `harness-acp-connect` starts the timer and the last connection
+to close stops it; `setopt` and Customize start, retime or stop it at
+once, and a `setq` is taken up by the next poll.  The timer never
+signals: a failed poll is logged, once while it repeats.  To tell
+whether a Mac needs the poll, the log says so the first time one reads
+output the event loop had not delivered, and `harness-acp--poll-reads`
+and `harness-acp--loop-reads` count the chunks each delivered.
+
 A request a client sends the harness (`harness-acp--handle-request`)
 always gets an answer to its id: when the real one cannot be sent --
 `json-serialize` refuses a raw byte, deep in a session's transcript a
@@ -7057,8 +7109,11 @@ reads process output in slices of at most `harness-acp--call-sync-slice`
 (0.02 s), running timers as it goes -- a server in the same Emacs
 answers from them, and the evaluation's own timer, or input under
 `while-no-input`, still stops the wait -- until the answer comes or
-TIMEOUT seconds pass (`harness-acp-call-sync-timeout`, 2).  It never
-waits for input: no `sit-for`, `read-event` or `harness-await`.  It
+TIMEOUT seconds pass (`harness-acp-call-sync-timeout`, 2).  Each slice
+starts with a read of the socket that waits for nothing, as the poll
+does, so an answer already there is seen at once whatever the event
+loop's select does.  It never waits for input: no `sit-for`,
+`read-event` or `harness-await`.  It
 returns the result, and signals an error answer, or a connection that
 closes, as the `(acp-error CODE MESSAGE DATA)` the promise of
 `harness-acp-request` rejects with; no answer in time signals
@@ -7636,10 +7691,11 @@ others.
 Connecting again never strands a session.  The connection the UI swaps
 out closes with the reason `replaced`, and the requests still waiting
 on it are rejected with that reason (`harness-ui-connection-replaced-p`):
-`harness-ui-call` and the chat do not report them, since the harness
-goes on with them (a prompt's turn runs, and the redrawn transcript
-shows it).  A permission prompt or question shown from before answers
-through the bus methods (`permission/answer`, `question/answer`): the
+`harness-ui-call`, `harness-ui-call-turn` and the chat do not report
+them, since the harness goes on with them (a prompt's turn runs, and the
+redrawn transcript shows it).  A permission prompt or question shown
+from before answers through the bus methods (`permission/answer`,
+`question/answer`): the
 pending module records the connection with each request, and a RESPOND
 whose connection is gone would never be heard.  While a chat buffer
 fetches its transcript again (after every reload and reconnect) it
@@ -7808,7 +7864,26 @@ cache-read price, at the model's list prices, when the catalogue
 prices both.  A session whose turn is still running shows none, a
 session blocked on an answer included: the next request is that turn's
 own, not the user's next message, and a running session's requests use
-the cache again.  A session switched away from the model whose cache its
+the cache again.  Nor does it show for a session this UI sent a message
+that has no answer yet: `session/prompt` is answered when the turn
+ends, and the UI's record of the session can be behind the harness --
+an Emacs that reads its socket late still holds it idle, with the
+`:cache` of the turn before -- so a panel saying the cache expired a
+minute after the user's message would be false, the turn being under
+way and having just used it.  `harness-ui-call-turn` (`harness-ui-call`
+for a request that runs a turn: the chat's send and send-queue, a BTW's
+first question) keeps each in flight (`harness-ui-prompt-in-flight-p`)
+until its request settles -- answered, failed, rejected with its
+connection, or its session deleted -- and runs
+`harness-ui-prompt-functions` with the session's id as one is sent and
+as one settles.  The panel goes as a message is sent and comes back
+with the answer, or the failure, if the cache lapsed.  A turn the
+harness starts by itself (the queue sent after a turn, a task's or the
+supervisor's message) is not tracked, so for those a UI that lags still
+relies on the session's status and live figures.  The panel reads the
+newest record the UI has of the session (`harness-ui-session`: the
+session list's and a fetch's too), not the chat buffer's copy of the
+last update.  A session switched away from the model whose cache its
 requests last used (`:cache :model`) shows the panel at once,
 whatever the time ("Prompt cache cold  cached for Opus 4.6, not
 DeepSeek V4"), with the same cost: the new model reads nothing of
@@ -7833,10 +7908,11 @@ the cache means for each.  The panel needs no input and no polling: each
 chat buffer holds one timer, for the moment its cache lapses, which
 redraws the box and whatever panel is above it (`harness-compose-redraw`);
 a session update (a new request stamps a new `:cache-at`) reschedules
-it, and the panel goes as soon as the session runs.  Its text names
-clock times only, never "idle for", so nothing in it goes stale between
-redraws.  A session without context or cache use never shows it.  Its
-last line offers to compact the conversation first, so the next
+it, and the panel goes as soon as the session runs or a message is
+sent.  Its text names clock times only, never "idle for", so nothing in
+it goes stale between redraws.  A session without context or cache use
+never shows it.  Its last line offers to compact the conversation
+first, so the next
 message sends only what stands in for it: a button per kind
 (`harness-ui-compact-kinds`), the brief summary first -- the cheap way
 out of a long conversation gone cold -- then the summary, the

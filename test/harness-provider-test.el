@@ -907,6 +907,44 @@ job, and the caller gets every event as it came."
         (should-not (harness-call 'session/nodes parent))
         (should (= 0 (plist-get (plist-get (harness-call 'session/get parent) :usage) :input)))))))
 
+(ert-deftest harness-provider-job-usage-leaves-the-parents-cache-stamp ()
+  "A call made for a session is no request of its conversation.
+Its usage counts toward its own internal session, cache tokens and the
+time and lifetime it reports included, and the session it was made for
+keeps the prompt cache stamp its last request left: neither moved to the
+call's time or model, nor dropped."
+  (harness-provider-test-with-sessions (test-job)
+    (harness-provider-test-job-provider)
+    (let* ((cwd (harness-test-temp-dir))
+           (parent (plist-get (harness-call 'session/create :cwd cwd :model "test-job:judge") :id))
+           (stamp (lambda ()
+                    (let ((s (harness-call 'session/get parent)))
+                      (list (plist-get s :cache)
+                            (plist-get (plist-get s :usage) :cache-at)
+                            (plist-get (plist-get s :usage) :cache-model)
+                            (plist-get (plist-get s :usage) :input))))))
+      (harness-call 'session/usage-add parent '(:input 10 :output 10 :cache-read 900 :context 920
+                                                :cache-at 1000.0 :cache-ttl 300))
+      (let ((before (funcall stamp)))
+        (should (equal 1000.0 (plist-get (car before) :at)))
+        (should (equal "test-job:judge" (plist-get (car before) :model)))
+        (dolist (usage '((:input 100 :output 4 :cache-read 800 :cache-write 50 :cost 0.25
+                          :cache-at 5000.0 :cache-ttl 3600 :model "test-job:other")
+                         (:input 100 :output 4 :cost 0.25)))
+          (harness-call 'provider/complete
+                        (list :model "test-job:judge" :job "Auto-name" :job-parent parent
+                              :session (list :id parent :cwd cwd)
+                              :messages (list (list :role 'user :content "name it"))
+                              :on-event #'ignore))
+          (harness-provider-test-answer (append (list :type 'usage) usage)
+                                        (list :type 'done :stop-reason 'end-turn))
+          (should (equal before (funcall stamp))))
+        ;; The calls' usage is theirs: two internal sessions, each with its own.
+        (let ((internal (harness-provider-test-internal)))
+          (should (equal '(100 100) (mapcar (lambda (s) (plist-get (plist-get s :usage) :input))
+                                            internal)))
+          (should (= 800 (plist-get (plist-get (car internal) :usage) :cache-read))))))))
+
 (ert-deftest harness-provider-job-finishes-however-the-request-ends ()
   "An error, a cancel, a model the policy refuses, no provider, or a
 provider that fails at once: the internal session finishes, idle,

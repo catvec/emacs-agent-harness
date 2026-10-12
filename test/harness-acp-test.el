@@ -1311,5 +1311,381 @@ project list and refreshing it rewrites its first message in place."
                   (should confirm)))))
         (ignore-errors (delete-directory dir t))))))
 
+;;;; Polling the TCP sockets
+
+;; GUI Emacs on macOS can leave a socket unread until the next input event
+;; (see "Client: polling the sockets" in harness-acp.el).  These tests
+;; connect to a listener of their own, a bare socket to write into as the
+;; harness would, so that nothing but the client side is at work, and some
+;; make the event loop blind to sockets, as it is there.
+
+(defvar harness-acp-test-peers nil
+  "The sockets the test listener accepted, newest first.
+That is the listener of `harness-acp-test-with-listener'.  Writing into
+one is the harness sending its connection something.")
+
+(defvar harness-acp-test-port nil
+  "The port of the listener of `harness-acp-test-with-listener'.")
+
+(defmacro harness-acp-test-with-listener (&rest body)
+  "Run BODY with a listener on loopback for TCP client connections to reach.
+`harness-acp-test-connect-tcp' connects to it.  The polling state is
+BODY's own, with no poll timer and the counters at zero, and whatever
+BODY leaves open is closed."
+  (declare (indent 0))
+  (let ((listener (make-symbol "listener")))
+    `(let* ((harness-acp-test-peers nil)
+            (,listener (make-network-process
+                        :name "harness-acp-test-listener" :server t
+                        :host "127.0.0.1" :service t :family 'ipv4
+                        :coding 'utf-8-unix :noquery t
+                        :log (lambda (_server peer _message)
+                               (set-process-query-on-exit-flag peer nil)
+                               (push peer harness-acp-test-peers))))
+            (harness-acp-test-port (process-contact ,listener :service))
+            (harness-acp-token nil)
+            (harness-acp--poll-timer nil)
+            (harness-acp--poll-timer-interval nil)
+            (harness-acp--poll-reads 0)
+            (harness-acp--loop-reads 0)
+            (harness-acp--poll-failure nil)
+            (harness-acp--inbox nil)
+            (harness-acp--inbox-tail nil)
+            (harness-acp--inbox-timer nil))
+       (unwind-protect (progn ,@body)
+         (dolist (conn (harness-acp--tcp-connections))
+           (harness-acp-close conn))
+         (harness-acp--poll-stop)
+         (when (timerp harness-acp--inbox-timer) (cancel-timer harness-acp--inbox-timer))
+         (mapc #'delete-process harness-acp-test-peers)
+         (delete-process ,listener)))))
+
+(defun harness-acp-test-connect-tcp ()
+  "Connect to the test listener and return the connection.
+That is the listener of `harness-acp-test-with-listener'.  It returns
+once the connection is established and the listener has accepted it, so
+the newest of `harness-acp-test-peers' is the other end."
+  (let* ((accepted (length harness-acp-test-peers))
+         (conn (harness-acp-connect (format "127.0.0.1:%d" harness-acp-test-port))))
+    (harness-test-wait (lambda () (and (harness-acp-connected-p conn)
+                                       (> (length harness-acp-test-peers) accepted)))
+                       5 "the connection to open")
+    conn))
+
+(defun harness-acp-test-line (n)
+  "Return the JSON line of a notification `x' whose :n is N."
+  (format "{\"jsonrpc\":\"2.0\",\"method\":\"x\",\"params\":{\"n\":%d}}" n))
+
+(defun harness-acp-test-poll-until (pred)
+  "Poll as the timer does until PRED holds, with no event loop run in between.
+Error after five seconds.  Return PRED's value."
+  (let ((deadline (+ (float-time) 5)))
+    (while (and (not (funcall pred)) (< (float-time) deadline))
+      (harness-acp--poll))
+    (or (funcall pred) (error "Timed out polling"))))
+
+(defun harness-acp-test-spin (pred &optional seconds)
+  "Wait with `accept-process-output' alone until PRED holds, or SECONDS pass.
+SECONDS defaults to 5.  Return PRED's value.  Timers run; unlike
+`harness-test-wait' it calls no `sit-for', whose `sleep-for' would read
+sockets too."
+  (let ((deadline (+ (float-time) (or seconds 5))) (result nil))
+    (while (and (not (setq result (funcall pred))) (< (float-time) deadline))
+      (accept-process-output nil 0.01))
+    result))
+
+(defmacro harness-acp-test-with-blind-select (&rest body)
+  "Run BODY with an event loop blind to sockets, as GUI Emacs on macOS can have.
+The select that hands descriptors to a helper thread loses its wake-up
+there: timers run, and nothing reads a socket until an input event.
+Here `accept-process-output' waits as asked, with timers running and a
+pipe nobody writes to standing in for what it would wait on, and reads no
+socket, but when JUST-THIS-ONE is an integer: that is a select of its
+own, as the poll and `harness-acp-call-sync' use.  Wait in BODY with
+`harness-acp-test-spin'."
+  (declare (indent 0))
+  (let ((real (make-symbol "real")) (idle (make-symbol "idle")))
+    `(let ((,real (symbol-function 'accept-process-output))
+           (,idle (make-pipe-process :name "harness-acp-test-idle" :noquery t)))
+       (unwind-protect
+           (cl-letf (((symbol-function 'accept-process-output)
+                      (lambda (&optional proc seconds millisec just-this-one)
+                        (if (integerp just-this-one)
+                            (funcall ,real proc seconds millisec just-this-one)
+                          (funcall ,real ,idle (or seconds 0.01) millisec t)))))
+             ,@body)
+         (delete-process ,idle)))))
+
+(ert-deftest harness-acp-poll-timer-runs-while-a-tcp-connection-is-open ()
+  "With an interval set, one repeating timer polls the TCP client connections.
+It starts with the first, serves the others, and stops with the last,
+whether that one is closed or its socket dies.  A local connection has no
+socket and starts none."
+  (harness-acp-test-with-listener
+    (let ((harness-acp-client-poll-interval 0.05))
+      (should-not harness-acp--poll-timer)
+      (harness-acp-close (harness-acp-connect))
+      (should-not harness-acp--poll-timer)
+      ;; Closed: the timer stops with its only connection.
+      (let* ((conn (harness-acp-test-connect-tcp))
+             (timer harness-acp--poll-timer))
+        (should (timerp timer))
+        (should (memq timer timer-list))
+        (should (eq #'harness-acp--poll (timer--function timer)))
+        (should (eql 0.05 (timer--repeat-delay timer)))
+        (harness-acp-close conn)
+        (should-not harness-acp--poll-timer)
+        (should-not (memq timer timer-list)))
+      ;; Two connections share one timer, which goes with the last of them,
+      ;; here when its socket dies and the sentinel says so.
+      (let* ((first (harness-acp-test-connect-tcp))
+             (timer harness-acp--poll-timer)
+             (second (harness-acp-test-connect-tcp))
+             (second-peer (car harness-acp-test-peers)))
+        (should (eq timer harness-acp--poll-timer))
+        (should (= 1 (cl-count #'harness-acp--poll timer-list :key #'timer--function)))
+        (harness-acp-close first)
+        (should (eq timer harness-acp--poll-timer))
+        (should (memq timer timer-list))
+        (delete-process second-peer)
+        (harness-test-wait (lambda () (not (harness-acp-connection-open second))) 5
+                           "the death of the socket noticed")
+        (should-not harness-acp--poll-timer)
+        (should-not (memq timer timer-list))
+        (should-not (cl-find #'harness-acp--poll timer-list :key #'timer--function))))))
+
+(ert-deftest harness-acp-poll-is-off-without-an-interval ()
+  "No timer polls when the interval is nil, or is not a positive number.
+It is on by default on macOS only."
+  (should (equal (and (eq system-type 'darwin) 0.1)
+                 (eval (car (get 'harness-acp-client-poll-interval 'standard-value)) t)))
+  (harness-acp-test-with-listener
+    (dolist (interval '(nil 0 -1 "0.1"))
+      (let* ((harness-acp-client-poll-interval interval)
+             (conn (harness-acp-test-connect-tcp)))
+        (should-not harness-acp--poll-timer)
+        (should-not (cl-find #'harness-acp--poll timer-list :key #'timer--function))
+        (harness-acp-close conn)))))
+
+(ert-deftest harness-acp-poll-follows-the-option ()
+  "A change of `harness-acp-client-poll-interval' applies from the next poll.
+Another number restarts the timer at that interval and nil stops it; a
+connection made after nil was set starts it again."
+  (harness-acp-test-with-listener
+    (let* ((harness-acp-client-poll-interval 0.05)
+           (conn (harness-acp-test-connect-tcp))
+           (timer harness-acp--poll-timer))
+      (should timer)
+      (setq harness-acp-client-poll-interval 0.2)
+      (harness-acp--poll)
+      (should-not (eq timer harness-acp--poll-timer))
+      (should-not (memq timer timer-list))
+      (should (memq harness-acp--poll-timer timer-list))
+      (should (eql 0.2 (timer--repeat-delay harness-acp--poll-timer)))
+      (should (= 1 (cl-count #'harness-acp--poll timer-list :key #'timer--function)))
+      (setq harness-acp-client-poll-interval nil)
+      (harness-acp--poll)
+      (should-not harness-acp--poll-timer)
+      (should-not (cl-find #'harness-acp--poll timer-list :key #'timer--function))
+      (setq harness-acp-client-poll-interval 0.05)
+      (let ((other (harness-acp-test-connect-tcp)))
+        (should (memq harness-acp--poll-timer timer-list))
+        (harness-acp-close other))
+      (should (memq harness-acp--poll-timer timer-list))
+      (harness-acp-close conn)
+      (should-not harness-acp--poll-timer))))
+
+(ert-deftest harness-acp-poll-setopt-applies-at-once ()
+  "`setopt' (and so Customize) starts, retimes and stops the poll timer
+for the connections that are open, without waiting for the next poll or
+the next connection."
+  (harness-acp-test-with-listener
+    (let ((original (default-toplevel-value 'harness-acp-client-poll-interval)))
+      (unwind-protect
+          (progn
+            (setopt harness-acp-client-poll-interval nil)
+            (let ((conn (harness-acp-test-connect-tcp)))
+              (should-not harness-acp--poll-timer)
+              (setopt harness-acp-client-poll-interval 0.05)
+              (should (memq harness-acp--poll-timer timer-list))
+              (should (eql 0.05 (timer--repeat-delay harness-acp--poll-timer)))
+              (setopt harness-acp-client-poll-interval 0.5)
+              (should (eql 0.5 (timer--repeat-delay harness-acp--poll-timer)))
+              (should (= 1 (cl-count #'harness-acp--poll timer-list :key #'timer--function)))
+              (setopt harness-acp-client-poll-interval nil)
+              (should-not harness-acp--poll-timer)
+              (should-not (cl-find #'harness-acp--poll timer-list :key #'timer--function))
+              (harness-acp-close conn)))
+        (setopt harness-acp-client-poll-interval original)))))
+
+(ert-deftest harness-acp-poll-reads-the-socket-without-the-event-loop ()
+  "A poll reads what waits in the socket, and the message reaches the inbox.
+Nothing here runs the event loop: the poll reads on its own and runs no
+timer, so the message is queued but not handled until the loop runs."
+  (harness-acp-test-with-listener
+    (let* ((harness-acp-client-poll-interval 60) ; its own timer stays out of this
+           (seen nil)
+           (canary nil)
+           (conn (harness-acp-test-connect-tcp))
+           (peer (car harness-acp-test-peers)))
+      (harness-acp-set-handler conn (lambda (_method params _respond)
+                                      (push (plist-get params :n) seen)))
+      (process-send-string peer (concat (harness-acp-test-line 1) "\n"))
+      (run-at-time 0 nil (lambda () (setq canary t)))
+      (harness-acp-test-poll-until (lambda () (> harness-acp--poll-reads 0)))
+      (should (equal (list (cons conn (harness-acp-test-line 1))) harness-acp--inbox))
+      (should (= 1 harness-acp--poll-reads))
+      (should (= 0 harness-acp--loop-reads))
+      ;; It only read: the timers due, a canary and the inbox's own, have not run.
+      (should-not canary)
+      (should-not seen)
+      ;; The event loop then handles what was queued, as it always does.
+      (harness-test-wait (lambda () (and canary seen)) 5 "the message handled")
+      (should (equal '(1) seen))
+      (should-not harness-acp--inbox)
+      (harness-acp-close conn))))
+
+(ert-deftest harness-acp-poll-delivers-what-the-event-loop-does-not ()
+  "With the event loop blind to sockets, the poll timer is what delivers.
+A message the harness sends is never read without it, and handled soon
+with it: the situation of GUI Emacs on macOS and the way out of it."
+  (harness-acp-test-with-listener
+    (let* ((harness-acp-client-poll-interval nil)
+           (seen nil)
+           (conn (harness-acp-test-connect-tcp))
+           (peer (car harness-acp-test-peers)))
+      (harness-acp-set-handler conn (lambda (_method params _respond)
+                                      (push (plist-get params :n) seen)))
+      (harness-acp-test-with-blind-select
+        ;; Nothing polls: the message sits in the socket.
+        (process-send-string peer (concat (harness-acp-test-line 1) "\n"))
+        (should-not (harness-acp-test-spin (lambda () seen) 0.3))
+        (should-not harness-acp--inbox)
+        (should (= 0 harness-acp--loop-reads))
+        ;; The option set: the poll reads it and the inbox's timer handles it.
+        (setq harness-acp-client-poll-interval 0.02)
+        (harness-acp--poll-sync)
+        (should harness-acp--poll-timer)
+        (should (harness-acp-test-spin (lambda () seen)))
+        (should (equal '(1) seen))
+        (process-send-string peer (concat (harness-acp-test-line 2) "\n"))
+        (should (harness-acp-test-spin (lambda () (equal '(2 1) seen))))
+        (should (= 2 harness-acp--poll-reads))
+        (should (= 0 harness-acp--loop-reads)))
+      (harness-acp-close conn)
+      (should-not harness-acp--poll-timer))))
+
+(ert-deftest harness-acp-poll-and-event-loop-share-the-line-buffer ()
+  "A line cut between a poll's read and the event loop's is joined, and handled once."
+  (harness-acp-test-with-listener
+    (let* ((harness-acp-client-poll-interval 60)
+           (seen nil)
+           (line (harness-acp-test-line 7))
+           (conn (harness-acp-test-connect-tcp))
+           (peer (car harness-acp-test-peers)))
+      (harness-acp-set-handler conn (lambda (_method params _respond)
+                                      (push (plist-get params :n) seen)))
+      (process-send-string peer (substring line 0 20))
+      (harness-acp-test-poll-until (lambda () (= 1 harness-acp--poll-reads)))
+      (should-not harness-acp--inbox)
+      (process-send-string peer (concat (substring line 20) "\n"))
+      (harness-test-wait (lambda () seen) 5 "the line handled")
+      (should (equal '(7) seen))
+      (should (= 1 harness-acp--loop-reads))
+      (harness-acp-close conn))))
+
+(ert-deftest harness-acp-poll-says-once-per-connection-that-it-read ()
+  "The poll's reads are counted apart from the event loop's, and the first
+poll to read on a connection says in the log that it read what the event
+loop had not delivered, naming the option."
+  (harness-acp-test-with-listener
+    (let* ((harness-acp-client-poll-interval 60)
+           (harness-log-level 'info)
+           (infos nil)
+           (log (lambda (level msg)
+                  (when (and (eq level 'info) (string-match-p "had not delivered" msg))
+                    (push msg infos))))
+           (first (harness-acp-test-connect-tcp))
+           (first-peer (car harness-acp-test-peers))
+           (second (harness-acp-test-connect-tcp))
+           (second-peer (car harness-acp-test-peers)))
+      (add-hook 'harness-log-hook log)
+      (unwind-protect
+          (progn
+            ;; The event loop's read is counted as such, and says nothing.
+            (process-send-string first-peer (concat (harness-acp-test-line 1) "\n"))
+            (harness-test-wait (lambda () (and (= 1 harness-acp--loop-reads)
+                                               (null harness-acp--inbox)))
+                               5 "the event loop's read handled")
+            (should (= 0 harness-acp--poll-reads))
+            (should-not infos)
+            ;; A poll's read is counted, and the log says so, once for the connection.
+            (process-send-string first-peer (concat (harness-acp-test-line 2) "\n"))
+            (harness-acp-test-poll-until (lambda () (= 1 harness-acp--poll-reads)))
+            (should (= 1 (length infos)))
+            (should (string-match-p "event loop had not delivered" (car infos)))
+            (should (string-match-p "harness-acp-client-poll-interval" (car infos)))
+            (should (string-match-p (regexp-quote (harness-acp-connection-address first)) (car infos)))
+            (process-send-string first-peer (concat (harness-acp-test-line 3) "\n"))
+            (harness-acp-test-poll-until (lambda () (= 2 harness-acp--poll-reads)))
+            (should (= 1 (length infos)))
+            ;; Another connection is told once of its own.
+            (process-send-string second-peer (concat (harness-acp-test-line 4) "\n"))
+            (harness-acp-test-poll-until (lambda () (= 3 harness-acp--poll-reads)))
+            (should (= 2 (length infos)))
+            (should (= 1 harness-acp--loop-reads)))
+        (remove-hook 'harness-log-hook log))
+      (harness-acp-close first)
+      (harness-acp-close second))))
+
+(ert-deftest harness-acp-poll-never-signals ()
+  "An error in a poll is logged, once while it repeats, and does not escape."
+  (harness-acp-test-with-listener
+    (let* ((harness-acp-client-poll-interval 60)
+           (harness-log-level 'info)
+           (warned nil)
+           (log (lambda (level msg) (when (eq level 'warn) (push msg warned))))
+           (conn (harness-acp-test-connect-tcp)))
+      (add-hook 'harness-log-hook log)
+      (unwind-protect
+          (progn
+            (cl-letf (((symbol-function 'harness-acp--poll-sockets)
+                       (lambda () (error "Boom"))))
+              (harness-acp--poll)
+              (harness-acp--poll))
+            (should (= 1 (length warned)))
+            (should (string-match-p "Boom" (car warned)))
+            ;; A poll that works forgets it, so the same error is logged again.
+            (harness-acp--poll)
+            (should-not harness-acp--poll-failure)
+            (cl-letf (((symbol-function 'harness-acp--poll-sockets)
+                       (lambda () (error "Boom"))))
+              (harness-acp--poll))
+            (should (= 2 (length warned))))
+        (remove-hook 'harness-log-hook log))
+      (harness-acp-close conn))))
+
+(ert-deftest harness-acp-call-sync-reads-the-socket-before-it-waits ()
+  "An answer already in the socket is found by `harness-acp-call-sync' at once.
+The event loop's select never reports the socket here, as in GUI Emacs
+on macOS when its wake-up is lost: the timed wait reads nothing, the
+zero-timeout read before it does."
+  (harness-acp-test-with-listener
+    (let* ((conn (harness-acp-test-connect-tcp))
+           (peer (car harness-acp-test-peers)))
+      ;; The answer to the first request, whose id will be 1, waits before it is asked for.
+      (process-send-string peer "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"answer\":42}}\n")
+      (harness-acp-test-with-blind-select
+        ;; The simulation reads nothing, however long it waits ...
+        (should-not (accept-process-output (harness-acp-connection-process conn) 0.1))
+        (should-not harness-acp--inbox)
+        ;; ... and still the answer comes within a slice, not after the timeout.
+        (let ((start (float-time)))
+          (should (equal '(:answer 42) (harness-acp-call-sync conn "x" nil 5)))
+          (should (< (- (float-time) start) 1)))
+        (should-not harness-acp--inbox)
+        (should (= 1 harness-acp--poll-reads)))
+      (harness-acp-close conn))))
+
 (provide 'harness-acp-test)
 ;;; harness-acp-test.el ends here

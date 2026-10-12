@@ -24,7 +24,10 @@
 ;; loop, never inside the caller's frame: what a client receives is
 ;; queued and handled from a timer, a slice at a time, so that a burst
 ;; of messages leaves Emacs time to redisplay and read input between
-;; slices (see "Client: receiving").
+;; slices (see "Client: receiving").  Where Emacs's event loop may leave
+;; a socket unread until the next input event, as GUI Emacs on macOS
+;; can, a timer reads the client's sockets as well (see "Client:
+;; polling the sockets").
 ;;
 ;; The module has no requirements.  The server dispatches to whatever
 ;; bus methods exist, so it loads and the client API works even when
@@ -71,6 +74,38 @@ What arrived beyond that waits until Emacs has redisplayed and read
 input, so a burst of messages (several sessions streaming at once, or a
 backlog after Emacs was busy) makes the UI pause briefly, not freeze."
   :type 'number :group 'harness)
+
+(defun harness-acp--set-poll-interval (symbol value)
+  "Set SYMBOL, `harness-acp-client-poll-interval', to VALUE and apply it.
+The poll timer starts, stops or changes its interval at once for the
+connections open (see `harness-acp--poll-sync'), as `setopt' and
+Customize set the option.  A plain `setq' applies from the next poll."
+  (set-default-toplevel-value symbol value)
+  (when (fboundp 'harness-acp--poll-sync)
+    (harness-acp--poll-sync)))
+
+(defcustom harness-acp-client-poll-interval (and (eq system-type 'darwin) 0.1)
+  "Seconds between polls of the open TCP client connections, or nil for none.
+The UI reads the harness process's socket when Emacs's event loop
+reports it readable.  GUI Emacs on macOS can fail to: timers keep
+running, but the socket's filter is not called until the next input
+event, so the UI shows what the harness sent only once you click or press
+a key.  Its select hands the file descriptors to a helper thread and
+waits for that thread's wake-up, which can get lost; a select with a
+zero timeout is a plain one, and reads them.
+
+So with a number here a repeating timer reads each open connection that
+often, with a zero-timeout `accept-process-output' on that socket alone.
+It runs while a TCP client connection is open.  A poll only reads: the
+messages it receives are queued and handled as ever (see \"Client:
+receiving\" in harness-acp.el), and the first time one reads output the
+event loop had not delivered, the harness log says so.
+
+nil turns polling off, as it is by default wherever the event loop reads
+sockets reliably.  `setopt' and Customize apply a change at once."
+  :type '(choice (const :tag "Off" nil) number)
+  :set #'harness-acp--set-poll-interval
+  :group 'harness)
 
 (defvar harness-acp--server-enabled t
   "Start the TCP server when the module initialises.")
@@ -1828,7 +1863,9 @@ by the user, so the bridge can authenticate for the editor it serves."
   "Open an ACP connection and return it.
 ADDRESS nil connects in-process to this harness (no JSON, no socket);
 \"HOST:PORT\" or (HOST . PORT) connects over TCP to a harness there.
-A TCP connection authenticates with `harness-acp-token' when it is set.
+A TCP connection authenticates with `harness-acp-token' when it is set,
+and is read from a timer as well while `harness-acp-client-poll-interval'
+is a number.
 Set a handler with `harness-acp-set-handler' to receive notifications
 and requests, then call `harness-acp-initialize'."
   (if (null address)
@@ -1851,6 +1888,9 @@ and requests, then call `harness-acp-initialize'."
                                              :sentinel #'harness-acp--conn-sentinel)))
       (process-put proc 'harness-acp-connection conn)
       (setf (harness-acp-connection-process conn) proc)
+      ;; The socket is read from a timer as well, where Emacs's event
+      ;; loop does not read it reliably (`harness-acp-client-poll-interval').
+      (harness-acp--poll-sync)
       (when harness-acp-token
         (harness-acp-authenticate conn harness-acp-token))
       conn)))
@@ -1988,6 +2028,9 @@ when it closed by itself, such as \"connection broken by remote peer\"."
   "Mark CONN closed for REASON, reject its pending requests and run on-close."
   (when (harness-acp-connection-open conn)
     (setf (harness-acp-connection-open conn) nil)
+    ;; Its socket may still live (see `harness-acp-close'), but is no
+    ;; longer read: the poll timer stops with the last connection.
+    (harness-acp--poll-sync)
     (let ((pending (harness-acp-connection-pending conn))
           (message (if (string-prefix-p "connection" reason) reason (format "connection %s" reason)))
           promises)
@@ -2000,6 +2043,161 @@ when it closed by itself, such as \"connection broken by remote peer\"."
       (harness-run-soon (lambda ()
                           (condition-case err (funcall fn)
                             (error (harness-log 'error "acp: on-close hook failed: %S" err))))))))
+
+;;;; Client: polling the sockets
+
+;; Emacs reads a socket when its event loop reports it readable.  In
+;; GUI Emacs on macOS that report can fail to come: timers keep running
+;; and the screen keeps updating, but a socket's filter is not called
+;; until the next input event, so the UI shows what the harness sent
+;; only once the user clicks or presses a key.  The NS port's `ns_select'
+;; hands the file descriptors to a helper thread and waits in the run
+;; loop for that thread's wake-up (src/nsterm.m, `ns_select_1'); the
+;; symptom is that of a wake-up lost.  A select with a zero timeout does
+;; not wait for it: `ns_select_1' passes that straight to `pselect'.
+;; `(accept-process-output PROC 0 nil 1)' is such a select, on PROC's
+;; descriptor alone (src/process.c, `wait_reading_process_output'): it
+;; reads what waits on PROC, calls PROC's filter, and, the 1 being an
+;; integer, runs no timer.
+;;
+;; So `harness-acp-client-poll-interval', set on macOS only by default,
+;; has one repeating timer read every open TCP client connection.  The
+;; timer runs while a TCP client connection is open: `harness-acp-connect'
+;; starts it and `harness-acp--conn-shutdown' stops it once none is, be it
+;; a close or the socket dying, which the sentinel reports.  A poll only
+;; reads: the filter queues the lines in the inbox and the inbox's timer
+;; handles them as ever (see "Client: receiving").  What a poll cannot
+;; read is a socket still connecting: waiting for its connection to
+;; complete takes the write side of the select, which a read of one
+;; socket leaves out.
+;;
+;; `harness-acp-call-sync' waits on the same select, so it reads that
+;; way before each wait.
+;;
+;; To tell that a Mac needs it, the filter counts what it receives: under
+;; a poll (`harness-acp--poll-reads') and from the event loop
+;; (`harness-acp--loop-reads'); and the first time a poll reads on a
+;; connection, the log says so.
+
+(defconst harness-acp--poll-budget 0.02
+  "Longest time, in seconds, one poll spends reading the sockets.")
+
+(defvar harness-acp--poll-timer nil
+  "The repeating timer that polls the TCP client connections, or nil.
+One timer serves them all (see `harness-acp--poll-sync').")
+
+(defvar harness-acp--poll-timer-interval nil
+  "The interval, in seconds, `harness-acp--poll-timer' runs at.")
+
+(defvar harness-acp--polling nil
+  "Non-nil while a socket is read outside the event loop, to be counted.
+`harness-acp--read-now' binds it, so that `harness-acp--conn-filter' can
+tell what a poll (or the read `harness-acp-call-sync' does before it
+waits) read from what the event loop delivered.")
+
+(defvar harness-acp--poll-reads 0
+  "How many chunks of output polls have read, since Emacs started.
+Each waited in a socket, undelivered, until a poll came; compare
+`harness-acp--loop-reads'.")
+
+(defvar harness-acp--loop-reads 0
+  "How many chunks of output the event loop has delivered since Emacs started.
+To a connection's filter, that is, and not as a poll read them.")
+
+(defvar harness-acp--poll-failure nil
+  "The error the last failed poll logged, so that one that repeats is logged once.")
+
+(defun harness-acp--tcp-connections ()
+  "Return the TCP client connections that are open, their sockets live."
+  (let (conns)
+    (dolist (proc (process-list))
+      (let ((conn (process-get proc 'harness-acp-connection)))
+        (when (and conn (harness-acp-connection-open conn) (process-live-p proc))
+          (push conn conns))))
+    (nreverse conns)))
+
+(defun harness-acp--poll-stop ()
+  "Stop the poll timer, if it runs."
+  (when (timerp harness-acp--poll-timer)
+    (cancel-timer harness-acp--poll-timer))
+  (setq harness-acp--poll-timer nil
+        harness-acp--poll-timer-interval nil))
+
+(defun harness-acp--poll-sync ()
+  "Run the poll timer while it is wanted, and stop it when it is not.
+It is wanted while `harness-acp-client-poll-interval' is a positive
+number and a TCP client connection is open: then one timer, at that
+interval, serves every connection.  This is called wherever that may
+have changed: a connection made or closed, an interval set.  It never
+signals, so a close is not undone by it."
+  (condition-case err
+      (let ((interval harness-acp-client-poll-interval))
+        (cond
+         ((not (and (numberp interval) (> interval 0) (harness-acp--tcp-connections)))
+          (harness-acp--poll-stop))
+         ((not (and (timerp harness-acp--poll-timer)
+                    (memq harness-acp--poll-timer timer-list)
+                    (eql interval harness-acp--poll-timer-interval)))
+          (harness-acp--poll-stop)
+          (setq harness-acp--poll-timer-interval interval
+                harness-acp--poll-timer (run-at-time interval interval #'harness-acp--poll)))))
+    (error (harness-log 'warn "acp: cannot set up polling of the harness socket: %S" err))))
+
+(defun harness-acp--read-now (proc)
+  "Read the output waiting on socket PROC without waiting; return non-nil if any.
+A select of its own with a zero timeout, on PROC alone, rather than the
+event loop's (see \"Client: polling the sockets\"); no timer runs in it.
+The output goes to PROC's filter, which counts it as read by a poll."
+  (and (processp proc)
+       (eq (process-status proc) 'open)
+       (let ((harness-acp--polling t))
+         (accept-process-output proc 0 nil 1))))
+
+(defun harness-acp--poll-sockets ()
+  "Read what waits on the open TCP client sockets, for a moment at most.
+Each is read while it has output and `harness-acp--poll-budget' seconds
+are left, and at least once, so a busy connection does not keep the others
+waiting.  The filter queues what is read; nothing is handled here."
+  (let ((deadline (+ (float-time) harness-acp--poll-budget)))
+    (dolist (conn (harness-acp--tcp-connections))
+      (let ((proc (harness-acp-connection-process conn)))
+        (while (and (harness-acp--read-now proc)
+                    (< (float-time) deadline)))))))
+
+(defun harness-acp--poll ()
+  "Read the open TCP client sockets: the function of the poll timer.
+It first sees that the timer is still wanted, at this interval (see
+`harness-acp--poll-sync').  It never signals: an error is logged, once
+while it repeats."
+  (unless harness-acp--polling
+    (condition-case err
+        (progn
+          (harness-acp--poll-sync)
+          (when harness-acp--poll-timer
+            (harness-acp--poll-sockets))
+          (setq harness-acp--poll-failure nil))
+      (error
+       (unless (equal err harness-acp--poll-failure)
+         (setq harness-acp--poll-failure err)
+         (harness-log 'warn "acp: polling the harness socket failed: %S" err))))))
+
+(defun harness-acp--note-read (proc conn)
+  "Count a chunk of output CONN's socket PROC delivered to its filter.
+It was read by a poll when `harness-acp--polling' says so, else the event
+loop delivered it.  The first poll to read on CONN says so in the log: the
+output waited in the socket although Emacs's event loop was running, which
+is what `harness-acp-client-poll-interval' is for."
+  (if (not harness-acp--polling)
+      (cl-incf harness-acp--loop-reads)
+    (cl-incf harness-acp--poll-reads)
+    (unless (process-get proc 'harness-acp-poll-noted)
+      (process-put proc 'harness-acp-poll-noted t)
+      (harness-log 'info "acp: a poll read output from %s that Emacs's event loop had not delivered \
+(polls have read %d chunk(s) so far, the event loop %d); \
+see `harness-acp-client-poll-interval', now %s"
+                   (harness-acp-connection-address conn)
+                   harness-acp--poll-reads harness-acp--loop-reads
+                   harness-acp-client-poll-interval))))
 
 ;;;; Client: receiving
 
@@ -2137,7 +2335,10 @@ They are parsed as they are handled, a slice at a time."
     (when conn
       (let ((split (harness-acp--split-lines (harness-acp-connection-buffer conn) chunk)))
         (setf (harness-acp-connection-buffer conn) (cdr split))
-        (harness-acp--enqueue-all conn (car split))))))
+        (harness-acp--enqueue-all conn (car split)))
+      ;; After the output is safe in the inbox: counting it is no reason to lose it.
+      (when (> (length chunk) 0)
+        (ignore-errors (harness-acp--note-read proc conn))))))
 
 (defun harness-acp--conn-sentinel (proc event)
   "React to EVENT on the client socket PROC: flush on open, shut down on close."
@@ -2217,8 +2418,11 @@ They are parsed as they are handled, a slice at a time."
 ;; It runs where nothing may wait for input (`inhibit-interaction',
 ;; `while-no-input'), so it reads process output only, timers allowed:
 ;; a server in the same Emacs answers from them, and the evaluation's
-;; own timer still stops the code.  What else arrives meanwhile is
-;; queued as usual but handled only once the wait is over, in order:
+;; own timer still stops the code.  Each turn of the wait first reads
+;; the socket without waiting, as the poll does (see "Client: polling
+;; the sockets"), so an answer already there is seen within one slice
+;; whatever the event loop's select does.  What else arrives meanwhile
+;; is queued as usual but handled only once the wait is over, in order:
 ;; handling it inside the wait would run the UI's handlers in the
 ;; middle of somebody's code, under its bindings.
 
@@ -2270,7 +2474,10 @@ must have the answer before it returns and cannot wait for input, such
 as code evaluated for the harness under `inhibit-interaction' and
 `while-no-input'.  It reads process output in short slices, running
 timers as it goes, so a timer such as an evaluation's own timeout can
-stop it, and so can input under `while-no-input'.  It never waits for
+stop it, and so can input under `while-no-input'.  Each slice starts
+with a read of the socket that waits for nothing, so an answer already
+there is seen at once whatever the event loop does (see
+`harness-acp-client-poll-interval').  It never waits for
 input: no `sit-for', `read-event' or `harness-await'.  Meanwhile the
 messages that arrive are queued but not handled, but for this answer:
 they are handled once the wait ends, however it ends, in the order
@@ -2285,6 +2492,11 @@ they came."
                (id (car sent))
                (promise (cdr sent)))
           (while (not (harness-promise-settled-p promise))
+            ;; The socket first, with a select that waits for nothing: the
+            ;; timed wait below goes through the event loop's, which in GUI
+            ;; Emacs on macOS can leave an answer already there unread for as
+            ;; long as the wait lasts (see "Client: polling the sockets").
+            (when proc (harness-acp--read-now proc))
             (let ((msg (and id (harness-acp--take-response conn id))))
               (cond
                (msg (harness-acp--conn-receive conn msg))
@@ -2393,6 +2605,10 @@ to the loopback address, on the same port when it is free."
 (when (harness-module-ready-p 'acp)
   (add-hook 'harness-corporate-mode-change-hook #'harness-acp--on-corporate-mode)
   (harness-acp--subscribe))
+
+;; Nor does a reload end the connections made before it: poll those too,
+;; whichever version made them (nothing happens when there are none).
+(harness-acp--poll-sync)
 
 (provide 'harness-acp)
 ;;; harness-acp.el ends here

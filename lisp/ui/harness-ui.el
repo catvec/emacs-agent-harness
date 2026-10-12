@@ -488,6 +488,14 @@ to report."
       (push (list method params p) harness-ui--queue)
       p)))
 
+(defun harness-ui--report-failed (method err)
+  "Say in the echo area that the request METHOD failed with ERR.
+Nothing failed when ERR is the rejection of a request on a connection
+the UI replaced on purpose (`harness-ui-connection-replaced-p')."
+  (unless (harness-ui-connection-replaced-p err)
+    (message "Harness: %s failed: %s" method (harness-error-message err)))
+  nil)
+
 (defun harness-ui-call (method params callback &optional on-error)
   "Request METHOD with PARAMS and call CALLBACK with the result.
 Errors are shown in the echo area unless ON-ERROR handles them, but
@@ -495,17 +503,84 @@ for those of a connection the UI replaced on purpose
 \(`harness-ui-connection-replaced-p'), which are not failures."
   (harness-then (harness-ui-request method params)
                 callback
-                (or on-error
-                    (lambda (e)
-                      (unless (harness-ui-connection-replaced-p e)
-                        (message "Harness: %s failed: %s" method (harness-error-message e)))
-                      nil))))
+                (or on-error (lambda (e) (harness-ui--report-failed method e)))))
 
 (defun harness-ui-notify (method &optional params)
   "Send notification METHOD with PARAMS."
   (if-let* ((conn (harness-ui-connection)))
       (harness-acp-notify conn method params)
     (push (list method params nil) harness-ui--queue)))
+
+;;;; Prompts in flight
+
+;; `session/prompt' is answered when the turn it starts, or steers,
+;; ends.  Until then the session runs, whatever the record the UI holds
+;; of it says: that record is the latest one the UI took in, and an
+;; Emacs that falls behind its socket (it reads it when input comes, as
+;; GUI Emacs on macOS does at times) still has the session idle, with
+;; the cache stamp of the turn before.  So the UI keeps, for each
+;; session, the requests it sent that run a turn and have no answer yet,
+;; and the cache panel (harness-ui-cache.el) asks
+;; `harness-ui-prompt-in-flight-p' before it speaks of the user's next
+;; message.
+;;
+;; Nothing else ends a prompt but its request settling.  A connection
+;; that closes, or that the UI replaces, rejects every request pending
+;; on it (`harness-acp-close'), so the prompts it carried go with it.
+
+(defvar harness-ui--prompts (make-hash-table :test 'equal)
+  "Session id -> the prompts this UI sent it that have no answer yet.
+Each prompt is a token, a fresh cons that leaves the list when its
+request settles, whether it was answered or failed.")
+
+(defvar harness-ui-prompt-functions nil
+  "Functions called with (SESSION-ID) after the prompts in flight to it changed.
+That is after a prompt was sent and after one was answered or failed,
+see `harness-ui-call-turn'.  The cache panel draws a session's chat again.")
+
+(defun harness-ui-prompt-in-flight-p (id)
+  "Non-nil while this UI has a prompt to session ID that nothing answered yet.
+The prompt is a turn that runs or is about to, whatever the session's
+record says (see `harness-ui-call-turn')."
+  (and id (gethash id harness-ui--prompts) t))
+
+(defun harness-ui--prompts-changed (id)
+  "Tell `harness-ui-prompt-functions' that the prompts in flight to ID changed."
+  (harness-ignore-errors-logged "harness-ui-prompt-functions"
+    (run-hook-with-args 'harness-ui-prompt-functions id)))
+
+(defun harness-ui--prompt-sent (id token)
+  "Note that the prompt TOKEN to session ID is in flight."
+  (push token (gethash id harness-ui--prompts))
+  (harness-ui--prompts-changed id))
+
+(defun harness-ui--prompt-settled (id token)
+  "Note that the prompt TOKEN to session ID has its answer, or failed.
+A token gone already, or never there, changes nothing."
+  (when (memq token (gethash id harness-ui--prompts))
+    (if-let* ((rest (delq token (gethash id harness-ui--prompts))))
+        (puthash id rest harness-ui--prompts)
+      (remhash id harness-ui--prompts))
+    (harness-ui--prompts-changed id)))
+
+(defun harness-ui-call-turn (id method params callback &optional on-error)
+  "Request METHOD with PARAMS, for a turn of session ID, as `harness-ui-call'.
+METHOD is `session/prompt' or sending the queue: the answer comes when
+the turn ends.  Until then, or until the request fails, it is a prompt
+in flight to ID (`harness-ui-prompt-in-flight-p'), which says the
+session runs even while the record the UI holds of it still reads idle.
+CALLBACK and ON-ERROR are called as `harness-ui-call' calls them, once
+the prompt is settled."
+  (let ((request (harness-ui-request method params))
+        (token (list id)))
+    (harness-ui--prompt-sent id token)
+    (harness-then request
+                  (lambda (value)
+                    (harness-ui--prompt-settled id token)
+                    (if callback (funcall callback value) value))
+                  (lambda (err)
+                    (harness-ui--prompt-settled id token)
+                    (if on-error (funcall on-error err) (harness-ui--report-failed method err))))))
 
 ;;;; The harness process
 
@@ -902,8 +977,10 @@ taken for an internal one, so that a view skips only what it is sure of."
 
 (defun harness-ui--forget-session (id)
   "Remove session ID from the cache and notify listeners.
-Its output rate and live token figures go with it."
+Its output rate, live token figures and prompts in flight go with it:
+a deleted session answers none."
   (remhash id harness-ui--sessions)
+  (remhash id harness-ui--prompts)
   (harness-ui--store-rate id nil)
   (harness-ui--store-live id nil)
   (run-hooks 'harness-ui-sessions-changed-hook))

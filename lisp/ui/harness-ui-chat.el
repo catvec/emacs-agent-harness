@@ -3449,9 +3449,9 @@ A module showing something of its own in this buffer
            (lambda (expanded)
              (let ((blocks (append (and (not (string-empty-p expanded)) (list (list :type "text" :text expanded)))
                                    (mapcar #'harness-compose-attachment-block atts))))
-               (harness-ui-call "session/prompt" (list :sessionId sid :prompt blocks)
-                                #'ignore
-                                (lambda (err) (harness-chat--report-error buf "send" err))))))))))))
+               (harness-ui-call-turn sid "session/prompt" (list :sessionId sid :prompt blocks)
+                                     #'ignore
+                                     (lambda (err) (harness-chat--report-error buf "send" err))))))))))))
 
 
 (defun harness-chat-queue ()
@@ -3475,7 +3475,8 @@ A module showing something of its own in this buffer
 (defun harness-chat-send-queue ()
   "Send every queued message now."
   (interactive)
-  (harness-ui-call "_harness/agent/send-queue" (list :session-id harness-ui-session-id) #'ignore))
+  (harness-ui-call-turn harness-ui-session-id "_harness/agent/send-queue"
+                        (list :session-id harness-ui-session-id) #'ignore))
 
 (defun harness-chat-edit-queued (qid)
   "Load queued item QID into the compose box; sending removes it from the queue."

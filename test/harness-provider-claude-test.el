@@ -33,6 +33,8 @@
 (defvar harness-provider-claude--cache-ttl)
 (declare-function harness-provider-claude--cache-ttl-of "harness-provider-claude")
 (declare-function harness-provider-claude--handle-stream "harness-provider-claude")
+(declare-function harness-provider-claude--handle "harness-provider-claude")
+(declare-function harness-provider-claude--complete "harness-provider-claude")
 (declare-function harness-provider-claude--finish "harness-provider-claude")
 (declare-function harness-provider-claude-close "harness-provider-claude")
 (declare-function harness-provider-claude-close-all "harness-provider-claude")
@@ -2218,6 +2220,274 @@ five minutes with an API key."
       (should (= ttl (gethash sid harness-provider-claude--cache-ttl)))
       (harness-provider-claude-close sid)
       (should-not (gethash sid harness-provider-claude--cache-ttl)))))
+
+;;;; When the prompt cache was last used
+;;
+;; A turn's `usage' event says when its main conversation last made a
+;; request (`:cache-at'), and the session stamps its prompt cache with
+;; it (see "The prompt cache" in harness-session.el).  A cache keeps
+;; for a while after the request that used it, so a time older than the
+;; turn's last request has a session flagged cold while its cache is
+;; warm.  These tests play a turn's output through the provider, one
+;; CLI message at a time, with a clock of their own: a number in the
+;; script sets it, so every time is exact.
+
+(defconst harness-provider-claude-test--cached-usage
+  '(:input_tokens 5 :cache_read_input_tokens 2000 :cache_creation_input_tokens 100
+    :output_tokens 1
+    :cache_creation (:ephemeral_1h_input_tokens 0 :ephemeral_5m_input_tokens 100))
+  "The usage of a request that read and wrote the prompt cache.")
+
+(defconst harness-provider-claude-test--bare-usage
+  '(:input_tokens 2105 :output_tokens 1)
+  "The usage of a request that says nothing of the prompt cache.
+Bedrock and gateways stream the cache fields later, or not at all.")
+
+(defun harness-provider-claude-test--message-start (id usage &optional sub-agent)
+  "Return the `message_start' of message ID with USAGE, as the CLI prints it.
+SUB-AGENT is the tool call whose sub-agent the message belongs to."
+  (append (list :type "stream_event"
+                :event (list :type "message_start" :message (list :id id :usage usage)))
+          (and sub-agent (list :parent_tool_use_id sub-agent))))
+
+(defun harness-provider-claude-test--assistant (id usage &optional sub-agent &rest message)
+  "Return the assistant message of message ID with USAGE, as the CLI prints it.
+SUB-AGENT is the tool call whose sub-agent it belongs to; MESSAGE more
+keys of the message itself."
+  (append (list :type "assistant"
+                :message (append (list :id id :role "assistant" :usage usage) message))
+          (and sub-agent (list :parent_tool_use_id sub-agent))))
+
+(defun harness-provider-claude-test--result (usage)
+  "Return the successful result that ends a turn with USAGE."
+  (list :type "result" :subtype "success" :is_error nil :session_id "cli-cache"
+        :result "ok" :stop_reason "end_turn" :usage usage))
+
+(defun harness-provider-claude-test--play (id script)
+  "Play SCRIPT as a turn of session ID; return the events it emitted, oldest first.
+SCRIPT is a list of numbers, which set the clock, and CLI messages,
+which the provider handles at the time the clock reads.  The turn is
+in flight when it starts, as `harness-provider-claude--complete' leaves
+it, on a process record of its own, which stays in
+`harness-provider-claude--sessions' after it.  No usage report is asked
+for when the turn ends."
+  (let* ((events nil)
+         (clock 1000.0)
+         (harness-provider-claude--status (list :billing 'api :updated 1.0))
+         (entry (puthash id (harness-provider-claude--make-session
+                             :id id :active t :on-event (lambda (ev) (push ev events)))
+                         harness-provider-claude--sessions)))
+    (cl-letf (((symbol-function 'float-time) (lambda (&optional _) clock)))
+      (dolist (step script)
+        (if (numberp step)
+            (setq clock (float step))
+          (harness-provider-claude--handle entry step))))
+    (nreverse events)))
+
+(defun harness-provider-claude-test--cache-at (id script)
+  "Return the `:cache-at' of the usage event of the turn SCRIPT plays on session ID."
+  (plist-get (harness-provider-claude-test--find
+              (harness-provider-claude-test--play id script) 'usage)
+             :cache-at))
+
+(ert-deftest harness-provider-claude-cache-time-is-the-last-requests-start ()
+  "A turn's cache time is when its last main-conversation request started.
+The assistant messages of a request that streamed come later, as its
+blocks end, and move nothing; a sub-agent's messages are its own
+cache's; a request that failed outright (a synthetic message) used no
+cache."
+  (harness-provider-claude-test--setup)
+  (let ((cached harness-provider-claude-test--cached-usage))
+    ;; Two requests, each started, then printed block by block.
+    (should (equal 500.0
+                   (harness-provider-claude-test--cache-at
+                    "cache-start"
+                    (list 100 (harness-provider-claude-test--message-start "msg_a" cached)
+                          190 (harness-provider-claude-test--assistant "msg_a" cached)
+                          500 (harness-provider-claude-test--message-start "msg_b" cached)
+                          560 (harness-provider-claude-test--assistant "msg_b" cached)
+                          575 (harness-provider-claude-test--assistant "msg_b" cached)
+                          580 (harness-provider-claude-test--result cached)))))
+    ;; A sub-agent runs requests of its own meanwhile.
+    (should (equal 100.0
+                   (harness-provider-claude-test--cache-at
+                    "cache-sub-agent"
+                    (list 100 (harness-provider-claude-test--message-start "msg_a" cached)
+                          150 (harness-provider-claude-test--assistant "msg_a" cached)
+                          300 (harness-provider-claude-test--message-start "msg_s" cached "toolu_sub")
+                          350 (harness-provider-claude-test--assistant "msg_s" cached "toolu_sub")
+                          400 (harness-provider-claude-test--result cached)))))
+    ;; The message that reports a failed request is no request.
+    (should (equal 100.0
+                   (harness-provider-claude-test--cache-at
+                    "cache-synthetic"
+                    (list 100 (harness-provider-claude-test--message-start "msg_a" cached)
+                          150 (harness-provider-claude-test--assistant "msg_a" cached)
+                          900 (harness-provider-claude-test--assistant
+                               "msg_err" harness-provider-claude-test--bare-usage nil
+                               :model "<synthetic>" :error "rate_limit")
+                          901 (harness-provider-claude-test--result cached)))))))
+
+(ert-deftest harness-provider-claude-cache-time-needs-no-partial-messages ()
+  "A turn printed without stream events still says when its last request was made.
+Each main-conversation assistant message carries its request's usage;
+the first block of a message gives the time, and the blocks after it,
+printed as they end, do not move it; a sub-agent's message is not the
+main conversation's."
+  (harness-provider-claude-test--setup)
+  (let ((cached harness-provider-claude-test--cached-usage))
+    (should (equal 400.0
+                   (harness-provider-claude-test--cache-at
+                    "cache-no-stream"
+                    (list 100 (harness-provider-claude-test--assistant "msg_a" cached) ; a tool call
+                          400 (harness-provider-claude-test--assistant "msg_b" cached) ; thinking
+                          410 (harness-provider-claude-test--assistant "msg_b" cached) ; text
+                          415 (harness-provider-claude-test--assistant "msg_s" cached "toolu_sub")
+                          420 (harness-provider-claude-test--result cached)))))))
+
+(ert-deftest harness-provider-claude-cache-time-without-message-ids ()
+  "A CLI that gives its messages no ids still gives a time.
+The blocks of a message cannot be told from its requests then: a
+stream's start is a request, whatever it holds, and an assistant message
+is one only when the turn has heard of none yet."
+  (harness-provider-claude-test--setup)
+  (let ((cached harness-provider-claude-test--cached-usage)
+        (bare harness-provider-claude-test--bare-usage))
+    (should (equal 100.0
+                   (harness-provider-claude-test--cache-at
+                    "cache-no-ids"
+                    (list 100 (harness-provider-claude-test--assistant nil cached)
+                          200 (harness-provider-claude-test--assistant nil cached)
+                          300 (harness-provider-claude-test--result cached)))))
+    (should (equal 300.0
+                   (harness-provider-claude-test--cache-at
+                    "cache-no-ids-stream"
+                    (list 100 (harness-provider-claude-test--message-start nil bare)
+                          150 (harness-provider-claude-test--assistant nil bare)
+                          300 (harness-provider-claude-test--message-start nil bare)
+                          350 (harness-provider-claude-test--assistant nil bare)
+                          400 (harness-provider-claude-test--result cached)))))))
+
+(ert-deftest harness-provider-claude-cache-time-follows-a-start-without-cache-fields ()
+  "A request whose `message_start' says nothing of the cache is still a request.
+Bedrock and gateways stream the cache fields later, or not at all, but
+the request still read the cache the turn's earlier requests wrote: the
+cache keeps from its start, not from the start of an earlier request
+that said more.  The turn's usage, at its end, says that the cache was
+used at all."
+  (harness-provider-claude-test--setup)
+  (let ((cached harness-provider-claude-test--cached-usage)
+        (bare harness-provider-claude-test--bare-usage))
+    ;; The second request of a turn, long after the first.
+    (should (equal 500.0
+                   (harness-provider-claude-test--cache-at
+                    "cache-bare-later"
+                    (list 100 (harness-provider-claude-test--message-start "msg_a" cached)
+                          130 (harness-provider-claude-test--assistant "msg_a" cached)
+                          500 (harness-provider-claude-test--message-start "msg_b" bare)
+                          560 (harness-provider-claude-test--assistant "msg_b" bare)
+                          570 (harness-provider-claude-test--result cached)))))
+    ;; The only request of a turn.
+    (should (equal 100.0
+                   (harness-provider-claude-test--cache-at
+                    "cache-bare-only"
+                    (list 100 (harness-provider-claude-test--message-start "msg_a" bare)
+                          160 (harness-provider-claude-test--assistant "msg_a" bare)
+                          170 (harness-provider-claude-test--result cached)))))))
+
+(ert-deftest harness-provider-claude-requests-outside-a-turn-leave-no-cache-time ()
+  "A request the CLI makes between turns belongs to no turn, and leaves no time behind.
+The CLI process outlives its turns, and may print a request of its own
+after a turn's result, a background task's say.  The next turn must not
+report that time, or any other left over, as its own."
+  (harness-provider-claude-test--setup)
+  (let* ((id "cache-between")
+         (cached harness-provider-claude-test--cached-usage))
+    (harness-provider-claude-test--play
+     id (list 100 (harness-provider-claude-test--message-start "msg_a" cached)
+              150 (harness-provider-claude-test--result cached)))
+    (let ((entry (gethash id harness-provider-claude--sessions)))
+      (should-not (harness-provider-claude-session-active entry))
+      ;; The CLI starts a request after the turn's end.
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 900.0)))
+        (harness-provider-claude--handle
+         entry (harness-provider-claude-test--message-start "msg_late" cached))
+        (harness-provider-claude--handle
+         entry (harness-provider-claude-test--assistant "msg_late" cached))))
+    (should-not (gethash id harness-provider-claude--cache-at))
+    ;; A turn that has heard of no request has no time to give.
+    (should-not (harness-provider-claude-test--cache-at
+                 id (list 1000 (harness-provider-claude-test--result cached))))))
+
+(ert-deftest harness-provider-claude-a-new-turn-starts-without-the-old-cache-time ()
+  "A turn starts with no cache time, whatever the turn before it left.
+A turn can end without `harness-provider-claude--finish' (the provider
+was reloaded during it, say), and its time would be the next turn's."
+  (harness-provider-claude-test--setup)
+  (let* ((id "cache-new-turn")
+         (request (harness-provider-claude-test--request id "hi")))
+    (puthash id 1.0 harness-provider-claude--cache-at)
+    (cl-letf (((symbol-function 'harness-provider-claude--ensure-process) (lambda (&rest _) 'live))
+              ((symbol-function 'harness-provider-claude--send-user) #'ignore))
+      (harness-provider-claude--complete request))
+    (should (harness-provider-claude-session-active (gethash id harness-provider-claude--sessions)))
+    (should-not (gethash id harness-provider-claude--cache-at))
+    (harness-provider-claude-close id)))
+
+(ert-deftest harness-provider-claude-each-turn-reports-its-own-cache-time ()
+  "Each turn's usage says when that turn made its last request.
+The CLI process lives on between turns: a turn of text, then a turn of
+a tool call and the reply after it, each report a time of their own.
+The fixture streams one `message_start' for the second turn, as the
+CLI would for its first request; the reply after the tool call is its
+second request, which only its assistant message tells of, a second on
+\(the fixture pauses a second as the tool call's input streams)."
+  (harness-provider-claude-test--setup)
+  (let* ((process-environment (cons "HARNESS_FAKE_CLAUDE_PAUSE=1" process-environment))
+         (sid "cache-turns")
+         (start (float-time))
+         (first (car (harness-provider-claude-test--run
+                      (harness-provider-claude-test--request sid "hi"))))
+         (between (float-time))
+         (second (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request
+                        sid "again"
+                        :messages (list '(:role user :content ((:type "text" :text "hi")))
+                                        '(:role assistant :content ((:type "text" :text "hello")))
+                                        '(:role user :content ((:type "text" :text "slow-tool again"))))))))
+         (end (float-time))
+         (at1 (plist-get (harness-provider-claude-test--find first 'usage) :cache-at))
+         (at2 (plist-get (harness-provider-claude-test--find second 'usage) :cache-at)))
+    (should (harness-provider-claude-test--find second 'tool-call))
+    (should (<= start at1 between))
+    (should (<= between at2 end))
+    (should (>= (- at2 between) 0.9))
+    (harness-provider-claude-close sid)))
+
+(ert-deftest harness-provider-claude-session-cache-follows-its-turns ()
+  "A Claude Code session reports the cache its last turn's last request used.
+Through the agent and the session, turn after turn: that request's time,
+the lifetime its writes asked for, and the model as the session names it
+\(so that nothing says the cache is another model's)."
+  (harness-provider-claude-test-with-sessions
+    (let* ((process-environment (cons "HARNESS_FAKE_CLAUDE_AUTH=subscription" process-environment))
+           (model "claude:claude-fable-5-1")
+           (sid (plist-get (harness-call 'session/create :cwd cwd :model model) :id))
+           (cache (lambda () (plist-get (harness-call 'session/get sid) :cache)))
+           (start (float-time)))
+      (should-not (funcall cache))
+      (harness-provider-claude-test--turn sid "hi")
+      (let ((first (funcall cache))
+            (between (float-time)))
+        (should (<= start (plist-get first :at) between))
+        (should (= 3600 (plist-get first :ttl)))
+        (should (= (+ (plist-get first :at) 3600) (plist-get first :expires)))
+        (should (equal model (plist-get first :model)))
+        (sleep-for 0.05)
+        (harness-provider-claude-test--turn sid "again")
+        (let ((second (funcall cache)))
+          (should (<= between (plist-get second :at) (float-time)))
+          (should (equal model (plist-get second :model))))))))
 
 (ert-deftest harness-provider-claude-resume-counts-only-new-spend ()
   "A resumed CLI session restores its earlier spend; only the new turn counts."

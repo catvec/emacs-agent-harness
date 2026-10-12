@@ -176,9 +176,9 @@ once; otherwise the first message sent from the box names the BTW."
          (if question
              (progn
                (setq harness-ui-btw--asked t)
-               (harness-ui-call "session/prompt"
-                                (list :sessionId id :prompt (list (list :type "text" :text question)))
-                                #'ignore))
+               (harness-ui-call-turn id "session/prompt"
+                                     (list :sessionId id :prompt (list (list :type "text" :text question)))
+                                     #'ignore))
            (add-hook 'harness-chat-send-functions #'harness-ui-btw--on-send nil t))
          ;; Ready for the question.
          (when (harness-compose-live-p)

@@ -2239,12 +2239,12 @@ hosted loop's turn) gives, else its `:output', else 0."
 RECORD keys: :input :output :cache-read :cache-write :cost :list-cost
 :context :last-output :turns, :billing and :plan saying how the call
 was paid, :model the model the request was sent to (the session's when
-unsaid), :cache-at and :cache-ttl, when the request used the prompt
-cache and how long its provider said it keeps it, and :cache-reset,
-which says the conversation starts over (a compaction) and, when the
-conversation had a cache, leaves `:cache-pending' until the first
-request that follows stamps the new cache (see
-`harness-session--cache-stamp').  Counters
+unsaid), :cache-at and :cache-ttl, when the request was made (the last
+of a turn's, for a record that covers several) and how long its provider
+said it keeps the prompt cache it used, and :cache-reset, which says the
+conversation starts over (a compaction) and, when the conversation had a
+cache, leaves `:cache-pending' until the first request that follows
+stamps the new cache (see `harness-session--cache-stamp').  Counters
 accumulate; `:context' replaces, and so do `:billing' and `:plan' when
 RECORD has a billing.  With `:context', the size of the latest prompt,
 comes the totals' `:last-output': the output of that request, which the

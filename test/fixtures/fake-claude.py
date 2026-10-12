@@ -720,10 +720,14 @@ class Fake:
                      "usage": {"input_tokens": 12, "cache_creation_input_tokens": 100,
                                "cache_read_input_tokens": 2000, "output_tokens": 7}})
         self.stream({"type": "message_stop"})
+        # A reply with no tool call before it is the message the stream
+        # started; after tool calls it is the turn's second request (which
+        # this fixture streams without a second message_start).
         emit({"type": "assistant", "session_id": self.session_id,
               "uuid": self.record("assistant", reply),
               "parent_tool_use_id": None,
-              "message": {"id": "msg_2", "role": "assistant", "model": self.model,
+              "message": {"id": "msg_2" if calls else "msg_1",
+                          "role": "assistant", "model": self.model,
                           "content": [{"type": "thinking", "thinking": "", "signature": "sig"},
                                       {"type": "text", "text": reply}],
                           "stop_reason": "end_turn", "usage": self.usage()}})
