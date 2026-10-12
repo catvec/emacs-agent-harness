@@ -1357,12 +1357,33 @@ call to one anyway, in every permission mode.
   `no_plan_needed` does not end the turn: the answer follows it.
 - **A soft step budget.** A turn that investigates for too long is
   steered, never stopped. After `harness-supervisor-step-budget` tool
-  calls (80) the session is told to stop investigating and submit the
+  calls (30) the session is told to stop investigating and submit the
   plan with what it knows, and it is told again every half budget after
-  that (at 120, 160 and so on). The default comes from 164 real
-  sessions: the median reached its plan after 61 tool calls, the 75th
-  percentile after 80 and the 90th after 103, so the nudge comes when a
-  turn is already among the slowest quarter.
+  that (at 45, 60 and so on). The budget is small because workers read
+  the code they change, so the supervisor needs only enough to split the
+  work, and the nudge says so. The default used to be 80, which came from
+  164 real sessions (the median reached its plan after 61 tool calls,
+  the 75th percentile after 80 and the 90th after 103) under a prompt
+  that had supervisors gather everything for their forks.
+- **Planning for cost.** The supervisor's tokens are the expensive
+  ones: each of its calls reads the whole conversation again on the hard
+  model, and its system prompt says so. It investigates only what the
+  plan needs: where the work goes, how it splits, what the parts share.
+  It writes each prompt for its tier. A medium worker can do a whole
+  programming task from a brief the size of a ticket (the goal, the
+  constraints, the decisions, the files it owns, how to verify it); a
+  simple worker needs its edits spelled out file by file. It splits no
+  further than parallel work or a cheaper tier calls for, since fewer,
+  larger medium steps cost less. It plans for parallel work: units that
+  each own their files, with the components they share defined once, in
+  the summary of the plan. A shared component gets a step of its own,
+  first, only when the others cannot be written against its spec. Steps
+  are fresh unless the conversation is short (see **The fork limit**).
+  It does not poll or read the workers while they run, and checks a
+  finished plan by what settles it most cheaply, the reports, a diff or
+  the test output, and not file by file. The description of
+  `submit_plan` says the same about the summary, the prompts, the tiers
+  and the contexts.
 - **Plans, tiers and models.** Each step has a tier and a one-line
   reason for it: `simple` for mechanical, well-specified edits and
   `medium` for the rest. The tiers are those of the supervisor's
@@ -1403,21 +1424,54 @@ call to one anyway, in every permission mode.
   harness the raised one stands. Workers keep the level they started
   with. The levels are set with the tiers, on the settings page under
   **Model tiers**.
-- **Fork or fresh, and `after`.** A step's context is `fork` (the
-  default) or `fresh`. A fork worker is a fork of the supervisor at the
-  call that submitted the plan, so it sees everything the supervisor
-  learned and nothing has to be found out again (a step that starts
-  again may get a summary of it instead, see **Retry and escalation**).
-  A fresh worker starts empty in the same directory, for a
-  self-contained job that needs none of it, and its prompt holds
-  everything. `after` lists the steps that must be done first, and a
-  worker is given the reports of the steps it follows. Steps with no
-  order between them run at once in the same working tree (a task's
-  worktree, in a task), so the supervisor gives them different files.
+- **Fork or fresh, and `after`.** A step's context is `fresh` (the
+  default) or `fork`. A fresh worker starts without the supervisor's
+  conversation, in the same directory, and its first message holds what
+  it needs: the plan's summary, the same for every fresh worker, where
+  the supervisor writes the approach and what the steps share (the
+  interfaces, names and data shapes, and which step makes each); its
+  own step; the plan's other steps, a line each, in the form
+  `- ID: TITLE (after A, B)`; the attempt before it, when it starts
+  again; and the reports of the steps it waits for. So the supervisor
+  writes what the steps share once, in the summary, and not in every
+  prompt. A fork worker is a fork of the supervisor at the call that
+  submitted the plan, so it sees everything the supervisor learned, but
+  only while that conversation is short (see **The fork limit**). A fork
+  that inherits the whole conversation needs neither the plan nor the
+  other steps, since the `submit_plan` call is in it; a fork whose
+  conversation was compacted (see **Retry and escalation**) is given
+  them. `after` lists the steps that must be done first, and a worker is
+  given the reports of the steps it follows. Steps with no order between
+  them run at once in the same working tree (a task's worktree, in a
+  task), so the supervisor gives them different files, and every worker
+  is told that others may run beside it and to keep to its step's files.
+- **The fork limit.** Fresh is the default because a fork is costly. No
+  fork reads its parent's prompt cache: its system prompt names its own
+  directories, its tools differ from the supervisor's, and its model
+  usually does. So a fork's first request writes the whole conversation
+  into its model's cache, and every request after it reads it again,
+  which with a long supervisor conversation and several workers was most
+  of a plan's cost. A fork step is therefore allowed only while the
+  supervisor's conversation is short: `harness-supervisor-fork-limit`
+  says how short (20000 tokens by default, nil for no limit; it is on
+  the settings page under **Supervisor mode**). The conversation is
+  estimated from the transcript at about four characters a token. The
+  estimate leaves out the system prompt and the tools, which a fresh
+  worker has too, and the thinking, whose signatures tie it to the
+  supervisor's model. Past the limit `submit_plan` refuses the plan. The
+  refusal names the fork steps, the size and the limit, and tells the
+  supervisor to make the steps fresh and to put what the workers need in
+  the summary and their prompts. A plan made before the limit existed,
+  or past a limit lowered since, can still have fork steps: they start
+  from a compaction of the conversation, the same one a step that starts
+  again gets when no warm seed holds its context (see **Retry and
+  escalation**), and a hint tells the supervisor so.
 - **Cache seeds.** A provider's prompt cache serves only the model that
   wrote it, so every fork onto a cheaper model would pay to write the
   whole conversation into that model's cache, and no two forks share a
-  prefix, since a system prompt names its own directories. When a plan
+  prefix, since a system prompt names its own directories. Fork steps
+  are for a short conversation only (see **The fork limit**), but even a
+  short one is written again for each of several forks. When a plan
   has two or more fork steps on one model, the harness forks them
   through a *seed*: a fork of the supervisor on that model, sent one
   tiny message that writes the context into the cache once. Each worker
@@ -1438,20 +1492,25 @@ call to one anyway, in every permission mode.
   worker's transcript says so, in a hint at its start ("Context window
   capped at 256k tokens, as a sub-agent's is
   (harness-subagent-context-limit)"), as the transcript of any
-  sub-agent does. A worker compacted before it starts (see **Retry and
-  escalation**) is capped from the summary it starts with, not from
-  all the supervisor holds.
+  sub-agent does. A worker compacted before it starts (a fork step that
+  starts again with no warm seed, or one whose plan is past the fork
+  limit; see **Retry and escalation**) is capped from the summary it
+  starts with, not from all the supervisor holds.
 - **Reports back.** Submitting the plan ends the turn: the supervisor
   does not wait or poll, and the harness reports to it in messages of
-  its own (**System · supervisor**). A finished step is a hint in the
-  transcript and starts the steps that waited for it. A step that did
-  not get done (its worker could not be made, its turn failed, was
+  its own (**System · supervisor**). A worker ends with a short report
+  of what it changed, how it checked it and anything the other steps
+  need to know. A finished step is a hint in the transcript and starts
+  the steps that waited for it, which are given that report. A step that
+  did not get done (its worker could not be made, its turn failed, was
   cancelled or blocked, or its session was deleted) is a message of its
   own: the step, its tier and model, why, the steps held on it and the
   ways on. When the last step is done, a message lists every step with
-  its result and asks the supervisor to check the work and decide. An
-  idle session starts a turn on a message, and a running turn is
-  steered.
+  its result and asks the supervisor to check the work as cheaply as
+  settles it (the reports it lists, a diff, the test output), reading a
+  file or a worker's session only where a report leaves doubt, and to
+  decide. An idle session starts a turn on a message, and a running turn
+  is steered.
 - **Retry and escalation.** After a failure the supervisor calls
   `retry_step`, which runs the step again on a new worker, with notes on
   what went wrong and, when the model was not up to it, a higher tier:
@@ -1459,17 +1518,19 @@ call to one anyway, in every permission mode.
   does not end the turn, so several steps can be retried in one
   message. Or the supervisor submits a new plan, which supersedes the
   steps of the earlier ones that have not started (their running steps
-  finish as usual), or it asks you. A step that starts again, retried or
-  interrupted by a restart, does not make its worker read the whole
-  conversation uncached on a model that never saw it, which a higher tier
-  usually is. With a warm seed on the step's model its fork worker forks
-  through the seed; otherwise it forks the supervisor and is compacted
-  before its first turn, as the cold-cache question would for a session
-  nobody is asked about (a brief summary by default, see
-  `harness-cowboy-default`), and a hint tells the supervisor which. The
-  worker's message also says which session, model and error the attempt
-  before had, so it can read what was tried (`session_read`) and not
-  repeat it.
+  finish as usual), or it asks you. A fresh step that starts again,
+  retried or interrupted by a restart, gets a new fresh worker, started
+  as the first was. A fork step that starts again does not make its
+  worker read the whole conversation uncached on a model that never saw
+  it, which a higher tier usually is. With a warm seed on the step's
+  model its worker forks through the seed; otherwise it forks the
+  supervisor and is compacted before its first turn, as the cold-cache
+  question would for a session nobody is asked about (a brief summary by
+  default, see `harness-cowboy-default`), and a hint tells the
+  supervisor which. A fork step whose plan is past the fork limit starts
+  from the same kind of compaction. The message of a worker that starts
+  again also says which session, model and error the attempt before had,
+  so it can read what was tried (`session_read`) and not repeat it.
 - **In tasks.** The session of a task starts as the task's own setting
   says, else `harness-supervisor-tasks` (judged, by default, from the
   message that starts the work), and a
@@ -2203,7 +2264,8 @@ The page leads with the settings most people change, grouped by what
 they are for: **New sessions** (model, thinking, permission mode,
 non-interactive, supervisor mode), **Supervisor mode** (whether
 sessions and tasks supervise or a cheap model judges them, the judge's
-model, the models of a plan's tiers, the step budget), **Model tiers**
+model, the models of a plan's tiers, the step budget, the fork limit),
+**Model tiers**
 (each provider's simple, medium, hard and frontier models and the
 thinking levels they run at, see [Model tiers](#model-tiers)),
 **Spending** (the

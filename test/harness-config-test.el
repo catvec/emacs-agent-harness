@@ -101,7 +101,8 @@ reaching a custom file."
                                      (cl-remove-if-not #'boundp '(harness-supervisor-tasks
                                                                   harness-supervisor-judge-model
                                                                   harness-supervisor-tiers
-                                                                  harness-supervisor-step-budget)))
+                                                                  harness-supervisor-step-budget
+                                                                  harness-supervisor-fork-limit)))
                              #'string<)))
         (should (equal (mapcar #'symbol-name placed)
                        (mapcar (lambda (s) (plist-get s :key))
@@ -546,7 +547,7 @@ A misspelt name would quietly drop a setting from the settings page."
     (let ((undefined-yet (unless (file-exists-p (expand-file-name "lisp/modules/harness-supervisor.el"
                                                                   harness-test-root))
                            '(harness-supervisor harness-supervisor-tasks harness-supervisor-tiers
-                             harness-supervisor-step-budget))))
+                             harness-supervisor-step-budget harness-supervisor-fork-limit))))
       (dolist (section harness-config-sections)
         (dolist (key (plist-get (cdr section) :keys))
           (unless (memq key undefined-yet)

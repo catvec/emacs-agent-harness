@@ -4880,10 +4880,12 @@ and a message for the echo area.  Only the user calls it.
   `harness-supervisor-tiers`
   (nil: an alist from `simple`, `medium` or `hard`, or the names of old
   `mundane` and `standard`, to a model id or a plist `(:model ID
-  :thinking LEVEL)`, either key left out to keep the default)
-  and `harness-supervisor-step-budget` (80), in the settings section
-  "Supervisor mode".  The thinking levels are the tiers' own, in the
-  providers' tier settings (section "Model tiers": see provider).
+  :thinking LEVEL)`, either key left out to keep the default),
+  `harness-supervisor-step-budget` (30) and
+  `harness-supervisor-fork-limit` (tokens, 20000; nil for no limit), in
+  the settings section "Supervisor mode".  The thinking levels are the
+  tiers' own, in the providers' tier settings (section "Model tiers":
+  see provider).
 - Thinking levels go with the tier.  A supervisor plans on the hard
   tier, so a session whose provider's hard tier names a thinking level
   (`provider/tier-thinking MODEL 'hard`: DeepSeek's `max`, none for
@@ -4964,25 +4966,54 @@ and a message for the echo area.  Only the user calls it.
   joins the transcript.  Every tool call of a supervising turn is
   counted (`agent/tool-call`; `agent/turn-started` resets it), and when
   the count reaches `harness-supervisor-step-budget`, and every half
-  budget after (80, 120, 160…), the session is steered by an
+  budget after (30, 45, 60…), the session is steered by an
   `agent/prompt` from the same sender to submit its plan: a nudge, never
-  a stop.  `no_plan_needed reason` (`reason` required) records the
+  a stop.  The budget is small because the workers read the code they
+  change, so a supervisor needs only enough to split the work, and the
+  nudge says so.  It was 80, taken from 164 real sessions (the median
+  made 61 tool calls before its plan, the 75th percentile 80 and the 90th
+  103) under a prompt that had supervisors gather everything for their
+  forks.  `no_plan_needed reason` (`reason` required) records the
   decision and a hint "No plan needed: REASON", and does not end the
   turn.  The sync filter `agent/system-prompt` (900) puts
   `harness-supervisor-prompt-section` in place of the Planning section
   (`harness-tools-agent-planning-section`; else at the end), the same
-  text on every call, as the prompt is part of the cache.
+  text on every call, as the prompt is part of the cache.  The section
+  tells the supervisor that its tokens are the expensive ones, each call
+  re-reading the whole conversation on the hard model; to investigate
+  only what the plan needs (where the work goes, how it splits, what the
+  parts share); to write each prompt for its tier (a medium worker can do
+  a whole programming task from a ticket-sized brief: the goal, the
+  constraints, the decisions, the files it owns, how to verify; a simple
+  worker needs its edits spelled out file by file); to split no further
+  than parallel work or a cheaper tier calls for, since fewer, larger
+  medium steps cost less; to plan for parallel work, in units that each
+  own their files, with the shared components defined once in the
+  summary and given a first step of their own only when the others
+  cannot be written against their spec; that steps are fresh by default
+  and a fork is only for a short conversation; not to poll or read the
+  workers while they run; and to check a finished plan by what settles
+  it most cheaply (the reports, a diff, the test output), not file by
+  file.  The `submit_plan` description says the same about the summary,
+  the prompts, the tiers and the contexts.
 - Plans are the session's `:ext` `:supervisor-plans`, oldest first, in
   the JSON the store keeps, so they survive a restart; each change of a
   step is `session/ext-changed ID :supervisor-plans PLANS`.  Plan:
-  `(:id "p-…" :title :summary :node :call-id :created F :steps (STEP…))`,
-  `:node` and `:call-id` being the call that submitted it, which every
-  fork step forks the supervisor at.  Step: `(:id :title :prompt :tier
+  `(:id "p-…" :title :summary :node :call-id :created F :fork-tokens N
+  :steps (STEP…))`, `:node` and `:call-id` being the call that submitted
+  it, which every fork step forks the supervisor at, and `:fork-tokens`
+  the estimate, in tokens, of the conversation such a fork inherits,
+  measured when the plan was accepted
+  (`harness-supervisor--conversation-tokens`).  Only a plan with a fork
+  step has it: `harness-supervisor--fork-tokens` reads it, or measures
+  the conversation as it is now for a plan stored without it.  Step:
+  `(:id :title :prompt :tier
   :reason :context :after (ID…) :model :thinking :state :session
   :attempts N :result :error :worker-model :previous)`: `:tier`
   simple|medium|hard (hard only after `retry_step`; a plan of old's
   mundane and standard read as simple and medium), `:thinking` the
-  level its tier names, if any, `:context` fork|fresh, `:state`
+  level its tier names, if any, `:context` fresh|fork (fresh when the
+  step names none), `:state`
   pending|running|done|failed|interrupted|cancelled|superseded,
   `:session` the worker, `:result` its last reply, `:worker-model` the
   model the worker was made for (`retry_step` may change `:model`
@@ -4991,15 +5022,20 @@ and a message for the echo area.  Only the user calls it.
   A new plan supersedes the earlier plans' steps that have not started;
   their running steps finish as usual.
 - `submit_plan summary steps &optional title`, `steps` being `{id, title,
-  prompt, tier, reason, context, after}`, is refused whole, every
+  prompt, tier, reason, context, after}` and `context` `fresh` unless it
+  says `fork`, is refused whole, every
   problem named, for an id used twice, an `after` naming no step, a
   cycle, a `hard` or unknown tier (a plan's steps are simple or medium:
   the supervisor runs on the hard model, and a step that would need it
-  is not broken down enough), an unknown context or a blank prompt.
+  is not broken down enough), an unknown context, a blank prompt, or
+  fork steps while the supervisor's conversation is past
+  `harness-supervisor-fork-limit` (the fork limit, below).
   Otherwise it
   records the plan, sets the session's plan (`session/set-plan`) to the
   summary, adds a `plan` node and the hint "Plan submitted: N steps",
-  starts the ready steps and ends the turn (`:end-turn t`).
+  starts the ready steps and ends the turn (`:end-turn t`).  Its answer
+  lists the steps, each with its model, tier, thinking level, ", fork"
+  when it is a fork step, and the steps it follows.
   `retry_step step reason &optional plan tier prompt` runs a failed,
   interrupted (by a restart, or as its task went back to the queue) or
   cancelled step again on a new worker (`plan` defaults
@@ -5019,31 +5055,80 @@ and a message for the echo area.  Only the user calls it.
 - Workers.  A step whose `:after` steps are all done starts: a worker
   session of kind `subagent` named "Step ID: TITLE" is made, with
   `:context-window-limit` from `harness-tools-agent-context-limit`.  A
-  fork step forks the supervisor (`session/fork`) at the plan's `:node`
-  and `:call-id`, through `seed/fork` when the plan has two or more fork
-  steps on the step's model, so that the context is written to that
-  model's cache once.  A fresh step is a `session/create` in the
-  supervisor's directory, worktree and host, with the supervisor as its
-  parent and the supervisor's permission mode, thinking level,
-  non-interactive switch and allowed directories; the thinking level is
-  the step's `:thinking`, else the supervisor's own, fitted to the
-  worker's model (`harness-supervisor--worker-thinking`), and a fork is
-  given it as `:thinking` when it differs from the supervisor's, so that
-  a raised supervisor level is not inherited.  The worker gets one
-  `agent/prompt`, from the supervisor session: the `:preamble` of
-  `seed/fork`, an opening that tells a fork it is a worker now, the step,
-  the attempt before it when the step starts again (below), what the
-  steps before it reported (each cut to 2000 characters) and a
-  closing.  Workers carry no `:supervisor`: they have every tool.  A
-  worker's turn ending `end-turn` or `max-tokens` makes the step done;
-  any other end, or no worker, makes it failed.
+  step is fresh unless its `:context` is `fork`.  A fresh step is a
+  `session/create` in the supervisor's directory, worktree and host,
+  with the supervisor as its parent and the supervisor's permission
+  mode, thinking level, non-interactive switch and allowed directories;
+  the thinking level is the step's `:thinking`, else the supervisor's
+  own, fitted to the worker's model
+  (`harness-supervisor--worker-thinking`).  A fork step forks the
+  supervisor (`session/fork`) at the plan's `:node` and `:call-id`,
+  through `seed/fork` when the plan has two or more fork steps on the
+  step's model, so that the context is written to that model's cache
+  once, and is given the thinking level as `:thinking` when it differs
+  from the supervisor's, so that a raised supervisor level is not
+  inherited.  How a fork step's worker is made also depends on the size
+  of the conversation and on the attempt (the next two bullets).
+  The worker gets one `agent/prompt`, from the supervisor session, of
+  these parts in this order: the `:preamble` of `seed/fork`; an opening
+  (a fresh worker is told that it starts without the supervisor's
+  conversation, a fork that it is a worker now; both that other workers
+  may run at the same time in the same working tree, so it keeps to its
+  step's files); the plan's summary ("## The plan"); the step; the
+  plan's other steps, a line each in the form `- ID: TITLE (after A,
+  B)`, leaving out the step itself and any that a later plan superseded
+  ("## The other steps"); the attempt before it when the step starts
+  again (below); what the steps before it reported (each cut to 2000
+  characters); and a closing that asks for a short report of what
+  changed, how it was checked and anything the other steps need to know.
+  The summary and the other steps go to a worker with no `submit_plan`
+  call in its conversation, a fresh one or a fork compacted before its
+  first turn; a fork that inherits the whole conversation has the call,
+  which holds both, and gets neither.  So the supervisor writes what the
+  steps share once, in the summary: the approach, the interfaces, names
+  and data shapes, and which step makes each.  Workers carry no
+  `:supervisor`: they have every tool.  A worker's turn ending
+  `end-turn` or `max-tokens` makes the step done; any other end, or no
+  worker, makes it failed.
+- The fork limit.  No fork reads its parent's prompt cache: its system
+  prompt names its own directories, its tools differ from the
+  supervisor's, and its model usually does.  So a fork's first request
+  writes the whole conversation into its model's cache, and every request
+  after it reads it again; with a long supervisor conversation and
+  several workers that was most of a plan's cost, which is why a step is
+  fresh by default.  A fork step is allowed only while the conversation
+  is short.  `harness-supervisor--conversation-tokens SESSION-ID`
+  estimates it from the transcript, the text the provider is sent
+  (`session/messages`), at about four characters a token
+  (`harness-estimate-tokens`); a tool call counts by its input and a
+  tool result by its output.  The estimate leaves out the system prompt
+  and the tools, which a fresh worker has too, and the thinking, whose
+  signatures tie it to the supervisor's model.  `submit_plan` measures it
+  when a step is a fork, before the plan or a hint joins the transcript.
+  Past `harness-supervisor-fork-limit` (nil is no limit)
+  `harness-supervisor--fork-problems` refuses the plan with one problem
+  that names the fork steps, the size and the limit and tells the
+  supervisor to make them fresh and to put what the workers need in the
+  summary and their prompts.  An accepted plan with a fork step keeps the
+  estimate as `:fork-tokens`.  A fork step whose plan is past the limit
+  all the same, because it was made before the limit existed or the limit
+  was lowered since (`harness-supervisor--fork-tokens` reads the plan's
+  estimate, or measures the conversation as it is now for a plan stored
+  without one), is neither forked whole nor forked through a seed, on its
+  first attempt as on any other: the worker is a `session/fork` onto the
+  model, compacted before its first turn as a step that starts again with
+  no warm seed is (below, `harness-supervisor--compact-fork`).  This
+  branch of `harness-supervisor--make-worker` comes before the one for a
+  step that starts again.
 - A step that starts again (`:attempts` above 1: `retry_step`, perhaps
   on a higher tier, or an interrupted, failed or cancelled step run
-  again) decides a fork worker's context by the cache.  A fork never
-  shares its parent's cache, a higher tier is a model that never read the
-  plan's conversation, and a new fork has no `:cache`, so the cowboy's
-  gate never finds it cold: forking the supervisor as a first attempt
-  does would send all of it uncached at that model's price.  With
+  again) decides a fork worker's context by the cache; a fresh step that
+  starts again is a `session/create` like the first time, with the
+  attempt before it in its message.  A fork never shares its parent's
+  cache, a higher tier is a model that never read the plan's
+  conversation, and a new fork has no `:cache`, so the cowboy's gate
+  never finds it cold: forking the supervisor as a first attempt does
+  would send all of it uncached at that model's price.  With
   `seed/warm-p` holding for (the supervisor, the plan's `:node`, the
   step's model), a seed whose cache is warm or which a turn is warming,
   the worker forks through `seed/fork` as above.  Otherwise it is a
@@ -5055,22 +5140,25 @@ and a message for the echo area.  Only the user calls it.
   compaction, the whole conversation and a hint.  A compaction that fails
   fails nothing.  The worker plist that `worker-made` gets then has
   `:context-cache` `seed`, `compacted` (and `:compaction`, the kind of
-  node the fork wrote) or `whole`, and the supervisor a hint naming the
+  node the fork wrote) or `whole`, plus `:fork-limit` t when the fork
+  limit sent it here, and the supervisor a hint naming the
   step, attempt, model and which it was ("Step s2 (attempt 2) on M:
   forked from the warm shared context", "…no warm prompt cache holds the
   plan's conversation, so its worker starts from a brief summary of it
   rather than reading it all uncached", "…and it was not compacted, so
-  its worker reads it all uncached").  First attempts and fresh steps
-  are unchanged.
+  its worker reads it all uncached"; for the fork limit "…the plan's
+  conversation is past harness-supervisor-fork-limit, so its worker
+  starts from a brief summary of it rather than inheriting all of it").
+  First attempts within the fork limit and fresh steps are unchanged.
 - The attempt before.  Before it wipes `:session` and `:error`, a step
   that starts again keeps its worker in `:previous`, when it had one, with
   the model the worker ran on: its session's, else `:worker-model`.  The
   worker's message then has a section "## The previous attempt" after the
-  step, naming the attempt, model, session and how it ended, and pointing
-  at `session_read` on that session so as not to repeat what failed; for a
-  compacted fork the opening adds that the conversation before the message
-  was compacted into a summary and `session_history` searches what it
-  replaced.
+  step and the other steps, naming the attempt, model, session and how it
+  ended, and pointing at `session_read` on that session so as not to
+  repeat what failed; for a compacted fork the opening adds that the
+  conversation before the message was compacted into a summary and
+  `session_history` searches what it replaced.
 - Reports are messages of the harness's `(harness-sender-system
   "supervisor")` through `agent/prompt`: an idle session starts a turn,
   a running one is steered.  A step done is a hint ("Step ID done on
@@ -5082,7 +5170,10 @@ and a message for the echo area.  Only the user calls it.
   because their task went back to the queue share one message (below).
   When no step is left but done
   or superseded ones, a message lists each step's result and asks to
-  check the work and decide (`hand_in` in a task).  A report that comes
+  check the work "as cheaply as settles it: the reports above, a diff,
+  the test output", reading a file, or a worker's session with
+  `session_read`, only where a report leaves doubt, and decide (`hand_in`
+  in a task).  A report that comes
   while the turn that submitted the plan is ending would be lost with
   it, so it is held until `agent/turn-ended`, and queued for the user's
   next message when that turn ended any other way than `end-turn`.
@@ -5189,7 +5280,7 @@ names its own working and temporary directories.
   none forgotten but a stale one that the lookup drops as `seed/fork`
   would; it never signals, an error being nil.  A caller that can do
   without a seed asks it to choose between forking through the seed and
-  compacting a fork (the supervisor, for a step that starts again).
+  compacting a fork (the supervisor, for a fork step that starts again).
 - `seed/list &optional SOURCE-ID` → seeds, newest first, `(:id :source
   :node :model :cache)`, for diagnostics and the UI; kept in memory, so
   one made before a restart is not listed, though its session remains.
@@ -5202,7 +5293,8 @@ names its own working and temporary directories.
   the UI reads it with `harness-ui-seed-session-p` and
   `harness-ui-navigable-session-p`, and leaves seeds out of navigation
   (the header's link to the parent, `harness-open-latest-session`, the
-  session pickers).  The supervisor module forks its workers this way.
+  session pickers).  The supervisor module forks the workers of its fork
+  steps this way, when a plan has two or more on one model.
 
 ### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-emacs-eval, tools-web, tools-agent, tools-sessions, tools-events, tools-notify, tools-handin, tools-compact
 
@@ -5265,7 +5357,7 @@ TRAMP prefixes come from the session host):
 | `notification_providers` | Notification providers | (none) | read (needs no approval: `harness-perms--inspection-tools`) |
 | `merge_done` | Finish merge | none | meta (merge module) |
 | `no_plan_needed` | No plan needed | reason | meta (supervisor module; offered to a session in supervisor mode only; records the turn's decision and does not end the turn) |
-| `submit_plan` | Submit plan | summary, steps (`{id, title, prompt, tier, reason, context, after}`), title | meta (supervisor module; supervising sessions only; ends the turn; in Ask mode the user answers its permission prompt) |
+| `submit_plan` | Submit plan | summary, steps (`{id, title, prompt, tier, reason, context, after}`), title | meta (supervisor module; supervising sessions only; ends the turn; a step's `context` is `fresh` unless it says `fork`, which is refused while the conversation is past `harness-supervisor-fork-limit`; in Ask mode the user answers its permission prompt) |
 | `retry_step` | Retry step | step, reason, plan, tier, prompt | meta (supervisor module; supervising sessions only; does not end the turn) |
 
 The tools of kind read that take a path (`read_file`, `list_dir`,
@@ -5511,8 +5603,9 @@ started it").  `spawn_agent` adds it to the child's transcript with
 hint that cannot be added is logged and does not fail the sub-agent.
 The supervisor's workers get the same hint once the worker exists
 (`harness-supervisor--limit-hint`).  A fork worker compacted before its
-first turn (a step that starts again with no warm seed) starts with far
-less than the supervisor holds, so its limit is fitted first: the cap
+first turn (a fork step that starts again with no warm seed, or whose
+plan is past `harness-supervisor-fork-limit`) starts with far less than
+the supervisor holds, so its limit is fitted first: the cap
 plus the context `compaction/estimate` gives the compacted fork
 (`harness-tools-agent-context-limit SUPERVISOR t CONTEXT`), set with
 `session/update` `:silent t`, as the hint that follows says it.

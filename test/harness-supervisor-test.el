@@ -215,14 +215,15 @@ Return a function that gives the requests it got, newest first."
 ;;;; The settings
 
 (ert-deftest harness-supervisor-settings-have-their-defaults ()
-  "Sessions and tasks are judged from their first message by default; a soft budget of 80 calls.
+  "Sessions and tasks are judged from their first message by default; a soft budget of 30 calls.
 The thinking levels come from the providers' tiers: there is no setting
 of the supervisor's own for them any more."
   (should (eq 'auto (eval (car (get 'harness-supervisor 'standard-value)) t)))
   (should (eq 'auto (eval (car (get 'harness-supervisor-tasks 'standard-value)) t)))
   (should (eq 'auto (eval (car (get 'harness-supervisor-judge-model 'standard-value)) t)))
   (should (null (eval (car (get 'harness-supervisor-tiers 'standard-value)) t)))
-  (should (= 80 (eval (car (get 'harness-supervisor-step-budget 'standard-value)) t)))
+  (should (= 30 (eval (car (get 'harness-supervisor-step-budget 'standard-value)) t)))
+  (should (= 20000 (eval (car (get 'harness-supervisor-fork-limit 'standard-value)) t)))
   (dolist (gone '(harness-supervisor-thinking harness-supervisor-worker-thinking))
     (should-not (get gone 'standard-value)))
   ;; The mode is a choice of three: judge, always supervise, always hands-on.
@@ -234,6 +235,12 @@ of the supervisor's own for them any more."
   (should (funcall (get 'harness-supervisor 'safe-local-variable) 'auto))
   (should (funcall (get 'harness-supervisor 'safe-local-variable) nil))
   (should-not (funcall (get 'harness-supervisor 'safe-local-variable) 'sometimes))
+  ;; The fork limit is a count of tokens, or nil for no limit: never a string, never negative.
+  (let ((safe (get 'harness-supervisor-fork-limit 'safe-local-variable)))
+    (dolist (value '(nil 0 20000))
+      (should (funcall safe value)))
+    (dolist (value '("20000" -1))
+      (should-not (funcall safe value))))
   ;; A tier is a model, a model at a thinking level, or a level alone.
   (let ((type (get 'harness-supervisor-tiers 'custom-type))
         (safe (get 'harness-supervisor-tiers 'safe-local-variable)))
@@ -252,7 +259,8 @@ of the supervisor's own for them any more."
   ;; The module is loaded in here, so the documentation can be read.
   (harness-supervisor-test-with
     (dolist (option '(harness-supervisor harness-supervisor-tasks harness-supervisor-judge-model
-                      harness-supervisor-tiers harness-supervisor-step-budget))
+                      harness-supervisor-tiers harness-supervisor-step-budget
+                      harness-supervisor-fork-limit))
       (ert-info ((symbol-name option))
         (should (assq option (get 'harness 'custom-group)))
         (should (string-match-p "settings page"
@@ -2000,7 +2008,7 @@ or model is coordination, like session_send, and is one."
                                               nudges)))
         (dolist (text nudges)
           (should (string-match-p "Stop investigating and submit the plan with what you know" text))
-          (should (string-match-p "open questions in the steps" text))))
+          (should (string-match-p "open questions to them, in the steps" text))))
       ;; The nudge is sent from the harness, as steering of the running turn.
       (let ((nudge (cl-find-if (lambda (n) (equal "supervisor" (plist-get (harness-node-sender n) :source)))
                                (harness-supervisor-test-nodes sid 'user))))
@@ -2047,15 +2055,17 @@ or model is coordination, like session_send, and is one."
       (should (< (string-match "^## Environment" prompt) (string-match "^## Supervisor mode" prompt)))
       (should (string-suffix-p (concat (harness-supervisor-prompt-section) "\n") prompt))
       (dolist (needle '("workers on cheaper models" "cannot change files yourself" "read-only and offline"
-                        "submit_plan" "a tier (simple or medium)" "one-line reason"
-                        "every step is medium at most" "plans have no hard steps"
-                        "You run on the hard model" "split the step" "up to hard"
-                        "fork (the default" "forks onto one model share one cache seed" "fresh"
-                        "`after` sets the order" "different files" "share the working tree"
-                        "reports a failed step" "retry_step" "escalates the tier" "submit a new plan"
-                        "Every turn ends on a decision"
-                        "no_plan_needed" "hand_in" "task_submit" "task_control" "session_send" "session_control"
-                        "you answered a question" "the plan is still running"
+                        "Your tokens are the expensive ones" "submit_plan" "a tier (simple or medium)"
+                        "one-line reason" "ticket-sized brief" "spelled out file by file"
+                        "Plans have no hard steps" "You run on the hard model" "split the step"
+                        "every step is medium at most" "fewer, larger medium steps" "Plan for parallel work"
+                        "`after` sets the order" "share the working tree" "different files"
+                        "once, in the summary" "fresh by default"
+                        "submit_plan refuses a fork of a long conversation" "reports a failed step"
+                        "do not poll" "retry_step" "escalates the tier" "up to hard" "submit a new plan"
+                        "Every turn ends on a decision" "no_plan_needed" "hand_in" "task_submit"
+                        "task_control" "session_send" "session_control" "you answered a question"
+                        "the plan is still running"
                         "In a task, the last step commits (git add -A && git commit)"
                         "review feedback means a new plan to fix it"))
         (ert-info (needle)
@@ -2202,12 +2212,13 @@ or model is coordination, like session_send, and is one."
       (should (member "supervisor" sections))
       (dolist (key '("harness-supervisor" "harness-supervisor-tasks" "harness-supervisor-judge-model"
                      "harness-supervisor-tiers" "harness-supervisor-step-budget"
-                     "harness-subagent-context-limit"))
+                     "harness-supervisor-fork-limit" "harness-subagent-context-limit"))
         (should (funcall find key)))
       (should (equal "sessions" (plist-get (funcall find "harness-supervisor") :section)))
       (should (plist-get (funcall find "harness-supervisor") :layered))
       (dolist (key '("harness-supervisor-tasks" "harness-supervisor-judge-model"
-                     "harness-supervisor-tiers" "harness-supervisor-step-budget"))
+                     "harness-supervisor-tiers" "harness-supervisor-step-budget"
+                     "harness-supervisor-fork-limit"))
         (should (equal "supervisor" (plist-get (funcall find key) :section))))
       ;; The supervisor's thinking comes from the providers' tiers now.
       (dolist (key '("harness-supervisor-thinking" "harness-supervisor-worker-thinking"))

@@ -58,7 +58,7 @@
 ;; in `harness-supervisor-tools' and `harness-supervisor-decision-tools',
 ;; so the gates above apply to them.  `submit_plan' takes a list of steps,
 ;; each a self-contained job with a tier (simple or medium), a context
-;; (fork or fresh) and the steps it waits for.  A plan has no hard step:
+;; (fresh or fork) and the steps it waits for.  A plan has no hard step:
 ;; the supervisor plans on its provider's hard model, and breaks the work
 ;; down until every step is medium at most, so that the strong model
 ;; decides and the cheaper ones carry it out; only `retry_step' runs a
@@ -74,14 +74,23 @@
 ;; listing does not read as a provider with no model for the tier; only one
 ;; that truly names none gives the step the supervisor's own model, and the
 ;; hint says which provider it is and why (the step keeps the reason as
-;; `:model-fallback').  A fork step forks the supervisor at the call that
-;; submitted the plan, a
-;; node every step of the plan shares; when a plan has two or more fork
-;; steps on one model they all fork through one seed (`seed/fork'), so
-;; that the context is written to that model's prompt cache once.  A fresh
-;; step is a new session in the supervisor's directory.  The window of both
-;; is capped as `harness-tools-agent-context-limit' says, and never
-;; silently: a hint in the worker's transcript says so
+;; `:model-fallback').  A step is fresh by default: a new session in the
+;; supervisor's directory, whose first message holds the plan's summary
+;; (what every step shares), its own prompt and the plan's other steps.
+;; A fork step forks the supervisor at the call that submitted the plan,
+;; a node every step of the plan shares, and only while that conversation
+;; is short: no fork reads its parent's prompt cache (its system prompt
+;; and tools differ, and its model usually does), so a fork writes the
+;; whole conversation into its model's cache and reads it again on every
+;; call.  Past `harness-supervisor-fork-limit' tokens of it
+;; (`harness-supervisor--conversation-tokens', recorded on the plan as
+;; `:fork-tokens') `submit_plan' refuses fork steps, and a fork step of
+;; an older plan past it starts from a compaction
+;; (`harness-supervisor--compact-fork').  When a plan has two or more
+;; fork steps on one model they all fork through one seed (`seed/fork'),
+;; so that the context is written to that model's prompt cache once.  The
+;; window of both is capped as `harness-tools-agent-context-limit' says,
+;; and never silently: a hint in the worker's transcript says so
 ;; (`harness-supervisor--limit-hint').  The worker's reply is the step's
 ;; result, which the steps that wait for it are given.  A worker shows
 ;; in the supervisor's transcript as the `spawn_agent' call that would
@@ -121,23 +130,24 @@
 ;; compacted.  The step keeps the attempt before as `:previous' (`:attempt
 ;; :session :model :error'), which the worker's message points at: it can
 ;; read what was tried with session_read, and should not repeat what
-;; failed.  First attempts, and fresh steps, decide as before.
+;; failed.  A fork step of a plan past `harness-supervisor-fork-limit' is
+;; compacted the same way on its first attempt too, seed or not.  Other
+;; first attempts, and fresh steps, decide as before.
 ;;
 ;; The plans of a session are its `:ext' `:supervisor-plans', so they
 ;; survive a restart and the UI shows them: each change of a step is a
 ;; `session/ext-changed'.  A plan has `:id :title :summary :node :call-id
-;; :created :steps', a step `:id :title :prompt :tier :reason :context
-;; :after :model :state :session :attempts :result :error', `:thinking'
-;; when its tier names a level, and, once it ran, `:worker-model' (the
-;; model of its worker) and, once it started again, `:previous'.  A step
-;; of a plan stored before the tiers were renamed has mundane or standard
-;; as its tier, which read as simple and medium.  A step whose tier found
-;; no model keeps
-;; `:model-fallback', the reason (`unknown', `unlisted' or `none'), and
-;; runs on the supervisor's own model.  A step is pending, running, done,
-;; failed, interrupted, cancelled or superseded: a new plan supersedes the
-;; steps of the earlier ones that have not started, and their running steps
-;; finish as usual.
+;; :created :fork-tokens :steps', a step `:id :title :prompt :tier
+;; :reason :context :after :model :state :session :attempts :result
+;; :error', `:thinking' when its tier names a level, and, once it ran,
+;; `:worker-model' (the model of its worker) and, once it started again,
+;; `:previous'.  A step of a plan stored before the tiers were renamed has
+;; mundane or standard as its tier, which read as simple and medium.  A
+;; step whose tier found no model keeps `:model-fallback', the reason
+;; (`unknown', `unlisted' or `none'), and runs on the supervisor's own
+;; model.  A step is pending, running, done, failed, interrupted,
+;; cancelled or superseded: a new plan supersedes the steps of the earlier
+;; ones that have not started, and their running steps finish as usual.
 ;;
 ;; What the supervisor hears.  A step that is done is a hint, and starts
 ;; the steps that waited for it.  A step that did not get done -- its
@@ -317,16 +327,37 @@ Supervisor mode."
   :safe #'harness-supervisor--tiers-safe-p
   :group 'harness)
 
-(defcustom harness-supervisor-step-budget 80
+(defcustom harness-supervisor-step-budget 30
   "Tool calls a supervising turn makes before it is told to submit its plan.
 A soft budget: when a turn reaches it the session is steered, once, to
 stop investigating and submit the plan with what it knows, and again
-every half budget after that (at 80, 120, 160 and so on by default).  It
-is a nudge and never a stop.  The default comes from 164 real sessions:
-the median turn made 61 tool calls before its plan, the 75th percentile
-80 and the 90th percentile 103.  It is on the settings page, under
-Supervisor mode."
+every half budget after that (at 30, 45, 60 and so on by default).  It
+is a nudge and never a stop.  In 164 real sessions under the first
+prompt, which had supervisors gather everything for their forks, the
+median turn made 61 tool calls before its plan; the workers read the
+code they change, so a supervisor needs only enough to split the work,
+and the default nudges well before that.  It is on the settings page,
+under Supervisor mode."
   :type 'integer :safe (lambda (v) (and (integerp v) (> v 0))) :group 'harness)
+
+(defcustom harness-supervisor-fork-limit 20000
+  "Most tokens of conversation a worker of a plan may inherit by forking.
+A step's worker starts fresh by default, with the plan's summary, its
+own prompt and the reports of the steps it waits for.  A fork step's
+worker inherits the supervisor's conversation instead, and no fork
+reads its parent's prompt cache: its system prompt and tools differ,
+and its model usually does.  So its first request writes the whole
+conversation into its model's cache, and every request after reads it
+again.  Past this many tokens of conversation, estimated from the
+transcript without the system prompt and tools a fresh worker has too
+\(`harness-supervisor--conversation-tokens'), `submit_plan' refuses
+fork steps, and a fork step of a plan made before, or past a limit
+lowered since, starts from a compaction of the conversation instead.
+Nil puts no limit on forks.  It is on the settings page, under
+Supervisor mode."
+  :type '(choice (const :tag "No limit" nil) (integer :tag "Tokens"))
+  :safe (lambda (v) (or (null v) (and (integerp v) (>= v 0))))
+  :group 'harness)
 
 (defconst harness-supervisor--judge-key :supervisor-judge
   "The `:ext' key that says a model may still decide how a session starts.
@@ -1363,7 +1394,7 @@ budget after it."
 
 (defun harness-supervisor--budget-text (n)
   "Return the message that tells a turn which made N tool calls to wrap up."
-  (format "%d tool calls so far. Stop investigating and submit the plan with what you know, putting open questions in the steps." n))
+  (format "%d tool calls so far. Stop investigating and submit the plan with what you know: the workers read the code they change, so leave the details and open questions to them, in the steps." n))
 
 (defun harness-supervisor--decision-call-p (node)
   "Non-nil when the tool call NODE is a decision of a supervising turn.
@@ -1468,17 +1499,21 @@ still write its answer."
 ;; oldest first, that JSON keeps as they are (strings, numbers and lists;
 ;; a field with nothing to say is left out).
 ;;
-;;   plan  (:id :title :summary :node :call-id :created :steps)
+;;   plan  (:id :title :summary :node :call-id :created :fork-tokens :steps)
 ;;   step  (:id :title :prompt :tier :reason :context :after :model :thinking
 ;;          :state :session :attempts :result :error :worker-model :previous)
 ;;
 ;; `:node' and `:call-id' are the fork point of the plan: the call that
-;; submitted it, which every fork step forks the supervisor at.  A step's
-;; `:state' is "pending", "running", "done", "failed", "interrupted",
-;; "cancelled" or "superseded"; `:session' is the id of its worker, and
-;; `:result' the worker's final reply when it is done.  `:thinking' is the
-;; level the step's tier names, which its worker runs at.  `:worker-model'
-;; is the model that worker was made for, which `retry_step' may change.
+;; submitted it, which every fork step forks the supervisor at.
+;; `:fork-tokens' is about how many tokens of conversation a fork there
+;; inherits, measured when the plan was submitted
+;; (`harness-supervisor--conversation-tokens'); a plan with no fork step,
+;; or stored before plans recorded it, has none.  A step's `:state' is
+;; "pending", "running", "done", "failed", "interrupted", "cancelled" or
+;; "superseded"; `:session' is the id of its worker, and `:result' the
+;; worker's final reply when it is done.  `:thinking' is the level the
+;; step's tier names, which its worker runs at.  `:worker-model' is the
+;; model that worker was made for, which `retry_step' may change.
 ;; A step that started again has `:previous', the attempt before:
 ;; (:attempt N :session SESSION :model MODEL :error TEXT).
 
@@ -1514,8 +1549,9 @@ that is no tier comes back downcased, for the problem that names it."
                               harness-supervisor--tier-keys)))
         (if keys (symbol-name (car keys)) name)))))
 
-(defconst harness-supervisor--context-names '("fork" "fresh")
-  "The contexts a step's worker may start with.")
+(defconst harness-supervisor--context-names '("fresh" "fork")
+  "The contexts a step's worker may start with.
+A step with no context is fresh.")
 
 (defconst harness-supervisor--retryable-states '("failed" "interrupted" "cancelled")
   "The states of a step that ended without being done, which `retry_step' accepts.")
@@ -1693,7 +1729,7 @@ each thing wrong with the step."
            (title (harness-supervisor--text (plist-get raw :title)))
            (tier (or (harness-supervisor--tier-name (plist-get raw :tier)) ""))
            (context (let ((c (downcase (or (harness-supervisor--text (plist-get raw :context)) ""))))
-                      (if (string-empty-p c) "fork" c)))
+                      (if (string-empty-p c) "fresh" c)))
            (problems nil))
       (when (harness-string-blank-p id)
         (push (format "%s has no id: give each step a short unique id" name) problems))
@@ -2023,6 +2059,72 @@ is set, nil when nothing caps a worker or the context cannot be told."
                         (plist-get worker :id) (harness-error-short-message err))
            nil)))
 
+(defun harness-supervisor--conversation-tokens (session-id)
+  "Return about how many tokens the conversation of SESSION-ID holds.
+That is what a fork of it inherits beyond the system prompt and the
+tools, which a fresh worker has too: the text of every message the
+provider is sent (`session/messages'), estimated as
+`harness-estimate-tokens' does it.  A tool call counts by its input and
+a tool result by its output.  Thinking is left out, since its signature
+ties it to the model that made it, so it does not travel to a worker's
+model.  A conversation that cannot be read counts as none, with a
+warning in the log."
+  (condition-case err
+      (let ((tokens 0))
+        (dolist (message (harness-call 'session/messages session-id))
+          (dolist (block (plist-get message :content))
+            (unless (equal (plist-get block :type) "thinking")
+              (cl-incf tokens
+                       (cond
+                        ((stringp (plist-get block :text))
+                         (harness-estimate-tokens (plist-get block :text)))
+                        ((stringp (plist-get block :content))
+                         (harness-estimate-tokens (plist-get block :content)))
+                        ((equal (plist-get block :type) "tool_use")
+                         (harness-estimate-tokens (format "%S" (plist-get block :input))))
+                        (t 0))))))
+        tokens)
+    (error
+     (harness-log 'warn "supervisor: could not measure the conversation of %s: %s"
+                  session-id (harness-error-short-message err))
+     0)))
+
+(defun harness-supervisor--past-fork-limit-p (tokens)
+  "Non-nil when TOKENS of conversation are past `harness-supervisor-fork-limit'.
+A nil limit is no limit: nothing is past it."
+  (and (integerp harness-supervisor-fork-limit)
+       (numberp tokens)
+       (> tokens harness-supervisor-fork-limit)))
+
+(defun harness-supervisor--fork-tokens (session-id plan)
+  "Return the tokens of conversation a fork step of PLAN inherits.
+That is the plan's `:fork-tokens', measured when `submit_plan' made it.
+A plan stored before plans recorded it has none; then the conversation
+of SESSION-ID, the supervisor, is measured as it is now
+\(`harness-supervisor--conversation-tokens'), which is at least as much."
+  (let ((tokens (plist-get plan :fork-tokens)))
+    (if (numberp tokens)
+        tokens
+      (harness-supervisor--conversation-tokens session-id))))
+
+(defun harness-supervisor--fork-problems (steps tokens)
+  "Return the problems STEPS have with forking TOKENS of conversation.
+Nil unless some of STEPS has the context fork and TOKENS are past
+`harness-supervisor-fork-limit'; then a list of one text, which names
+the fork steps, says why a fork is refused and what to do instead."
+  (let* ((forks (cl-remove-if-not (lambda (step) (equal (plist-get step :context) "fork"))
+                                  steps))
+         (many (cdr forks))
+         (ids (mapconcat (lambda (step) (or (plist-get step :id) "?")) forks ", ")))
+    (when (and forks (harness-supervisor--past-fork-limit-p tokens))
+      (list (format (concat "%s %s %s this conversation, which holds about %s tokens, past harness-supervisor-fork-limit (%s):"
+                            " a fork writes all of it into its worker model's cache and reads it again on every call."
+                            " Make %s fresh, and put what the workers need in the summary, which every fresh worker gets, and in their prompts")
+                    (if many "steps" "step") ids (if many "fork" "forks")
+                    (harness-format-tokens-compact tokens)
+                    (harness-format-tokens-compact harness-supervisor-fork-limit)
+                    (if many "them" "it"))))))
+
 (defun harness-supervisor--seeded-p (plan step)
   "Non-nil when the worker of STEP forks through a seed.
 That is when PLAN has two or more fork steps on STEP's model, all its
@@ -2121,12 +2223,21 @@ worker at its model's own level, as its supervisor is."
 
 (defun harness-supervisor--make-worker (session-id plan step)
   "Return a promise of the session of the worker of STEP of PLAN.
-SESSION-ID is the supervisor.  A fork step forks it at the call that
-submitted the plan -- through a seed when the plan has several fork
-steps on the model -- and a fresh step is a new session in the
-supervisor's directory, with its settings.  Either way the worker
-thinks at the level of its tier, else at the supervisor's
-\(`harness-supervisor--worker-thinking').
+SESSION-ID is the supervisor.  A fresh step, which is any step that is
+not a fork, is a new session in the supervisor's directory, with its
+settings; a fork step forks the supervisor at the call that submitted
+the plan -- through a seed when the plan has several fork steps on the
+model.  Either way the worker thinks at the level of its tier, else at
+the supervisor's (`harness-supervisor--worker-thinking').
+
+A fork step of a plan whose conversation is past
+`harness-supervisor-fork-limit' (`harness-supervisor--fork-tokens': a
+plan made before plans recorded its size, or a limit lowered since;
+`submit_plan' refuses such a fork in a new plan) forks the supervisor
+directly and compacts the fork before its first turn
+\(`harness-supervisor--compact-fork'), on a first attempt too, rather
+than write the whole conversation into the cache of its model.  The
+worker the promise resolves with then has `:fork-limit' as well.
 
 A fork step that starts again (`harness-supervisor--restarted-p': its
 `retry_step', or a restart of the harness) decides by the cache instead,
@@ -2137,8 +2248,8 @@ shared context is read from the cache.  Without one it forks the
 supervisor directly and compacts the fork before its first turn
 \(`harness-supervisor--compact-fork'), rather than send the whole
 conversation uncached.  The worker the promise resolves with then has
-`:context-cache' (`seed', `compacted' or `whole'); a first attempt and
-a fresh step never do.
+`:context-cache' (`seed', `compacted' or `whole'); a first attempt
+within the limit and a fresh step never do.
 
 Every worker's context window is capped as a sub-agent's is
 \(`harness-supervisor--context-limit'), and once the worker exists a
@@ -2147,7 +2258,7 @@ the limit fitted to the compacted conversation for a fork compacted."
   (let* ((session (harness-call 'session/get session-id))
          (model (plist-get step :model))
          (name (harness-supervisor--worker-name step))
-         (fresh (equal (plist-get step :context) "fresh"))
+         (fresh (not (equal (plist-get step :context) "fork")))
          (inherited (harness-supervisor--inherited session-id (not fresh)))
          (limit (harness-supervisor--context-limit session-id (not fresh) inherited))
          ;; The level of the step's tier, else the supervisor's, fitted
@@ -2178,6 +2289,14 @@ the limit fitted to the compacted conversation for a fork compacted."
               :non-interactive (if (harness-json-true-p (plist-get session :non-interactive)) t :false)
               :allowed-dirs (plist-get session :allowed-dirs)
               options))
+      ;; A fork of a conversation past the limit -- in a plan made before
+      ;; plans recorded its size, or under a limit lowered since --
+      ;; starts from a compaction, seed or not.
+      ((harness-supervisor--past-fork-limit-p (harness-supervisor--fork-tokens session-id plan))
+       (harness-then (funcall plain-fork)
+                     (lambda (worker)
+                       (harness-then (harness-supervisor--compact-fork session-id worker model)
+                                     (lambda (compacted) (append compacted (list :fork-limit t)))))))
       ((harness-supervisor--restarted-p step)
        (if (harness-supervisor--warm-seed session-id plan step)
            (harness-then (funcall seed-fork)
@@ -2198,11 +2317,11 @@ the limit fitted to the compacted conversation for a fork compacted."
        worker))))
 
 (defconst harness-supervisor--fork-opening
-  "You are now a worker for one step of the supervisor's plan, not the supervisor. You have the full tool set: you can read and change files and run commands. The supervisor's rules and reminders earlier in this conversation (read-only tools, ending every turn on a decision, submit_plan and retry_step) do not apply to you. Do this one step and nothing else; other workers do the other steps."
+  "You are now a worker for one step of the supervisor's plan, not the supervisor. You have the full tool set: you can read and change files and run commands. The supervisor's rules and reminders earlier in this conversation (read-only tools, ending every turn on a decision, submit_plan and retry_step) do not apply to you. Do this one step and nothing else: other workers do the other steps, some at the same time in the same working tree, so keep to your step's files."
   "What a worker that forked the supervisor is told first.")
 
 (defconst harness-supervisor--fresh-opening
-  "You are a worker for one step of a plan that a supervisor made. You have the full tool set: you can read and change files and run commands. You start without the supervisor's conversation, so the step below holds what you need. Do this one step and nothing else; other workers do the other steps."
+  "You are a worker for one step of a plan that a supervisor made. You have the full tool set: you can read and change files and run commands. You start without the supervisor's conversation: the plan and your step below are your brief, and the decisions in them are made. Read the code you need. Do this one step and nothing else: other workers do the other steps, some at the same time in the same working tree, so keep to your step's files."
   "What a worker that starts fresh is told first.")
 
 (defconst harness-supervisor--compacted-note
@@ -2210,7 +2329,7 @@ the limit fitted to the compacted conversation for a fork compacted."
   "What a worker whose forked conversation was compacted is told after its opening.")
 
 (defconst harness-supervisor--worker-closing
-  "Do the step, then verify it. End with a short report of what you changed and how you checked it. Do not commit unless the step says so."
+  "Do the step, then verify it. End with a short report of what you changed, how you checked it, and anything the other steps need to know. Do not commit unless the step says so."
   "What a worker is told last.")
 
 (defun harness-supervisor--previous-text (previous)
@@ -2237,20 +2356,47 @@ what failed."
 PREAMBLE is what `seed/fork' asks a fork's first message to open with,
 or nil.  COMPACTED is non-nil for a fork whose inherited conversation
 was compacted before this message, which the opening then says.  The
-message is the opening, the step, the attempt before it when STEP
-starts again (its `:previous'), what the steps it waits for reported
-\(cut short), and the closing."
-  (let ((before (delq nil (mapcar (lambda (id) (harness-supervisor--step plan id))
-                                  (plist-get step :after))))
-        (previous (harness-supervisor--previous-text (plist-get step :previous))))
+message is the preamble, the opening, the plan's summary, the step, the
+other steps of the plan that no later plan superseded, the attempt
+before it when STEP starts again (its `:previous'), what the steps it
+waits for reported (cut short), and the closing.
+
+A worker with no `submit_plan' call in its conversation -- a fresh one,
+or a fork whose conversation was compacted -- is given the summary and
+the other steps, which that call holds.  A fork with the whole
+conversation gets neither section, since the call it inherits has both."
+  (let* ((fork (equal (plist-get step :context) "fork"))
+         ;; Only a whole fork has the plan's call in its conversation.
+         (brief (or (not fork) compacted))
+         (summary (plist-get plan :summary))
+         (others (and brief
+                      (cl-remove-if (lambda (other)
+                                      (or (equal (plist-get other :id) (plist-get step :id))
+                                          (harness-supervisor--state-p other "superseded")))
+                                    (plist-get plan :steps))))
+         (before (delq nil (mapcar (lambda (id) (harness-supervisor--step plan id))
+                                   (plist-get step :after))))
+         (previous (harness-supervisor--previous-text (plist-get step :previous))))
     (concat
      (and (stringp preamble) (not (string-blank-p preamble)) (concat (string-trim preamble) "\n\n"))
-     (if (equal (plist-get step :context) "fresh")
-         harness-supervisor--fresh-opening
-       (concat harness-supervisor--fork-opening
-               (and compacted (concat " " harness-supervisor--compacted-note))))
+     (if fork
+         (concat harness-supervisor--fork-opening
+                 (and compacted (concat " " harness-supervisor--compacted-note)))
+       harness-supervisor--fresh-opening)
+     (and brief (not (harness-string-blank-p summary))
+          (format "\n\n## The plan\n\n%s" (string-trim summary)))
      (format "\n\n## Step %s: %s\n\n%s\n" (plist-get step :id) (plist-get step :title)
              (plist-get step :prompt))
+     (and others
+          (concat "\n## The other steps\n\n"
+                  (mapconcat
+                   (lambda (other)
+                     (format "- %s: %s%s" (plist-get other :id) (plist-get other :title)
+                             (if (plist-get other :after)
+                                 (format " (after %s)" (string-join (plist-get other :after) ", "))
+                               "")))
+                   others "\n")
+                  "\n"))
      (and previous (format "\n## The previous attempt\n\n%s\n" previous))
      (and before
           (concat "\n## What the steps before this one reported\n\n"
@@ -2382,8 +2528,10 @@ to do."
 WORKER is its session, whose `:context-cache' says: `seed' (forked from
 a warm shared context), `compacted' (no warm cache held the plan's
 conversation, so the fork starts from a compaction of it) or `whole'
-\(and was not compacted).  Only a fork step that starts again has one;
-nothing is said for any other."
+\(and was not compacted).  A fork step that starts again has one, and
+so does a fork step past `harness-supervisor-fork-limit' on a first
+attempt too (its worker has `:fork-limit'), which the hint then says
+is the reason; nothing is said for any other."
   (when-let* ((how (plist-get worker :context-cache)))
     (harness-supervisor--hint
      session-id
@@ -2392,16 +2540,22 @@ nothing is said for any other."
              (pcase how
                ('seed "forked from the warm shared context")
                ('compacted
-                (format "no warm prompt cache holds the plan's conversation, so its worker starts from %s rather than reading it all uncached"
-                        (harness-supervisor--compaction-words (plist-get worker :compaction))))
-               (_ "no warm prompt cache holds the plan's conversation and it was not compacted, so its worker reads it all uncached"))))))
+                (if (plist-get worker :fork-limit)
+                    (format "the plan's conversation is past harness-supervisor-fork-limit, so its worker starts from %s rather than inheriting all of it"
+                            (harness-supervisor--compaction-words (plist-get worker :compaction)))
+                  (format "no warm prompt cache holds the plan's conversation, so its worker starts from %s rather than reading it all uncached"
+                          (harness-supervisor--compaction-words (plist-get worker :compaction)))))
+               (_ (if (plist-get worker :fork-limit)
+                      "the plan's conversation is past harness-supervisor-fork-limit but could not be compacted, so its worker reads it all uncached"
+                    "no warm prompt cache holds the plan's conversation and it was not compacted, so its worker reads it all uncached")))))))
 
 (defun harness-supervisor--worker-made (session-id plan-id step-id worker attempt)
   "Run the step STEP-ID of plan PLAN-ID of session SESSION-ID on its new WORKER.
 WORKER is the session `seed/fork', `session/fork' or `session/create'
-made, plus `:context-cache' and `:compaction' for a fork step that
-starts again (see `harness-supervisor--make-worker'), whose supervisor
-is told how its context stands (`harness-supervisor--restart-hint').
+made, plus `:context-cache', `:compaction' and `:fork-limit' for a fork
+step that starts again or whose conversation is past the fork limit
+\(see `harness-supervisor--make-worker'), whose supervisor is told how
+its context stands (`harness-supervisor--restart-hint').
 The step notes the model of the worker, which `retry_step' may change
 before the step starts again.  The worker's turn is the step: when it
 ends the step is done or it failed.
@@ -2715,7 +2869,7 @@ Every step is done, or was superseded by a later plan and never ran."
                   (or (harness-supervisor--cut (plist-get step :result) harness-supervisor--report-limit)
                       "(it reported nothing)"))))
       steps "\n")
-     "\n\nCheck the work now, with the read-only tools: read the files the steps changed, and use session_read on a worker when its report is not enough. Then decide: a follow-up plan with submit_plan if something is missing or wrong, "
+     "\n\nCheck the work now, as cheaply as settles it: the reports above, a diff, the test output; read a file, or a worker's session with session_read, only where a report leaves doubt. Then decide: a follow-up plan with submit_plan if something is missing or wrong, "
      (if (harness-supervisor--task-p session-id)
          "hand_in once the work is checked and committed, or no_plan_needed with your reply to the user."
        "or no_plan_needed with your reply to the user."))))
@@ -2777,22 +2931,26 @@ made more calls in the same message; without the call, the head."
                                (harness-call 'session/nodes session-id) :from-end t))))
     (or (plist-get call :id) (plist-get (harness-call 'session/get session-id) :head))))
 
-(defun harness-supervisor--make-plan (input steps node call-id)
+(defun harness-supervisor--make-plan (input steps node call-id &optional fork-tokens)
   "Return the plan that INPUT, a `submit_plan' call, makes of STEPS.
-NODE and CALL-ID are the fork point.  Every step starts out pending."
+NODE and CALL-ID are the fork point.  FORK-TOKENS, when it is known, is
+about how many tokens of conversation a fork there inherits
+\(`harness-supervisor--conversation-tokens'), which the plan keeps as
+`:fork-tokens'.  Every step starts out pending."
   (let ((title (harness-supervisor--text (plist-get input :title))))
     (harness-supervisor--with
      (list :id (concat "p-" (harness-short-id 6)))
      :title (and (not (harness-string-blank-p title)) title)
      :summary (harness-supervisor--text (plist-get input :summary))
      :node node :call-id call-id :created (float-time)
+     :fork-tokens fork-tokens
      :steps (mapcar (lambda (step) (harness-supervisor--with step :state "pending" :attempts 0)) steps))))
 
 (defun harness-supervisor--step-line (step)
   "Return the line of the answer to `submit_plan' that tells where STEP runs."
   (format "- %s → %s (%s%s%s%s)" (plist-get step :id) (plist-get step :model) (plist-get step :tier)
           (if (plist-get step :thinking) (format ", %s thinking" (plist-get step :thinking)) "")
-          (if (equal (plist-get step :context) "fresh") ", fresh" "")
+          (if (equal (plist-get step :context) "fork") ", fork" "")
           (if (plist-get step :after) (format ", after %s" (string-join (plist-get step :after) " ")) "")))
 
 (defun harness-supervisor--hands-on-result (tool)
@@ -2810,22 +2968,30 @@ direction, a mode turned on while the model has an old tool list."
 (defun harness-supervisor--submit-plan (input ctx)
   "Handler of the submit_plan tool: record INPUT's plan and start its workers.
 CTX is the call's context.  A plan with problems is refused as a whole,
-every problem named.  Otherwise each step is given the model of its
-tier -- the provider's catalogue is waited for, briefly, when it has
-not answered yet -- the plan is recorded on the session (the steps of
-its earlier plans that have not started are superseded), shown like the
-`plan' tool shows one, and its ready steps start.  The answer ends the
-turn: the harness reports back.  It may answer with a promise: a
-provider whose catalogue answers slowly delays the answer, not the
-mapping of tiers to models."
+every problem named; a fork step is one when the conversation is past
+`harness-supervisor-fork-limit' (`harness-supervisor--fork-problems').
+Otherwise each step is given the model of its tier -- the provider's
+catalogue is waited for, briefly, when it has not answered yet -- the
+plan is recorded on the session (the steps of its earlier plans that
+have not started are superseded), shown like the `plan' tool shows one,
+and its ready steps start.  A plan with a fork step keeps the size of
+the conversation as `:fork-tokens', measured before the plan or a hint
+joins it.  The answer ends the turn: the harness reports back.  It may
+answer with a promise: a provider whose catalogue answers slowly delays
+the answer, not the mapping of tiers to models."
   (let* ((sid (plist-get ctx :session-id))
          (session (harness-call 'session/get sid))
-         (read (harness-supervisor--read-plan input)))
+         (read (harness-supervisor--read-plan input))
+         ;; What a fork would inherit, measured now, before the plan node
+         ;; or a hint joins the transcript.  Only a fork needs it.
+         (tokens (and (cl-some (lambda (step) (equal (plist-get step :context) "fork")) (car read))
+                      (harness-supervisor--conversation-tokens sid)))
+         (problems (append (cdr read) (harness-supervisor--fork-problems (car read) tokens))))
     (cond
      ((not (harness-supervisor--session-p session))
       (harness-supervisor--hands-on-result "submit_plan"))
-     ((cdr read)
-      (harness-supervisor--problems-result "submit_plan" (cdr read)))
+     (problems
+      (harness-supervisor--problems-result "submit_plan" problems))
      (t
       (harness-then
        (harness-supervisor--tier-models session (car read))
@@ -2833,7 +2999,8 @@ mapping of tiers to models."
          ;; The call's own node, taken before the plan and its hint join the transcript.
          (let* ((plan (harness-supervisor--make-plan input steps
                                                      (harness-supervisor--call-node sid (plist-get ctx :call-id))
-                                                     (plist-get ctx :call-id)))
+                                                     (plist-get ctx :call-id)
+                                                     tokens))
                 (n (length steps))
                 (fallback (cl-remove-if-not (lambda (step) (plist-get step :model-fallback)) steps)))
            (harness-supervisor--save-plans
@@ -2859,21 +3026,21 @@ mapping of tiers to models."
 
 (harness-define-tool "submit_plan"
   :label "Submit plan"
-  :description "Submit the plan for the work and start its workers. Call it once you know enough to plan; it is your decision for the turn whenever the work changes files, however small. The plan is a list of steps, each a self-contained job for a worker on a cheaper model, which has the full tool set that you lack. summary is the plan in markdown, shown to the user: the approach, the steps, and how the result is verified. Each step has an id (short, unique), a title, a prompt (self-contained: what to do, which files, how to verify, what to report; say when the step must commit), a tier with a one-line reason (simple for mechanical, well-specified edits; medium for the rest), a context (fork, the default: the worker sees this conversation up to now; or fresh: it starts empty, so the prompt must hold everything), and after: the ids of the steps that must be done first. Steps with no order between them run at once in the same working tree, so give them different files. A plan has no hard steps: you run on the hard model, and work that would need it is not broken down enough. Make the hard decisions yourself, here, and split the work into steps that are each medium at most, the decisions written into their prompts; a worker that is not up to its step can be run again on hard with retry_step. A worker also gets the reports of the steps it follows. The harness starts the steps that are ready, tells you in a new message when a step fails and when the plan has finished, and ends this turn now. A problem with the plan (an id used twice, an after that names no step, a cycle, a hard or unknown tier, an unknown context, a blank prompt) is returned as an error and nothing starts: fix it and call again."
+  :description "Submit the plan for the work and start its workers. Call it once you know enough to plan; it is your decision for the turn whenever the work changes files, however small. summary is the plan in markdown, shown to the user and given to every fresh worker: the approach, what the steps share (interfaces, names, data shapes, which step makes each), and how the result is verified. Each step is a discrete unit of work for a worker on a cheaper model, which has the full tool set that you lack: an id (short, unique), a title, a prompt, a tier with a one-line reason, a context and after. The prompt is the step's brief, at the length its tier needs: for medium, a ticket (the goal, the constraints, the decisions you made, the files it owns, how to verify, what to report), whose worker reads the code it needs itself; for simple, the edits spelled out file by file. Say when the step must commit. The tier is simple for mechanical, well-specified edits and medium for the rest. A plan has no hard steps: you run on the hard model, and work that would need it is not broken down enough, so make the hard decisions yourself and write them into the prompts; a worker that is not up to its step can be run again on hard with retry_step. The context is fresh (the default: the worker starts with the summary, its prompt and the reports of the steps it waits for) or fork (it inherits this conversation as well, refused once the conversation is long, since a fork writes all of it into its worker model's cache). after lists the steps that must be done first; steps with no order between them run at once in the same working tree, so give them different files. The harness starts the steps that are ready, tells you in a new message when a step fails and when the plan has finished, and ends this turn now. A problem with the plan (an id used twice, an after that names no step, a cycle, a hard or unknown tier, an unknown context, a blank prompt, a fork of a long conversation) is returned as an error and nothing starts: fix it and call again."
   :schema '(:type "object"
             :properties (:title (:type "string" :description "Optional short title for the plan.")
-                         :summary (:type "string" :description "The plan in markdown, shown to the user.")
+                         :summary (:type "string" :description "The plan in markdown, shown to the user and given to every fresh worker: the approach, what the steps share, and how the result is verified.")
                          :steps (:type "array"
                                  :description "The steps, at least one."
                                  :items (:type "object"
                                          :properties (:id (:type "string" :description "A short id, unique in the plan.")
                                                       :title (:type "string" :description "What the step does, in a few words.")
-                                                      :prompt (:type "string" :description "Self-contained instructions for the worker: what to do, which files, how to verify, what to report.")
+                                                      :prompt (:type "string" :description "The step's brief, at the length its tier needs: for medium, the goal, constraints, decisions, the files it owns, how to verify and what to report; for simple, the edits file by file.")
                                                       :tier (:type "string" :enum ("simple" "medium")
                                                              :description "How hard the step is, which decides the worker's model: simple or medium. There is no hard: break such a step down.")
                                                       :reason (:type "string" :description "Why this tier, in one line.")
-                                                      :context (:type "string" :enum ("fork" "fresh")
-                                                                :description "fork (default): the worker sees this conversation. fresh: it starts empty.")
+                                                      :context (:type "string" :enum ("fresh" "fork")
+                                                                :description "fresh (default): the worker starts with the summary, its prompt and the reports of the steps it waits for. fork: it inherits this conversation too; refused once the conversation is long.")
                                                       :after (:type "array" :items (:type "string")
                                                               :description "Ids of the steps of this plan that must be done before this one starts."))
                                          :required ("id" "title" "prompt" "tier" "reason"))))
@@ -3251,12 +3418,13 @@ It is the same text on every call, since the system prompt is part of the
 prompt cache: nothing in it names a session, a directory or a count."
   (concat
    "## Supervisor mode\n"
-   "You plan and coordinate; workers on cheaper models make the changes. You cannot change files yourself, and bash is read-only and offline.\n"
-   "- Investigate just enough to plan, then call submit_plan. Each step is self-contained, with a tier (simple or medium) and a one-line reason for it.\n"
-   "- Break the work down until every step is medium at most: plans have no hard steps. You run on the hard model, so a step that seems to need it is too big or leaves a hard decision open: make the decision yourself, write it into the prompt, and split the step.\n"
-   "- A step's context is fork (the default: the worker sees this conversation, and forks onto one model share one cache seed) or fresh (a self-contained job that needs none of it).\n"
-   "- `after` sets the order of the steps. Steps that run in parallel must touch different files: they share the working tree.\n"
-   "- The harness reports a failed step, and the finished plan, back to you. After a failure call retry_step (it escalates the tier, up to hard when a medium worker was not up to its step) or submit a new plan.\n"
+   "You plan and coordinate; workers on cheaper models make the changes. You cannot change files yourself, and bash is read-only and offline. Your tokens are the expensive ones: every call you make reads this whole conversation again on the hard model, so spend them on decisions and coordination, not on details a worker finds for itself.\n"
+   "- Investigate only what the plan needs: where the work goes, how it splits, and what the parts share. The workers read the code they change. Then call submit_plan.\n"
+   "- Each step has a tier (simple or medium) and a one-line reason for it. A medium worker can do a whole programming task from a ticket-sized brief: the goal, the constraints, the decisions you made, the files it owns, and how to verify. A simple worker needs its edits spelled out file by file. Write each prompt at the length its tier needs, no longer and no shorter.\n"
+   "- Plans have no hard steps. You run on the hard model, so a step that seems to need it is too big or leaves a hard decision open: make the decision yourself, write it into the prompt, and split the step until every step is medium at most. Split no further than parallel work or a cheaper tier calls for: fewer, larger medium steps cost less than many small ones.\n"
+   "- Plan for parallel work: discrete units that each own their files, running at once where nothing orders them. `after` sets the order of the steps; use it for real dependencies only. Steps that run in parallel share the working tree, so they must touch different files. Define what the units share (interfaces, names, data shapes, helpers, and which step makes each) once, in the summary, which every fresh worker reads; a shared component gets a step of its own, first, only when the others cannot be written against its spec.\n"
+   "- A step's context is fresh by default: its worker gets the summary, its prompt and the reports of the steps it waits for, not this conversation. Fork a step (its worker inherits this conversation) only while the conversation is short: a fork writes all of it into another model's cache and reads it again on every call, so submit_plan refuses a fork of a long conversation.\n"
+   "- The harness reports a failed step, and the finished plan, back to you: do not poll or read the workers while they run. After a failure call retry_step (it escalates the tier, up to hard when a medium worker was not up to its step) or submit a new plan. Check a finished plan by what settles it most cheaply (the reports, a diff, the test output), not file by file.\n"
    "- Every turn ends on a decision: "
    (string-join harness-supervisor-decision-tools ", ")
    ". Use submit_plan when the work changes files, and no_plan_needed when you answered a question, there is nothing to do, or the plan is still running.\n"
