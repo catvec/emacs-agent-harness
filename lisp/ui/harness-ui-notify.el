@@ -12,7 +12,9 @@
 ;; each with buttons answering what it waits on, the task board's, and
 ;; RET or a click on one switches to its project and opens it there,
 ;; unless it shows there already.  With none waiting the click opens
-;; the session list.
+;; the session list.  The harness's own model calls, which are sessions
+;; of kind internal, are no session that waits or works for you: they
+;; are not counted (`harness-ui-user-sessions').
 ;;
 ;; Other modules add segments of their own after its "harness"
 ;; (`harness-ui-notify-segment-functions'), which show with no session
@@ -77,9 +79,11 @@ redefines it.  The version page's nag icon shows this way.")
     (apply #'concat (nreverse segments))))
 
 (defun harness-ui-notify--counts ()
-  "Return (BLOCKED RUNNING IDLE) over active sessions."
+  "Return (BLOCKED RUNNING IDLE) over active sessions.
+The internal sessions, the records of the harness's own model calls,
+are not counted: a judge at work is no session for you to look at."
   (let ((blocked 0) (running 0) (idle 0))
-    (dolist (s (harness-ui-sessions))
+    (dolist (s (harness-ui-user-sessions))
       (pcase (plist-get s :status)
         ("blocked" (cl-incf blocked))
         ("running" (cl-incf running))

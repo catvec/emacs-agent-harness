@@ -6,9 +6,9 @@
 ;; segment), the click and the V key that toggle the mode through
 ;; `_harness/supervisor/set', what the toggle says when the harness has
 ;; no supervisor module, when a session is not governed or not known,
-;; how it takes the task board's setting target (the next task's mode or
-;; every current task's), and the module's key and header hook, added
-;; and removed again.
+;; how it takes a setting target that is no session (the task board's
+;; next task, the session list's marked sessions), and the module's key
+;; and header hook, added and removed again.
 ;;
 ;; `harness-set-supervisor-all' (the menu's V) is here too: it asks on
 ;; or off, changes every governed session through
@@ -238,8 +238,9 @@ Each toggle sends `_harness/supervisor/set' and says what it changed."
 (ert-deftest harness-ui-supervisor-toggle-takes-the-boards-target ()
   "On the task board the toggle changes the next task's setting, not a session's.
 The board hands the setting commands a `(VALUES SET-FN CONTEXT)' target
-rather than a session id, as it does for the other settings; the
-command then shows what it changed and who it applies to."
+rather than a session id, as it does for the other settings, and the
+session list does for the sessions it has marked; the command then
+shows what it changed and who it applies to."
   (harness-ui-supervisor-test-with
     (let ((values (list :supervisor :false))
           (context nil)
@@ -252,12 +253,12 @@ command then shows what it changed and who it applies to."
                         (lambda () (call-interactively #'harness-toggle-supervisor)))))
         (should (eq t (plist-get values :supervisor)))
         ;; Off is an explicit false, and the context says who it is for.
-        (setq context "for 2 tasks")
-        (should (equal '("Supervisor mode off (hands-on) (for 2 tasks)")
+        (setq context "for the 2 marked sessions")
+        (should (equal '("Supervisor mode off (hands-on) (for the 2 marked sessions)")
                        (harness-ui-supervisor-test-messages
                         (lambda () (call-interactively #'harness-toggle-supervisor)))))
         (should (eq :false (plist-get values :supervisor)))
-        ;; A value that differs (`mixed') turns it on.
+        ;; No value, as when the marked sessions differ, turns it on.
         (setq values nil context nil)
         (should (equal '("Supervisor mode on (for new tasks)")
                        (harness-ui-supervisor-test-messages

@@ -670,9 +670,10 @@ against the session as it is then; off gives the tools back from the
 next step.  A pending judgement of how the session starts is dropped:
 the user's choice is the session's (`harness-supervisor--judge-key').
 Only the user does this, over ACP as `_harness/supervisor/set'
-with `:sessionId' and `:on', or through the task board's bulk edit
-\(`task/set-all', which applies a task's setting to its session); the
-agent has no tool for it."
+with `:sessionId' and `:on', through the session list's setting
+commands on the marked sessions (`supervisor/set-all' with an `:ids'
+filter), or through `task/set-all', which applies a task's setting to
+its session; the agent has no tool for it."
   (harness-supervisor--set session-id (if (harness-json-true-p on) t :false)))
 
 (harness-defmethod supervisor/set-all (on &optional filter)
@@ -864,14 +865,17 @@ A subscriber of `session/created'.  A top-level session takes
 `harness-supervisor' for its directory (`harness-supervisor--start-session':
 `auto' is judged from its opening message), and a fork its parent's
 value when the parent has one, never the judge.  A sub-agent, a side
-conversation and any other kind are never governed; only a top-level
-session of its own starts supervised.  A setting its maker gave it in
-`:ext' stays."
+conversation, an internal session and any other kind are never
+governed; only a top-level session of its own starts supervised.  A
+setting its maker gave it in `:ext' stays."
   (condition-case err
       (unless (plist-member (plist-get session :ext) :supervisor)
         (let* ((kind (harness-supervisor--kind session))
                (parent-id (plist-get session :parent-id)))
           (cond
+           ;; The record of one model call the harness made, the session
+           ;; judge's own among them: nothing to govern or to judge.
+           ((eq kind 'internal) nil)
            ((and (eq kind 'main) (null parent-id))
             (harness-supervisor--start-session
              id (harness-supervisor--setting 'harness-supervisor (plist-get session :cwd))))
@@ -1043,6 +1047,8 @@ or it takes longer than `harness-supervisor--judge-timeout'."
                          :session (list :id (format "%s-judge" (plist-get session :id))
                                         :cwd (plist-get session :cwd)
                                         :host (plist-get session :host))
+                         ;; Recorded as an internal session made for SESSION.
+                         :job "Session judge" :job-parent (plist-get session :id)
                          :system harness-supervisor--judge-system-prompt
                          :messages (list (list :role 'user
                                                :content (list (list :type "text"

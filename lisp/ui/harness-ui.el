@@ -650,7 +650,11 @@ answered by `harness-emacs-endpoint-answer'; everything else is the UI's."
      (let ((event (plist-get params :event)) (args (plist-get params :args)))
        (when (equal event "tools/file-written")
          (harness-emacs-endpoint-revert-visiting (car args)))
-       (when (member event '("session/created" "session/deleted"))
+       ;; An internal session comes and goes with every model call the
+       ;; harness makes on its own: the cache hears of it from its
+       ;; `_harness/session' updates, so it is not worth fetching them all.
+       (when (and (member event '("session/created" "session/deleted"))
+                  (not (harness-ui-internal-event-p event args)))
          (harness-ui-refresh-sessions))
        (when (equal event "harness/reloaded")
          ;; Reloaded code may label its tools anew: views fetch them again.
@@ -665,7 +669,11 @@ answered by `harness-emacs-endpoint-answer'; everything else is the UI's."
          (harness-ui--store-rate (car args) (cadr args)))
        (when (equal event "usage/live-updated")
          (harness-ui--store-live (car args) (cadr args)))
-       (run-hook-with-args 'harness-ui-event-functions event args)))
+       (prog1 (run-hook-with-args 'harness-ui-event-functions event args)
+         ;; Every listener has had the chance to tell the deleted
+         ;; session was internal: now it can be forgotten.
+         (when (equal event "session/deleted")
+           (harness-ui--forget-internal (car-safe args))))))
     (_ (when respond (harness-acp-respond-error respond -32601 (format "unhandled %s" method))))))
 
 (defun harness-ui--leave-pending (params respond what)
@@ -831,12 +839,62 @@ yet: it starts after the init file, with the value set there."
 (defvar harness-ui--sessions (make-hash-table :test 'equal)
   "Session id -> latest session plist (wire shape).")
 
+(defvar harness-ui--internal-ids (make-hash-table :test 'equal)
+  "The ids of the sessions known to be internal, each mapped to t.
+`harness-ui--note-internal' adds a session whenever one of kind
+internal is cached or announced, `harness-ui-refresh-sessions' sets the
+table from the whole list, and `harness-ui--forget-internal' drops an id
+once its `session/deleted' event was heard.  That event can come after
+the cache forgot the session, which then no longer says what it was.")
+
 (defvar harness-ui--live)               ; The live token cache, below.
+
+(defun harness-ui-internal-session-p (session)
+  "Non-nil when SESSION, a session plist, is an internal one.
+The harness records each model call it makes on its own -- the
+permission and session judges, naming a session and the like -- as a
+session of kind internal.  That is a record, not a conversation: no
+session to switch to, to count as working or to open as the latest, and
+it never moves a task.  Views list it only when asked."
+  (let ((kind (plist-get session :kind)))
+    (or (equal kind "internal") (eq kind 'internal))))
+
+(defun harness-ui--note-internal (session &optional id)
+  "Remember in `harness-ui--internal-ids' that SESSION is internal, when it is.
+SESSION is a session plist; ID is its id, by default its own `:id'.
+Return non-nil when SESSION is internal."
+  (when (harness-ui-internal-session-p session)
+    (when-let* ((id (or id (plist-get session :id))))
+      (puthash id t harness-ui--internal-ids))
+    t))
+
+(defun harness-ui--forget-internal (id)
+  "Forget that session ID was internal, once its `session/deleted' event was heard."
+  (when id (remhash id harness-ui--internal-ids)))
+
+(defun harness-ui-internal-event-p (event args)
+  "Non-nil when EVENT with ARGS tells of an internal session.
+Only the session events that views reload for are looked at:
+`session/created', whose ARGS are (ID SESSION), `session/status' with
+\(ID STATUS) and `session/deleted' with (ID), and the session too when
+the harness sends it.  A session is known to be internal when the one
+in ARGS says so, when the session cache does, or when it was seen to be
+before (`harness-ui--internal-ids'), which is how one that the cache
+forgot is told.  An event of a session nothing is known about is not
+taken for an internal one, so that a view skips only what it is sure of."
+  (and (member event '("session/created" "session/deleted" "session/status"))
+       (let ((id (car-safe args))
+             (session (car-safe (cdr-safe args))))
+         (and (stringp id)
+              (or (and (consp session) (harness-ui--note-internal session id))
+                  (harness-ui-internal-session-p (harness-ui-session id))
+                  (and (gethash id harness-ui--internal-ids) t))))))
 
 (defun harness-ui-cache-session (session)
   "Record SESSION (a wire plist) in the cache and notify listeners."
   (when-let* ((id (plist-get session :id)))
     (puthash id session harness-ui--sessions)
+    (harness-ui--note-internal session id)
     (harness-ui--settle-live session)
     (run-hooks 'harness-ui-sessions-changed-hook)))
 
@@ -855,17 +913,29 @@ Its output rate and live token figures go with it."
   (gethash id harness-ui--sessions))
 
 (defun harness-ui-sessions (&optional predicate)
-  "Return cached sessions, newest first, filtered by PREDICATE when given."
+  "Return cached sessions, newest first, filtered by PREDICATE when given.
+Every session is there, the internal ones too: a view that picks sessions
+for a person, or counts them, asks `harness-ui-user-sessions'."
   (let (out)
     (maphash (lambda (_ s) (when (or (null predicate) (funcall predicate s)) (push s out))) harness-ui--sessions)
     (sort out (lambda (a b) (> (or (plist-get a :updated) 0) (or (plist-get b :updated) 0))))))
+
+(defun harness-ui-user-sessions (&optional predicate)
+  "Return the cached sessions to pick from or count, newest first.
+That is `harness-ui-sessions' but for the internal ones
+\(`harness-ui-internal-session-p'), which are the harness's own records.
+PREDICATE filters the rest further."
+  (cl-remove-if #'harness-ui-internal-session-p (harness-ui-sessions predicate)))
 
 (defun harness-ui-refresh-sessions (&optional callback)
   "Reload the session cache from the harness, then call CALLBACK."
   (harness-ui-call "_harness/session/list" nil
                    (lambda (sessions)
                      (clrhash harness-ui--sessions)
-                     (dolist (s sessions) (puthash (plist-get s :id) s harness-ui--sessions))
+                     (clrhash harness-ui--internal-ids)
+                     (dolist (s sessions)
+                       (puthash (plist-get s :id) s harness-ui--sessions)
+                       (harness-ui--note-internal s))
                      (maphash (lambda (id _)
                                 (harness-ui--settle-live (or (gethash id harness-ui--sessions) (list :id id))))
                               harness-ui--live)
@@ -1496,13 +1566,15 @@ on one line (see `harness-ui-one-line')."
   "Return the session id of the current buffer, or prompt for one.
 Signal unless NOERROR when none can be found."
   (or harness-ui-session-id
-      (let ((sessions (harness-ui-sessions)))
+      (let ((sessions (harness-ui-user-sessions)))
         (cond ((null sessions) (unless noerror (user-error "No sessions yet; create one with `harness-new-session'")))
               (t (plist-get (harness-ui-read-session "Session: ") :id))))))
 
 (defun harness-ui-read-session (prompt &optional predicate)
-  "Read a session with completion showing PROMPT; PREDICATE filters."
-  (let* ((sessions (harness-ui-sessions predicate))
+  "Read a session with completion showing PROMPT; PREDICATE filters.
+An internal session is not offered (see `harness-ui-internal-session-p'):
+it is a record of a model call, no session to switch to."
+  (let* ((sessions (harness-ui-user-sessions predicate))
          (table (mapcar (lambda (s) (cons (format "%s  %s  %s" (harness-ui-session-label s)
                                                   (propertize (harness-ui-model-label (plist-get s :model)) 'face 'harness-dim-face)
                                                   (propertize (abbreviate-file-name (or (plist-get s :project) "")) 'face 'harness-dim-face))
@@ -1909,6 +1981,50 @@ details."
       (propertize (concat (harness-ui-format-rate-number value) (if bare "" " tok/s"))
                   'face (and (not live) 'harness-dim-face)
                   'help-echo (harness-ui-rate-help rate live)))))
+
+(defun harness-ui-session-average-rate (session)
+  "Return SESSION's average output rate in tokens per second, or nil.
+That is the output tokens of the model calls the harness measured over
+the seconds the model spent streaming them, the totals `:stream-output'
+and `:stream-seconds' of the session's `:usage': the average over its
+whole life, which neither the wait for a first token nor running tools
+dilute.  Nil without those totals, and with under a second of
+streaming, which is too little to tell a rate from."
+  (let* ((usage (plist-get session :usage))
+         (output (plist-get usage :stream-output))
+         (seconds (plist-get usage :stream-seconds)))
+    (and (numberp output) (numberp seconds) (>= seconds 1.0)
+         (/ (float output) seconds))))
+
+(defun harness-ui-average-rate-help (session rate)
+  "Return the one-line tooltip of SESSION's average output RATE.
+It says that RATE is the average over the whole session, how many
+output tokens it is of how much streaming, and that it is not the
+current rate; when the harness measured one for SESSION it follows, as
+the current rate while SESSION runs and else as the last one measured
+\(`harness-ui-rate-help')."
+  (let* ((usage (plist-get session :usage))
+         (measured (harness-ui-session-rate (plist-get session :id)))
+         (live (equal (plist-get session :status) "running")))
+    (harness-ui-one-line
+     (format "Average output rate over the whole session: %s tokens per second, %s output tokens in %s of streaming, not the current rate. %s"
+             (harness-ui-format-rate-number rate)
+             (harness-format-tokens (plist-get usage :stream-output))
+             (harness-format-duration (plist-get usage :stream-seconds))
+             (if (plist-get measured :rate)
+                 (harness-ui-rate-help measured live)
+               "Waiting for the first token and running tools do not count.")))))
+
+(defun harness-ui-format-average-rate (session &optional bare)
+  "Return how fast SESSION's model wrote on average, as \"48 tok/s avg\".
+Nil when it has no average yet (`harness-ui-session-average-rate').
+BARE leaves out the unit.  Unlike `harness-ui-format-rate' this is the
+rate over the whole session, not the current one, so it is not dimmed
+once the session is idle; the tooltip says what it is and gives the
+current rate beside it."
+  (when-let* ((rate (harness-ui-session-average-rate session)))
+    (propertize (concat (harness-ui-format-rate-number rate) (if bare "" " tok/s avg"))
+                'help-echo (harness-ui-average-rate-help session rate))))
 
 (defun harness-ui--prettify-model-name (name)
   "Return a readable form of model slug NAME, or nil when it has no known shape.
@@ -3642,12 +3758,14 @@ conversation to open (`harness-ui-navigable-session-p')."
 
 (defvar-local harness-ui-setting-target-function nil
   "Function telling the session setting commands what to change in this buffer.
-It returns a session id, or (SETTINGS . SET) for settings that are not a
-session's yet: SETTINGS is a plist with a session's setting keys
-\(`:model' `:thinking' `:permission-mode' `:non-interactive') and SET a
-function of KEY and VALUE storing one.  The task board uses it so the
-same commands set up the next task.  When it is nil or returns nil, the
-commands use `harness-ui-current-session-id'.")
+It returns a session id, or (VALUES SET-FN &optional CONTEXT) for
+settings that are not one session's: VALUES is a plist with a session's
+setting keys (`:model' `:thinking' `:permission-mode' `:non-interactive'
+`:supervisor'), SET-FN a function of KEY and VALUE storing one, and
+CONTEXT the words saying whom it applies to (\"for new tasks\" without
+them).  The task board uses it so the same commands set up the next
+task, and the session list so they change every marked session.  When
+it is nil or returns nil, the commands use `harness-ui-current-session-id'.")
 
 (defun harness-ui--setting-target (session-id)
   "Return what the setting commands change.

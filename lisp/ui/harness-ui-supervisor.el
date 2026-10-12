@@ -98,8 +98,9 @@ which it is, and clicking there toggles too.
 
 On the task board the setting target is not a session: `C-c h V' or
 the settings line's button then turns the mode the next task starts
-with, or, in bulk mode, the mode of every current task, as the board's
-other setting buttons do.  Without the supervisor module the harness
+with, as the board's other setting buttons do.  In the session list it
+turns the mode of every marked session, and of the session at point
+when none is marked.  Without the supervisor module the harness
 reports no such setting and the board offers no button."
   (interactive)
   (let* ((target (harness-ui--setting-target session-id))
@@ -109,7 +110,7 @@ reports no such setting and the board offers no button."
                   (harness-ui--setting-get target :supervisor))))
     (cond
      ((not (stringp target))
-      ;; What the next task starts with, or the current tasks' setting.
+      ;; What the next task starts with, or the marked sessions' setting.
       (let ((on (not (harness-json-true-p value))))
         (harness-ui--setting-set target :supervisor (if on t :false)
                                  (if on "Supervisor mode on" "Supervisor mode off (hands-on)"))))

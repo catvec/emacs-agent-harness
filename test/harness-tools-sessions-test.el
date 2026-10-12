@@ -110,6 +110,43 @@
       (should (string-match-p (regexp-quote other)
                               (harness-tools-sessions-test-ok me "session_list" '(:name "parser")))))))
 
+(ert-deftest harness-tools-sessions-internal-sessions-stay-aside ()
+  "The records of the harness's own model calls are listed only for kind
+internal and never searched, and a name finds one only when it finds no
+other session; session_read still reads one, its prompt and its reply."
+  (harness-tools-sessions-test-with
+    (let* ((me (harness-tools-sessions-test-session :name "Me"))
+           (other (harness-tools-sessions-test-session :name "Other"))
+           (judge (harness-call 'session/internal-start :job "Permission judge" :parent-id me
+                                :model "demo:scripted" :prompt "May the agent edit zebra.el?")))
+      (harness-call 'session/internal-finish judge :reply "Allow: zebra.el is in the project.")
+      (harness-call 'session/append other '(:kind user :content "Rename the zebra handler"))
+      (let ((text (harness-tools-sessions-test-ok me "session_list" nil)))
+        (should (string-search other text))
+        (should-not (string-search judge text)))
+      (should-not (string-search judge (harness-tools-sessions-test-ok me "session_list" '(:include_inactive t))))
+      (should-not (string-search judge (harness-tools-sessions-test-ok me "session_list" (list :parent_id me))))
+      (let ((text (harness-tools-sessions-test-ok me "session_list" '(:kind "internal"))))
+        (should (string-search judge text))
+        (should (string-search "Permission judge" text))
+        (should-not (string-search other text)))
+      ;; Its prompt matches, yet only the session that mentions it is found.
+      (let ((text (harness-tools-sessions-test-ok me "session_search" '(:query "zebra"))))
+        (should (string-search other text))
+        (should-not (string-search judge text)))
+      (should (string-match-p "No session mentions"
+                              (harness-tools-sessions-test-ok me "session_search" '(:query "edit zebra.el"))))
+      (dolist (ref (list judge "permission judge"))
+        (let ((text (harness-tools-sessions-test-ok me "session_read" (list :session_id ref))))
+          (should (string-search "May the agent edit zebra.el?" text))
+          (should (string-search "Allow: zebra.el is in the project." text))))
+      ;; Once a session of the same name exists, the name means it.
+      (let ((namesake (harness-tools-sessions-test-session :name "Permission judge")))
+        (harness-call 'session/append namesake '(:kind user :content "A session of my own"))
+        (let ((text (harness-tools-sessions-test-ok me "session_read" '(:session_id "Permission judge"))))
+          (should (string-search "A session of my own" text))
+          (should-not (string-search "zebra" text)))))))
+
 (ert-deftest harness-tools-sessions-search-content ()
   (harness-tools-sessions-test-with
     (let ((me (harness-tools-sessions-test-session :name "Me"))

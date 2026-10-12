@@ -73,8 +73,13 @@ OpenAI-compatible APIs and AWS Bedrock.
   judging for later sessions and to put this one in the other mode; a
   click on the header line (or `C-c h V`) switches it at any time.
   Task sessions follow `harness-supervisor-tasks`, and the task board's
-  settings line has the same switch for the task about to be submitted,
-  or, in bulk edit, for every current task.
+  settings line has the same switch for the task about to be submitted;
+  `C-c h V` in the session list switches every marked session.
+- **Session list.** Mark sessions as you mark files in Dired, and the
+  list's keys and the harness's setting commands act on every marked
+  session at once: delete, cancel, make tasks, give a priority, switch
+  the model, the thinking level or the permission mode (see
+  [Session list](#session-list)).
 - **Notifications.** A desktop notification, and a push to your phone
   through Gotify once you set it up, when a task waits for your review
   or is done. Agents can notify you too.
@@ -345,11 +350,17 @@ default), or nil for nowhere.
 | `C-c h s` | `harness-switch-session` | Switch to another session |
 | `C-c h o` | `harness-open-latest-session` | Open the newest session of the current project |
 | `C-c h O` | `harness-open-session` | Open a session chosen by name |
-| `C-c h l` | `harness-sessions` | Show the session list |
+| `C-c h l` | `harness-sessions` | Show the session list (see [Session list](#session-list)) |
 | `SPC` | `harness-ui-sessions-requests` | Pop out what the session at point waits on |
 | `b` | `harness-ui-sessions-toggle-blocked` | In the session list, show only the sessions waiting for you, or every session again |
-| `+` / `-` | `harness-ui-sessions-raise-priority` / `harness-ui-sessions-lower-priority` | In the session list, raise or lower the priority of the session at point (with `C-u`, ask for the level) |
-| `p` | `harness-ui-sessions-set-priority` | In the session list, set the priority of the session at point |
+| `m` / `u` / `DEL` | `harness-ui-sessions-mark` / `harness-ui-sessions-unmark` / `harness-ui-sessions-unmark-backward` | In the session list, mark the session at point and move down, unmark it and move down, or move up and unmark the session there (a numeric argument does that many rows) |
+| `U` / `t` | `harness-ui-sessions-unmark-all` / `harness-ui-sessions-toggle-marks` | In the session list, unmark every session, or invert the marks of the rows listed |
+| `d` / `k` / `x` | `harness-ui-sessions-delete` / `harness-ui-sessions-cancel` / `harness-ui-sessions-deactivate` | In the session list, delete the marked sessions, cancel their turns, or deactivate them; without a mark, the session at point |
+| `M-t` | `harness-ui-sessions-make-task` | In the session list, make the marked sessions, else the one at point, tasks on their projects' boards |
+| `+` / `-` | `harness-ui-sessions-raise-priority` / `harness-ui-sessions-lower-priority` | In the session list, raise or lower the priority of the marked sessions, else of the session at point (with `C-u`, ask for the level) |
+| `p` | `harness-ui-sessions-set-priority` | In the session list, set the priority of the marked sessions, else of the session at point |
+| `T` / `I` | `harness-ui-sessions-toggle-tasks-only` / `harness-ui-sessions-toggle-internal` | In the session list, list only the sessions that work on a task (with their sub-agents, forks and BTWs), or show the harness's own model calls, which it leaves out |
+| `P` / `C` | `harness-ui-sessions-toggle-pause` / `harness-ui-sessions-toggle-column` | In the session list, pause the live updates or resume them, or show or hide a column |
 | `y` / `n` | `harness-ui-sessions-allow` / `harness-ui-sessions-deny` | On the lines of a listed session waiting on a permission request, answer it with Allow or Deny, as the request's own `y` and `n` do |
 | `C-c h g` | `harness-search-sessions` | Search what was said in every session: words, the exact text, a regexp or meaning (see [Searching sessions](#searching-sessions)) |
 | `C-c h a` | `harness-tasks` | Show the task board |
@@ -376,7 +387,7 @@ default), or nil for nowhere.
 | menu `V` | `harness-set-supervisor-all` | In the `C-c h ?` menu, turn supervisor mode on or off for every current session and task of every project (see [Supervisor mode](#supervisor-mode)) |
 | `C-c h d` | `harness-directories` | Manage the directories a session may access |
 | `C-c h W` | `harness-move-session` | Move a session to another working directory, and with it to that directory's project (see [Moving a session](#moving-a-session-to-another-directory)) |
-| `m` | `harness-ui-sessions-move` | In the session list, move the session at point to another directory |
+| `M` | `harness-ui-sessions-move` | In the session list, move the session at point to another directory |
 | `C-c h u` | `harness-usage` | Show the usage and cost dashboard |
 | `C` | `harness-cost-compare` | In the usage dashboard, compare what the recorded usage would have cost at other models' prices |
 | `C-c h A` | `harness-insights` | Show the Insights report: how a period of work with the agents went |
@@ -397,6 +408,12 @@ have not named gets a short title from a cheap model as soon as you
 send its first message, while the agent works on it (see
 `harness-naming-auto` and `harness-naming-model`). A task gets its
 title as soon as you submit it (see [Task board](#task-board)).
+
+In the session list the harness prefix's setting commands -- `C-c h m`,
+`C-c h T`, `C-c h p`, `C-c h i` and `C-c h V` -- change every marked
+session, or the session at point when none is marked; the list's own
+`m`, `T`, `p` and `i` are other commands, so the prefix is how they are
+reached there (see [Session list](#session-list)).
 
 With a prefix argument (`C-u`), the commands that open a session ask
 where to show it: `right` (the default, see
@@ -834,6 +851,9 @@ such as CLAUDE.md. It refuses only what risks serious harm that is
 hard to undo, such as wiping data outside the project, force pushes,
 system changes, leaking secrets, or widening its own permissions. It
 never rules on the task or your workflow, and when in doubt it allows.
+Each of its calls is recorded as a session of kind `internal`, with the
+prompt it saw, its verdict and what it cost, which the session list
+shows on request (see [Session list](#session-list)).
 It also follows the `autoMode` rules that Claude Code's own auto mode
 follows, taken from the same places: your `~/.claude/settings.json`
 and your organization's managed settings, never a project's. So with
@@ -888,8 +908,8 @@ A session works in the directory it was started in, and the session
 list files it under that directory's project. When a session started in
 one place turns out to work on another, move it there: `C-c h W`
 (`M-x harness-move-session`, also called `harness-session-move`) asks
-for the new directory, starting next to the session's own, and `m` does
-the same for the session at point in the session list and for the
+for the new directory, starting next to the session's own, and `M` does
+the same for the session at point in the session list, `m` for the
 session of the directory access list (`C-c h d`). The session then
 works in the new directory and is listed under its project, also after
 a restart. It no longer reaches the old directory, unless you move it
@@ -1270,10 +1290,12 @@ call to one anyway, in every permission mode.
   that only reading. They decide how a session starts;
   from then on each session has its own switch, and changing a setting
   leaves the sessions that exist as they are. A task can carry a mode
-  of its own, set on the task board's settings line -- the next task, or,
-  in bulk edit (`B`), the current ones: its session then starts with
-  that, whatever the setting says. Sub-agents and BTW side conversations
-  never supervise, and a fork starts as its parent is.
+  of its own, set on the task board's settings line for the next task,
+  or with `C-c h V` in the session list on the sessions of the tasks you
+  marked (see [Session list](#session-list)): its session then starts
+  with that, whatever the setting says. Sub-agents, BTW side
+  conversations and the harness's own model calls never supervise, and a
+  fork starts as its parent is.
 
 - **The session judge.** Under `auto` the harness asks
   `harness-supervisor-judge-model` (by default the session provider's
@@ -1286,8 +1308,11 @@ call to one anyway, in every permission mode.
   of a session reads "renamed to X" rather than repeating what the model
   said: "judged supervising (claude:claude-haiku)", or "judged hands-on
   (…)", or "not judged (…): supervising as configured". The judge's own
-  answer is never shown, and the note never reaches the model. The note
-  carries the two things to do about the choice as buttons, like the
+  answer is not shown in the chat (the call is recorded as a session of
+  kind `internal` under the session, which the session list shows on
+  request; see [Session list](#session-list)), and the note never
+  reaches the model. The note carries the two things to do about the
+  choice as buttons, like the
   [Undo] of a lasting permission answer: one stops the judging of new
   sessions, by writing the setting that decided this one at the project
   it read, and one puts this session in the other mode, as `C-c h V`
@@ -1619,8 +1644,10 @@ The commands take the session in front of you:
   project the level you choose (`harness-set-priority-all`);
 - in the session list (`C-c h l`), a **Priority** column shows each
   session's arrow -- up for high, down for low, nothing at medium, the
-  default -- and a click on it, `+`, `-` and `p` all ask for and set the
-  priority of the session on that row;
+  default -- and a click on it asks for and sets the priority of the
+  session on that row, while `+`, `-` and `p` set the priority of every
+  marked session, or of the session at point when none is marked (see
+  [Session list](#session-list));
 - the chat's header line shows the same arrow beside the session's name
   when the priority is not the default, and a click on it, like the
   list's and a card's, offers the levels as a menu at the click.
@@ -1631,6 +1658,95 @@ agent sets one with the `set_priority` tool (a `session_id`, and
 `all=true` for every current session and task of every project at once),
 the session of a task being the one `task_list` shows for it;
 `task_control`'s `priority` action does the same for a task's session.
+
+### Session list
+
+`C-c h l` lists the sessions of the current project, its git worktrees
+and so its tasks' sessions included; `a` lists every project's. A row
+has the session's status, name, kind, model, thinking level, priority,
+context, average output rate, cost and when its last message came, and
+the project when every project is listed. Forks, BTWs and sub-agents
+are indented under their parents, a task's session goes by its task's
+title, and the column headers sort. `/` filters by name, model, status,
+kind and permission mode, `i` hides or shows inactive sessions and `b`
+shows only the sessions waiting for you. `RET` opens a session in its
+project, `o` in another position, `f` forks it, `r` renames it and `M`
+moves it to another directory (see
+[Moving a session](#moving-a-session-to-another-directory)).
+
+- **Columns.** *Avg tok/s* is the session's output tokens over the
+  seconds its model spent streaming them, averaged over its whole life,
+  so waiting for a first token and running tools do not count; hover
+  over it for the current rate beside it. A task's card on the board
+  shows the same average (`48 tok/s avg`). *Think* is the session's
+  thinking level, empty on its model's default. *Last msg* is how long
+  ago its last message from you or the agent came; a session saved
+  before the harness kept that shows its last change of any kind
+  instead. *Mode* and *Output* are hidden by default
+  (`harness-ui-sessions-hidden-columns`), and `C` shows or hides a
+  column in that list only. *Project* shows only when every project is
+  listed, as in one project's list it says the same on every row.
+- **Marks.** Sessions are marked as files are in Dired. `m` marks the
+  session at point and moves to the next row (a numeric argument marks
+  that many), `u` unmarks it and moves on, `DEL` moves up and unmarks
+  the session there, `U` unmarks every session and `t` inverts the
+  marks of the rows listed. A `*` before a row shows its mark, and the
+  mode line counts them. The marks stay through a redraw, `g`, the
+  filters, a change of scope and a pause. A session a filter hides
+  stays marked and is acted on with the rest, so `U` is the way to be
+  rid of marks out of sight.
+- **Acting on the marked sessions.** `d` deletes them after one
+  question, `k` cancels the turns of those that run or wait for you,
+  `x` deactivates them, `M-t` makes them tasks on their projects' task
+  boards, `+` and `-` raise and lower their priority and `p` sets it,
+  asking for the level once. With no mark each acts on the session at
+  point. `d`, `k`, `x` and `M-t` unmark the sessions they acted on and
+  leave the mark on one they skipped, such as an idle session `k` has no
+  turn to cancel; `+`, `-` and `p` leave the marks, so several changes
+  can be given to the same sessions. `f`, `r` and `M` act on one
+  session and refuse while any is marked. `RET`, `o`, `SPC`, `y` and
+  `n` are always the session at point's.
+- **Settings.** The harness's setting commands act on the marked
+  sessions too: `C-c h m` sets the model, `C-c h T` the thinking level,
+  `C-c h p` the permission mode, `C-c h i` non-interactive mode and
+  `C-c h V` supervisor mode; the menu (`C-c h ?`) runs the first four
+  too. They change every marked session, or the session at point when
+  none is marked, as in that session's chat, and the offer they make is
+  what the marked sessions agree on. A marked session that works on a
+  task passes the setting on to its task, which keeps it for its next
+  start. A model switch that would lose conversations asks once, for all
+  of them, how to hand them over (see
+  [Switching model or provider](#switching-model-or-provider)). The
+  marks stay, so more can be given to the same sessions. The list binds
+  no key of its own to these commands: its `m`, `T`, `p` and `i` are
+  others, so the prefix is how they are reached there.
+- **Tasks only.** `T` lists only the sessions that work on a task, with
+  the sub-agents, forks and BTWs under them, and `T` again lists them
+  all.
+- **The harness's own model calls.** The permission judge, the Elisp
+  judge, the session judge, auto-naming, recaps, the Insights summary,
+  the pet and the task board's search each record the call they make as
+  a session of kind `internal`: its model, status, cost and time, with
+  the prompt as a message the harness sent and the reply, which you can
+  open and read. They come and go with every call, so the list leaves
+  them out; `I` shows them, and the mode line says `+internal` while
+  they show (`harness-ui-sessions-hidden-kinds` names the kinds left
+  out). They are records, not conversations: nothing can be sent to one,
+  the notifier and the session pickers leave them out, the task board
+  and the conversation tree do not reload for them, and the newest 100
+  are kept, the oldest that are not running being deleted as new ones
+  start.
+- **Pause.** The list follows the sessions as they change, a few times a
+  second while a model streams. `P`, or the `[Pause]` button in the mode
+  line, makes it hold still until you resume it or reload it with `g`;
+  changes, rates, token counts and a reload of the UI leave a paused
+  list alone, while its own commands -- the filter, the scope, the
+  toggles -- still redraw it. The mode line says so, and a mark shows at
+  once even on a paused list.
+
+`SPC` pops out what a blocked session waits on, with `y` and `n` to
+allow or deny a permission request, and `F` gives the list the
+fullscreen layout (see [Fullscreen overviews](#fullscreen-overviews)).
 
 ### Task board
 
@@ -1698,7 +1814,9 @@ your checkout itself can be submitted to the **main tree** instead (the
   loaded the settings line also shows a `supervisor` / `hands-on`
   switch, the same one a session's header has: it sets
   [supervisor mode](#supervisor-mode) for the task about to be
-  submitted, or, in bulk edit (`B`), for every current task.
+  submitted. To change many tasks at once, mark their sessions in the
+  session list and use the same keys there (see
+  [Session list](#session-list)).
 - The `own worktree` / `main tree` switch beside those settings, in a
   git project, picks where the next task works: **own worktree**, on its
   own branch, merged back when it is done, or **main tree**, the
@@ -1722,8 +1840,9 @@ your checkout itself can be submitted to the **main tree** instead (the
   next task's (a click cycles it through high and low);
   `+` and `-` on a card raise and lower that task's — the session's it
   already has, waiting or not — to reorder the
-  queue, and bulk edit (`B`) has a priority button that sets every
-  current task's at once, only when you click it. A high task shows `↑`
+  queue; to give many tasks a priority at once, mark their sessions in
+  the session list and press `p` there (see
+  [Session list](#session-list)). A high task shows `↑`
   before its title and a low one `↓`. An
   agent sets it with `task_submit`'s `priority`, `task_control`'s
   `priority` action or `set_priority` on the task's session, and the
@@ -2158,8 +2277,10 @@ placeholder, so your Emacs never waits.
 By default a cheap model of your provider writes the summary: the simple
 tier of `harness-model`, or set `harness-insights-model`. Its input is
 the figures and each session's name and first request, never code or
-tool output. A summary is kept for a day for the same period and
-project (`harness-insights-narrative-max-age`). Set
+tool output. The call is recorded as an internal session (see
+[Session list](#session-list)), and the report leaves internal sessions
+out of the sessions it counts and lists. A summary is kept for a day for
+the same period and project (`harness-insights-narrative-max-age`). Set
 `harness-insights-narrative` to `manual` to write one only when you
 press `n`, or to nil for none at all. When no model can be reached, for
 example offline, the report shows without a summary.
@@ -2571,16 +2692,19 @@ another model of the same provider, or back to a provider before any
 other ran a step in the session (it resumes its own conversation) loses
 nothing and does not ask.
 
-The task board has the same thing scoped to its tasks: turn on bulk edit
-(`B`, or `[Bulk edit]` in the board's header) and the model,
-thinking, permission-mode and interactivity buttons then change every
-running, pending and blocked task at once. A priority button joins them
-(`high priority`, or `mixed priority` while the tasks differ): click it
-and pick low, medium or high to give them all that priority. Each
-button changes only its own setting, so the tasks keep their
-priorities unless you click that one. A conspicuous `EDITING N
-CURRENT TASKS` banner shows while it is on, and review, done and
-archived tasks are history and are left alone.
+The session list has the same thing scoped to the sessions you choose:
+mark them (`m`, see [Session list](#session-list)) and `C-c h m`,
+`C-c h T`, `C-c h p`, `C-c h i` and `C-c h V` change the model,
+thinking level, permission mode, non-interactive mode and supervisor
+mode of every marked session at once, as they do in a session's chat.
+Without a mark they change the session at point. A marked session
+that works on a task passes the setting on to its task, which keeps it
+for its next start; tasks in review, done or archived are history and
+are left alone. A model switch that would lose conversations asks once,
+for all the marked sessions, how to hand them over, with the choices
+above. Each command changes only its own setting, so the priorities
+stay as they were unless you press `p` (or `+` and `-`), and the marks
+stay, so more settings can be given to the same sessions.
 
 ### Session settings, from an agent
 

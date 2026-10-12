@@ -103,8 +103,10 @@ Modules add to it per session through the `naming/system-prompt' filter.")
 The start of a long message (a task's whole write-up, say) is enough to
 title it, and keeps the request short.")
 
-(defconst harness-naming--skip-kinds '(btw subagent)
-  "Session kinds that are never named automatically.")
+(defconst harness-naming--skip-kinds '(btw subagent internal)
+  "Session kinds that are never named automatically.
+An internal session, the record of a model call the harness made on
+its own, is named after that call's job already.")
 
 (defvar harness-naming--timeout 60
   "Seconds a request naming from a first message may take before it fails.
@@ -268,6 +270,8 @@ storing the name unless the session's name is no longer BEFORE."
     (harness-call
      'provider/complete
      (list :model (plist-get session :model) :session session
+           ;; Recorded as an internal session made for SESSION.
+           :job "Auto-name" :job-parent sid
            :system (harness-naming--system-prompt session)
            :messages (harness-naming--messages sid)
            :tools nil :provider-state state :max-tokens harness-naming--max-tokens
@@ -299,6 +303,9 @@ request."
                 (harness-call
                  'provider/complete
                  (list :model model :session session :ephemeral t :system system
+                       ;; Recorded as an internal session, made for the
+                       ;; session named when it is one.
+                       :job "Auto-name" :job-parent (plist-get session :id)
                        :messages (list (list :role 'user :content (harness-naming--opening-blocks opening)))
                        :tools nil :no-thinking t :max-tokens harness-naming--max-tokens
                        :on-event
@@ -381,10 +388,12 @@ yet: task mode names a task from its prompt this way while it waits for
 a slot.  It goes to `harness-naming-model' for the model OPTS' `:model'
 names (by default that model's simple tier), ephemeral and without
 thinking, under an id of its own that is closed once it is answered.
-Nothing is stored and no session hears of it.  OPTS also give `:cwd'
-and `:host', where the request runs, and go to the `naming/system-prompt'
-filters as what is named, so that `:task' ID, say, has a task titled like
-a ticket.  The promise resolves with the sanitised title, and rejects
+The call is recorded as an internal session, \"Auto-name\", with no
+parent (see `session/internal-start'); nothing else is stored and no
+session hears of it.  OPTS also give `:cwd' and `:host', where the
+request runs, and go to the `naming/system-prompt' filters as what is
+named, so that `:task' ID, say, has a task titled like a ticket.  The
+promise resolves with the sanitised title, and rejects
 when the request fails, gives no usable title or takes longer than
 `harness-naming--timeout' seconds."
   (let ((model (harness-naming--model opts))
@@ -412,11 +421,11 @@ when the request fails, gives no usable title or takes longer than
 
 (defun harness-naming--auto-p (session)
   "Non-nil when SESSION is to be named from its first message now.
-That is when it has no name, is of a kind that gets one (not btw or
-subagent), has a message to name it from, and no `naming/auto-p' filter
-\(value the verdict so far, args SESSION) says otherwise: task mode holds
-it off a session whose task's title is on its way, which then names the
-session."
+That is when it has no name, is of a kind that gets one (not btw,
+subagent or internal), has a message to name it from, and no
+`naming/auto-p' filter (value the verdict so far, args SESSION) says
+otherwise: task mode holds it off a session whose task's title is on
+its way, which then names the session."
   (and (harness-string-blank-p (plist-get session :name))
        (not (memq (plist-get session :kind) harness-naming--skip-kinds))
        (harness-naming--opening (plist-get session :id))

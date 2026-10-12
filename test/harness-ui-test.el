@@ -1384,6 +1384,171 @@ session's name, once it has one, comes first."
       (should-not (harness-ui-task-name nameless))
       (should-not (harness-ui-task-name nameless '(:id "s-1" :name ""))))))
 
+;;;; Internal sessions
+
+;; The harness records each model call it makes on its own -- the
+;; permission and session judges, naming a session -- as a session of
+;; kind internal: one per call, many an hour.  They are in the cache,
+;; for the session list to show on request, but no other view picks one,
+;; counts it or reloads for it.
+
+(defvar harness-ui--internal-ids)
+
+(defmacro harness-ui-test-with-sessions (sessions &rest body)
+  "Run BODY with the session cache holding SESSIONS, a list of plists, only.
+The record of internal ids starts empty, and the hook the cache runs is off."
+  (declare (indent 1))
+  `(let ((harness-ui--sessions (make-hash-table :test 'equal))
+         (harness-ui--internal-ids (make-hash-table :test 'equal))
+         (harness-ui-sessions-changed-hook nil))
+     (dolist (s ,sessions) (harness-ui-cache-session s))
+     ,@body))
+
+(defconst harness-ui-test--mixed-sessions
+  '((:id "main-1" :name "Fix the parser" :kind "main" :project "/p/" :updated 10)
+    (:id "int-1" :name "Permission judge" :kind "internal" :project "/p/" :updated 20)
+    (:id "sub-1" :name "Worker" :kind "subagent" :project "/p/" :updated 5))
+  "Sessions of the user's and an internal one, the internal one the newest.")
+
+(ert-deftest harness-ui-read-session-does-not-offer-an-internal-session ()
+  "Switching to a session offers the user's sessions, not the harness's records.
+An internal session is in the cache, and the newest there, but it is no
+session to switch to.  A predicate narrows the rest; the callers get the
+session chosen, and a cache of nothing else reads as no sessions."
+  (harness-ui-test-with-sessions harness-ui-test--mixed-sessions
+    (let (offered)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt table &rest _)
+                   (setq offered (mapcar #'car table))
+                   (car (car table)))))
+        (should (equal "main-1" (plist-get (harness-ui-read-session "Switch to session: ") :id)))
+        (should (= 2 (length offered)))
+        (should-not (cl-some (lambda (label) (string-search "Permission judge" label)) offered))
+        (should (equal "sub-1" (plist-get (harness-ui-read-session
+                                           "Open: " (lambda (s) (equal "subagent" (plist-get s :kind))))
+                                          :id)))
+        (should (= 1 (length offered)))
+        ;; The predicate cannot bring one back.
+        (harness-ui-read-session "Open: " (lambda (s) (equal "internal" (plist-get s :kind))))
+        (should-not offered)
+        ;; A session to act on, without a buffer's own: the choice.
+        (should (equal "main-1" (harness-ui-current-session-id)))
+        ;; Switching shows the session chosen.
+        (let (shown)
+          (cl-letf (((symbol-function 'harness-ui-refresh-sessions)
+                     (lambda (&optional callback) (when callback (funcall callback nil))))
+                    ((symbol-function 'harness-ui-display-session)
+                     (lambda (id &optional _position) (setq shown id))))
+            (harness-switch-session))
+          (should (equal "main-1" shown)))
+        (should (equal '("main-1" "sub-1")
+                       (mapcar (lambda (s) (plist-get s :id)) (harness-ui-user-sessions))))
+        ;; The cache holds it all the same.
+        (should (= 3 (length (harness-ui-sessions))))))
+    (harness-ui-test-with-sessions '((:id "int-1" :kind "internal" :updated 20))
+      (should-not (harness-ui-user-sessions))
+      (should-not (harness-ui-current-session-id t))
+      (should-error (harness-ui-current-session-id) :type 'user-error))))
+
+(ert-deftest harness-ui-internal-event-tells-a-session-by-its-event-the-cache-or-the-record ()
+  "An event of an internal session is told by the session it carries, the cache or the record.
+`session/created' carries the session and `session/status' only its id
+and status; a `session/deleted' with only the id may come after the
+cache forgot the session, so what was seen of it before decides.  What
+nothing is known about is not taken for an internal session, and no other
+event is ever one's."
+  (harness-ui-test-with-sessions nil
+    (let ((internal '(:id "int-1" :kind "internal" :name "Permission judge"))
+          (main '(:id "main-1" :kind "main" :name "Fix the parser")))
+      ;; The creation carries the session; the id is remembered from it.
+      (should (harness-ui-internal-event-p "session/created" (list "int-1" internal)))
+      (should-not (harness-ui-internal-event-p "session/created" (list "main-1" main)))
+      (should (harness-ui-internal-event-p "session/status" (list "int-1" "running")))
+      (should-not (harness-ui-internal-event-p "session/status" (list "main-1" "running")))
+      (should-not (harness-ui-internal-event-p "session/status" (list "stranger" "idle")))
+      ;; The cache tells a session never seen created.
+      (puthash "int-2" '(:id "int-2" :kind "internal") harness-ui--sessions)
+      (should (harness-ui-internal-event-p "session/status" (list "int-2" "idle")))
+      ;; A deletion carries the session on the wire, or only the id, the
+      ;; cache having let it go: then the record has it.
+      (harness-ui--forget-session "int-1")
+      (should-not (harness-ui-session "int-1"))
+      (should (harness-ui-internal-event-p "session/deleted" (list "int-1")))
+      (should (harness-ui-internal-event-p "session/deleted" (list "int-1" internal)))
+      (should-not (harness-ui-internal-event-p "session/deleted" (list "main-1")))
+      ;; Only the events views reload for are told apart.
+      (should-not (harness-ui-internal-event-p "agent/turn-ended" (list "int-1")))
+      (should-not (harness-ui-internal-event-p "session/ext-changed" (list "int-1" "priority" "low")))
+      (should-not (harness-ui-internal-event-p "session/created" nil))
+      (should-not (harness-ui-internal-event-p "session/created" '(nil)))
+      (should-not (harness-ui-internal-event-p "session/created" '(:id))))))
+
+(ert-deftest harness-ui-event-of-an-internal-session-fetches-no-session-list ()
+  "The creation and deletion of an internal session do not reload the session cache.
+Those of a session of the user's do, as they did.  The cache hears of an
+internal session from its own updates; it comes and goes with every
+model call the harness makes on its own.  Every listener of the
+deletion can still tell the session was internal, and the id is
+forgotten once it has been told."
+  (harness-ui-test-with-sessions nil
+    (let ((harness-ui-event-functions nil)
+          (fetched 0)
+          (heard nil))
+      (add-hook 'harness-ui-event-functions
+                (lambda (event args) (push (list event (harness-ui-internal-event-p event args)) heard)))
+      (cl-letf (((symbol-function 'harness-ui-refresh-sessions)
+                 (lambda (&rest _) (cl-incf fetched))))
+        (cl-flet ((event (name &rest args)
+                    (setq heard nil)
+                    (harness-ui--dispatch-ui "_harness/event" (list :event name :args args) nil)
+                    (car heard)))
+          ;; A session of the user's: fetched.
+          (should (equal '("session/created" nil)
+                         (event "session/created" "main-1" '(:id "main-1" :kind "main"))))
+          (should (= 1 fetched))
+          ;; An internal session's creation and status: not fetched, and
+          ;; every listener can tell.
+          (should (equal '("session/created" t)
+                         (event "session/created" "int-1" '(:id "int-1" :kind "internal"))))
+          (should (equal '("session/status" t) (event "session/status" "int-1" "running")))
+          (should (= 1 fetched))
+          ;; Its deletion, with the cache having forgotten it: nor fetched.
+          (harness-ui--forget-session "int-1")
+          (should (equal '("session/deleted" t) (event "session/deleted" "int-1")))
+          (should (= 1 fetched))
+          (should-not (gethash "int-1" harness-ui--internal-ids))
+          ;; Forgotten: a later event of that id is an ordinary one's.
+          (should (equal '("session/deleted" nil) (event "session/deleted" "int-1")))
+          (should (= 2 fetched))
+          (should (equal '("session/deleted" nil) (event "session/deleted" "main-1")))
+          (should (= 3 fetched)))))))
+
+(ert-deftest harness-ui-cache-remembers-which-sessions-are-internal ()
+  "The record of internal ids follows the cache, and a fetch of every session sets it.
+An internal session is remembered whenever it is cached; the whole list
+replaces the record, so ids of sessions gone while the UI was not
+listening do not pile up."
+  (harness-ui-test-with-sessions '((:id "int-1" :kind "internal") (:id "main-1" :kind "main"))
+    (should (gethash "int-1" harness-ui--internal-ids))
+    (should-not (gethash "main-1" harness-ui--internal-ids))
+    (harness-ui-cache-session '(:id "int-2" :kind "internal" :status "running"))
+    (should (gethash "int-2" harness-ui--internal-ids))
+    ;; The harness may write the kind as a symbol or a string.
+    (harness-ui-cache-session '(:id "int-3" :kind internal))
+    (should (gethash "int-3" harness-ui--internal-ids))
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (method _params callback &rest _)
+                 (should (equal "_harness/session/list" method))
+                 (funcall callback (list '(:id "int-2" :kind "internal") '(:id "main-1" :kind "main"))))))
+      (harness-ui-refresh-sessions))
+    (should-not (gethash "int-1" harness-ui--internal-ids))
+    (should (gethash "int-2" harness-ui--internal-ids))
+    (should-not (gethash "int-3" harness-ui--internal-ids))
+    (should-not (gethash "main-1" harness-ui--internal-ids))
+    (should (equal '("main-1" "int-2")
+                   (sort (mapcar (lambda (s) (plist-get s :id)) (harness-ui-sessions))
+                         (lambda (a b) (string> a b)))))))
+
 ;;;; The prefix key
 
 (ert-deftest harness-ui-prefix-key-moves-the-keys ()
@@ -2163,6 +2328,60 @@ last, dimmed.  A session never measured shows nothing."
     (let ((help (get-text-property 0 'help-echo (harness-ui-format-rate '(:id "s1" :status "idle")))))
       (should (string-match-p " over the latest model call on " help))
       (should (string-match-p ", measured on [0-9]+-[0-9]+-[0-9]+ [0-9]+:[0-9]+\\. " help)))))
+
+(ert-deftest harness-ui-average-rate-reads-the-streamed-totals ()
+  "A session's average output rate is its streamed output over its streaming time.
+Both are totals of its usage.  It reads as tokens per second with
+\"avg\" after the unit, whatever the session's status: it is no last
+figure to dim.  A session without the totals, or with under a second of
+streaming, has none.  The tooltip says it is the average of the whole
+session and not the current rate, which follows once one is measured:
+the current rate while the session runs, else the last one."
+  (let ((harness-ui--rates (make-hash-table :test 'equal))
+        (idle (list :id "s1" :status "idle" :usage (list :stream-output 1200 :stream-seconds 25.0)))
+        (rate (list :rate 48.2 :output 1234 :seconds 25.6 :calls 3
+                    :at (float-time) :model "demo:scripted")))
+    (should (= 48.0 (harness-ui-session-average-rate idle)))
+    (let ((cell (harness-ui-format-average-rate idle)))
+      (should (equal "48 tok/s avg" (substring-no-properties cell)))
+      (should-not (get-text-property 0 'face cell)))
+    (should (equal "48" (substring-no-properties (harness-ui-format-average-rate idle t))))
+    (should-not (get-text-property 0 'face (harness-ui-format-average-rate
+                                            (append '(:status "running") idle))))
+    ;; The number is written as the current rate is: one decimal below ten.
+    (should (equal "6.0 tok/s avg"
+                   (substring-no-properties
+                    (harness-ui-format-average-rate '(:id "s2" :usage (:stream-output 600 :stream-seconds 100))))))
+    ;; No totals, or under a second of streaming: none.
+    (should-not (harness-ui-session-average-rate '(:id "s1")))
+    (should-not (harness-ui-session-average-rate '(:id "s1" :usage (:cost 1.5 :output 900))))
+    (should-not (harness-ui-format-average-rate '(:id "s1" :usage (:stream-output 30))))
+    (should-not (harness-ui-format-average-rate '(:id "s1" :usage (:stream-output 30 :stream-seconds 0.9))))
+    (should (equal "30 tok/s avg" (substring-no-properties
+                                   (harness-ui-format-average-rate
+                                    '(:id "s1" :usage (:stream-output 30 :stream-seconds 1.0))))))
+    ;; The tooltip: the average of the whole session, in one line.
+    (let ((help (get-text-property 0 'help-echo (harness-ui-format-average-rate idle))))
+      (should (equal (concat "Average output rate over the whole session: 48 tokens per second,"
+                             " 1.2k output tokens in 25.0s of streaming, not the current rate."
+                             " Waiting for the first token and running tools do not count.")
+                     help)))
+    ;; A rate measured for the session follows, as the current one while it runs...
+    (puthash "s1" rate harness-ui--rates)
+    (let ((help (get-text-property 0 'help-echo
+                                   (harness-ui-format-average-rate (append '(:status "running") idle)))))
+      (should (string-prefix-p (concat "Average output rate over the whole session: 48 tokens per second,"
+                                       " 1.2k output tokens in 25.0s of streaming, not the current rate."
+                                       " Output rate: 48 tokens per second, 1.2k output tokens in 25.6s"
+                                       " of streaming over the 3 latest model calls on ")
+                               help))
+      (should-not (string-match-p "\n" help)))
+    ;; ...and else as the last one measured.
+    (should (string-match-p " not the current rate\\. Last output rate: 48 tokens per second, "
+                            (get-text-property 0 'help-echo (harness-ui-format-average-rate idle))))
+    ;; The tooltip of the current rate is as it was.
+    (should (string-prefix-p "Last output rate: 48 "
+                             (get-text-property 0 'help-echo (harness-ui-format-rate idle))))))
 
 (ert-deftest harness-ui-rate-cache-follows-the-harness ()
   "The UI's rates come from `usage/rate-updated' events and tell the views.

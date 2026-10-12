@@ -47,6 +47,9 @@
 (declare-function harness-ui-tasks--held "harness-ui-tasks")
 (declare-function harness-ui-tasks--caps-that-fit "harness-ui-tasks")
 (declare-function harness-ui-cache-session "harness-ui")
+(declare-function harness-ui-refresh-sessions "harness-ui")
+(declare-function harness-ui-session "harness-ui")
+(declare-function harness-ui--forget-session "harness-ui")
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-ui-tasks-submit "harness-ui-tasks")
 (declare-function harness-ui-tasks-edit "harness-ui-tasks")
@@ -197,10 +200,21 @@ session's, and a `+` or `-` on a card goes through its `priority/set'."
         (dolist (task (harness-call 'task/list default-directory))
           (harness-call 'task/cancel (plist-get task :id)))))))
 
-(ert-deftest harness-ui-tasks-card-shows-the-output-rate ()
-  "A card says how fast its session writes, once the harness measured it.
-The figure comes with the harness's `usage/rate-updated' event, which
-redraws the board by itself."
+(defun harness-ui-tasks-test--help-at (board regexp)
+  "The `help-echo' of the text in BOARD's board region that REGEXP matches, or nil."
+  (with-current-buffer board
+    (save-excursion
+      (goto-char (point-min))
+      (and (re-search-forward regexp harness-ui-tasks--list-end t)
+           (get-text-property (match-beginning 0) 'help-echo)))))
+
+(ert-deftest harness-ui-tasks-card-shows-the-average-output-rate ()
+  "A card says how fast its session wrote on average, once the harness timed it.
+The figure is the output of the session's measured model calls over the
+seconds they streamed, the totals `:stream-output' and `:stream-seconds'
+of its usage, which come with the session; the card words it as an
+average, and its tooltip names the current rate beside it once the
+harness's `usage/rate-updated' event brings one."
   (harness-ui-tasks-test-with
     ;; A turn that never ends keeps the task in progress.
     (let ((harness-provider-demo-script-override '((:type text :delta "Working on it."))))
@@ -211,12 +225,24 @@ redraws the board by itself."
             (should-not (string-match-p "tok/s" (harness-ui-tasks-test--board-text board)))
             (let ((sid (plist-get (car (harness-call 'task/list default-directory)) :session)))
               (should sid)
+              (harness-call 'session/usage-note sid (list :stream-output 420 :stream-seconds 10.0))
+              (harness-ui-tasks-test--wait-text board "Write quickly\\(.\\|\n\\)*42 tok/s avg")
+              ;; Not the wording of the current rate, "42 tok/s".
+              (should-not (string-match-p "tok/s\\($\\| ·\\)" (harness-ui-tasks-test--board-text board)))
+              ;; The tooltip says what the figure is, and no current rate was measured yet.
+              (let ((help (harness-ui-tasks-test--help-at board "42 tok/s avg")))
+                (should (string-prefix-p "Average output rate over the whole session: 42 tokens per second,"
+                                         help))
+                (should-not (string-match-p "measured at" help)))
+              ;; The harness measures the current rate: the tooltip follows.
               (harness-emit 'usage/rate-updated sid
-                            (list :rate 42.0 :output 420 :seconds 10.0 :calls 1
+                            (list :rate 61.0 :output 610 :seconds 10.0 :calls 1
                                   :at (float-time) :model "demo:scripted"))
-              (harness-test-wait (lambda () (string-match-p "Write quickly\\(.\\|\n\\)*42 tok/s"
-                                                            (harness-ui-tasks-test--board-text board)))
-                                 5 "the rate on the card")))
+              (harness-test-wait (lambda ()
+                                   (with-current-buffer board (harness-ui-tasks--render))
+                                   (string-match-p "Output rate: 61 tokens per second"
+                                                   (or (harness-ui-tasks-test--help-at board "42 tok/s avg") "")))
+                                 5 "the current rate in the tooltip")))
         (dolist (task (harness-call 'task/list default-directory))
           (harness-call 'task/cancel (plist-get task :id)))))))
 
@@ -570,38 +596,6 @@ told from, like a worktree git lost track of, still leads back."
                          5 "the session's mode to change"))))
 
 (declare-function harness-ui-tasks--on-window-change "harness-ui-tasks")
-
-(ert-deftest harness-ui-tasks-bulk-edit-current-tasks ()
-  "Bulk mode makes the setting commands change every current task."
-  (harness-ui-tasks-test-with
-    (let ((pending nil))
-      (let ((harness-tasks-max-running 0))
-        (setq pending (plist-get (harness-call 'task/submit default-directory "later") :id)))
-      (harness-ui-tasks--fetch board t)
-      (harness-test-wait (lambda () (with-current-buffer board (harness-ui-tasks--find pending)))
-                         5 "the board's task")
-      (with-current-buffer board
-        (should (= 1 (length (harness-ui-tasks--bulk-tasks))))
-        (should-not harness-ui-tasks--bulk)
-        (harness-ui-tasks-toggle-bulk)
-        (should harness-ui-tasks--bulk)
-        ;; The header says it is on; how many tasks it edits is the banner's.
-        (should (string-match-p "\\[Bulk edit: on\\]" (harness-ui-tasks--header)))
-        (should (string-match-p "EDITING 1 CURRENT TASK" (harness-ui-tasks-test--tail-text board)))
-        (should (equal "for 1 task" (nth 2 (harness-ui--setting-target nil))))
-        ;; The next task's own settings are untouched; the current one changes,
-        ;; and so does the record the next task will start from.
-        (should (equal "auto" (format "%s" (plist-get harness-ui-tasks--new :permission-mode))))
-        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "YOLO")))
-          (harness-set-permission-mode))
-        (harness-test-wait (lambda () (equal "yolo" (format "%s" (plist-get (harness-call 'task/get pending) :permission-mode))))
-                           5 "the pending task's mode")
-        (should (equal "yolo" (format "%s" (plist-get harness-ui-tasks--new :permission-mode))))
-        (harness-ui-tasks-toggle-bulk)
-        (should-not harness-ui-tasks--bulk)
-        (let ((header (harness-ui-tasks--header most-positive-fixnum)))
-          (should-not (string-match-p "Bulk edit: on" header))
-          (should (string-match-p "\\[Bulk edit\\]" header)))))))
 
 ;;;; Commands that change every session and task
 
@@ -1401,6 +1395,145 @@ task on the board, and the list of every session's change, do not."
           (harness-ui-tasks--on-event "session/ext-changed" (list sid "priority" "low"))
           (should (equal (list (buffer-name board)) refreshed)))))))
 
+(defun harness-ui-tasks-test--sessions-settled ()
+  "Wait until the session list a board asks for as it opens has arrived.
+It replaces the session cache, so a test that fills the cache waits first."
+  (let (done)
+    (harness-ui-refresh-sessions (lambda (_) (setq done t)))
+    (harness-test-wait (lambda () done) 5 "the session list")))
+
+(ert-deftest harness-ui-tasks-internal-sessions-reload-no-board ()
+  "A session's creation, status change and deletion reload the board, unless it is internal.
+The harness records each model call it makes on its own -- a judge, the
+naming of a session -- as a session of kind internal, one per call and
+many an hour, and none moves a task.  The event says what the session
+is when it carries it (`session/created' does), else the session cache
+does, else what was seen of the session before: a deletion comes after
+the cache forgot the session.  A session nothing is known about is
+taken for an ordinary one."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--sessions-settled)
+    (let ((refreshed nil)
+          (main '(:id "main-1" :kind "main" :name "Fix the parser"))
+          (internal '(:id "int-1" :kind "internal" :name "Permission judge")))
+      (cl-letf (((symbol-function 'harness-ui-tasks--refresh-soon)
+                 (lambda (buffer) (push (buffer-name buffer) refreshed))))
+        (cl-flet ((reloaded (event &rest args)
+                    (setq refreshed nil)
+                    (harness-ui-tasks--on-event event args)
+                    refreshed))
+          ;; A main session's events reload the board, as they did.
+          (should (member (buffer-name board) (reloaded "session/created" "main-1" main)))
+          (should (member (buffer-name board) (reloaded "session/status" "main-1" "running")))
+          (should (member (buffer-name board) (reloaded "session/deleted" "main-1")))
+          ;; So does any other event of the list, whoever it is about.
+          (should (member (buffer-name board) (reloaded "agent/turn-ended" "int-1")))
+          ;; An internal session's do not: its creation says what it is,
+          ;; and the events after go by what was seen then.
+          (should-not (reloaded "session/created" "int-1" internal))
+          (should-not (reloaded "session/status" "int-1" "running"))
+          (should-not (reloaded "session/status" "int-1" "idle"))
+          (should-not (reloaded "session/deleted" "int-1"))
+          ;; The cache tells a session the board never saw created.
+          (harness-ui-cache-session '(:id "int-2" :kind "internal" :status "idle"))
+          (should-not (reloaded "session/status" "int-2" "running"))
+          ;; A deletion that comes after the cache let the session go.
+          (harness-ui--forget-session "int-2")
+          (should-not (harness-ui-session "int-2"))
+          (should-not (reloaded "session/deleted" "int-2"))
+          ;; A session nothing is known about is an ordinary one.
+          (should (member (buffer-name board) (reloaded "session/status" "stranger" "idle"))))))))
+
+(ert-deftest harness-ui-tasks-internal-session-over-the-wire-reloads-no-board ()
+  "A real internal session, from its start to its deletion, reloads no board.
+The events reach the UI in the shape the guard reads: the creation with
+the session, the status changes and the deletion by the id (and the
+session, which the harness adds).  A session of the user's made after
+reloads the board, so the board still hears the events."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--sessions-settled)
+    (let* ((reloads 0)
+           (fetches 0)
+           (heard nil)
+           (listener (lambda (event args)
+                       (when (string-prefix-p "session/" event)
+                         ;; Asked as the board is, while the event is heard.
+                         (push (list event (car-safe args) (harness-ui-internal-event-p event args))
+                               heard))))
+           (heard-of (lambda (event id)
+                       (seq-filter (lambda (h) (and (equal (car h) event) (equal (nth 1 h) id)))
+                                   heard))))
+      (add-hook 'harness-ui-event-functions listener)
+      (unwind-protect
+          (cl-letf (((symbol-function 'harness-ui-tasks--refresh-soon)
+                     (lambda (_buffer) (cl-incf reloads)))
+                    ((symbol-function 'harness-ui-refresh-sessions)
+                     (lambda (&rest _) (cl-incf fetches))))
+            (let ((id (harness-call 'session/internal-start :job "Permission judge"
+                                    :model "demo:scripted" :prompt "May it run ls?")))
+              (harness-call 'session/internal-finish id :reply "Allow")
+              (harness-test-wait (lambda () (and (funcall heard-of "session/created" id)
+                                                 (= 2 (length (funcall heard-of "session/status" id)))))
+                                 5 "the events of the internal session")
+              ;; The session cache hears of it from the session's own
+              ;; updates, with no list of every session fetched.
+              (harness-test-wait (lambda () (equal "idle" (plist-get (harness-ui-session id) :status)))
+                                 5 "the internal session in the cache")
+              (harness-call 'session/delete id)
+              (harness-test-wait (lambda () (funcall heard-of "session/deleted" id))
+                                 5 "the deletion of the internal session")
+              (harness-test-wait (lambda () (not (harness-ui-session id)))
+                                 5 "the internal session to leave the cache")
+              ;; Every event was the internal session's, and none reloaded
+              ;; a board or fetched the sessions.
+              (should (cl-every #'caddr (cl-remove-if-not (lambda (h) (equal (nth 1 h) id)) heard)))
+              (should (zerop reloads))
+              (should (zerop fetches))
+              ;; A session of the user's does both.
+              (let ((main (plist-get (harness-call 'session/create :cwd default-directory :name "Fix it")
+                                     :id)))
+                (harness-test-wait (lambda () (funcall heard-of "session/created" main))
+                                   5 "the creation of the session")
+                (should-not (nth 2 (car (funcall heard-of "session/created" main))))
+                (should (> reloads 0))
+                (should (> fetches 0)))))
+        (remove-hook 'harness-ui-event-functions listener)))))
+
+(ert-deftest harness-ui-tasks-board-key-leaves-out-internal-sessions ()
+  "An internal session changing does not make the board draw itself again.
+The key of what the board draws holds the sessions the cards read; the
+internal ones change with every model call the harness makes on its
+own, and no card shows one."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--sessions-settled)
+    (with-current-buffer board
+      (let ((sessions (lambda () (nth 1 (harness-ui-tasks--board-key)))))
+        (harness-ui-cache-session '(:id "main-1" :kind "main" :status "idle" :updated 1))
+        (let ((before (funcall sessions)))
+          (should (= 1 (length before)))
+          (harness-ui-cache-session '(:id "int-1" :kind "internal" :status "running" :updated 2))
+          (harness-ui-cache-session '(:id "int-1" :kind "internal" :status "idle" :updated 3
+                                      :usage (:cost 0.01)))
+          (should (equal before (funcall sessions)))
+          ;; A session of the user's does.
+          (harness-ui-cache-session '(:id "main-1" :kind "main" :status "running" :updated 4))
+          (should-not (equal before (funcall sessions))))))))
+
+(ert-deftest harness-ui-tasks-has-no-bulk-edit ()
+  "The board does not edit many tasks at once any more: the session list does.
+Marking sessions there makes the harness's setting commands, and the
+list's own keys, change them all and the tasks they work on.  The board
+keeps the settings line of the next task: off a card, the commands
+change its settings."
+  (harness-ui-tasks-test-with
+    (with-current-buffer board
+      (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
+      (should-not (lookup-key harness-ui-tasks-board-map (kbd "B")))
+      (should-not (string-match-p "Bulk" (harness-ui-tasks--header most-positive-fixnum)))
+      (should-not (string-match-p "Bulk\\|EDITING" (harness-ui-tasks-test--tail-text board)))
+      (should-not (string-match-p "Bulk" (format "%S" (get 'harness-ui-tasks-mode 'harness-menu-group))))
+      (should (equal harness-ui-tasks--new (car (harness-ui--setting-target nil)))))))
+
 (ert-deftest harness-ui-tasks-new-task-priority ()
   "The button beside Submit sets the next task's priority for one task.
 Clicking again cycles the level, and the notice above the box keeps the
@@ -1444,9 +1577,6 @@ choice on with [keep on]; a submission spends a one-shot choice."
         (should-not harness-ui-tasks--priority-mode)
         (should (string-match-p "Submit +medium priority\n" (harness-ui-tasks-test--tail-text board)))))))
 
-(declare-function harness-ui-tasks-bulk-priority "harness-ui-tasks")
-(declare-function harness-ui-tasks-toggle-bulk "harness-ui-tasks")
-
 (defun harness-ui-tasks-test--tail-button (board text)
   "Where BOARD's button showing TEXT is, below the board."
   (with-current-buffer board
@@ -1454,59 +1584,6 @@ choice on with [keep on]; a submission spends a one-shot choice."
       (goto-char harness-ui-tasks--list-end)
       (search-forward text)
       (match-beginning 0))))
-
-(ert-deftest harness-ui-tasks-bulk-edit-priority ()
-  "Bulk mode gives the current tasks a priority only when its button is used.
-The button is on the settings line, in place of the next task's beside
-Submit; the other bulk settings leave each task's priority alone, and
-the next task keeps its own."
-  (harness-ui-tasks-test-with
-    (let* ((harness-tasks-max-running 0)
-           (alpha (plist-get (harness-call 'task/submit default-directory "Alpha") :id))
-           (bravo (plist-get (harness-call 'task/submit default-directory "Bravo" (list :priority "low"))
-                             :id))
-           (priorities (lambda ()
-                         (mapcar (lambda (id) (plist-get (harness-call 'task/get id) :priority))
-                                 (list alpha bravo)))))
-      (harness-ui-tasks-test--wait-text board "Pending  2")
-      (with-current-buffer board
-        (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
-        (should-error (harness-ui-tasks-bulk-priority "high") :type 'user-error)
-        (harness-ui-tasks-toggle-bulk)
-        (let ((tail (harness-ui-tasks-test--tail-text board)))
-          (should-not (string-match-p "Submit +medium priority" tail))
-          (should (string-match-p "· mixed priority" tail)))
-        ;; Another setting leaves their priorities as they are.
-        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "YOLO")))
-          (harness-set-permission-mode)))
-      (harness-test-wait (lambda () (equal "yolo" (format "%s" (plist-get (harness-call 'task/get bravo)
-                                                                          :permission-mode))))
-                         5 "the tasks' mode to change")
-      (should (equal '(medium low) (funcall priorities)))
-      ;; The priority button asks; no answer is no change.
-      (with-current-buffer board
-        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "")))
-          (push-button (harness-ui-tasks-test--tail-button board "mixed priority"))))
-      (should (equal '(medium low) (funcall priorities)))
-      ;; An answer goes to them all.
-      (with-current-buffer board
-        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "high")))
-          (push-button (harness-ui-tasks-test--tail-button board "mixed priority"))))
-      (harness-test-wait (lambda () (equal '(high high) (funcall priorities))) 5 "both to be high")
-      (harness-test-wait (lambda ()
-                           (with-current-buffer board
-                             (harness-ui-tasks--render-tail)
-                             (string-match-p "· high priority" (harness-ui-tasks-test--tail-text board))))
-                         5 "the button to say high")
-      (with-current-buffer board
-        (should (eq 'harness-task-priority-high-face
-                    (get-text-property (harness-ui-tasks-test--tail-button board "high priority") 'face)))
-        ;; The next task keeps its own, beside Submit again once bulk mode is off.
-        (should (equal "medium" (harness-ui-tasks--priority harness-ui-tasks--new)))
-        (harness-ui-tasks-toggle-bulk)
-        (let ((tail (harness-ui-tasks-test--tail-text board)))
-          (should (string-match-p "Submit +medium priority\n" tail))
-          (should-not (string-match-p "high priority" tail)))))))
 
 (defun harness-ui-tasks-test--show-subtitle (board text)
   "Show the subtitle of BOARD's card whose title shows TEXT, and render.
@@ -3163,7 +3240,7 @@ the wire gives them, symbols as strings."
                             (harness-ui-tasks--sent-back-message '(:state "pending" :queue-suspended t))))))
 
 (ert-deftest harness-ui-tasks-supervisor-switch ()
-  "The settings line turns supervisor mode for the next task, and in bulk.
+  "The settings line turns supervisor mode for the next task.
 The button appears only while the harness has the supervisor module,
 and a task submitted with the setting keeps it (the session of one that
 starts with it is checked in the supervisor suite)."
@@ -3206,27 +3283,7 @@ starts with it is checked in the supervisor suite)."
                          (harness-call 'task/list default-directory))))
         (should (= 2 (length ids)))
         (should (cl-every (lambda (id) (eq :false (plist-get (harness-call 'task/get id) :supervisor)))
-                          ids))
-        ;; Bulk editing turns it on for every current task, and for the
-        ;; task submitted next.
-        (with-current-buffer board
-          (harness-ui-tasks-toggle-bulk)
-          (harness-ui-tasks--render-tail)
-          (should (string-match-p "EDITING 2 CURRENT TASKS" (harness-ui-tasks-test--tail-text board)))
-          (should (string-match-p "· hands-on" (harness-ui-tasks-test--tail-text board)))
-          (push-button (harness-ui-tasks-test--tail-button board "hands-on")))
-        (harness-test-wait
-         (lambda ()
-           (cl-every (lambda (id) (eq t (plist-get (harness-call 'task/get id) :supervisor))) ids))
-         5 "the tasks to supervise")
-        ;; The board follows: the button now says supervisor, and the
-        ;; next task keeps the bulk change.
-        (harness-test-wait
-         (lambda () (with-current-buffer board
-                      (harness-ui-tasks--render-tail)
-                      (string-match-p "· supervisor" (harness-ui-tasks-test--tail-text board))))
-         5 "the settings line to say supervisor")
-        (should (harness-json-true-p (plist-get harness-ui-tasks--new :supervisor)))))))
+                          ids))))))
 
 ;;;; One-shot and sticky submit modes, and what a card stopped part way offers
 

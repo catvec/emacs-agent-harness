@@ -175,6 +175,66 @@ is never handed out, nor deleted with the session."
         (should (equal "deepseek:deepseek-flash" (plist-get (harness-call 'session/get (plist-get a :id)) :model)))
         (should (equal "claude:opus" (plist-get (harness-call 'session/get (plist-get b :id)) :model)))))))
 
+(defun harness-session-test-ids (sessions)
+  "Return the ids of the session plists SESSIONS, sorted."
+  (sort (mapcar (lambda (s) (plist-get s :id)) sessions) #'string<))
+
+(ert-deftest harness-session-list-takes-ids ()
+  "`:ids' names the only sessions that match; without it, or empty, all do."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (a (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (b (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (c (plist-get (harness-call 'session/create :cwd cwd) :id))
+           (listed (lambda (filter) (harness-session-test-ids (harness-call 'session/list filter)))))
+      (should (equal (sort (list a b c) #'string<) (funcall listed nil)))
+      (should (equal (sort (list a b c) #'string<) (funcall listed (list :ids nil))))
+      (should (equal (list a) (funcall listed (list :ids (list a)))))
+      ;; An id no session has names nothing.
+      (should (equal (sort (list b c) #'string<) (funcall listed (list :ids (list c "gone" b)))))
+      (should-not (funcall listed (list :ids (list "gone"))))
+      ;; The other keys narrow it further.
+      (harness-call 'session/deactivate c)
+      (should (equal (list b) (funcall listed (list :ids (list b c) :active t))))
+      ;; `session/select' passes it on, and `:except' still takes sessions out.
+      (should (equal (list a) (harness-session-test-ids
+                               (harness-call 'session/select (list :ids (list a b) :except (list b)))))))))
+
+(ert-deftest harness-session-set-all-changes-only-the-sessions-ids-names ()
+  "A bulk change with `:ids' reaches those sessions and no other, even when
+`:tasks' adds the sessions of the current tasks."
+  (harness-session-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (a (plist-get (harness-call 'session/create :cwd cwd :model "claude:opus") :id))
+           (b (plist-get (harness-call 'session/create :cwd cwd :model "claude:opus") :id))
+           (task (plist-get (harness-call 'session/create :cwd cwd :model "claude:opus") :id))
+           (model (lambda (id) (plist-get (harness-call 'session/get id) :model))))
+      (should (equal (list a) (harness-call 'session/set-all (list :model "deepseek:deepseek-flash")
+                                            (list :ids (list a)))))
+      (should (equal "deepseek:deepseek-flash" (funcall model a)))
+      (should (equal "claude:opus" (funcall model b)))
+      (should (equal "claude:opus" (funcall model task)))
+      ;; Ids that name no session change nothing, and `:except' still holds.
+      (should-not (harness-call 'session/set-all (list :model "claude:sonnet") (list :ids (list "gone"))))
+      (should-not (harness-call 'session/set-all (list :model "claude:sonnet")
+                                (list :ids (list b) :except (list b))))
+      (should (equal "claude:opus" (funcall model b)))
+      ;; The sessions of the current tasks join a selection, but not
+      ;; those `:ids' leaves out.
+      (harness-call 'session/deactivate task)
+      (harness-register-method 'task/session-ids
+                               (lambda (&optional filter)
+                                 (unless (equal '("done") (plist-get filter :columns)) (list task))))
+      (should (equal (list b) (harness-session-test-ids
+                               (harness-call 'session/select (list :ids (list b) :active t :tasks t)))))
+      (should (equal (sort (list b task) #'string<)
+                     (harness-session-test-ids
+                      (harness-call 'session/select (list :ids (list b task) :active t :tasks t)))))
+      (should (equal (list b) (harness-call 'session/set-all (list :model "claude:sonnet")
+                                            (list :ids (list b) :active t :tasks t))))
+      (should (equal "claude:sonnet" (funcall model b)))
+      (should (equal "claude:opus" (funcall model task))))))
+
 (ert-deftest harness-session-setting-equal-p-reads-json-values ()
   "Settings compare as they mean: a false non-interactive is off however
 it is spelt, and a mode's name is the mode."
@@ -294,6 +354,66 @@ its parent's, off as well as on; and the hint of a change says which."
       (should (eq 'idle (plist-get (harness-call 'session/get id) :status)))
       (should (equal '(:limit-check t) '(:limit-check t)))
       (should (= 1 (length (harness-call 'session/nodes id '(:limit 1))))))))
+
+(ert-deftest harness-session-last-message-moves-with-messages-only ()
+  "A user or assistant node sets `:last-message' to its `:ts', its kind a
+symbol or a string.  A hint, thinking, a tool call or result, a
+compaction node, a setting and usage leave it alone, though `:updated'
+moves with each; the record keeps it, and one written without it has none."
+  (harness-session-test-with
+    (let ((now 1000.0))
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) now)))
+        (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+               (get (lambda (key) (plist-get (harness-call 'session/get id) key)))
+               (append-node (lambda (node) (harness-call 'session/append id node))))
+          (should-not (funcall get :last-message))
+          ;; A message is written now, unless its node says when.
+          (setq now 2000.0)
+          (funcall append-node '(:kind user :content "q1"))
+          (should (= 2000.0 (funcall get :last-message)))
+          (setq now 3000.0)
+          (funcall append-node '(:kind assistant :content "a1" :ts 2500.0))
+          (should (= 2500.0 (funcall get :last-message)))
+          (should (= 3000.0 (funcall get :updated)))
+          ;; Nothing else is a message.
+          (dolist (node '((:kind thinking :content "hm")
+                          (:kind tool-call :call-id "c1" :name "read_file" :input (:path "x"))
+                          (:kind tool-result :call-id "c1" :output "ok")
+                          (:kind compaction :content "the story so far")))
+            (cl-incf now 100.0)
+            (funcall append-node node)
+            (should (= 2500.0 (funcall get :last-message)))
+            (should (= now (funcall get :updated))))
+          (cl-incf now 100.0)
+          (harness-call 'session/hint id "a hint")
+          (should (= 2500.0 (funcall get :last-message)))
+          (should (= now (funcall get :updated)))
+          (cl-incf now 100.0)
+          (harness-call 'session/update id :name "Renamed")
+          (should (equal "Renamed" (funcall get :name)))
+          (should (= 2500.0 (funcall get :last-message)))
+          (should (= now (funcall get :updated)))
+          (cl-incf now 100.0)
+          (harness-call 'session/usage-add id '(:input 10 :output 5))
+          (should (= 2500.0 (funcall get :last-message)))
+          (should (= now (funcall get :updated)))
+          ;; The kind may be a string, as a node from the wire has it.
+          (cl-incf now 100.0)
+          (funcall append-node '(:kind "user" :content "q2"))
+          (should (= now (funcall get :last-message)))
+          ;; The record keeps it.
+          (let ((written now))
+            (harness-session-flush)
+            (clrhash harness-sessions)
+            (harness-session--load-all)
+            (should (= written (funcall get :last-message))))
+          ;; A record written before sessions kept it has none.
+          (let ((name (harness-session--meta-name id)))
+            (harness-call 'store/save name (harness-plist-remove (harness-call 'store/load name) :last-message)))
+          (clrhash harness-sessions)
+          (harness-session--load-all)
+          (should (equal "Renamed" (funcall get :name)))
+          (should-not (funcall get :last-message)))))))
 
 (ert-deftest harness-session-append-leaves-the-session-as-it-was-when-the-log-cannot-be-written ()
   "A node that cannot be written to the node log never becomes the head.
@@ -649,12 +769,14 @@ its transcript; one made at its parent's head goes on."
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :name "old") :id))
            (s (gethash id harness-sessions))
-           ;; Made before the last three slots: provider-node, move and ext.
-           (old (apply #'record (cl-loop for i below (- (length s) 3) collect (aref s i)))))
+           ;; Made before the last four slots: provider-node, move, ext
+           ;; and last-message.
+           (old (apply #'record (cl-loop for i below (- (length s) 4) collect (aref s i)))))
       (puthash id old harness-sessions)
       (should-error (harness-session-provider-node old))
       (should-error (harness-session-move old))
       (should-error (harness-session-ext old))
+      (should-error (harness-session-last-message old))
       (harness-session--upgrade-records)
       (let ((new (gethash id harness-sessions)))
         (should (= (length s) (length new)))
@@ -662,10 +784,13 @@ its transcript; one made at its parent's head goes on."
         (should-not (harness-session-provider-node new))
         (should-not (harness-session-move new))
         (should-not (harness-session-ext new))
+        (should-not (harness-session-last-message new))
         (should (equal "old" (plist-get (harness-call 'session/get id) :name)))
-        ;; The slot is there to use.
+        ;; The slots are there to use.
         (harness-call 'session/set-ext id :supervisor t)
-        (should (equal '(:supervisor t) (harness-session-ext (gethash id harness-sessions))))))))
+        (should (equal '(:supervisor t) (harness-session-ext (gethash id harness-sessions))))
+        (harness-call 'session/append id '(:kind user :content "hi" :ts 5.0))
+        (should (= 5.0 (harness-session-last-message (gethash id harness-sessions))))))))
 
 (defun harness-session-test-kinds (id)
   (mapcar (lambda (n) (plist-get n :kind)) (harness-call 'session/nodes id)))
@@ -1018,6 +1143,52 @@ context leaves both."
       (clrhash harness-sessions)
       (harness-session--load-all)
       (should (= 20 (plist-get (funcall usage) :last-output))))))
+
+(ert-deftest harness-session-usage-note-adds-the-streamed-totals ()
+  "`session/usage-note' adds the two streamed totals and nothing else, in a
+new plist each time.  Usage records keep them as they find them, a restart
+keeps them, and a session that is gone is left alone."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (usage (lambda () (plist-get (harness-call 'session/get id) :usage)))
+           (announced 0))
+      (harness-on 'session/changed (lambda (sid _) (when (equal sid id) (cl-incf announced))))
+      (should-not (plist-member (funcall usage) :stream-output))
+      (let* ((before (funcall usage))
+             (totals (harness-call 'session/usage-note id
+                                   '(:stream-output 100 :stream-seconds 2.5 :input 7 :cost 1.0))))
+        (should (= 100 (plist-get totals :stream-output)))
+        (should (= 2.5 (plist-get totals :stream-seconds)))
+        ;; Anything else in the record is ignored.
+        (should (= 0 (plist-get totals :input)))
+        (should (= 0.0 (plist-get totals :cost)))
+        ;; The totals the caller held do not change under it.
+        (should-not (eq before totals))
+        (should-not (plist-member before :stream-output))
+        (should (equal totals (funcall usage)))
+        (should (= 1 announced)))
+      (harness-call 'session/usage-note id '(:stream-output 50 :stream-seconds 1.0))
+      (should (= 150 (plist-get (funcall usage) :stream-output)))
+      (should (= 3.5 (plist-get (funcall usage) :stream-seconds)))
+      ;; Usage records, a compaction's among them, keep them.
+      (harness-call 'session/usage-add id '(:input 10 :output 5 :cost 0.5 :context 100 :turns 1))
+      (harness-call 'session/usage-add id '(:input 20 :output 8 :cache-read 50 :context 130))
+      (harness-call 'session/usage-add id '(:input 30 :output 9 :context 40 :cache-reset t))
+      (should (= 150 (plist-get (funcall usage) :stream-output)))
+      (should (= 3.5 (plist-get (funcall usage) :stream-seconds)))
+      (should (= 60 (plist-get (funcall usage) :input)))
+      ;; A record with neither number changes nothing, announces nothing.
+      (let ((seen announced))
+        (should (equal (funcall usage) (harness-call 'session/usage-note id '(:input 99))))
+        (should (= seen announced))
+        (should (= 60 (plist-get (funcall usage) :input))))
+      ;; A restart keeps them.
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (= 150 (plist-get (funcall usage) :stream-output)))
+      (should (= 3.5 (plist-get (funcall usage) :stream-seconds)))
+      (should-not (harness-call 'session/usage-note "gone" '(:stream-output 1 :stream-seconds 1.0))))))
 
 (defvar harness-cache-ttl)
 (defvar harness-cache-ttl-overrides)

@@ -290,6 +290,18 @@ Return a function giving the requests it received, newest first."
                   (list :cancel #'ignore)))
     (lambda () requests)))
 
+(defun harness-perms-test--record-jobs ()
+  "Stand in for the internal sessions the judge's calls are recorded as.
+Return a function giving the job and the parent of each call, newest
+first, as `provider/complete' passed them to `session/internal-start'."
+  (let ((jobs nil))
+    (harness-register-method 'session/internal-start
+                             (lambda (&rest plist)
+                               (push (list (plist-get plist :job) (plist-get plist :parent-id)) jobs)
+                               (format "internal-%d" (length jobs))))
+    (harness-register-method 'session/internal-finish #'ignore)
+    (lambda () jobs)))
+
 (ert-deftest harness-perms-auto-mode-uses-the-judge ()
   (harness-perms-test--setup :permission-mode 'auto :model "judge:big")
   (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler #'ignore)
@@ -519,7 +531,8 @@ A reasoning model writes no verdict before `max-tokens'; the second call
 gets `harness-perms--judge-retry-max-tokens', and its verdict decides the
 call, so a non-interactive session is not refused one nobody judged."
   (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
-  (let* ((requests (harness-perms-test--scripted-judge
+  (let* ((jobs (harness-perms-test--record-jobs))
+         (requests (harness-perms-test--scripted-judge
                     '(((:type text :delta "{\"decision\":")
                        (:type done :stop-reason max-tokens))
                       ((:type text :delta "{\"decision\":\"allow\",\"reason\":\"ordinary work\"}")
@@ -533,7 +546,9 @@ call, so a non-interactive session is not refused one nobody judged."
     (should (equal harness-perms--judge-max-tokens
                    (plist-get (cadr (funcall requests)) :max-tokens)))
     (should (equal harness-perms--judge-retry-max-tokens
-                   (plist-get (car (funcall requests)) :max-tokens)))))
+                   (plist-get (car (funcall requests)) :max-tokens)))
+    ;; Each call is recorded as an internal session of the session asking.
+    (should (equal '(("Permission judge (retry)" "s1") ("Permission judge" "s1")) (funcall jobs)))))
 
 (ert-deftest harness-perms-auto-mode-takes-a-verdict-written-before-the-cap ()
   "A complete JSON verdict stands even when the model talks on to `max-tokens'."

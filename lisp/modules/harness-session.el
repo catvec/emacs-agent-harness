@@ -45,8 +45,9 @@
 ;; stand-in given for a model the catalogue had not listed yet.  When
 ;; the catalogue changes, the sessions whose window moved are announced.
 ;;
-;; Every local session has a temporary directory of its own,
-;; harness-UID/ID in `temporary-file-directory' (/tmp/harness-1000/ID/).
+;; Every local session but an internal one (see below) has a temporary
+;; directory of its own, harness-UID/ID in `temporary-file-directory'
+;; (/tmp/harness-1000/ID/).
 ;; It is made with the session, made again whenever it is asked for and
 ;; missing (a reboot empties /tmp), and deleted with the session.
 ;; `session/tmp-dir' hands it out: the permission layer lets the session
@@ -73,6 +74,21 @@
 ;; (`session/set-ext').  It is stored with the record, announced as
 ;; `session/ext-changed' and never copied to a fork: each module sets
 ;; up its own forks.
+;;
+;; The harness also makes model calls of its own, outside any turn: the
+;; permission judge and the session judge, a session's name, the Elisp
+;; judge, insights, the pet, task search and recaps.  A request that
+;; names its job makes `provider/complete' record the call as a session
+;; of kind `internal' (`session/internal-start', then
+;; `session/internal-finish'): the prompt as a message the harness
+;; sent, the reply, the model, its usage and cost, and as its parent the
+;; session the call was made for.  Only the newest
+;; `harness-session--internal-keep' are kept: each new one deletes the
+;; oldest that are not running.  An internal session is a record, not a
+;; conversation: it cannot be continued (the agent refuses to prompt
+;; it), it has no temporary directory, and neither bulk changes
+;; (`session/select') nor its parent's fork family (`session/tree')
+;; take it in.  The session list hides internal sessions unless asked.
 
 ;;; Code:
 
@@ -91,6 +107,20 @@
 (defconst harness-session--save-delay 0.3
   "Seconds of quiet before a changed session record is written to disk.")
 
+(defvar harness-session--internal-keep 100
+  "How many internal sessions to keep, the newest ones.
+An internal session records one model call the harness makes on its
+own, such as the permission judge's (see `session/internal-start').
+Each new one deletes the oldest internal sessions that are not
+running until at most this many remain; 0 keeps none but the calls
+still under way.  They are records to read back what the harness
+asked, not conversations, so the count only bounds the state
+directory while keeping the recent calls to look at.")
+
+(defconst harness-session--internal-prompt-max 20000
+  "Most characters of its prompt an internal session keeps.
+A longer prompt is cut there, with a note saying it was.")
+
 (cl-defstruct (harness-session (:copier nil))
   id name kind project cwd host worktree model permission-mode thinking non-interactive
   allowed-dirs (status 'idle) parent-id fork-node created updated
@@ -105,7 +135,8 @@
   ;; Slots added later go last, see `harness-session--upgrade-records'.
   provider-node                         ; the node its provider conversation reached
   move                                  ; a move waiting for its turn to end, or nil
-  ext)                                  ; settings modules keep here, a plist, or nil
+  ext                                   ; settings modules keep here, a plist, or nil
+  last-message)                         ; time of its latest user or assistant message, or nil
 
 (defvar harness-sessions (make-hash-table :test 'equal)
   "Session id -> `harness-session'.")
@@ -131,7 +162,7 @@ defaults."
   '(:id :name :kind :project :cwd :host :worktree :model :permission-mode :thinking
     :non-interactive :allowed-dirs :status :parent-id :fork-node :created :updated :usage
     :context-window :context-window-override :context-window-limit :budget :head :queue :pending
-    :todos :plan :provider-state :provider-node :cache :move :ext))
+    :todos :plan :provider-state :provider-node :cache :move :ext :last-message))
 
 (defconst harness-session--symbol-keys '(:kind :status :permission-mode)
   "Keys whose values are symbols in memory and strings on disk.")
@@ -153,7 +184,10 @@ defaults."
 `:context-window' is the window in effect (see `harness-session--window');
 `:context-window-override' and `:context-window-limit' are what was set
 for S, and are nil when unset.  `:cache' is what is known of its prompt
-cache (see `harness-session--cache')."
+cache (see `harness-session--cache').  `:last-message' is when S's latest
+user or assistant message was written (see `session/append'), nil
+before it has one: unlike `:updated', which moves with every change, it
+moves with messages only."
   (list :id (harness-session-id s) :name (harness-session-name s)
         :kind (harness-session-kind s) :project (harness-session-project s)
         :cwd (harness-session-cwd s) :host (harness-session-host s)
@@ -175,7 +209,8 @@ cache (see `harness-session--cache')."
         :provider-node (harness-session-provider-node s)
         :cache (harness-session--cache s)
         :move (harness-session-move s)
-        :ext (harness-session-ext s)))
+        :ext (harness-session-ext s)
+        :last-message (harness-session-last-message s)))
 
 ;; The `ext' slot holds what the modules that are not the session's own
 ;; keep about it, a plist of keyword to value (`session/set-ext').  It
@@ -259,7 +294,9 @@ or a plist (keyword keys) of those."
           (harness-session-provider-state s) (plist-get pl :provider-state)
           (harness-session-provider-node s) (plist-get pl :provider-node)
           (harness-session-move s) (harness-session--move-value (plist-get pl :move))
-          (harness-session-ext s) (harness-session--ext-value (plist-get pl :ext)))
+          (harness-session-ext s) (harness-session--ext-value (plist-get pl :ext))
+          ;; Nil for a record written before sessions kept it.
+          (harness-session-last-message s) (let ((v (plist-get pl :last-message))) (and (numberp v) v)))
     ;; A session saved before the policy came keeps no setting it fixes.
     (harness-session--apply-policy s)
     s))
@@ -282,8 +319,10 @@ Its model is not left: a policy on `harness-model' fixes a BTW's model
 too, and `harness-btw-model' then changes nothing.")
 
 (defun harness-session--policy-option (key kind)
-  "Return the option that fixes setting KEY of a session of KIND, or nil."
-  (unless (and (eq key :thinking) (eq kind 'btw))
+  "Return the option that fixes setting KEY of a session of KIND, or nil.
+Nil for every key of an `internal' session: it records a call made with
+the model it names, which the policy's model must not replace."
+  (unless (or (eq kind 'internal) (and (eq key :thinking) (eq kind 'btw)))
     (alist-get key harness-session--policy-options)))
 
 (defun harness-session--setting-value (key value)
@@ -820,9 +859,12 @@ can reach outside the root and no two ids share a directory."
 (defun harness-session--tmp-path (s)
   "Return the name of the temporary directory of session S.
 Nil for a remote session: its tools work on another host, where the
-harness makes no directories behind the user's back.  Only the name:
-`harness-session--tmp-dir' makes the directory and checks it."
-  (unless (or (harness-session-host s)
+harness makes no directories behind the user's back.  Nil for an
+internal session too: it records one model call and runs no tools.
+Only the name: `harness-session--tmp-dir' makes the directory and
+checks it."
+  (unless (or (eq (harness-session-kind s) 'internal)
+              (harness-session-host s)
               (file-remote-p (or (harness-session-cwd s) "")))
     (file-name-as-directory
      (expand-file-name (harness-session--tmp-name (harness-session-id s))
@@ -969,14 +1011,17 @@ Every local session has one of its own, harness-UID/ID in
 session, made again whenever it is asked for and missing (a reboot
 empties /tmp), and deleted with the session.  The permission layer lets
 the session use it, the sandbox lets its commands write there, and the
-system prompt names it.  Nil for a remote session, and when no
-directory of the user's own can be had there: /tmp is shared, so a
-directory somebody else made, or a symbolic link, is refused."
+system prompt names it.  Nil for a remote session, for an internal
+one (see `session/internal-start'), and when no directory of the user's
+own can be had there: /tmp is shared, so a directory somebody else
+made, or a symbolic link, is refused."
   (harness-session--tmp-dir (harness-session--get id)))
 
 (harness-defmethod session/list (&optional filter)
   "Return session plists matching FILTER, newest first.
-FILTER keys: :project :status :kind :parent-id :active."
+FILTER keys: :project :status :kind :parent-id :active :ids.
+`:ids' is a list of session ids: only the sessions it names match, and
+nil (or a missing key) matches every session, as the other keys do."
   (let (out)
     (maphash
      (lambda (_ s)
@@ -988,6 +1033,8 @@ FILTER keys: :project :status :kind :parent-id :active."
                       (eq (plist-get filter :kind) (harness-session-kind s)))
                   (or (null (plist-get filter :parent-id))
                       (equal (plist-get filter :parent-id) (harness-session-parent-id s)))
+                  (or (null (plist-get filter :ids))
+                      (member (harness-session-id s) (plist-get filter :ids)))
                   (or (null (plist-get filter :active))
                       (not (eq (harness-session-status s) 'inactive))))
          (push (harness-session-plist s) out)))
@@ -1110,16 +1157,23 @@ changes nothing either."
 (harness-defmethod session/select (&optional filter)
   "Return the session plists FILTER selects, newest first.
 FILTER is `session/list''s filter (`:project' `:status' `:kind'
-`:parent-id' `:active'), plus `:except', a list of session ids to leave
-out, and `:tasks': non-nil adds the sessions of the current tasks of
-every project (`task/session-ids'), whatever the other keys say, so
+`:parent-id' `:active' `:ids'), plus `:except', a list of session ids to
+leave out, and `:tasks': non-nil adds the sessions of the current tasks
+of every project (`task/session-ids'), whatever the other keys say, so
 an inactive session a task goes on in is not missed, and leaves out
 the sessions of completed tasks, the done column of the board, even an
-active one: a bulk change must not reach a task that is over.  Nil
-selects every session.  This is the selection of `session/set-all' and
-of the handoff's `handoff/check-all' and `handoff/switch-all'."
+active one: a bulk change must not reach a task that is over.  `:ids'
+limits even that: a session it does not name is never selected.  An
+internal session (see `session/internal-start') is selected only when
+`:kind' asks for kind `internal', even when `:ids' names it: it records
+a call and goes on with nothing, so a bulk change has nothing to do
+there.  Nil selects every other session.  This is the selection of
+`session/set-all', `priority/set-all', `supervisor/set-all' and of the
+handoff's `handoff/check-all' and `handoff/switch-all'."
   (let* ((except (plist-get filter :except))
          (tasks (plist-get filter :tasks))
+         (ids (plist-get filter :ids))
+         (internal (eq (plist-get filter :kind) 'internal))
          (done (when (and tasks (harness-method-exists-p 'task/session-ids))
                  (harness-call 'task/session-ids (list :columns '("done")))))
          (selected (harness-call 'session/list (harness-plist-remove filter :except :tasks))))
@@ -1127,24 +1181,27 @@ of the handoff's `handoff/check-all' and `handoff/switch-all'."
       (let ((have (mapcar (lambda (s) (plist-get s :id)) selected))
             (more nil))
         (dolist (id (harness-call 'task/session-ids))
-          (when (and (not (member id have)) (gethash id harness-sessions))
+          (when (and (not (member id have)) (gethash id harness-sessions)
+                     (or (null ids) (member id ids)))
             (push id have)
             (push (harness-session-plist (gethash id harness-sessions)) more)))
         (when more
           (setq selected (sort (append selected more)
                                (lambda (a b) (> (plist-get a :updated) (plist-get b :updated))))))))
     (cl-remove-if (lambda (s) (or (member (plist-get s :id) except)
-                                  (member (plist-get s :id) done)))
+                                  (member (plist-get s :id) done)
+                                  (and (not internal) (eq (plist-get s :kind) 'internal))))
                   selected)))
 
 (harness-defmethod session/set-all (settings &optional filter)
   "Apply SETTINGS to every session FILTER selects; return the ids changed.
 SETTINGS is a plist of keys `session/update' accepts, usually just
 `:model'.  FILTER is the one of `session/select': `session/list''s
-filter (`:project' `:status' `:kind' `:parent-id' `:active'), plus
-`:except', a list of session ids to leave alone, and `:tasks' to add
-the sessions of the current tasks; nil means every session.  A session
-whose value is already the one asked for is left alone (see
+filter (`:project' `:status' `:kind' `:parent-id' `:active' `:ids'),
+plus `:except', a list of session ids to leave alone, and `:tasks' to
+add the sessions of the current tasks; nil means every session.  `:ids',
+a list of session ids, limits the change to the sessions it names.  A
+session whose value is already the one asked for is left alone (see
 `harness-setting-equal-p': a false non-interactive is off, a mode's
 name is the mode), and one that changes is changed exactly as
 `session/update' would (same event, same hint).  The return value
@@ -1264,6 +1321,121 @@ With only ID return the whole runtime plist."
           ((eq value :get) (plist-get (harness-session-runtime s) key))
           (t (setf (harness-session-runtime s) (plist-put (harness-session-runtime s) key value))
              value))))
+
+;;;; Methods: internal sessions
+;;
+;; See the Commentary.  The provider module starts and finishes them
+;; around a request that names its job (`provider/complete').
+
+(defun harness-session--internal-prompt (prompt)
+  "Return PROMPT as an internal session keeps it.
+A prompt longer than `harness-session--internal-prompt-max' characters
+is cut there, and a note at the end says how long it was."
+  (if (<= (length prompt) harness-session--internal-prompt-max)
+      prompt
+    (concat (substring prompt 0 harness-session--internal-prompt-max)
+            (format "\n\n[The prompt was cut here: it had %d characters, the first %d are kept.]"
+                    (length prompt) harness-session--internal-prompt-max))))
+
+(defun harness-session--state-dir-p (dir)
+  "Non-nil when DIR is `harness-state-directory' or lies inside it."
+  (and (bound-and-true-p harness-state-directory)
+       (not (file-remote-p dir))
+       (string-prefix-p (file-name-as-directory (expand-file-name harness-state-directory))
+                        (file-name-as-directory (expand-file-name dir)))))
+
+(defun harness-session--internal-prune (keep)
+  "Delete the oldest internal sessions until at most KEEP remain.
+Only sessions that are not running are deleted, the oldest created
+first, so a call still under way keeps its session even when that
+leaves more than KEEP."
+  (let ((count 0) idle)
+    (maphash (lambda (_ s)
+               (when (eq (harness-session-kind s) 'internal)
+                 (cl-incf count)
+                 (unless (eq (harness-session-status s) 'running)
+                   (push s idle))))
+             harness-sessions)
+    (when (> count keep)
+      (dolist (s (take (- count keep)
+                       (sort idle (lambda (a b) (< (harness-session-created a)
+                                                   (harness-session-created b))))))
+        (condition-case err
+            (harness-call 'session/delete (harness-session-id s))
+          (error (harness-log 'warn "session: could not delete internal session %s: %s"
+                              (harness-session-id s) (harness-error-message err))))))))
+
+(harness-defmethod session/internal-start (&rest plist)
+  "Start an internal session, the record of one model call; return its id.
+The harness makes some model calls on its own, outside any turn: the
+permission judge's, a session's name, a recap.  Each is recorded as a
+session of kind `internal', running until `session/internal-finish'.
+PLIST's `:job' says what the call is for and names the session,
+`:model' is the model it asks, and `:prompt' what it asks, appended as
+a user message the harness sent, cut at
+`harness-session--internal-prompt-max' characters with a note saying
+so.  `:parent-id' is the session the call is made for, kept only when
+that session exists.  `:cwd' and `:host' say where the session is,
+by default where its parent is, else in `harness-state-directory';
+`:project' is its project, by default its parent's, else the one of
+its directory, where a directory of `harness-state-directory', the
+harness's own, is a project of its own rather than part of the one
+around it.  Starting one deletes the oldest internal sessions that
+are not running beyond `harness-session--internal-keep'.  An internal
+session has no temporary directory, the policy fixes none of its
+settings, and the agent refuses to prompt it: it cannot be continued."
+  (let* ((job (let ((j (plist-get plist :job)))
+                (if (and (stringp j) (not (string-blank-p j))) j "Internal call")))
+         (parent-id (plist-get plist :parent-id))
+         (parent (and parent-id (gethash parent-id harness-sessions)))
+         (cwd (plist-get plist :cwd))
+         (host (or (plist-get plist :host) (and parent (not cwd) (harness-session-host parent))))
+         (cwd (or cwd (and parent (harness-session-cwd parent))
+                  (bound-and-true-p harness-state-directory) default-directory))
+         (project (or (plist-get plist :project)
+                      (and parent (harness-session-project parent))
+                      ;; The harness's own directories (the pet's, say)
+                      ;; belong to no project around them.
+                      (and (harness-session--state-dir-p cwd)
+                           (file-name-as-directory (expand-file-name cwd)))))
+         (model (plist-get plist :model))
+         (prompt (plist-get plist :prompt))
+         (id (plist-get (apply #'harness-call 'session/create
+                               :kind 'internal :name job :cwd cwd
+                               (append (and model (list :model model))
+                                       (and host (list :host host))
+                                       (and project (list :project project))
+                                       (and parent (list :parent-id parent-id))))
+                        :id)))
+    (when (and (stringp prompt) (not (string-empty-p prompt)))
+      (harness-call 'session/append id
+                    (list :kind 'user :content (harness-session--internal-prompt prompt)
+                          :meta (list :from (harness-sender-system job)))))
+    (harness-call 'session/set-status id 'running)
+    (harness-session--internal-prune harness-session--internal-keep)
+    id))
+
+(harness-defmethod session/internal-finish (id &rest plist)
+  "Finish internal session ID, recording how its model call ended.
+PLIST keys: `:reply', the text the model wrote, appended as its reply
+unless empty; `:stop-reason', how the call ended, a symbol or its name;
+`:error', what went wrong.  A call that ended in `error' or was
+`cancelled' gets a hint saying so, with the error.  The session is then
+idle.  A session that is gone is left alone: this never signals for
+one.  Return ID, nil when it is gone."
+  (when (gethash id harness-sessions)
+    (let ((reply (plist-get plist :reply))
+          (stop (let ((r (plist-get plist :stop-reason))) (if (stringp r) (intern r) r)))
+          (err (let ((e (plist-get plist :error)))
+                 (and e (not (equal e "")) (if (stringp e) e (format "%s" e))))))
+      (when (and (stringp reply) (not (string-empty-p reply)))
+        (harness-call 'session/append id (list :kind 'assistant :content reply)))
+      (pcase stop
+        ('error (harness-call 'session/hint id (format "Error: %s" (or err "unknown"))))
+        ('cancelled (harness-call 'session/hint id (if err (format "The call was cancelled: %s" err)
+                                                     "The call was cancelled."))))
+      (harness-call 'session/set-status id 'idle)
+      id)))
 
 ;;;; Methods: moving to another directory
 ;;
@@ -1679,7 +1851,10 @@ session list and the tree show it under ID."
                     :permission-mode (harness-session-permission-mode parent)))))
 
 (defun harness-session--family (s)
-  "Return every session struct in the fork family of S."
+  "Return every session struct in the fork family of S.
+The internal sessions made for its members (see
+`session/internal-start') are not of it, but for S itself: they share
+no node with the conversation."
   (let ((root s))
     (while (and (harness-session-parent-id root)
                 (gethash (harness-session-parent-id root) harness-sessions))
@@ -1689,6 +1864,7 @@ session list and the tree show it under ID."
         (let ((cur (pop frontier)))
           (maphash (lambda (_ c)
                      (when (and (equal (harness-session-parent-id c) (harness-session-id cur))
+                                (or (eq c s) (not (eq (harness-session-kind c) 'internal)))
                                 (not (memq c family)))
                        (push c family) (push c frontier)))
                    harness-sessions)))
@@ -1744,7 +1920,11 @@ The node is written to the node log before it becomes the head.  A
 write that fails (a node the log cannot encode, a full disk) signals
 and leaves the session as it was: a node kept in memory only would
 parent the nodes written after it, and when the session is loaded again
-their parent would be missing, which cuts the transcript there."
+their parent would be missing, which cuts the transcript there.
+The node's kind `user' or `assistant' (a symbol or a string) also sets the
+session's `:last-message' to the node's `:ts', which is now unless NODE
+has one.  Nothing else moves it: not a hint, thinking, a tool call or
+result, nor a compaction."
   (let* ((s (harness-session--get id))
          (n (copy-sequence node)))
     (harness-session--load-nodes s)
@@ -1755,6 +1935,9 @@ their parent would be missing, which cuts the transcript there."
     (harness-session--persist-node s n)
     (puthash (plist-get n :id) n (harness-session-nodes s))
     (setf (harness-session-head s) (plist-get n :id))
+    (let ((kind (plist-get n :kind)))
+      (when (memq (if (stringp kind) (intern kind) kind) '(user assistant))
+        (setf (harness-session-last-message s) (plist-get n :ts))))
     (harness-emit 'session/node-added id n)
     (harness-session--touch s)
     n))
@@ -1988,7 +2171,11 @@ request that read or wrote the cache stamps the totals' `:cache-at',
 `:cache-model' and `:cache-ttl' (see `harness-session--cache-stamp').
 A missing `:cost' is priced from the model catalogue; a missing
 `:list-cost', the call at API prices, is the cost, or priced when a
-subscription paid.  Return the totals."
+subscription paid.  The totals may also hold `:stream-output' and
+`:stream-seconds', the output tokens of the model calls whose streaming
+was timed and the seconds they streamed: those are added by
+`session/usage-note', not by this method, which keeps them as it finds
+them.  Return the totals."
   (let* ((s (harness-session--get id))
          (u (copy-sequence (harness-session-usage s)))
          (record (harness-session--price-record (harness-session-model s) record)))
@@ -2008,7 +2195,34 @@ subscription paid.  Return the totals."
     (setf (harness-session-usage s) u)
     (harness-emit 'session/usage id u record)
     (harness-session--touch s)
-    u))
+    ;; A subscriber of the event may have added to the totals meanwhile
+    ;; (the streamed output, see `session/usage-note').
+    (harness-session-usage s)))
+
+(harness-defmethod session/usage-note (id record)
+  "Add what RECORD says session ID streamed to its usage totals.
+RECORD's `:stream-output', the output tokens of model calls whose
+streaming was timed, and `:stream-seconds', the seconds the model spent
+streaming them, are added to the totals' keys of the same names; any
+other key of RECORD is ignored.  Output over seconds is the average
+output rate over the whole session, where `usage/rate' averages only
+the newest calls.  The totals are a new plist, as `session/usage-add'
+makes one, and the session is saved and announced (`session/changed').
+Unlike `session/usage-add', this records no usage row and emits no
+`session/usage' event: that event would record a row and be measured
+for the output rate again.  A RECORD with neither number changes
+nothing.  Return the totals, nil for a session that is gone."
+  (when-let* ((s (gethash id harness-sessions)))
+    (let ((u (copy-sequence (harness-session-usage s)))
+          (added nil))
+      (dolist (k '(:stream-output :stream-seconds))
+        (when (numberp (plist-get record k))
+          (setq u (plist-put u k (+ (or (plist-get u k) 0) (plist-get record k)))
+                added t)))
+      (when added
+        (setf (harness-session-usage s) u)
+        (harness-session--touch s))
+      (harness-session-usage s))))
 
 (harness-defmethod session/set-todos (id todos)
   "Replace the todo list of session ID with TODOS."

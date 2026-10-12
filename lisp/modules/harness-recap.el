@@ -232,6 +232,8 @@ RECAP, or rejects with why there is none."
          (request (append
                    (list :model (harness-recap--model session)
                          :session session
+                         ;; Recorded as an internal session made for SESSION.
+                         :job "Recap" :job-parent (plist-get session :id)
                          :system harness-recap--system-prompt
                          :messages (list (list :role 'user
                                                :content (list (list :type "text"
@@ -357,9 +359,12 @@ or from when the session started."
 
 (defun harness-recap--session-maybe (session-id session force)
   "Start a recap request for SESSION-ID when one is due and it may get one.
-FORCE skips the thresholds.  Return the promise of a request just
-started, or nil."
+FORCE skips the thresholds, but never recaps an internal session, the
+record of one model call (see `session/internal-start'): there is
+nothing to recap there.  Return the promise of a request just started,
+or nil."
   (when (and (not (gethash session-id harness-recap--session-running))
+             (not (equal (format "%s" (plist-get session :kind)) "internal"))
              (or force (harness-recap--session-own-p session)))
     (let ((retry (gethash session-id harness-recap--session-failed)))
       (when (and (or (null retry) (>= (float-time) retry))

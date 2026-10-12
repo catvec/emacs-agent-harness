@@ -353,5 +353,44 @@
         (should (equal pid (car harness-ui-worktree--queue)))
         (should (string-match-p "merge queue" (harness-ui-worktree-test-mode-line)))))))
 
+(ert-deftest harness-ui-worktree-sessions-leave-out-internal-ones ()
+  "The sessions of a worktree are the user's: an internal session working there is none.
+The harness records each model call it makes on its own as an internal
+session, made for a session, living where it does and having it as its
+parent.  The sessions column does not name one, and the merge key does
+not take it for a forked session of the worktree: with the one fork it
+queues that, without asking which."
+  (harness-ui-worktree-test-with
+    (harness-ui-worktree-test-open root 2)
+    (let* ((parent (harness-call 'session/create :cwd root :model "demo:scripted" :name "Parent"))
+           (pid (plist-get parent :id))
+           (child (harness-call 'session/create :cwd wt :model "demo:scripted" :name "Feature worker"
+                                :parent-id pid))
+           (cid (plist-get child :id))
+           (jid (harness-call 'session/internal-start :job "Permission judge" :model "demo:scripted"
+                              :parent-id cid :prompt "May it run ls?"))
+           (enqueued nil)
+           (real (symbol-function 'harness-ui-call)))
+      (let (done)
+        (harness-ui-refresh-sessions (lambda (_) (setq done t)))
+        (harness-test-wait (lambda () done) 5 "the sessions"))
+      (should (equal "internal" (format "%s" (plist-get (harness-ui-session jid) :kind))))
+      ;; The judge lives in the worktree, with the fork as its parent.
+      (should (harness-ui-worktree-test-same-p wt (plist-get (harness-ui-session jid) :cwd)))
+      (should (equal (list cid) (mapcar (lambda (s) (plist-get s :id)) (harness-ui-worktree--sessions-in wt))))
+      (should (string-match-p "Feature worker" (harness-ui-worktree--sessions-label wt)))
+      (should-not (string-match-p "Permission judge" (harness-ui-worktree--sessions-label wt)))
+      ;; The merge key: one fork there, so no question.
+      (harness-ui-worktree-test-goto wt)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (ert-fail "The merge key asked which session")))
+                ((symbol-function 'harness-ui-call)
+                 (lambda (method params &rest rest)
+                   (if (equal method "_harness/merge/enqueue")
+                       (push params enqueued)
+                     (apply real method params rest)))))
+        (harness-ui-worktree-merge))
+      (should (equal (list (list :child-id cid :target pid)) enqueued)))))
+
 (provide 'harness-ui-worktree-test)
 ;;; harness-ui-worktree-test.el ends here

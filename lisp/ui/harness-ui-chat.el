@@ -4194,9 +4194,9 @@ seeds has none to open, so a new one starts as it would with no
 session at all."
   (interactive (list (and current-prefix-arg (harness-ui-read-position))))
   (let* ((root (harness-chat--project-root default-directory))
-         (mine (harness-ui-sessions (lambda (s)
-                                      (and (equal (plist-get s :project) root)
-                                           (harness-ui-navigable-session-p s))))))
+         (mine (harness-ui-user-sessions (lambda (s)
+                                           (and (equal (plist-get s :project) root)
+                                                (harness-ui-navigable-session-p s))))))
     (if mine
         (harness-open-session (plist-get (car mine) :id) position)
       (harness-new-session root position))))

@@ -1399,7 +1399,10 @@ A hit's snippet is the start of its nearest chunk."
 (defun harness-session-search--candidates (opts)
   "Return the session plists OPTS asks to search, newest first.
 `:sessions' names them (all when absent), `:exclude' leaves some out and
-`:project' keeps those of that project, its worktrees included."
+`:project' keeps those of that project, its worktrees included.  The
+internal sessions, the records of the harness's own model calls, are
+left out: their prompts hold what the sessions they were made for did,
+which would match twice."
   (let* ((only (harness-session-search--set (plist-get opts :sessions)))
          (exclude (plist-get opts :exclude))
          (project (plist-get opts :project))
@@ -1416,6 +1419,7 @@ A hit's snippet is the start of its nearest chunk."
        (let ((id (plist-get s :id)))
          (and (or (null only) (gethash id only))
               (not (member id exclude))
+              (not (eq (plist-get s :kind) 'internal))
               (or (null root)
                   (equal root (funcall root-of (or (plist-get s :project) (plist-get s :cwd))))))))
      (harness-call 'session/list))))

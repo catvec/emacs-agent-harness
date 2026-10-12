@@ -183,7 +183,11 @@ When the policy sets one of these, every session has the policy's value:
 new ones, forks, sub-agents, task sessions, sessions saved before the
 policy came (when they are loaded) and those that exist when a reload
 brings a new policy.  `session/update`, `session/set-all` and the task
-board refuse another value, with the reason above.
+board refuse another value, with the reason above.  An internal session,
+the record of a model call the harness made on its own (the permission
+judge's, a session's name), is the exception: the policy fixes none of
+its settings, so it keeps the model that call was made with, which the
+policy's model would misname.
 
 A BTW thinks at `harness-btw-thinking`, or at the nearest level below
 it that its model offers (its weakest when it has none that low), so a

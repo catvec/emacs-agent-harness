@@ -69,6 +69,9 @@ Each is (ID . RESULT).")
 (defvar harness-tools-emacs-eval-test--model "judge:big"
   "The model of the session the tests call the tool in.")
 
+(defvar harness-tools-emacs-eval-test--jobs nil
+  "The job and the parent of each internal session the judge started.
+Newest first: one for each call to the judge.")
 (defun harness-tools-emacs-eval-test--mystery ()
   "Count one more run of code the tests sent, and return the count.
 It returns at once: it only adds one to a number.  No judge knows it,
@@ -131,6 +134,18 @@ from a timer, as a provider's events come."
                   (when events
                     (run-at-time 0.01 nil #'harness-tools-emacs-eval-test--play events on-event)))
                 (list :cancel (lambda () (setq harness-tools-emacs-eval-test--cancelled t))))))
+
+(defun harness-tools-emacs-eval-test--record-jobs ()
+  "Stand in for the internal sessions the judge's calls are recorded as.
+The job and the parent `provider/complete' passes to
+`session/internal-start' go to `harness-tools-emacs-eval-test--jobs'."
+  (setq harness-tools-emacs-eval-test--jobs nil)
+  (harness-register-method 'session/internal-start
+                           (lambda (&rest plist)
+                             (push (list (plist-get plist :job) (plist-get plist :parent-id))
+                                   harness-tools-emacs-eval-test--jobs)
+                             (format "internal-%d" (length harness-tools-emacs-eval-test--jobs))))
+  (harness-register-method 'session/internal-finish #'ignore))
 
 ;;;; Setting up
 
@@ -315,6 +330,7 @@ a failed request, one cut off twice, an unknown provider, no model."
   "A judge that spent its output before its verdict is asked once more,
 with more room; a verdict written before the cap stands at once."
   (harness-tools-emacs-eval-test--with
+    (harness-tools-emacs-eval-test--record-jobs)
     (harness-tools-emacs-eval-test--judge-says
      (harness-tools-emacs-eval-test--reply "Let me think about what this" 'max-tokens)
      (harness-tools-emacs-eval-test--verdict "fast" "It sets one variable."))
@@ -322,6 +338,8 @@ with more room; a verdict written before the cap stands at once."
                                      :content)))
     (should (equal (list harness-tools-emacs-eval--judge-retry-max-tokens harness-tools-emacs-eval--judge-max-tokens)
                    (mapcar (lambda (req) (plist-get req :max-tokens)) harness-tools-emacs-eval-test--requests)))
+    ;; Each call is recorded as an internal session of the session asking.
+    (should (equal '(("Elisp judge (retry)" "s1") ("Elisp judge" "s1")) harness-tools-emacs-eval-test--jobs))
     (harness-tools-emacs-eval-test--judge-says
      (harness-tools-emacs-eval-test--reply "{\"verdict\":\"fast\",\"reason\":\"Quick.\"} And more" 'max-tokens))
     (should (equal "=> 2" (plist-get (harness-tools-emacs-eval-test--call "(cl-incf harness-tools-emacs-eval-test--ran)")

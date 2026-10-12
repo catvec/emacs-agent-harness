@@ -1277,6 +1277,114 @@ Its streaming time goes on counting for the output it reports later."
         (harness-emit 'agent/call-usage id '(:output 100))
         (should (harness-usage-test-near 50.0 (plist-get (harness-call 'usage/rate id) :rate)))))))
 
+(defun harness-usage-test-streamed (id)
+  "Return what session ID's usage totals say it streamed: (OUTPUT SECONDS)."
+  (let ((usage (plist-get (harness-call 'session/get id) :usage)))
+    (list (plist-get usage :stream-output) (plist-get usage :stream-seconds))))
+
+(ert-deftest harness-usage-rate-totals-add-up-every-measured-call ()
+  "The session keeps the output and the seconds of every call the rate
+measures, one made on another model included, which the rate's window
+drops.  A call too short to measure, or without output, adds nothing."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let ((id (harness-usage-test-session)))
+        (should (equal '(nil nil) (harness-usage-test-streamed id)))
+        (harness-emit 'agent/turn-started id)
+        (harness-usage-test-phase id 'writing)
+        (harness-usage-test-at 2)
+        (harness-call 'session/usage-add id '(:input 1 :output 100))
+        (should (equal '(100 2.0) (harness-usage-test-streamed id)))
+        ;; The session goes on with another model: the rate forgets the
+        ;; call made on the first, the totals keep it.
+        (harness-call 'session/update id :model "demo:other")
+        (harness-usage-test-at 6)
+        (harness-call 'session/usage-add id '(:input 1 :output 60))
+        (let ((rate (harness-call 'usage/rate id)))
+          (should (= 1 (plist-get rate :calls)))
+          (should (= 60 (plist-get rate :output))))
+        (should (equal '(160 6.0) (harness-usage-test-streamed id)))
+        ;; Output that came at once, and none at all, add nothing.
+        (harness-usage-test-at 6.1)
+        (harness-call 'session/usage-add id '(:input 1 :output 500))
+        (harness-usage-test-at 9)
+        (harness-call 'session/usage-add id '(:input 1 :output 0))
+        (should (equal '(160 6.0) (harness-usage-test-streamed id)))
+        ;; The accounting is as ever: a row for each record, the totals
+        ;; of the session counting only what the records said.
+        (should (= 4 (plist-get (harness-call 'usage/totals :session id) :calls)))
+        (should (= 660 (plist-get (plist-get (harness-call 'session/get id) :usage) :output)))))))
+
+(ert-deftest harness-usage-rate-totals-follow-hosted-calls ()
+  "A hosted loop's calls add up one by one; the record that totals its
+turn is not measured again, so it adds nothing."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let ((id (harness-usage-test-session)))
+        (harness-emit 'agent/turn-started id)
+        (harness-usage-test-phase id 'writing)
+        (harness-usage-test-at 2)
+        (harness-emit 'agent/call-usage id '(:output 100))
+        (harness-usage-test-at 3)
+        (harness-emit 'agent/call-usage id '(:output 80))
+        ;; The turn's total, which may count sub-agents too, at its end.
+        (harness-usage-test-at 4)
+        (harness-call 'session/usage-add id '(:input 900 :output 9000))
+        (should (equal '(180 3.0) (harness-usage-test-streamed id)))
+        (should (= 9000 (plist-get (plist-get (harness-call 'session/get id) :usage) :output)))))))
+
+(ert-deftest harness-usage-rate-totals-of-a-streamed-turn ()
+  "A turn the demo provider streams leaves its output and streaming time with
+the session, and the rate is still measured."
+  (harness-usage-test-with
+    (let* ((id (harness-usage-test-session))
+           (harness-provider-demo--delay 0.05)
+           (harness-provider-demo-script-override
+            (append (make-list 8 '(:type text :delta "word "))
+                    '((:type usage :input 100 :output 40 :cost 0.0001 :context 100)
+                      (:type done :stop-reason end-turn)))))
+      (should (eq 'end-turn (plist-get (harness-await (harness-call 'agent/prompt id "hello")) :stop-reason)))
+      (pcase-let ((`(,output ,seconds) (harness-usage-test-streamed id))
+                  (rate (harness-call 'usage/rate id)))
+        (should (= 40 output))
+        (should (< 0.3 seconds 5.0))
+        (should (harness-usage-test-near seconds (plist-get rate :seconds)))))))
+
+(ert-deftest harness-usage-note-records-no-row-and-no-usage-event ()
+  "`session/usage-note' only adds to the totals: it emits no `session/usage'
+event, which would record a row and be measured for the rate again."
+  (harness-usage-test-with
+    (let ((id (harness-usage-test-session)) (events nil) (rows nil) (rates nil))
+      (harness-call 'session/usage-add id '(:input 10 :output 5 :cost 0.01))
+      (harness-on 'session/usage (lambda (&rest args) (push args events)))
+      (harness-on 'usage/recorded (lambda (row) (push row rows)))
+      (harness-on 'usage/rate-updated (lambda (&rest args) (push args rates)))
+      (let ((totals (harness-call 'session/usage-note id '(:stream-output 40 :stream-seconds 2.0))))
+        (should (= 40 (plist-get totals :stream-output)))
+        (should (= 5 (plist-get totals :output))))
+      (should (equal '(40 2.0) (harness-usage-test-streamed id)))
+      (should-not events)
+      (should-not rows)
+      (should-not rates)
+      (should-not (harness-call 'usage/rate id))
+      (should (= 1 (plist-get (harness-call 'usage/totals :session id) :calls))))))
+
+(ert-deftest harness-usage-rate-survives-a-failing-note ()
+  "A failure to add to the session's totals is logged and goes no further:
+the call is still measured."
+  (harness-usage-test-with
+    (harness-usage-test-clock
+      (let ((id (harness-usage-test-session)))
+        (harness-register-method 'session/usage-note (lambda (&rest _) (error "No totals today")))
+        (harness-emit 'agent/turn-started id)
+        (harness-usage-test-phase id 'writing)
+        (harness-usage-test-at 2)
+        (harness-call 'session/usage-add id '(:input 1 :output 100))
+        (should (harness-usage-test-near 50.0 (plist-get (harness-call 'usage/rate id) :rate)))
+        (with-current-buffer (get-buffer-create harness-log-buffer-name)
+          (should (string-match-p "usage: could not add what .* streamed to its totals: No totals today"
+                                  (buffer-string))))))))
+
 ;;;; Live usage
 
 (defun harness-usage-test-live-recorder ()

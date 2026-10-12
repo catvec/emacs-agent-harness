@@ -171,7 +171,7 @@ that signals finds nothing, and is logged under LABEL."
 
 (cl-defun harness-judge-ask (&key session model system prompt tools (max-lookups 0)
                                   (max-tokens 200) retry-max-tokens (timeout 30)
-                                  parse label (suffix "judge"))
+                                  parse label job (suffix "judge"))
   "Ask a judge PROMPT; return a promise of its answer, which never rejects.
 A judge is a one-off question to a cheap model, whose reply PARSE, a
 function of the reply's text, reads.  The answer is
@@ -205,7 +205,9 @@ promise rejects, gives an error result, and content longer than
 `harness-judge-lookup-max-chars' is cut.  A call past the budget, or
 of a name not among TOOLS, gets an error result and runs nothing.
 LABEL names the judge in the log, as \"emacs_eval judge\" (\"judge\"
-by default)."
+by default).  JOB, a few words, when given, names the judge's
+internal session, in which the request is recorded (see
+`provider/complete''s `:job')."
   (let* ((session (harness-judge--session session))
          (label (or label "judge"))
          (timeout (or timeout 30))
@@ -332,6 +334,10 @@ by default)."
                                  :ephemeral t
                                  :session (list :id (format "%s-%s" (plist-get session :id) suffix)
                                                 :cwd (plist-get session :cwd) :host (plist-get session :host))
+                                 ;; Recorded as an internal session made for
+                                 ;; the session asking.
+                                 :job (and job (if retried (format "%s (retry)" job) job))
+                                 :job-parent (and job (plist-get session :id))
                                  :system system
                                  :messages messages
                                  :tools specs

@@ -86,6 +86,7 @@ layout: half the frame keeps the board's cards whole.")
 (defvar harness-supervisor)
 (defvar harness-supervisor-tasks)
 (defvar harness-recap--sessions)
+(defvar harness-merge--locks)
 
 (declare-function harness-start "harness")
 (declare-function harness-call "harness-core")
@@ -1209,7 +1210,6 @@ The handle is the one the approval message names."
     ("slower than" . harness-media--task-slow)
     ("typed config" . harness-media--task-settings)
     ("OpenAPI" . harness-media--task-openapi)
-    ("Hold this turn" . harness-media--hold-script)
     ("Let a sub-agent run" . harness-media--notes-script)
     ("Run the project's check suite" . harness-media--notes-child-script)
     ;; The denied call and the user's approval of it.
@@ -1475,10 +1475,6 @@ Give up after TIMEOUT seconds (default 90)."
   "Submit PROMPT as a task of the demo project with OPTS; return its id."
   (plist-get (harness-call 'task/submit harness-media-project prompt opts) :id))
 
-(defun harness-media--hold-script (_request)
-  "A turn that never ends: the merge queue's parent, kept busy for the board picture."
-  (list (list :type 'hold)))
-
 (defconst harness-media--notes-command
   "for i in $(seq 1 40); do printf 'run %s of 40: ' \"$i\"; python3 -m unittest 2>&1 | tail -n 1; sleep 0.7; done"
   "What the notes picture's sub-agent runs: checks in a loop, long enough
@@ -1499,12 +1495,11 @@ to still be running while the picture is taken, a line each round.")
         (harness-media--say "Every run passed.")))
 
 (defun harness-media--hold-merge-session ()
-  "Keep the task project's merge session busy, so a merged branch waits in the queue.
-The picture of the board then has a task in its merging section."
-  (let ((merger (cl-find "Task merges" (harness-call 'session/list)
-                         :key (lambda (s) (plist-get s :name)) :test #'equal)))
-    (when merger
-      (harness-media--prompt (plist-get merger :id) "Hold this turn while the picture is taken." '(running)))))
+  "Keep the task project's merge lock taken, so a merged branch waits in the queue.
+A task's branch merges into the main checkout, which has no session to
+keep busy: the lock is what the queue waits for.  The picture of the
+board then has a task in its merging section."
+  (puthash (directory-file-name harness-media-project) "media" harness-merge--locks))
 
 (defun harness-media--build-tasks ()
   "Fill the task board: done, merging, in review, in progress, stuck and in the backlog."
@@ -1707,11 +1702,6 @@ recaps: the lines the model would have written by now."
       (harness-media--set-times (plist-get harness-media--world key) created updated))
     (pcase-dolist (`(,key ,minutes) '((:ratelimit 5) (:fork 2) (:btw 0.6)))
       (harness-media--age-nodes (plist-get harness-media--world key) minutes))
-    ;; The session tasks merge into, made by the first merge.
-    (maphash (lambda (id _session)
-               (when (equal (plist-get (harness-media--session id) :name) "Task merges")
-                 (harness-media--set-times id 1560 140)))
-             harness-sessions)
     (harness-ui-refresh-sessions)))
 
 (defun harness-media--age-nodes (id minutes)
@@ -1728,10 +1718,39 @@ recaps: the lines the model would have written by now."
           (puthash node-id (plist-put (copy-sequence node) :ts (- (or (plist-get node :ts) 0) shift)) table))))))
 
 (defun harness-media--set-times (id created updated)
-  "Say session ID was created CREATED and updated UPDATED minutes ago."
+  "Say session ID was created CREATED and updated UPDATED minutes ago.
+Its last message is as old as that."
   (when-let* ((s (gethash id harness-sessions)))
     (aset s (cl-struct-slot-offset 'harness-session 'created) (harness-media--ago created))
-    (aset s (cl-struct-slot-offset 'harness-session 'updated) (harness-media--ago updated))))
+    (aset s (cl-struct-slot-offset 'harness-session 'updated) (harness-media--ago updated))
+    (aset s (cl-struct-slot-offset 'harness-session 'last-message) (harness-media--ago updated))))
+
+(defconst harness-media--rates
+  '(("claude:claude-fable-5-1" . 48.0) ("claude:claude-opus-5-5" . 41.0)
+    ("claude:claude-sonnet-5" . 74.0) ("openrouter:openai/gpt-5" . 96.0))
+  "Tokens per second each model of the world writes at, for the Avg tok/s column.")
+
+(defun harness-media--seed-rates ()
+  "Give every session the output it streamed and the seconds that took.
+Every agent of the run is scripted and replays its turns in a blink, so
+the usage module measured next to nothing (on a busy machine, a call or
+two that happened to take longer, at a rate no model has).  The
+pictures get the totals a session would have kept had it written at its
+model's pace (`:stream-output' and `:stream-seconds' of its usage):
+nine tenths of its output, over the time that takes at the pace plus or
+minus four tokens a second, picked from the output so the sessions of
+one model differ a little.  They replace what was measured."
+  (maphash (lambda (id s)
+             (let* ((slot (cl-struct-slot-offset 'harness-session 'usage))
+                    (session (harness-media--session id))
+                    (pace (cdr (assoc (plist-get session :model) harness-media--rates)))
+                    (output (plist-get (plist-get session :usage) :output)))
+               (when (and pace output (> output 0))
+                 (let* ((streamed (round (* 0.9 output)))
+                        (rate (+ pace (- (mod output 9) 4)))
+                        (usage (plist-put (copy-sequence (aref s slot)) :stream-output streamed)))
+                   (aset s slot (plist-put usage :stream-seconds (/ streamed rate)))))))
+           harness-sessions))
 
 (defun harness-media--build-world ()
   "Make everything the pictures show."
@@ -1744,6 +1763,7 @@ recaps: the lines the model would have written by now."
   (harness-media--build-tasks)
   (harness-media--log "running the conversations")
   (harness-media--build-sessions)
+  (harness-media--seed-rates)
   (harness-media--age)
   (harness-media--settle 1))
 
@@ -2002,7 +2022,11 @@ handle linking the two."
   "Return the sub-agent session PARENT sent to run the checks, once it exists."
   (harness-media--wait
    (lambda ()
-     (let ((session (car (harness-call 'session/list (list :parent-id parent)))))
+     ;; The permission judge's verdicts on the parent's calls are internal
+     ;; sessions with the same parent (`session/internal-start'): not it.
+     (let ((session (cl-find-if-not
+                     (lambda (s) (equal (format "%s" (plist-get s :kind)) "internal"))
+                     (harness-call 'session/list (list :parent-id parent)))))
        (and session (plist-get session :id))))
    30 "the sub-agent session"))
 
@@ -2344,14 +2368,17 @@ The popout closes after the picture."
     (goto-char (prop-match-beginning match))
     (recenter 4)))
 
-(defun harness-media--fit-popout-shot (most)
+(defun harness-media--fit-popout-shot (most &optional spare)
   "Size the frame for a view with a popout under it, at most MOST lines.
 The frame is fitted to the text of every window, so the view and the
-popout both show; the popout is a side window and keeps its height."
+popout both show; the popout is a side window and keeps its height,
+which is more than its text needs.  SPARE lines more make up for that
+when the view must show whole."
   (set-frame-size nil harness-media-columns
                   (min (or most harness-media-lines)
-                       (max 24 (+ 6 (cl-loop for w in (window-list nil 'nomini)
-                                             sum (harness-media--text-lines w))))))
+                       (max 24 (+ 6 (or spare 0)
+                                  (cl-loop for w in (window-list nil 'nomini)
+                                           sum (harness-media--text-lines w))))))
   (harness-media--settle 1))
 
 (defun harness-media-shot-popout-permission ()
@@ -2359,7 +2386,9 @@ popout both show; the popout is a side window and keeps its height."
   (harness-media--view #'harness-sessions)
   (harness-media--goto-session-row (plist-get harness-media--world :permission))
   (harness-ui-sessions-requests)
-  (harness-media--fit-popout-shot 32)
+  ;; The whole list shows over the popout: four lines more than the
+  ;; text of the two windows, which the popout's own height eats.
+  (harness-media--fit-popout-shot 36 4)
   (harness-media--capture "popout-permission"))
 
 (defun harness-media-shot-popout-question ()

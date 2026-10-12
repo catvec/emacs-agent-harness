@@ -319,7 +319,7 @@ of the supervisor's own for them any more."
                    (plist-get (harness-test-await (harness-call 'session/fork parent)) :id))))))
 
 (ert-deftest harness-supervisor-other-kinds-are-never-governed ()
-  "Sub-agents, side conversations and any other kind get no setting."
+  "Sub-agents, side conversations, internal sessions and any other kind get no setting."
   (harness-supervisor-test-with
     (let ((parent (harness-supervisor-test-session)))
       (dolist (kind '(subagent btw scratch))
@@ -333,7 +333,17 @@ of the supervisor's own for them any more."
       (should-not (harness-supervisor-test-get (harness-supervisor-test-session :parent-id parent)))
       (let* ((child (harness-supervisor-test-session :kind 'subagent :parent-id parent))
              (fork (plist-get (harness-test-await (harness-call 'session/fork child :kind 'subagent)) :id)))
-        (should-not (harness-supervisor-test-get fork))))))
+        (should-not (harness-supervisor-test-get fork)))
+      ;; Nor is an internal session, the record of a model call the harness
+      ;; made, with a parent or without one, even with `auto' to judge.
+      (let ((harness-supervisor 'auto))
+        (dolist (sid (list (harness-call 'session/internal-start :job "Recap" :model "demo:scripted"
+                                         :parent-id parent :prompt "recap")
+                           (harness-call 'session/internal-start :job "Pet" :model "demo:scripted"
+                                         :prompt "hello")))
+          (should-not (harness-supervisor-test-get sid))
+          (should-not (harness-supervisor-test-judge-mark sid))
+          (should-not (harness-call 'supervisor/active-p sid)))))))
 
 (ert-deftest harness-supervisor-a-setting-its-maker-gave-stays ()
   "A session made with its setting in `:ext' keeps it."
@@ -429,7 +439,15 @@ sessions a project starts do."
           (should (string-match-p "Rework the whole storage layer" (plist-get judge :text)))
           (should (string-match-p "Reply with exactly one word" (plist-get judge :system)))
           ;; The judge is not the turn: its request carries no session transcript.
-          (should (string-match-p "SUPERVISE or HANDS-ON" (plist-get judge :text))))))))
+          (should (string-match-p "SUPERVISE or HANDS-ON" (plist-get judge :text))))
+        ;; The call is recorded as an internal session made for the session,
+        ;; which is governed by nobody and judged by nobody.
+        (let ((calls (harness-call 'session/list (list :kind 'internal))))
+          (should (= 1 (length calls)))
+          (should (equal "Session judge" (plist-get (car calls) :name)))
+          (should (equal sid (plist-get (car calls) :parent-id)))
+          (should-not (harness-supervisor-test-get (plist-get (car calls) :id)))
+          (should-not (harness-supervisor-test-judge-mark (plist-get (car calls) :id))))))))
 
 (ert-deftest harness-supervisor-a-judged-hands-on-job-gives-the-mode-up ()
   "An `auto' session whose opening message reads hands-on ends up hands-on."

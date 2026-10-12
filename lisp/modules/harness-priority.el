@@ -204,10 +204,11 @@ orders the queues its work waits in."
 (harness-defmethod priority/set-all (priority &optional filter)
   "Give every session FILTER selects PRIORITY; return the ids that changed.
 The bulk way to give sessions a priority, as `task/set-all' is for
-tasks.  FILTER is the one of `session/select' (`session/set-all''s);
-nil selects every session.  PRIORITY is read as
-`harness-priority-read' reads it.  A session already carrying that
-level of its own is left alone.  The ids come newest first, as
+tasks.  FILTER is the one of `session/select' (`session/set-all''s),
+which includes `:ids', a list of session ids: only the sessions it
+names are given PRIORITY.  Nil selects every session.  PRIORITY is
+read as `harness-priority-read' reads it.  A session already carrying
+that level of its own is left alone.  The ids come newest first, as
 `session/set-all' returns them."
   (unless (harness-method-exists-p 'session/select)
     (error "The sessions module is not loaded, so sessions have no priority"))

@@ -8,11 +8,16 @@
 ;; Sessions:
 ;; - `session_list' lists sessions (this project by default) with
 ;;   status, model, usage, priority and whether they wait on the user.
+;;   Internal sessions, the records of the model calls the harness
+;;   makes on its own (see `session/internal-start'), are listed only
+;;   for kind internal, and a prefix or a name finds one only when it
+;;   finds no other session.
 ;; - `session_search' finds sessions by their transcripts and names:
 ;;   full-text search by words, best match first, by default; the exact
 ;;   text, a regexp, or what is nearest in meaning on request.  The
 ;;   search is `session/search' (harness-session-search.el), over an
 ;;   SQLite index of the node logs, and grep over the logs themselves.
+;;   It leaves out the internal sessions.
 ;; - `session_read' shows the recent transcript of one session.
 ;; - `session_history' searches and reads the calling session's own
 ;;   conversation from before its last compaction or handoff, which the
@@ -222,16 +227,29 @@ A user message the user did not write says who sent it."
 
 ;;;; Resolving references
 
+(defun harness-tools-sessions--internal-p (session)
+  "Non-nil when SESSION, a plist, is an internal session.
+Such a session records one model call the harness made on its own, such
+as a verdict of the permission judge (see `session/internal-start')."
+  (eq (plist-get session :kind) 'internal))
+
 (defun harness-tools-sessions--resolve (ref)
-  "Return the session id REF names: an id, a unique id prefix or a unique name."
+  "Return the session id REF names: an id, a unique id prefix or a unique name.
+An internal session (`harness-tools-sessions--internal-p') answers to
+a prefix or a name only when no other session does: many are named
+after the same job, and a prefix of another session's id is not meant
+for them."
   (let ((ref (string-trim (format "%s" (or ref "")))))
     (when (string-empty-p ref) (signal 'harness-error (list "A session id is required")))
     (if (harness-call 'session/exists-p ref)
         ref
       (let* ((all (harness-call 'session/list))
-             (hits (or (cl-remove-if-not (lambda (s) (string-prefix-p ref (plist-get s :id))) all)
-                       (cl-remove-if-not (lambda (s) (equal (downcase ref) (downcase (or (plist-get s :name) ""))))
-                                         all))))
+             (match (lambda (sessions)
+                      (or (cl-remove-if-not (lambda (s) (string-prefix-p ref (plist-get s :id))) sessions)
+                          (cl-remove-if-not (lambda (s) (equal (downcase ref) (downcase (or (plist-get s :name) ""))))
+                                            sessions))))
+             (hits (or (funcall match (cl-remove-if #'harness-tools-sessions--internal-p all))
+                       (funcall match all))))
         (pcase (length hits)
           (1 (plist-get (car hits) :id))
           (0 (signal 'harness-error (list (format "No session matches %s; use session_list to find ids" ref))))
@@ -288,7 +306,9 @@ Without all_projects it keeps sessions of CTX's project, worktrees included."
 
 (defun harness-tools-sessions--list (input ctx)
   "Handler of session_list.
-INPUT is the tool call's input plist and CTX its context."
+INPUT is the tool call's input plist and CTX its context.  Internal
+sessions (`harness-tools-sessions--internal-p') are left out unless
+INPUT asks for kind internal."
   (let* ((scope (harness-tools-sessions--scope input ctx))
          (status (let ((s (plist-get input :status))) (and s (intern s))))
          (kind (let ((k (plist-get input :kind))) (and k (intern k))))
@@ -302,7 +322,9 @@ INPUT is the tool call's input plist and CTX its context."
                       (and (funcall scope s)
                            (or inactive status (not (eq (plist-get s :status) 'inactive)))
                            (or (null status) (eq status (plist-get s :status)))
-                           (or (null kind) (eq kind (plist-get s :kind)))
+                           (if kind
+                               (eq kind (plist-get s :kind))
+                             (not (harness-tools-sessions--internal-p s)))
                            (or (null parent) (equal parent (plist-get s :parent-id)))
                            (or (null name) (string-match-p (regexp-quote (downcase name))
                                                            (downcase (or (plist-get s :name) ""))))))
@@ -322,11 +344,11 @@ INPUT is the tool call's input plist and CTX its context."
 
 (harness-define-tool "session_list"
   :label "List sessions"
-  :description "List harness sessions with id, status (idle, running, blocked, inactive), kind, name, model, working directory, cost, priority (when it is not the default medium) and what each one waits on. A task's priority is its session's. Defaults to the open sessions of this project; set include_inactive for closed ones and all_projects for every project. Session ids (or a unique prefix, or a unique name) are accepted by the other session_* tools."
+  :description "List harness sessions with id, status (idle, running, blocked, inactive), kind, name, model, working directory, cost, priority (when it is not the default medium) and what each one waits on. A task's priority is its session's. Defaults to the open sessions of this project; set include_inactive for closed ones and all_projects for every project. Internal sessions, the records of the model calls the harness makes on its own (the permission judge, naming, recaps…), are left out unless kind is internal. Session ids (or a unique prefix, or a unique name) are accepted by the other session_* tools."
   :schema '(:type "object"
             :properties (:status (:type "string" :enum ("idle" "running" "blocked" "inactive")
                                   :description "Only sessions in this status.")
-                         :kind (:type "string" :description "Only sessions of this kind (main, fork, subagent, btw…).")
+                         :kind (:type "string" :description "Only sessions of this kind (main, fork, subagent, btw, internal…).")
                          :parent_id (:type "string" :description "Only children of this session.")
                          :name (:type "string" :description "Only sessions whose name contains this text.")
                          :include_inactive (:type "boolean" :description "Include closed sessions (default false).")
@@ -381,7 +403,8 @@ A user message the user did not write says who sent it."
 
 (defun harness-tools-sessions--search (input ctx)
   "Handler of session_search.
-INPUT is the tool call's input plist and CTX its context."
+INPUT is the tool call's input plist and CTX its context.  Internal
+sessions (`harness-tools-sessions--internal-p') are not searched."
   (let* ((query (or (plist-get input :query) ""))
          (per-session (or (plist-get input :max_matches) 3))
          (self (plist-get ctx :session-id))
@@ -401,7 +424,7 @@ INPUT is the tool call's input plist and CTX its context."
 
 (harness-define-tool "session_search"
   :label "Search sessions"
-  :description "Search the transcripts of other sessions (messages, thinking, tool calls and results) and their names. Mode text (the default) is full-text search: words match in any form (\"parse\" finds \"parsing\"), case and accents aside; every word must match; \"quoted words\" match as a phrase, word* as a prefix, a OR b either, and -word excludes; best matches first, and when no session has every word, those with some. Mode literal finds the exact text and regexp an extended regular expression (as grep -E), both case-insensitively, newest sessions first. Mode semantic finds what is nearest in meaning, when the user set an embedding model. Returns the matching sessions with snippets and node ids; read one with session_read. Searches this project unless all_projects is set; closed sessions are included. This session's own conversation from before a compaction is searched with session_history instead."
+  :description "Search the transcripts of other sessions (messages, thinking, tool calls and results) and their names. Mode text (the default) is full-text search: words match in any form (\"parse\" finds \"parsing\"), case and accents aside; every word must match; \"quoted words\" match as a phrase, word* as a prefix, a OR b either, and -word excludes; best matches first, and when no session has every word, those with some. Mode literal finds the exact text and regexp an extended regular expression (as grep -E), both case-insensitively, newest sessions first. Mode semantic finds what is nearest in meaning, when the user set an embedding model. Returns the matching sessions with snippets and node ids; read one with session_read. Searches this project unless all_projects is set; closed sessions are included, internal ones (the records of the harness's own model calls) are not. This session's own conversation from before a compaction is searched with session_history instead."
   :schema '(:type "object"
             :properties (:query (:type "string" :description "What to find.")
                          :mode (:type "string" :enum ("text" "literal" "regexp" "semantic")

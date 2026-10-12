@@ -141,9 +141,15 @@ calls a model or the network.
   session, a fork of it and a BTW over it (the tree, BTW, menu and
   attachments pictures), the permission and question chats, and two
   older sessions, closed since.
-- `harness-media--age` moves the times of the tasks, the sessions and
-  the tree's nodes back, so the pictures read "done 2h ago" and "took
-  14m" rather than "just now".
+- `harness-media--seed-rates` gives every session the output it streamed
+  and the seconds that took, at its model's pace
+  (`harness-media--rates`), for the session list's Avg tok/s column and
+  the cards of the board.  The scripted agents replay their turns in a
+  blink, so the usage module measured next to nothing.
+- `harness-media--age` moves the times of the tasks, the sessions (their
+  last messages too, for the Last msg column) and the tree's nodes back,
+  so the pictures read "done 2h ago" and "took 14m" rather than "just
+  now".
 - `harness-media--seed-history` writes a month of earlier chats for
   the Insights pictures. The report reads transcripts from disk, where
   the world's nodes all date from today; `harness-media--age` moves
@@ -297,6 +303,12 @@ Before committing, check that
   of its window with padding, which the fitting leaves out.
 - **Times.**  Anything a view shows as "N ago" needs a time in
   `harness-media--age`, or it reads "just now".
+- **Internal sessions.**  The harness records its own model calls (the
+  judge's verdicts, session titles, recaps) as sessions of kind
+  `internal`, children of the session they were made for when there is
+  one.  The session list leaves them out, but `session/list` does not:
+  code that looks for a session by its parent or its name must skip
+  them.
 - **Bugs.**  When a picture shows the UI doing something wrong, fix the
   UI rather than the picture.  Taking these pictures found five so
   far: the chat header dropped the % of quota windows, Markdown tables

@@ -1224,8 +1224,10 @@ See `harness-tasks-search-model'."
 
 (defun harness-tasks-search--ask (search messages)
   "Send MESSAGES to SEARCH's model; return a promise of its reply's text.
-It fails after `harness-tasks-search--timeout' seconds, and when the
-provider ends the request with an error."
+The call is recorded as an internal session in SEARCH's project, which
+records its usage too (see `session/internal-start'); without one, the
+usage is recorded here.  It fails after `harness-tasks-search--timeout'
+seconds, and when the provider ends the request with an error."
   (harness-with-promise (resolve reject)
     (let* ((text "") (settled nil) (timer nil) (handle nil)
            (finish (lambda (ok value)
@@ -1243,11 +1245,15 @@ provider ends the request with an error."
              'provider/complete
              (append (harness-tasks-search--request (plist-get search :model) (plist-get search :session))
                      (list :messages messages
+                           ;; Recorded as an internal session, which
+                           ;; records the usage too.
+                           :job "Task search" :job-project (plist-get search :root)
                            :on-event
                            (lambda (ev)
                              (pcase (plist-get ev :type)
                                ('text (setq text (concat text (or (plist-get ev :delta) ""))))
-                               ('usage (harness-tasks-search--record search ev))
+                               ('usage (unless (harness-method-exists-p 'session/internal-start)
+                                         (harness-tasks-search--record search ev)))
                                ('done
                                 (let ((reason (plist-get ev :stop-reason)))
                                   (if (memq reason '(error cancelled))

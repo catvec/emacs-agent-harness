@@ -275,6 +275,41 @@ warned that it exceeded `undo-outer-limit'."
         (should (equal id (plist-get node :id)))
         (should (<= (length (plist-get node :content)) (1+ harness-ui-tree--node-text-limit)))))))
 
+(ert-deftest harness-ui-tree-ignores-internal-sessions-coming-and-going ()
+  "A tree refreshes for a session created or deleted, but not for an internal one.
+Any new session may be a fork in a tree's family, but an internal
+session -- the record of a model call the harness made on its own, one
+for every judge or naming call -- is none, and comes by the dozen.  The
+creation carries the session, which says what it is; a deletion with
+only an id goes by what was seen of the session before.  Forks and
+moved heads refresh the tree whatever they are of."
+  (harness-ui-tree-test-with
+    (let* ((buffer (harness-ui-tree--buffer-for "trunk-1"))
+           (refreshed nil))
+      (cl-letf (((symbol-function 'harness-ui-refresh-sessions) #'ignore)
+                ((symbol-function 'harness-ui-tree--refresh-buffer)
+                 (lambda (b) (push b refreshed))))
+        (cl-flet ((refreshes (event &rest args)
+                    (setq refreshed nil)
+                    ;; As the UI hears it from the harness.
+                    (harness-ui--dispatch-ui "_harness/event" (list :event event :args args) nil)
+                    refreshed))
+          ;; A session of the user's may be a fork of the family.
+          (should (equal (list buffer) (refreshes "session/created" "main-1" '(:id "main-1" :kind "main"))))
+          (should (equal (list buffer) (refreshes "session/deleted" "main-1")))
+          ;; An internal session is none.
+          (should-not (refreshes "session/created" "int-1" '(:id "int-1" :kind "internal")))
+          (should-not (refreshes "session/deleted" "int-1"))
+          ;; What the harness says of a fork or a head still counts.
+          (should (equal (list buffer) (refreshes "session/forked" "trunk-1" "fork-1")))
+          (should (equal (list buffer) (refreshes "session/head-moved" "trunk-1" "node-1")))
+          ;; The handler too, called as the harness's hook calls it.
+          (setq refreshed nil)
+          (harness-ui-tree--on-event "session/created" (list "int-2" '(:id "int-2" :kind "internal")))
+          (should-not refreshed)
+          (harness-ui-tree--on-event "session/created" (list "main-2" '(:id "main-2" :kind "main")))
+          (should (equal (list buffer) refreshed)))))))
+
 (provide 'harness-ui-tree-test)
 ;;; harness-ui-tree-test.el ends here
 

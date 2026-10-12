@@ -467,6 +467,15 @@ for the period and shown in the report, and written again on request."
         ;; Old, it is shown as stale.
         (let ((harness-insights-narrative-max-age 0))
           (should (plist-get (plist-get (harness-insights-test-compute) :narrative) :stale))))
+      ;; Each call is recorded as an internal session of no parent, which
+      ;; the report does not count among the user's sessions, nor its
+      ;; project, the harness's own directory, among theirs.
+      (let ((calls (harness-call 'session/select '(:kind internal))))
+        (should (equal '("Insights summary" "Insights summary") (mapcar (lambda (s) (plist-get s :name)) calls)))
+        (should-not (cl-some (lambda (s) (plist-get s :parent-id)) calls))
+        (should (plist-get (car calls) :project))
+        (should-not (member (plist-get (car calls) :project) (harness-call 'insights/projects))))
+      (should (= 4 (plist-get (plist-get (harness-insights-test-compute) :sessions) :active)))
       ;; Its cost is recorded like any other.
       (should (cl-some (lambda (r) (equal "demo:scripted" (plist-get r :key)))
                        (harness-call 'usage/summary :group-by 'model))))))

@@ -26,6 +26,7 @@
 (declare-function harness-provider-claude-close-all "harness-provider-claude")
 (declare-function harness-perms--add-rule-noted "harness-perms")
 (declare-function harness-ui-session-live "harness-ui")
+(declare-function harness-ui-cache-session "harness-ui")
 
 (defvar harness-ui-chat-test-events nil "Recorded (EVENT . ARGS), newest first.")
 
@@ -4993,6 +4994,32 @@ it can show."
             (should (harness-chat--cursor-line-fully-visible window)))
         (set-window-buffer window buf)
         (kill-buffer huge)))))
+
+(ert-deftest harness-ui-chat-open-latest-session-skips-internal-sessions ()
+  "The latest session of the project is the user's, not the harness's newest record.
+An internal session -- one model call the harness made on its own, such
+as a judge's -- belongs to the project of the session it was made for
+and is updated more recently than that session, but it is no session to
+open.  With nothing else in the project, a new session starts."
+  (harness-ui-chat-test-with
+    (let ((root (harness-chat--project-root default-directory))
+          (opened nil)
+          (started nil))
+      (harness-ui-cache-session (list :id "mine-1" :name "Mine" :kind "main" :project root :updated 10))
+      (harness-ui-cache-session (list :id "int-1" :name "Permission judge" :kind "internal"
+                                      :project root :updated 20))
+      (cl-letf (((symbol-function 'harness-open-session)
+                 (lambda (id &optional _position) (push id opened)))
+                ((symbol-function 'harness-new-session)
+                 (lambda (directory &optional _position) (push directory started))))
+        (harness-open-latest-session)
+        (should (equal '("mine-1") opened))
+        (should-not started)
+        ;; Only the harness's records: a new session, nothing opened.
+        (remhash "mine-1" harness-ui--sessions)
+        (harness-open-latest-session)
+        (should (equal '("mine-1") opened))
+        (should (equal (list root) started))))))
 
 (ert-deftest harness-ui-chat-renders-user-messages-as-markdown ()
   "A message the user wrote is rendered as Markdown, in the user's style."

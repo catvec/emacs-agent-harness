@@ -60,9 +60,10 @@
 ;; (`harness-ui-priority-arrow') -- and the card's facts say what it is;
 ;; + and - on a card raise and lower it (the change goes to the task's
 ;; session), and the button beside the Submit / Refine
-;; toggle sets the next task's.  In bulk mode (B) a priority button on
-;; the settings line gives every current task one; the other bulk
-;; settings leave priorities alone.
+;; toggle sets the next task's.  To give many tasks a priority, or any
+;; other setting, at once, mark their sessions in the session list
+;; (`harness-sessions'): its keys and the harness's setting commands act
+;; on every marked session, and on the tasks they work on.
 ;;
 ;; Review can be turned off (V, or `harness-tasks-require-verification'
 ;; on the settings page): finished tasks then merge and complete by
@@ -82,8 +83,8 @@
 ;; session, it says what the tasks cost and who pays: their summed cost,
 ;; or the plan that pays for them with its quota windows, then the
 ;; fullest budget that applies to the project.  A click there opens the
-;; usage dashboard.  Its buttons follow: [Bulk edit], [Search], [BTW],
-;; [Add session], [Archived] and [Refresh].
+;; usage dashboard.  Its buttons follow: [Search], [BTW], [Add session],
+;; [Archived] and [Refresh].
 ;;
 ;; Everything comes over ACP (`_harness/task/…', `_harness/config/set'
 ;; for turning review off and the limit, `_harness/usage/project-budgets' for the
@@ -254,8 +255,6 @@ find tasks, sessions and commands with, or to act on tasks
   "How the main-tree choice holds: nil, `once' or `sticky'.")
 (defvar-local harness-ui-tasks--priority-mode nil
   "How the priority choice holds: nil, `once' or `sticky'.")
-(defvar-local harness-ui-tasks--bulk nil
-  "Non-nil when the setting buttons change every current task at once.")
 (defvar-local harness-ui-tasks--list-end nil "Marker: end of the board, start of the tail.")
 (defvar-local harness-ui-tasks--budgets nil
   "Status of every budget that applies to the project, for the header.
@@ -283,9 +282,9 @@ companion pet its face the second.")
 (defvar harness-ui-tasks-corner-functions nil
   "Functions drawing something at the right of the lines above the compose box.
 The lines between the board and the box -- the error, the compose
-label, the bulk banner and the settings -- narrow for it, as Claude
-Code's prompt narrows for its companion, rather than the board giving
-it lines of its own.  Each function is called in the board's buffer
+label and the settings -- narrow for it, as Claude Code's prompt
+narrows for its companion, rather than the board giving it lines of
+its own.  Each function is called in the board's buffer
 whenever those lines are drawn -- with the box, and as a window showing
 the board changes size -- with ROOM, the columns the lines have, and
 WIDTHS, the columns each of them takes whole, top first; the first to
@@ -783,9 +782,10 @@ has written, unless LEAN, which a narrow card falls back on."
                       ;; Its tokens, which grow while it streams.
                       (and session (not lean) (eq column 'active)
                            (harness-ui-tasks--tokens session))
-                      ;; How fast the session writes, while it is open.
+                      ;; How fast the session writes on average, while it
+                      ;; is open.
                       (and session (not (equal (plist-get session :status) "inactive"))
-                           (harness-ui-format-rate session))
+                           (harness-ui-format-average-rate session))
                       (and session (> (harness-usage-list-cost usage) 0)
                            (harness-ui-format-spend session)))))
          (facts (propertize (string-join parts " · ") 'face 'harness-dim-face))
@@ -1754,19 +1754,19 @@ board, so what was skipped is only skipped while both are unchanged."
       (harness-ui-tasks--restore places)
       (harness-ui-tasks--focus-card)
       (set-buffer-modified-p nil)
-      (force-mode-line-update)
-      ;; The bulk banner counts the tasks, so it follows the board.
-      (when harness-ui-tasks--bulk (harness-ui-tasks--render-tail)))))
+      (force-mode-line-update))))
 
 (defun harness-ui-tasks--board-key ()
   "Return what the board region's drawing depends on.
 The tasks and their sessions (their status, todos, cost, output rate
 and token figures feed the cards: a running session's figures as the
-cards read them, which change less often than the figures do), the
-clock, the caps the window allows, and the state a card cannot show:
-which column is folded, which is expanded, which tasks are submitting,
-which cards you folded their recap on, and whether finished work waits
-for your review."
+cards read them, which change less often than the figures do; the
+internal sessions, which no card reads and which change with every
+model call the harness makes on its own, are left out), the clock, the
+caps the window allows, and the state a card cannot show: which column
+is folded, which is expanded, which tasks are submitting, which cards
+you folded their recap on, and whether finished work waits for your
+review."
   (list harness-ui-tasks--tasks
         (mapcar (lambda (session)
                   (let ((id (plist-get session :id)))
@@ -1774,7 +1774,7 @@ for your review."
                           (plist-get session :todos) (plist-get session :pending) (plist-get session :usage)
                           (harness-ui-session-rate id)
                           (and (harness-ui-session-live id) (harness-ui-tasks--tokens session)))))
-                (harness-ui-sessions))
+                (harness-ui-user-sessions))
         (truncate (float-time) 5)
         (harness-ui-tasks--window)
         (and (harness-ui-tasks--window) (window-body-height (harness-ui-tasks--window) t))
@@ -1894,147 +1894,10 @@ That depends on `harness-ui-tasks--target': a new task by default."
 
 (defun harness-ui-tasks--setting-button (label command help)
   "A button LABEL running the session setting COMMAND on the board's target.
-The target is the new-task settings, the task at point, or every current
-task in bulk mode (see `harness-ui-tasks--setting-target').  HELP is
-its tooltip."
+The target is the new-task settings, or the task at point (see
+`harness-ui-tasks--setting-target').  HELP is its tooltip."
   (propertize (harness-ui-tasks--button label (lambda () (call-interactively command)) help command)
               'face 'harness-dim-face))
-
-(defconst harness-ui-tasks--bulk-columns '(active pending backlog needs-input)
-  "Columns the bulk editor reaches: running, pending, backlog and blocked tasks.
-Review, done and archived tasks are history and are left alone.")
-
-(defun harness-ui-tasks--bulk-tasks ()
-  "Return the tasks a bulk update on this board would reach."
-  (cl-remove-if-not (lambda (task)
-                      (and (not (harness-ui-tasks--archived-p task))
-                           (memq (harness-ui-tasks--column task) harness-ui-tasks--bulk-columns)))
-                    harness-ui-tasks--tasks))
-
-(defun harness-ui-tasks--bulk-common (tasks key)
-  "Return TASKS' common value for KEY, or nil when they differ."
-  (let ((values (mapcar (lambda (task) (plist-get task key)) tasks)))
-    (and values (cl-every (lambda (v) (equal v (car values))) values) (car values))))
-
-(defun harness-ui-tasks--bulk-values ()
-  "Return the values the bulk-edited tasks agree on, for the setting commands.
-`:priority' is theirs too: \"low\", \"medium\" or \"high\", nil when they differ."
-  (let ((tasks (harness-ui-tasks--bulk-tasks)))
-    (list :model (harness-ui-tasks--bulk-common tasks :model)
-          :thinking (harness-ui-tasks--bulk-common tasks :thinking)
-          :permission-mode (harness-ui-tasks--bulk-common tasks :permission-mode)
-          :non-interactive (harness-ui-tasks--bulk-common tasks :non-interactive)
-          :supervisor (harness-ui-tasks--bulk-common tasks :supervisor)
-          :priority (let ((priorities (delete-dups (mapcar #'harness-ui-tasks--priority tasks))))
-                      (and (null (cdr priorities)) (car priorities))))))
-
-(defun harness-ui-tasks--set-bulk (key value)
-  "Apply KEY VALUE to every current task on this board.
-The new-task settings take it too, so a task submitted next matches.
-Only KEY goes to the harness: every other setting of the tasks, their
-priority included, stays as it is."
-  (setq harness-ui-tasks--new (plist-put (copy-sequence harness-ui-tasks--new) key value))
-  (let ((ids (mapcar (lambda (task) (plist-get task :id)) (harness-ui-tasks--bulk-tasks))))
-    (harness-ui-call "_harness/task/set-all"
-                     (list :settings (list key (if (and (memq key '(:non-interactive :supervisor))
-                                                       (not value))
-                                                  :false value))
-                           :filter (list :ids ids :cwd harness-ui-tasks--dir))
-                     (lambda (_) (harness-ui-tasks--render-tail))
-                     (lambda (e) (message "Bulk update failed: %s" (harness-error-message e))))))
-
-(defun harness-ui-tasks--bulk-priority-p ()
-  "Non-nil when the priority button sets the priority of the current tasks.
-That is in bulk mode, while there are tasks for it to change; it is then
-on the settings line with the other bulk settings, and the next task's
-priority waits until bulk mode is off."
-  (and harness-ui-tasks--bulk (harness-ui-tasks--bulk-tasks) t))
-
-(defun harness-ui-tasks--bulk-priority-button (priority)
-  "The bulk editor's priority button, showing PRIORITY, nil when they differ.
-A click asks for the priority to give every current task
-\(`harness-ui-tasks-bulk-priority'); until one is chosen, each task
-keeps its own."
-  (propertize
-   (harness-ui-tasks--button
-    (concat (or priority "mixed") " priority")
-    (lambda () (call-interactively #'harness-ui-tasks-bulk-priority))
-    (concat "Priority of the current tasks"
-            (if priority "" ", which differ")
-            ": click to give them all one; other bulk changes leave it alone")
-    'harness-ui-tasks-bulk-priority)
-   'face (harness-ui-tasks--priority-button-face priority)))
-
-(defun harness-ui-tasks--read-bulk-priority (n current)
-  "Read the priority to give N tasks, CURRENT now (nil when they differ).
-Return \"low\", \"medium\" or \"high\", or nil for an empty answer.  The
-levels, their order and the reading are the priority UI's
-\(`harness-ui-priority--choose')."
-  (harness-ui-priority--choose
-   (format "Priority of %d task%s (%s now): " n (if (= 1 n) "" "s") (or current "mixed"))
-   current))
-
-(defun harness-ui-tasks-bulk-priority (&optional priority)
-  "Give every current task on this board PRIORITY: \"low\", \"medium\" or \"high\".
-It is the priority button of bulk editing (\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-bulk]), and changes the
-running, pending, backlog and blocked tasks, as the other bulk settings do.
-Interactively it asks which; an empty answer changes nothing, and
-neither does quitting.  It is the only way a bulk edit changes
-priorities: the other settings leave each task's alone.  A task's
-priority is its session's, which `task/set-all' changes; the next task
-keeps its own priority too, as a priority only means something against
-the others'."
-  (interactive)
-  (unless harness-ui-tasks--bulk
-    (user-error "Bulk editing is off; %s turns it on"
-                (substitute-command-keys "\\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-bulk]")))
-  (let* ((tasks (or (harness-ui-tasks--bulk-tasks)
-                    (user-error "No running, pending, backlog or blocked task to change")))
-         (n (length tasks))
-         (priority (or priority
-                       (harness-ui-tasks--read-bulk-priority
-                        n (plist-get (harness-ui-tasks--bulk-values) :priority))))
-         (buffer (current-buffer)))
-    (cond
-     ((null priority) (message "Priorities unchanged"))
-     ((not (member priority harness-ui-priority-levels))
-      (user-error "Unknown priority %s; it is low, medium or high" priority))
-     (t
-      (harness-ui-call "_harness/task/set-all"
-                       (list :settings (list :priority priority)
-                             :filter (list :ids (mapcar (lambda (task) (plist-get task :id)) tasks)
-                                           :cwd harness-ui-tasks--dir))
-                       (lambda (_)
-                         (when (buffer-live-p buffer)
-                           (with-current-buffer buffer (harness-ui-tasks--render-tail))))
-                       (lambda (e) (message "Bulk update failed: %s" (harness-error-message e))))
-      (message "Priority → %s (for %d task%s)" priority n (if (= 1 n) "" "s"))))))
-
-(defun harness-ui-tasks-toggle-bulk ()
-  "Switch bulk editing of the current tasks on or off.
-While on, the model, effort, permission-mode, non-interactive,
-supervisor and priority buttons change every running, pending,
-backlog or blocked task, not just the new task or the one at point.  Each changes
-only its own setting, when it is used: a task's other settings, its
-priority among them, stay as they are.  Review, done and archived tasks
-are history and are left alone."
-  (interactive)
-  (setq harness-ui-tasks--bulk (not harness-ui-tasks--bulk))
-  (harness-ui-tasks--render-tail)
-  (force-mode-line-update)
-  (let ((n (length (harness-ui-tasks--bulk-tasks))))
-    (message (if harness-ui-tasks--bulk
-                 (format "Bulk editing %d current task%s: the settings below change all of them"
-                         n (if (= 1 n) "" "s"))
-               "Bulk editing off"))))
-
-(defun harness-ui-tasks--bulk-banner ()
-  "The conspicuous line that says bulk editing is on."
-  (let ((n (length (harness-ui-tasks--bulk-tasks))))
-    (propertize
-     (format "EDITING %d CURRENT TASK%s (running, pending, backlog, blocked) — the settings below change all of them"
-             n (if (= 1 n) "" "S"))
-     'face 'harness-task-attention-face)))
 
 (defconst harness-ui-tasks--min-settings-room 24
   "Columns the settings keep before the limit's button is cut off too.
@@ -2052,30 +1915,24 @@ there is nothing to show and nothing to run."
 
 (defun harness-ui-tasks--supervisor-label (value)
   "Return the label of a supervisor setting VALUE.
-t reads \"supervisor\", `:false' \"hands-on\" (the user turned it off)
-and nil \"mixed\": the current tasks differ, or none of them says."
-  (cond ((harness-json-true-p value) "supervisor")
-        (value "hands-on")
-        (t "mixed")))
+t reads \"supervisor\", and `:false' \"hands-on\" (the user turned it
+off), as does anything else that is not true."
+  (if (harness-json-true-p value) "supervisor" "hands-on"))
 
 (defun harness-ui-tasks--new-settings-line (&optional room)
   "The settings line: each setting as a button, fitted to ROOM columns.
-In bulk mode the values are the current tasks', their priority too, and
-a button changes its one setting of them all; otherwise they are the
-new task's, and the line ends with how many tasks work at once
-\(`harness-ui-tasks--max-running-button').  When ROOM is too narrow
-for it all, the settings shorten first, down to
+The values are the new task's, and the line ends with how many tasks
+work at once (`harness-ui-tasks--max-running-button').  When ROOM is
+too narrow for it all, the settings shorten first, down to
 `harness-ui-tasks--min-settings-room' columns, so that button stays
 whole; the line shortens as a whole after that.  Without ROOM it is
 not fitted."
-  (let* ((bulk harness-ui-tasks--bulk)
-         (values (if bulk (harness-ui-tasks--bulk-values) harness-ui-tasks--new))
+  (let* ((values harness-ui-tasks--new)
          (s harness-ui-tasks--settings)
-         (scope (if bulk "current tasks" "new tasks"))
-         (main-tree (and (not bulk) (harness-json-true-p (plist-get harness-ui-tasks--new :main-tree))))
+         (main-tree (harness-json-true-p (plist-get values :main-tree)))
          ;; How many tasks work at once is the harness's, for every
          ;; project, not the next task's: apart from its settings.
-         (limit (not (or bulk harness-ui-tasks--refine))))
+         (limit (not harness-ui-tasks--refine)))
     (if (null s)
         ""
       (harness-ui-tasks--fit-settings
@@ -2086,43 +1943,39 @@ not fitted."
          (delq nil
                (list (harness-ui-tasks--setting-button
                       (harness-ui-model-label (plist-get values :model))
-                      #'harness-set-model (format "Model of %s" scope))
+                      #'harness-set-model "Model of new tasks")
                      (harness-ui-tasks--setting-button
                       (if-let* ((m (plist-get values :permission-mode))) (harness-ui-permission-mode-label m) "default mode")
-                      #'harness-set-permission-mode (format "Permission mode of %s" scope))
+                      #'harness-set-permission-mode "Permission mode of new tasks")
                      (harness-ui-tasks--setting-button
                       (harness-ui-thinking-label (plist-get values :thinking))
-                      #'harness-set-thinking (format "Thinking level of %s" scope))
+                      #'harness-set-thinking "Thinking level of new tasks")
                      (harness-ui-tasks--setting-button
                       (harness-ui-non-interactive-label (plist-get values :non-interactive))
-                      #'harness-toggle-non-interactive (format "Non-interactive mode of %s" scope))
+                      #'harness-toggle-non-interactive "Non-interactive mode of new tasks")
                      ;; Supervisor mode is the supervisor module's; a
                      ;; harness without it has no setting to offer.
                      (and (harness-ui-tasks--supervisor-p)
                           (harness-ui-tasks--setting-button
                            (harness-ui-tasks--supervisor-label (plist-get values :supervisor))
                            #'harness-toggle-supervisor
-                           (format "Supervisor mode of %s: plan and delegate to workers, or work hands-on" scope)))
-                     ;; The next task's priority is beside Submit; the
-                     ;; current tasks' is here, changed only when clicked.
-                     (and (harness-ui-tasks--bulk-priority-p)
-                          (harness-ui-tasks--bulk-priority-button (plist-get values :priority)))
-                     ;; A task that starts cannot change where it works, so
-                     ;; this one is only about the next task, never bulk.
+                           "Supervisor mode of new tasks: plan and delegate to workers, or work hands-on"))
+                     ;; The next task's priority is beside Submit.  A task
+                     ;; that starts cannot change where it works, so this
+                     ;; one is only about the next task.
                      (and (harness-json-true-p (plist-get s :worktrees))
                           (harness-ui-tasks--setting-button
                            (if main-tree "main tree" "own worktree")
                            #'harness-ui-tasks-toggle-main-tree
                            "Where the next task works: its own worktree and branch, or the project's main tree, where nothing merges"))))
          (propertize " · " 'face 'harness-dim-face)))
-       (cond (bulk (propertize "   new tasks keep their own settings" 'face 'harness-dim-face))
-             (harness-ui-tasks--refine
-              (propertize "   an agent writes it up; you start it" 'face 'harness-dim-face))
-             (t (concat "   "
-                        (and (harness-ui-tasks--queue-suspended-p)
-                             (concat (propertize "queue suspended" 'face 'harness-dim-face)
-                                     (propertize " · " 'face 'harness-dim-face)))
-                        (harness-ui-tasks--max-running-button))))
+       (if harness-ui-tasks--refine
+           (propertize "   an agent writes it up; you start it" 'face 'harness-dim-face)
+         (concat "   "
+                 (and (harness-ui-tasks--queue-suspended-p)
+                      (concat (propertize "queue suspended" 'face 'harness-dim-face)
+                              (propertize " · " 'face 'harness-dim-face)))
+                 (harness-ui-tasks--max-running-button)))
        limit room))))
 
 (defun harness-ui-tasks--fit-settings (settings note keep room)
@@ -2296,17 +2149,13 @@ from the harness when they do.  Return the boards' directories."
 
 (defun harness-ui-tasks--setting-target ()
   "Where the session setting commands apply on the board.
-In bulk mode, every current task; else the session of the started task
-at point, else the new-task settings.  A backlog task's session only
-writes it up, with settings of its own, so it counts as not started."
-  (if (and harness-ui-tasks--bulk (harness-ui-tasks--bulk-tasks))
-      (let ((n (length (harness-ui-tasks--bulk-tasks))))
-        (list (harness-ui-tasks--bulk-values) #'harness-ui-tasks--set-bulk
-              (format "for %d task%s" n (if (= 1 n) "" "s"))))
-    (let ((task (and (not (harness-compose-in-p)) (harness-ui-tasks--task t))))
-      (if (and task (plist-get task :session) (not (harness-ui-tasks--unstarted-p task)))
-          (plist-get task :session)
-        (list harness-ui-tasks--new #'harness-ui-tasks--set-new)))))
+That is the session of the started task at point, else the new-task
+settings.  A backlog task's session only writes it up, with settings of
+its own, so it counts as not started."
+  (let ((task (and (not (harness-compose-in-p)) (harness-ui-tasks--task t))))
+    (if (and task (plist-get task :session) (not (harness-ui-tasks--unstarted-p task)))
+        (plist-get task :session)
+      (list harness-ui-tasks--new #'harness-ui-tasks--set-new))))
 
 (defun harness-ui-tasks--label-line (room messaging bar)
   "The compose label, fitted to ROOM columns: what the box does, and the
@@ -2325,10 +2174,7 @@ board's search each lead with their icon, in their accent."
                    ""))
          (toggle (if harness-ui-tasks--target ""
                    (concat "   " (harness-ui-tasks--mode-toggle)
-                           ;; Bulk editing has the current tasks' priority
-                           ;; on its settings line instead.
-                           (if (harness-ui-tasks--bulk-priority-p) ""
-                             (concat "   " (harness-ui-tasks--priority-toggle))))))
+                           "   " (harness-ui-tasks--priority-toggle))))
          (accent (cond (messaging 'harness-compose-message-accent-face)
                        (searching 'harness-task-search-box-accent-face)))
          (icon (cond (messaging (concat (harness-ui-icon 'harness-icon-message) " "))
@@ -2424,7 +2270,7 @@ only gets a [keep on] BUTTON; a sticky one an [off] button."
 
 (defun harness-ui-tasks--tail-lines (messaging band bar)
   "The lines between the board and the compose box: (KEY FIT BAND) each.
-Top first: the error, the compose label, the bulk banner, the settings
+Top first: the error, the compose label, the settings
 and, nearest the box, the armed submit-mode notices, those there are.
 KEY names the line for redraws, FIT returns it fitted to the columns
 it is called with, BAND is the face behind it or nil.  MESSAGING and
@@ -2435,19 +2281,15 @@ BAR are as `harness-ui-tasks--label-line' takes them."
         (push (list 'error (lambda (room) (harness-ui-tasks--fit text room)) band) lines)))
     (push (list 'label (lambda (room) (harness-ui-tasks--label-line room messaging bar)) band) lines)
     (unless harness-ui-tasks--target
-      (when harness-ui-tasks--bulk
-        (let ((text (harness-ui-tasks--bulk-banner)))
-          (push (list 'bulk (lambda (room) (harness-ui-tasks--fit text room)) nil) lines)))
       (unless (string-empty-p (harness-ui-tasks--new-settings-line))
         (push (list 'settings (lambda (room) (harness-ui-tasks--new-settings-line room)) nil) lines))
-      (unless harness-ui-tasks--bulk
-        (dolist (notice (harness-ui-tasks--mode-notices))
-          (let ((text (nth 1 notice))
-                (button (nth 2 notice)))
-            (push (list (car notice)
-                        (lambda (room) (harness-ui-tasks--mode-notice-fit text button room))
-                        nil)
-                  lines)))))
+      (dolist (notice (harness-ui-tasks--mode-notices))
+        (let ((text (nth 1 notice))
+              (button (nth 2 notice)))
+          (push (list (car notice)
+                      (lambda (room) (harness-ui-tasks--mode-notice-fit text button room))
+                      nil)
+                lines))))
     (nreverse lines)))
 
 (defun harness-ui-tasks--corner (room lines)
@@ -2574,9 +2416,7 @@ Medium, or nil for none in particular, is dim like the other settings."
 (defun harness-ui-tasks--priority-toggle ()
   "The button beside the Submit / Refine toggle: the next task's priority.
 It wears the face a card's priority fact has, and a click moves it on,
-as `harness-ui-tasks-cycle-new-priority' does.  In bulk mode the
-current tasks' priority takes its place, on the settings line
-\(`harness-ui-tasks--bulk-priority-button')."
+as `harness-ui-tasks-cycle-new-priority' does."
   (let ((priority (harness-ui-tasks--priority harness-ui-tasks--new)))
     (propertize
      (harness-ui-tasks--button
@@ -2803,14 +2643,15 @@ is a setting (`harness-tasks-require-verification', on the settings
 page; \\<harness-ui-tasks-board-map>\\[harness-ui-tasks-toggle-review] here).
 
 In a window too narrow for all of it, [Add session] goes first, then
-[Bulk edit]; the project's name shortens after those, then [Archived],
-[BTW] and the other modules' segments (`harness-ui-tasks-header-functions',
-the search's [Search]) go.  Another module's segment with a priority of
-its own goes when that says: the companion pet's face before anything
-else.  What the tasks cost and the plan's quota stay longer, the budget
-going first (`harness-ui-tasks--spend-segment'); bulk editing while it
-is on, [Refresh] and a board still loading stay longest.  WIDTH is as
-`harness-ui-fit-header' takes it."
+the queue switch while the queue runs; the project's name shortens
+after those, then [Archived], [BTW] and the other modules' segments
+\(`harness-ui-tasks-header-functions', the search's [Search]) go.
+Another module's segment with a priority of its own goes when that
+says: the companion pet's face before anything else.  What the tasks
+cost and the plan's quota stay longer, the budget going first
+\(`harness-ui-tasks--spend-segment'); [Refresh], a board still loading
+and a suspended queue stay longest.  WIDTH is as `harness-ui-fit-header'
+takes it."
   (let* ((groups (harness-ui-tasks--visible))
          ;; Other modules' segments: strings join into one, lists stand
          ;; on their own.
@@ -2821,11 +2662,6 @@ is on, [Refresh] and a board still loading stay longest.  WIDTH is as
          (name (if harness-ui-tasks--project
                    (file-name-nondirectory (directory-file-name harness-ui-tasks--project))
                  (abbreviate-file-name (or harness-ui-tasks--dir ""))))
-         ;; How many tasks it edits is the banner's, above the box.
-         (bulk (harness-ui-tasks--segment
-                (if harness-ui-tasks--bulk "[Bulk edit: on]" "[Bulk edit]")
-                #'harness-ui-tasks-toggle-bulk
-                "Bulk edit: apply the model, effort, permission mode, interactivity or priority you change to every running, pending, backlog or blocked task"))
          (sep "   ")
          (gap (lambda () (prog1 sep (setq sep "  ")))))
     (harness-ui-fit-header
@@ -2839,9 +2675,6 @@ is on, [Refresh] and a board still loading stay longest.  WIDTH is as
        (list (concat (funcall gap) (harness-ui-tasks--queue-segment))
              (if (harness-ui-tasks--queue-suspended-p) 92 30))
        (harness-ui-tasks--spend-segment groups (funcall gap))
-       (list (concat (funcall gap)
-                     (if harness-ui-tasks--bulk (propertize bulk 'face 'harness-task-attention-face) bulk))
-             (if harness-ui-tasks--bulk 82 30))
        ;; Other modules' segments, the search's say.
        (and joined (list (concat (funcall gap) (mapconcat #'identity joined " ")) 65)))
       ;; Those with a priority of their own, the companion pet's say.
@@ -2958,7 +2791,10 @@ It is drawn 0.1 seconds after the last call, if it is still a board."
 `task/changed' and `task/deleted' update a board directly; these catch
 anything that moves a task without one, so a board never drifts.  A
 turn's end and the budget events also change what its budgets show, and
-`task/queue' changes the queue switch's state in the settings.")
+`task/queue' changes the queue switch's state in the settings.  The
+creation, status change and deletion of an internal session reload no
+board (`harness-ui-internal-event-p'): the harness makes one for every
+model call of its own, and none moves a task.")
 
 (defun harness-ui-tasks--refresh-soon (buffer)
   "Reload BUFFER's tasks in the background, once a burst of events settles."
@@ -2985,8 +2821,10 @@ A task event updates the boards it concerns, and a task ready for
 review is announced when `harness-ui-tasks--notify-review' is non-nil.
 A task's priority is its session's, so a board with a card of the
 session whose `:ext' changed reloads: the task's view, which carries
-the level the card shows, is asked for again."
-  (when (member event harness-ui-tasks--refresh-events)
+the level the card shows, is asked for again.  Those of an internal
+session (see `harness-ui-tasks--refresh-events') reload none."
+  (when (and (member event harness-ui-tasks--refresh-events)
+             (not (harness-ui-internal-event-p event args)))
     (mapc #'harness-ui-tasks--refresh-soon (harness-ui-tasks--buffers)))
   (pcase event
     ("session/ext-changed"
@@ -3136,7 +2974,6 @@ so they type, into the compose box (`harness-compose-acts-p')."
   (define-key map (kbd "D") #'harness-ui-tasks-delete)
   (define-key map (kbd "A") #'harness-ui-tasks-toggle-archived)
   (define-key map (kbd "V") #'harness-ui-tasks-toggle-review)
-  (define-key map (kbd "B") #'harness-ui-tasks-toggle-bulk)
   (define-key map (kbd "I") #'harness-ui-tasks-adopt)
   (define-key map (kbd "b") #'harness-ui-tasks-btw)
   (define-key map (kbd "/") #'harness-ui-tasks-search)
@@ -3230,7 +3067,6 @@ task's key typed off a card.
         (". A" "Show archived" harness-ui-tasks-toggle-archived)
         (". P" "Suspend or resume the queue" harness-ui-tasks-toggle-queue)
         (". V" "Review on or off" harness-ui-tasks-toggle-review)
-        (". B" "Bulk edit current tasks" harness-ui-tasks-toggle-bulk)
         (". F" "Fullscreen layout" harness-fullscreen)
         (". g" "Refresh" harness-ui-tasks-refresh)
         ("C-c C-z" "Bury (q)" harness-ui-bury)]

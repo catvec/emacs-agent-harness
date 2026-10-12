@@ -1163,15 +1163,102 @@ the same over the wire."
           (error (harness-log 'error "provider event handler failed on %S: %S"
                               (plist-get event :type) err)))))))
 
+;;;; Internal calls
+;;
+;; A model call the harness makes on its own, outside any turn (the
+;; permission judge's, a session's name, a recap), names its job in the
+;; request: `:job', a few words, `:job-parent', the session it is made
+;; for, and `:job-project', its project.  `provider/complete' records
+;; such a call as an internal session (`session/internal-start'): the
+;; prompt, the reply, the usage and how the call ended.  The provider
+;; never sees those keys, and the caller gets every event as it would
+;; without them.
+
+(defun harness-provider--job-prompt (messages)
+  "Return the text of the last user message of MESSAGES, or nil.
+Its text blocks are joined by blank lines; content that is a string is
+the text itself."
+  (when-let* ((message (cl-find-if (lambda (m) (equal (format "%s" (plist-get m :role)) "user"))
+                                   messages :from-end t)))
+    (let ((content (plist-get message :content)))
+      (if (stringp content)
+          content
+        (mapconcat #'identity
+                   (delq nil (mapcar (lambda (block)
+                                       (and (consp block)
+                                            (equal (format "%s" (plist-get block :type)) "text")
+                                            (stringp (plist-get block :text))
+                                            (plist-get block :text)))
+                                     content))
+                   "\n\n")))))
+
+(defun harness-provider--job-start (request)
+  "Start the internal session that records REQUEST; return its id, or nil.
+Nil when REQUEST names no job (a non-empty string `:job'), when no
+module records internal sessions, and when starting one fails, which
+is logged: the request then goes on unrecorded."
+  (let ((job (plist-get request :job)))
+    (when (and (stringp job) (not (string-blank-p job))
+               (harness-method-exists-p 'session/internal-start))
+      (condition-case err
+          (let ((session (plist-get request :session)))
+            (harness-call 'session/internal-start
+                          :job job :model (plist-get request :model)
+                          :cwd (plist-get session :cwd) :host (plist-get session :host)
+                          :parent-id (plist-get request :job-parent)
+                          :project (plist-get request :job-project)
+                          :prompt (harness-provider--job-prompt (plist-get request :messages))))
+        (error (harness-log 'warn "provider: recording the call %S failed: %s"
+                            job (harness-error-message err))
+               nil)))))
+
+(defun harness-provider--job-events (id on-event)
+  "Wrap ON-EVENT so that internal session ID records the call's events.
+Every event reaches ON-EVENT unchanged, and is recorded after it: the
+text the model writes is gathered for the reply, its usage is added to
+the session's (`session/usage-add'), and `done', whatever its stop
+reason, finishes the session (`session/internal-finish').  An error of
+the recording is logged, never passed on; one of ON-EVENT still is,
+to `harness-provider--guard-events', which wraps this."
+  (let ((reply nil))
+    (lambda (event)
+      (unwind-protect
+          (funcall on-event event)
+        (condition-case err
+            (pcase (plist-get event :type)
+              ('text (when (stringp (plist-get event :delta))
+                       (push (plist-get event :delta) reply)))
+              ('usage (harness-call 'session/usage-add id (harness-plist-remove event :type)))
+              ('done (harness-call 'session/internal-finish id
+                                   :reply (apply #'concat (reverse reply))
+                                   :stop-reason (plist-get event :stop-reason)
+                                   :error (plist-get event :error))))
+          (error (harness-log 'warn "provider: recording %S in internal session %s failed: %s"
+                              (plist-get event :type) id (harness-error-message err))))))))
+
 (harness-defmethod provider/complete (request)
   "Start a completion for REQUEST; return a handle plist with `:cancel'.
 The provider is chosen from the request's `:model'.  Errors in setup
 are reported through the `:on-event' callback as a `done' event with
 `:stop-reason' error, and so is a model `harness-allowed-models' does
-not allow, which no provider is asked for."
-  (pcase-let* ((`(,pid . ,_) (harness-provider-parse-model (plist-get request :model)))
+not allow, which no provider is asked for.  A REQUEST whose `:job' says
+what a call the harness makes on its own is for, such as \"Permission
+judge\", is recorded as an internal session (`session/internal-start'),
+made for the session `:job-parent' names, in the project `:job-project'
+names; it is finished when the request is done, refused or failed
+alike.  The provider never sees those keys."
+  (pcase-let* ((job-id (harness-provider--job-start request))
+               (request (if (or (plist-member request :job) (plist-member request :job-parent)
+                                (plist-member request :job-project))
+                            (harness-plist-remove request :job :job-parent :job-project)
+                          request))
+               (`(,pid . ,_) (harness-provider-parse-model (plist-get request :model)))
                (provider (and pid (harness-provider-get pid)))
-               (on-event (harness-provider--guard-events (or (plist-get request :on-event) #'ignore)))
+               (on-event (let ((caller (or (plist-get request :on-event) #'ignore)))
+                           ;; Inside the guard, so the recording too sees
+                           ;; `done' once.
+                           (harness-provider--guard-events
+                            (if job-id (harness-provider--job-events job-id caller) caller))))
                (request (plist-put (copy-sequence request) :on-event on-event))
                (refusal (harness-provider-model-refusal (plist-get request :model))))
     (cond

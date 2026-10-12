@@ -644,8 +644,10 @@ See `harness-pet-model'."
 The reply holds at most MAX-TOKENS tokens.  The call is a one-off
 \(`:ephemeral'), without extended thinking (`:no-thinking'), under a
 session id of its own that is closed when it ends; its cost is recorded
-under PROJECT.  It fails after `harness-pet--timeout' seconds, and when
-the provider ends it with an error."
+under PROJECT, by the internal session that records the call (see
+`session/internal-start'), else here.  It fails after
+`harness-pet--timeout' seconds, and when the provider ends it with an
+error."
   (if (null model)
       (harness-rejected (list 'error "No model for the pet to speak with"))
     (let* ((sid (format "pet-%s" (harness-short-id 10)))
@@ -666,6 +668,9 @@ the provider ends it with an error."
                        'provider/complete
                        (list :model model
                              :session (list :id sid :cwd (file-name-as-directory (harness-pet--directory)))
+                             ;; Recorded as an internal session, which
+                             ;; records the usage too.
+                             :job "Pet" :job-project project
                              ;; A one-off question: no earlier calls, no
                              ;; project instructions or memory, a process
                              ;; of its own where the provider keeps them.
@@ -681,7 +686,8 @@ the provider ends it with an error."
                              (lambda (ev)
                                (pcase (plist-get ev :type)
                                  ('text (setq reply (concat reply (or (plist-get ev :delta) ""))))
-                                 ('usage (harness-pet--record-usage model project ev))
+                                 ('usage (unless (harness-method-exists-p 'session/internal-start)
+                                           (harness-pet--record-usage model project ev)))
                                  ('done
                                   (let ((reason (plist-get ev :stop-reason)))
                                     (if (memq reason '(error cancelled))
@@ -944,6 +950,15 @@ The saying is remembered and announced with `pet/said', then
   (and (equal (harness-pet--str (plist-get node :kind)) "user")
        (not (harness-node-sender node))))
 
+(defun harness-pet--internal-p (session-id)
+  "Non-nil when SESSION-ID is an internal session.
+Such a session records a model call the harness made on its own, the
+pet's among them (see `session/internal-start'): its prompt is no
+message of the user's."
+  (let ((session (and session-id (harness-method-exists-p 'session/get)
+                      (ignore-errors (harness-call 'session/get session-id)))))
+    (equal (harness-pet--str (plist-get session :kind)) "internal")))
+
 (defun harness-pet--addressed-p (text)
   "Non-nil when TEXT names the pet, by the name it goes by now."
   (let ((name (harness-pet--name)))
@@ -1003,8 +1018,10 @@ ADDRESSED non-nil means the message names it."
 
 (defun harness-pet--on-node-added (session-id node)
   "Grow when NODE, added to SESSION-ID, is a message the user wrote.
-The pet may say something about it too.  Turned off, it does nothing."
-  (when (and (harness-pet--enabled-p) (harness-pet--own-message-p node))
+The pet may say something about it too.  Turned off, it does nothing,
+and so it does for an internal session's prompt (`harness-pet--internal-p')."
+  (when (and (harness-pet--enabled-p) (harness-pet--own-message-p node)
+             (not (harness-pet--internal-p session-id)))
     (harness-pet--load)
     (when harness-pet--pet
       (harness-pet--gain 2 session-id)

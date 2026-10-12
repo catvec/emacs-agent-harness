@@ -470,12 +470,28 @@ and never used is closed after a while."
         (harness-provider--forget 'test-search)))))
 
 (ert-deftest harness-tasks-search-records-what-it-costs ()
-  "Each call of the search model is a usage record of the board's project."
+  "Each call of the search model is an internal session of the board's
+project, \"Task search\", which carries its usage: the search records
+none itself, so nothing is counted twice.  Without internal sessions,
+each call is a usage record of the board's project."
   (harness-tasks-search-test-with
     (let ((rows nil))
       (harness-register-method 'usage/record (lambda (row) (push row rows) row))
       (harness-tasks-search-test--search "q" "{\"grep\":\"x\"}" "{\"show\":[]}")
+      (should-not rows)
+      (let ((calls (harness-call 'session/list (list :kind 'internal))))
+        (should (= 2 (length calls)))
+        (dolist (s calls)
+          (should (equal "Task search" (plist-get s :name)))
+          (should (equal "demo:scripted" (plist-get s :model)))
+          (should (equal (harness-call 'project/root default-directory) (plist-get s :project)))
+          (should (eq 'idle (plist-get s :status)))
+          (should (= 1200 (plist-get (plist-get s :usage) :input)))
+          (should (= 0.0015 (plist-get (plist-get s :usage) :cost)))))
+      (remhash 'session/internal-start harness--methods)
+      (harness-tasks-search-test--search "q" "{\"grep\":\"x\"}" "{\"show\":[]}")
       (should (= 2 (length rows)))
+      (should (= 2 (length (harness-call 'session/list (list :kind 'internal)))))
       (let ((row (car rows)))
         (should (equal "demo:scripted" (plist-get row :model)))
         (should (equal (harness-call 'project/root default-directory) (plist-get row :project)))

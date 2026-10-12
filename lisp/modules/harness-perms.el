@@ -2285,6 +2285,10 @@ value and NEXT continues the chain."
                                      :ephemeral t
                                      :session (list :id (format "%s-perms" (plist-get session :id))
                                                     :cwd (plist-get session :cwd) :host (plist-get session :host))
+                                     ;; Recorded as an internal session made
+                                     ;; for the session asking.
+                                     :job (if (= n 1) "Permission judge" "Permission judge (retry)")
+                                     :job-parent (plist-get session :id)
                                      :system system
                                      :messages (list (list :role 'user
                                                            :content (list (list :type "text"

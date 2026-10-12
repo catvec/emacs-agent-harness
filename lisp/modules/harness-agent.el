@@ -703,7 +703,14 @@ Blank text blocks are dropped; a message left empty signals an error,
 so no turn, steering message or queued item is ever empty.
 A message that starts a turn or steers one goes through the
 `agent/message' filters first (see `harness-agent--message'); a queued
-one does when its queue is sent."
+one does when its queue is sent.  An internal session (see
+`session/internal-start') refuses every message: it records one model
+call the harness made and cannot be continued."
+  (when (and (harness-call 'session/exists-p session-id)
+             (eq (plist-get (harness-call 'session/get session-id) :kind) 'internal))
+    (signal 'harness-error
+            (list (format "Session %s records one internal model call and cannot be continued"
+                          session-id))))
   (let* ((blocks (cl-remove-if #'harness-agent--blank-p
                                (if (stringp blocks) (list (list :type "text" :text blocks)) blocks)))
          (queue (harness-json-true-p (plist-get opts :queue)))

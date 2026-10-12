@@ -303,6 +303,7 @@ session's record, which names the model and the place."
                         :timeout harness-tools-emacs-eval--judge-timeout
                         :parse #'harness-tools-emacs-eval--parse-verdict
                         :label "emacs_eval judge"
+                        :job "Elisp judge"
                         :suffix "emacs-eval")
      (lambda (answer)
        (or (plist-get answer :value)

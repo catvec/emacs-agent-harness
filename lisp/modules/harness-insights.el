@@ -535,7 +535,9 @@ the board does for a project it shows."
   "Return what the child reads for the period SINCE to UNTIL in PROJECT.
 TASKS are the board's tasks, which say whose sessions are tasks'.  The
 sessions are those whose life overlaps the period, from the harness's
-records, which are current where their files may lag."
+records, which are current where their files may lag; internal ones,
+the records of the model calls the harness made on its own (see
+`session/internal-start'), are no work of the user's and are left out."
   (let ((task-of (make-hash-table :test 'equal)))
     (dolist (task tasks)
       (when-let* ((sid (plist-get task :session)))
@@ -550,7 +552,8 @@ records, which are current where their files may lag."
                (cl-loop for s in (harness-call 'session/list)
                         for created = (or (plist-get s :created) 0)
                         for updated = (or (plist-get s :updated) created)
-                        when (and (or (null since) (>= updated since)) (< created until))
+                        when (and (or (null since) (>= updated since)) (< created until)
+                                  (not (eq (plist-get s :kind) 'internal)))
                         collect (list :id (plist-get s :id) :name (plist-get s :name)
                                       :kind (format "%s" (or (plist-get s :kind) "main"))
                                       :project (plist-get s :project) :model (plist-get s :model)
@@ -920,13 +923,16 @@ A report asked for again while it is computed shares its promise."
 (harness-defmethod insights/projects ()
   "Return the main checkouts an Insights report can be narrowed to, sorted.
 They are the projects of the sessions and of the tasks, each as the
-main checkout it belongs to."
+main checkout it belongs to.  An internal session's project is not
+among them for that: one with no parent is in a directory of the
+harness's own (see `session/internal-start')."
   (let ((mains (make-hash-table :test 'equal))
         (memo (make-hash-table :test 'equal)))
     (when (harness-method-exists-p 'session/list)
       (dolist (s (harness-call 'session/list))
-        (let ((main (harness-insights--main (plist-get s :project) memo)))
-          (unless (string-empty-p main) (puthash main t mains)))))
+        (unless (eq (plist-get s :kind) 'internal)
+          (let ((main (harness-insights--main (plist-get s :project) memo)))
+            (unless (string-empty-p main) (puthash main t mains))))))
     (dolist (task (harness-insights--all-tasks))
       (when-let* ((root (harness-insights--root (plist-get task :project))))
         (puthash root t mains)))
@@ -994,8 +1000,10 @@ configured for PROJECT."
   "Ask MODEL to write the summary of TEXT; return a promise of its reply.
 A one-off call (`:ephemeral'), without thinking or tools, under a
 session id of its own closed when it ends; its cost is recorded under
-PROJECT.  It fails after `harness-insights--narrative-timeout' seconds
-and when the provider ends it with an error."
+PROJECT, by the internal session that records the call (see
+`session/internal-start'), else here.  It fails after
+`harness-insights--narrative-timeout' seconds and when the provider
+ends it with an error."
   (let* ((sid (format "insights-%s" (harness-short-id 10)))
          (promise
           (harness-with-promise (resolve reject)
@@ -1014,6 +1022,9 @@ and when the provider ends it with an error."
                      'provider/complete
                      (list :model model
                            :session (list :id sid :cwd (file-name-as-directory (harness-insights--directory)))
+                           ;; Recorded as an internal session, which
+                           ;; records the usage too.
+                           :job "Insights summary" :job-project project
                            :ephemeral t
                            :system harness-insights--system-prompt
                            :messages (list (list :role 'user :content (list (list :type "text" :text text))))
@@ -1024,7 +1035,8 @@ and when the provider ends it with an error."
                            (lambda (ev)
                              (pcase (plist-get ev :type)
                                ('text (setq reply (concat reply (or (plist-get ev :delta) ""))))
-                               ('usage (harness-insights--record-usage model project ev))
+                               ('usage (unless (harness-method-exists-p 'session/internal-start)
+                                         (harness-insights--record-usage model project ev)))
                                ('done
                                 (let ((reason (plist-get ev :stop-reason)))
                                   (if (memq reason '(error cancelled))

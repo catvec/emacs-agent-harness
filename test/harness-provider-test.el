@@ -5,6 +5,7 @@
 
 (defvar harness-providers)
 (defvar harness-provider-fallback-context-window)
+(defvar harness-policy-file)
 (defvar harness-allowed-models)
 (declare-function harness-define-provider "harness-provider")
 (declare-function harness-provider--forget "harness-provider")
@@ -800,6 +801,196 @@ one of them."
         (should-not (harness-call 'provider/tier-model "test-other" :simple)))
       (should (= 3 (length (harness-test-await (harness-call 'provider/models)))))
       (should (equal "test-allowed:small" (harness-call 'provider/tier-model "test-allowed" :simple))))))
+
+;;;; Internal calls
+
+(defvar harness-sessions)
+
+(defmacro harness-provider-test-with-sessions (providers &rest body)
+  "Like `harness-provider-test-with', with the session module loaded too.
+The state is a temporary directory, DIR, which is also BODY's
+`default-directory'."
+  (declare (indent 1))
+  `(harness-test-with-temp-state
+     (harness-test-reset-bus)
+     (dolist (m '(store project config provider session)) (harness-test-load-module m))
+     (clrhash harness-sessions)
+     (let ((default-directory dir))
+       (unwind-protect (progn ,@body)
+         (dolist (id ',providers)
+           (remhash id harness-providers)
+           (harness-provider--forget id))))))
+
+(defvar harness-provider-test-requests nil
+  "The requests the `test-job' provider was sent, newest first.")
+
+(defun harness-provider-test-job-provider ()
+  "Define the provider `test-job', which keeps its requests and answers nothing.
+A test answers through the `:on-event' of the request the provider got."
+  (setq harness-provider-test-requests nil)
+  (harness-define-provider 'test-job
+    :complete (lambda (request) (push request harness-provider-test-requests) (list :cancel #'ignore))
+    :models (lambda () (harness-resolved (list (list :name "judge" :pricing '(:input 1.0 :output 5.0)))))))
+
+(defun harness-provider-test-answer (&rest events)
+  "Send EVENTS to the newest request `test-job' got, as its provider would."
+  (let ((on-event (plist-get (car harness-provider-test-requests) :on-event)))
+    (dolist (e events) (funcall on-event e))))
+
+(defun harness-provider-test-internal ()
+  "Return the plists of the internal sessions, oldest first."
+  (sort (harness-call 'session/list (list :kind 'internal))
+        (lambda (a b) (< (plist-get a :created) (plist-get b :created)))))
+
+(defun harness-provider-test-last-node (id)
+  "Return the content of the last node of session ID."
+  (plist-get (car (last (harness-call 'session/nodes id))) :content))
+
+(ert-deftest harness-provider-job-records-one-internal-session ()
+  "A request naming its job is recorded as one internal session: its
+prompt, the reply, the usage and its end.  The provider never sees the
+job, and the caller gets every event as it came."
+  (harness-provider-test-with-sessions (test-job)
+    (harness-provider-test-job-provider)
+    (let* ((cwd (harness-test-temp-dir))
+           (parent (plist-get (harness-call 'session/create :cwd cwd :model "test-job:judge") :id))
+           (events (list (list :type 'start)
+                         (list :type 'text :delta "Al")
+                         (list :type 'thinking :delta "hmm")
+                         (list :type 'text :delta "low")
+                         (list :type 'usage :input 100 :output 4 :cost 0.25)
+                         (list :type 'done :stop-reason 'end-turn)))
+           (sent (copy-tree events))
+           (got nil))
+      (harness-call 'provider/complete
+                    (list :model "test-job:judge" :job "Permission judge" :job-parent parent
+                          :session (list :id (format "%s-perms" parent) :cwd cwd)
+                          :messages (list (list :role 'user :content (list (list :type "text" :text "earlier")))
+                                          (list :role 'assistant :content (list (list :type "text" :text "ok")))
+                                          (list :role 'user
+                                                :content (list (list :type "text" :text "Is it safe?")
+                                                               (list :type "image" :data "AAAA")
+                                                               (list :type "text" :text "Answer ALLOW or DENY."))))
+                          :on-event (lambda (e) (push e got))))
+      (should (= 1 (length harness-provider-test-requests)))
+      (dolist (k '(:job :job-parent :job-project))
+        (should-not (plist-member (car harness-provider-test-requests) k)))
+      (let* ((internal (harness-provider-test-internal))
+             (id (plist-get (car internal) :id)))
+        (should (= 1 (length internal)))
+        (should (equal "Permission judge" (plist-get (car internal) :name)))
+        (should (equal parent (plist-get (car internal) :parent-id)))
+        (should (equal "test-job:judge" (plist-get (car internal) :model)))
+        (should (equal cwd (plist-get (car internal) :cwd)))
+        (should (eq 'running (plist-get (car internal) :status)))
+        (should (equal "Is it safe?\n\nAnswer ALLOW or DENY."
+                       (plist-get (car (harness-call 'session/nodes id)) :content)))
+        (apply #'harness-provider-test-answer events)
+        ;; Every event reached the caller, the very one, unchanged.
+        (should (= (length events) (length got)))
+        (should (cl-every #'eq events (reverse got)))
+        (should (equal sent events))
+        (let* ((s (harness-call 'session/get id))
+               (usage (plist-get s :usage)))
+          (should (eq 'idle (plist-get s :status)))
+          (should (= 100 (plist-get usage :input)))
+          (should (= 4 (plist-get usage :output)))
+          (should (= 0.25 (plist-get usage :cost))))
+        (should (equal '(user assistant) (mapcar (lambda (n) (plist-get n :kind))
+                                                 (harness-call 'session/nodes id))))
+        (should (equal "Allow" (harness-provider-test-last-node id)))
+        ;; A second `done' records nothing more.
+        (harness-provider-test-answer (list :type 'done :stop-reason 'error :error "late"))
+        (should (= 2 (length (harness-call 'session/nodes id))))
+        ;; The parent and the record, nothing else; the parent is as it was.
+        (should (= 2 (length (harness-call 'session/list))))
+        (should-not (harness-call 'session/nodes parent))
+        (should (= 0 (plist-get (plist-get (harness-call 'session/get parent) :usage) :input)))))))
+
+(ert-deftest harness-provider-job-finishes-however-the-request-ends ()
+  "An error, a cancel, a model the policy refuses, no provider, or a
+provider that fails at once: the internal session finishes, idle,
+saying why, and the caller hears of it as before."
+  (harness-provider-test-with-sessions (test-job test-broken)
+    (harness-provider-test-job-provider)
+    (harness-define-provider 'test-broken
+      :complete (lambda (_request) (error "Cannot connect"))
+      :models (lambda () (harness-resolved (list (list :name "m")))))
+    (let ((ask (lambda (model)
+                 (let ((got nil))
+                   (harness-call 'provider/complete
+                                 (list :model model :job "Recap" :job-project "/proj/"
+                                       :messages (list (list :role 'user :content "recap it"))
+                                       :on-event (lambda (e) (push e got))))
+                   (list :got got :id (plist-get (car (last (harness-provider-test-internal))) :id)))))
+          (finished (lambda (id hint)
+                      (let ((s (harness-call 'session/get id)))
+                        (should (eq 'idle (plist-get s :status)))
+                        (should (equal "/proj/" (plist-get s :project)))
+                        (should (equal hint (harness-provider-test-last-node id)))))))
+      ;; The provider ends it with an error, or it is cancelled.
+      (let ((call (funcall ask "test-job:judge")))
+        (harness-provider-test-answer (list :type 'done :stop-reason 'error :error "overloaded"))
+        (funcall finished (plist-get call :id) "Error: overloaded"))
+      (let ((call (funcall ask "test-job:judge")))
+        (harness-provider-test-answer (list :type 'done :stop-reason 'cancelled))
+        (funcall finished (plist-get call :id) "The call was cancelled."))
+      ;; Refused by the policy: the provider is never asked.
+      (harness-test-with-policy '((harness-allowed-models "test-job:other"))
+        (let ((call (funcall ask "test-job:judge")))
+          (should (= 2 (length harness-provider-test-requests)))
+          (should (= 1 (length (plist-get call :got))))
+          (should (eq 'error (plist-get (car (plist-get call :got)) :stop-reason)))
+          (should (string-match-p "not allowed" (harness-provider-test-last-node (plist-get call :id))))
+          (should (eq 'idle (plist-get (harness-call 'session/get (plist-get call :id)) :status)))))
+      ;; No provider for the model.
+      (let ((call (funcall ask "nope:model")))
+        (should (eq 'error (plist-get (car (plist-get call :got)) :stop-reason)))
+        (funcall finished (plist-get call :id) "Error: No provider for model nope:model"))
+      ;; A provider that fails as it is asked.
+      (let ((call (funcall ask "test-broken:m")))
+        (should (equal "Cannot connect" (plist-get (car (plist-get call :got)) :error)))
+        (funcall finished (plist-get call :id) "Error: Cannot connect"))
+      (should (= 5 (length (harness-provider-test-internal)))))))
+
+(ert-deftest harness-provider-without-a-job-records-nothing ()
+  "A request that names no job, or a blank one, makes no session."
+  (harness-provider-test-with-sessions (test-job)
+    (harness-provider-test-job-provider)
+    (let ((got nil))
+      (harness-call 'provider/complete (list :model "test-job:judge"
+                                             :messages (list (list :role 'user :content "hi"))
+                                             :on-event (lambda (e) (push e got))))
+      (harness-provider-test-answer (list :type 'usage :input 1 :output 1)
+                                    (list :type 'done :stop-reason 'end-turn))
+      (harness-call 'provider/complete (list :model "test-job:judge" :job "  " :on-event #'ignore))
+      (harness-provider-test-answer (list :type 'done :stop-reason 'end-turn))
+      (should (= 2 (length got)))
+      (should-not (harness-call 'session/list))
+      (should-not (plist-member (cadr harness-provider-test-requests) :job)))))
+
+(ert-deftest harness-provider-job-record-and-caller-fail-apart ()
+  "A caller whose handler fails does not keep the call from being
+recorded, and a record that cannot start keeps no event from the caller."
+  (harness-provider-test-with-sessions (test-job)
+    (harness-provider-test-job-provider)
+    (harness-call 'provider/complete (list :model "test-job:judge" :job "Pet"
+                                           :messages (list (list :role 'user :content "hi"))
+                                           :on-event (lambda (_) (error "Caller broke"))))
+    (let ((id (plist-get (car (harness-provider-test-internal)) :id)))
+      (harness-provider-test-answer (list :type 'text :delta "Hello")
+                                    (list :type 'done :stop-reason 'end-turn))
+      (should (eq 'idle (plist-get (harness-call 'session/get id) :status)))
+      (should (equal "Hello" (harness-provider-test-last-node id))))
+    (harness-register-method 'session/internal-start (lambda (&rest _) (error "Disk full")))
+    (let ((got nil))
+      (harness-call 'provider/complete (list :model "test-job:judge" :job "Pet"
+                                             :on-event (lambda (e) (push e got))))
+      (should (= 2 (length harness-provider-test-requests)))
+      (should-not (plist-member (car harness-provider-test-requests) :job))
+      (harness-provider-test-answer (list :type 'done :stop-reason 'end-turn))
+      (should (equal (list (list :type 'done :stop-reason 'end-turn)) got))
+      (should (= 1 (length (harness-provider-test-internal)))))))
 
 (provide 'harness-provider-test)
 ;;; harness-provider-test.el ends here

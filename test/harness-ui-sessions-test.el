@@ -11,12 +11,34 @@
 ;; The tasks: a task's session is of kind task and shows its task's
 ;; title until it has a name.  The harness's answer to `_harness/task/list'
 ;; is `harness-ui-sessions-test--tasks'; events are run as the UI runs them.
+;;
+;; The filters and the pause: the internal sessions the list leaves out
+;; and the filter of the tasks' sessions, then the pause that holds the
+;; list still while the paths that follow the sessions go on.  Those tests
+;; count the calls of `harness-ui-sessions--redraw'
+;; (`harness-ui-sessions-test--counting-redraws') and let the timers run
+;; (`harness-ui-sessions-test--spin').  One test fills the list with 300
+;; sessions and reports how long a redraw takes.
+;;
+;; The marks: m, u, DEL, U and t on rows, in a list built by
+;; `harness-ui-sessions-test--rows' and read back by
+;; `harness-ui-sessions-test--starred'; the marks through redraws, filters
+;; and the pause; and the commands that act on the marked sessions, with
+;; the requests they send recorded in `harness-ui-sessions-test--requests'.
+;;
+;; The setting commands: the list names its target to them, the marked
+;; sessions or the session at point, and the commands change the marked
+;; sessions and their tasks.  The sessions have settings of their own
+;; (`harness-ui-sessions-test--settings-rows'), the harness's answers are
+;; named in `harness-ui-sessions-test--replies', and the supervisor
+;; module is loaded for its command.
 
 ;;; Code:
 
 (require 'harness-test-helpers)
 (require 'harness-ui)
 (require 'harness-ui-sessions)
+(require 'harness-ui-supervisor)
 
 (defvar harness-ui--sessions)
 
@@ -26,18 +48,60 @@
 (defvar harness-ui-sessions-test--requests nil
   "The requests the list sent the harness, newest first: (METHOD PARAMS).")
 
+(defvar harness-ui-sessions-test--refused nil
+  "Ids of the sessions the harness refuses to delete, in a test that has some.")
+
+(defvar harness-ui-sessions-test--replies nil
+  "What the harness answers requests with, in a test that sets some.
+An alist (METHOD . ANSWER): ANSWER is the value the request resolves
+with, a function of the request's params returning it, or `fail', which
+rejects the request.  It wins over the answers the harness gives by
+itself (`harness-ui-sessions-test--request').")
+
 (defun harness-ui-sessions-test--request (method &optional params)
-  "Answer METHOD as the harness would: `_harness/task/list' with the tasks.
-An answer to what a session waits on is taken.  Anything else, or the
-tasks when they are `fail', fails.  Each request is recorded in
-`harness-ui-sessions-test--requests'."
+  "Answer METHOD with PARAMS as the harness would.
+`_harness/task/list' is answered with the tasks.  An answer to what a
+session waits on is taken, and so is a request to delete or deactivate a
+session or make it a task, but for the sessions of
+`harness-ui-sessions-test--refused', which cannot be deleted.  A
+priority is set, for one session or for the ids of a filter, which
+change.  So is a setting, for one session or for the ids of a filter
+\(`session/set-all', `supervisor/set-all', `task/set-all' and
+`handoff/switch-all' change them all); `handoff/check-all' finds no
+conversation lost and `handoff/check' none.  What
+`harness-ui-sessions-test--replies' names is answered as it says.
+Anything else, or the tasks when they are `fail', fails.  Each request is
+recorded in `harness-ui-sessions-test--requests'."
   (push (list method params) harness-ui-sessions-test--requests)
-  (cond ((and (equal method "_harness/task/list") (listp harness-ui-sessions-test--tasks))
+  (cond ((assoc method harness-ui-sessions-test--replies)
+         (let ((reply (cdr (assoc method harness-ui-sessions-test--replies))))
+           (cond ((eq reply 'fail)
+                  (harness-rejected (list 'harness-error (format "%s failed" method))))
+                 ((functionp reply) (harness-resolved (funcall reply params)))
+                 (t (harness-resolved reply)))))
+        ((and (equal method "_harness/task/list") (listp harness-ui-sessions-test--tasks))
          (harness-resolved harness-ui-sessions-test--tasks))
-        ((member method '("_harness/permission/answer" "_harness/question/answer"))
+        ((and (equal method "_harness/session/delete")
+              (member (plist-get params :id) harness-ui-sessions-test--refused))
+         (harness-rejected (list 'harness-error "The session cannot be deleted")))
+        ((member method '("_harness/permission/answer" "_harness/question/answer"
+                          "_harness/task/adopt" "_harness/session/delete"
+                          "_harness/session/deactivate"))
          (harness-resolved t))
         ((equal method "_harness/priority/set")
          (harness-resolved (plist-get params :priority)))
+        ((equal method "_harness/priority/set-all")
+         (harness-resolved (plist-get (plist-get params :filter) :ids)))
+        ((member method '("_harness/session/set-all" "_harness/supervisor/set-all"
+                          "_harness/task/set-all" "_harness/handoff/switch-all"))
+         (harness-resolved (plist-get (plist-get params :filter) :ids)))
+        ((equal method "_harness/handoff/check-all")
+         (harness-resolved (mapcar (lambda (id) (list :id id :lossy :false))
+                                   (plist-get (plist-get params :filter) :ids))))
+        ((equal method "_harness/handoff/check")
+         (harness-resolved (list :id (plist-get params :sessionId) :lossy :false)))
+        ((member method '("_harness/session/update" "session/set_model" "session/set_mode"))
+         (harness-resolved t))
         ((equal method "_harness/session/move")
          (harness-resolved (harness-plist-merge (harness-ui-session (plist-get params :id))
                                                 (list :cwd (plist-get params :dir)
@@ -81,6 +145,7 @@ tasks when they are `fail', fails.  Each request is recorded in
                      ((symbol-function 'harness-ui-request) #'harness-ui-sessions-test--request)
                      ((symbol-function 'harness-ui-display-view) #'ignore))
              (let ((harness-ui-sessions-test--tasks nil)
+                   (harness-ui-sessions-test--replies nil)
                    (harness-ui-sessions-test--requests nil))
                ,@body)))
        (clrhash harness-ui--sessions)
@@ -117,6 +182,42 @@ It is named ID unless PROPS, which go first, say otherwise."
                                          :key #'car :test #'equal))))
       (and at (substring-no-properties (aref columns at))))))
 
+(defun harness-ui-sessions-test--raw-cell (id column)
+  "Return COLUMN in session ID's row with its text properties, or nil.
+Nil when the row has no such column, as when the list hides it."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (let* ((columns (cadr (assoc id tabulated-list-entries)))
+           (at (and columns (cl-position column tabulated-list-format
+                                         :key #'car :test #'equal))))
+      (and at (aref columns at)))))
+
+(defun harness-ui-sessions-test--help (id column)
+  "Return the tooltip of COLUMN in session ID's row, or nil without one."
+  (when-let* ((cell (harness-ui-sessions-test--raw-cell id column)))
+    (get-text-property 0 'help-echo cell)))
+
+(defun harness-ui-sessions-test--column (name)
+  "Return the format entry of column NAME, or nil when the list hides it."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (cl-find name tabulated-list-format :key #'car :test #'equal)))
+
+(defun harness-ui-sessions-test--names ()
+  "Return the names of the columns the list shows, in order."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (mapcar #'car tabulated-list-format)))
+
+(defun harness-ui-sessions-test--header-text ()
+  "Return the text of the list's header line, without properties.
+\(`format-mode-line' formats nothing in batch.)"
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (substring-no-properties (car (last header-line-format)))))
+
+(defun harness-ui-sessions-test--row-start (id)
+  "Return (CHAR . ID): the first character of session ID's row, and the id there."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (let ((at (harness-ui-sessions--position id)))
+      (cons (char-after at) (tabulated-list-get-id at)))))
+
 (defun harness-ui-sessions-test--arrow-position (id)
   "Return the buffer position of the priority arrow in session ID's row."
   (with-current-buffer harness-ui-sessions--buffer-name
@@ -141,6 +242,16 @@ It is named ID unless PROPS, which go first, say otherwise."
       (funcall thunk))
     said))
 
+(defun harness-ui-sessions-test--messages (thunk)
+  "Call THUNK and return all the messages it showed, oldest first."
+  (let (said)
+    (cl-letf (((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (when format-string
+                   (push (apply #'format format-string args) said)))))
+      (funcall thunk))
+    (nreverse said)))
+
 (defun harness-ui-sessions-test--blocked (id project kind &rest props)
   "Cache a session ID in PROJECT blocked on a request of KIND, as the wire has it.
 KIND is \"permission\", for a shell command, or \"question\"; the
@@ -161,6 +272,27 @@ request's id is ID-p or ID-q.  PROPS go first."
   "Return the text of the list buffer, without properties."
   (with-current-buffer harness-ui-sessions--buffer-name
     (buffer-substring-no-properties (point-min) (point-max))))
+
+(defun harness-ui-sessions-test--mode-line ()
+  "Return the text of the list's mode line, without properties.
+That is the pause button, then what it says of the scope and the filters."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (substring-no-properties mode-line-process)))
+
+(defun harness-ui-sessions-test--spin (seconds)
+  "Spin the event loop for SECONDS, so the timers due by then run."
+  (let ((deadline (+ (float-time) seconds)))
+    (while (< (float-time) deadline)
+      (accept-process-output nil 0.02))))
+
+(defmacro harness-ui-sessions-test--counting-redraws (var &rest body)
+  "Run BODY with VAR counting the calls of `harness-ui-sessions--redraw'."
+  (declare (indent 1))
+  `(let ((,var 0))
+     (advice-add 'harness-ui-sessions--redraw :before (lambda () (cl-incf ,var))
+                 '((name . harness-ui-sessions-test-count)))
+     (unwind-protect (progn ,@body)
+       (advice-remove 'harness-ui-sessions--redraw 'harness-ui-sessions-test-count))))
 
 (defun harness-ui-sessions-test--goto (id)
   "Put point on the row of session ID in the current buffer, the list."
@@ -189,9 +321,8 @@ Only a line of the session's own: the one saying what it waits on."
      (harness-ui-sessions--init)
      (unwind-protect
          (progn ,@body)
-       (when (timerp harness-ui-sessions--live-timer)
-         (cancel-timer harness-ui-sessions--live-timer))
-       (setq harness-ui-sessions--live-timer nil))))
+       ;; No redraw left to fire in a test that follows.
+       (harness-ui-sessions--drop-pending-redraws))))
 
 (ert-deftest harness-ui-sessions-show-token-figures ()
   "The Context and Output columns show each session's token figures.
@@ -203,6 +334,8 @@ arrive."
   (harness-ui-sessions-test-with-repo
     (harness-ui-sessions-test--with-init
       (let ((harness-ui--live (make-hash-table :test 'equal))
+            ;; Output is left out by default; this test reads it.
+            (harness-ui-sessions-hidden-columns nil)
             (redraws 0))
         (harness-ui-sessions-test--add "busy" root :status "running"
                                        :usage (list :cost 0 :context 1000 :last-output 200 :output 300))
@@ -269,39 +402,399 @@ arrive."
                 (should (equal "10.2k" (funcall cell "busy" "Output")))))
           (advice-remove 'harness-ui-sessions--redraw 'harness-ui-sessions-test-count))))))
 
-(ert-deftest harness-ui-sessions-show-output-rates ()
-  "The Tok/s column shows each measured session's output rate and sorts by it.
-An idle session's figure is its last, dimmed; a new one redraws the list."
+(ert-deftest harness-ui-sessions-show-average-output-rates ()
+  "The Avg tok/s column shows each session's average output rate and sorts by it.
+The average is the output tokens of the model calls the harness timed
+over the seconds they streamed, the totals in the session's usage: none
+without them or under a second of streaming.  It is not dimmed once the
+session is idle.  Its tooltip says it is the average of the whole
+session, not the current rate, which it names beside it once the
+harness measured one; a new rate and new totals redraw the list."
   (harness-ui-sessions-test-with-repo
     (harness-ui-sessions-test--with-init
       (let ((harness-ui--rates (make-hash-table :test 'equal)))
-        (harness-ui-sessions-test--add "fast" root :status "running")
-        (harness-ui-sessions-test--add "slow" root)
-        (harness-ui-sessions-test--add "never" root)
+        (harness-ui-sessions-test--add "fast" root :status "running" :updated 400
+                                       :usage (list :cost 0 :context 0
+                                                    :stream-output 1200 :stream-seconds 20.0))
+        (harness-ui-sessions-test--add "slow" root :updated 300
+                                       :usage (list :cost 0 :context 0
+                                                    :stream-output 600 :stream-seconds 100.0))
+        (harness-ui-sessions-test--add "brief" root :updated 200
+                                       :usage (list :cost 0 :context 0
+                                                    :stream-output 30 :stream-seconds 0.5))
+        (harness-ui-sessions-test--add "never" root :updated 100)
         (puthash "fast" '(:rate 61.4 :output 600 :seconds 9.8 :calls 2 :at 1000.0 :model "demo:scripted")
                  harness-ui--rates)
-        (puthash "slow" '(:rate 4.3 :output 17 :seconds 4.0 :calls 1 :at 900.0 :model "demo:scripted")
-                 harness-ui--rates)
         (let ((default-directory root)) (harness-sessions))
+        ;; It replaces the column of the current rate.
+        (should-not (harness-ui-sessions-test--column "Tok/s"))
+        (should (= 9 (nth 1 (harness-ui-sessions-test--column "Avg tok/s"))))
+        (should (plist-get (nthcdr 3 (harness-ui-sessions-test--column "Avg tok/s")) :right-align))
+        (should (equal "60" (harness-ui-sessions-test--cell "fast" "Avg tok/s")))
+        (should (equal "6.0" (harness-ui-sessions-test--cell "slow" "Avg tok/s")))
+        ;; None without totals, or with under a second of streaming.
+        (should (equal "" (harness-ui-sessions-test--cell "brief" "Avg tok/s")))
+        (should (equal "" (harness-ui-sessions-test--cell "never" "Avg tok/s")))
+        ;; An idle session's average is no last figure to dim.
+        (should-not (get-text-property 0 'face (harness-ui-sessions-test--raw-cell "slow" "Avg tok/s")))
+        ;; The tooltip speaks of the average of the whole session, and of
+        ;; no current rate while none was measured.
+        (let ((help (harness-ui-sessions-test--help "slow" "Avg tok/s")))
+          (should (string-prefix-p (concat "Average output rate over the whole session: 6.0 tokens per second,"
+                                           " 600 output tokens in 1m40s of streaming, not the current rate. ")
+                                   help))
+          (should-not (string-match-p "measured at" help)))
+        ;; With one measured, it follows as the current rate.
+        (should (string-prefix-p (concat "Average output rate over the whole session: 60 tokens per second,"
+                                         " 1.2k output tokens in 20.0s of streaming, not the current rate."
+                                         " Output rate: 61 tokens per second, 600 output tokens in 9.8s"
+                                         " of streaming over the 2 latest model calls")
+                                 (harness-ui-sessions-test--help "fast" "Avg tok/s")))
+        ;; Sorting puts the sessions without an average first, the fastest last.
         (with-current-buffer harness-ui-sessions--buffer-name
-          (let* ((column (cl-position "Tok/s" tabulated-list-format :key #'car :test #'equal))
-                 (cell (lambda (id) (aref (cadr (assoc id tabulated-list-entries)) column))))
-            (should (equal "61" (substring-no-properties (funcall cell "fast"))))
-            (should (equal "4.3" (substring-no-properties (funcall cell "slow"))))
-            (should (equal "" (funcall cell "never")))
-            (should-not (get-text-property 0 'face (funcall cell "fast")))
-            (should (eq 'harness-dim-face (get-text-property 0 'face (funcall cell "slow"))))
-            (should (string-prefix-p "Last output rate: 4.3 tokens per second"
-                                     (get-text-property 0 'help-echo (funcall cell "slow"))))
-            ;; Sorting by the column puts the unmeasured first, the fastest last.
-            (let ((sorter (nth 2 (aref tabulated-list-format column))))
-              (should (equal '("never" "slow" "fast")
-                             (mapcar #'car (sort (copy-sequence tabulated-list-entries) sorter)))))
-            ;; A rate from the harness redraws the list.
-            (harness-ui--store-rate "never" '(:rate 120.0 :output 1200 :seconds 10.0 :calls 1
-                                              :at 1100.0 :model "demo:scripted"))
-            (harness-test-wait (lambda () (equal "120" (substring-no-properties (funcall cell "never"))))
-                               5 "the list to show the new rate")))))))
+          (should (equal '("brief" "never" "slow" "fast")
+                         (mapcar #'car (sort (copy-sequence tabulated-list-entries)
+                                             (nth 2 (harness-ui-sessions-test--column "Avg tok/s")))))))
+        ;; A rate from the harness redraws the list: an idle session's
+        ;; tooltip names it as the last one measured.
+        (harness-ui--store-rate "slow" '(:rate 120.0 :output 1200 :seconds 10.0 :calls 1
+                                         :at 1100.0 :model "demo:scripted"))
+        (harness-test-wait (lambda () (string-match-p "Last output rate: 120 tokens per second"
+                                                      (harness-ui-sessions-test--help "slow" "Avg tok/s")))
+                           5 "the list to name the new rate")
+        ;; So do new totals.
+        (harness-ui-cache-session (append (list :usage (list :cost 0 :context 0
+                                                             :stream-output 1200 :stream-seconds 100.0))
+                                          (harness-ui-session "slow")))
+        (harness-test-wait (lambda () (equal "12" (harness-ui-sessions-test--cell "slow" "Avg tok/s")))
+                           5 "the list to show the new average")))))
+
+;;;; Columns
+
+(ert-deftest harness-ui-sessions-have-the-columns-of-the-spec ()
+  "The header has the columns of the spec, and the rows hold their cells.
+Avg tok/s, Think and Last msg are there and Tok/s and Updated are not;
+Mode and Output are left out by default and come back when the option
+does not name them.  The status icon column always shows."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "main" root)
+    (let ((default-directory root)) (harness-sessions))
+    (let ((shown '("" "Name" "Status" "Kind" "Model" "Think" "Priority" "Context"
+                   "Avg tok/s" "Cost" "Last msg")))
+      (should (equal shown (harness-ui-sessions-test--names)))
+      (with-current-buffer harness-ui-sessions--buffer-name
+        ;; A cell for each, in the same order.
+        (should (= (length shown) (length (cadr (assoc "main" tabulated-list-entries)))))
+        (should (equal "main" (harness-ui-sessions-test--cell "main" "Name")))
+        ;; The header line names them too.
+        (should (string-match-p "Think.*Priority.*Context.*Avg tok/s.*Cost.*Last msg"
+                                (harness-ui-sessions-test--header-text)))
+        (let ((case-fold-search nil))
+          (should-not (string-match-p "\\<\\(Mode\\|Output\\|Updated\\|Tok/s\\|Project\\)\\>"
+                                      (harness-ui-sessions-test--header-text))))))
+    (should (equal '(("Model" . 22) ("Think" . 7) ("Avg tok/s" . 9) ("Last msg" . 9))
+                   (mapcar (lambda (name) (cons name (nth 1 (harness-ui-sessions-test--column name))))
+                           '("Model" "Think" "Avg tok/s" "Last msg"))))
+    (should-not (harness-ui-sessions-test--column "Tok/s"))
+    (should-not (harness-ui-sessions-test--column "Updated"))
+    (should-not (harness-ui-sessions-test--cell "main" "Mode"))
+    (should-not (harness-ui-sessions-test--cell "main" "Output"))
+    ;; The option names the columns left out; a change of it shows at the
+    ;; next redraw, the header with it.
+    (let ((harness-ui-sessions-hidden-columns nil))
+      (harness-ui-sessions--redraw))
+    (should (equal '("" "Name" "Status" "Kind" "Model" "Think" "Mode" "Priority" "Context"
+                     "Output" "Avg tok/s" "Cost" "Last msg")
+                   (harness-ui-sessions-test--names)))
+    (should (equal "Auto" (harness-ui-sessions-test--cell "main" "Mode")))
+    (should (string-match-p "Think.*Mode.*Priority.*Context.*Output.*Avg tok/s"
+                            (harness-ui-sessions-test--header-text)))
+    (let ((harness-ui-sessions-hidden-columns '("Name" "Cost")))
+      (harness-ui-sessions--redraw))
+    (should (equal '("" "Status" "Kind" "Model" "Think" "Mode" "Priority" "Context" "Output"
+                     "Avg tok/s" "Last msg")
+                   (harness-ui-sessions-test--names)))
+    ;; A sort by a column that is not shown ends at the next redraw.
+    (let ((harness-ui-sessions-hidden-columns nil))
+      (harness-ui-sessions--redraw))
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (setq tabulated-list-sort-key (cons "Output" t))
+      (tabulated-list-init-header)
+      (should (string-match-p "Output" (harness-ui-sessions-test--header-text))))
+    (harness-ui-sessions--redraw)
+    (should-not (harness-ui-sessions-test--column "Output"))
+    (should-not (buffer-local-value 'tabulated-list-sort-key
+                                    (get-buffer harness-ui-sessions--buffer-name)))
+    (let ((case-fold-search nil))
+      (should-not (string-match-p "Output" (harness-ui-sessions-test--header-text))))
+    ;; The status icon is not a column to leave out, whatever the option says.
+    (let ((harness-ui-sessions-hidden-columns '("")))
+      (harness-ui-sessions--redraw))
+    (should (equal "" (car (harness-ui-sessions-test--names))))
+    (should (= (length (harness-ui-sessions-test--names))
+               (length (cadr (assoc "main" (buffer-local-value 'tabulated-list-entries
+                                                               (get-buffer harness-ui-sessions--buffer-name)))))))))
+
+(ert-deftest harness-ui-sessions-project-column-is-for-all-projects ()
+  "The Project column shows in the list of all projects only.
+In one project's list it says the same on every row.  The scope decides
+at the next redraw, whatever the option says."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "main" root)
+    (harness-ui-sessions-test--add "elsewhere" other)
+    (let ((default-directory root)) (harness-sessions))
+    (should-not (harness-ui-sessions-test--column "Project"))
+    (should-not (harness-ui-sessions-test--cell "main" "Project"))
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (harness-ui-sessions-toggle-scope))
+    (should (equal "Project" (car (last (harness-ui-sessions-test--names)))))
+    (should (equal "repo" (harness-ui-sessions-test--cell "main" "Project")))
+    (should (equal "other" (harness-ui-sessions-test--cell "elsewhere" "Project")))
+    (should (string-match-p "Last msg.*Project" (harness-ui-sessions-test--header-text)))
+    ;; The option hides it there too, and back in one project's list the
+    ;; header is without it again.
+    (let ((harness-ui-sessions-hidden-columns '("Project")))
+      (harness-ui-sessions--redraw))
+    (should-not (harness-ui-sessions-test--column "Project"))
+    (should-not (string-match-p "Project" (harness-ui-sessions-test--header-text)))
+    (harness-ui-sessions--redraw)
+    (should (harness-ui-sessions-test--column "Project"))
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (harness-ui-sessions-toggle-scope))
+    (should-not (harness-ui-sessions-test--column "Project"))
+    (should-not (string-match-p "Project" (harness-ui-sessions-test--header-text)))
+    (should (equal '("main") (harness-ui-sessions-test--shown)))
+    ;; A list opened for every project shows it from the start.
+    (let ((default-directory root)) (harness-sessions t))
+    (should (harness-ui-sessions-test--column "Project"))
+    (should (equal "other" (harness-ui-sessions-test--cell "elsewhere" "Project")))))
+
+(ert-deftest harness-ui-sessions-toggle-column-shows-or-hides-one-here ()
+  "C asks for a column, noting which are shown, and shows or hides it here.
+The option stays as it is, and from the first toggle on the list keeps
+its own choice, whatever the option becomes.  A sort by a column that
+goes ends; one by a column that stays does not."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "main" root)
+    (let ((default-directory root)) (harness-sessions))
+    (let (asked answer)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (prompt table &rest _) (setq asked (list prompt table)) answer)))
+        (with-current-buffer harness-ui-sessions--buffer-name
+          (should (eq 'harness-ui-sessions-toggle-column (key-binding (kbd "C"))))
+          (should-not (local-variable-p 'harness-ui-sessions--hidden-columns))
+          ;; Mode is hidden by default: C shows it.
+          (setq answer "Mode")
+          (call-interactively (key-binding (kbd "C")))
+          (should (equal "Show or hide column: " (car asked)))
+          (should (equal '("Name" "Status" "Kind" "Model" "Think" "Mode" "Priority" "Context"
+                           "Output" "Avg tok/s" "Cost" "Last msg" "Project")
+                         (all-completions "" (cadr asked))))
+          (let ((note (completion-metadata-get (completion-metadata "" (cadr asked) nil)
+                                               'annotation-function)))
+            (should (string-match-p "hidden" (funcall note "Mode")))
+            (should (string-match-p "hidden" (funcall note "Output")))
+            (should (string-match-p "hidden" (funcall note "Project")))
+            (should (string-match-p "shown" (funcall note "Name")))
+            (should (string-match-p "shown" (funcall note "Avg tok/s"))))
+          (should (member "Mode" (harness-ui-sessions-test--names)))
+          (should (equal "Auto" (harness-ui-sessions-test--cell "main" "Mode")))
+          ;; Only this list's: the option is as it was.
+          (should (equal '("Mode" "Output") (default-value 'harness-ui-sessions-hidden-columns)))
+          (should (local-variable-p 'harness-ui-sessions--hidden-columns))
+          ;; Again, and Mode is hidden.
+          (call-interactively (key-binding (kbd "C")))
+          (should-not (member "Mode" (harness-ui-sessions-test--names)))
+          (let ((note (completion-metadata-get (completion-metadata "" (cadr asked) nil)
+                                               'annotation-function)))
+            (should (string-match-p "shown" (funcall note "Mode"))))
+          ;; A sort by a column that stays survives a toggle; one by the
+          ;; column that goes ends, and the list prints on.
+          (setq tabulated-list-sort-key (cons "Context" nil))
+          (tabulated-list-init-header)
+          (setq answer "Kind")
+          (call-interactively (key-binding (kbd "C")))
+          (should-not (member "Kind" (harness-ui-sessions-test--names)))
+          (should (equal '("Context") tabulated-list-sort-key))
+          (setq tabulated-list-sort-key (cons "Cost" t))
+          (setq answer "Cost")
+          (call-interactively (key-binding (kbd "C")))
+          (should-not (member "Cost" (harness-ui-sessions-test--names)))
+          (should-not tabulated-list-sort-key)
+          (should (equal '("main") (harness-ui-sessions-test--shown)))
+          ;; The list's own choice holds whatever the option becomes.
+          (let ((harness-ui-sessions-hidden-columns '("Think")))
+            (harness-ui-sessions--redraw))
+          (should (member "Think" (harness-ui-sessions-test--names)))
+          (should-not (member "Output" (harness-ui-sessions-test--names)))
+          (should-not (member "Kind" (harness-ui-sessions-test--names)))
+          (should-not (member "Cost" (harness-ui-sessions-test--names)))
+          ;; The status icon is not offered, and nothing else is made up.
+          (should-error (harness-ui-sessions-toggle-column "") :type 'user-error)
+          (should-error (harness-ui-sessions-toggle-column "Tok/s") :type 'user-error)
+          ;; The project's list has no Project column to show: it says so.
+          (should (string-match-p "only when the list covers all projects"
+                                  (harness-ui-sessions-test--message
+                                   (lambda () (harness-ui-sessions-toggle-column "Project")))))
+          (should-not (member "Project" (harness-ui-sessions-test--names)))
+          (harness-ui-sessions-toggle-scope)
+          (should-not (member "Project" (harness-ui-sessions-test--names)))
+          (harness-ui-sessions-toggle-column "Project")
+          (should (member "Project" (harness-ui-sessions-test--names))))))))
+
+(ert-deftest harness-ui-sessions-show-the-thinking-level ()
+  "The Think column shows a session's thinking level as plain text.
+A session without one thinks as its model does by default, and its cell
+is empty.  A level has a tooltip naming it and the command that changes
+it.  The column sorts by the level's place in the order of strength, the
+sessions without a level, or with one that order does not know, first."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "deep" root :thinking "xhigh" :updated 500)
+    (harness-ui-sessions-test--add "sharp" root :thinking "high" :updated 450)
+    (harness-ui-sessions-test--add "light" root :thinking "low" :updated 400)
+    (harness-ui-sessions-test--add "plain" root :updated 300)
+    (harness-ui-sessions-test--add "odd" root :thinking "bespoke" :updated 200)
+    (harness-ui-sessions-test--add "top" root :thinking "max" :updated 100)
+    (let ((default-directory root)) (harness-sessions))
+    (should (equal "xhigh" (harness-ui-sessions-test--cell "deep" "Think")))
+    (should (equal "high" (harness-ui-sessions-test--cell "sharp" "Think")))
+    (should (equal "low" (harness-ui-sessions-test--cell "light" "Think")))
+    (should (equal "max" (harness-ui-sessions-test--cell "top" "Think")))
+    (should (equal "" (harness-ui-sessions-test--cell "plain" "Think")))
+    (should-not (harness-ui-sessions-test--help "plain" "Think"))
+    ;; The cell is right after the model's.
+    (should (equal "Think" (nth (1+ (cl-position "Model" (harness-ui-sessions-test--names) :test #'equal))
+                                (harness-ui-sessions-test--names))))
+    (let ((help (harness-ui-sessions-test--help "deep" "Think")))
+      (should (string-match-p "\\`Thinking level: xhigh" help))
+      (should (string-match-p "harness-set-thinking" help))
+      (should-not (string-match-p "\n" help)))
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (should (equal '("plain" "odd" "light" "sharp" "deep" "top")
+                     (mapcar #'car (sort (copy-sequence tabulated-list-entries)
+                                         (nth 2 (harness-ui-sessions-test--column "Think")))))))))
+
+(ert-deftest harness-ui-sessions-show-when-the-last-message-came ()
+  "The Last msg column is how long ago a session's last message came.
+That is a user or assistant message, which can be an hour older than the
+session's last change of any kind.  A record from before the harness
+kept that falls back to the last change, and its tooltip says so.  The
+column sorts by the same time, and the rows stay in the order of the
+last change."
+  (harness-ui-sessions-test-with-repo
+    (let ((now (float-time)))
+      ;; Changed 10 minutes ago, its last message an hour before that.
+      (harness-ui-sessions-test--add "quiet" root :updated (- now 600) :last-message (- now 4200))
+      ;; No message time recorded: its last change stands in.
+      (harness-ui-sessions-test--add "old" root :updated (- now 1200))
+      ;; Changed a while ago, wrote a minute ago.
+      (harness-ui-sessions-test--add "fresh" root :updated (- now 1800) :last-message (- now 120))
+      (let ((default-directory root)) (harness-sessions))
+      (should-not (harness-ui-sessions-test--column "Updated"))
+      (should (equal "1h ago" (harness-ui-sessions-test--cell "quiet" "Last msg")))
+      (should (equal "20m ago" (harness-ui-sessions-test--cell "old" "Last msg")))
+      (should (equal "2m ago" (harness-ui-sessions-test--cell "fresh" "Last msg")))
+      (should (string-prefix-p "Last user or assistant message: "
+                               (harness-ui-sessions-test--help "quiet" "Last msg")))
+      (should (string-suffix-p (format-time-string "%F %H:%M" (- now 4200))
+                               (harness-ui-sessions-test--help "quiet" "Last msg")))
+      (let ((help (harness-ui-sessions-test--help "old" "Last msg")))
+        (should (string-match-p "\\`No message time is recorded for this session" help))
+        (should (string-suffix-p (format-time-string "%F %H:%M" (- now 1200)) help)))
+      ;; The rows keep the order of the last change; the column sorts by
+      ;; the last message, oldest first.
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (should (equal '("quiet" "old" "fresh") (mapcar #'car tabulated-list-entries)))
+        (should (equal '("quiet" "old" "fresh")
+                       (mapcar #'car (sort (copy-sequence tabulated-list-entries)
+                                           (nth 2 (harness-ui-sessions-test--column "Last msg"))))))
+        (should (equal '("fresh" "old" "quiet")
+                       (mapcar #'car (sort (copy-sequence tabulated-list-entries)
+                                           (lambda (a b) (funcall (nth 2 (harness-ui-sessions-test--column "Last msg"))
+                                                                  b a))))))))))
+
+(ert-deftest harness-ui-sessions-show-the-marks ()
+  "A marked session's row starts with a * in place of the padding space.
+The row keeps its text properties, so the start of the line is still on
+its session, and point stays there over a redraw.  Marks survive
+redraws, an unmarked row starts with a space, and so does the line under
+a blocked session's row, marked or not."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "plain" root :updated 300)
+    (harness-ui-sessions-test--blocked "asks" root "permission" :updated 200)
+    (harness-ui-sessions-test--add "child" root :parent-id "plain" :updated 100)
+    (let ((default-directory root)) (harness-sessions))
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (should (hash-table-p harness-ui-sessions--marked))
+      (should (equal (cons ?\s "plain") (harness-ui-sessions-test--row-start "plain")))
+      (let ((before (progn (harness-ui-sessions-test--goto "asks")
+                           (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
+            (under (harness-ui-sessions-test--line "asks")))
+        (puthash "asks" t harness-ui-sessions--marked)
+        (puthash "child" t harness-ui-sessions--marked)
+        (harness-ui-sessions--redraw)
+        (should (equal (cons ?* "asks") (harness-ui-sessions-test--row-start "asks")))
+        (should (equal (cons ?* "child") (harness-ui-sessions-test--row-start "child")))
+        (should (equal (cons ?\s "plain") (harness-ui-sessions-test--row-start "plain")))
+        (should (eq 'harness-ui-sessions-mark-face
+                    (get-text-property (harness-ui-sessions--position "asks") 'face)))
+        ;; Nothing else of the row changed, and point is on it still.
+        (should (equal "asks" (tabulated-list-get-id)))
+        (should (equal (concat "*" (substring before 1))
+                       (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
+        (should (equal "asks" (tabulated-list-get-id (line-beginning-position))))
+        (should (equal "asks" (tabulated-list-get-id (1+ (line-beginning-position)))))
+        (should (tabulated-list-get-entry (line-beginning-position)))
+        ;; The line under a blocked session's row is not marked.
+        (should (equal under (harness-ui-sessions-test--line "asks")))
+        (should (string-prefix-p " " (harness-ui-sessions-test--line "asks")))
+        ;; Marks outlive redraws, and unmarking takes the mark away.
+        (harness-ui-sessions--redraw)
+        (should (equal (cons ?* "asks") (harness-ui-sessions-test--row-start "asks")))
+        (remhash "asks" harness-ui-sessions--marked)
+        (harness-ui-sessions--redraw)
+        (should (equal (cons ?\s "asks") (harness-ui-sessions-test--row-start "asks")))
+        (should (equal before (progn (harness-ui-sessions-test--goto "asks")
+                                     (buffer-substring-no-properties (line-beginning-position)
+                                                                     (line-end-position)))))
+        (should (equal (cons ?* "child") (harness-ui-sessions-test--row-start "child")))))))
+
+(ert-deftest harness-ui-sessions-redraw-for-the-token-cells-shown ()
+  "A session's growing token figures redraw the list for the cells it shows.
+Output is left out by default, so a count that grows in output alone
+leaves the list as it is, and one that grows the context redraws it;
+with Context left out as well nothing redraws for either."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--with-init
+      (let ((harness-ui--live (make-hash-table :test 'equal)))
+        (harness-ui-sessions-test--add "busy" root :status "running"
+                                       :usage (list :cost 0 :context 1000 :last-output 200 :output 300))
+        (let ((default-directory root)) (harness-sessions))
+        ;; The count of 1.2k context, as the totals have it, writes more.
+        (harness-ui--store-live "busy" '(:context 1200 :output 900 :estimated 0))
+        (should (harness-ui-sessions--tokens-shown-p "busy"))
+        (should-not harness-ui-sessions--live-timer)
+        ;; The context grows: the list redraws soon.
+        (harness-ui--store-live "busy" '(:context 5000 :output 900 :estimated 0))
+        (should-not (harness-ui-sessions--tokens-shown-p "busy"))
+        (should (timerp harness-ui-sessions--live-timer))
+        (harness-test-wait (lambda () (equal "5.0k/200k" (harness-ui-sessions-test--cell "busy" "Context")))
+                           5 "the list to show the context")
+        (should (harness-ui-sessions--tokens-shown-p "busy"))
+        ;; With only Output shown, the output decides.
+        (let ((harness-ui-sessions-hidden-columns '("Context")))
+          (harness-ui-sessions--redraw))
+        (should (equal "900" (harness-ui-sessions-test--cell "busy" "Output")))
+        (harness-ui--store-live "busy" '(:context 9000 :output 900 :estimated 0))
+        (should (harness-ui-sessions--tokens-shown-p "busy"))
+        (harness-ui--store-live "busy" '(:context 9000 :output 1500 :estimated 0))
+        (should-not (harness-ui-sessions--tokens-shown-p "busy"))
+        ;; With neither shown there is nothing to redraw for.
+        (let ((harness-ui-sessions-hidden-columns '("Context" "Output")))
+          (harness-ui-sessions--redraw))
+        (should (harness-ui-sessions--tokens-shown-p "busy"))
+        (harness-ui--store-live "busy" '(:context 90000 :output 15000 :estimated 0))
+        (should (harness-ui-sessions--tokens-shown-p "busy"))))))
 
 (ert-deftest harness-ui-sessions-project-includes-its-worktrees ()
   "A task's session in a worktree is listed with its project, not another's."
@@ -480,6 +973,1565 @@ harness cannot say, as one without tasks, the list names no task."
       (harness-ui-sessions-filter "")
       (should (equal '("s-guide" "s-task") (harness-ui-sessions-test--shown))))))
 
+;;;; Filters
+
+(ert-deftest harness-ui-sessions-hide-the-internal-sessions ()
+  "A session of kind internal is left out of the list until I shows it.
+The kinds left out are those of `harness-ui-sessions-hidden-kinds'.  The
+rows and the printed buffer lack them, and the mode line says when they
+are shown.  A shown one indents under its parent like any child, and the
+fullscreen layout never picks one to show beside the list, though it is
+the newest session listed."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "chat" root :updated 100)
+    (harness-ui-sessions-test--add "judge" root :kind "internal" :name "Permission judge"
+                                   :updated 300)
+    (harness-ui-sessions-test--add "naming" root :kind "internal" :name "Auto-naming"
+                                   :parent-id "chat" :created 10 :updated 200)
+    (harness-ui-sessions-test--add "aside" root :kind "btw" :parent-id "chat"
+                                   :created 20 :updated 150)
+    (let ((default-directory root)) (harness-sessions))
+    ;; Out of the rows and of the buffer, by default.
+    (should (equal '("aside" "chat") (harness-ui-sessions-test--shown)))
+    (should-not (string-match-p "judge\\|naming" (harness-ui-sessions-test--text)))
+    (should (equal " [Pause] [project]" (harness-ui-sessions-test--mode-line)))
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (should (eq 'harness-ui-sessions-toggle-internal (key-binding (kbd "I"))))
+      (goto-char (point-max))
+      (should (equal "chat" (harness-ui-sessions--overview-session)))
+      ;; I shows them, a child under its parent as any is.
+      (call-interactively (key-binding (kbd "I")))
+      (should (equal '("aside" "chat" "judge" "naming") (harness-ui-sessions-test--shown)))
+      (should (equal '("judge" "chat" "naming" "aside") (mapcar #'car tabulated-list-entries)))
+      (should (string-match-p "Permission judge" (harness-ui-sessions-test--text)))
+      (should (equal "internal" (harness-ui-sessions-test--cell "judge" "Kind")))
+      (should (equal "  ↳ Auto-naming" (harness-ui-sessions-test--cell "naming" "Name")))
+      (should (equal " [Pause] [project +internal]" (harness-ui-sessions-test--mode-line)))
+      ;; With point on no row the layout shows the newest session, not
+      ;; the judge that was updated after it, nor the BTW conversation.
+      (goto-char (point-max))
+      (should-not (tabulated-list-get-id))
+      (should (equal "chat" (harness-ui-sessions--overview-session)))
+      ;; I again hides them.
+      (call-interactively (key-binding (kbd "I")))
+      (should (equal '("aside" "chat") (harness-ui-sessions-test--shown)))
+      (should (equal " [Pause] [project]" (harness-ui-sessions-test--mode-line)))
+      ;; The option names the kinds: with none nothing is left out, and
+      ;; another kind goes the way the internal ones did.
+      (let ((harness-ui-sessions-hidden-kinds nil))
+        (harness-ui-sessions--redraw))
+      (should (equal '("aside" "chat" "judge" "naming") (harness-ui-sessions-test--shown)))
+      (let ((harness-ui-sessions-hidden-kinds '("btw")))
+        (harness-ui-sessions--redraw))
+      (should (equal '("chat" "judge" "naming") (harness-ui-sessions-test--shown)))
+      ;; A kind is compared as text: a symbol counts, a session with none does not.
+      (should (harness-ui-sessions--hidden-kind-p '(:kind internal)))
+      (should-not (harness-ui-sessions--hidden-kind-p '(:id "no-kind"))))))
+
+(ert-deftest harness-ui-sessions-list-only-the-tasks ()
+  "T lists only the sessions that work on a task, and those under them.
+A task's sub-agent, the fork of that and a BTW conversation of the task
+are listed, indented under it.  A session that is no task's and has no
+ancestor that is stays out, one whose parent the cache lacks too, until
+T lists every session again.  The search up the parents ends at a cycle
+of them.  Making the session at point a task, which T used to do, has a
+key of its own now."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "task" wt :name nil :status "running" :updated 700)
+    (harness-ui-sessions-test--add "agent" wt :kind "subagent" :parent-id "task"
+                                   :created 10 :updated 600)
+    (harness-ui-sessions-test--add "fork" wt :kind "fork" :parent-id "agent"
+                                   :created 10 :updated 500)
+    (harness-ui-sessions-test--add "aside" wt :kind "btw" :parent-id "task"
+                                   :created 20 :updated 400)
+    (harness-ui-sessions-test--add "plain" root :updated 300)
+    (harness-ui-sessions-test--add "plain-child" root :kind "fork" :parent-id "plain" :updated 200)
+    (harness-ui-sessions-test--add "orphan" root :parent-id "gone" :updated 100)
+    (setq harness-ui-sessions-test--tasks
+          (list (list :id "t-1" :session "task" :state "active" :prompt "Paginate GET /orders")))
+    (let ((default-directory root)) (harness-sessions))
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (should (equal '("agent" "aside" "fork" "orphan" "plain" "plain-child" "task")
+                     (harness-ui-sessions-test--shown)))
+      (should (eq 'harness-ui-sessions-toggle-tasks-only (key-binding (kbd "T"))))
+      (call-interactively (key-binding (kbd "T")))
+      (should (equal '("task" "agent" "fork" "aside") (mapcar #'car tabulated-list-entries)))
+      (should (equal '(0 1 2 1) (mapcar (lambda (id) (gethash id harness-ui-sessions--depths))
+                                        '("task" "agent" "fork" "aside"))))
+      (should (equal "    ↳ fork" (harness-ui-sessions-test--cell "fork" "Name")))
+      (should (equal " [Pause] [project tasks]" (harness-ui-sessions-test--mode-line)))
+      ;; T again lists every session.
+      (call-interactively (key-binding (kbd "T")))
+      (should (equal '("agent" "aside" "fork" "orphan" "plain" "plain-child" "task")
+                     (harness-ui-sessions-test--shown)))
+      (should (equal " [Pause] [project]" (harness-ui-sessions-test--mode-line)))
+      ;; Parents that lead in a circle, or to a session the cache lacks,
+      ;; end the search, unless a task is among them.
+      (harness-ui-sessions-test--add "ring-a" root :parent-id "ring-b")
+      (harness-ui-sessions-test--add "ring-b" root :parent-id "ring-a")
+      (should-not (harness-ui-sessions--on-task-p (harness-ui-session "ring-a")))
+      (should-not (harness-ui-sessions--on-task-p (harness-ui-session "orphan")))
+      (puthash "ring-b" (list :id "t-2" :session "ring-b") harness-ui-sessions--tasks)
+      (should (harness-ui-sessions--on-task-p (harness-ui-session "ring-a")))
+      (should (harness-ui-sessions--on-task-p (harness-ui-session "ring-b")))
+      ;; M-t, which T gave way to, makes the session at point a task.
+      (should (eq 'harness-ui-sessions-make-task (key-binding (kbd "M-t"))))
+      (harness-ui-sessions-test--goto "plain")
+      (should (string-prefix-p "Added to the task board"
+                               (harness-ui-sessions-test--message
+                                (lambda () (call-interactively (key-binding (kbd "M-t")))))))
+      (should (equal '(("_harness/task/adopt" (:session-id "plain")))
+                     (harness-ui-sessions-test--answers))))))
+
+(ert-deftest harness-ui-sessions-toggles-work-from-any-buffer ()
+  "The toggles set their flag in the list, whichever buffer is current.
+That is how they run from the menu, or from a click in the mode line,
+which may not have the list current."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "chat" root)
+    (harness-ui-sessions-test--add "judge" root :kind "internal")
+    (let ((default-directory root)) (harness-sessions))
+    (with-temp-buffer
+      (harness-ui-sessions-toggle-internal)
+      (harness-ui-sessions-toggle-tasks-only)
+      (should-not (local-variable-p 'harness-ui-sessions--show-hidden-kinds))
+      (should-not (local-variable-p 'harness-ui-sessions--tasks-only)))
+    (should (equal " [Pause] [project tasks +internal]" (harness-ui-sessions-test--mode-line)))
+    ;; No task, so the tasks-only list is empty.
+    (should-not (harness-ui-sessions-test--shown))
+    (harness-ui-sessions-toggle-tasks-only)
+    (should (equal '("chat" "judge") (harness-ui-sessions-test--shown)))
+    ;; Without a list the toggles have nothing to do.
+    (kill-buffer harness-ui-sessions--buffer-name)
+    (harness-ui-sessions-toggle-internal)
+    (harness-ui-sessions-toggle-tasks-only)
+    (harness-ui-sessions-toggle-pause)
+    (should-not (get-buffer harness-ui-sessions--buffer-name))))
+
+;;;; Pausing
+
+(defun harness-ui-sessions-test--button ()
+  "Return the pause button of the list's mode line, with its properties."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (when (string-match "\\[Pause[^]]*\\]" mode-line-process)
+      (match-string 0 mode-line-process))))
+
+(defun harness-ui-sessions-test--paused-p ()
+  "Non-nil when the list buffer is paused."
+  (buffer-local-value 'harness-ui-sessions--paused (get-buffer harness-ui-sessions--buffer-name)))
+
+(ert-deftest harness-ui-sessions-pause-holds-the-list-still ()
+  "P pauses the list: nothing that follows the sessions redraws it.
+Changes, output rates, requests answered, growing token figures, task
+events and a reload of the UI leave a paused list as it is and start no
+timer.  Pausing drops a redraw already scheduled, whether it is the one
+of a burst of changes or the one the token figures wait for, and
+redraws nothing itself.  Resuming redraws once, with all that changed
+meanwhile.  The marks and the filter are as they were."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--with-init
+      (let ((harness-ui--live (make-hash-table :test 'equal))
+            (harness-ui--rates (make-hash-table :test 'equal)))
+        (harness-ui-sessions-test--add "busy" root :status "running" :updated 300
+                                       :usage (list :cost 0 :context 1000 :last-output 200 :output 300))
+        (harness-ui-sessions-test--add "quiet" root :updated 200)
+        (let ((default-directory root)) (harness-sessions))
+        (with-current-buffer harness-ui-sessions--buffer-name
+          (harness-ui-sessions-filter "demo")
+          (puthash "busy" t harness-ui-sessions--marked))
+        (harness-ui-sessions-test--counting-redraws redraws
+          (with-current-buffer harness-ui-sessions--buffer-name
+            (should (eq 'harness-ui-sessions-toggle-pause (key-binding (kbd "P"))))
+            (should-not harness-ui-sessions--paused)
+            ;; A burst of changes, then P before it redraws: pausing
+            ;; redraws nothing, the burst's redraw is dropped, and
+            ;; resuming right away makes the only one.
+            (harness-ui-sessions--on-changed)
+            (call-interactively (key-binding (kbd "P")))
+            (should harness-ui-sessions--paused)
+            (should (= 0 redraws))
+            (call-interactively (key-binding (kbd "P")))
+            (should-not harness-ui-sessions--paused)
+            (should (= 1 redraws))
+            (harness-ui-sessions-test--spin 0.3)
+            (should (= 1 redraws))
+            ;; A burst and a growing count scheduled, and then P: both
+            ;; are dropped, the live timer cancelled.
+            (setq redraws 0)
+            (harness-ui-sessions--on-changed)
+            (harness-ui--store-live "busy" '(:context 1500 :output 400 :estimated 0))
+            (let ((timer harness-ui-sessions--live-timer))
+              (should (timerp timer))
+              (call-interactively (key-binding (kbd "P")))
+              (should-not harness-ui-sessions--live-timer)
+              (should-not (memq timer timer-list)))
+            (harness-ui-sessions-test--spin 0.3)
+            (should (= 0 redraws))
+            ;; Everything that follows the sessions, left to fire.  The
+            ;; figures read otherwise than the list shows them, so
+            ;; without the pause they start the live timer.
+            (puthash "busy" '(:context 6000 :output 1000 :estimated 0) harness-ui--live)
+            (harness-ui-sessions--on-changed)
+            (harness-ui-sessions--on-rate "busy" '(:rate 40.0))
+            (harness-ui-sessions--on-pending "busy")
+            (harness-ui-sessions--on-live "busy" nil)
+            (harness-ui-sessions--on-live nil nil)
+            (should-not harness-ui-sessions--live-timer)
+            (harness-ui--store-live "busy" '(:context 6000 :output 1100 :estimated 0))
+            (harness-ui--store-rate "busy" (list :rate 42.0 :output 600 :seconds 14.0 :calls 1
+                                                 :at 1000.0 :model "demo:scripted"))
+            (harness-ui-cache-session (append (list :name "Renamed") (harness-ui-session "quiet")))
+            (setq harness-ui-sessions-test--tasks
+                  (list (list :id "t-1" :session "quiet" :state "active" :prompt "Rename it")))
+            (run-hook-with-args 'harness-ui-event-functions "task/changed"
+                                (list (car harness-ui-sessions-test--tasks)))
+            (run-hooks 'harness-ui-redraw-hook)
+            (should-not harness-ui-sessions--live-timer)
+            (harness-ui-sessions-test--spin 0.3)
+            (should (= 0 redraws))
+            (should-not harness-ui-sessions--live-timer)
+            ;; The redraws that fire by themselves look at the pause when
+            ;; they do, whatever scheduled them.
+            (harness-ui-sessions--live-redraw)
+            (harness-ui-sessions--redraw-live)
+            (should (= 0 redraws))
+            ;; The list shows what it showed.
+            (should (equal "1.2k/200k" (harness-ui-sessions-test--cell "busy" "Context")))
+            (should (equal '("quiet" "") (harness-ui-sessions-test--row "quiet")))
+            ;; Resuming redraws once, with all of it.
+            (call-interactively (key-binding (kbd "P")))
+            (should (= 1 redraws))
+            (should (equal "6.0k/200k" (harness-ui-sessions-test--cell "busy" "Context")))
+            (should (equal '("Renamed" "task") (harness-ui-sessions-test--row "quiet")))
+            (harness-ui-sessions-test--spin 0.3)
+            (should (= 1 redraws))
+            ;; The marks and the filter were left alone.
+            (should (gethash "busy" harness-ui-sessions--marked))
+            (should (equal "demo" harness-ui-sessions--filter))
+            (should (equal '("busy" "quiet") (harness-ui-sessions-test--shown)))))))))
+
+(ert-deftest harness-ui-sessions-pause-still-redraws-for-what-you-ask ()
+  "A paused list is redrawn by its own commands, by g and by opening it.
+The filter, the scope, the toggles and the columns redraw it, once each;
+g does when the harness has answered with the sessions and with the
+tasks; opening the list shows it afresh.  The hook that runs after a
+reload or reconnect asks for the tasks too, and keeps them, but does not
+redraw the list: they show once it is resumed.  It stays paused."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--with-init
+      (harness-ui-sessions-test--add "busy" root :status "running" :updated 300)
+      (harness-ui-sessions-test--add "quiet" root :updated 200)
+      (let ((default-directory root)) (harness-sessions))
+      (harness-ui-sessions-test--counting-redraws redraws
+        (with-current-buffer harness-ui-sessions--buffer-name
+          (harness-ui-sessions-toggle-pause)
+          (should harness-ui-sessions--paused)
+          ;; The list's own commands.
+          (setq redraws 0)
+          (harness-ui-sessions-filter "busy")
+          (should (= 1 redraws))
+          (should (equal '("busy") (harness-ui-sessions-test--shown)))
+          (harness-ui-sessions-filter "")
+          (dolist (command '(harness-ui-sessions-toggle-scope harness-ui-sessions-toggle-inactive
+                             harness-ui-sessions-toggle-blocked harness-ui-sessions-toggle-tasks-only
+                             harness-ui-sessions-toggle-internal))
+            (setq redraws 0)
+            (funcall command)
+            (should (= 1 redraws))
+            (funcall command))
+          (setq redraws 0)
+          (harness-ui-sessions-toggle-column "Mode")
+          (should (= 1 redraws))
+          (harness-ui-sessions-toggle-column "Mode")
+          ;; g: the sessions and the tasks the harness answers with.
+          (harness-ui-sessions-test--add "late" root :name nil :updated 900)
+          (setq harness-ui-sessions-test--tasks
+                (list (list :id "t-9" :session "late" :prompt "Late task")))
+          (setq redraws 0)
+          (call-interactively (key-binding (kbd "g")))
+          (should (= 2 redraws))
+          (should (equal '("Late task" "task") (harness-ui-sessions-test--row "late")))
+          ;; The hook after a reload takes the tasks and leaves the list.
+          (setq harness-ui-sessions-test--tasks
+                (list (list :id "t-9" :session "late" :prompt "Late task, edited")))
+          (setq redraws 0)
+          (run-hooks 'harness-ui-redraw-hook)
+          (should (= 0 redraws))
+          (should (equal '("Late task" "task") (harness-ui-sessions-test--row "late")))
+          ;; Resumed, the tasks it fetched show.
+          (harness-ui-sessions-toggle-pause)
+          (should (= 1 redraws))
+          (should (equal '("Late task, edited" "task") (harness-ui-sessions-test--row "late")))
+          ;; Paused again, opening the list shows it afresh: the sessions
+          ;; and the tasks it asks for redraw it, and it stays paused.
+          (harness-ui-sessions-toggle-pause)
+          (harness-ui-sessions-test--add "later" root :updated 950)
+          (setq harness-ui-sessions-test--tasks
+                (list (list :id "t-9" :session "late" :prompt "Late task, opened")))
+          (let ((default-directory root)) (harness-sessions))
+          (should (member "later" (harness-ui-sessions-test--shown)))
+          (should (equal '("Late task, opened" "task") (harness-ui-sessions-test--row "late")))
+          (should harness-ui-sessions--paused))))))
+
+(ert-deftest harness-ui-sessions-pause-button-in-the-mode-line ()
+  "The mode line always has a pause button, and a click on it toggles the pause.
+It reads [Pause] while the list follows the sessions, and [Paused: resume],
+highlighted, while it holds still, with a tooltip naming P.  The click
+is a left click in the mode line.  The pause is the list's own, so a
+command from any buffer sets it.  The button comes first, as a narrow
+mode line cuts its end, and the other things the mode line says follow."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "main" root)
+    (let ((default-directory root)) (harness-sessions))
+    (let ((live (harness-ui-sessions-test--button)))
+      (should (equal "[Pause]" (substring-no-properties live)))
+      (should-not (get-text-property 0 'face live))
+      (should (eq 'mode-line-highlight (get-text-property 0 'mouse-face live)))
+      (should (string-match-p "\\<P\\>" (get-text-property 0 'help-echo live))))
+    (let ((event (list 'mouse-1 (list (selected-window) 1 '(0 . 0) 0))))
+      ;; A click pauses it; the button then says so.
+      (funcall (lookup-key (get-text-property 0 'local-map (harness-ui-sessions-test--button))
+                           [mode-line mouse-1])
+               event)
+      (should (harness-ui-sessions-test--paused-p))
+      (let ((paused (harness-ui-sessions-test--button)))
+        (should (equal "[Paused: resume]" (substring-no-properties paused)))
+        (should (eq 'harness-ui-sessions-paused-face (get-text-property 0 'face paused)))
+        (should (eq 'mode-line-highlight (get-text-property 0 'mouse-face paused)))
+        (should (string-match-p "\\<P\\>" (get-text-property 0 'help-echo paused)))
+        ;; A click again resumes it.
+        (funcall (lookup-key (get-text-property 0 'local-map paused) [mode-line mouse-1]) event))
+      (should-not (harness-ui-sessions-test--paused-p))
+      (should (equal "[Pause]" (substring-no-properties (harness-ui-sessions-test--button)))))
+    ;; From another buffer, the list's own flag is the one that changes.
+    (with-temp-buffer
+      (harness-ui-sessions-toggle-pause)
+      (should-not (local-variable-p 'harness-ui-sessions--paused)))
+    (should (harness-ui-sessions-test--paused-p))
+    ;; The rest of the mode line follows the button, whatever is on.
+    (harness-ui-sessions-toggle-internal)
+    (harness-ui-sessions-toggle-tasks-only)
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (harness-ui-sessions-filter "ma"))
+    (should (equal " [Paused: resume] [project /ma tasks +internal]"
+                   (harness-ui-sessions-test--mode-line)))))
+
+(ert-deftest harness-ui-sessions-stay-responsive-with-many-sessions ()
+  "Hundreds of sessions redraw in a moment, and bursts of changes coalesce.
+There are 300 sessions in eight projects, in trees of three, a fifth of
+them running with live token figures.  One full redraw stays well
+within a generous bound.  200 changes and 200 growing counts in a row
+end in a few redraws -- the debounce and `harness-ui-sessions--live-interval'
+coalesce them -- and in none while the list is paused."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--with-init
+      (let ((harness-ui--live (make-hash-table :test 'equal))
+            (projects (list root wt other))
+            (count 300)
+            (running nil))
+        (dotimes (i 5)
+          (let ((dir (file-name-as-directory (expand-file-name (format "extra-%d" i) base))))
+            (make-directory dir t)
+            (push dir projects)))
+        (dotimes (i count)
+          (let ((id (format "s-%03d" i)))
+            ;; Trees of three: a session, its fork and the fork of that.
+            (harness-ui-sessions-test--add
+             id (nth (% (/ i 3) (length projects)) projects)
+             :status (if (zerop (% i 5)) "running" "idle")
+             :kind (if (zerop (% i 3)) "main" "fork")
+             :parent-id (and (> (% i 3) 0) (format "s-%03d" (1- i)))
+             :created (+ 1000 i) :updated (+ 1000 i)
+             :usage (list :cost (* 0.01 i) :context (* 100 i) :last-output 50 :output (* 10 i)))
+            (when (zerop (% i 5))
+              (push id running)
+              (puthash id (list :context (+ 5000 i) :output (* 20 i) :estimated 100) harness-ui--live))))
+        (let ((default-directory root)) (harness-sessions t))
+        (should (= count (length (harness-ui-sessions-test--shown))))
+        ;; One full redraw.
+        (let* ((start (float-time))
+               (_ (harness-ui-sessions--redraw))
+               (took (- (float-time) start)))
+          (message "harness-ui-sessions: one full redraw of %d sessions took %.3fs" count took)
+          (should (< took 2.0)))
+        (harness-ui-sessions-test--counting-redraws redraws
+          (cl-flet ((burst ()
+                      (dotimes (n 200)
+                        (harness-ui-sessions--on-changed)
+                        (harness-ui--store-live (nth (% n (length running)) running)
+                                                (list :context (+ 10000 n) :output (* 30 n)
+                                                      :estimated 0)))))
+            ;; Following the sessions, the burst ends in a couple of
+            ;; redraws: one of the debounce, one of the live interval.
+            (let ((start (float-time)))
+              (burst)
+              (message "harness-ui-sessions: a burst of 200 changes and 200 counts took %.3fs"
+                       (- (float-time) start)))
+            (harness-test-wait (lambda () (and (null harness-ui-sessions--live-timer) (> redraws 0)))
+                               5 "the burst to redraw the list")
+            (should (<= 1 redraws 3))
+            (message "harness-ui-sessions: the burst ended in %d redraws" redraws)
+            ;; Paused, the same burst redraws nothing, and starts no timer.
+            (harness-ui-sessions-toggle-pause)
+            (setq redraws 0)
+            (burst)
+            (should-not harness-ui-sessions--live-timer)
+            (harness-ui-sessions-test--spin 0.3)
+            (should (= 0 redraws))
+            ;; Resumed, one redraw shows the last counts.
+            (harness-ui-sessions-toggle-pause)
+            (should (= 1 redraws))
+            (should (= count (length (harness-ui-sessions-test--shown))))))))))
+
+;;;; Marks
+
+(defun harness-ui-sessions-test--rows (root ids &rest props)
+  "Cache a session in ROOT for each of IDS and open the list on them.
+The first of IDS is the newest session, so the rows come in the order of
+IDS.  PROPS go to every session."
+  (let ((updated (* 100 (length ids))))
+    (dolist (id ids)
+      (apply #'harness-ui-sessions-test--add id root :updated updated props)
+      (cl-decf updated 100)))
+  (let ((default-directory root)) (harness-sessions)))
+
+(defun harness-ui-sessions-test--press (keys)
+  "Run what the list binds to KEYS, in the list buffer, as typing them would."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (call-interactively (key-binding (kbd keys)))))
+
+(defun harness-ui-sessions-test--starred ()
+  "Return the ids of the rows that start with a *, in the order of the rows."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (let (ids)
+      (save-excursion
+        (goto-char (point-min))
+        (while (not (eobp))
+          (when (and (eq (char-after) ?*) (tabulated-list-get-id))
+            (push (tabulated-list-get-id) ids))
+          (forward-line 1)))
+      (nreverse ids))))
+
+(defun harness-ui-sessions-test--mark (&rest ids)
+  "Mark the sessions IDS with m, one row after the other, as a user would.
+Point ends on the row after the last one marked, or stays on it at the
+end of the list."
+  (with-current-buffer harness-ui-sessions--buffer-name
+    (dolist (id ids)
+      (harness-ui-sessions-test--goto id)
+      (harness-ui-sessions-test--press "m"))))
+
+(ert-deftest harness-ui-sessions-mark-and-unmark-the-rows ()
+  "The mark keys mark, unmark and invert rows, and move over them.
+m marks the session at point and moves to the next row, skipping the
+line under a blocked session's row, which is the row's own, and keeping
+the column; at the last row point stays.  A numeric prefix marks that
+many rows.  u unmarks and moves on; DEL moves up and unmarks; U unmarks
+every session and says how many; t inverts the rows listed and leaves
+the marks of the sessions the filters hide.  A mark changes its row in
+place: nothing is redrawn, the row keeps its properties, and an
+unmarked row is as it was printed."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "gone" root :status "inactive" :updated 100)
+    (harness-ui-sessions-test--add "three" root :updated 200)
+    (harness-ui-sessions-test--add "two" root :updated 300)
+    (harness-ui-sessions-test--blocked "asks" root "permission" :updated 400)
+    (harness-ui-sessions-test--add "one" root :updated 500)
+    (let ((default-directory root)) (harness-sessions))
+    (harness-ui-sessions-test--counting-redraws redraws
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (should (equal '("one" "asks" "two" "three" "gone") (mapcar #'car tabulated-list-entries)))
+        (dolist (binding '(("m" . harness-ui-sessions-mark) ("u" . harness-ui-sessions-unmark)
+                           ("DEL" . harness-ui-sessions-unmark-backward)
+                           ("U" . harness-ui-sessions-unmark-all)
+                           ("t" . harness-ui-sessions-toggle-marks)
+                           ("M" . harness-ui-sessions-move)))
+          (should (eq (cdr binding) (key-binding (kbd (car binding))))))
+        (should-not (harness-ui-sessions--marked-ids))
+        ;; m marks the row and moves to the same column of the next.
+        (let ((row (progn (harness-ui-sessions-test--goto "one")
+                          (buffer-substring (line-beginning-position) (line-end-position))))
+              (under (harness-ui-sessions-test--line "asks")))
+          (move-to-column 5)
+          (harness-ui-sessions-test--press "m")
+          (should (equal '("one") (harness-ui-sessions-test--starred)))
+          (should (equal "asks" (tabulated-list-get-id)))
+          (should (= 5 (current-column)))
+          (should (equal '("one") (harness-ui-sessions--marked-ids)))
+          (should (equal " [Pause] [project] 1 marked" (harness-ui-sessions-test--mode-line)))
+          ;; The row is the same but for its tag, and still its session's.
+          (let ((start (harness-ui-sessions--position "one")))
+            (should (equal (concat "*" (substring-no-properties (substring row 1)))
+                           (buffer-substring-no-properties start (save-excursion (goto-char start)
+                                                                                 (line-end-position)))))
+            (should (equal "one" (tabulated-list-get-id start)))
+            (should (equal "one" (tabulated-list-get-id (1+ start))))
+            (should (tabulated-list-get-entry start))
+            (should (eq 'harness-ui-sessions-mark-face (get-text-property start 'face))))
+          (should-not (buffer-modified-p))
+          ;; The blocked row: the line under it is no row, nor marked.
+          (harness-ui-sessions-test--press "m")
+          (should (equal '("one" "asks") (harness-ui-sessions-test--starred)))
+          (should (equal "two" (tabulated-list-get-id)))
+          (should (= 5 (current-column)))
+          (should (equal under (harness-ui-sessions-test--line "asks")))
+          (should (string-prefix-p " " (harness-ui-sessions-test--line "asks"))))
+        ;; A numeric prefix marks that many rows, and point ends after them.
+        (let ((current-prefix-arg 2)) (harness-ui-sessions-test--press "m"))
+        (should (equal '("one" "asks" "two" "three") (harness-ui-sessions-test--starred)))
+        (should (equal "gone" (tabulated-list-get-id)))
+        ;; At the last row point stays, with the row marked.
+        (harness-ui-sessions-test--press "m")
+        (should (equal "gone" (tabulated-list-get-id)))
+        (should (equal '("one" "asks" "two" "three" "gone") (harness-ui-sessions-test--starred)))
+        ;; DEL moves up, then unmarks.
+        (harness-ui-sessions-test--press "DEL")
+        (should (equal "three" (tabulated-list-get-id)))
+        (should (equal '("one" "asks" "two" "gone") (harness-ui-sessions-test--starred)))
+        (harness-ui-sessions-test--press "DEL")
+        (should (equal "two" (tabulated-list-get-id)))
+        (should (equal '("one" "asks" "gone") (harness-ui-sessions-test--starred)))
+        ;; u unmarks the row it is on, the blocked one from the line under it
+        ;; too, and moves on; the padding is as it was printed.
+        (harness-ui-sessions-test--goto "asks")
+        (forward-line 1)
+        (should (equal "asks" (tabulated-list-get-id)))
+        (harness-ui-sessions-test--press "u")
+        (should (equal '("one" "gone") (harness-ui-sessions-test--starred)))
+        (should (equal "two" (tabulated-list-get-id)))
+        (should (equal (cons ?\s "asks") (harness-ui-sessions-test--row-start "asks")))
+        (should-not (get-text-property (harness-ui-sessions--position "asks") 'face))
+        ;; Marking from the line under the row marks the row.
+        (harness-ui-sessions-test--goto "asks")
+        (forward-line 1)
+        (harness-ui-sessions-test--press "m")
+        (should (equal '("one" "asks" "gone") (harness-ui-sessions-test--starred)))
+        (should (equal "two" (tabulated-list-get-id)))
+        (should (string-prefix-p " " (harness-ui-sessions-test--line "asks")))
+        ;; U unmarks them all and says how many.
+        (should (equal '("Unmarked 3 sessions")
+                       (harness-ui-sessions-test--messages
+                        (lambda () (harness-ui-sessions-test--press "U")))))
+        (should-not (harness-ui-sessions-test--starred))
+        (should-not (harness-ui-sessions--marked-ids))
+        (should (= 0 (hash-table-count harness-ui-sessions--marked)))
+        (should (equal " [Pause] [project]" (harness-ui-sessions-test--mode-line)))
+        (should (equal '("No session was marked")
+                       (harness-ui-sessions-test--messages
+                        (lambda () (harness-ui-sessions-test--press "U")))))
+        (should (= 0 redraws))
+        ;; t inverts the rows listed and leaves a hidden session's mark.
+        (harness-ui-sessions-test--mark "two" "gone")
+        (harness-ui-sessions-test--press "i")
+        (should (equal '("one" "asks" "two" "three") (mapcar #'car tabulated-list-entries)))
+        (should (equal '("two") (harness-ui-sessions-test--starred)))
+        (setq redraws 0)
+        (harness-ui-sessions-test--press "t")
+        (should (equal '("one" "asks" "three") (harness-ui-sessions-test--starred)))
+        (should (equal '("one" "asks" "three" "gone") (harness-ui-sessions--marked-ids)))
+        (should (equal " [Pause] [project active] 4 marked" (harness-ui-sessions-test--mode-line)))
+        (should (= 0 redraws))
+        (harness-ui-sessions-test--press "i")
+        (should (equal '("one" "asks" "three" "gone") (harness-ui-sessions-test--starred)))
+        (harness-ui-sessions-test--press "t")
+        (should (equal '("two") (harness-ui-sessions-test--starred)))
+        (should (equal '("two") (harness-ui-sessions--marked-ids)))))))
+
+(ert-deftest harness-ui-sessions-a-mark-in-place-is-what-a-redraw-prints ()
+  "Marking in place leaves the list as a redraw of the marks prints it.
+Marked and unmarked, the text and every text property are the same, for
+a plain row and for the rows of sessions waiting on a permission request
+and on a question, whose lines under them and keys must stay as they
+are: y on the tag of a marked permission row still allows."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "plain" root :updated 300)
+    (harness-ui-sessions-test--blocked "asks" root "permission" :updated 200)
+    (harness-ui-sessions-test--blocked "wonders" root "question" :updated 100)
+    (let ((default-directory root)) (harness-sessions))
+    (cl-flet ((text () (with-current-buffer harness-ui-sessions--buffer-name
+                         (buffer-substring (point-min) (point-max)))))
+      (let ((unmarked (text)))
+        (harness-ui-sessions-test--mark "plain" "asks" "wonders")
+        (let ((in-place (text)))
+          (should (equal '("plain" "asks" "wonders") (harness-ui-sessions-test--starred)))
+          (harness-ui-sessions--redraw)
+          (should (equal-including-properties in-place (text))))
+        (with-current-buffer harness-ui-sessions--buffer-name
+          (let ((start (harness-ui-sessions--position "asks")))
+            (should (eq harness-ui-sessions-permission-map (get-text-property start 'keymap)))
+            (should (eq 'harness-ui-sessions-allow
+                        (lookup-key (get-text-property start 'keymap) (kbd "y"))))))
+        (harness-ui-sessions-test--press "U")
+        (should (equal-including-properties unmarked (text)))))))
+
+(ert-deftest harness-ui-sessions-marks-work-under-the-banner-of-the-blocked-filter ()
+  "The banner above the rows of the sessions waiting for you is no row.
+DEL on the first row stays on it, m marks the rows below the banner and
+moves down them, and the banner is not tagged."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--blocked "first" root "permission" :updated 200)
+    (harness-ui-sessions-test--blocked "second" root "question" :updated 100)
+    (harness-sessions-waiting)
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (should-not (tabulated-list-get-id (point-min)))
+      (harness-ui-sessions-test--goto "first")
+      (harness-ui-sessions-test--press "DEL")
+      (should (equal "first" (tabulated-list-get-id)))
+      (should-not (harness-ui-sessions-test--starred))
+      ;; m moves down, past the line under the first row, and stays at the last.
+      (harness-ui-sessions-test--press "m")
+      (should (equal "second" (tabulated-list-get-id)))
+      (harness-ui-sessions-test--press "m")
+      (should (equal "second" (tabulated-list-get-id)))
+      (should (equal '("first" "second") (harness-ui-sessions-test--starred)))
+      (should-not (eq ?* (char-after (point-min))))
+      ;; DEL moves up to the first row, and no further.
+      (harness-ui-sessions-test--press "DEL")
+      (should (equal "first" (tabulated-list-get-id)))
+      (should (equal '("second") (harness-ui-sessions-test--starred)))
+      (harness-ui-sessions-test--press "DEL")
+      (should (equal "first" (tabulated-list-get-id)))
+      (should (equal '("second") (harness-ui-sessions-test--starred)))
+      (harness-ui-sessions-test--press "t")
+      (should (equal '("first") (harness-ui-sessions-test--starred)))
+      (should-not (eq ?* (char-after (point-min)))))))
+
+(ert-deftest harness-ui-sessions-a-list-from-before-marks-takes-them ()
+  "A list kept through a reload from before marks existed has no table of marks.
+It reads as nothing marked, and the first mark makes the table."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--rows root '("a" "b"))
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (setq harness-ui-sessions--marked nil)
+      (should-not (harness-ui-sessions--marked-ids))
+      (should (= 0 (harness-ui-sessions--marked-count)))
+      (harness-ui-sessions-test--goto "a")
+      (should (equal '("a") (harness-ui-sessions--targets)))
+      (harness-ui-sessions--redraw)
+      (harness-ui-sessions-test--press "U")
+      (should-not harness-ui-sessions--marked)
+      (harness-ui-sessions-test--mark "a")
+      (should (hash-table-p harness-ui-sessions--marked))
+      (should (equal '("a") (harness-ui-sessions-test--starred))))))
+
+(ert-deftest harness-ui-sessions-marking-needs-a-session-on-the-line ()
+  "A line with no session is no target of a mark or of any command on sessions.
+That is the banner of a list of the sessions waiting for you when none
+waits.  m, u, DEL and the commands that act on sessions say so, and
+nothing is marked, asked or sent; U and t have nothing to do."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "idle" root)
+    (harness-sessions-waiting)
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (should-not (harness-ui-sessions-test--shown))
+      (goto-char (point-min))
+      (should-not (tabulated-list-get-id))
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) (error "Asked")))
+                ((symbol-function 'completing-read) (lambda (&rest _) (error "Asked"))))
+        (dolist (keys '("m" "u" "DEL" "d" "k" "x" "+" "-" "p" "M-t" "f" "r" "M"))
+          (ert-info (keys)
+            (let ((err (should-error (harness-ui-sessions-test--press keys) :type 'user-error)))
+              (should (equal "No session on this line" (cadr err)))))))
+      (should-not (harness-ui-sessions--marked-ids))
+      (harness-ui-sessions-test--press "t")
+      (harness-ui-sessions-test--press "U")
+      (should-not (harness-ui-sessions-test--answers))
+      (should (= 0 (hash-table-count harness-ui-sessions--marked))))))
+
+(ert-deftest harness-ui-sessions-marks-survive-redraws-filters-and-the-pause ()
+  "Marks stay through a redraw, the filter, a change of scope, g and the pause.
+A marked session the filters hide stays marked, counts in the mode line
+and shows its mark again when listed.  Marking works on a filtered list,
+and on a paused one, which shows the mark without a redraw.  The next
+refresh drops the mark of a session the cache has lost, hidden or not."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "q-one" root :updated 400)
+    (harness-ui-sessions-test--add "q-two" root :updated 300)
+    (harness-ui-sessions-test--add "r-three" root :updated 200)
+    (harness-ui-sessions-test--add "elsewhere" other :updated 100)
+    (let ((default-directory root)) (harness-sessions))
+    (harness-ui-sessions-test--counting-redraws redraws
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (harness-ui-sessions-test--mark "q-one" "r-three")
+        (should (equal '("q-one" "r-three") (harness-ui-sessions-test--starred)))
+        (harness-ui-sessions--redraw)
+        (should (equal '("q-one" "r-three") (harness-ui-sessions-test--starred)))
+        ;; The filter hides one: its mark stays and counts.
+        (harness-ui-sessions-filter "q")
+        (should (equal '("q-one" "q-two") (mapcar #'car tabulated-list-entries)))
+        (should (equal '("q-one") (harness-ui-sessions-test--starred)))
+        (should (equal '("q-one" "r-three") (harness-ui-sessions--marked-ids)))
+        (should (equal " [Pause] [project /q] 2 marked" (harness-ui-sessions-test--mode-line)))
+        ;; A filtered list takes marks, too.
+        (harness-ui-sessions-test--mark "q-two")
+        (should (equal '("q-one" "q-two" "r-three") (harness-ui-sessions--marked-ids)))
+        (harness-ui-sessions-filter "")
+        (should (equal '("q-one" "q-two" "r-three") (harness-ui-sessions-test--starred)))
+        ;; The scope: another project's session marked, then out of view.
+        (harness-ui-sessions-toggle-scope)
+        (harness-ui-sessions-test--mark "elsewhere")
+        (should (equal '("q-one" "q-two" "r-three" "elsewhere") (harness-ui-sessions-test--starred)))
+        (harness-ui-sessions-toggle-scope)
+        (should (equal '("q-one" "q-two" "r-three") (harness-ui-sessions-test--starred)))
+        (should (equal '("q-one" "q-two" "r-three" "elsewhere") (harness-ui-sessions--marked-ids)))
+        ;; g asks the harness for the sessions again.
+        (harness-ui-sessions-test--press "g")
+        (should (equal '("q-one" "q-two" "r-three") (harness-ui-sessions-test--starred)))
+        (should (= 4 (hash-table-count harness-ui-sessions--marked)))
+        ;; A paused list holds still but takes a mark at once.
+        (harness-ui-sessions-test--press "P")
+        (setq redraws 0)
+        (harness-ui-sessions-test--goto "q-one")
+        (harness-ui-sessions-test--press "u")
+        (should (equal '("q-two" "r-three") (harness-ui-sessions-test--starred)))
+        (should (equal " [Paused: resume] [project] 3 marked" (harness-ui-sessions-test--mode-line)))
+        (harness-ui-sessions-test--press "t")
+        (should (equal '("q-one") (harness-ui-sessions-test--starred)))
+        (should (= 0 redraws))
+        (harness-ui-sessions-test--press "t")
+        (harness-ui-sessions-test--press "P")
+        (should (= 1 redraws))
+        (should (equal '("q-two" "r-three") (harness-ui-sessions-test--starred)))
+        ;; A session the cache has lost is not a target, and loses its mark
+        ;; at the next refresh -- the hidden one too.
+        (remhash "q-two" harness-ui--sessions)
+        (remhash "elsewhere" harness-ui--sessions)
+        (should (equal '("r-three") (harness-ui-sessions--marked-ids)))
+        (should (= 3 (hash-table-count harness-ui-sessions--marked)))
+        (harness-ui-sessions--redraw)
+        (should (equal '("r-three") (hash-table-keys harness-ui-sessions--marked)))
+        (should (equal " [Pause] [project] 1 marked" (harness-ui-sessions-test--mode-line)))))))
+
+(ert-deftest harness-ui-sessions-targets-are-the-marked-sessions-or-the-one-at-point ()
+  "The sessions a command acts on are the marked ones, else the one at point.
+The marked ones come in the order of the rows, not of marking, and the
+ones the filters hide after them, newest first and by id among those
+updated together.  A session the cache lacks is none of them.  Commands
+that act on one session refuse while any is marked, whichever."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "d" root :updated 400)
+    (harness-ui-sessions-test--add "c" root :updated 300)
+    (harness-ui-sessions-test--add "b" root :updated 200)
+    (harness-ui-sessions-test--add "a" root :updated 100)
+    (harness-ui-sessions-test--add "h-old" root :status "inactive" :updated 10)
+    (harness-ui-sessions-test--add "h-b" root :status "inactive" :updated 20)
+    (harness-ui-sessions-test--add "h-a" root :status "inactive" :updated 20)
+    (harness-ui-sessions-test--add "h-new" root :status "inactive" :updated 30)
+    (let ((default-directory root)) (harness-sessions))
+    (with-current-buffer harness-ui-sessions--buffer-name
+      ;; Nothing marked: the session at point.
+      (harness-ui-sessions-test--goto "b")
+      (should (equal '("b") (harness-ui-sessions--targets)))
+      (should (equal "b" (harness-ui-sessions--one-id "Fork")))
+      ;; Marked in another order than the rows are in: a before c, and the
+      ;; inactive ones in an order that is neither theirs by time nor by id.
+      (harness-ui-sessions-test--mark "a" "c" "h-a" "h-old" "h-b" "h-new")
+      (harness-ui-sessions-test--goto "b")
+      (should (equal '("c" "a") (seq-take (harness-ui-sessions--marked-ids) 2)))
+      (should (equal (cl-remove-if-not #'harness-ui-sessions--marked-p
+                                       (mapcar #'car tabulated-list-entries))
+                     (harness-ui-sessions--marked-ids)))
+      (should (equal (harness-ui-sessions--marked-ids) (harness-ui-sessions--targets)))
+      ;; The hidden ones go last: newest first, by id among equals.
+      (harness-ui-sessions-test--press "i")
+      (should (equal '("c" "a" "h-new" "h-a" "h-b" "h-old") (harness-ui-sessions--marked-ids)))
+      (should (= 6 (harness-ui-sessions--marked-count)))
+      ;; A session the cache lacks is left out, before any refresh.
+      (remhash "c" harness-ui--sessions)
+      (should (equal '("a" "h-new" "h-a" "h-b" "h-old") (harness-ui-sessions--targets)))
+      ;; Marks keep a command for one session from acting on the one at point.
+      (let ((err (should-error (harness-ui-sessions--one-id "Fork") :type 'user-error)))
+        (should (string-match-p "\\`Fork acts on one session, but 5 are marked: unmark them first (U)\\'"
+                                (cadr err))))
+      (harness-ui-sessions-test--press "U")
+      (should (equal '("b") (harness-ui-sessions--targets)))
+      (harness-ui-sessions-test--goto "b")
+      (harness-ui-sessions-test--press "m")
+      (let ((err (should-error (harness-ui-sessions--one-id "Rename") :type 'user-error)))
+        (should (equal "Rename acts on one session, but one is marked: unmark it first (U)" (cadr err)))))))
+
+(ert-deftest harness-ui-sessions-delete-the-marked-sessions ()
+  "Deleting the marked sessions asks once and deletes each of them.
+The question counts them, or names the session at point when none is
+marked, and says how many of the marked ones the list does not show.
+Each goes by `_harness/session/delete' and leaves the cache as its
+request is answered; `harness-delete-session', which would ask for each,
+is not called.  Once the last is answered the ones deleted are unmarked,
+the list is redrawn once and one message says how many went.  One that
+cannot be deleted keeps its mark; declining the question deletes
+nothing."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--rows root '("a" "b" "c" "d"))
+    (let ((asked nil) (answer nil))
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (prompt) (push prompt asked) answer))
+                ((symbol-function 'harness-delete-session) (lambda (&rest _) (error "Asks again"))))
+        (harness-ui-sessions-test--counting-redraws redraws
+          (with-current-buffer harness-ui-sessions--buffer-name
+            (harness-ui-sessions-test--mark "a" "c")
+            (harness-ui-sessions-test--goto "b")
+            ;; Declined: nothing is sent, the marks stay.
+            (harness-ui-sessions-test--press "d")
+            (should (equal '("Delete 2 marked sessions? ") asked))
+            (should-not (harness-ui-sessions-test--answers))
+            (should (equal '("a" "c") (harness-ui-sessions-test--starred)))
+            ;; Accepted: one question and one request for each of the marked.
+            (setq asked nil answer t redraws 0)
+            (should (equal '("Deleted 2 sessions")
+                           (harness-ui-sessions-test--messages
+                            (lambda () (harness-ui-sessions-test--press "d")))))
+            (should (equal '("Delete 2 marked sessions? ") asked))
+            (should (equal '(("_harness/session/delete" (:id "a"))
+                             ("_harness/session/delete" (:id "c")))
+                           (harness-ui-sessions-test--answers)))
+            (should-not (harness-ui-session "a"))
+            (should-not (harness-ui-session "c"))
+            (should (harness-ui-session "b"))
+            (should (= 1 redraws))
+            (should (equal '("b" "d") (harness-ui-sessions-test--shown)))
+            (should-not (harness-ui-sessions-test--starred))
+            (should (= 0 (hash-table-count harness-ui-sessions--marked)))
+            (should (equal " [Pause] [project]" (harness-ui-sessions-test--mode-line)))
+            ;; Nothing marked: the session at point, named.
+            (setq asked nil harness-ui-sessions-test--requests nil)
+            (harness-ui-sessions-test--goto "b")
+            (should (equal '("Session deleted")
+                           (harness-ui-sessions-test--messages
+                            (lambda () (harness-ui-sessions-test--press "d")))))
+            (should (equal '("Delete session b? ") asked))
+            (should (equal '(("_harness/session/delete" (:id "b")))
+                           (harness-ui-sessions-test--answers)))
+            (should (equal '("d") (harness-ui-sessions-test--shown)))
+            ;; One that cannot be deleted says so and keeps its mark.
+            (harness-ui-sessions-test--add "e" root :updated 50)
+            (harness-ui-sessions-test--add "f" root :updated 40)
+            (harness-ui-sessions--redraw)
+            (setq asked nil harness-ui-sessions-test--requests nil)
+            (let ((harness-ui-sessions-test--refused '("f")))
+              (harness-ui-sessions-test--mark "e" "f")
+              (harness-ui-sessions-test--goto "d")
+              (let ((said (harness-ui-sessions-test--messages
+                           (lambda () (harness-ui-sessions-test--press "d")))))
+                (should (= 2 (length said)))
+                (should (string-match-p "_harness/session/delete failed" (car said)))
+                (should (equal "Deleted 1 of 2 sessions" (cadr said)))))
+            (should (equal '("d" "f") (harness-ui-sessions-test--shown)))
+            (should (equal '("f") (harness-ui-sessions-test--starred)))
+            ;; The question says how many marked sessions are out of view.
+            (let ((harness-ui-sessions-test--refused nil))
+              (harness-ui-sessions-test--add "h" root :status "inactive" :updated 1)
+              (harness-ui-sessions--redraw)
+              (harness-ui-sessions-test--mark "h")
+              (harness-ui-sessions-test--press "i")
+              (setq asked nil answer nil)
+              (harness-ui-sessions-test--press "d")
+              (should (equal '("Delete 2 marked sessions, 1 of them not listed? ") asked)))))))))
+
+(ert-deftest harness-ui-sessions-cancel-the-turns-of-the-marked-sessions ()
+  "Cancelling cancels the turn of every marked session that has one.
+A session has one when it runs or is blocked.  The others are skipped and keep their marks, the ones cancelled are
+unmarked, and several sessions get a message saying how many turns were
+cancelled.  A mark outweighs point.  Without marks k acts on the session
+at point, which says so when it has no turn."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "busy" root :status "running" :updated 500)
+    (harness-ui-sessions-test--blocked "asks" root "permission" :updated 400)
+    (harness-ui-sessions-test--add "idle" root :updated 300)
+    (harness-ui-sessions-test--add "other" root :updated 200)
+    (let ((default-directory root)) (harness-sessions))
+    (let ((cancelled nil))
+      (cl-letf (((symbol-function 'harness-cancel-turn) (lambda (id) (push id cancelled))))
+        (with-current-buffer harness-ui-sessions--buffer-name
+          (harness-ui-sessions-test--mark "busy" "asks" "idle")
+          (harness-ui-sessions-test--goto "other")
+          (should (equal '("Cancelling 2 turns; 1 not running")
+                         (harness-ui-sessions-test--messages
+                          (lambda () (harness-ui-sessions-test--press "k")))))
+          (should (equal '("busy" "asks") (reverse cancelled)))
+          (should (equal '("idle") (harness-ui-sessions-test--starred)))
+          ;; The session still marked is the target, not the one at point.
+          (setq cancelled nil)
+          (harness-ui-sessions-test--goto "busy")
+          (should (equal '("idle is not running")
+                         (harness-ui-sessions-test--messages
+                          (lambda () (harness-ui-sessions-test--press "k")))))
+          (should-not cancelled)
+          (harness-ui-sessions-test--mark "other")
+          (should (equal '("None of the 2 sessions is running")
+                         (harness-ui-sessions-test--messages
+                          (lambda () (harness-ui-sessions-test--press "k")))))
+          (should (equal '("idle" "other") (harness-ui-sessions-test--starred)))
+          ;; Without marks, the session at point, whose own message is
+          ;; harness-cancel-turn's.
+          (harness-ui-sessions-test--press "U")
+          (harness-ui-sessions-test--goto "asks")
+          (should-not (harness-ui-sessions-test--messages
+                       (lambda () (harness-ui-sessions-test--press "k"))))
+          (should (equal '("asks") cancelled)))))))
+
+(ert-deftest harness-ui-sessions-deactivate-the-marked-sessions ()
+  "Deactivating deactivates every marked session, or the session at point.
+Each goes by `_harness/session/deactivate'; once the last is answered the
+sessions are unmarked, the list is redrawn once and one message says how
+many were deactivated."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--rows root '("a" "b" "c"))
+    (harness-ui-sessions-test--counting-redraws redraws
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (harness-ui-sessions-test--mark "a" "c")
+        (harness-ui-sessions-test--goto "b")
+        (setq redraws 0)
+        (should (equal '("Deactivated 2 sessions")
+                       (harness-ui-sessions-test--messages
+                        (lambda () (harness-ui-sessions-test--press "x")))))
+        (should (equal '(("_harness/session/deactivate" (:id "a"))
+                         ("_harness/session/deactivate" (:id "c")))
+                       (harness-ui-sessions-test--answers)))
+        (should (= 1 redraws))
+        (should-not (harness-ui-sessions-test--starred))
+        (should (= 0 (hash-table-count harness-ui-sessions--marked)))
+        ;; Nothing marked: the session at point.
+        (setq harness-ui-sessions-test--requests nil)
+        (harness-ui-sessions-test--goto "b")
+        (should (equal '("Deactivated b")
+                       (harness-ui-sessions-test--messages
+                        (lambda () (harness-ui-sessions-test--press "x")))))
+        (should (equal '(("_harness/session/deactivate" (:id "b")))
+                       (harness-ui-sessions-test--answers)))))))
+
+(ert-deftest harness-ui-sessions-set-the-priority-of-the-marked-sessions ()
+  "Setting the priority asks for the level once, for every marked session.
+They are given it in one request, `_harness/priority/set-all' with their
+ids as the filter; one session, marked or at point, is set as for one.
++ and - shift the priority of each, and with a prefix ask once for a
+level.  The marks stay after all of them, so more can be given to the
+same sessions."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--rows root '("a" "b" "c"))
+    (let ((asked nil))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (prompt &rest _) (push prompt asked) "high")))
+        (with-current-buffer harness-ui-sessions--buffer-name
+          (harness-ui-sessions-test--mark "a" "b")
+          (harness-ui-sessions-test--goto "c")
+          ;; p: one question, one request for both, the marks kept.
+          (should (equal '("Priority → high for 2 sessions")
+                         (harness-ui-sessions-test--messages
+                          (lambda () (harness-ui-sessions-test--press "p")))))
+          (should (equal '("Priority for the 2 marked sessions: ") asked))
+          (should (equal '(("_harness/priority/set-all"
+                            (:priority "high" :filter (:ids ("a" "b")))))
+                         (harness-ui-sessions-test--answers)))
+          (should (equal '("a" "b") (harness-ui-sessions-test--starred)))
+          ;; C-u + and C-u - ask once, too, through the same command.
+          (setq asked nil harness-ui-sessions-test--requests nil)
+          (let ((current-prefix-arg '(4))) (harness-ui-sessions-test--press "+"))
+          (let ((current-prefix-arg '(4))) (harness-ui-sessions-test--press "-"))
+          (should (= 2 (length asked)))
+          (should (equal '("_harness/priority/set-all" "_harness/priority/set-all")
+                         (mapcar #'car (harness-ui-sessions-test--answers))))
+          (should (equal '("a" "b") (harness-ui-sessions-test--starred)))
+          ;; + and - shift each marked session's priority, the marks kept.
+          (let (shifted)
+            (cl-letf (((symbol-function 'harness-priority-shift-session)
+                       (lambda (id step &optional _done) (push (list id step) shifted))))
+              (harness-ui-sessions-test--press "+")
+              (harness-ui-sessions-test--press "-"))
+            (should (equal '(("a" 1) ("b" 1) ("a" -1) ("b" -1)) (reverse shifted))))
+          (should (equal '("a" "b") (harness-ui-sessions-test--starred)))
+          ;; Unstubbed, each is raised by its own request, and one message
+          ;; counts the sessions that reached a new level.
+          (setq harness-ui-sessions-test--requests nil)
+          (should (equal '("Priority raised for 1 of 2 sessions" "Priority raised for 2 of 2 sessions")
+                         (harness-ui-sessions-test--messages
+                          (lambda () (harness-ui-sessions-test--press "+")))))
+          (should (equal '(("_harness/priority/set" (:sessionId "a" :priority "high"))
+                           ("_harness/priority/set" (:sessionId "b" :priority "high")))
+                         (harness-ui-sessions-test--answers)))
+          (should (equal '("a" "b") (harness-ui-sessions-test--starred)))
+          ;; One marked session is set as one is, by the request for one.
+          (harness-ui-sessions-test--press "U")
+          (harness-ui-sessions-test--mark "c")
+          (harness-ui-sessions-test--goto "a")
+          (setq asked nil harness-ui-sessions-test--requests nil)
+          (harness-ui-sessions-test--press "p")
+          (should (equal '("Priority: ") asked))
+          (should (equal '(("_harness/priority/set" (:sessionId "c" :priority "high")))
+                         (harness-ui-sessions-test--answers))))))))
+
+(ert-deftest harness-ui-sessions-make-tasks-of-the-marked-sessions ()
+  "Making tasks adopts every marked session that is no task yet.
+One message says how many.  A session that is a task already is skipped
+and keeps its mark; the ones adopted are unmarked.  Without marks it is
+the session at point, as it was."
+  (harness-ui-sessions-test-with-repo
+    (setq harness-ui-sessions-test--tasks
+          (list (list :id "t-1" :session "a" :state "active" :prompt "Paginate GET /orders")))
+    (harness-ui-sessions-test--rows root '("a" "b" "c" "d"))
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (harness-ui-sessions-test--mark "a" "b" "c")
+      (harness-ui-sessions-test--goto "d")
+      (let ((said (harness-ui-sessions-test--messages
+                   (lambda () (harness-ui-sessions-test--press "M-t")))))
+        (should (= 1 (length said)))
+        (should (string-match-p "\\`Added 2 sessions to the task board (.*); 1 was a task already\\'"
+                                (car said))))
+      (should (equal '(("_harness/task/adopt" (:session-id "b"))
+                       ("_harness/task/adopt" (:session-id "c")))
+                     (harness-ui-sessions-test--answers)))
+      (should (equal '("a") (harness-ui-sessions-test--starred)))
+      ;; Only tasks marked: nothing to adopt, and nothing sent.
+      (setq harness-ui-sessions-test--requests nil)
+      (should (equal '("a is a task already")
+                     (harness-ui-sessions-test--messages
+                      (lambda () (harness-ui-sessions-test--press "M-t")))))
+      (should-not (harness-ui-sessions-test--answers))
+      (should (equal '("a") (harness-ui-sessions-test--starred)))
+      ;; Nothing marked: the session at point.
+      (harness-ui-sessions-test--press "U")
+      (harness-ui-sessions-test--goto "d")
+      (should (string-match-p "\\`Added to the task board ("
+                              (car (harness-ui-sessions-test--messages
+                                    (lambda () (harness-ui-sessions-test--press "M-t"))))))
+      (should (equal '(("_harness/task/adopt" (:session-id "d")))
+                     (harness-ui-sessions-test--answers))))))
+
+(ert-deftest harness-ui-sessions-one-session-commands-refuse-marks ()
+  "Fork, rename and move refuse while any session is marked.
+They act on one session, and say to unmark first (U); they ask for
+nothing and send nothing then.  RET still opens the session at point,
+marked or not.  Without marks they act on the session at point."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--rows root '("a" "b"))
+    (let ((ran nil))
+      (cl-letf (((symbol-function 'harness-fork-session) (lambda (id &rest _) (push (list 'fork id) ran)))
+                ((symbol-function 'harness-rename-session) (lambda (name id) (push (list 'rename name id) ran)))
+                ((symbol-function 'harness-move-session) (lambda (dir id &rest _) (push (list 'move dir id) ran)))
+                ((symbol-function 'harness-ui-visit-session) (lambda (id &rest _) (push (list 'open id) ran)))
+                ((symbol-function 'read-string) (lambda (&rest _) (error "Asked")))
+                ((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked"))))
+        (with-current-buffer harness-ui-sessions--buffer-name
+          (harness-ui-sessions-test--mark "a")
+          (harness-ui-sessions-test--goto "b")
+          (dolist (keys '("f" "r" "M"))
+            (ert-info (keys)
+              (let ((err (should-error (harness-ui-sessions-test--press keys) :type 'user-error)))
+                (should (string-match-p "acts on one session, but one is marked: unmark it first (U)"
+                                        (cadr err))))))
+          (should-not ran)
+          (should (equal '("a") (harness-ui-sessions-test--starred)))
+          ;; Opening is the session at point's.
+          (harness-ui-sessions-test--press "RET")
+          (should (equal '((open "b")) ran))
+          ;; Unmarked, they act on the session at point.
+          (harness-ui-sessions-test--press "U")
+          (harness-ui-sessions-test--goto "b")
+          (harness-ui-sessions-test--press "f")
+          (should (equal '((fork "b") (open "b")) ran))
+          (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "Fresh name")))
+            (harness-ui-sessions-test--press "r"))
+          (should (equal '(rename "Fresh name" "b") (car ran))))))))
+
+(ert-deftest harness-ui-sessions-menu-offers-the-marks ()
+  "The harness menu lists the marking keys beside the commands they feed.
+The group says its commands act on the marked sessions too, and move is
+at M now that m marks."
+  (let* ((group (get 'harness-ui-sessions-mode 'harness-menu-group))
+         (column (cl-find "Session at point, or the marked ones" (cdr group)
+                          :key (lambda (column) (aref column 0)) :test #'equal))
+         (entries (and column (cl-remove-if-not #'consp (append column nil)))))
+    (should (equal "Session list" (car group)))
+    (should column)
+    (dolist (entry '((". m" "Mark" harness-ui-sessions-mark)
+                     (". u" "Unmark" harness-ui-sessions-unmark)
+                     (". U" "Unmark all" harness-ui-sessions-unmark-all)
+                     (". t" "Invert marks" harness-ui-sessions-toggle-marks)
+                     (". M" "Move to another directory" harness-ui-sessions-move)
+                     (". f" "Fork" harness-ui-sessions-fork)
+                     (". d" "Delete" harness-ui-sessions-delete)
+                     (". k" "Cancel turn" harness-ui-sessions-cancel)
+                     (". x" "Deactivate" harness-ui-sessions-deactivate)
+                     ("M-t" "Make it a task" harness-ui-sessions-make-task)
+                     (". +" "Raise priority" harness-ui-sessions-raise-priority)
+                     (". p" "Set priority…" harness-ui-sessions-set-priority)))
+      (ert-info ((format "%S" entry))
+        (should (member entry entries))))
+    ;; Each key is listed once, and move has only the key M now.
+    (let ((keys (mapcar #'car entries)))
+      (should (equal keys (delete-dups (copy-sequence keys)))))
+    (should (= 1 (cl-count 'harness-ui-sessions-move entries :key #'caddr)))
+    (should (equal ". M" (car (cl-find 'harness-ui-sessions-move entries :key #'caddr))))))
+
+;;;; The harness's setting commands
+
+(defun harness-ui-sessions-test--settings-rows (root)
+  "Cache three sessions in ROOT that have settings of their own, and open the list.
+The sessions a, b and c come in this order.  a and b are on the model
+demo:scripted and in the mode auto, c is on demo:other in yolo; a and c
+think at high, b at low; a and c are non-interactive, b is not; a and b
+supervise, c is hands-on."
+  (harness-ui-sessions-test--add "a" root :updated 300 :model "demo:scripted" :thinking "high"
+                                 :permission-mode "auto" :non-interactive t
+                                 :ext '(:supervisor t))
+  (harness-ui-sessions-test--add "b" root :updated 200 :model "demo:scripted" :thinking "low"
+                                 :permission-mode "auto" :non-interactive :false
+                                 :ext '(:supervisor t))
+  (harness-ui-sessions-test--add "c" root :updated 100 :model "demo:other" :thinking "high"
+                                 :permission-mode "yolo" :non-interactive t
+                                 :ext '(:supervisor :false))
+  (let ((default-directory root)) (harness-sessions)))
+
+(defun harness-ui-sessions-test--b-is-a-task ()
+  "Have the harness say that session b works on the task t-1."
+  (setq harness-ui-sessions-test--tasks
+        (list (list :id "t-1" :session "b" :state "active" :prompt "Paginate GET /orders"))))
+
+(ert-deftest harness-ui-sessions-setting-target-is-the-marked-sessions-or-the-one-at-point ()
+  "The list tells the setting commands what to change, in the list only.
+With no session marked it is the id of the session at point, a string,
+so the commands act on that session as in its chat, and nil where point
+is on no session, so they ask which.  With sessions marked it is
+\(VALUES SET-FN CONTEXT) for them, wherever point is."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--settings-rows root)
+    (with-temp-buffer (should-not harness-ui-setting-target-function))
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (should (local-variable-p 'harness-ui-setting-target-function))
+      (should (eq #'harness-ui-sessions--setting-target harness-ui-setting-target-function))
+      ;; No mark: the session at point, which is what the commands use.
+      (harness-ui-sessions-test--goto "b")
+      (should (equal "b" (harness-ui-sessions--setting-target)))
+      (should (equal "b" (harness-ui--setting-target nil)))
+      ;; Where point is on no session the commands ask, as they do anywhere.
+      (goto-char (point-max))
+      (should-not (tabulated-list-get-id))
+      (should-not (harness-ui-sessions--setting-target))
+      (cl-letf (((symbol-function 'harness-ui-current-session-id) (lambda (&rest _) "asked")))
+        (should (equal "asked" (harness-ui--setting-target nil))))
+      ;; Marked: the marked sessions, whichever row point is on.
+      (harness-ui-sessions-test--mark "a" "b")
+      (harness-ui-sessions-test--goto "c")
+      (let ((target (harness-ui-sessions--setting-target)))
+        (should (equal (list #'harness-ui-sessions--set-marked "for the 2 marked sessions")
+                       (cdr target)))
+        (should (equal target (harness-ui--setting-target nil))))
+      (goto-char (point-max))
+      (should (consp (harness-ui-sessions--setting-target)))
+      ;; One mark is still the marks: the sessions' own checks come with them.
+      (harness-ui-sessions-test--press "U")
+      (harness-ui-sessions-test--mark "c")
+      (should (equal "for the marked session" (nth 2 (harness-ui-sessions--setting-target))))
+      ;; A marked session the filters hide counts.
+      (harness-ui-sessions-test--press "U")
+      (harness-ui-sessions-test--add "h" root :status "inactive" :updated 1)
+      (harness-ui-sessions--redraw)
+      (harness-ui-sessions-test--mark "a" "h")
+      (harness-ui-sessions-test--press "i")
+      (should-not (assoc "h" tabulated-list-entries))
+      (should (equal "for the 2 marked sessions" (nth 2 (harness-ui-sessions--setting-target)))))))
+
+(ert-deftest harness-ui-sessions-setting-values-are-what-the-marked-sessions-agree-on ()
+  "The values the commands read are those all the marked sessions have.
+A setting on which the sessions differ is left out, so it reads as none;
+one they share is there, a switch that is off as nil and `:false' alike.
+The supervisor mode is the `:supervisor' of a session's `:ext'.
+`harness-ui--setting-get' reads them, as the menu's label of
+non-interactive mode does."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--settings-rows root)
+    (harness-ui-sessions-test--add "d" root :updated 50 :non-interactive :false)
+    (harness-ui-sessions-test--add "e" root :updated 40 :thinking nil)
+    (harness-ui-sessions--redraw)
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (cl-flet ((agreed (&rest ids)
+                  (harness-ui-sessions-test--press "U")
+                  (apply #'harness-ui-sessions-test--mark ids)
+                  (harness-ui-sessions--setting-target)))
+        ;; a and b share the model, the mode and supervising, not the rest.
+        (let ((target (agreed "a" "b")))
+          (should (equal '(:model "demo:scripted" :permission-mode "auto" :supervisor t)
+                         (car target)))
+          (should (equal "demo:scripted" (harness-ui--setting-get target :model)))
+          (should (equal "auto" (harness-ui--setting-get target :permission-mode)))
+          (should (eq t (harness-ui--setting-get target :supervisor)))
+          (should-not (harness-ui--setting-get target :thinking))
+          (should-not (plist-member (car target) :thinking))
+          (should-not (plist-member (car target) :non-interactive)))
+        ;; a and c share the level and being non-interactive.
+        (let ((target (agreed "a" "c")))
+          (should (equal '(:thinking "high" :non-interactive t) (car target)))
+          (should (harness-json-true-p (harness-ui--setting-get target :non-interactive)))
+          (should (equal "Non-interactive: on" (harness-ui--non-interactive-menu-label))))
+        ;; The menu says off where they differ, as the command then turns it on.
+        (should (equal "Non-interactive: off"
+                       (progn (agreed "a" "b") (harness-ui--non-interactive-menu-label))))
+        ;; d and e are off, one explicitly, and think as their models do.
+        (let ((target (agreed "d" "e")))
+          (should (equal '(:model "demo:scripted" :thinking nil :permission-mode "auto"
+                           :non-interactive :false :supervisor nil)
+                         (car target)))
+          (should-not (harness-json-true-p (harness-ui--setting-get target :non-interactive))))
+        ;; Not governed by the supervisor module and hands-on are not alike.
+        (should-not (plist-member (car (agreed "c" "d")) :supervisor))
+        (should (eq :false (harness-ui--setting-get (agreed "c") :supervisor)))
+        ;; Not marked, the label is that of the session at point.
+        (harness-ui-sessions-test--press "U")
+        (harness-ui-sessions-test--goto "b")
+        (should (equal "Non-interactive: off" (harness-ui--non-interactive-menu-label)))
+        (harness-ui-sessions-test--goto "a")
+        (should (equal "Non-interactive: on" (harness-ui--non-interactive-menu-label)))))))
+
+(ert-deftest harness-ui-sessions-set-a-setting-on-the-marked-sessions-and-their-tasks ()
+  "A setting changes the marked sessions together, and the tasks they work on.
+The sessions go in one request, `_harness/session/set-all' with their
+ids as the filter.  Then the marked sessions that work on a task give one
+`_harness/task/set-all' with the ids of those tasks and no project, as
+they may be of several, so each task's record keeps the setting for its
+next start.  One message says what changed.  The marks stay, and are
+read in the list when the change is made, whichever buffer is current."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--b-is-a-task)
+    (harness-ui-sessions-test--settings-rows root)
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (harness-ui-sessions-test--mark "a" "b")
+      (harness-ui-sessions-test--goto "c")
+      (let* ((target (harness-ui--setting-target nil))
+             (said (harness-ui-sessions-test--messages
+                    (lambda ()
+                      ;; The setting comes from another buffer, as the reply to a
+                      ;; question does.
+                      (with-temp-buffer
+                        (harness-ui--setting-set target :thinking "high" "Thinking → high"))))))
+        ;; Both are said, the first when the change is given and the second
+        ;; once the harness has answered.
+        (should (= 2 (length said)))
+        (should (member "Thinking → high (for the 2 marked sessions)" said))
+        (should (member "Thinking → high for 2 sessions (1 task)" said)))
+      (should (equal '(("_harness/session/set-all"
+                        (:settings (:thinking "high") :filter (:ids ("a" "b"))))
+                       ("_harness/task/set-all"
+                        (:settings (:thinking "high") :filter (:ids ("t-1")))))
+                     (harness-ui-sessions-test--answers)))
+      (should (equal '("a" "b") (harness-ui-sessions-test--starred)))
+      (should (equal '("a" "b") (harness-ui-sessions--marked-ids)))
+      ;; The same sessions can be given another setting; with no task among
+      ;; them there is no request for tasks.
+      (setq harness-ui-sessions-test--requests nil)
+      (harness-ui-sessions--forget-task "t-1")
+      (harness-ui-sessions--set-marked :permission-mode "yolo")
+      (should (equal '(("_harness/session/set-all"
+                        (:settings (:permission-mode "yolo") :filter (:ids ("a" "b")))))
+                     (harness-ui-sessions-test--answers)))
+      (should (equal '("a" "b") (harness-ui-sessions-test--starred))))))
+
+(ert-deftest harness-ui-sessions-say-how-a-setting-change-went ()
+  "One message says how many sessions and tasks changed, or why nothing did.
+The harness leaves a session that has the setting already alone; a
+message says so, and counts the ones it changed.  A task request that
+fails is told after what the sessions got, and a session request that
+fails ends it there: no task is changed.  Nothing marked changes
+nothing."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--b-is-a-task)
+    (harness-ui-sessions-test--settings-rows root)
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (cl-flet ((say (&optional reply (value "high"))
+                  (setq harness-ui-sessions-test--requests nil
+                        harness-ui-sessions-test--replies reply)
+                  (car (last (harness-ui-sessions-test--messages
+                              (lambda () (harness-ui-sessions--set-marked :thinking value)))))))
+        (harness-ui-sessions-test--mark "a" "b")
+        ;; All changed, as the harness answers by itself.
+        (should (equal "Thinking → high for 2 sessions (1 task)" (say)))
+        ;; One had it already.
+        (should (equal "Thinking → high for 1 of 2 sessions (1 task)"
+                       (say '(("_harness/session/set-all" . ("a"))))))
+        ;; No task changed, or no session.
+        (should (equal "Thinking → high for 2 sessions"
+                       (say '(("_harness/task/set-all" . nil)))))
+        (should (equal "Thinking → high (1 task)"
+                       (say '(("_harness/session/set-all" . nil)))))
+        (should (equal "Thinking → high: nothing to change in the 2 marked sessions"
+                       (say '(("_harness/session/set-all" . nil) ("_harness/task/set-all" . nil)))))
+        ;; The tasks' request fails after the sessions' did not.
+        (let ((said (say '(("_harness/task/set-all" . fail)))))
+          (should (string-match-p
+                   "\\`Thinking → high for 2 sessions, but the tasks' settings did not change: .*task/set-all failed"
+                   said)))
+        ;; The sessions' request fails: the tasks are not asked.
+        (let ((said (say '(("_harness/session/set-all" . fail)))))
+          (should (string-match-p "\\`Thinking → high failed: .*session/set-all failed" said))
+          (should (equal '("_harness/session/set-all")
+                         (mapcar #'car (harness-ui-sessions-test--answers)))))
+        (should (equal '("a" "b") (harness-ui-sessions-test--starred)))
+        ;; No level is the model's default.
+        (should (equal "Thinking → default for 2 sessions (1 task)" (say nil nil)))
+        (should (equal '(:settings (:thinking nil))
+                       (cl-subseq (cadr (car (harness-ui-sessions-test--answers))) 0 2)))
+        ;; One session says so in its count.
+        (harness-ui-sessions-test--press "U")
+        (harness-ui-sessions-test--mark "a")
+        (should (equal "Thinking → high for 1 session" (say)))
+        ;; Nothing marked: nothing is sent.
+        (harness-ui-sessions-test--press "U")
+        (setq harness-ui-sessions-test--requests nil)
+        (should (equal '("No session is marked")
+                       (harness-ui-sessions-test--messages
+                        (lambda () (harness-ui-sessions--set-marked :thinking "high")))))
+        (should-not (harness-ui-sessions-test--answers))))))
+
+(ert-deftest harness-ui-sessions-set-the-model-of-the-marked-sessions ()
+  "A model switch of the marked sessions is checked first, for all of them.
+When no session would lose its conversation, they switch together
+\(`session/set-all').  When one would, `harness-ui-switch-function' asks
+once, as `harness-set-model-all' has it ask, for no session and no
+chat: the checks of the sessions that lose theirs, the model's label and
+how many sessions change in all.  The mode it answers goes to
+`handoff/switch-all' with the same sessions; `cancel' sends nothing.  A
+harness that cannot check switches them as it always did.  The tasks take
+the model after the sessions, and the default model stays."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--b-is-a-task)
+    (harness-ui-sessions-test--settings-rows root)
+    (let* ((model "demo:other")
+           (label (harness-ui-model-label model))
+           (asked nil) (answer nil)
+           (harness-ui-switch-function
+            (lambda (&rest args) (push (butlast args) asked) (setq answer (car (last args)))))
+           (lossy (list :id "a" :from "demo:scripted" :lossy t :reason "A provider of its own"
+                        :risks '("Context lost: the new model starts again"))))
+      (with-current-buffer harness-ui-sessions--buffer-name
+        (harness-ui-sessions-test--mark "a" "b")
+        (let ((target (harness-ui-sessions--setting-target)))
+          (cl-flet ((switch ()
+                      (setq harness-ui-sessions-test--requests nil asked nil answer nil)
+                      (harness-ui-sessions-test--messages
+                       (lambda () (harness-ui--setting-set target :model model (format "Model → %s" label))))))
+            ;; Nothing is lost: checked, switched, and the task's record follows.
+            (should (member (format "Model → %s for 2 sessions (1 task)" label) (switch)))
+            (should (equal `(("_harness/handoff/check-all" (:model ,model :filter (:ids ("a" "b"))))
+                             ("_harness/session/set-all"
+                              (:settings (:model ,model) :filter (:ids ("a" "b"))))
+                             ("_harness/task/set-all"
+                              (:settings (:model ,model) :filter (:ids ("t-1")))))
+                           (harness-ui-sessions-test--answers)))
+            (should-not asked)
+            ;; One would lose its conversation: asked once, and nothing sent yet.
+            (setq harness-ui-sessions-test--replies
+                  `(("_harness/handoff/check-all"
+                     . ,(list lossy (list :id "b" :from "demo:scripted" :lossy :false)))))
+            (switch)
+            (should (equal `(((,lossy) ,label 2 nil nil)) asked))
+            (should (equal '("_harness/handoff/check-all")
+                           (mapcar #'car (harness-ui-sessions-test--answers))))
+            ;; The answer goes to the switch of the same sessions, then to their
+            ;; tasks, and the message says how the conversations went over.
+            (should (equal (list (format "Model → %s for 2 sessions, summarising the conversations that need it first (1 task)"
+                                         label))
+                           (harness-ui-sessions-test--messages (lambda () (funcall answer 'compact)))))
+            (should (equal `(("_harness/handoff/check-all" (:model ,model :filter (:ids ("a" "b"))))
+                             ("_harness/handoff/switch-all"
+                              (:model ,model :filter (:ids ("a" "b")) :mode "compact"))
+                             ("_harness/task/set-all"
+                              (:settings (:model ,model) :filter (:ids ("t-1")))))
+                           (harness-ui-sessions-test--answers)))
+            ;; Without a handoff they just switch, and the message has nothing to add.
+            (switch)
+            (should (equal (list (format "Model → %s for 2 sessions (1 task)" label))
+                           (harness-ui-sessions-test--messages (lambda () (funcall answer 'none)))))
+            (should (equal '(:model "demo:other" :filter (:ids ("a" "b")) :mode "none")
+                           (cadr (cadr (harness-ui-sessions-test--answers)))))
+            ;; Cancelled: nothing more is sent, and the marks stay.
+            (switch)
+            (should (equal '("Models unchanged")
+                           (harness-ui-sessions-test--messages (lambda () (funcall answer 'cancel)))))
+            (should (equal '("_harness/handoff/check-all")
+                           (mapcar #'car (harness-ui-sessions-test--answers))))
+            (should (equal '("a" "b") (harness-ui-sessions-test--starred)))
+            ;; A harness that cannot check switches them at once.
+            (setq harness-ui-sessions-test--replies '(("_harness/handoff/check-all" . fail)))
+            (switch)
+            (should-not asked)
+            (should (equal '("_harness/handoff/check-all" "_harness/session/set-all"
+                             "_harness/task/set-all")
+                           (mapcar #'car (harness-ui-sessions-test--answers))))
+            ;; The switch itself failing is said, with why.
+            (setq harness-ui-sessions-test--replies '(("_harness/session/set-all" . fail)))
+            (should (cl-some (lambda (said)
+                               (string-match-p (format "\\`Model → %s failed: .*session/set-all failed"
+                                                       (regexp-quote label))
+                                               said))
+                             (switch)))))))))
+
+(ert-deftest harness-ui-sessions-set-the-switches-and-modes-of-the-marked-sessions ()
+  "The other settings go the way the commands send them.
+A permission mode and non-interactive mode are session settings, and an
+off switch goes as `:false', as it does for one session.  The
+supervisor mode is its module's: `_harness/supervisor/set-all' takes it
+as `:on' with the sessions' ids as the filter, and the task's record as
+`:supervisor'."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--b-is-a-task)
+    (harness-ui-sessions-test--settings-rows root)
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (harness-ui-sessions-test--mark "a" "b")
+      (cl-flet ((give (key value)
+                  (setq harness-ui-sessions-test--requests nil)
+                  (harness-ui-sessions-test--messages
+                   (lambda () (harness-ui--setting-set (harness-ui-sessions--setting-target)
+                                                       key value "Set")))
+                  (harness-ui-sessions-test--answers)))
+        (should (equal '(("_harness/session/set-all"
+                          (:settings (:non-interactive :false) :filter (:ids ("a" "b"))))
+                         ("_harness/task/set-all"
+                          (:settings (:non-interactive :false) :filter (:ids ("t-1")))))
+                       (give :non-interactive nil)))
+        (should (equal '(("_harness/session/set-all"
+                          (:settings (:non-interactive t) :filter (:ids ("a" "b"))))
+                         ("_harness/task/set-all"
+                          (:settings (:non-interactive t) :filter (:ids ("t-1")))))
+                       (give :non-interactive t)))
+        (should (equal '(("_harness/session/set-all"
+                          (:settings (:permission-mode "yolo") :filter (:ids ("a" "b"))))
+                         ("_harness/task/set-all"
+                          (:settings (:permission-mode "yolo") :filter (:ids ("t-1")))))
+                       (give :permission-mode "yolo")))
+        (should (equal '(("_harness/supervisor/set-all" (:on t :filter (:ids ("a" "b"))))
+                         ("_harness/task/set-all" (:settings (:supervisor t) :filter (:ids ("t-1")))))
+                       (give :supervisor t)))
+        (should (equal '(("_harness/supervisor/set-all" (:on :false :filter (:ids ("a" "b"))))
+                         ("_harness/task/set-all"
+                          (:settings (:supervisor :false) :filter (:ids ("t-1")))))
+                       (give :supervisor :false)))
+        ;; An off switch is never nil on the wire.
+        (should (equal :false (plist-get (cadr (car (give :supervisor nil))) :on)))
+        (should (equal '("a" "b") (harness-ui-sessions-test--starred)))
+        ;; What each says once it is done.
+        (should (equal "Supervisor mode off (hands-on) for 2 sessions (1 task)"
+                       (car (last (harness-ui-sessions-test--messages
+                                   (lambda () (harness-ui-sessions--set-marked :supervisor :false)))))))
+        (should (equal "Non-interactive on for 2 sessions (1 task)"
+                       (car (last (harness-ui-sessions-test--messages
+                                   (lambda () (harness-ui-sessions--set-marked :non-interactive t)))))))
+        (should (equal (format "Permission mode → %s for 2 sessions (1 task)"
+                               (harness-ui-permission-mode-label "yolo"))
+                       (car (last (harness-ui-sessions-test--messages
+                                   (lambda () (harness-ui-sessions--set-marked :permission-mode "yolo")))))))))))
+
+(ert-deftest harness-ui-sessions-setting-commands-change-the-marked-sessions ()
+  "The commands themselves, run in the list, change the marked sessions.
+They read the values the sessions agree on, ask for the new one as
+anywhere, and send the change for all of them: the model, the level, the
+mode, non-interactive mode and supervisor mode.  The marks stay, so the
+same sessions can be given the next.  Unmarked, a command changes the
+session at point as in its chat: the model is checked for that session
+alone."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--b-is-a-task)
+    (harness-ui-sessions-test--settings-rows root)
+    (setq harness-ui-sessions-test--replies
+          '(("_harness/provider/model" . (:thinking-levels ("low" "high")))))
+    (let ((prompts nil))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (prompt table &rest _)
+                   (push prompt prompts)
+                   (pcase prompt
+                     ("Thinking: " "high")
+                     ("Permission mode: " "YOLO")
+                     ("Model: " (caar table))
+                     (_ (error "Unexpected question %s" prompt)))))
+                ((symbol-function 'harness-ui-refresh-models)
+                 (lambda (&optional callback)
+                   (funcall callback (list (list :id "demo:other" :label "Other" :provider-label "Demo"))))))
+        (with-current-buffer harness-ui-sessions--buffer-name
+          (cl-flet ((run (command)
+                      (setq harness-ui-sessions-test--requests nil)
+                      (call-interactively command)
+                      (harness-ui-sessions-test--answers)))
+            (harness-ui-sessions-test--mark "a" "b")
+            (harness-ui-sessions-test--goto "c")
+            (should (equal '(("_harness/provider/model" (:model-id "demo:scripted"))
+                             ("_harness/session/set-all"
+                              (:settings (:thinking "high") :filter (:ids ("a" "b"))))
+                             ("_harness/task/set-all"
+                              (:settings (:thinking "high") :filter (:ids ("t-1")))))
+                           (run #'harness-set-thinking)))
+            (should (equal '(("_harness/session/set-all"
+                              (:settings (:permission-mode "yolo") :filter (:ids ("a" "b"))))
+                             ("_harness/task/set-all"
+                              (:settings (:permission-mode "yolo") :filter (:ids ("t-1")))))
+                           (run #'harness-set-permission-mode)))
+            ;; Their levels differ: toggled, it turns the mode on for all.
+            (should (equal '(("_harness/session/set-all"
+                              (:settings (:non-interactive t) :filter (:ids ("a" "b"))))
+                             ("_harness/task/set-all"
+                              (:settings (:non-interactive t) :filter (:ids ("t-1")))))
+                           (run #'harness-toggle-non-interactive)))
+            (should (equal '(("_harness/supervisor/set-all" (:on :false :filter (:ids ("a" "b"))))
+                             ("_harness/task/set-all"
+                              (:settings (:supervisor :false) :filter (:ids ("t-1")))))
+                           (run #'harness-toggle-supervisor)))
+            (should (equal `(("_harness/handoff/check-all"
+                              (:model "demo:other" :filter (:ids ("a" "b"))))
+                             ("_harness/session/set-all"
+                              (:settings (:model "demo:other") :filter (:ids ("a" "b"))))
+                             ("_harness/task/set-all"
+                              (:settings (:model "demo:other") :filter (:ids ("t-1")))))
+                           (run #'harness-set-model)))
+            (should (equal '("a" "b") (harness-ui-sessions-test--starred)))
+            ;; Both are non-interactive: toggled, it turns the mode off for them.
+            (harness-ui-sessions-test--press "U")
+            (harness-ui-sessions-test--mark "a" "c")
+            (should (equal '(("_harness/session/set-all"
+                              (:settings (:non-interactive :false) :filter (:ids ("a" "c")))))
+                           (run #'harness-toggle-non-interactive)))
+            ;; Not marked: the session at point, as in its chat.
+            (harness-ui-sessions-test--press "U")
+            (harness-ui-sessions-test--goto "b")
+            (should (equal '(("_harness/session/update" (:id "b" :non-interactive t)))
+                           (run #'harness-toggle-non-interactive)))
+            (should (equal `(("_harness/handoff/check" (:sessionId "b" :model "demo:other"))
+                             ("session/set_model" (:sessionId "b" :modelId "demo:other")))
+                           (run #'harness-set-model)))
+            (should (equal '(("session/set_mode" (:sessionId "b" :modeId "yolo")))
+                           (run #'harness-set-permission-mode)))))))))
+
+(ert-deftest harness-ui-sessions-menu-settings-act-on-the-marked-sessions ()
+  "The menu's settings, opened from the list, change the marked sessions.
+The list binds no key to them, its m, T, p and i being others, so its
+menu group does not list them: the menu's own Session settings column
+does, and its commands run in the list, where the marks are.  The label
+of non-interactive mode says what the marked sessions have."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--b-is-a-task)
+    (harness-ui-sessions-test--settings-rows root)
+    (save-window-excursion
+      (delete-other-windows)
+      (switch-to-buffer harness-ui-sessions--buffer-name)
+      (cl-flet ((menu (keys)
+                  (call-interactively #'harness-menu)
+                  (unwind-protect
+                      (prog1 (with-current-buffer transient--buffer-name
+                               (buffer-substring-no-properties (point-min) (point-max)))
+                        (execute-kbd-macro (kbd keys)))
+                    (when transient--prefix (execute-kbd-macro (kbd "C-g"))))))
+        ;; a and c are non-interactive: the label says so, and i turns it off.
+        (harness-ui-sessions-test--mark "a" "c")
+        (should (string-match-p " i Non-interactive: on$" (menu "i")))
+        (should (equal '(("_harness/session/set-all"
+                          (:settings (:non-interactive :false) :filter (:ids ("a" "c")))))
+                       (harness-ui-sessions-test--answers)))
+        ;; b is not, a is: the label says off, and i turns it on for all.
+        (harness-ui-sessions-test--press "U")
+        (harness-ui-sessions-test--mark "a" "b")
+        (setq harness-ui-sessions-test--requests nil)
+        (should (string-match-p " i Non-interactive: off$" (menu "i")))
+        (should (equal '("_harness/session/set-all" "_harness/task/set-all")
+                       (mapcar #'car (harness-ui-sessions-test--answers))))
+        (should (equal '(:non-interactive t)
+                       (plist-get (cadr (car (harness-ui-sessions-test--answers))) :settings)))
+        (should (equal '("a" "b") (harness-ui-sessions-test--starred)))))
+    (should-not transient--prefix)))
+
 ;;;; Priority
 
 (ert-deftest harness-ui-sessions-show-the-priority-of-each-session ()
@@ -595,7 +2647,7 @@ notifier opens the list so for every project, whatever its filter."
       (should (eq 'harness-ui-sessions-toggle-blocked (key-binding (kbd "b"))))
       (call-interactively #'harness-ui-sessions-toggle-blocked)
       (should (equal '("asks") (harness-ui-sessions-test--shown)))
-      (should (equal " [project blocked]" mode-line-process))
+      (should (equal " [Pause] [project blocked]" (harness-ui-sessions-test--mode-line)))
       ;; The banner first, which is no session's, then the rows.
       (should (string-match-p "\\` .+ 1 session waits for you in this project  \\[Show all\\] b\n"
                               (harness-ui-sessions-test--text)))
@@ -606,7 +2658,7 @@ notifier opens the list so for every project, whatever its filter."
       (search-forward "[Show all")
       (harness-ui-action-push)
       (should (equal '("asks" "busy") (harness-ui-sessions-test--shown)))
-      (should (equal " [project]" mode-line-process))
+      (should (equal " [Pause] [project]" (harness-ui-sessions-test--mode-line)))
       (should-not (string-match-p "waits? for you" (harness-ui-sessions-test--text)))
       ;; None waiting, or none the filter lets through: the banner says so.
       (harness-ui-sessions-toggle-blocked)
@@ -619,7 +2671,7 @@ notifier opens the list so for every project, whatever its filter."
     (harness-sessions-waiting)
     (with-current-buffer harness-ui-sessions--buffer-name
       (should (equal '("asks" "elsewhere") (harness-ui-sessions-test--shown)))
-      (should (equal " [all projects blocked]" mode-line-process))
+      (should (equal " [Pause] [all projects blocked]" (harness-ui-sessions-test--mode-line)))
       (should (string-match-p "\\` .+ 2 sessions wait for you in any project  \\[Show all\\] b\n"
                               (harness-ui-sessions-test--text))))
     ;; The list opened as ever shows them all again.
@@ -684,9 +2736,10 @@ before the session says it waits no more."
           (should (= 2 (length (harness-ui-sessions-test--answers)))))))))
 
 (ert-deftest harness-ui-sessions-move-the-session-at-point ()
-  "m moves the session at point to another directory, read from the
-directory that holds its own, and the list follows it to the project
-there."
+  "M moves the session at point to another directory, and the list follows it.
+The directory is read from the one that holds the session's own, and the
+list shows the session under the project there.  m marks the session
+now."
   (harness-ui-sessions-test-with-repo
     (harness-ui-sessions-test--with-init
       (let ((asked nil))
@@ -696,10 +2749,11 @@ there."
         (with-current-buffer harness-ui-sessions--buffer-name
           (should (equal '("lost") (harness-ui-sessions-test--shown)))
           (harness-ui-sessions-test--goto "lost")
-          (should (eq 'harness-ui-sessions-move (key-binding (kbd "m"))))
+          (should (eq 'harness-ui-sessions-move (key-binding (kbd "M"))))
+          (should (eq 'harness-ui-sessions-mark (key-binding (kbd "m"))))
           (cl-letf (((symbol-function 'read-directory-name)
                      (lambda (prompt dir &rest _) (push (list prompt dir) asked) root)))
-            (call-interactively (key-binding (kbd "m"))))
+            (call-interactively (key-binding (kbd "M"))))
           (should (= 1 (length asked)))
           (should (string-match-p "\\`Move .*lost to directory: \\'" (car (car asked))))
           (should (equal base (cadr (car asked))))
@@ -1042,13 +3096,13 @@ it opens the list as ever."
       (call-interactively click)
       (with-current-buffer harness-ui-sessions--buffer-name
         (should (equal '("elsewhere") (harness-ui-sessions-test--shown)))
-        (should (equal " [all projects blocked]" mode-line-process)))
+        (should (equal " [Pause] [all projects blocked]" (harness-ui-sessions-test--mode-line))))
       ;; Answered: with none waiting, the list as ever.
       (harness-ui-sessions-test--add "elsewhere" other :status "idle")
       (call-interactively click)
       (with-current-buffer harness-ui-sessions--buffer-name
         (should (equal '("busy") (harness-ui-sessions-test--shown)))
-        (should (equal " [project]" mode-line-process))))))
+        (should (equal " [Pause] [project]" (harness-ui-sessions-test--mode-line)))))))
 
 ;;;; The fullscreen layout
 

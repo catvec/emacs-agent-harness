@@ -589,9 +589,13 @@ making each buffer current in turn."
       (when (member sid (buffer-local-value 'harness-ui-tree--family b))
         (harness-ui-tree--refresh-buffer b)))))
 
-(defun harness-ui-tree--on-event (event _args)
-  "Refresh every tree when EVENT may have added a fork."
-  (when (member event '("session/created" "session/deleted" "session/forked" "session/head-moved"))
+(defun harness-ui-tree--on-event (event args)
+  "Refresh every tree when EVENT with ARGS may have added a fork.
+An internal session, the record of a model call the harness made on its
+own, is no fork of any: its creation and deletion refresh no tree
+\(`harness-ui-internal-event-p'), however often they come."
+  (when (and (member event '("session/created" "session/deleted" "session/forked" "session/head-moved"))
+             (not (harness-ui-internal-event-p event args)))
     (mapc #'harness-ui-tree--refresh-buffer (harness-ui-tree--buffers))))
 
 (defun harness-ui-tree--redraw-all ()

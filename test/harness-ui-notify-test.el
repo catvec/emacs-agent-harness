@@ -41,6 +41,32 @@ notifier is gone."
       (should (string-search (funcall icon 'harness-icon-running 1) text))
       (should-not (string-search (funcall icon 'harness-icon-idle 2) text)))))
 
+(ert-deftest harness-ui-notify-does-not-count-internal-sessions ()
+  "A judge at work is no session that works or waits for you.
+The harness records each model call it makes on its own as a session of
+kind internal, running while the call lasts, and there is one for every
+call: the notifier counts none of them, and stays gone while they are
+all that runs."
+  (let ((harness-ui-notify--string "")
+        (judges '((:id "j1" :kind "internal" :status "running")
+                  (:id "j2" :kind "internal" :status "running")
+                  (:id "j3" :kind "internal" :status "idle")))
+        (icon (lambda (name n) (concat (substring-no-properties (harness-ui-icon name))
+                                       (number-to-string n)))))
+    (should (equal "" (harness-ui-notify-test--shown judges)))
+    (let ((harness-ui-notify-show-idle t))
+      (should (equal "" (harness-ui-notify-test--shown judges))))
+    ;; Beside the sessions of the user's, the count is theirs alone.
+    (let ((text (harness-ui-notify-test--shown
+                 (append judges '((:id "a" :kind "main" :status "running")
+                                  (:id "b" :kind "task" :status "running")
+                                  (:id "c" :kind "main" :status "blocked"))))))
+      (should (string-search (funcall icon 'harness-icon-running 2) text))
+      (should (string-search (funcall icon 'harness-icon-blocked 1) text)))
+    (should (equal '(0 0 0) (cl-letf (((symbol-function 'harness-ui-sessions)
+                                       (lambda (&optional _) judges)))
+                              (harness-ui-notify--counts))))))
+
 (provide 'harness-ui-notify-test)
 
 ;;; harness-ui-notify-test.el ends here

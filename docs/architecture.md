@@ -325,7 +325,7 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
 ### Session
 
 ```elisp
-(:id "uuid"  :name "short title or nil"  :kind main|fork|btw|subagent
+(:id "uuid"  :name "short title or nil"  :kind main|fork|btw|subagent|internal
  :project "/abs/root/"  :cwd "/abs/dir/"  :host nil|"/ssh:user@host:"   ; TRAMP prefix
  :worktree nil|"/abs/worktree/"
  :model "PROVIDER:MODEL"            ; e.g. "claude:claude-fable-5-1"
@@ -335,8 +335,10 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
  :status idle|running|blocked|inactive
  :parent-id nil|"uuid"  :fork-node nil|"node-id"
  :created FLOAT  :updated FLOAT
+ :last-message nil|FLOAT            ; when its latest user or assistant message was written
  :usage (:input N :output N :cache-read N :cache-write N :cost F :list-cost F :context N :turns N
          :last-output N                                         ; the output of the request :context sizes
+         :stream-output N :stream-seconds F                     ; what its timed calls streamed: output tokens, seconds
          :billing api|subscription|extra-usage :plan "max"     ; billing and plan of the latest call
          :cache-at FLOAT :cache-model "ID" :cache-ttl N)  ; the last request that used the prompt cache
  :cache nil|(:at FLOAT :ttl N :expires FLOAT :model "ID")  ; derived: when the prompt cache lapses, whose it is
@@ -377,6 +379,31 @@ stands in for both and for `:output` (see "usage", Live token count).
 `:cost` is what the session's calls were billed and `:list-cost` the
 same calls at API prices (they differ when a subscription paid); see
 "Usage record".
+
+`:usage :stream-output` and `:stream-seconds` are the output tokens of
+the model calls whose streaming the usage module timed and the seconds
+the model spent streaming them, summed over the session's whole life
+(`session/usage-note`; "usage", Output rate).  Output over seconds is
+the session's average output rate, which waiting for a first token and
+running tools do not dilute, where `usage/rate` averages only the
+newest calls.  `session/usage-add` never writes them and keeps them as
+it finds them; a session that streamed nothing measurable has neither
+key.
+
+`:last-message` is when the session's latest user or assistant message
+was written (`session/append` sets it from the node's `:ts`).  Unlike
+`:updated`, which moves with every change of any kind, it moves with
+messages only, so a list can say how long ago anything was said.  A
+hint, thinking, a tool call or result and a compaction leave it alone.
+A record written before sessions kept it has none, and a reader falls
+back on `:updated`.
+
+`:kind internal` is the record of one model call the harness made on
+its own, outside any turn (see `session/internal-start`).  It holds the
+prompt as its one user message and the reply, when the call got one, as
+its one assistant message, and has a model, usage and cost like any
+session, but no temporary directory; the policy fixes none of its
+settings and nothing can be sent to it.
 
 `:cache` says when the session's prompt cache lapses, and whose it is.
 A provider keeps the start of a conversation cached for a while after a
@@ -772,12 +799,16 @@ its sender, and the hint says so (`harness-session--requeue`).
   `session/update`, `session/set-all` and the task board refuse another
   value with "OPTION is set by policy (FILE) and cannot be changed",
   changing nothing; `harness-session-check-policy` is the check, which
-  also refuses a model `harness-allowed-models` does not allow.
+  also refuses a model `harness-allowed-models` does not allow.  An
+  internal session is the exception: the policy fixes none of its
+  settings, so it keeps the model its call was made with.
 - `session/get ID`, `session/list &optional FILTER` (`:project :status
-  :kind :parent-id :active`), `session/delete ID` (its temporary
+  :kind :parent-id :active :ids`; `:ids` is a list of session ids, and
+  only the sessions it names match, nil or no key matching every
+  session as the other keys do), `session/delete ID` (its temporary
   directory goes too).
 - `session/tmp-dir ID` → the session's own temporary directory, made if
-  missing, or nil.  Every local session has one:
+  missing, or nil.  Every local session but an internal one has one:
   `harness-UID/ID/` in `temporary-file-directory` (`/tmp/harness-1000/ID/`;
   the internal `harness-session--tmp-root` moves the root, which the
   tests do).  It is made with the session (mode 700, as is the root),
@@ -804,9 +835,14 @@ its sender, and the hint says so (`harness-session--requeue`).
   (`task/session-ids`), even an inactive one a task goes on in, and to
   leave out those of completed tasks, the board's done column
   (`task/session-ids` with `:columns '("done")`), an active one
-  included: a bulk change must not reach a task that is over.  It is
-  the selection of `session/set-all`, `handoff/check-all` and
-  `handoff/switch-all`.
+  included: a bulk change must not reach a task that is over.  `:ids`
+  limits even the sessions `:tasks` adds: one it does not name is never
+  selected, which is how the session list changes exactly its marked
+  sessions.  An internal session is selected only when `:kind` asks for
+  `internal`, even when `:ids` names it: it records a call and goes on
+  with nothing, so a bulk change has nothing to do there.  It is the
+  selection of `session/set-all`, `priority/set-all`,
+  `supervisor/set-all`, `handoff/check-all` and `handoff/switch-all`.
 - `session/set-all SETTINGS &optional FILTER` — the same change on every
   session FILTER selects (`session/select`); returns the ids that
   changed, newest first.  A session already holding the value is
@@ -817,7 +853,9 @@ its sender, and the hint says so (`harness-session--requeue`).
   every session to another model or provider at once, when no session
   would lose its conversation (else `handoff/switch-all`), and what
   `harness-set-thinking-all`, `harness-set-non-interactive-all` and the
-  `set_non_interactive` tool use, with `(:active t :tasks t)`.
+  `set_non_interactive` tool use, with `(:active t :tasks t)`; the
+  session list's setting commands send `(:ids MARKED-IDS)` instead, to
+  change the marked sessions and no others.
 - `session/move ID DIR &rest OPTIONS` — moves ID to the working
   directory DIR, and with it to DIR's project, which the session list
   files it under: for a session started in one directory that works on
@@ -866,6 +904,36 @@ its sender, and the hint says so (`harness-session--requeue`).
 - `session/set-status ID STATUS`.  Event `session/status ID STATUS`.
 - `session/resume ID` (loads nodes, status idle), `session/deactivate ID`
   (closed: still listed and readable; the next message sent to it resumes it).
+- `session/internal-start &rest PLIST` → the id of a new internal
+  session, running: the record of one model call the harness makes on
+  its own, outside any turn (the permission and Elisp judges, the
+  session judge, a session's name, a recap, the Insights summary, the
+  pet, the task board's search).  The provider module starts it for a
+  request that names its job (`provider/complete`, "provider").  PLIST:
+  `:job` (a few words, "Permission judge"; it names the session, and is
+  "Internal call" when blank), `:model` (the model asked), `:prompt` (a
+  user message marked as sent by the harness, `harness-sender-system`
+  with the job, cut at 20000 characters with a note saying how long it
+  was), `:parent-id` (the session the call is made for, kept only when
+  that session exists; the call is listed under it), `:cwd` and `:host`
+  (default the parent's, else `harness-state-directory`) and `:project`
+  (default the parent's, else the one of its directory, a directory of
+  `harness-state-directory` being a project of its own rather than part
+  of the one around it).  The session is `kind internal` with status
+  `running`, and starting it deletes the oldest internal sessions that
+  are not running until at most 100 remain (the internal variable
+  `harness-session--internal-keep`, not an option), so a call still
+  under way keeps its session.  An internal session has no temporary
+  directory, the policy fixes none of its settings, it is never named,
+  governed by the supervisor or recapped, `agent/prompt` refuses it (it
+  cannot be continued), and `session/select` and `session/tree` leave
+  it out.
+- `session/internal-finish ID &rest PLIST` → ID, nil for a session that
+  is gone (it never signals for one): records how the call ended.
+  PLIST: `:reply` (the text the model wrote, appended as an assistant
+  message unless empty), `:stop-reason` (a symbol or its name) and
+  `:error`.  A call that ended in `error` or was `cancelled` gets a hint
+  saying so, with the error.  The session is then idle.
 - `session/fork ID &rest PLIST` — copies the ancestor chain up to
   `:node` (default the head; ID's head never moves); `:kind
   fork|subagent`, `:name`, `:cwd` (defaults to parent's).  Each copied
@@ -925,8 +993,12 @@ its sender, and the hint says so (`harness-session--requeue`).
 - `session/nodes ID &optional (:limit N :before NODE-ID)` → path nodes,
   oldest first; `session/node ID NODE-ID`; `session/tree ID` → every
   node of the family (session + ancestors + forks) as a list with
-  `:session` set, plus `:sessions` summaries.
+  `:session` set, plus `:sessions` summaries.  The internal sessions
+  made for a member of the family are left out of it, except the
+  session asked for itself: they share no node with the conversation.
 - `session/append ID NODE` → node with id/ts/parent filled; advances head.
+  A `user` or `assistant` node (`:kind` a symbol or a string) also sets
+  the session's `:last-message` to the node's `:ts`; no other kind does.
   Event `session/node-added ID NODE`.
 - `session/update-node ID NODE-ID PLIST` (tool result streaming, titles).
   Event `session/node-updated ID NODE`.
@@ -965,7 +1037,18 @@ its sender, and the hint says so (`harness-session--requeue`).
   A record of a request that read or wrote the prompt cache stamps the
   totals' `:cache-at`, `:cache-model` and `:cache-ttl`; one that used
   none, or one with `:cache-reset` (a compaction), clears them (see
-  "Session").  Event `session/usage ID USAGE-TOTAL RECORD`.
+  "Session").  Event `session/usage ID USAGE-TOTAL RECORD`.  It keeps
+  the totals' `:stream-output` and `:stream-seconds` as it finds them.
+- `session/usage-note ID RECORD` → the totals (nil for a session that is
+  gone): adds RECORD's `:stream-output` and `:stream-seconds`, the
+  output tokens of model calls whose streaming was timed and the
+  seconds they streamed, to the totals' keys of the same names, and
+  nothing else of RECORD.  The usage module calls it for every call it
+  measures ("usage", Output rate).  Unlike `session/usage-add` it
+  records no usage row and emits no `session/usage` event, which would
+  record a row and be measured for the output rate again; the session is
+  saved and announced (`session/changed`).  A RECORD with neither
+  number changes nothing.
 - `session/set-todos ID TODOS`, `session/set-plan ID TEXT`.
 - `session/set-ext ID KEY VALUE &optional HINT` → session plist: sets the
   setting KEY of ID's `:ext`.  KEY is a keyword, or a symbol or a string
@@ -1197,6 +1280,32 @@ every time (the HTTP APIs) already work that way.  Claude Code starts
 a throwaway CLI process for it, and Copilot a throwaway session (see
 below).
 
+A REQUEST with `:job`, a few words saying what a call the harness makes
+on its own is for ("Permission judge", "Auto-name", "Recap"), is
+recorded as an internal session (`session/internal-start`, see
+"session"): `:job-parent` is the session the call is made for, which
+the new session is listed under, and `:job-project` the project it
+belongs to when no parent says (the Insights summary, the pet and the
+task board's search have none).  `provider/complete` starts the session
+before the provider is asked, with the model, the directory and host of
+`:session` and the text of the request's last user message as the
+prompt, and strips the three keys, so no provider sees them.  The
+caller's `:on-event` still gets every event as it would without them;
+after each, the session records it: `text` is gathered for the reply,
+`usage` is added to the session's totals (`session/usage-add`, so the
+call's cost is counted once, which is why the callers that used to
+record their own usage -- the Insights summary, the pet, the task
+board's search -- skip it while the method exists; if starting the
+session fails, which is logged, their usage goes unrecorded), and `done`,
+whatever its stop reason, finishes the session with the reply
+(`session/internal-finish`).  A request the allow list refuses or that
+fails in setup finishes it too.  A failure of the recording is logged
+and goes no further; a request without `:job`, or a harness without the
+method, is not recorded.  Callers: the permission judge, the Elisp
+judge, the session judge, auto-naming (`naming/title` too, with no
+parent), recaps, the Insights summary, the pet and the task board's
+search.
+
 Events delivered to `:on-event` (one plist each, in order):
 
 ```elisp
@@ -1346,8 +1455,8 @@ CHECKPOINT` → promise, `provider/quota PROVIDER-ID &optional REFRESH`,
 `provider/warm REQUEST` (ask the provider to prepare what a request like
 REQUEST, which has no messages, will need -- the Claude CLI spawns its
 process now, so the answer comes sooner; a failure is only logged) and
-`provider/close MODEL-ID SESSION-ID` (free what the provider keeps for a
-session id of a request that is not a session of its own, such as a task
+`provider/close MODEL-ID SESSION-ID` (free what the provider keeps for the
+session id of a request made outside any session, such as a task
 board's search; the CLI kills its process).  The model used when nothing
 more specific is configured is `harness-model`.
 
@@ -2250,7 +2359,10 @@ non-interactive session it stays a denial.
   (`harness-perms--judge-harness`: its code and state directories and
   its credential files).  The request is `:ephemeral`, so the
   provider brings no earlier verdicts and no project instructions
-  (CLAUDE.md).  A judge's denial carries `harness-perms-judge-deny-hint`.
+  (CLAUDE.md).  It names its job, "Permission judge" ("Permission judge
+  (retry)" for the second ask), with the session asking as `:job-parent`,
+  so each verdict is recorded as an internal session under it (see
+  "provider").  A judge's denial carries `harness-perms-judge-deny-hint`.
   A long input is cut (`harness-perms--judge-input-chars') and the block
   above it says so; the judge is told to weigh what the call would do,
   never whether a value looks complete, since a cut input once read as
@@ -2498,7 +2610,9 @@ non-interactive session it stays a denial.
   the model stops first), and only once.  OPTS `:queue` true only
   queues, even while a turn runs.  OPTS `:from`, when the user is not
   the sender, is the sender plist (see "Node") kept on the message's
-  node (and on a queued item).  An empty message is refused.  An
+  node (and on a queued item).  An empty message is refused, and so is
+  any message to an internal session (`session/internal-start`): it
+  records one model call and cannot be continued.  An
   inactive session is resumed first (`session/resume`), so a message
   sent to a closed session brings it back; queueing leaves it closed.
 - `agent/cancel SESSION-ID`.  Emits `agent/cancelling SID` at once, so
@@ -2670,6 +2784,9 @@ non-interactive session it stays a denial.
 - Subscribes `session/usage`; records to sqlite (`usage` table:
   ts, session, project, model, input, output, cache_read, cache_write, cost,
   turn, list_cost, billing; older tables gain the last two in place).
+  The harness's own model calls, recorded as internal sessions (see
+  "session" and "provider"), reach it the same way: the cost of each is
+  one row, under its session's project.
 - `usage/summary &key group-by since until project session model billing` → rows
   `(:key :input :output :cache-read :cache-write :cost :list-cost :calls)`;
   group-by `project|model|day|hour|session|billing` (billing keys "api",
@@ -2787,6 +2904,16 @@ non-interactive session it stays a denial.
     :calls N :at FLOAT :model ID)` or nil. `usage/rates` returns every
     measured session's rate, each with `:session`. Each new rate
     triggers `usage/rate-updated SID RATE`, which ACP forwards.
+  - Average over the whole session: every call measured, whatever its
+    model, is also added to the session's usage totals as
+    `:stream-output` and `:stream-seconds` (`session/usage-note`; a
+    failure is logged and never breaks the measurement).  Unlike the
+    rate above they outlast the window of recent calls, the model
+    switches and a restart, so output over seconds is how fast the
+    session wrote on average over its whole life.  The UI shows it as
+    the session list's Avg tok/s column and on a task's card
+    (`harness-ui-session-average-rate`), and the current rate stays in
+    the tooltip.
 - Live token count: a running session's token figures, its context in
   use and its output, grow while its model streams instead of only
   when its provider reports usage.  Counted here in the harness process,
@@ -2834,7 +2961,9 @@ decision log), so it is the same for every provider.  Methods are
   named by `HARNESS_INSIGHTS_INPUT`/`HARNESS_INSIGHTS_OUTPUT`), so the
   harness process never waits on them; it is killed after
   `harness-insights--scan-timeout`.  The sessions it reads are those
-  `session/list` says lived in the period.  A node is counted in the log
+  `session/list` says lived in the period, but for the internal ones
+  (`session/internal-start`): the harness's own model calls are no work
+  of the user's.  A node is counted in the log
   of the session that made it (`:session`), so a fork's copy of its
   parent's history is not counted twice; a fork's settling results
   (`:meta :forked`) are not activity.  A failed scan leaves a REPORT
@@ -2878,7 +3007,8 @@ decision log), so it is the same for every provider.  Methods are
     :conflict :created :done-at)`, WHY one of failed, sent-back, review,
     done.
 - `insights/projects` → the main checkouts of every session's and
-  task's project, sorted: what the report can be narrowed to.
+  task's project, sorted: what the report can be narrowed to.  An
+  internal session's project is not counted for that.
 - `insights/narrative &key since until project period refresh` →
   promise of `(:summary :themes :patterns :friction :suggestions :model
   :at :stale)`, or `(:skipped TEXT [:error t])`.  A model of the user's
@@ -2888,8 +3018,10 @@ decision log), so it is the same for every provider.  Methods are
   at most `harness-insights--prompt-chars` characters) and answers in
   JSON.  One `provider/complete` call, `:ephemeral t`, `:no-thinking t`,
   in `insights/` under the state directory, cancelled after
-  `harness-insights--narrative-timeout`; its cost is recorded with
-  `usage/record` under the project, or none.  Summaries are kept in
+  `harness-insights--narrative-timeout`; it is recorded as an internal
+  session, "Insights summary", in the project, which records its cost
+  too (without the session module the cost is recorded with
+  `usage/record` under the project, or none).  Summaries are kept in
   `insights/narratives.json` by period and project
   (`harness-insights--narratives-kept`); a kept one younger than
   `harness-insights-narrative-max-age` is returned unless REFRESH.  A
@@ -3271,7 +3403,9 @@ so switching to either loses nothing.
   which is what makes it cheap for that model to summarise.
 - `handoff/check-all MODEL &optional FILTER` → the checks of the
   sessions `session/set-all` would change (FILTER is `session/select`'s,
-  so `:tasks` takes in the sessions of current tasks).
+  so `:tasks` takes in the sessions of current tasks and `:ids` limits
+  the check to the sessions it names, as the session list's model
+  switch for its marked sessions does).
 - `handoff/switch SESSION-ID MODEL &optional MODE` → promise of `(:id
   :model :from :lossy :mode :summarizer :context :deferred :file :node
   :fallback :error)`.
@@ -3336,7 +3470,10 @@ so switching to either loses nothing.
   never answers does not keep a session nameless.  A session still
   nameless when a later turn starts (its naming failed) is named then,
   and so is a nameless session whose turn runs when the harness reloads
-  (`harness-naming--name-running`); btw and subagent sessions never are.
+  (`harness-naming--name-running`); btw, subagent and internal sessions
+  never are.  The request names its job, "Auto-name", so the call is
+  recorded as an internal session made for the session being named (see
+  "provider").
   Without `:opening` the whole
   conversation is titled on the session's model, on a fork of its
   provider state when possible so the cached prefix is reused.  Hints
@@ -3347,9 +3484,10 @@ so switching to either loses nothing.
   first message no session holds yet: the same request as `:opening`
   naming, to `harness-naming-model` for OPTS' `:model`, under a pseudo
   session id `naming-…` of its own (`:cwd`, `:host` from OPTS) that is
-  `provider/close`d once it settles.  Nothing is stored and no session
-  hears of it; it rejects with a message (blank TEXT, no model, provider
-  error, no usable title, timeout) and never signals.  Task mode names a
+  `provider/close`d once it settles.  The call is recorded as an internal
+  session, "Auto-name", with no parent; nothing else is stored and no
+  session hears of it; it rejects with a message (blank TEXT, no model,
+  provider error, no usable title, timeout) and never signals.  Task mode names a
   task from its prompt this way as it is submitted.
 - Sync filter `naming/system-prompt` (value string, args the session, or
   `naming/title`'s OPTS) lets modules add to
@@ -3719,8 +3857,10 @@ input to set or read one is always a session id.
   priority, as `task/set-all' is for tasks: FILTER is the one
   `session/select' takes (nil selects every session, `(:active t :tasks
   t)' every current session and the session of every current task of
-  every project), PRIORITY is read before anything changes, and a
-  session already carrying that level of its own is left alone.
+  every project, `(:ids IDS)' just the sessions named, which is what the
+  session list sends for its marked sessions), PRIORITY is read before
+  anything changes, and a session already carrying that level of its
+  own is left alone.
 
 A task has no priority of its own: a task's priority is its session's,
 and every task has that session from the moment it is submitted (see
@@ -4186,9 +4326,11 @@ priority).
   with null) every task keeps its own; FILTER is `:columns'
   (default `harness-tasks-bulk-columns': running, pending, backlog and
   blocked),
-  `:ids', `:except' and `:cwd' (without it, every project), and review,
-  done and archived tasks are never touched; a task already set so is
-  skipped, non-interactive counting as what the task would start with
+  `:ids' (task ids, which the session list sends for the tasks its marked
+  sessions work on), `:except' and `:cwd' (without it, every project),
+  and review, done and archived tasks are never touched; a task already
+  set so is skipped, non-interactive counting as what the task would
+  start with
   (`harness-tasks--non-interactive-p`: its own setting, else
   `harness-tasks-non-interactive`, else its directory's
   `harness-non-interactive`), and its session is sent only the
@@ -4197,9 +4339,9 @@ priority).
   than a `session/update' setting, so it is applied with
   `supervisor/set' when the module is loaded
   (`harness-tasks--apply-supervisor'), and a backlog write-up's session
-  is skipped, its setting waiting for the work; this is the board's bulk
-  edit, and the all-sessions
-  commands' and `set_non_interactive`'s reach into tasks),
+  is skipped, its setting waiting for the work; this is the reach of the
+  session list's setting commands on marked sessions into their tasks,
+  and of the all-sessions commands' and `set_non_interactive`'s),
   `task/session-ids &optional FILTER` (the sessions of the tasks FILTER
   selects, whatever their status; `session/select`'s `:tasks` adds
   those of the current tasks and subtracts those of the done column's
@@ -4548,8 +4690,11 @@ text, and by nothing else.
   the priority given, as `:text`), and the rest are the tasks methods.
   ARCHIVE and RESTORE carry `:undo`, the action that undoes them, and
   PRIORITY the priority action back to what the task had.
-- Searches are not sessions: their cost is recorded with `usage/record`
-  under the project with `:session nil`.
+- Each round of a search is recorded as an internal session, "Task
+  search", in the board's project (`session/internal-start`), which
+  records the round's cost too; without the session module the cost is
+  recorded with `usage/record` under the board's project with
+  `:session nil`.
 - Settings `harness-tasks-search-model`, `harness-tasks-search-thinking`;
   the demo provider answers search requests heuristically (word match
   plus action verbs, and priority words such as "prioritize", and the
@@ -4648,14 +4793,18 @@ again brings it back as it was.
   t`, a session id of its own (closed with `provider/close` when it
   ends) and `pet/` under the state directory as its directory, so no
   project instructions, memory or history reach it; a call taking
-  longer than `harness-pet--timeout` is cancelled.  Its cost is recorded
-  with `usage/record` with `:session nil`, under the project of the
+  longer than `harness-pet--timeout` is cancelled.  Each call is
+  recorded as an internal session, "Pet" (`session/internal-start`),
+  which records its cost too (without the session module the cost is
+  recorded with `usage/record` and `:session nil`), under the project of the
   session it spoke about.
 - Model: `harness-pet-model`, `auto` (the default) the simple tier
   (`provider/tier-model`) of the session's model, or of `harness-model`
   for a hatching or a petting; nil that model itself; a string forces
   one.
-- Growing: +2 xp for every message the user writes, +1 for every turn
+- Growing: +2 xp for every message the user writes (the prompt of an
+  internal session is none: it grows the pet nothing and gives it
+  nothing to say), +1 for every turn
   of theirs that ends well, +3 for every task that gets done
   (`task/done`).  Event `pet/changed VIEW` after any change
   (growing only while watched or when it gains a level), `pet/said
@@ -4832,7 +4981,10 @@ verdict that arrives after it is dropped.  A `submit_plan` or
 `retry_step' call the model wrote while the judge was still reading (its
 tool list from before the flip) is refused by its handler
 (`harness-supervisor--hands-on-result'), so no plan starts behind the
-mode's back.  Deleting a session forgets its judgement.
+mode's back.  Deleting a session forgets its judgement.  The call is
+recorded as an internal session, "Session judge", under the session it
+judges (see "provider"); an internal session is itself never governed or
+judged.
 
 The note the judge leaves (`harness-supervisor--note') is a hint, which
 the model never gets, written in the harness's voice: what was decided,
@@ -4863,9 +5015,11 @@ and a message for the echo area.  Only the user calls it.
   first: `supervisor/set` for every governed session (`supervisor/get`
   non-nil: a top-level session or a fork) FILTER of `session/select`
   selects, the same filter as `session/set-all`, `(:active t :tasks t)`
-  from the UI, completed tasks' sessions left out by the selection.  A
-  sub-agent, a side conversation, a session from before the module and
-  one already at the asked value are left alone; each change is the
+  from the UI, completed tasks' sessions left out by the selection, or
+  `(:ids IDS)` from the session list's supervisor command for its marked
+  sessions.  A sub-agent, a side conversation, an internal session, a
+  session from before the module and one already at the asked value are
+  left alone; each change is the
   same `:ext` setting, hint and `supervisor/changed` event as
   `supervisor/set`.  Only the user does this, over ACP as
   `_harness/supervisor/set-all` with `:on` and `:filter` (the UI's
@@ -5683,9 +5837,12 @@ most `harness-tasks-recap-max-tokens' tokens, without thinking unless
 `harness-tasks-recap-tool-calls', measured from the session's start
 until the first recap and from the last one after that (FORCE skips
 them).  Only a sub-agent's session (`harness-recap--session-own-p')
-gets one written; another session's is its card's business, though a
+gets one written, never an internal session (`session/internal-start'),
+whatever FORCE says; another session's is its card's business, though a
 recap already kept for it is shown, and the one in hand is returned
-while a new one is made.  `recap/session-done' and
+while a new one is made.  The call that writes a recap is recorded as
+an internal session, "Recap", under the session it sums up.
+`recap/session-done' and
 `recap/session-failed' announce it, and a failure waits
 `harness-tasks-recap-retry' seconds before the next try.
 
@@ -5787,6 +5944,12 @@ The session and task tools (`tools-sessions`) let an agent coordinate the
 rest of the harness.  Sessions are named by id, a unique id prefix or a
 unique name; a session cannot message, control or wait on itself.
 Listing and search default to the current project (worktrees included).
+The internal sessions (`session/internal-start`), the records of the
+harness's own model calls, are left out of `session_list` unless its
+`kind` is `internal`, and of `session_search` always: a judge's prompt
+holds what the session it judged did, which would match twice.  A prefix
+or a name finds one only when it finds no other session, since many are
+named after the same job.
 `session_history` is the calling session's own `session_read` and
 `session_search` in one, over the part of its conversation that its
 context holds only as a compaction or a handoff tells of it: the nodes
@@ -6111,6 +6274,10 @@ three gates before its code runs, in order:
    running the code, and the model is told to leave it alone.  The lent
    Emacs evaluates only while its own `harness-emacs-eval` is on, so
    the Emacs that would freeze has the last word.
+
+Each ask of the judge, the retry too, is recorded as an internal session,
+"Elisp judge" ("Elisp judge (retry)"), under the session whose code it
+judged (see "provider").
 
 The result reads as the `elisp` tool's (`=> VALUE`, then the output and
 the messages), with `:meta` `(:emacs "user" :verdict V :reason R)`;
@@ -6861,6 +7028,22 @@ and icons via `icons.el` (`define-icon`) with text fallbacks.  Every
 command has a mouse target: buttons, header-line segments, or mode-line
 segments.
 
+Internal sessions (`harness-ui-internal-session-p`): the harness's own
+model calls are sessions of kind `internal`, which come and go with
+every call.  The session cache holds them like any (`harness-ui-sessions`
+returns every cached session), but a view that picks sessions for a
+person, or counts them, asks `harness-ui-user-sessions`, which leaves
+them out: the mode line notifier's counts, the session pickers
+(`harness-ui-read-session`, `harness-open-latest-session`), the
+worktree list's sessions and what the task board redraws for
+(`harness-ui-tasks--board-key`).  Their
+`session/created`, `session/deleted` and `session/status` events reload
+no session cache, board or conversation tree
+(`harness-ui-internal-event-p`, which knows an id seen to be internal
+before, as the cache forgets a session before its `session/deleted`
+comes); the cache hears of them from the `_harness/session` updates.
+The session list shows them only when asked (I).
+
 Pending requests (`harness-ui-pending`): the permission prompts and
 questions a session waits on, held per session -- fed both by the ACP
 requests that block a client and by the session's pending list, so a
@@ -7211,6 +7394,15 @@ The UI keeps the rates in a cache (`harness-ui-session-rate`). It is
 filled with `_harness/usage/rates` on connect and kept current by
 `usage/rate-updated`. Every change runs `harness-ui-rate-functions`,
 which redraws the session list and the task board.
+The session list's Avg tok/s column and a task's card show the average
+over the whole session instead ("48 tok/s avg",
+`harness-ui-format-average-rate`; the column leaves out the unit):
+`harness-ui-session-average-rate` divides the `:stream-output` of the
+session's usage totals by their `:stream-seconds`, and gives nothing
+without them or with under a second of streaming.  It is not dimmed when
+the session is idle, being no last rate, and its tooltip says what it
+is, how much output over how much streaming, and names the current rate
+beside it (`harness-ui-average-rate-help`) when one was measured.
 The context ("12.3k/200k", `harness-ui-format-context`) and the output
 tokens ("3.4k out", `harness-ui-format-output`, none until the session
 wrote some) read `harness-ui-session-tokens`: the session's totals, or
@@ -7279,10 +7471,11 @@ follows the session as the harness sends it.  The command takes the
 buffer's setting target like the other session settings: a session it
 refuses when the harness has not sent it or the plugin does not govern
 it, and the task board's non-session target -- the setting of the next
-task, or of every current task in bulk mode, offered only while the
-harness has the supervisor module -- it toggles through
-`harness-ui--setting-set' as the board's other setting buttons do; a
-harness without the supervisor module
+task, offered only while the harness has the supervisor module -- it
+toggles through `harness-ui--setting-set' as the board's other setting
+buttons do, as it does the session list's marked sessions
+(`_harness/supervisor/set-all' with their ids, and their tasks' setting
+through `task/set-all'); a harness without the supervisor module
 does not know the method, which is said plainly ("Supervisor mode is not
 available") rather than as a failure.
 
@@ -7321,8 +7514,8 @@ nothing changes nothing.  `y` in the
 harness keys (`C-c h y', `harness-set-priority') does the same without
 a click, reading the level in the minibuffer with the session's own as
 the default (`harness-ui-priority--choose', the one place the levels'
-order and prompt live, which the board's bulk priority button reads
-through too); either way the request is
+order and prompt live, which the session list's `p' reads through too
+for its marked sessions); either way the request is
 `_harness/priority/set {sessionId, priority}', and the answer says what
 it is now ("Priority: high").  `+` and `-` in the harness keys
 (`C-c h +', `C-c h -', `harness-priority-raise' / `-lower') move the
@@ -7628,7 +7821,10 @@ settings leaves locked ones out.
 Session settings: `harness-set-model`, `-thinking`, `-permission-mode`
 and `harness-toggle-non-interactive` (`C-c h m` `T` `p` `i`) change what
 the buffer's `harness-ui-setting-target-function` names -- a session
-id, or a settings plist with its setter -- and otherwise the current
+id, or `(VALUES SET-FN &optional CONTEXT)`: the settings it holds, the
+function that stores one and the words saying whom it is for, which is
+how the task board answers for the next task and the session list for
+its marked sessions -- and otherwise the current
 session.  The menu's `i` entry says whether that is non-interactive
 ("Non-interactive: on"), and has no state where the command would
 ask for a session.
@@ -7680,6 +7876,13 @@ carrying that level of their own, and the command says how many
 changed.  It sets no default for later work: a task submitted
 afterwards is submitted with the board's next-task priority, which the
 board's own button picks (see the task board).
+
+The session list reaches the same methods with a narrower filter: with
+sessions marked in it, the setting commands and `p` change those
+sessions (`(:ids IDS)`) and the tasks they work on (`task/set-all` with
+the tasks' ids), and nothing else.  They set no default for later work
+and leave the new-task settings of the boards as they are (see the
+session list, below).
 
 A model switch asks the harness first (`handoff/check`, or
 `handoff/check-all` for `harness-set-model-all`, which asks once for the
@@ -7794,8 +7997,8 @@ sections -- requires your input, ready for review, merging, in progress,
 pending, backlog, completed -- with each card's current todo, progress, elapsed
 time, token figures (a working task's context in use and output, growing
 as its model streams; a card short of room leaves them out first),
-output rate (while its session is open), cost and merge state, one-click answers to a blocked task's
-question or
+average output rate (while its session is open), cost and merge state,
+one-click answers to a blocked task's question or
 permission, and a compose box that submits a task, edits a pending one,
 messages a task's session, answers its question or takes the feedback
 that sends a task back from review (`C-g` leaves an edit, message,
@@ -7858,14 +8061,13 @@ from the compose box the settings the next task starts with (shown as
 buttons under the New task label), and so does the worktree switch
 beside them: `own worktree` (the default in a git project) or `main
 tree`, where the next task works in the project's own checkout, with
-nothing to merge (`harness-ui-tasks-toggle-main-tree`; new tasks only,
-never bulk).  While the harness has the supervisor module the line also
-shows the supervisor switch (`supervisor`, or `hands-on' once turned
-off, `harness-toggle-supervisor'): the setting of the next task's
-session, turned for every current task in bulk mode, sent with the
-task and applied to its session when it starts.  The harness says
-whether it has the module by carrying `:supervisor' in `task/settings';
-without it there is no button.  A
+nothing to merge (`harness-ui-tasks-toggle-main-tree`; new tasks only).
+While the harness has the supervisor module the line also shows the
+supervisor switch (`supervisor`, or `hands-on' once turned off,
+`harness-toggle-supervisor'): the setting of the next task's session,
+sent with the task and applied to its session when it starts.  The
+harness says whether it has the module by carrying `:supervisor' in
+`task/settings'; without it there is no button.  A
 Submit / Refine toggle beside that label, showing only the current mode
 (a click or `C-c C-t` switches it), picks what a new task does: start,
 or go to the backlog, written up by an agent and
@@ -7879,16 +8081,10 @@ writes it up anyway, `m` takes what makes it another task than the one
 it duplicates.  Beside the Submit / Refine toggle, the priority button
 (`medium priority`, `harness-ui-tasks-cycle-new-priority`) cycles the
 next task's priority through high and low and back; it is a setting of
-the board like the others, sent as `task/submit`'s `:priority`.  Bulk
-edit (`B`) turns the setting buttons on every running, pending and
-blocked task (`task/set-all` with the one setting a button changes, so
-the others stay each task's own), and puts the current tasks' priority
-among them: the settings line gains `high priority`, or `mixed
-priority` when they differ, in place of the next task's beside the
-toggle.  A click reads low, medium or high
-(`harness-ui-tasks-bulk-priority`; no answer changes nothing) and sends
-`task/set-all` with `:priority` alone; it is the only bulk change that
-touches priorities, and the next task keeps its own.  `+` and `-` on a card raise and lower its task's priority
+the board like the others, sent as `task/submit`'s `:priority`.  The
+board has no mode for changing many tasks at once: that is the session
+list's, which changes the sessions marked in it and the tasks they work
+on (below).  `+` and `-` on a card raise and lower its task's priority
 (`harness-ui-tasks-raise-priority` / `-lower-priority`), which is its
 session's: they send `_harness/priority/set {sessionId, priority}' with
 the task's session -- a waiting task's included, since it has one from
@@ -7929,7 +8125,7 @@ becomes a segment of its own, which the board separates from the rest
 and which makes room as PRIORITY says (the companion pet's face and
 name, at 15, before [Add session]).  A module can draw at the right of
 the lines between the cards and the compose box (the error, the compose
-label, the bulk banner, the settings) through
+label, the settings) through
 `harness-ui-tasks-corner-functions`.  Each function is called whenever
 those lines are drawn, with the columns they have and the columns each
 takes whole, and cannot move point.  The first that answers returns
@@ -8240,25 +8436,132 @@ read by name (on a budget's line, that one is the default).  A hard
 budget's refusal says it is deleted there, or the setting's, where it
 is changed.
 
-Other buffers: settings page (`harness-ui-config`, above), sessions list (`tabulated-list-mode`, tree indentation for
-children, filter/sort by any column; the Context and Output columns show
-each session's token figures, which grow while it streams; a Tok/s column shows each session's
-output rate, dimmed while it is not running; a Priority column shows
-each session's arrow (up for high, down for low, nothing at the default
-medium, as a task's card and a chat's header line do), and it is a
-button: a click asks for that row's session's priority as the header's
-arrow does; `+` and `-` raise and lower the session at point and `p` sets it
-(as the harness keys do, a prefix argument asking for the level, through
-`_harness/priority/set'; a priority is the session's, so a task is set
-on its own session); SPC on a session pops out what it
+Session list (`harness-ui-sessions`, `*harness sessions*`, a
+`tabulated-list-mode` buffer): tree indentation for children, filter and
+sort by any column, scoped to the current project, its git worktrees and
+so its tasks' sessions included (each session's root is resolved to its
+main checkout once, with `harness-files-owning-checkout`), or, with `a`,
+to every project.  A task's session is of kind task and goes by its
+task's title, as on the board, until the model names it after its first
+turn: the list loads the tasks with `_harness/task/list` and follows
+`task/changed` and `task/deleted`.  SPC on a session pops out what it
 waits on (a session that waits on nothing leaves SPC scrolling), its
-status cell's tooltip says so (`harness-ui-sessions-requests`);
-scoped to the current project, its
-git worktrees and so its tasks' sessions included, each session's root
-resolved to its main checkout once with `harness-files-owning-checkout`;
-a task's session is of kind task and goes by its task's title, as on the
-board, until the model names it after its first turn — the list loads
-the tasks with `_harness/task/list` and follows `task/changed' and
+status cell's tooltip says so (`harness-ui-sessions-requests`).
+
+Its columns are one spec (`harness-ui-sessions--columns`), from which
+the header, the rows and the sorts are made: the status icon, which is
+always there, then Name, Status, Kind, Model, Think, Mode, Priority,
+Context, Output, Avg tok/s, Cost, Last msg and Project.  Think is the
+session's `:thinking` as plain text, empty for a session on its model's
+default, and sorts weakest level first.  Context and Output show each
+session's token figures, which grow while it streams.  Avg tok/s is the
+session's average output rate over its whole life
+(`harness-ui-format-average-rate`, without the unit), never dimmed, with
+the current rate named in its tooltip.  Last msg is how long ago the
+session's `:last-message` came, else, for a record from before the
+session kept that, its `:updated`, which the tooltip says.  Priority
+shows each session's arrow (up for high, down for low, nothing at the
+default medium, as a task's card and a chat's header line do), and it is
+a button: a click asks for that row's session's priority as the header's
+arrow does.  Mode and Output are hidden by default
+(`harness-ui-sessions-hidden-columns`); `C`
+(`harness-ui-sessions-toggle-column`) shows or hides a column in that
+list only, which then keeps a list of its own, and a sort by a column
+that is no longer shown ends.  Project shows only when the list covers
+every project.
+
+Sessions are marked as files are in Dired.  The marks are session ids in
+a table kept apart from the rows (`harness-ui-sessions--marked`), so a
+redraw, `g`, the filters, a change of scope and the pause leave them as
+they are, and a session the filters hide stays marked; the table drops
+the ids of sessions the session cache no longer has at each refresh.
+`m` marks the session at point and moves to the next row (a numeric
+argument marks that many, a negative one the rows above), `u` unmarks it,
+`DEL` moves up and unmarks the row there, `U` unmarks every session, the
+hidden ones too, and `t` inverts the marks of the rows listed.  A mark
+shows as a `*` (`harness-ui-sessions-mark-face`) in place of the row's
+padding space, changed in place with `tabulated-list-put-tag` and no
+redraw, so a paused list shows it; the mode line counts the marked
+sessions, hidden ones included.  The commands that act on sessions ask
+`harness-ui-sessions--targets` which: the marked sessions, the ones the
+list shows in the order of its rows, then the hidden ones newest first,
+else the session at point.  `d` deletes them after one question that
+counts the marked sessions and says how many the list does not show
+(`_harness/session/delete` for each), `k` cancels the turns of those
+that are running or blocked, `x` deactivates them
+(`_harness/session/deactivate`), `M-t` makes them tasks
+(`_harness/task/adopt`, skipping a session that is a task already),
+`+` and `-` raise and lower each one's priority a level
+(`harness-priority-shift-session`) and `p` sets it, asking for the level
+once (one `_harness/priority/set-all` with their ids for several; a
+prefix argument on `+` or `-` asks too).  `d`, `x` and `M-t` send their
+requests together and finish once, when the last is answered: they
+unmark the sessions that went through, leave the mark on one they
+skipped (a task already, for `M-t`) or that failed, redraw the list once
+and say one message.  `k` cancels each turn at once, unmarks those
+sessions and leaves the mark on one with no turn to cancel (an idle
+session); `+`, `-` and `p` leave the marks, so several changes can be
+given to the same sessions.  `f`, `r` and `M` act
+on one session and refuse while any is marked
+(`harness-ui-sessions--one-id`); `RET`, `o`, `SPC`, `y` and `n` are the
+session at point's, marked or not.
+
+The harness's setting commands (`harness-set-model`,
+`harness-set-thinking`, `harness-set-permission-mode`,
+`harness-toggle-non-interactive` and `harness-toggle-supervisor`: the
+prefix keys `C-c h m`, `T`, `p`, `i` and `V`, and the menu's) ask the
+buffer what they change through `harness-ui-setting-target-function`,
+and the list answers with `harness-ui-sessions--setting-target`: the id
+of the session at point when none is marked (nil off a row, so they ask
+which), else `(VALUES SET-FN CONTEXT)`, the shape the task board's
+new-task settings use.  VALUES holds the settings the marked sessions
+agree on (`harness-ui-sessions--marked-values`: a setting they differ on
+is left out, as if unset), which the commands offer as the current ones;
+SET-FN is `harness-ui-sessions--set-marked`; CONTEXT says "for the 3
+marked sessions".  SET-FN reads the marks in the list when it runs and
+sends one request for the sessions: `_harness/session/set-all` with the
+marked ids as the filter (`(:ids IDS)`), `_harness/supervisor/set-all`
+for the supervisor mode, and for a model `_harness/handoff/check-all`,
+then `_harness/session/set-all` when no conversation would be lost or,
+when one would, `harness-ui-switch-function` asking once for all of them
+how to hand them over (the answer `cancel` changes nothing) and
+`_harness/handoff/switch-all` by the mode chosen.  Then, for the marked
+sessions that work on a task, one `_harness/task/set-all` with the
+setting and the tasks' ids as its filter (`(:ids TASK-IDS)`, tasks of
+every project, none named by a project), so each task starts again with
+it; the tasks in review, done or archived are skipped, as `task/set-all`
+always does.  One message says how many sessions and tasks changed, and
+a request that fails says why.  The marks stay.  The list binds none of
+these commands to a key (its `m`, `T`, `p` and `i` are others), so its
+menu group, which lists the keys the buffer has, does not list them; the
+menu's own Session settings column, which lists all but supervisor mode
+(its `V` sets every session's), does, and runs them here.
+
+`T` lists only the sessions that work on a task, and their sub-agents,
+forks and BTW conversations however deep
+(`harness-ui-sessions-toggle-tasks-only`).  `I` shows the kinds the list
+leaves out, by default `internal` (`harness-ui-sessions-hidden-kinds`,
+`harness-ui-sessions-toggle-internal`).  With `b` (blocked), `i`
+(inactive) and `/` (the filter) these are the list's filters, and its
+mode line says which are on.  The mode line also holds a `[Pause]`
+button, first, as a narrow mode line cuts its end, which `P` presses too
+(`harness-ui-sessions-toggle-pause`): a paused list holds still, reading
+`[Paused: resume]`.  The paths by which the list follows the harness --
+session changes, output rates and growing token figures, the requests
+sessions wait on, a reload of the UI, the tasks fetched after a
+reconnect -- redraw through `harness-ui-sessions--redraw-live`, which
+leaves a paused list as it is; a change or a growing figure schedules no
+redraw for it, and pausing drops those already scheduled.  What the user
+asks of the list (the filter, the scope, the toggles) and `g` redraw it
+anyway, with what changed meanwhile, and resuming redraws it once.
+
+In the fullscreen layout (`F`) the session beside the list is the one at
+point, else the most recently updated one listed, where a BTW
+conversation and a session of a hidden kind are passed over even when
+the list shows them (`harness-ui-sessions--overview-session`).
+
+Other buffers: settings page (`harness-ui-config`, above), sessions list
+(above; it follows `task/changed' and
 `task/deleted'),
 conversation tree (`harness-ui-tree`: each row's properties, its
 `mouse-face` among them, stop before its newline, so hovering highlights
@@ -8285,7 +8588,8 @@ all again, RET a session or task line's session; a redraw keeps every
 window's start and point lines), worktrees (`harness-ui-worktree`),
 notifier
 (`harness-ui-notify`: global mode-line segment with blocked and running
-counts, idle ones too with `harness-ui-notify-show-idle`, clickable;
+counts of the user's sessions (`harness-ui-user-sessions`, so no internal
+session), idle ones too with `harness-ui-notify-show-idle`, clickable;
 `harness-ui-notify-segment-functions` add segments of other modules
 after its "harness", such as the version page's nag icon, and keep it
 showing with no session active), BTW side window (`harness-ui-btw`: a

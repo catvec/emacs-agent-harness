@@ -176,6 +176,12 @@ and the tasks module would prompt the session while a test runs."
         (should (= 1 (plist-get task :recap-tools)))
         (should (numberp (plist-get task :recap-at)))
         (should (equal "demo:scripted" (plist-get req :model)))
+        ;; Recorded as an internal session of the session recapped.
+        (should (equal "Recap" (plist-get req :job)))
+        (should (equal sid (plist-get req :job-parent)))
+        (should (equal (list (list "Recap" sid 'idle))
+                       (mapcar (lambda (s) (list (plist-get s :name) (plist-get s :parent-id) (plist-get s :status)))
+                               (harness-call 'session/select '(:kind internal)))))
         (should-not (plist-get req :tools))
         ;; A recap is one short line: thinking is off unless asked for.
         (should (eq t (plist-get req :no-thinking)))

@@ -422,9 +422,43 @@ cooldown), and no UI shows it until BODY says one does."
         (harness-call 'session/append sid (list :kind 'user :content (format "%s, do the task" name)
                                                 :meta (list :from (list :kind 'system :source "tasks"))))
         (harness-call 'session/append sid (list :kind 'assistant :content (format "%s says hi" name)))
+        ;; Nor does a message of an internal session, the record of a call
+        ;; the harness made, even one that says nobody sent it.
+        (let ((internal (harness-call 'session/internal-start :job "Recap" :model "demo:scripted"
+                                      :parent-id sid :prompt (format "%s, recap" name))))
+          (harness-call 'session/append internal (list :kind 'user :content (format "%s, look" name))))
         (sleep-for 0.1)
         (should (null requests))
         (should (= 0 (plist-get (harness-call 'pet/get) :xp)))))))
+
+(ert-deftest harness-pet-calls-are-internal-sessions ()
+  "Each call of the pet's model is recorded as an internal session, \"Pet\",
+in the project of the session it speaks about, and that session carries
+the call's usage: the pet records none itself, so none counts twice."
+  (harness-pet-test-with
+    (let ((rows nil))
+      (harness-register-method 'usage/record (lambda (row) (push row rows) row))
+      (harness-pet-test-counting-requests requests
+        (let ((harness-provider-demo-script-override
+               '((:type text :delta "{\"name\": \"Pip\", \"personality\": \"Rates every function.\"}")
+                 (:type usage :input 300 :output 20 :cost 0.0004)
+                 (:type done :stop-reason end-turn))))
+          (harness-pet-test-hatch))
+        (should (equal "Pet" (plist-get (car requests) :job)))
+        (harness-pet-test-watch)
+        (let* ((sid (harness-pet-test-session))
+               (said (harness-pet-test-said)))
+          (harness-call 'session/append sid (list :kind 'user :content "rewrite the tokenizer"))
+          (harness-test-wait (lambda () (funcall said)) 5 "a comment")
+          (should (equal (plist-get (harness-call 'session/get sid) :project)
+                         (plist-get (car requests) :job-project)))))
+      (should-not rows)
+      (let ((calls (sort (harness-call 'session/list (list :kind 'internal))
+                         (lambda (a b) (< (plist-get a :created) (plist-get b :created))))))
+        (should (= 2 (length calls)))
+        (should (equal '("Pet" "Pet") (mapcar (lambda (s) (plist-get s :name)) calls)))
+        (should (= 300 (plist-get (plist-get (car calls) :usage) :input)))
+        (should-not (plist-get (car calls) :parent-id))))))
 
 (ert-deftest harness-pet-one-saying-at-a-time ()
   "While a saying is asked for, nothing else asks; a few seconds pass between two."

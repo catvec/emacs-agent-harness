@@ -53,7 +53,11 @@
 ;; tokens of its latest model calls, as the usage records count them,
 ;; over the seconds the agent's activity spent streaming them (see
 ;; "Output rate" below).  They are measured here, in the harness, and
-;; kept in memory; `usage/rate-updated' announces each new one.
+;; kept in memory; `usage/rate-updated' announces each new one.  The
+;; output and seconds of every measured call are also added up in the
+;; session's own usage totals (`:stream-output' and `:stream-seconds',
+;; see `session/usage-note'), which say how fast it wrote over its whole
+;; life and are kept with it.
 ;;
 ;; Live usage lets a running session's token figures, its context and
 ;; its output, grow while its model streams: what streamed since the
@@ -515,6 +519,9 @@ cost when a subscription paid.  Budgets are checked after."
 ;; average of its latest calls on its current model, over up to
 ;; `harness-usage-rate-window' seconds of streaming.  It is kept after
 ;; the turn, so an idle session still shows how fast it wrote last.
+;; Every measured call, whatever its model, is also added to the totals
+;; the session keeps of what it streamed, and so counts in its average
+;; over the whole session.
 
 (defcustom harness-usage-rate-window 30
   "Seconds of streaming that a session's output rate averages over.
@@ -579,14 +586,30 @@ A stream that is still open goes on counting from now."
         seconds)
     0.0))
 
+(defun harness-usage--note-stream (sid output seconds)
+  "Add a measured model call of session SID to the totals of what it streamed.
+The call wrote OUTPUT tokens in SECONDS of streaming.  The session keeps
+the sums in its usage totals (`session/usage-note'), where they outlast
+the window of recent calls that the rate averages over, and a restart.
+A failure is logged and goes no further: it never breaks the
+measurement."
+  (when (harness-method-exists-p 'session/usage-note)
+    (condition-case err
+        (harness-call 'session/usage-note sid (list :stream-output output :stream-seconds seconds))
+      (error (harness-log 'warn "usage: could not add what %s streamed to its totals: %s"
+                          sid (harness-error-message err))))))
+
 (defun harness-usage--measure (sid output seconds)
   "Add a model call in which session SID wrote OUTPUT tokens in SECONDS.
 A call without output, or one too short to measure, is left out.
-Calls made on another model than the session's current one are
-dropped.  The new rate is announced as `usage/rate-updated' and returned."
+Every call measured is added to the session's totals of what it
+streamed (`harness-usage--note-stream'), but calls made on another
+model than the session's current one are dropped from the rate.  The
+new rate is announced as `usage/rate-updated' and returned."
   (when (and (numberp output) (> output 0)
              (>= seconds harness-usage--rate-min-seconds)
              (harness-call 'session/exists-p sid))
+    (harness-usage--note-stream sid output seconds)
     (let* ((model (plist-get (harness-call 'session/get sid) :model))
            (calls (cons (list (harness-usage--int output) (float seconds) model)
                         (cl-remove-if-not (lambda (call) (equal (nth 2 call) model))

@@ -22,6 +22,7 @@
 (declare-function harness-naming--init "harness-naming")
 (declare-function harness-naming--shutdown "harness-naming")
 (declare-function harness-naming--name-running "harness-naming")
+(declare-function harness-naming--auto-p "harness-naming")
 (declare-function harness-openai-register-endpoint "harness-provider-openai")
 (defvar harness-http-retry-delay)
 (defvar harness-http-retry-jitter)
@@ -180,7 +181,15 @@ Its models are \"big\" and \"small\", its simple tier; see
         (should (null (plist-get req :provider-state)))
         (should (null (plist-get req :tools)))
         (should (= 3 (length (plist-get req :messages))))
-        (should (string-match-p "3 to 6 words" (plist-get (car (last (plist-get last :content))) :text))))
+        (should (string-match-p "3 to 6 words" (plist-get (car (last (plist-get last :content))) :text)))
+        (should (equal "Auto-name" (plist-get req :job)))
+        (should (equal id (plist-get req :job-parent))))
+      ;; The call is recorded as an internal session made for the session.
+      (let ((calls (harness-call 'session/list (list :kind 'internal))))
+        (should (= 1 (length calls)))
+        (should (equal "Auto-name" (plist-get (car calls) :name)))
+        (should (equal id (plist-get (car calls) :parent-id)))
+        (should (equal '(user assistant) (harness-naming-test-kinds (plist-get (car calls) :id)))))
       (should (zerop (hash-table-count harness-naming--running))))))
 
 (ert-deftest harness-naming-system-prompt-filter ()
@@ -253,6 +262,10 @@ question, ephemeral, with no provider state."
                                  (plist-get (car blocks) :text)))
           (should-not (string-search "latest message" (plist-get (car blocks) :text)))
           (should (string-search "3 to 6 words" (plist-get (cadr blocks) :text))))
+        ;; Recorded as an internal session made for the session.
+        (let ((calls (harness-call 'session/list (list :kind 'internal))))
+          (should (= 1 (length calls)))
+          (should (equal id (plist-get (car calls) :parent-id))))
         (harness-naming-test-release)
         (should (eq 'end-turn (plist-get (harness-await turn) :stop-reason)))
         (should (equal '(user hint hint assistant) (harness-naming-test-kinds id)))
@@ -371,7 +384,9 @@ That version subscribed to the end of turns; its subscription goes."
           (harness-await (harness-call 'agent/prompt id "hello")))
         (should (= 1 calls))
         (should (null (harness-naming-test-name id)))
-        (should (equal '(user assistant) (harness-naming-test-kinds id)))))))
+        (should (equal '(user assistant) (harness-naming-test-kinds id)))))
+    ;; An internal session is named after its call's job already.
+    (should-not (harness-naming--auto-p (list :id "internal-1" :kind 'internal)))))
 
 (ert-deftest harness-naming-auto-respects-custom ()
   (harness-naming-test-with
@@ -457,7 +472,8 @@ the one that names a session from its first message: to the cheap
 model, ephemeral, without thinking, tools or provider state, the message
 quoted.  It goes under an id of its own, which the provider is told to
 free once it is answered, and its options go to the
-`naming/system-prompt' filters: nothing is stored, no session is made."
+`naming/system-prompt' filters: nothing is stored, no session is made
+but the internal one that records the call, with no parent."
   (harness-naming-test-with
     (harness-naming-test-with-held
       (harness-add-filter 'naming/system-prompt
@@ -481,7 +497,12 @@ free once it is answered, and its options go to the
         (should (string-search "<message>\nfix the parser, it drops comments\n</message>"
                                (harness-naming-test-opening-text naming)))
         (should (equal (list id) harness-naming-test--closed)))
-      (should (zerop (hash-table-count harness-sessions)))
+      (let ((sessions (harness-call 'session/list)))
+        (should (= 1 (length sessions)))
+        (should (eq 'internal (plist-get (car sessions) :kind)))
+        (should (equal "Auto-name" (plist-get (car sessions) :name)))
+        (should-not (plist-get (car sessions) :parent-id))
+        (should (eq 'idle (plist-get (car sessions) :status))))
       ;; Another request, another id; without `:task', the plain prompt.
       (harness-await (harness-call 'naming/title "add a CSV export" '(:model "naming-held:big")))
       (should (equal harness-naming--base-system-prompt (plist-get (car harness-naming-test--requests) :system)))

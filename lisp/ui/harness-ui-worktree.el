@@ -73,10 +73,10 @@
 
 (defun harness-ui-worktree--sessions-in (path)
   "Return cached sessions living in PATH: by `:worktree', else by `:cwd'."
-  (harness-ui-sessions (lambda (s)
-                         (let ((wt (plist-get s :worktree)))
-                           (if wt (harness-ui-worktree--same-p wt path)
-                             (harness-ui-worktree--same-p (plist-get s :cwd) path))))))
+  (harness-ui-user-sessions (lambda (s)
+                              (let ((wt (plist-get s :worktree)))
+                                (if wt (harness-ui-worktree--same-p wt path)
+                                  (harness-ui-worktree--same-p (plist-get s :cwd) path))))))
 
 (defun harness-ui-worktree--sessions-label (path)
   "Return a short description of the sessions using PATH."
