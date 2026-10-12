@@ -27,6 +27,25 @@
 ;; shows the user: an image, a video (as a poster the user can play;
 ;; the model is told what it is and how to look inside), and the
 ;; picture of an SVG read from its top, whose text the model reads.
+;;
+;; An image is also returned as `:images', which the model sees when its
+;; model reads images: a list of (:path PATH :mime MIME), MIME one of
+;; image/png, image/jpeg, image/gif and image/webp, the types every
+;; provider takes.  `:attachments' stays what the user sees, the file
+;; as it is; `:images' is the model's view of it.  PATH is the file
+;; itself when it is within `harness-tools-fs-image-max-bytes' and
+;; `harness-tools-fs-image-max-side'.  Otherwise ffmpeg makes a copy
+;; that is (`harness-tools-fs-ffmpeg'): fitted into that many pixels,
+;; its first frame only, a JPEG for a JPEG and else a PNG, so that a
+;; BMP or a TIFF is converted too.  The copy is kept under
+;; `harness-state-directory', named after the file it comes from, its
+;; size and time, and the size it was fitted into, so a second read
+;; makes none.  Without a copy the file itself is shown when it is no
+;; larger than a provider takes (8000 pixels on a side), and otherwise
+;; the model is told that the image is too large and how to make a
+;; smaller one.  The text says which: the model must not believe it
+;; saw an image it did not, and a model that reads no images is told so
+;; by the agent, which owns that knowledge.
 
 ;;; Code:
 
@@ -36,6 +55,8 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-tools)
+
+(defvar harness-state-directory)
 
 (defconst harness-tools-fs--glob-limit 500
   "Maximum number of paths returned by the glob tool.")
@@ -51,6 +72,41 @@
 
 (defconst harness-tools-fs--line-count-limit (* 20 1024 1024)
   "Byte size above which file_info stops counting lines.")
+
+(defcustom harness-tools-fs-image-max-bytes 3932160
+  "Largest image file, in bytes, that read_file shows a model as it is.
+A larger one is made smaller first, by `harness-tools-fs-ffmpeg'.  The
+default, 3.75 MiB, is the most Bedrock takes of an image; as base64 it
+is 5 MiB, the most Anthropic takes."
+  :type 'integer :group 'harness)
+
+(defcustom harness-tools-fs-image-max-side 2000
+  "Most pixels on a side of an image that read_file shows a model as it is.
+A larger one is fitted into a square of this many pixels first, by
+`harness-tools-fs-ffmpeg'.  Anthropic rejects an image of more than 2000
+pixels on a side in a request with more than 20 images, and any of
+more than 8000 (`harness-tools-fs--image-hard-max-side')."
+  :type 'integer :group 'harness)
+
+(defcustom harness-tools-fs-ffmpeg "ffmpeg"
+  "Program that read_file runs to make an image fit for a model to see.
+It fits an image over `harness-tools-fs-image-max-side' pixels on a
+side or `harness-tools-fs-image-max-bytes' bytes into those limits,
+and converts one of a type models do not read (BMP, TIFF ...) to PNG,
+keeping the first frame of either.  Nil never runs it: an image is then
+shown to a model only when it is within the byte limit and 8000 pixels
+on a side, and the model is told so when it is not."
+  :type '(choice (const :tag "Never" nil) (string :tag "Program"))
+  :group 'harness)
+
+(defconst harness-tools-fs--image-hard-max-side 8000
+  "Most pixels on a side of an image read_file shows a model, at any rate.
+Providers reject an image larger than this.  One over
+`harness-tools-fs-image-max-side' is shown as it is, up to this size,
+only when ffmpeg cannot make it smaller.")
+
+(defconst harness-tools-fs--ffmpeg-timeout 60
+  "Seconds ffmpeg may take to make one copy of an image before it is killed.")
 
 ;;;; Helpers
 
@@ -139,6 +195,269 @@ The UI reverts unmodified buffers visiting PATH on `tools/file-written'."
       (write-region (point-min) (point-max) path nil 'silent)))
   (harness-emit 'tools/file-written path))
 
+;;;; Images
+
+(defun harness-tools-fs--head (path n)
+  "Return the first N bytes of PATH as a unibyte string, empty when unreadable."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (condition-case nil
+        (insert-file-contents-literally path nil 0 n)
+      (error nil))
+    (buffer-string)))
+
+(defun harness-tools-fs--image-size (path)
+  "Return (WIDTH . HEIGHT), in pixels, of the image PATH, or nil when unknown.
+It is read from the header of the file, without decoding it or running
+anything, so it costs the same for any size and needs no display (see
+`harness-image-pixel-size'): PNG, GIF, JPEG, WebP and BMP are known."
+  (harness-image-pixel-size path))
+
+(defun harness-tools-fs--image-kind (path)
+  "Return the MIME type of the image PATH by its first bytes, or nil.
+Only the types models read are known: image/png, image/jpeg, image/gif
+and image/webp.  A file named for one type that holds another is the
+type its bytes say, as a provider checks it and refuses an image whose
+type is wrong; other bytes (a BMP, a TIFF, text) have none."
+  (let ((head (harness-tools-fs--head path 12)))
+    (cond ((string-prefix-p "\211PNG\r\n\032\n" head) "image/png")
+          ((string-prefix-p "\377\330\377" head) "image/jpeg")
+          ((or (string-prefix-p "GIF87a" head) (string-prefix-p "GIF89a" head)) "image/gif")
+          ((and (>= (length head) 12) (string-prefix-p "RIFF" head)
+                (equal (substring head 8 12) "WEBP"))
+           "image/webp"))))
+
+(defun harness-tools-fs--file-bytes (path)
+  "Return the size in bytes of the file PATH names, following a symbolic link.
+`file-attributes' gives a link's own size, the length of its target's
+name, which would let a large image through as a small one."
+  (harness-file-size (file-truename path)))
+
+(defun harness-tools-fs--image-side ()
+  "Return the most pixels on a side that an image is shown to a model as it is.
+That is `harness-tools-fs-image-max-side', but no more than providers
+take (`harness-tools-fs--image-hard-max-side')."
+  (max 1 (min harness-tools-fs-image-max-side harness-tools-fs--image-hard-max-side)))
+
+(defun harness-tools-fs--image-info (path)
+  "Return what read_file needs to know of the image PATH, as a plist.
+`:kind' is its MIME type by its bytes when models read that type, else
+nil.  `:mime' is the type to name it by: `:kind', else the one its
+extension gives.  `:bytes' is the size of the file and `:size' its
+\(WIDTH . HEIGHT) in pixels, nil when unknown."
+  (let ((kind (harness-tools-fs--image-kind path)))
+    (list :kind kind
+          :mime (or kind (harness-tools-fs--mime path))
+          :bytes (harness-tools-fs--file-bytes path)
+          :size (harness-tools-fs--image-size path))))
+
+(defun harness-tools-fs--image-fits-p (info side)
+  "Non-nil when the image INFO describes can be shown to a model as it is.
+That is, it is of a type models read, no larger than
+`harness-tools-fs-image-max-bytes', and, when its size is known, no more
+than SIDE pixels on a side."
+  (let ((bytes (plist-get info :bytes))
+        (size (plist-get info :size)))
+    (and (plist-get info :kind) bytes
+         (<= bytes harness-tools-fs-image-max-bytes)
+         (or (null size) (<= (max (car size) (cdr size)) side)))))
+
+(defun harness-tools-fs--copy-dir ()
+  "Return the directory the copies of images for models are kept in.
+It is made when missing, under `harness-state-directory', where the
+harness keeps what it makes (video thumbnails, saved outputs)."
+  (harness-ensure-directory
+   (expand-file-name "model-images/" (if (bound-and-true-p harness-state-directory)
+                                         harness-state-directory
+                                       temporary-file-directory))))
+
+(defun harness-tools-fs--copy-name (path side jpeg)
+  "Return the file that holds the copy of the image PATH fitted into SIDE pixels.
+A JPEG if JPEG, else a PNG.  The name is a hash of the true name of
+PATH, its size and its time, and SIDE, so that a copy is made once for
+each state of the file, and a file that changed gets a new one."
+  (let* ((true (file-truename path))
+         (attrs (file-attributes true))
+         (key (format "%s|%s|%s|%d" true (file-attribute-size attrs)
+                      (float-time (file-attribute-modification-time attrs)) side)))
+    (expand-file-name (concat (sha1 (encode-coding-string key 'utf-8)) (if jpeg ".jpg" ".png"))
+                      (harness-tools-fs--copy-dir))))
+
+(defun harness-tools-fs--ffmpeg-command (program src dest side jpeg)
+  "Return the command that makes the image DEST of SRC with ffmpeg PROGRAM.
+DEST is the first frame of SRC fitted into SIDE pixels on a side and
+never enlarged; a JPEG (quality 3) if JPEG, else a PNG."
+  (append (list program "-nostdin" "-loglevel" "error" "-y" "-i" src "-frames:v" "1"
+                "-vf" (format "scale='min(%d,iw)':'min(%d,ih)':force_original_aspect_ratio=decrease"
+                              side side))
+          (and jpeg (list "-q:v" "3"))
+          (list dest)))
+
+(defun harness-tools-fs--ffmpeg-failure (result)
+  "Return why the ffmpeg run that came to RESULT made no image.
+RESULT is what `harness-run-command' resolves to."
+  (let* ((exit (plist-get result :exit))
+         (line (car (split-string (or (plist-get result :stderr) "") "\n" t "[ \t\r]+"))))
+    (cond ((eq exit 'timeout)
+           (format "ffmpeg took more than %s seconds" harness-tools-fs--ffmpeg-timeout))
+          (line
+           ;; "[png @ 0x5570d1d4a880] Invalid PNG signature": the address is noise.
+           (format "ffmpeg failed: %s"
+                   (harness-truncate-end (replace-regexp-in-string " @ 0x[0-9a-f]+\\]" "]" line) 200)))
+          ((eql exit 0) "ffmpeg wrote no image")
+          (t (format "ffmpeg failed (exit %s)" exit)))))
+
+(defun harness-tools-fs--ffmpeg (src dest side jpeg)
+  "Make the image DEST of SRC with `harness-tools-fs-ffmpeg'; return a promise.
+DEST is SRC fitted into SIDE pixels, a JPEG if JPEG (see
+`harness-tools-fs--ffmpeg-command').  The promise resolves to (:path
+DEST), or to (:error WHY) when nothing was made.  ffmpeg writes a file
+of its own first, which is renamed once it is whole, so that no read
+sees half an image.  It runs asynchronously, and is killed after
+`harness-tools-fs--ffmpeg-timeout' seconds, so it never holds the
+harness up."
+  (let ((program (and harness-tools-fs-ffmpeg (executable-find harness-tools-fs-ffmpeg))))
+    (cond
+     ((null harness-tools-fs-ffmpeg)
+      (harness-resolved (list :error "ffmpeg is turned off (harness-tools-fs-ffmpeg is nil)")))
+     ((null program)
+      (harness-resolved (list :error (format "%s is not installed" harness-tools-fs-ffmpeg))))
+     (t
+      (let ((part (concat (file-name-sans-extension dest) "-" (harness-short-id 6) ".part"
+                          (file-name-extension dest t))))
+        (harness-then
+         (harness-run-command (harness-tools-fs--ffmpeg-command program src part side jpeg)
+                              :cwd (file-name-directory dest)
+                              :timeout harness-tools-fs--ffmpeg-timeout :name "harness-ffmpeg")
+         (lambda (r)
+           (cond ((and (eql (plist-get r :exit) 0) (> (or (harness-file-size part) 0) 0))
+                  (rename-file part dest t)
+                  (list :path dest))
+                 (t (ignore-errors (delete-file part))
+                    ;; A process killed for taking too long may leave
+                    ;; what it was writing after this, as it dies.
+                    (when (eq (plist-get r :exit) 'timeout)
+                      (run-at-time 5 nil (lambda () (ignore-errors (delete-file part)))))
+                    (list :error (harness-tools-fs--ffmpeg-failure r)))))
+         (lambda (err)
+           (ignore-errors (delete-file part))
+           (list :error (format "ffmpeg could not run: %s" (harness-error-message err))))))))))
+
+(defun harness-tools-fs--shrink-sides ()
+  "Return the sides, in pixels, to try fitting a too large image into.
+The first, the largest, is `harness-tools-fs-image-max-side' (see
+`harness-tools-fs--image-side').  A copy that is still over
+`harness-tools-fs-image-max-bytes' (a PNG of noise is) is made again
+at 70 % of it, and at 50 %."
+  (let ((side (harness-tools-fs--image-side)))
+    (delete-dups (list side (max 1 (floor (* side 0.7))) (max 1 (floor (* side 0.5)))))))
+
+(defun harness-tools-fs--shrink-step (path info sides)
+  "Return a promise of a copy of the image PATH fitted into the first of SIDES.
+INFO describes PATH.  A copy made before is used, and one that is over
+`harness-tools-fs-image-max-bytes' is made again with the next of
+SIDES, if any.  The promise resolves like `harness-tools-fs--shrink'."
+  (let* ((jpeg (equal (plist-get info :kind) "image/jpeg"))
+         (side (car sides))
+         (dest (harness-tools-fs--copy-name path side jpeg)))
+    (harness-then
+     (if (> (or (harness-file-size dest) 0) 0)
+         (harness-resolved (list :path dest))
+       (harness-tools-fs--ffmpeg path dest side jpeg))
+     (lambda (made)
+       (let ((bytes (and (plist-get made :path) (harness-file-size dest))))
+         (cond
+          ((null bytes) made)
+          ((<= bytes harness-tools-fs-image-max-bytes)
+           (list :path dest :mime (if jpeg "image/jpeg" "image/png")
+                 :size (harness-tools-fs--image-size dest)))
+          ((cdr sides) (harness-tools-fs--shrink-step path info (cdr sides)))
+          (t (list :error (format "its smallest copy, fitted into %d px, is still %s"
+                                  side (harness-format-bytes bytes))))))))))
+
+(defun harness-tools-fs--shrink (path info)
+  "Return a promise of a copy of the image PATH that a model can be shown.
+INFO describes PATH (`harness-tools-fs--image-info').  The promise
+resolves to (:path COPY :mime MIME :size SIZE), the copy being no
+larger than the limits (`harness-tools-fs-image-max-bytes',
+`harness-tools-fs-image-max-side'), or to (:error WHY) when none could
+be made: the file is on another host, ffmpeg is off or missing or
+failed."
+  (if (file-remote-p path)
+      (harness-resolved (list :error "it is on another host, where read_file cannot run ffmpeg"))
+    (harness-tools-fs--shrink-step path info (harness-tools-fs--shrink-sides))))
+
+(defun harness-tools-fs--limit-text (bytes)
+  "Return the limit BYTES as a short size: 3932160 is \"3.75 MiB\"."
+  (if (< bytes 1048576)
+      (harness-format-bytes bytes)
+    (format "%s MiB" (string-trim-right
+                      (string-trim-right (format "%.2f" (/ bytes 1048576.0)) "0+")
+                      "\\."))))
+
+(defun harness-tools-fs--image-name (shown info)
+  "Return how the text names the image that INFO describes and SHOWN names.
+Its type, its size in bytes and, when known, in pixels."
+  (let ((size (plist-get info :size)))
+    (format "Image %s (%s, %s%s)" shown (plist-get info :mime)
+            (harness-format-bytes (plist-get info :bytes))
+            (if size (format ", %dx%d px" (car size) (cdr size)) ""))))
+
+(defun harness-tools-fs--image-reply (text attachment image)
+  "Return the RESULT of read_file saying TEXT about an image.
+ATTACHMENT is what the user is shown, IMAGE, if any, what the model is:
+\(:path PATH :mime MIME)."
+  (apply #'harness-tool-ok text :attachments (list attachment)
+         (and image (list :images (list image)))))
+
+(defun harness-tools-fs--image-result (shown path attachment info copy)
+  "Return the RESULT of read_file on the image PATH once ffmpeg had its say.
+SHOWN names PATH, ATTACHMENT is what the user is shown and INFO describes
+PATH.  COPY is what `harness-tools-fs--shrink' came to.  The text says
+what the model gets: the copy, else PATH itself when providers take it,
+else nothing; and never that it sees an image it does not."
+  (let ((name (harness-tools-fs--image-name shown info)))
+    (cond
+     ((plist-get copy :path)
+      (let* ((size (plist-get info :size))
+             (new (plist-get copy :size))
+             (changes (delq nil (list (and (not (plist-get info :kind)) "converted to PNG")
+                                      (and size new (not (equal size new))
+                                           (format "downscaled to %dx%d px" (car new) (cdr new)))))))
+        (harness-tools-fs--image-reply
+         (format "%s, %s to show you." name (if changes (string-join changes " and ") "recompressed"))
+         attachment (list :path (plist-get copy :path) :mime (plist-get copy :mime)))))
+     ((harness-tools-fs--image-fits-p info harness-tools-fs--image-hard-max-side)
+      (harness-tools-fs--image-reply (concat name ".") attachment
+                                     (list :path path :mime (plist-get info :mime))))
+     (t
+      (let ((why (string-remove-suffix "." (or (plist-get copy :error) "no copy was made"))))
+        (harness-tools-fs--image-reply
+         (if (plist-get info :kind)
+             (format "%s is shown to the user, but it is too large to show you (at most %s and %d px a side) and could not be made smaller: %s. Make a smaller copy with bash (ffmpeg -i IN -vf \"scale=%d:%d:force_original_aspect_ratio=decrease\" OUT.png) and read that."
+                     name (harness-tools-fs--limit-text harness-tools-fs-image-max-bytes)
+                     harness-tools-fs--image-hard-max-side why
+                     (harness-tools-fs--image-side) (harness-tools-fs--image-side))
+           (format "%s is shown to the user, but you can read only PNG, JPEG, GIF and WebP images, and it could not be converted: %s. Convert it with bash (ffmpeg -i IN OUT.png) and read that."
+                   name why))
+         attachment nil))))))
+
+(defun harness-tools-fs--read-image (path shown)
+  "Return the RESULT of read_file on the raster image PATH, which SHOWN names.
+The user is shown the image as it is (`:attachments'); the model is
+given `:images' (see the commentary at the top): the image itself when
+it is within the limits, else the copy ffmpeg makes of it, else the
+image itself when providers still take it, else none.  Making a copy
+takes ffmpeg a moment, so then a promise of the result is returned."
+  (let ((attachment (harness-tools-fs--attachment path (harness-tools-fs--mime path)))
+        (info (harness-tools-fs--image-info path)))
+    (if (harness-tools-fs--image-fits-p info (harness-tools-fs--image-side))
+        (harness-tools-fs--image-reply (concat (harness-tools-fs--image-name shown info) ".")
+                                       attachment (list :path path :mime (plist-get info :mime)))
+      (harness-then (harness-tools-fs--shrink path info)
+                    (lambda (copy)
+                      (harness-tools-fs--image-result shown path attachment info copy))))))
+
 ;;;; read_file
 
 (defun harness-tools-fs--read-range (path offset limit)
@@ -179,10 +498,10 @@ TEXT is numbered and already trimmed to the output budget."
                                   shown (plist-get ctx :cwd))))
      ((not (file-readable-p path))
       (harness-tool-error (format "File not readable: %s" shown)))
+     ;; The user is shown the image; the model gets it too when its
+     ;; model reads images (`:images').
      ((harness-tools-fs--image-p path)
-      (let ((size (harness-file-size path)) (mime (harness-tools-fs--mime path)))
-        (harness-tool-ok (format "Image %s (%s, %s) attached." shown mime (harness-format-bytes size))
-                         :attachments (list (harness-tools-fs--attachment path mime)))))
+      (harness-tools-fs--read-image path shown))
      ;; The chat shows a video to the user, who can play it; the model
      ;; gets what it is and how to look inside.
      ((harness-tools-fs--video-p path)
@@ -233,7 +552,7 @@ TEXT is numbered and already trimmed to the output budget."
 
 (harness-define-tool "read_file"
   :label "Read file"
-  :description "Read a text file. Output lines are prefixed with their line number. Use offset (1-based line) and limit (number of lines) to read a range of a large file; a read that would be too big is trimmed and tells you where to continue. Images are attached as images; a video is shown to the user, who can play it; other binary files are refused."
+  :description "Read a text file. Output lines are prefixed with their line number. Use offset (1-based line) and limit (number of lines) to read a range of a large file; a read that would be too big is trimmed and tells you where to continue. An image (PNG, JPEG, GIF, WebP; other types and oversized images are converted when ffmpeg is installed) comes back as an image you see, when your model reads images, and is shown to the user; a video is shown to the user, who can play it; other binary files are refused."
   :schema '(:type "object"
             :properties (:path (:type "string" :description "File path, absolute or relative to the working directory")
                          :offset (:type "integer" :description "First line to read (1-based). Default 1")

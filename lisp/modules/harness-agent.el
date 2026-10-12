@@ -19,6 +19,11 @@
 ;; at once: the `agent/stop' filters may answer it with a message of the
 ;; harness's and a step more, a few times at most (`harness-agent--stopped').
 ;;
+;; A tool result may carry pictures for the model (`:images', as read_file
+;; on an image gives): a hosted loop is handed them with the result, a
+;; native one reads them from the transcript with its next request, and
+;; only a model that reads images is sent any (see "Images tools return").
+;;
 ;; A provider may run a tool of its own in place of a harness tool (see
 ;; `tools/builtin'): Claude Code's web search for web_search, say.  It
 ;; reports such a call (a `tool-call' event marked `:builtin'), asks the
@@ -72,6 +77,37 @@ one worked, without filling its context; the oldest go first.")
 
 (defconst harness-agent--handoff-item-chars 4000
   "Most characters of one message, tool call or result in a handoff.")
+
+(defcustom harness-agent-history-images 16
+  "How many of the newest images that tools returned a request carries.
+A model that reads images sees the pictures a tool returned (an image
+read_file read, say), and a provider whose loop the harness runs is sent
+the whole conversation again at every step, those pictures with it.  So
+only the newest this many go with a request.  When there are more, the
+oldest are left out in chunks of half this many: the request then stays
+the same from one step to the next until the next chunk goes, and the
+provider's prompt cache with it.  The result of a call whose image was
+left out says so, and the model can read the file again.  nil keeps
+every one."
+  :type '(choice (integer :tag "Newest images kept") (const :tag "All of them" nil))
+  :safe (lambda (v) (or (null v) (natnump v)))
+  :group 'harness)
+
+(defconst harness-agent--image-mimes '("image/png" "image/jpeg" "image/gif" "image/webp")
+  "The media types of the images a tool result can hand a model.
+They are what the providers take as an image of a tool result.")
+
+(defconst harness-agent--no-vision-note
+  "\n\n[This model does not read images: only the user sees this one.]"
+  "Added to a tool result whose image goes to a model that cannot read it.")
+
+(defconst harness-agent--image-dropped-note
+  "\n\n[The image this call returned is no longer attached, to keep the request small; read the file again to see it.]"
+  "Added to a tool result whose image `harness-agent-history-images' left out.")
+
+(defun harness-agent--image-gone-note (path)
+  "Return what a tool result says of its image, the file at PATH, once unreadable."
+  (format "\n\n[The image this call returned (%s) is gone; read the file again to see it.]" path))
 
 (cl-defstruct (harness-agent-turn (:copier nil))
   session-id promise handle (steps 0) cancelled
@@ -376,7 +412,9 @@ That is when `provider/model' lists \"image\" in its `:input-modalities'."
 (defun harness-agent--prepare-block (block session)
   "Return BLOCK ready for SESSION's provider: images inlined, files described.
 An image file is inlined only when SESSION's model reads images; else a
-text block names it."
+text block names it.  A tool_result block whose call returned images
+gets them the same way (`harness-agent--prepare-result'); any other is
+returned as it is."
   (pcase (plist-get block :type)
     ("image"
      (cond ((plist-get block :data) block)
@@ -393,6 +431,8 @@ text block names it."
      (list :type "text"
            :text (format "Attached file: %s (%s bytes)" (plist-get block :path)
                          (or (plist-get block :size) (harness-file-size (plist-get block :path)) "?"))))
+    ("tool_result"
+     (if (plist-get block :images) (harness-agent--prepare-result block session) block))
     (_ block)))
 
 (defun harness-agent--image-label (block)
@@ -418,13 +458,15 @@ which image each one means."
 
 (defun harness-agent--prepare-messages (session messages)
   "Return MESSAGES with the content of each user message ready for SESSION.
-See `harness-agent--prepare-content'."
+See `harness-agent--prepare-content'.  The images of tool results are
+cut to the newest `harness-agent-history-images' first (see
+`harness-agent--cap-images'), so the files of those cut are never read."
   (mapcar (lambda (m)
             (if (eq (plist-get m :role) 'user)
                 (list :role 'user
                       :content (harness-agent--prepare-content (plist-get m :content) session))
               m))
-          messages))
+          (harness-agent--cap-images messages session)))
 
 (defun harness-agent--blocks-text (blocks)
   "Return the plain text of BLOCKS for a transcript node.
@@ -513,6 +555,147 @@ An image keeps its `:label', which its token in the text names."
                     (t (list :type "file" :path (plist-get a :path) :size (plist-get a :size)
                              :mime mime :name (plist-get a :name))))))
           attachments))
+
+;;;; Images tools return
+;;
+;; A tool may hand the model a picture with its result: read_file on an
+;; image returns the image file as `:images', (:path PATH :mime MIME)
+;; each, beside the `:attachments' the chat shows the user.  The
+;; transcript keeps those paths on the result's node and never the bytes
+;; (`harness-agent--record-result'); `session/messages' gives them to a
+;; native provider as the `:images' of the result's tool_result block,
+;; which the request is made ready with (`harness-agent--prepare-result',
+;; `harness-agent--cap-images'); a hosted loop is handed them with the
+;; result as it comes (`harness-agent--hosted-images').  Only a model that
+;; reads images (`harness-agent--vision-p') is sent one: any other is told
+;; in the result's text that only the user sees it.
+
+(defun harness-agent--result-images (result)
+  "Return the images RESULT, what a tool returned, hands the model, paths only.
+Each is (:path PATH :mime MIME), the tool's `:images' reduced to those
+two keys: a picture the transcript names and never holds.  Only one a
+provider can be sent stays -- a file named, of a type in
+`harness-agent--image-mimes' -- and none stays of a call that failed,
+whose result a provider takes as text."
+  (unless (plist-get result :is-error)
+    (let ((images (plist-get result :images)))
+      (and (proper-list-p images)
+           (delq nil (mapcar (lambda (image)
+                               (let ((path (and (consp image) (plist-get image :path)))
+                                     (mime (and (consp image) (plist-get image :mime))))
+                                 (and (stringp path) (not (string-empty-p path))
+                                      (member mime harness-agent--image-mimes)
+                                      (list :path path :mime mime))))
+                             images))))))
+
+(defun harness-agent--image-data (path)
+  "Return the base64 of the image file PATH, or nil when it cannot be read.
+A file that is empty, gone or not readable is no image to send."
+  (and (stringp path) (file-readable-p path)
+       (let ((data (condition-case nil (harness-agent--file-base64 path) (error nil))))
+         (and data (not (string-empty-p data)) data))))
+
+(defun harness-agent--revise-result (block images note)
+  "Return tool_result BLOCK with IMAGES as `:images' and NOTE added to its text.
+A BLOCK without IMAGES has no `:images' key.  NOTE, a string or nil for
+none, is appended to the block's `:content', which stays a string; BLOCK
+itself is not changed."
+  (let ((new (if images
+                 (plist-put (copy-sequence block) :images images)
+               (harness-plist-remove block :images))))
+    (if (and note (stringp (plist-get new :content)))
+        (plist-put new :content (concat (plist-get new :content) note))
+      new)))
+
+(defun harness-agent--prepare-result (block session)
+  "Return tool_result BLOCK, which holds `:images', ready for SESSION's provider.
+For a model that reads images each image becomes (:type \"image\" :mime
+MIME :data BASE64), read from its `:path'; one whose file cannot be read
+any more is left out, and the block's text says it is gone.  For any
+other model all the images go, and the text says that only the user
+sees them.  The images stay in the transcript either way."
+  (if (not (harness-agent--vision-p session))
+      (harness-agent--revise-result block nil harness-agent--no-vision-note)
+    (let (images notes)
+      (dolist (image (plist-get block :images))
+        (let* ((path (plist-get image :path))
+               (data (or (plist-get image :data) (harness-agent--image-data path))))
+          (if data
+              (push (list :type "image" :mime (or (plist-get image :mime) "image/png") :data data) images)
+            (push (harness-agent--image-gone-note (or path "?")) notes))))
+      (harness-agent--revise-result block (nreverse images) (and notes (apply #'concat (nreverse notes)))))))
+
+(defun harness-agent--result-image-count (messages)
+  "Return how many images the tool results in MESSAGES carry."
+  (let ((count 0))
+    (dolist (m messages count)
+      (when (eq (plist-get m :role) 'user)
+        (dolist (b (plist-get m :content))
+          (when (equal (plist-get b :type) "tool_result")
+            (cl-incf count (safe-length (plist-get b :images)))))))))
+
+(defun harness-agent--drop-oldest-images (messages count)
+  "Return MESSAGES without the oldest COUNT images of their tool results.
+The text of a result that lost images says so
+\(`harness-agent--image-dropped-note').  A message that lost none is
+returned as it is."
+  (mapcar (lambda (m)
+            (if (or (<= count 0) (not (eq (plist-get m :role) 'user)))
+                m
+              (let* ((changed nil)
+                     (blocks (mapcar
+                              (lambda (b)
+                                (let ((have (and (> count 0) (equal (plist-get b :type) "tool_result")
+                                                 (safe-length (plist-get b :images)))))
+                                  (if (or (null have) (zerop have))
+                                      b
+                                    (let ((drop (min have count)))
+                                      (setq count (- count drop) changed t)
+                                      (harness-agent--revise-result b (nthcdr drop (plist-get b :images))
+                                                                    harness-agent--image-dropped-note)))))
+                              (plist-get m :content))))
+                (if changed (list :role 'user :content blocks) m))))
+          messages))
+
+(defun harness-agent--cap-images (messages session)
+  "Return MESSAGES with only the newest tool-result images the limit allows.
+The limit N is `harness-agent-history-images'.  With more of them, T,
+the oldest D go, D being the least multiple of N/2 that leaves no more
+than N: N/2 for a T up to N + N/2, then N, and so on.  D follows from
+the conversation alone, so the images a request carries stay the same
+from one step to the next until D grows, and the provider's prompt
+cache lasts.  Counted and cut before any file is read.  Nothing goes
+for a model of SESSION that reads no images, which is sent none."
+  (let ((limit harness-agent-history-images))
+    (if (not (natnump limit))
+        messages
+      (let ((total (harness-agent--result-image-count messages)))
+        (if (or (<= total limit) (not (harness-agent--vision-p session)))
+            messages
+          (let ((chunk (max 1 (/ limit 2))))
+            (harness-agent--drop-oldest-images
+             messages (min total (* chunk (ceiling (- total limit) chunk))))))))))
+
+(defun harness-agent-strip-result-images (messages)
+  "Return MESSAGES without the images of their tool results; their text stays.
+For a request that needs the conversation's words and not its pictures:
+a hosted loop keeps the pictures it was handed itself, and a summary or
+a title is written from text.  A message without images is returned as
+it is."
+  (mapcar (lambda (m)
+            (if (and (eq (plist-get m :role) 'user)
+                     (cl-some (lambda (b) (and (equal (plist-get b :type) "tool_result")
+                                               (plist-member b :images)))
+                              (plist-get m :content)))
+                (list :role 'user
+                      :content (mapcar (lambda (b)
+                                         (if (and (equal (plist-get b :type) "tool_result")
+                                                  (plist-member b :images))
+                                             (harness-plist-remove b :images)
+                                           b))
+                                       (plist-get m :content)))
+              m))
+          messages))
 
 ;;;; Handoff to a hosted loop
 ;;
@@ -639,10 +822,15 @@ Otherwise MESSAGES is returned as it is."
 (defun harness-agent--request-messages (session)
   "Return the provider messages of SESSION's next request.
 A hosted loop gets the turns it missed handed over, see
-`harness-agent--handoff'."
-  (let ((messages (harness-agent--prepare-messages
-                   session (harness-call 'session/messages (plist-get session :id)))))
-    (if (harness-agent--hosted-p session)
+`harness-agent--handoff'.  It is also sent no tool result's images
+here: it was handed each with its result (`harness-agent--hosted-images')
+and keeps them in the conversation it holds itself, so reading the files
+again to send none of them would only cost time."
+  (let* ((hosted (harness-agent--hosted-p session))
+         (history (harness-call 'session/messages (plist-get session :id)))
+         (messages (harness-agent--prepare-messages
+                    session (if hosted (harness-agent-strip-result-images history) history))))
+    (if hosted
         (condition-case err
             (harness-agent--handoff session messages)
           (error (harness-log 'warn "agent: handing %s over failed: %S" (plist-get session :id) err)
@@ -1064,18 +1252,47 @@ logged and given up.  Return non-nil when MESSAGE itself went out."
                              what (harness-error-short-message err2))))
        nil))))
 
-(defun harness-agent--respond (respond name content is-error)
+(defun harness-agent--respond (respond name content is-error &optional images)
   "Send CONTENT, the result of the call of tool NAME, through RESPOND.
-IS-ERROR marks a failed call.  Never signals: a result the provider
-cannot take is answered with one saying that the harness could not send
-it, so that the model hears of the call all the same (see
-`harness-agent--respond-with-fallback')."
+IS-ERROR marks a failed call.  IMAGES, when given, are the pictures the
+model is to see with it, each (:mime MIME :data BASE64 :name FILENAME):
+they go as the result's `:images'.  Never signals: a result the
+provider cannot take is answered with one saying that the harness could
+not send it, so that the model hears of the call all the same (see
+`harness-agent--respond-with-fallback'); that one is text alone, even
+when the images were what the provider could not take."
   (harness-agent--respond-with-fallback
    respond (format "the result of %s" name)
-   (list :content content :is-error is-error)
+   (append (list :content content :is-error is-error)
+           (and images (list :images images)))
    (lambda (why)
      (list :content (format "The harness could not send the result of %s: %s" name why)
            :is-error t))))
+
+(defun harness-agent--hosted-images (sid images)
+  "Return (NOTE . SENT): what SID's hosted loop is told of a result's IMAGES.
+IMAGES are (:path PATH :mime MIME).  For a model that reads images SENT
+holds each one that can be read as (:mime MIME :data BASE64 :name
+FILENAME), the shape of `harness-agent--respond's IMAGES; NOTE then
+says of each that cannot that it is gone.  Any other model gets no
+SENT and a NOTE saying that only the user sees the image.  NOTE is
+text to add to the result's content, or nil for none.  The model is the
+one the running step went to, which a switch of the session's model
+leaves be until the next step."
+  (if (not (harness-agent--vision-p
+            (list :model (or (gethash sid harness-agent--step-models)
+                             (plist-get (harness-call 'session/get sid) :model)))))
+      (cons harness-agent--no-vision-note nil)
+    (let (sent notes)
+      (dolist (image images)
+        (let* ((path (plist-get image :path))
+               (data (harness-agent--image-data path)))
+          (if data
+              (push (list :mime (plist-get image :mime) :data data
+                          :name (file-name-nondirectory path))
+                    sent)
+            (push (harness-agent--image-gone-note path) notes))))
+      (cons (and notes (apply #'concat (nreverse notes))) (nreverse sent)))))
 
 (defun harness-agent--call-title (name input)
   "Return the title of a call of tool NAME with INPUT, for people to read.
@@ -1092,30 +1309,38 @@ That is logged, short, and the result goes on to the provider all the
 same: a result the transcript refuses must not leave the model waiting."
   (harness-agent--try (format "recording result of %s" name)
     (harness-call 'session/append sid
-                  (list :kind 'tool-result :call-id call-id
-                        :output (plist-get result :content)
-                        :is-error (plist-get result :is-error)
-                        :attachments (plist-get result :attachments)
-                        :meta (append
-                               (list :duration (- (float-time) started)
-                                     :denied (plist-get result :denied)
-                                     :truncated (plist-get result :truncated))
-                               ;; What the tool recorded on its
-                               ;; result -- the child session a
-                               ;; spawn_agent call ran, the report a
-                               ;; hand_in handed in, the denied call a
-                               ;; rerun_approved call ran again and
-                               ;; the tool it was -- rides the node,
-                               ;; so the transcript can draw it later.
-                               ;; Its `:child-id', `:rerun-of' and
-                               ;; `:rerun-tool' are among it.
-                               (plist-get result :meta))))))
+                  (append
+                   (list :kind 'tool-result :call-id call-id
+                         :output (plist-get result :content)
+                         :is-error (plist-get result :is-error)
+                         :attachments (plist-get result :attachments))
+                   ;; The images the model is to see: their files, never
+                   ;; their bytes (`harness-agent--result-images').
+                   (when-let* ((images (harness-agent--result-images result)))
+                     (list :images images))
+                   (list :meta (append
+                                (list :duration (- (float-time) started)
+                                      :denied (plist-get result :denied)
+                                      :truncated (plist-get result :truncated))
+                                ;; What the tool recorded on its
+                                ;; result -- the child session a
+                                ;; spawn_agent call ran, the report a
+                                ;; hand_in handed in, the denied call a
+                                ;; rerun_approved call ran again and
+                                ;; the tool it was -- rides the node,
+                                ;; so the transcript can draw it later.
+                                ;; Its `:child-id', `:rerun-of' and
+                                ;; `:rerun-tool' are among it.
+                                (plist-get result :meta)))))))
 
 (defun harness-agent--tool-call (turn ev)
   "Run the call EV of a harness tool for TURN; record it and its result.
 The result, with any steering waiting, goes back to the provider through
-EV's `:respond' when it runs a hosted loop.  Then the turn ends, if the
-tool asked it to (`:end-turn'), or decides what follows.
+EV's `:respond' when it runs a hosted loop, and with it the images the
+tool returned for the model to see (`harness-agent--hosted-images'); a
+model that reads none is told in the text that only the user sees them.
+Then the turn ends, if the tool asked it to (`:end-turn'), or decides
+what follows.
 
 The call is over, and the turn decides what follows, whatever happens to
 the result on the way: a transcript that refuses it, a provider that
@@ -1156,13 +1381,26 @@ logged, short, and the ones after it still run."
          (harness-agent--remove-call sid call-id)
          (harness-agent--update-activity sid)
          (unwind-protect
-             (let ((rnode (harness-agent--record-result sid name call-id result started))
-                   (content (harness-agent--with-steering turn (plist-get result :content))))
+             (let* ((rnode (harness-agent--record-result sid name call-id result started))
+                    ;; The pictures of the result go to a hosted loop with
+                    ;; it, for a model that reads them: (NOTE . IMAGES).  A
+                    ;; loop the harness runs reads them from the transcript
+                    ;; with its next request, and nothing is read here.
+                    (shown (and respond
+                                (harness-agent--try (format "reading the images of %s" name)
+                                  (when-let* ((wanted (harness-agent--result-images result)))
+                                    (harness-agent--hosted-images sid wanted)))))
+                    (content (harness-agent--with-steering
+                              turn (let ((text (plist-get result :content)))
+                                     (if (and (car shown) (or (null text) (stringp text)))
+                                         (concat text (car shown))
+                                       text)))))
                (when rnode
                  (harness-agent--try (format "announcing the result of %s" name)
                    (harness-emit 'agent/tool-result sid rnode)))
                (when respond
-                 (harness-agent--respond respond name content (plist-get result :is-error))))
+                 (harness-agent--respond respond name content (plist-get result :is-error)
+                                         (cdr shown))))
            ;; Whatever went wrong above, the call is over.
            (cl-decf (harness-agent-turn-pending turn))
            (if (plist-get result :end-turn)

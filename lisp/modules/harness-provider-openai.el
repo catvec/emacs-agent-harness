@@ -23,6 +23,12 @@
 ;; provider lists it, say), unless the endpoint names one with
 ;; `:default-context'.  Endpoints without a /models route can list
 ;; their models statically with `:models'.
+;;
+;; A tool message holds text only, so the images a tool returned (the
+;; `:images' of a tool_result block, each with `:data' or a `:path') go
+;; in the user message after the tool messages
+;; (`harness-openai--tool-image-parts').  The DeepSeek provider builds
+;; its messages here too.
 
 ;;; Code:
 
@@ -482,10 +488,38 @@ and nothing is cached."
         (t (format "%s" content))))
 
 (defun harness-openai--tool-message (block)
-  "Map a tool_result BLOCK to a {\"role\":\"tool\"} message."
+  "Map a tool_result BLOCK to a {\"role\":\"tool\"} message.
+The message is text: chat completions take nothing else in a tool
+message, so the images of BLOCK go elsewhere (see
+`harness-openai--tool-image-parts')."
   (list :role "tool"
         :tool_call_id (plist-get block :tool_use_id)
         :content (harness-openai--result-text (plist-get block :content))))
+
+(defun harness-openai--tool-image-parts (block)
+  "Return the user content parts for the images of tool_result BLOCK, or nil.
+An image of BLOCK's `:images' is a block (:type \"image\" :mime MIME)
+with `:data' (base64) or only a `:path' to read.  Each becomes a text
+part naming the tool call it came from, then the image itself as
+`harness-openai--content-part' maps it, since a tool message cannot
+carry one.  An image that cannot be read is replaced by a text part
+saying so rather than failing the request: its path stays in the
+transcript, so a request that failed on it would fail on every turn
+after it, whether the file was deleted or just not there any more."
+  (let ((id (plist-get block :tool_use_id)))
+    (apply #'append
+           (mapcar (lambda (image)
+                     (let ((part (and (consp image)
+                                      (condition-case nil
+                                          (harness-openai--content-part
+                                           (plist-put (copy-sequence image) :type "image"))
+                                        (file-error nil)))))
+                       (if part
+                           (list (list :type "text" :text (format "[Image returned by tool call %s]" id))
+                                 part)
+                         (list (list :type "text"
+                                     :text (format "[Image returned by tool call %s is not available]" id))))))
+                   (plist-get block :images)))))
 
 (defun harness-openai--assistant-message (blocks &optional reasoning)
   "Map assistant content BLOCKS to one assistant message.
@@ -527,7 +561,13 @@ DeepSeek rejects a tool-using history whose assistant messages omit it."
 (defun harness-openai--messages (request &optional endpoint)
   "Build the OpenAI messages array for REQUEST at ENDPOINT.
 DeepSeek endpoints get the thinking of assistant messages back as
-`reasoning_content'; every other dialect drops it."
+`reasoning_content'; every other dialect drops it.
+
+The images a tool returned (the `:images' of a tool_result block) cannot
+ride in its tool message, which is text.  They go in the user message
+that follows the tool messages of the same harness message, before its
+other content: every tool message must come right after the assistant
+message that made the calls, so nothing may be put between them."
   (let ((reasoning (and endpoint (harness-openai--deepseek-p endpoint)))
         out)
     (when-let* ((system (plist-get request :system)))
@@ -544,14 +584,17 @@ DeepSeek endpoints get the thinking of assistant messages back as
           (_
            ;; user or tool: tool results become their own messages first
            ;; (they must follow the assistant call), the rest is user content.
-           (let (parts)
+           ;; The images the tools returned lead that content.
+           (let (parts images)
              (dolist (b blocks)
                (if (equal (harness-openai--block-type b) "tool_result")
-                   (push (harness-openai--tool-message b) out)
+                   (progn
+                     (push (harness-openai--tool-message b) out)
+                     (setq images (append images (harness-openai--tool-image-parts b))))
                  (when-let* ((part (harness-openai--content-part b)))
                    (push part parts))))
-             (when parts
-               (push (list :role "user" :content (nreverse parts)) out)))))))
+             (when (or images parts)
+               (push (list :role "user" :content (append images (nreverse parts))) out)))))))
     (nreverse out)))
 
 (defun harness-openai--tools (specs)

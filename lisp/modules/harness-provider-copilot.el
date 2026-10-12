@@ -36,7 +36,13 @@
 ;;   stream text and thinking, `external_tool.requested' asks the
 ;;   harness to run a tool, answered by `session.tools.handlePendingToolCall'
 ;;   through the `:respond' of a `tool-call' event, `assistant.usage'
-;;   reports each model call, and `session.idle' ends the turn.
+;;   reports each model call, and `session.idle' ends the turn.  The
+;;   answer is the tool's text (`textResultForLlm') and, for each picture
+;;   in the result's `:images' (the ones the model is to see, such as an
+;;   image read_file read), an entry of `binaryResultsForLlm': base64
+;;   `data', `mimeType', `type' "image" and the file's name as
+;;   `description'.  The agent sends `:images' only for a model that
+;;   reads images.
 ;; - `session.abort' cancels a turn and `sessions.fork' copies a
 ;;   session for `:fork'.  A process can hold several sessions at once,
 ;;   so side requests run in throwaway sessions beside the
@@ -998,14 +1004,50 @@ answers the CLI."
                     :input (plist-get data :arguments) :respond respond))
       (funcall respond '(:content "The harness is not running a turn in this conversation" :is-error t)))))
 
+(defun harness-provider-copilot--binary-results (images)
+  "Return the `binaryResultsForLlm' entries for IMAGES, a tool result's `:images'.
+Each of IMAGES is (:mime MIME :data BASE64 :name FILENAME), a picture
+the model is to see.  Its entry is (:data BASE64 :mimeType MIME :type
+\"image\" :description NAME), the SDK's `ToolBinaryResult'; the
+description, the file's name, is left out when there is none.  An
+element with no data or no media type is left out: the model is given
+only what the CLI can hand it as an image."
+  (delq nil
+        (mapcar (lambda (image)
+                  (let ((data (plist-get image :data))
+                        (mime (plist-get image :mime))
+                        (name (plist-get image :name)))
+                    (when (and (stringp data) (not (string-empty-p data))
+                               (stringp mime) (not (string-empty-p mime)))
+                      (append (list :data data :mimeType mime :type "image")
+                              (when (and (stringp name) (not (string-empty-p name)))
+                                (list :description name))))))
+                images)))
+
 (defun harness-provider-copilot-tool-result (result)
-  "Convert a harness tool RESULT (:content :is-error) for handlePendingToolCall."
+  "Convert a harness tool RESULT for handlePendingToolCall.
+RESULT is (:content TEXT :is-error BOOL), and with `:images' the
+pictures the model is to see (see `harness-provider-copilot--binary-results').
+The answer is the SDK's `ToolResultObject': `textResultForLlm' and
+`resultType' (and `error' for a failure), and `binaryResultsForLlm',
+base64 images that the CLI hands the model with the text, only when
+there are images.  Images that cannot be read are dropped, logged: the
+CLI waits for the tool's answer for good, so the text must go out
+whatever the images are."
   (let* ((content (plist-get result :content))
          (text (if (stringp content) content (format "%s" (or content ""))))
-         (failed (harness-json-true-p (plist-get result :is-error))))
-    (if failed
-        (list :textResultForLlm text :resultType "failure" :error text)
-      (list :textResultForLlm text :resultType "success"))))
+         (failed (harness-json-true-p (plist-get result :is-error)))
+         (binary (condition-case err
+                     (harness-provider-copilot--binary-results (plist-get result :images))
+                   (error
+                    (harness-log 'warn "provider-copilot: dropped the images of a tool result: %s"
+                                 (harness-error-message err))
+                    nil))))
+    (append (if failed
+                (list :textResultForLlm text :resultType "failure" :error text)
+              (list :textResultForLlm text :resultType "success"))
+            (when binary
+              (list :binaryResultsForLlm (harness-json-array binary))))))
 
 (defun harness-provider-copilot--permission-request (entry sid data)
   "Answer the permission request DATA of Copilot session SID on ENTRY.

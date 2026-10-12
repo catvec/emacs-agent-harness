@@ -100,6 +100,8 @@
 
 (defvar harness-provider-fallback-context-window)
 
+(declare-function harness-agent-strip-result-images "harness-agent" (messages))
+
 (defconst harness-compaction-kinds '(summary brief transcript fresh truncate)
   "The kinds of compaction: what stands in for the conversation from then on.
 `summary' is a summary the session's model writes from the whole
@@ -712,8 +714,11 @@ conversation; without it, `sample' is the conversation's narrative --
 every user and assistant message, each tool call and result in one
 line, never a payload.  A hosted loop without STATE is sent the context
 as one message of text, since only the newest user messages ever reach
-it."
-  (let* ((messages (harness-call 'session/messages session-id))
+it.  The images that tool results returned are left out whatever the
+context: a summary is written from the conversation's words, and a
+request carrying every picture of a conversation that outgrew its
+window could be too large for the provider to take."
+  (let* ((messages (harness-agent-strip-result-images (harness-call 'session/messages session-id)))
          (contextual (if (eq context 'sample)
                          (harness-compaction--narrative-messages messages)
                        messages)))

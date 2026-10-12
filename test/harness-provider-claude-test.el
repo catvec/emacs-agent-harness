@@ -471,6 +471,29 @@ That is the harness's shorter budget for a task's session."
                         (harness-provider-claude--environment-for
                          (funcall with-window 1000000))))))
 
+(ert-deftest harness-provider-claude-lets-image-results-through-the-cli-limit ()
+  "The CLI is started with its limit on a tool result raised past an image's size.
+Its default is 25000 tokens, and it counts an image's base64 against
+that and turns the result away with an error, so a picture over 75 KB
+would never reach the model.  The largest image the API takes, 5 MB of
+base64, is about 1.3 million tokens at four characters a token."
+  (harness-provider-claude-test--setup)
+  (let* ((request (harness-provider-claude-test--request "s-mcp-limit" "hello"))
+         (limit (lambda (env)
+                  (let ((entry (cl-find "MAX_MCP_OUTPUT_TOKENS=" env :test #'string-prefix-p)))
+                    (and entry (string-to-number (substring entry (length "MAX_MCP_OUTPUT_TOKENS=")))))))
+         (max-base64 (* 5 1024 1024)))
+    (should (>= (funcall limit (harness-provider-claude--environment-for request))
+                (/ max-base64 3)))
+    ;; Whatever the session's window and thinking are.
+    (should (funcall limit (harness-provider-claude--environment-for
+                            (plist-put (copy-sequence request) :no-thinking t))))
+    ;; The Emacs environment's own, such as the advice to set 50000, does not win:
+    ;; the first entry does, and the harness's is the first.
+    (let ((process-environment (cons "MAX_MCP_OUTPUT_TOKENS=50000" process-environment)))
+      (should (>= (funcall limit (harness-provider-claude--environment-for request))
+                  (/ max-base64 3))))))
+
 (ert-deftest harness-provider-claude-call-usage-follows-the-stream ()
   "Each streamed message's output goes out as `call-usage', in parts.
 A message says the size of its prompt as it starts, with no output yet.
@@ -554,6 +577,156 @@ harness could not send the real result, instead of none at all (see
         (should (string-match-p "could not send" (plist-get (car (plist-get (funcall reply second) :content)) :text)))
         (should (harness-json-true-p (plist-get (funcall reply second) :isError)))))))
 
+(defun harness-provider-claude-test--answer-lines (results &optional fail-first)
+  "Answer a tools/call with each of RESULTS; return what the CLI is sent.
+The tools/call is the MCP request of control request \"req-1\" with
+JSON-RPC id 7.  Each answer is the line `harness-provider-claude--send'
+would write: the control_response, encoded.  `:respond' answers once, so
+a second RESULT is the test of that.  With FAIL-FIRST the first write
+fails, as a broken pipe would, and what comes is the fallback."
+  (let* ((events nil)
+         (lines nil)
+         (fail fail-first)
+         (entry (harness-provider-claude--make-session
+                 :id "s-lines" :active t
+                 :on-event (lambda (ev) (push ev events)))))
+    (cl-letf (((symbol-function 'harness-provider-claude--send)
+               (lambda (_entry object)
+                 (when fail
+                   (setq fail nil)
+                   (signal 'wrong-type-argument (list 'json-value-p "binary")))
+                 (push (harness-json-encode object) lines))))
+      (harness-provider-claude--tools-call
+       entry "req-1" (list :id 7 :params (list :name "mcp__harness__read_file"
+                                               :arguments '(:path "a.png"))))
+      (let ((respond (plist-get (car events) :respond)))
+        (should (functionp respond))
+        (dolist (result results) (funcall respond result))))
+    (nreverse lines)))
+
+(defun harness-provider-claude-test--answer-content (line)
+  "Return the MCP result content blocks of the control_response JSON LINE."
+  (plist-get (harness-plist-get-in (harness-json-parse line)
+                                   '(:response :response :mcp_response :result))
+             :content))
+
+(ert-deftest harness-provider-claude-tools-call-without-images-is-unchanged ()
+  "A tool result with no images goes out as the one text block it always was.
+The JSON is pinned byte for byte, so a result that carries no `:images'
+-- every tool but one that shows the model a picture -- cannot change."
+  (harness-provider-claude-test--setup)
+  (let ((expected (lambda (text is-error)
+                    (format (concat "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\","
+                                    "\"request_id\":\"req-1\",\"response\":{\"mcp_response\":{\"jsonrpc\":\"2.0\","
+                                    "\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"%s\"}],"
+                                    "\"isError\":%s}}}}}")
+                            text is-error))))
+    (should (equal (list (funcall expected "some result" "false"))
+                   (harness-provider-claude-test--answer-lines
+                    (list '(:content "some result" :is-error nil)))))
+    ;; An empty list of images is no images.
+    (should (equal (list (funcall expected "some result" "false"))
+                   (harness-provider-claude-test--answer-lines
+                    (list '(:content "some result" :is-error nil :images nil)))))
+    (should (equal (list (funcall expected "it failed" "true"))
+                   (harness-provider-claude-test--answer-lines
+                    (list '(:content "it failed" :is-error t)))))))
+
+(ert-deftest harness-provider-claude-tools-call-sends-images-after-the-text ()
+  "A tool result's images reach the CLI as MCP image blocks after the text.
+The CLI puts an MCP `image' block into the tool_result it sends the
+model, so this is how the model sees what read_file read.  They go in
+order, each as `type image' with its base64 `data' and `mimeType'; the
+file's name (`:name') is for the UI and goes nowhere in the block."
+  (harness-provider-claude-test--setup)
+  (let* ((images (list (list :mime "image/png" :data "QUJD" :name "a.png")
+                       (list :mime "image/jpeg" :data "REVGRw==" :name "b.jpg")
+                       (list :mime "image/webp" :data "R0hJ" :name "c.webp")))
+         (lines (harness-provider-claude-test--answer-lines
+                 (list (list :content "Image a.png (image/png, 1 KB) attached." :is-error nil
+                             :images images)))))
+    (should (= 1 (length lines)))
+    (should (equal (concat "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\","
+                           "\"request_id\":\"req-1\",\"response\":{\"mcp_response\":{\"jsonrpc\":\"2.0\","
+                           "\"id\":7,\"result\":{\"content\":["
+                           "{\"type\":\"text\",\"text\":\"Image a.png (image/png, 1 KB) attached.\"},"
+                           "{\"type\":\"image\",\"data\":\"QUJD\",\"mimeType\":\"image/png\"},"
+                           "{\"type\":\"image\",\"data\":\"REVGRw==\",\"mimeType\":\"image/jpeg\"},"
+                           "{\"type\":\"image\",\"data\":\"R0hJ\",\"mimeType\":\"image/webp\"}],"
+                           "\"isError\":false}}}}}")
+                   (car lines)))
+    (should (equal '((:type "text" :text "Image a.png (image/png, 1 KB) attached.")
+                     (:type "image" :data "QUJD" :mimeType "image/png")
+                     (:type "image" :data "REVGRw==" :mimeType "image/jpeg")
+                     (:type "image" :data "R0hJ" :mimeType "image/webp"))
+                   (harness-provider-claude-test--answer-content (car lines))))))
+
+(ert-deftest harness-provider-claude-tools-call-answers-once-with-images ()
+  "`:respond' answers once, whether or not the first answer held images."
+  (harness-provider-claude-test--setup)
+  (let* ((image (list :mime "image/png" :data "QUJD" :name "a.png"))
+         (lines (harness-provider-claude-test--answer-lines
+                 (list (list :content "first" :is-error nil :images (list image))
+                       (list :content "second" :is-error nil :images (list image image))))))
+    (should (= 1 (length lines)))
+    (should (equal '((:type "text" :text "first")
+                     (:type "image" :data "QUJD" :mimeType "image/png"))
+                   (harness-provider-claude-test--answer-content (car lines))))))
+
+(ert-deftest harness-provider-claude-tools-call-leaves-out-images-it-cannot-send ()
+  "An image without data or a media type is left out, the rest still go.
+The API refuses an image whose media type it cannot match to its data,
+and the conversation would carry that image for good, so a half-formed
+element is dropped rather than guessed at."
+  (harness-provider-claude-test--setup)
+  (let ((lines (harness-provider-claude-test--answer-lines
+                (list (list :content "text" :is-error nil
+                            :images (list (list :mime "image/png" :name "no-data.png")
+                                          (list :mime "image/png" :data "" :name "empty.png")
+                                          (list :data "QUJD" :name "no-mime.png")
+                                          (list :mime "image/gif" :data "R0lG" :name "ok.gif")))))))
+    (should (equal '((:type "text" :text "text")
+                     (:type "image" :data "R0lG" :mimeType "image/gif"))
+                   (harness-provider-claude-test--answer-content (car lines))))
+    ;; All of them unusable is a plain text result.
+    (should (equal '((:type "text" :text "text"))
+                   (harness-provider-claude-test--answer-content
+                    (car (harness-provider-claude-test--answer-lines
+                          (list (list :content "text" :is-error nil
+                                      :images (list (list :name "nothing.png")))))))))))
+
+(ert-deftest harness-provider-claude-tools-call-text-goes-out-whatever-the-images-are ()
+  "A result whose images are junk still answers the CLI with its text.
+Junk elements are left out; junk that is not even a list of them (a
+number, a dotted list) is dropped whole, and the text is not lost with it."
+  (harness-provider-claude-test--setup)
+  (dolist (images '(("junk" (junk) (1 2 3) ((:mime "image/png" :data 42)))
+                    5 junk (:mime "image/png" . "x")))
+    (let ((lines (harness-provider-claude-test--answer-lines
+                  (list (list :content "the text" :is-error nil :images images)))))
+      (should (= 1 (length lines)))
+      (should (equal '((:type "text" :text "the text"))
+                     (harness-provider-claude-test--answer-content (car lines)))))))
+
+(ert-deftest harness-provider-claude-tools-call-explains-a-failed-image-result-in-text ()
+  "When a result with images cannot be written, the CLI gets text saying so.
+The fallback is an error result of text alone: no image goes with it, so
+whatever made the first one fail cannot fail the second."
+  (harness-provider-claude-test--setup)
+  (let ((lines (harness-provider-claude-test--answer-lines
+                (list (list :content "text" :is-error nil
+                            :images (list (list :mime "image/png" :data "QUJD" :name "a.png"))))
+                t)))
+    (should (= 1 (length lines)))
+    (let ((blocks (harness-provider-claude-test--answer-content (car lines))))
+      (should (= 1 (length blocks)))
+      (should (equal "text" (plist-get (car blocks) :type)))
+      (should (string-match-p "could not send" (plist-get (car blocks) :text))))
+    (should (harness-json-true-p
+             (plist-get (harness-plist-get-in (harness-json-parse (car lines))
+                                              '(:response :response :mcp_response :result))
+                        :isError)))))
+
 (ert-deftest harness-provider-claude-turn-with-hosted-tool-call ()
   (harness-provider-claude-test--setup)
   (let* ((argv-file (harness-provider-claude-test--argv-file))
@@ -622,6 +795,45 @@ harness could not send the real result, instead of none at all (see
       (should (equal (file-truename (plist-get (plist-get request :session) :cwd))
                      (file-name-as-directory (file-truename (plist-get dump :cwd))))))
     (harness-provider-claude-close "s1")))
+
+(ert-deftest harness-provider-claude-turn-with-a-tool-result-image ()
+  "A tool result with an image reaches the CLI over its pipe and the turn goes on.
+The fixture takes the MCP reply and echoes its content blocks as the
+tool_result it would hand the model, image included; the echo of a
+result of ours is not reported again, so the turn shows only the text
+the model wrote after it.  The image is a megabyte, a few times the size
+of a pipe's buffer, as a photo is."
+  (harness-provider-claude-test--setup)
+  (let* ((data (base64-encode-string (make-string (* 1024 1024) ?x) t))
+         (send (symbol-function 'harness-provider-claude--send))
+         (replies nil)
+         (events
+          ;; What is written to the CLI is kept as it goes.
+          (cl-letf (((symbol-function 'harness-provider-claude--send)
+                     (lambda (entry object)
+                       (when-let* ((result (harness-plist-get-in
+                                            object '(:response :response :mcp_response :result))))
+                         (push result replies))
+                       (funcall send entry object))))
+            (car (harness-provider-claude-test--run
+                  (harness-provider-claude-test--request "s-image" "please call echo with ping")
+                  20
+                  (lambda (ev)
+                    (funcall (plist-get ev :respond)
+                             (list :content "Image a.png (image/png, 1 MB) attached."
+                                   :is-error nil
+                                   :images (list (list :mime "image/png" :data data
+                                                       :name "a.png"))))))))))
+    ;; The CLI's tools/call got the text, then the image.
+    (let ((calls (cl-remove-if-not (lambda (r) (and (consp r) (plist-member r :isError))) replies)))
+      (should (= 1 (length calls)))
+      (should (equal `((:type "text" :text "Image a.png (image/png, 1 MB) attached.")
+                       (:type "image" :data ,data :mimeType "image/png"))
+                     (plist-get (car calls) :content))))
+    (should (equal "hello" (harness-provider-claude-test--text events)))
+    (should-not (memq 'tool-result (harness-provider-claude-test--types events)))
+    (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
+    (harness-provider-claude-close "s-image")))
 
 (ert-deftest harness-provider-claude-second-turn-reuses-process ()
   (harness-provider-claude-test--setup)

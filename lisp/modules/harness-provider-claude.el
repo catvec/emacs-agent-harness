@@ -17,6 +17,17 @@
 ;;   JSON-RPC calls (initialize, tools/list, tools/call) inline.  A
 ;;   tools/call becomes a `tool-call' provider event whose `:respond'
 ;;   writes the result back, which is how the hosted loop continues.
+;;   A result is its text, one MCP text block, then one MCP image
+;;   block (base64 `data' and `mimeType') for each picture in its
+;;   `:images', the ones the model is to see, such as an image
+;;   read_file read: the CLI hands the model an image in the tool
+;;   result, as its own Read tool does.  The agent sends `:images'
+;;   only for a model that reads images (see
+;;   `harness-provider-claude--image-blocks').  The CLI counts an
+;;   image's base64 against its limit on a tool result, 25000 tokens
+;;   (MAX_MCP_OUTPUT_TOKENS), and turns a bigger one away with an error,
+;;   so every process starts with that limit raised
+;;   (`harness-provider-claude--mcp-output-tokens').
 ;;   tools/list answers with the tools of the last request, kept after
 ;;   its turn: the CLI may list them between turns, and keeps the list
 ;;   it got for as long as the process lives.
@@ -554,6 +565,15 @@ resumes the CLI session in a new one."
   "Environment entry that has the CLI load no auto memory.
 Claude Code's documented switch; a CLI too old to know it ignores it.")
 
+(defconst harness-provider-claude--mcp-output-tokens 2000000
+  "Tokens of one tool result that the CLI lets through (MAX_MCP_OUTPUT_TOKENS).
+The CLI turns a result away with an error past 25000 tokens, and for a
+result that holds an image never saves it to a file as it does text:
+the image's base64 counts, at about four characters to a token, so a
+picture over 75 KB is out.  The harness's tools keep their text short
+themselves (`harness-tools-max-output-chars'), so what this lets through
+is images, up to the API's limit of 5 MB of base64, 1.3 million tokens.")
+
 (defun harness-provider-claude--environment (&optional effort)
   "Return `process-environment' for a CLI process.
 The CLAUDECODE nesting marker goes, and auto memory is off unless
@@ -606,13 +626,17 @@ A session that runs below its model's context window tells the CLI to
 auto-compact at the same point (`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', a
 percentage), so the CLI's own compaction matches the shorter budget the
 harness gave the session (a task's, say).  A request with
-`:no-thinking' also turns the CLI's extended thinking off."
+`:no-thinking' also turns the CLI's extended thinking off.  The CLI is
+always told to let a tool result as big as an image through
+\(`harness-provider-claude--mcp-output-tokens'); its default would turn
+away any picture over 75 KB."
   (let ((pct (harness-provider-claude--autocompact-pct request))
         (env (harness-provider-claude--environment
               (harness-provider-claude--effort request))))
-    (if pct
-        (cons (format "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=%d" pct) env)
-      env)))
+    (cons (format "MAX_MCP_OUTPUT_TOKENS=%d" harness-provider-claude--mcp-output-tokens)
+          (if pct
+              (cons (format "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=%d" pct) env)
+            env))))
 
 ;;;; Command line and spawning
 
@@ -891,11 +915,40 @@ every later turn without tools."
           (append (harness-provider-claude-session-pending-tools entry)
                   (list (cons id (harness-provider-claude--strip-prefix name)))))))
 
+(defun harness-provider-claude--image-blocks (images)
+  "Return the MCP `image' content blocks for IMAGES, a tool result's `:images'.
+Each of IMAGES is (:mime MIME :data BASE64 :name FILENAME), a picture
+the model is to see.  The block is (:type \"image\" :data BASE64
+:mimeType MIME), the MCP shape; the CLI puts it into the tool_result it
+sends the model as an image.  The name is for the user and goes
+nowhere.  An element with no data or no media type is left out: the
+API refuses an image whose media type does not match its data, and the
+conversation would carry that image for good.  IMAGES that is not a
+list of elements is dropped, logged: the text of the result is what
+matters most, and it must go out."
+  (condition-case err
+      (delq nil
+            (mapcar (lambda (image)
+                      (let ((data (plist-get image :data))
+                            (mime (plist-get image :mime)))
+                        (when (and (stringp data) (not (string-empty-p data))
+                                   (stringp mime) (not (string-empty-p mime)))
+                          (list :type "image" :data data :mimeType mime))))
+                    images))
+    (error
+     (harness-log 'warn "provider-claude: dropped the images of a tool result: %s"
+                  (harness-error-short-message err))
+     nil)))
+
 (defun harness-provider-claude--tools-call (entry request-id message)
   "Serve a tools/call MESSAGE under control request REQUEST-ID on ENTRY.
-The CLI always gets an answer.  When the result cannot be written --
-JSON encoding rejects text it cannot represent, such as the raw bytes
-of a binary file -- it gets an error result saying so instead (see
+The tool call's `:respond' takes the result, (:content TEXT :is-error
+BOOL), and with it `:images' when the model is to see pictures (see
+`harness-provider-claude--image-blocks'): they follow the text, as
+image blocks, in the MCP result.  The CLI always gets an answer.  When
+the result cannot be written -- JSON encoding rejects text it cannot
+represent, such as the raw bytes of a binary file -- it gets an error
+result saying so instead, text alone and with no image (see
 `harness-provider-claude--answer-or-explain'), since the model would
 otherwise wait for the tool for good.  `:respond' answers once."
   (let* ((rpc-id (plist-get message :id))
@@ -905,24 +958,26 @@ otherwise wait for the tool for good.  `:respond' answers once."
          (tool-id (harness-provider-claude--take-tool-id entry name))
          (answered nil)
          (reply
-          (lambda (text is-error)
+          (lambda (text is-error &optional images)
             (harness-provider-claude--control-response
              entry request-id
              (list :jsonrpc "2.0" :id rpc-id
-                   :result (list :content (list (list :type "text" :text text))
+                   :result (list :content (cons (list :type "text" :text text)
+                                                (harness-provider-claude--image-blocks images))
                                  :isError (if is-error t :false))))))
          (respond
           (lambda (result)
             (unless answered
               (setq answered t)
               (let ((content (plist-get result :content))
+                    (images (plist-get result :images))
                     (is-error (harness-json-true-p (plist-get result :is-error))))
                 (push tool-id (harness-provider-claude-session-own-results entry))
                 (harness-provider-claude--answer-or-explain
                  entry (format "the result of %s" name)
                  (lambda ()
                    (funcall reply (if (stringp content) content (format "%s" (or content "")))
-                            is-error))
+                            is-error images))
                  (lambda (why)
                    (funcall reply (format "The harness could not send this tool's result: %s" why)
                             t))))))))

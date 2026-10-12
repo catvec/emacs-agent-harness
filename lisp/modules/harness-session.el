@@ -2408,6 +2408,24 @@ no change is returned as it is; one that does lists its results first."
       (when asked (push (list :role 'user :content (mapcar #'missing asked)) out)))
     (nreverse out)))
 
+(defun harness-session--result-images (node)
+  "Return the image blocks of tool-result NODE, for its tool_result block.
+The images a tool returned for the model to see are kept on the node as
+`:images', (:path PATH :mime MIME) each; here each is the block
+\(:type \"image\" :mime MIME :path PATH), which names the file and holds
+none of its bytes: the agent reads it when the request goes out, and
+only for a model that reads images (`harness-agent--prepare-messages').
+A failed call has none: a provider takes only text in the result of one.
+Nil when the node has no images."
+  (unless (plist-get node :is-error)
+    (let ((images (plist-get node :images)))
+      (and (proper-list-p images)
+           (delq nil (mapcar (lambda (image)
+                               (let ((path (and (consp image) (plist-get image :path))))
+                                 (and (stringp path) (not (string-empty-p path))
+                                      (list :type "image" :mime (plist-get image :mime) :path path))))
+                             images))))))
+
 (harness-defmethod session/messages (id)
   "Return provider messages (:role :content BLOCKS) for the transcript of ID.
 Adjacent assistant-side nodes merge into one assistant message; tool
@@ -2417,6 +2435,10 @@ stands where the model got it, after its `:delivered-after' node and
 the tool results right after that, not where it was sent mid-step.
 Every tool call is answered in the message after it, by a stand-in
 result when the path has none (see `harness-session--pair-tools').
+A tool_result block is (:type \"tool_result\" :tool_use_id ID :content
+TEXT :is_error BOOL), its content always a string; the images the call
+returned follow as `:images', image blocks that name their files (see
+`harness-session--result-images'), on a block whose call returned any.
 A call the harness recorded, and its result, are left out: the model
 never made it (`harness-outside-node-p')."
   (let* ((s (harness-session--get id))
@@ -2464,9 +2486,11 @@ never made it (`harness-outside-node-p')."
                       (add 'assistant (list :type "tool_use" :id (plist-get n :call-id)
                                             :name (plist-get n :tool) :input (or (plist-get n :input) :empty))))
           ('tool-result (unless (eq cur-role 'user) (flush))
-                        (add 'user (list :type "tool_result" :tool_use_id (plist-get n :call-id)
-                                         :content (or (plist-get n :output) "")
-                                         :is_error (and (plist-get n :is-error) t))))
+                        (add 'user (append (list :type "tool_result" :tool_use_id (plist-get n :call-id)
+                                                 :content (or (plist-get n :output) "")
+                                                 :is_error (and (plist-get n :is-error) t))
+                                           (when-let* ((images (harness-session--result-images n)))
+                                             (list :images images)))))
           ('plan (unless (eq cur-role 'assistant) (flush))
                  (add 'assistant (list :type "text" :text (concat "Plan:\n" (plist-get n :content)))))
           (_ nil))

@@ -404,6 +404,190 @@ Folded header lines continue the header above them."
     (should (equal (list (list :text (format "[called tool echo with {\"value\":\"%s\"}]" value))) flat))
     (should (equal flat (harness-json-parse (harness-json-encode flat))))))
 
+;;;; Tool results with images
+
+(defmacro harness-bedrock-test-with-png (var &rest body)
+  "Run BODY with VAR bound to a temporary .png file holding \"\\211PNG\\r\\n\"."
+  (declare (indent 1))
+  `(let ((,var (make-temp-file "harness-bedrock-tool-img" nil ".png")))
+     (unwind-protect
+         (progn (with-temp-file ,var (set-buffer-multibyte nil) (insert "\211PNG\r\n"))
+                ,@body)
+       (delete-file ,var))))
+
+(defconst harness-bedrock-test--png-b64 (base64-encode-string "\211PNG\r\n" t)
+  "The base64 of the bytes `harness-bedrock-test-with-png' writes.")
+
+(defun harness-bedrock-test--image-request (img)
+  "Return a request whose tool call read_file answers with two images: data, and file IMG.
+A second call answers in text only, and the message ends with text."
+  `(:tools ((:name "read_file" :description "Read it.") (:name "echo" :description "Echo it."))
+    :messages
+    ((:role user :content "go")
+     (:role assistant :content ((:type "tool_use" :id "toolu_1" :name "read_file" :input (:path "a.png"))
+                                (:type "tool_use" :id "toolu_2" :name "echo" :input (:value "x"))))
+     (:role user :content ((:type "tool_result" :tool_use_id "toolu_1" :content "Image a.png attached."
+                            :images ((:type "image" :mime "image/png" :data "QUJD")
+                                     (:type "image" :mime "image/png" :path ,img)))
+                           (:type "tool_result" :tool_use_id "toolu_2" :content "x!")
+                           (:type "text" :text "and now?"))))))
+
+(ert-deftest harness-provider-bedrock-tool-result-images-ride-in-the-tool-result ()
+  (harness-bedrock-test-with-env ()
+    (harness-bedrock-test-with-png img
+      (let* ((messages (plist-get (harness-bedrock--messages (harness-bedrock-test--image-request img)) :messages))
+             (results (plist-get (nth 2 messages) :content)))
+        (should (equal '("user" "assistant" "user") (mapcar (lambda (m) (plist-get m :role)) messages)))
+        ;; The text first, then an image block for each image, whether it
+        ;; carries its data or is read from its path.
+        (should (equal `((:toolResult
+                          (:toolUseId "toolu_1"
+                           :content ((:text "Image a.png attached.")
+                                     (:image (:format "png" :source (:bytes "QUJD")))
+                                     (:image (:format "png" :source (:bytes ,harness-bedrock-test--png-b64))))
+                           :status "success"))
+                         ;; A result without images is what it was.
+                         (:toolResult (:toolUseId "toolu_2" :content ((:text "x!")) :status "success"))
+                         (:text "and now?"))
+                       results))
+        ;; On the wire the image sits in the toolResult's content.
+        (should (string-search
+                 (concat "\"toolResult\":{\"toolUseId\":\"toolu_1\",\"content\":[{\"text\":\"Image a.png attached.\"},"
+                         "{\"image\":{\"format\":\"png\",\"source\":{\"bytes\":\"QUJD\"}}},"
+                         "{\"image\":{\"format\":\"png\",\"source\":{\"bytes\":\"" harness-bedrock-test--png-b64 "\"}}}],"
+                         "\"status\":\"success\"}")
+                 (harness-json-encode messages)))))))
+
+(ert-deftest harness-provider-bedrock-tool-result-images-that-cannot-be-sent ()
+  ;; A format Converse lacks and a file that is gone are named, as a user's
+  ;; image is: the request must not fail on them, or every turn after it would.
+  (harness-bedrock-test-with-env ()
+    (let* ((request '(:messages
+                      ((:role assistant :content ((:type "tool_use" :id "toolu_1" :name "read_file" :input nil)))
+                       (:role user :content ((:type "tool_result" :tool_use_id "toolu_1" :content "attached"
+                                              :images ((:type "image" :mime "image/bmp" :path "/tmp/x.bmp")
+                                                       (:type "image" :mime "image/png"
+                                                        :path "/nonexistent/harness-bedrock-test/gone.png")
+                                                       (:type "image" :mime "image/gif" :data "R0lG"))))))))
+           (messages (plist-get (harness-bedrock--messages request) :messages)))
+      (should (equal '((:text "attached")
+                       (:text "[image attached: /tmp/x.bmp]")
+                       (:text "[image attached: /nonexistent/harness-bedrock-test/gone.png]")
+                       (:image (:format "gif" :source (:bytes "R0lG"))))
+                     (harness-plist-get-in (car (plist-get (nth 2 messages) :content)) '(:toolResult :content)))))))
+
+(ert-deftest harness-provider-bedrock-flattened-tool-results-keep-their-images ()
+  ;; Without tools a result is text, but an image cannot be: it follows the
+  ;; text, in the user message.  The same goes for a result no call asked for.
+  (harness-bedrock-test-with-env ()
+    (harness-bedrock-test-with-png img
+      (let* ((request (harness-bedrock-test--image-request img))
+             (flat (plist-get (harness-bedrock--messages request :tools nil) :messages)))
+        (should-not (string-search "toolResult" (harness-json-encode flat)))
+        (should (equal `((:text "[result of tool call toolu_1]\nImage a.png attached.")
+                         (:image (:format "png" :source (:bytes "QUJD")))
+                         (:image (:format "png" :source (:bytes ,harness-bedrock-test--png-b64)))
+                         (:text "[result of tool call toolu_2]\nx!")
+                         (:text "and now?"))
+                       (plist-get (nth 2 flat) :content))))
+      (let ((messages (plist-get
+                       (harness-bedrock--messages
+                        '(:messages ((:role user :content "go")
+                                     (:role assistant :content "hi")
+                                     (:role user :content ((:type "tool_result" :tool_use_id "toolu_orphan"
+                                                            :content "stray"
+                                                            :images ((:type "image" :mime "image/png" :data "QUJD"))))))))
+                       :messages)))
+        (should (equal '((:text "[result of tool call toolu_orphan]\nstray")
+                         (:image (:format "png" :source (:bytes "QUJD"))))
+                       (plist-get (nth 2 messages) :content)))))))
+
+(ert-deftest harness-provider-bedrock-tool-images-p-by-model ()
+  ;; Converse takes an image inside a tool result from Claude and Nova only.
+  (dolist (name '("anthropic.claude-sonnet-4-5-20250929-v1:0" "us.anthropic.claude-opus-4-6-v1"
+                  "global.anthropic.claude-opus-5-5" "claude-sonnet-4-5"
+                  "amazon.nova-pro-v1:0" "us.amazon.nova-lite-v1:0" "nova-premier"))
+    (ert-info (name :prefix "model: ")
+      (should (harness-bedrock--tool-images-p (list :name name)))))
+  ;; An inference profile of an application is known by the model behind it.
+  (should (harness-bedrock--tool-images-p
+           '(:name "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc"
+             :base "anthropic.claude-sonnet-4-5-20250929-v1:0")))
+  (dolist (name '("meta.llama3-2-90b-instruct-v1:0" "mistral.pixtral-large-2502-v1:0" "acme.mystery-v1"
+                  "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc"))
+    (ert-info (name :prefix "model: ")
+      (should-not (harness-bedrock--tool-images-p (list :name name))))))
+
+(ert-deftest harness-provider-bedrock-body-puts-tool-images-where-the-model-takes-them ()
+  (harness-bedrock-test-with-env ()
+    (harness-bedrock-test-with-png img
+      (let* ((endpoint '(:id x))
+             (request (harness-bedrock-test--image-request img))
+             (inside `(:toolResult
+                       (:toolUseId "toolu_1"
+                        :content ((:text "Image a.png attached.")
+                                  (:image (:format "png" :source (:bytes "QUJD")))
+                                  (:image (:format "png" :source (:bytes ,harness-bedrock-test--png-b64))))
+                        :status "success"))))
+        (cl-flet ((user-content (model)
+                    (let ((body (harness-bedrock--body endpoint (harness-bedrock--model-info endpoint model)
+                                                       request '(:no-cache t))))
+                      (plist-get (nth 2 (plist-get body :messages)) :content))))
+          ;; Claude and Nova: inside the tool result.
+          (dolist (model (list harness-bedrock-test-sonnet "us.anthropic.claude-opus-4-6-v1" "amazon.nova-pro-v1:0"))
+            (ert-info (model :prefix "model: ")
+              (should (equal `(,inside
+                               (:toolResult (:toolUseId "toolu_2" :content ((:text "x!")) :status "success"))
+                               (:text "and now?"))
+                             (user-content model)))))
+          ;; Any other model: after the results, each led by a note of its call.
+          (dolist (model '("meta.llama3-2-90b-instruct-v1:0" "mistral.pixtral-large-2502-v1:0"))
+            (ert-info (model :prefix "model: ")
+              (should (equal `((:toolResult (:toolUseId "toolu_1" :content ((:text "Image a.png attached.")) :status "success"))
+                               (:toolResult (:toolUseId "toolu_2" :content ((:text "x!")) :status "success"))
+                               (:text "[Image returned by tool call toolu_1]")
+                               (:image (:format "png" :source (:bytes "QUJD")))
+                               (:text "[Image returned by tool call toolu_1]")
+                               (:image (:format "png" :source (:bytes ,harness-bedrock-test--png-b64)))
+                               (:text "and now?"))
+                             (user-content model)))))
+          ;; With cache points the images are still inside the cached message.
+          (should (equal '(:cachePoint (:type "default"))
+                         (car (last (plist-get (nth 2 (plist-get (harness-bedrock--body
+                                                                  endpoint
+                                                                  (harness-bedrock--model-info endpoint harness-bedrock-test-sonnet)
+                                                                  request)
+                                                                 :messages))
+                                               :content))))))))))
+
+(ert-deftest harness-provider-bedrock-sends-tool-result-images ()
+  ;; The whole way to the wire: the signed bytes, parsed back, hold the images.
+  (harness-bedrock-test-with-keys
+    (harness-bedrock-test-with-png img
+      (dolist (model (list harness-bedrock-test-sonnet "meta.llama3-2-90b-instruct-v1:0"))
+        (harness-bedrock-test-with-fake
+            `(("converse-stream" . (:chunks ,(harness-bedrock-test--chunks
+                                              (harness-bedrock-mock-text-stream "A cat." 5 2) 50))))
+          (ert-info (model :prefix "model: ")
+            (let* ((request (append (list :model (concat "testrock:" model))
+                                    (harness-bedrock-test--image-request img)))
+                   (events (car (harness-bedrock-test--complete harness-bedrock-test-endpoint request)))
+                   (sent (plist-get (car harness-bedrock-test--requests) :json))
+                   (user (plist-get (nth 2 (plist-get sent :messages)) :content))
+                   (image (lambda (bytes) `(:image (:format "png" :source (:bytes ,bytes))))))
+              (should (equal "A cat." (harness-bedrock-test--text events)))
+              (if (equal model harness-bedrock-test-sonnet)
+                  (should (equal `((:text "Image a.png attached.")
+                                   ,(funcall image "QUJD")
+                                   ,(funcall image harness-bedrock-test--png-b64))
+                                 (harness-plist-get-in (nth 0 user) '(:toolResult :content))))
+                (should (equal '((:text "Image a.png attached."))
+                               (harness-plist-get-in (nth 0 user) '(:toolResult :content))))
+                (should (equal `((:text "[Image returned by tool call toolu_1]") ,(funcall image "QUJD")
+                                 (:text "[Image returned by tool call toolu_1]")
+                                 ,(funcall image harness-bedrock-test--png-b64))
+                               (cl-subseq user 2 6)))))))))))
+
 (ert-deftest harness-provider-bedrock-request-body ()
   (harness-bedrock-test-with-env ()
     (let* ((endpoint '(:id testrock :region "us-east-1" :request-fields (:anthropic_beta ("beta-1"))))

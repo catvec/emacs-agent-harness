@@ -28,6 +28,11 @@
 ;; cache points, streamed tool use or tools is asked again without
 ;; them, and that is remembered.  Throttling is retried with backoff
 ;; while nothing has been streamed yet.  Nothing here blocks.
+;;
+;; The images a tool returned (the `:images' of a tool_result block, each
+;; with `:data' or a `:path') ride inside its toolResult for Claude and
+;; Nova, the models Converse takes an image there from; any other model
+;; gets them after the tool results (`harness-bedrock--lift-tool-images').
 
 ;;; Code:
 
@@ -1685,6 +1690,15 @@ listing lacks."
         (list :image (list :format format :source (list :bytes data)))
       (list :text (format "[image attached: %s]" (or path mime "unsupported format"))))))
 
+(defun harness-bedrock--result-content (block)
+  "Return the Converse content blocks of tool_result BLOCK.
+Its text first, then one block for each of its `:images' (blocks with
+a `:mime' and either `:data', base64, or a `:path' to read), as
+`harness-bedrock--image' maps them."
+  (cons (list :text (harness-bedrock--result-text (plist-get block :content)))
+        (delq nil (mapcar (lambda (image) (and (consp image) (harness-bedrock--image image)))
+                          (plist-get block :images)))))
+
 (defun harness-bedrock--user-content (block)
   "Map a user BLOCK to a Converse content block, or nil to drop it."
   (pcase (harness-bedrock--block-type block)
@@ -1696,9 +1710,56 @@ listing lacks."
                                 (or (plist-get block :path) (plist-get block :name) "?"))))
     ("tool_result"
      (list :toolResult (list :toolUseId (harness-bedrock--tool-id (plist-get block :tool_use_id))
-                             :content (list (list :text (harness-bedrock--result-text (plist-get block :content))))
+                             :content (harness-bedrock--result-content block)
                              :status (if (harness-json-true-p (plist-get block :is_error)) "error" "success"))))
     (_ nil)))
+
+(defconst harness-bedrock--tool-image-models
+  "claude\\|amazon\\.nova\\|nova-\\(?:premier\\|pro\\|lite\\|micro\\)"
+  "Regexp for the models that take an image inside a tool result.
+Converse documents that for Anthropic Claude and Amazon Nova only.  Any
+other model that reads images gets those of a tool result after the
+results instead (see `harness-bedrock--lift-tool-images'); an image
+where the model does not take one is a validation error, and the image
+stays in the history, so every request after it would fail too.")
+
+(defun harness-bedrock--tool-images-p (info)
+  "Non-nil when model INFO takes images inside a tool result.
+That is decided by the model's id, or by the foundation model's behind
+an inference profile (see `harness-bedrock--tool-image-models')."
+  (cl-some (lambda (id) (and (stringp id) (string-match-p harness-bedrock--tool-image-models id)))
+           (list (plist-get info :name) (plist-get info :base))))
+
+(defun harness-bedrock--lift-tool-images (messages)
+  "Return Converse MESSAGES with the images of their tool results moved out.
+For a model that takes no image inside a tool result: each image follows
+the message's tool results as a block of the message, after a note
+naming the call it came from.  Tool results keep their text, and stay
+first in the message, as Claude requires."
+  (mapcar (lambda (m)
+            (let ((results nil) (lifted nil) (others nil))
+              (dolist (b (plist-get m :content))
+                (if-let* ((result (plist-get b :toolResult)))
+                    (let ((parts (plist-get result :content)))
+                      (dolist (part parts)
+                        (when (plist-get part :image)
+                          (push (list :text (format "[Image returned by tool call %s]"
+                                                    (plist-get result :toolUseId)))
+                                lifted)
+                          (push part lifted)))
+                      (push (if (cl-some (lambda (part) (plist-get part :image)) parts)
+                                (list :toolResult
+                                      (plist-put (copy-sequence result) :content
+                                                 (cl-remove-if (lambda (part) (plist-get part :image))
+                                                               parts)))
+                              b)
+                            results))
+                  (push b others)))
+              (if lifted
+                  (list :role (plist-get m :role)
+                        :content (append (nreverse results) (nreverse lifted) (nreverse others)))
+                m)))
+          messages))
 
 (defun harness-bedrock--tool-input (input)
   "Return tool INPUT as a JSON object for Converse."
@@ -1747,21 +1808,27 @@ tool calls."
           (cl-remove-if (lambda (b) (plist-get b :toolResult)) content)))
 
 (defun harness-bedrock--flatten-tools (content)
-  "Return CONTENT with tool calls and results turned into text."
-  (mapcar (lambda (b)
-            (cond
-             ((plist-get b :toolUse)
-              (let ((use (plist-get b :toolUse)))
-                (list :text (format "[called tool %s with %s]" (plist-get use :name)
-                                    (harness-json-encode-text (plist-get use :input))))))
-             ((plist-get b :toolResult)
-              (let ((result (plist-get b :toolResult)))
-                (list :text (format "[result of tool call %s%s]\n%s" (plist-get result :toolUseId)
-                                    (if (equal (plist-get result :status) "error") ", an error" "")
-                                    (mapconcat (lambda (c) (or (plist-get c :text) ""))
-                                               (plist-get result :content) "\n")))))
-             (t b)))
-          content))
+  "Return CONTENT with tool calls and results turned into text.
+The images of a result cannot become text: they follow its text, as
+blocks of the message."
+  (apply #'append
+         (mapcar (lambda (b)
+                   (cond
+                    ((plist-get b :toolUse)
+                     (let ((use (plist-get b :toolUse)))
+                       (list (list :text (format "[called tool %s with %s]" (plist-get use :name)
+                                                 (harness-json-encode-text (plist-get use :input)))))))
+                    ((plist-get b :toolResult)
+                     (let* ((result (plist-get b :toolResult))
+                            (parts (plist-get result :content)))
+                       (cons (list :text (format "[result of tool call %s%s]\n%s" (plist-get result :toolUseId)
+                                                 (if (equal (plist-get result :status) "error") ", an error" "")
+                                                 (mapconcat (lambda (c) (or (plist-get c :text) ""))
+                                                            (cl-remove-if (lambda (c) (plist-get c :image)) parts)
+                                                            "\n")))
+                             (cl-remove-if-not (lambda (c) (plist-get c :image)) parts))))
+                    (t (list b))))
+                 content)))
 
 (defun harness-bedrock--pair-tools (messages)
   "Return MESSAGES with every tool call answered and every result asked for.
@@ -1783,12 +1850,13 @@ call becomes text.  Converse rejects either."
                                                       :content '((:text "No result was recorded for this call."))
                                                       :status "error")))
                             (cl-set-difference asked answered :test #'equal))
-                    (mapcar (lambda (b)
-                              (let ((id (harness-plist-get-in b '(:toolResult :toolUseId))))
-                                (if (and id (not (member id asked)))
-                                    (car (harness-bedrock--flatten-tools (list b)))
-                                  b)))
-                            content))))))
+                    (apply #'append
+                           (mapcar (lambda (b)
+                                     (let ((id (harness-plist-get-in b '(:toolResult :toolUseId))))
+                                       (if (and id (not (member id asked)))
+                                           (harness-bedrock--flatten-tools (list b))
+                                         (list b))))
+                                   content)))))))
         (let ((m (list :role (plist-get m :role) :content content)))
           (push m out)
           (setq prev m))))
@@ -1800,7 +1868,10 @@ Roles alternate starting with the user, tool results ride in user
 messages and blank text is dropped.  With REASONING, an assistant
 message that made tool calls goes back as the model produced it,
 reasoning included, when that response is remembered; without it,
-reasoning is left out.  Without TOOLS, calls and results become text."
+reasoning is left out.  Without TOOLS, calls and results become text,
+the images of a result following its text.  The images of a tool
+result are inside its toolResult; see `harness-bedrock--lift-tool-images'
+for a model that takes none there."
   (let (merged system)
     (dolist (msg (plist-get request :messages))
       (let* ((role (harness-bedrock--string (plist-get msg :role)))
@@ -1946,7 +2017,9 @@ the tools."
          (fields (harness-plist-merge (plist-get endpoint :request-fields)
                                       (plist-get info :request-fields)
                                       (car thinking)))
-         (body (list :messages (plist-get converted :messages))))
+         (body (list :messages (if (harness-bedrock--tool-images-p info)
+                                   (plist-get converted :messages)
+                                 (harness-bedrock--lift-tool-images (plist-get converted :messages))))))
     (when system
       (setq body (plist-put body :system (list (list :text (string-join system "\n\n"))))))
     (when tools

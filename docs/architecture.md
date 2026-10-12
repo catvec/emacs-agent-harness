@@ -510,8 +510,9 @@ catalogue changes, the sessions whose window moved get `session/changed`.
  :content "text"  :blocks (BLOCK…)          ; blocks only when non-text content exists
  ;; tool-call (:title from `harness-tool-title': the tool's label, then what the call is about):
  :tool "read_file" :call-id "toolu_…" :input PLIST :title "Read file: src/x.el"
- ;; tool-result:
+ ;; tool-result (:images only when the tool returned pictures for the model to see):
  :call-id "toolu_…" :output "text" :is-error BOOL :attachments (ATTACHMENT…)
+ :images ((:path "/abs/shot.png" :mime "image/png")…)
  :usage PLIST        ; assistant nodes: this response's usage
  :checkpoint PLIST   ; where a hosted provider's conversation stood after this node
  :meta PLIST)        ; anything else (model, duration, cost …)
@@ -610,9 +611,17 @@ parent's whole conversation; such a session starts a new one.
 (:type "thinking" :text "…" :signature "…")
 (:type "tool_use" :id "…" :name "…" :input PLIST)
 (:type "tool_result" :tool_use_id "…" :content "…" :is_error BOOL)
+(:type "tool_result" … :images ((:type "image" :mime "image/png" :path "/abs")…))  ; or :data BASE64
 ```
 
 ATTACHMENT = `(:path "/abs" :size N :mime "…" :name "display")`.
+
+A tool_result's `:content` is always a string, so everything that reads
+the words of a conversation (a summary, a title, the judge) is
+unaffected by its `:images`.  `session/messages` gives the block the
+images with their `:path`; the agent makes them `:data` when the request
+goes out, for a model that reads images, and drops them with a note in
+the text for one that does not (see agent).
 
 ### Usage record
 
@@ -1148,7 +1157,11 @@ redact).
   message before it becomes text.  That covers a call cancelled
   mid-turn, a result that came after its turn ended, and a head moved
   back between a call and its result.  The transcript itself is not
-  changed, and a message that needs no change comes out as it is.
+  changed, and a message that needs no change comes out as it is.  The
+  images a tool returned for the model (the result node's `:images`)
+  follow in the tool_result block's `:images`, image blocks that name
+  their files and hold no bytes, on the block of a call that returned
+  any and did not fail; the block's `:content` stays a string.
 - `session/transcript-text ID` → searchable plain text.
 - `session/write-transcript ID &optional OPTS` → `(:file :lines)`:
   writes `session/transcript-text` to a new Markdown file named after
@@ -1667,6 +1680,23 @@ process record keeps the tool set of its last request after the turn
 (`tools` slot) and `tools/list` answers from it, never with an empty
 list for want of a running turn.
 
+A tool result's pictures (`:images` of the `:respond` argument, see
+agent) go to the CLI inside the MCP result: its `content` is the text as
+one `{type:"text"}` block, then a `{type:"image", data, mimeType}` block
+for each picture (`harness-provider-claude--image-blocks`), which the CLI
+documents as an image of the tool result for the model.  A picture with
+no data or no media type is left out, so the text always goes.  A result
+with none is the single text block it always was.  The CLI turns a tool
+result away past 25,000 tokens (`MAX_MCP_OUTPUT_TOKENS`) and counts an
+image's base64 in them, about four characters a token, which would
+refuse any picture over 75 KB, so every process the provider starts has
+the limit raised to 2 million
+(`harness-provider-claude--mcp-output-tokens`); the harness's tools keep
+their text short themselves.  A result that cannot be encoded as JSON
+is answered with an error that says so, text alone and without its
+pictures.  None of this was run against the real CLI, which the tests
+stand a fake in for (test/fixtures).
+
 Every `assistant` message and tool-result echo of the CLI carries the
 uuid of its entry in the CLI session's chain; messages of a sub-agent's
 chain (`parent_tool_use_id`) do not count.  The provider reports them
@@ -1759,6 +1789,23 @@ nothing has been streamed yet, with a hint for each wait
 `:binary t` for such framings: the response then reaches `:on-chunk` as
 unibyte strings.
 
+The pictures a tool returned (the `:images` of a `tool_result` block, each
+with `:data` or only a `:path`, read when the request is built) ride in
+the block's `toolResult`, whose `content` is `[{text}, {image: {format,
+source: {bytes}}}…]`, for the models Converse documents an image there
+for: Claude and Nova (`harness-bedrock--tool-images-p`, by the model's
+id or its foundation model's).  For any other model that reads images
+they follow the tool results of their message instead, each after a text
+block `[Image returned by tool call ID]`
+(`harness-bedrock--lift-tool-images`), because Converse rejects an image
+in a tool result there and the history would keep the request failing.
+A request without tools flattens a result to text and the pictures
+follow its text.  Converse takes at most 20 images in a message, each
+up to 3.75 MB and 8,000 pixels on a side; the provider does not enforce
+that: read_file keeps the image it shows to its own limits
+(`harness-tools-fs-image-max-bytes` and `-max-side`) and the agent sends
+the newest `harness-agent-history-images` only.
+
 An endpoint can point at a gateway in front of Bedrock instead.  Its
 `:endpoint-url` holds the prefix that Bedrock's paths go under, and a
 query that every request keeps (`harness-bedrock--url`).  Listing
@@ -1793,6 +1840,21 @@ and `top_provider.context_length` of OpenRouter and others,
 Studio, `max_model_len` of vLLM, `max_input_tokens` of LiteLLM), else
 the endpoint's `:default-context`, else the catalogue's estimate:
 plain OpenAI lists ids alone.
+
+A `{"role":"tool"}` message holds text only, so the pictures a tool
+returned (the `:images` of a `tool_result` block, each with `:data` or
+only a `:path`, read when the request is built) go in the user message
+that follows the tool messages of their harness message
+(`harness-openai--tool-image-parts`): for each, a text part `[Image
+returned by tool call ID]` and the picture as an `image_url` data URL,
+ahead of the message's other user parts.  Nothing goes between the
+assistant message that made the calls and their tool messages, which
+every API requires.  A file that cannot be read any more becomes a text
+part `[Image returned by tool call ID is not available]`, since the
+path stays in the transcript and a request that failed on it would fail
+on every later turn.  The agent gives this provider pictures only for a
+model that lists image input; a DeepSeek model lists it only when its
+catalogue entry says `:vision`.
 
 The DeepSeek provider (`provider-deepseek`, `deepseek:` models) is the
 OpenAI-compatible one with `:flavor deepseek`: the streaming comes from
@@ -1861,7 +1923,11 @@ version 3 or newer.  Per harness session one CLI process:
   CLI uses for web_search was not checked against the real CLI.
 - `session.send` runs a turn.  `assistant.message_delta` and
   `assistant.reasoning_delta` stream, `external_tool.requested` becomes a
-  `tool-call` whose `:respond` answers `session.tools.handlePendingToolCall`,
+  `tool-call` whose `:respond` answers `session.tools.handlePendingToolCall`
+  (the result's text is `textResultForLlm`; its pictures, the `:images`
+  of the argument, are `binaryResultsForLlm`, `[{data, mimeType, type:
+  "image", description}…]` with the file's name as `description`, only
+  when there are any, `harness-provider-copilot--binary-results`),
   `assistant.usage` reports each model call, `session.idle` ends the
   turn, and `session.abort` cancels it (the process is killed when it
   stays busy).  A request the CLI leaves unanswered (opening a session,
@@ -1949,7 +2015,13 @@ activity line shows (its last line, `tools/progress'); `:note` accepts
 a line or a few for people to read, which the chat shows under the
 call's own block (`tools/note', see "The note under a running call"
 below).  RESULT = `(:content "…" :is-error BOOL :attachments (…)
-:meta PLIST)`.  A handler can hand back a raw byte in `:content` --
+:images ((:path "/abs" :mime "image/png")…) :meta PLIST)`: `:attachments`
+is what the chat shows the user, `:images` the pictures the model is to
+see (read_file on an image gives both; the agent sends them on, see
+agent), a list of files of type `image/png`, `image/jpeg`, `image/gif`
+or `image/webp`; it survives the size guard and the filters (secrets
+masking among them), which rebuild a result.  A handler can hand back a
+raw byte in `:content` --
 `cat` of a binary file, say, or a stuck transcript `session_read` or
 `emacs_buffer` read back -- which `harness-tools--normalise-result`
 repairs with `harness-valid-text` before anything truncates, saves,
@@ -2846,6 +2918,33 @@ non-interactive session it stays a denial.
   turn that outgrows the window reaches the provider's own error;
   a hard budget spent mid-turn ends the turn at the next step boundary
   (see "usage" below), and one already spent refuses a new turn.
+- Images a tool returns for the model (`:images` of its result, see
+  tools; read_file on an image gives them) are the model's to see only
+  when it reads images (its `:input-modalities` list "image",
+  `harness-agent--vision-p`); a model that does not is told in the
+  result's text that only the user sees the image
+  (`harness-agent--no-vision-note`).  The result node keeps the files'
+  paths and types, never their bytes, and only a path of an
+  `image/png`, `image/jpeg`, `image/gif` or `image/webp` file, from a
+  call that did not fail.  A hosted loop is handed them with the result:
+  `:respond` gets `(:content TEXT :is-error BOOL :images IMAGES)`, each
+  of IMAGES `(:mime MIME :data BASE64 :name FILENAME)`, read when the
+  call ends and only then; a file that cannot be read is left out and
+  the text says it is gone.  The note, like that one, comes before the
+  steering the result carries.  A native loop is sent them with its next
+  request: `harness-agent--prepare-messages` makes each tool_result
+  block's `:images` image blocks with `:data`, or drops them with the
+  note, and nothing is read for the call itself.  A request carries
+  only the newest `harness-agent-history-images` (16) images of tool
+  results: a native provider is sent the whole conversation again at
+  every step, so past that the oldest go in chunks of half as many,
+  counted from the conversation alone, so the request is the same from
+  step to step between two chunks and the provider's prompt cache
+  lasts; the result of a call whose image went says it is no longer
+  attached, and the model can read the file again.  A hosted loop is
+  sent none from the transcript, having been handed each once; neither
+  are a summary or a title (compaction and naming), which are written
+  from words (`harness-agent-strip-result-images`).
 - Each step reads the session's model afresh: a model switch reaches a
   running turn at its next step, never mid-step.  The step sends only
   the provider state its model can continue and drops one of another
@@ -6465,6 +6564,38 @@ under a play button, which plays it.  A video is something the model
 cannot see: it is told what the file is and to inspect it with
 `ffmpeg`.  Text behind a video's extension (TypeScript's `.ts`) is
 still read as text.
+
+An image is also the model's to see, in `:images`, a list of `(:path
+PATH :mime MIME)` -- MIME one of `image/png`, `image/jpeg`, `image/gif`
+and `image/webp`, the types every provider takes, told by the file's
+first bytes rather than its name (a provider refuses a type that does
+not match) -- while `:attachments` stays the user's view, the file as
+it is.  The agent turns `:images` into what each provider's wire takes
+for a model that reads images, and tells one that does not so (see
+agent).  The handler decides (`harness-tools-fs--read-image`): an image
+within `harness-tools-fs-image-max-bytes` (3.75 MiB, Bedrock's limit;
+its base64 is Anthropic's 5 MiB) and `harness-tools-fs-image-max-side`
+(2000 pixels, what Anthropic accepts in a request of more than 20
+images) is its own `:images`.  The size is read from the header
+\(`harness-image-pixel-size`: PNG, GIF, JPEG, WebP, BMP), without
+decoding.  Over a limit, or of another type, a copy is made with
+`harness-tools-fs-ffmpeg` (nil never runs it): the first frame fitted
+into the side and never enlarged, a JPEG (quality 3) for a JPEG and
+else a PNG, so that a BMP or a TIFF is converted too.  It runs
+asynchronously under a timeout, so the handler then returns a promise.
+A copy still over the byte limit is made again at 70 % and 50 % of the
+side.  Copies are named after the hash of the file's true name, size
+and time and the side, and kept in `model-images/` of
+`harness-state-directory`, so a second read makes none, nor needs
+ffmpeg for the copy.  Where no copy can be had (a file on another host,
+ffmpeg off, missing or failing) the file itself stands when it is within
+the byte limit and 8000 pixels (`harness-tools-fs--image-hard-max-side`);
+otherwise there is no `:images`, and the text says the user sees the
+image and the model does not, why, and how to make a smaller copy with
+bash.  The text never claims the model saw it: `Image a.png (image/png,
+412 KiB, 1280x720 px).` when the file is shown, `..., downscaled to
+2000x1125 px to show you.` or `..., converted to PNG to show you.` for a
+copy.
 
 `web_search` asks the search provider `harness-websearch-provider`
 (Brave, whose key comes from `harness-brave-api-key`, `BRAVE_API_KEY` or

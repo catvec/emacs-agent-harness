@@ -354,6 +354,85 @@ ON-EVENT, when given, is called with each event as well."
   (should (equal '(:textResultForLlm "no" :resultType "failure" :error "no")
                  (harness-provider-copilot-tool-result '(:content "no" :is-error t)))))
 
+(ert-deftest harness-provider-copilot-tool-result-without-images-is-unchanged ()
+  "A tool result with no images has no `binaryResultsForLlm', not even an empty one.
+The JSON is pinned, so a result that carries no `:images' -- every tool
+but one that shows the model a picture -- cannot change."
+  (harness-provider-copilot-test--setup)
+  (dolist (result '((:content "ok" :is-error nil)
+                    (:content "ok" :is-error nil :images nil)
+                    ;; Nothing in them can be sent as an image.
+                    (:content "ok" :is-error nil :images ((:name "nothing.png")))))
+    (should (equal '(:textResultForLlm "ok" :resultType "success")
+                   (harness-provider-copilot-tool-result result)))
+    (should (equal "{\"textResultForLlm\":\"ok\",\"resultType\":\"success\"}"
+                   (harness-json-encode (harness-provider-copilot-tool-result result)))))
+  (should (equal "{\"textResultForLlm\":\"no\",\"resultType\":\"failure\",\"error\":\"no\"}"
+                 (harness-json-encode (harness-provider-copilot-tool-result
+                                       '(:content "no" :is-error t))))))
+
+(ert-deftest harness-provider-copilot-tool-result-carries-images ()
+  "A tool result's images go to the CLI as `binaryResultsForLlm', in order.
+That is the SDK's `ToolResultObject': each entry a `ToolBinaryResult' of
+base64 `data', `mimeType', `type' \"image\" and the file's name as its
+`description', which is left out when there is none; the text stays
+`textResultForLlm', and a failure keeps its `error'."
+  (harness-provider-copilot-test--setup)
+  (let ((result (harness-provider-copilot-tool-result
+                 (list :content "Image a.png (image/png, 1 KB) attached." :is-error nil
+                       :images (list (list :mime "image/png" :data "QUJD" :name "a.png")
+                                     (list :mime "image/jpeg" :data "REVGRw==" :name "b.jpg")
+                                     (list :mime "image/webp" :data "R0hJ"))))))
+    (should (equal "Image a.png (image/png, 1 KB) attached." (plist-get result :textResultForLlm)))
+    (should (equal "success" (plist-get result :resultType)))
+    (should-not (plist-member result :error))
+    (should (equal [(:data "QUJD" :mimeType "image/png" :type "image" :description "a.png")
+                    (:data "REVGRw==" :mimeType "image/jpeg" :type "image" :description "b.jpg")
+                    (:data "R0hJ" :mimeType "image/webp" :type "image")]
+                   (plist-get result :binaryResultsForLlm)))
+    ;; On the wire it is a JSON array next to the text and the result type.
+    (should (equal (concat "{\"textResultForLlm\":\"Image a.png (image/png, 1 KB) attached.\","
+                           "\"resultType\":\"success\",\"binaryResultsForLlm\":["
+                           "{\"data\":\"QUJD\",\"mimeType\":\"image/png\",\"type\":\"image\","
+                           "\"description\":\"a.png\"},"
+                           "{\"data\":\"REVGRw==\",\"mimeType\":\"image/jpeg\",\"type\":\"image\","
+                           "\"description\":\"b.jpg\"},"
+                           "{\"data\":\"R0hJ\",\"mimeType\":\"image/webp\",\"type\":\"image\"}]}")
+                   (harness-json-encode result))))
+  ;; A failure keeps its error, and its images if it has any.
+  (let ((result (harness-provider-copilot-tool-result
+                 '(:content "no" :is-error t :images ((:mime "image/gif" :data "R0lG" :name "x.gif"))))))
+    (should (equal "failure" (plist-get result :resultType)))
+    (should (equal "no" (plist-get result :error)))
+    (should (equal [(:data "R0lG" :mimeType "image/gif" :type "image" :description "x.gif")]
+                   (plist-get result :binaryResultsForLlm)))))
+
+(ert-deftest harness-provider-copilot-tool-result-leaves-out-images-it-cannot-send ()
+  "An image without data or a media type is left out, and the rest go.
+The CLI hands the model only an image it has data and a media type
+for, and the conversation would carry a half-formed one for good."
+  (harness-provider-copilot-test--setup)
+  (should (equal [(:data "R0lG" :mimeType "image/gif" :type "image" :description "ok.gif")]
+                 (plist-get (harness-provider-copilot-tool-result
+                             '(:content "text" :is-error nil
+                               :images ((:mime "image/png" :name "no-data.png")
+                                        (:mime "image/png" :data "" :name "empty.png")
+                                        (:data "QUJD" :name "no-mime.png")
+                                        (:mime "image/gif" :data "R0lG" :name "ok.gif"))))
+                            :binaryResultsForLlm))))
+
+(ert-deftest harness-provider-copilot-tool-result-text-goes-out-whatever-the-images-are ()
+  "A result whose images are junk still answers the CLI with its text.
+The CLI waits for a tool's answer for good, so a conversion that
+signalled would hang the turn.  Junk elements are left out; junk that
+is not even a list of them (a number, a dotted list) is dropped whole."
+  (harness-provider-copilot-test--setup)
+  (dolist (images '(("junk" (junk) (1 2 3) ((:mime "image/png" :data 42)))
+                    5 junk (:mime "image/png" . "x")))
+    (should (equal '(:textResultForLlm "ok" :resultType "success")
+                   (harness-provider-copilot-tool-result
+                    (list :content "ok" :is-error nil :images images))))))
+
 (ert-deftest harness-provider-copilot-model-conversion ()
   "Entries of a models.list answer become catalogue entries."
   (harness-provider-copilot-test--setup)
@@ -560,6 +639,48 @@ ON-EVENT, when given, is called with each event as well."
         (should (equal (file-truename (plist-get (plist-get request :session) :cwd))
                        (file-name-as-directory (file-truename (plist-get start :cwd)))))))
     (harness-provider-copilot-close "s1")))
+
+(ert-deftest harness-provider-copilot-turn-sends-tool-result-images ()
+  "The CLI is handed a tool result's images as `binaryResultsForLlm'.
+The fixture logs what `session.tools.handlePendingToolCall' carried.  The
+image is a megabyte, a few times the size of a pipe's buffer, as a photo
+is; the turn goes on to its end.  A result with no images carries no
+`binaryResultsForLlm'."
+  (harness-provider-copilot-test--setup)
+  (let ((log (harness-provider-copilot-test--log-file))
+        (data (base64-encode-string (make-string (* 1024 1024) ?x) t)))
+    (harness-provider-copilot-test--with-env (list (concat "HARNESS_FAKE_COPILOT_LOG=" log))
+      (let* ((with-images (car (harness-provider-copilot-test--run
+                                (harness-provider-copilot-test--request "s-image" "please call echo with ping")
+                                20
+                                (lambda (ev)
+                                  (funcall (plist-get ev :respond)
+                                           (list :content "Image a.png (image/png, 1 MB) attached."
+                                                 :is-error nil
+                                                 :images (list (list :mime "image/png" :data data
+                                                                     :name "a.png"))))))))
+             (without (car (harness-provider-copilot-test--run
+                            (harness-provider-copilot-test--request "s-plain" "please call echo with ping"))))
+             (results (harness-provider-copilot-test--requests log "session.tools.handlePendingToolCall")))
+        (should (eq 'end-turn (harness-provider-copilot-test--done with-images)))
+        (should (equal "hello" (harness-provider-copilot-test--text with-images)))
+        (should (eq 'end-turn (harness-provider-copilot-test--done without)))
+        (should (= 2 (length results)))
+        (let* ((result (plist-get (car results) :result))
+               (images (plist-get result :binaryResultsForLlm))
+               (image (car images)))
+          (should (equal "Image a.png (image/png, 1 MB) attached." (plist-get result :textResultForLlm)))
+          (should (equal "success" (plist-get result :resultType)))
+          (should (= 1 (length images)))
+          (should (equal "image" (plist-get image :type)))
+          (should (equal "image/png" (plist-get image :mimeType)))
+          (should (equal "a.png" (plist-get image :description)))
+          (should (equal data (plist-get image :data))))
+        (let ((result (plist-get (cadr results) :result)))
+          (should (equal "echo: ping" (plist-get result :textResultForLlm)))
+          (should-not (plist-member result :binaryResultsForLlm)))))
+    (harness-provider-copilot-close "s-image")
+    (harness-provider-copilot-close "s-plain")))
 
 (ert-deftest harness-provider-copilot-second-turn-reuses-process-and-session ()
   (harness-provider-copilot-test--setup)

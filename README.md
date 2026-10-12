@@ -802,6 +802,26 @@ installed) or, failing those, the desktop's own player; the poster then
 shows Stop. A video `read_file` reads is shown to you and told to the
 model, which cannot see it and inspects it with `ffmpeg` instead.
 
+A model that reads images sees an image `read_file` reads too, not only
+you. It gets the file itself when it is a PNG, JPEG, GIF or WebP of at
+most `harness-tools-fs-image-max-bytes` (3.75 MiB) and
+`harness-tools-fs-image-max-side` (2000) pixels on a side. A larger
+image, or one of a type models do not read (BMP, TIFF ...), is made fit
+with `ffmpeg` (`harness-tools-fs-ffmpeg`; nil never runs it): fitted
+into that many pixels, its first frame only, a JPEG kept a JPEG and the
+rest PNG. The copies are kept under `model-images/` in the state
+directory, so reading the image again makes none. Where `ffmpeg` cannot
+help, the model gets the file itself if it is within the byte limit and
+8000 pixels on a side, the most providers take. Otherwise it is told
+that you see the image and it does not, and how to make a smaller copy.
+A model that reads no images is told that you see it and it does not.
+A provider whose loop the harness runs is sent the whole conversation
+again at every step, those images with it, so it keeps only the newest
+`harness-agent-history-images` (16): past that the oldest go in chunks
+of half as many, so the request stays the same between two chunks and
+the prompt cache with it. The result of a call whose image went says so,
+and the model can read the file again.
+
 A digit answers a question with that option; any other answer goes in
 the compose box. When the options are easier to compare by sight, such
 as layouts or architectures, the agent can give each one a diagram,

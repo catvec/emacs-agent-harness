@@ -55,6 +55,8 @@
 (require 'harness-core)
 (require 'harness-util)
 
+(declare-function harness-agent-strip-result-images "harness-agent" (messages))
+
 (defcustom harness-naming-auto t
   "When non-nil, name a nameless session as soon as its first message is sent."
   :type 'boolean :group 'harness)
@@ -194,8 +196,10 @@ last, in a block of its own."
         (list :type "text" :text harness-naming--opening-request-text)))
 
 (defun harness-naming--messages (session-id)
-  "Return the naming messages for SESSION-ID: the transcript plus the question."
-  (let* ((messages (harness-call 'session/messages session-id))
+  "Return the naming messages for SESSION-ID: the transcript plus the question.
+A title is written from the words of the conversation, so the images its
+tool results returned are left out."
+  (let* ((messages (harness-agent-strip-result-images (harness-call 'session/messages session-id)))
          (ask (list :type "text" :text harness-naming--request-text))
          (last (car (last messages))))
     (if (and last (eq (plist-get last :role) 'user))

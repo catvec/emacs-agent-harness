@@ -2716,6 +2716,64 @@ back when the session is loaded again."
       (should (equal (list u hint)
                      (mapcar (lambda (n) (plist-get n :id)) (harness-call 'session/nodes id)))))))
 
+(ert-deftest harness-session-messages-carry-the-images-a-result-returned ()
+  "A tool result's images ride on its tool_result block, as paths.
+The block's content stays a string, so everything that reads the text of
+a conversation (a summary, a title, the judge) is unaffected.  Results
+with no image keep the shape they had, a failed call has none, a stand-in
+for a missing result has none, and the images outlive a restart."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (images '((:path "/a/shot.png" :mime "image/png") (:path "/a/photo.jpg" :mime "image/jpeg"))))
+      (harness-call 'session/append id '(:kind user :content "look"))
+      (dolist (c '("c1" "c2" "c3" "c4"))
+        (harness-call 'session/append id (list :kind 'tool-call :tool "read_file" :call-id c :input '(:path "x"))))
+      (harness-call 'session/append id (list :kind 'tool-result :call-id "c1" :output "Image shot.png attached."
+                                             :attachments '((:path "/a/shot.png" :mime "image/png"))
+                                             :images images))
+      (harness-call 'session/append id '(:kind tool-result :call-id "c2" :output "plain text"))
+      (harness-call 'session/append id (list :kind 'tool-result :call-id "c3" :output "failed" :is-error t
+                                             :images images))
+      ;; c4 is never answered.
+      (let ((expected
+             (list (list :type "tool_result" :tool_use_id "c1" :content "Image shot.png attached." :is_error nil
+                         :images '((:type "image" :mime "image/png" :path "/a/shot.png")
+                                   (:type "image" :mime "image/jpeg" :path "/a/photo.jpg")))
+                   ;; No `:images' key at all when there are none.
+                   '(:type "tool_result" :tool_use_id "c2" :content "plain text" :is_error nil)
+                   ;; A failed call's result is text: a provider takes nothing else of one.
+                   '(:type "tool_result" :tool_use_id "c3" :content "failed" :is_error t)
+                   (list :type "tool_result" :tool_use_id "c4" :content harness-session-missing-result-output
+                         :is_error t))))
+        (should (equal expected (plist-get (nth 2 (harness-call 'session/messages id)) :content)))
+        ;; The images are kept as paths on the node; no bytes are there.
+        (should (equal images (plist-get (harness-session-test-result id "c1") :images)))
+        ;; A restart reads them back from the node log as they were.
+        (harness-session-flush)
+        (clrhash harness-sessions)
+        (harness-session--load-all)
+        (should (equal images (plist-get (harness-session-test-result id "c1") :images)))
+        (should (equal expected (plist-get (nth 2 (harness-call 'session/messages id)) :content)))))))
+
+(ert-deftest harness-session-messages-image-results-pair-with-their-calls ()
+  "Pairing a call with its result keeps the images of the result, and a result
+that answers no call becomes text, which has no image."
+  (harness-session-test-with
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+          (images '((:path "/a/shot.png" :mime "image/png"))))
+      (harness-call 'session/append id '(:kind user :content "look"))
+      (harness-call 'session/append id '(:kind tool-call :tool "read_file" :call-id "c1" :input (:path "x")))
+      (harness-call 'session/append id (list :kind 'tool-result :call-id "c1" :output "one" :images images))
+      ;; The same call answered again, and a call nobody made: both stray.
+      (harness-call 'session/append id (list :kind 'tool-result :call-id "c1" :output "again" :images images))
+      (harness-call 'session/append id (list :kind 'tool-result :call-id "c9" :output "stray" :images images))
+      (let* ((msgs (harness-call 'session/messages id))
+             (blocks (plist-get (nth 2 msgs) :content)))
+        (should-not (harness-session-test-unpaired msgs))
+        (should (equal '("tool_result" "text" "text") (mapcar (lambda (b) (plist-get b :type)) blocks)))
+        (should (equal '((:type "image" :mime "image/png" :path "/a/shot.png")) (plist-get (car blocks) :images)))
+        (should-not (cl-some (lambda (b) (plist-member b :images)) (cdr blocks)))))))
+
 (provide 'harness-session-test)
 (provide 'harness-session-test)
 ;;; harness-session-test.el ends here

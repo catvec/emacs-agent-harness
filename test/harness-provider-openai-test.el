@@ -240,6 +240,147 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
     (should (equal "echo" (harness-plist-get-in call '(:function :name))))
     (should (equal input (harness-json-parse (harness-plist-get-in call '(:function :arguments)))))))
 
+;;;; Tool results with images
+
+(defun harness-openai-test--tool-order-valid-p (messages)
+  "Non-nil when every assistant message of MESSAGES that made calls is answered.
+The tool messages must follow it at once, one for each call in order,
+before a message of any other role: that is all the API checks."
+  (let ((ok t))
+    (while messages
+      (let* ((msg (pop messages))
+             (ids (mapcar (lambda (call) (plist-get call :id)) (plist-get msg :tool_calls))))
+        (when (equal (plist-get msg :role) "assistant")
+          (dolist (id ids)
+            (let ((next (pop messages)))
+              (unless (and (equal (plist-get next :role) "tool")
+                           (equal (plist-get next :tool_call_id) id))
+                (setq ok nil)))))))
+    ok))
+
+(defmacro harness-openai-test-with-png (var &rest body)
+  "Run BODY with VAR bound to a temporary .png file holding \"\\211PNG\\r\\n\"."
+  (declare (indent 1))
+  `(let ((,var (make-temp-file "harness-openai-tool-img" nil ".png")))
+     (unwind-protect
+         (progn (with-temp-file ,var (set-buffer-multibyte nil) (insert "\211PNG\r\n"))
+                ,@body)
+       (delete-file ,var))))
+
+(defconst harness-openai-test--png-b64 (base64-encode-string "\211PNG\r\n" t)
+  "The base64 of the bytes `harness-openai-test-with-png' writes.")
+
+(ert-deftest harness-provider-openai-tool-result-images-follow-the-tool-messages ()
+  ;; A tool message is text, so the images a tool returned ride in the
+  ;; user message after the tool messages: each led by a note naming its
+  ;; call, ahead of the message's other content.
+  (harness-openai-test-with-png img
+    (let* ((request
+            `(:messages
+              ((:role user :content "go")
+               (:role assistant :content ((:type "text" :text "reading")
+                                          (:type "tool_use" :id "call_1" :name "read_file" :input (:path "a.png"))
+                                          (:type "tool_use" :id "call_2" :name "echo" :input (:value "x"))))
+               (:role user :content ((:type "tool_result" :tool_use_id "call_1"
+                                      :content "Image a.png (image/png, 6 B) attached."
+                                      :images ((:type "image" :mime "image/png" :data "QUJD")
+                                               (:type "image" :mime "image/png" :path ,img)))
+                                     (:type "tool_result" :tool_use_id "call_2" :content "x!")
+                                     (:type "text" :text "and now?")))
+               (:role assistant :content ((:type "text" :text "I see it.")))
+               (:role user :content "thanks"))))
+           (msgs (harness-openai--messages request)))
+      (should (equal '("user" "assistant" "tool" "tool" "user" "assistant" "user")
+                     (mapcar (lambda (m) (plist-get m :role)) msgs)))
+      ;; The tool messages are as they were without images.
+      (should (equal '(:role "tool" :tool_call_id "call_1" :content "Image a.png (image/png, 6 B) attached.")
+                     (nth 2 msgs)))
+      (should (equal '(:role "tool" :tool_call_id "call_2" :content "x!") (nth 3 msgs)))
+      ;; The user message: the images first, each after its note, then the text.
+      (should (equal `(:role "user"
+                       :content ((:type "text" :text "[Image returned by tool call call_1]")
+                                 (:type "image_url" :image_url (:url "data:image/png;base64,QUJD"))
+                                 (:type "text" :text "[Image returned by tool call call_1]")
+                                 (:type "image_url"
+                                  :image_url (:url ,(concat "data:image/png;base64," harness-openai-test--png-b64)))
+                                 (:type "text" :text "and now?")))
+                     (nth 4 msgs)))
+      (should (harness-openai-test--tool-order-valid-p msgs))
+      ;; On the wire the image is a data URL part, and the tool message stays a string.
+      (let ((json (harness-json-encode (list :messages msgs))))
+        (should (string-search "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,QUJD\"}}" json))
+        (should (string-search "\"role\":\"tool\",\"tool_call_id\":\"call_1\",\"content\":\"Image a.png" json))))))
+
+(ert-deftest harness-provider-openai-tool-result-without-images-is-unchanged ()
+  ;; Nothing else about a tool result changes: no user message appears
+  ;; for results alone, and `:images' nil or empty is the same.
+  (dolist (images '(nil :absent))
+    (let* ((block (append '(:type "tool_result" :tool_use_id "call_1" :content "ok")
+                          (unless (eq images :absent) (list :images images))))
+           (msgs (harness-openai--messages
+                  `(:messages ((:role user :content "go")
+                               (:role assistant :content ((:type "tool_use" :id "call_1" :name "echo" :input nil)))
+                               (:role user :content (,block)))))))
+      (should (equal '("user" "assistant" "tool") (mapcar (lambda (m) (plist-get m :role)) msgs)))
+      (should (equal '(:role "tool" :tool_call_id "call_1" :content "ok") (nth 2 msgs))))))
+
+(ert-deftest harness-provider-openai-tool-result-image-that-cannot-be-read ()
+  ;; A path that is gone (a deleted temporary file, say) must not fail the
+  ;; request: it would stay in the history and fail every turn after it.
+  (let ((msgs (harness-openai--messages
+               '(:messages ((:role assistant :content ((:type "tool_use" :id "call_1" :name "read_file" :input nil)))
+                            (:role user :content ((:type "tool_result" :tool_use_id "call_1" :content "attached."
+                                                  :images ((:type "image" :mime "image/png"
+                                                            :path "/nonexistent/harness-openai-test/gone.png")
+                                                           (:type "image" :mime "image/png"))))))))))
+    (should (equal '("assistant" "tool" "user") (mapcar (lambda (m) (plist-get m :role)) msgs)))
+    (should (equal '((:type "text" :text "[Image returned by tool call call_1 is not available]")
+                     (:type "text" :text "[Image returned by tool call call_1 is not available]"))
+                   (plist-get (nth 2 msgs) :content)))))
+
+(ert-deftest harness-provider-openai-tool-result-images-go-out-for-every-dialect ()
+  ;; OpenRouter, plain OpenAI and DeepSeek share the serializer; the
+  ;; thinking DeepSeek wants replayed stays on the assistant messages,
+  ;; and the images do not come between a call and its results.
+  (harness-openai-test-with-png img
+    (dolist (endpoint (list harness-openai-test-endpoint
+                            harness-openai-test-openai-endpoint
+                            harness-openai-test-deepseek-endpoint
+                            harness-openai-test-deepseek-host-endpoint))
+      (harness-openai-test-with-fake
+          `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                              '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                                              "[DONE]")))))
+        (harness-openai-test--complete
+         endpoint
+         `(:model ,(format "%s:vision-model" (plist-get endpoint :id)) :thinking "high"
+           :tools ((:name "read_file"))
+           :messages ((:role user :content "look at it")
+                      (:role assistant :content ((:type "thinking" :text "plan")
+                                                 (:type "tool_use" :id "call_1" :name "read_file" :input (:path "a.png"))))
+                      (:role user :content ((:type "tool_result" :tool_use_id "call_1" :content "attached"
+                                            :images ((:type "image" :mime "image/png" :path ,img)))))
+                      (:role assistant :content ((:type "thinking" :text "more")
+                                                 (:type "tool_use" :id "call_2" :name "read_file" :input (:path "b.png"))))
+                      (:role user :content ((:type "tool_result" :tool_use_id "call_2" :content "attached"
+                                            :images ((:type "image" :mime "image/png" :data "QUJD"))))))))
+        (let* ((msgs (plist-get (harness-openai-test--last-request-json) :messages))
+               (deepseek (harness-openai--deepseek-p endpoint)))
+          (ert-info ((format "%s" (plist-get endpoint :id)) :prefix "endpoint: ")
+            (should (equal '("user" "assistant" "tool" "user" "assistant" "tool" "user")
+                           (mapcar (lambda (m) (plist-get m :role)) msgs)))
+            (should (harness-openai-test--tool-order-valid-p msgs))
+            (should (equal "attached" (plist-get (nth 2 msgs) :content)))
+            (should (equal (concat "data:image/png;base64," harness-openai-test--png-b64)
+                           (harness-plist-get-in (nth 1 (plist-get (nth 3 msgs) :content)) '(:image_url :url))))
+            (should (equal "data:image/png;base64,QUJD"
+                           (harness-plist-get-in (nth 1 (plist-get (nth 6 msgs) :content)) '(:image_url :url))))
+            ;; DeepSeek still gets its thinking back on every assistant message.
+            (if deepseek
+                (should (equal '("plan" "more") (mapcar (lambda (i) (plist-get (nth i msgs) :reasoning_content))
+                                                        '(1 4))))
+              (should-not (plist-get (nth 1 msgs) :reasoning_content)))))))))
+
 (ert-deftest harness-provider-openai-request-body-plain-openai-dialect ()
   (harness-openai-test-with-fake
       `(("chat/completions" . (:chunks (,(harness-openai-test--sse
