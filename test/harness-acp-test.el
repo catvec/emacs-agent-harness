@@ -1395,9 +1395,12 @@ sockets too."
     result))
 
 (defmacro harness-acp-test-with-blind-select (&rest body)
-  "Run BODY with an event loop blind to sockets, as GUI Emacs on macOS can have.
-The select that hands descriptors to a helper thread loses its wake-up
-there: timers run, and nothing reads a socket until an input event.
+  "Run BODY with an event loop blind to sockets, as a UI can have.
+Timers run, the screen updates, and nothing reads a socket until an
+input event: so it is while a timer keeps setting itself ripe (Emacs
+runs the timers due and redisplays, again and again, and never gets to
+its select), and so GUI Emacs on macOS may be, where the select that
+hands descriptors to a helper thread can lose its wake-up.
 Here `accept-process-output' waits as asked, with timers running and a
 pipe nobody writes to standing in for what it would wait on, and reads no
 socket, but when JUST-THIS-ONE is an integer: that is a select of its
@@ -1456,9 +1459,9 @@ socket and starts none."
 
 (ert-deftest harness-acp-poll-is-off-without-an-interval ()
   "No timer polls when the interval is nil, or is not a positive number.
-It is on by default on macOS only."
-  (should (equal (and (eq system-type 'darwin) 0.1)
-                 (eval (car (get 'harness-acp-client-poll-interval 'standard-value)) t)))
+It is on by default, on every system: a timer that keeps setting itself
+ripe starves the event loop of its reads wherever Emacs runs."
+  (should (eql 0.1 (eval (car (get 'harness-acp-client-poll-interval 'standard-value)) t)))
   (harness-acp-test-with-listener
     (dolist (interval '(nil 0 -1 "0.1"))
       (let* ((harness-acp-client-poll-interval interval)
@@ -1548,7 +1551,8 @@ timer, so the message is queued but not handled until the loop runs."
 (ert-deftest harness-acp-poll-delivers-what-the-event-loop-does-not ()
   "With the event loop blind to sockets, the poll timer is what delivers.
 A message the harness sends is never read without it, and handled soon
-with it: the situation of GUI Emacs on macOS and the way out of it."
+with it: the situation of a UI whose timers never let Emacs reach its
+select, and the way out of it."
   (harness-acp-test-with-listener
     (let* ((harness-acp-client-poll-interval nil)
            (seen nil)
@@ -1671,7 +1675,8 @@ The event loop's select never reports the socket here, as in GUI Emacs
 on macOS when its wake-up is lost: the timed wait reads nothing, the
 zero-timeout read before it does."
   (harness-acp-test-with-listener
-    (let* ((conn (harness-acp-test-connect-tcp))
+    (let* ((harness-acp-client-poll-interval nil) ; the poll would read it first
+           (conn (harness-acp-test-connect-tcp))
            (peer (car harness-acp-test-peers)))
       ;; The answer to the first request, whose id will be 1, waits before it is asked for.
       (process-send-string peer "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"answer\":42}}\n")

@@ -304,15 +304,17 @@ named by `harness-server-init-file`.
   settings.
 - `M-x harness-show-log` (`C-c h L`) shows its log.
 
-Your Emacs reads what the process sends over a local socket. On macOS,
-GUI Emacs can leave that socket unread until the next click or key
-press, so a chat would show nothing new until you touched the
-keyboard. `harness-acp-client-poll-interval` guards against that: a
-timer reads the socket that many seconds apart, 0.1 on macOS and nil
-(off) elsewhere. Set it to a number on another system that shows the
-same symptom, or to nil on a Mac that does not need it; `setopt` takes
-effect at once. The log (`C-c h L`) notes the first time a poll read
-something Emacs had not delivered.
+Your Emacs reads what the process sends over a local socket. Emacs
+does not read a socket while some timer keeps setting itself to run at
+once: it runs timers and redisplays, over and over, and a chat would
+show nothing new, though clocks and spinners go on ticking, until you
+touched the keyboard. Any package's timer can do that, and GUI Emacs
+on macOS may also leave the socket unread for a reason of its own.
+`harness-acp-client-poll-interval` guards against both: a timer reads
+the socket that many seconds apart, 0.1 by default, on every system.
+Set it to nil to turn it off; `setopt` takes effect at once. The log
+(`C-c h L`) notes the first time a poll read something Emacs had not
+delivered.
 
 ### Running the latest version
 

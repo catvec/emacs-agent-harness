@@ -91,15 +91,25 @@ default) the layers above are split across two Emacs processes:
   later.
 - The UI reads the child's socket when its event loop reports it
   readable, and handles what it read from a timer, a slice at a time
-  (`harness-acp-receive-slice`; see acp).  GUI Emacs on macOS can fail
-  to report it: timers keep firing and the screen keeps updating, but
-  the socket's filter is not called until the next click or key, so the
-  chat shows what the harness did only then.  Its select hands the file
-  descriptors to a helper thread and waits for that thread's wake-up;
-  the symptom is that of a wake-up lost.  A select with a zero timeout
-  waits for no one, and does read them.  So
-  `harness-acp-client-poll-interval` (0.1 s on macOS, nil elsewhere)
-  has one repeating timer read every open TCP client connection that
+  (`harness-acp-receive-slice`; see acp).  The loop does not always get
+  to report it.  While a timer keeps setting itself ripe -- `run-at-time`
+  0 from its own function, an idle timer set again from the idle job --
+  Emacs runs the timers due, redisplays, and runs the timers due again,
+  and never reaches its select: timers keep firing and the screen keeps
+  updating, but the socket's filter is not called until the next click
+  or key, so the chat shows what the harness did only then.  (A filter
+  with a feeder process, 0 calls in six seconds, 59 in sixty with the
+  poll below.)  The quick search's idle build of its scan of the
+  commands did this to a UI left alone, once a hot reload had left a
+  command defined that its library no longer has: Emacs loads a library
+  again at every read of the documentation of such a command, a load
+  marked the scan stale, and the build began again at once (see the quick
+  search).  GUI Emacs on macOS may also leave the socket unread: its
+  select hands the file descriptors to a helper thread and waits for that
+  thread's wake-up; the symptom is that of a wake-up lost.  A select with
+  a zero timeout waits for no one, and does read them.  So
+  `harness-acp-client-poll-interval` (0.1 s on every system; nil turns it
+  off) has one repeating timer read every open TCP client connection that
   often (see acp).
 - Every tool runs in the harness process; no client runs one, so an
   ACP client that is not an Emacs (a phone) loses nothing, and the
@@ -7195,10 +7205,10 @@ A TCP connection's socket filter only queues the lines it receives; a
 timer handles them a slice at a time (`harness-acp-receive-slice`,
 0.05 s), so a burst of messages leaves Emacs time to redisplay and read
 input.  The filter is called when Emacs's event loop reports the socket
-readable, which GUI Emacs on macOS can fail to do until the next input
-event (see Processes).  `harness-acp-client-poll-interval`, seconds or
-nil, covers that; it is `(and (eq system-type 'darwin) 0.1)` by
-default, so nil wherever the event loop reads sockets reliably.  While
+readable, which it does not while a timer keeps setting itself ripe, nor,
+in GUI Emacs on macOS, always, until the next input event (see
+Processes).  `harness-acp-client-poll-interval`, seconds or nil, covers
+that; it is 0.1 by default, on every system.  While
 it is a positive number and a TCP client connection is open, one
 repeating timer (`harness-acp--poll`) reads every open connection with
 `(accept-process-output PROC 0 nil 1)`: a select of its own, with a zero
@@ -7211,7 +7221,7 @@ connect.  `harness-acp-connect` starts the timer and the last connection
 to close stops it; `setopt` and Customize start, retime or stop it at
 once, and a `setq` is taken up by the next poll.  The timer never
 signals: a failed poll is logged, once while it repeats.  To tell
-whether a Mac needs the poll, the log says so the first time one reads
+when the poll is what read, the log says so the first time one reads
 output the event loop had not delivered, and `harness-acp--poll-reads`
 and `harness-acp--loop-reads` count the chunks each delivered.
 
@@ -9029,9 +9039,19 @@ that builds it in `while-no-input`, so typing stops the build and the
 next idle moment starts again; `after-load-functions` marks the scan
 stale and schedules one rebuild (at most one timer waits), the stale
 scan serving until then, so a command defined a moment ago may be
-missing for a second; only a search that finds no scan at all builds one
-on the spot, and the module's shutdown unhooks, cancels the timer and
-forgets the scan.  A search does only what its buffer decides, from the
+missing for a few seconds; only a search that finds no scan at all
+builds one on the spot, and the module's shutdown unhooks, cancels the
+timer and forgets the scan.  A build must not ask for another, or a UI
+left alone would run it again and again and Emacs would read no socket
+in between (see Processes): reading the documentation of a command
+loads its library again when the library's .elc changed since it was
+loaded, and at every read for a command the new .elc no longer has, which
+a hot reload leaves defined, so the loads a build makes are its own and
+mark nothing stale (`harness-quick-search--scanning`), and builds begin
+`harness-quick-search--min-interval` (5 s) apart at least: within the
+interval the timer is an ordinary one, which sets the idle timer when it
+is due, since an idle timer is ripe the moment Emacs has been idle long
+enough.  A search does only what its buffer decides, from the
 scan: the menu's suffixes, the keys under the prefix, the modes' groups,
 the `:here` flags and the keys it binds (a few milliseconds).  The
 popout draws where the search was opened from and what it favours, the

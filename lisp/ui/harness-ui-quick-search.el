@@ -368,11 +368,31 @@ a line that refers to none is as written."
 ;; starts again.  A file that loads may define commands and modes, so
 ;; it marks the scan stale and has one rebuild scheduled; the stale scan
 ;; serves until then, and a command loaded a moment ago may be missing
-;; for a second.  Only a search that finds no scan at all builds one on
-;; the spot.
+;; for a few seconds.  Only a search that finds no scan at all builds
+;; one on the spot.
+;;
+;; A build must not ask for another.  Reading a command's documentation
+;; can load its library again: Emacs does when the .elc changed on disk
+;; since it was loaded, and does at every read for a command the new
+;; .elc no longer has, which a reload leaves defined.  A scan that took
+;; those loads for news would be built again as soon as it was done,
+;; for ever, and an idle timer set ripe by the one that ran it keeps
+;; Emacs in its timer loop: it runs timers and redisplays, so a clock or
+;; a spinner goes on ticking, but reads no process output.  A UI left
+;; alone then heard nothing from the harness, no tool call and no text,
+;; until a click or a key ended the loop.  So the loads a build makes
+;; are its own and mark nothing stale (`harness-quick-search--scanning'),
+;; and builds begin `harness-quick-search--min-interval' seconds apart
+;; at least, whatever marks the scan stale.
 
 (defconst harness-quick-search--idle-delay 1
   "Seconds Emacs is idle before the scan of the symbols is built or rebuilt.")
+
+(defconst harness-quick-search--min-interval 5
+  "Fewest seconds between the starts of two builds of the scan of the symbols.
+An idle timer is ripe the moment Emacs has been idle long enough, which
+can be at once, so this is kept by the timer before it
+\(`harness-quick-search--schedule-scan').")
 
 (defvar harness-quick-search--scan-cache nil
   "What the last scan of the symbols found, or nil before the first.
@@ -386,12 +406,28 @@ It may have defined commands or modes the scan lacks; the next idle
 moment builds the scan again.")
 
 (defvar harness-quick-search--scan-timer nil
-  "The idle timer that will build the scan, or nil when none waits.")
+  "The timer that will have the scan built, or nil when none waits.
+That is the idle timer that builds it, or, within
+`harness-quick-search--min-interval' of the last build's start, the
+ordinary timer that sets the idle timer once the interval is over.")
+
+(defvar harness-quick-search--scan-began nil
+  "When the last build of the scan began, as `float-time', or nil before any.")
+
+(defvar harness-quick-search--scanning nil
+  "Non-nil while the scan is being built.
+A file that loads then does so for the build, and is no news
+\(`harness-quick-search--after-load'): Emacs loads a command's library
+again when it reads the documentation of a command the library's .elc
+changed under, and that load must not call for a build of its own.")
 
 (defun harness-quick-search--scan-build ()
   "Scan the symbols and read each command's documentation; return the scan.
-That is what `harness-quick-search--scan-cache' keeps."
-  (let* ((scan (harness-quick-search--scan))
+That is what `harness-quick-search--scan-cache' keeps.  The loads it
+makes are its own (`harness-quick-search--scanning')."
+  (setq harness-quick-search--scan-began (float-time))
+  (let* ((harness-quick-search--scanning t)
+         (scan (harness-quick-search--scan))
          (docs (make-hash-table :test 'eq :size (max 100 (length (cdr scan))))))
     (dolist (command (cdr scan))
       (puthash command (harness-quick-search--doc-line command) docs))
@@ -407,22 +443,46 @@ A stale scan is still served: the idle job builds it again."
 
 (defun harness-quick-search--schedule-scan ()
   "Have the scan built once Emacs has been idle a moment.
-At most one timer waits, however often this is called."
+At most one timer waits, however often this is called.  Builds begin
+`harness-quick-search--min-interval' seconds apart at least: sooner
+after the last, the timer is an ordinary one that sets the idle timer
+when the interval is over (`harness-quick-search--scan-wait-over').
+Otherwise a build wanted again as soon as it is done would run again and
+again, and Emacs would never get to read a socket between two."
   (unless harness-quick-search--scan-timer
-    (setq harness-quick-search--scan-timer
-          (run-with-idle-timer harness-quick-search--idle-delay nil #'harness-quick-search--idle-build))))
+    (let ((rest (and harness-quick-search--scan-began
+                     (- (+ harness-quick-search--scan-began harness-quick-search--min-interval)
+                        (float-time)))))
+      (setq harness-quick-search--scan-timer
+            (if (and rest (> rest 0))
+                ;; At most the interval, should the clock have been set back.
+                (run-at-time (min rest harness-quick-search--min-interval) nil
+                             #'harness-quick-search--scan-wait-over)
+              (run-with-idle-timer harness-quick-search--idle-delay nil
+                                   #'harness-quick-search--idle-build))))))
+
+(defun harness-quick-search--scan-wait-over ()
+  "Have the scan built when Emacs is idle, now that the interval is over.
+This is the function of the ordinary timer that waits it out, after the
+last build began."
+  (when (timerp harness-quick-search--scan-timer)
+    (cancel-timer harness-quick-search--scan-timer))
+  (setq harness-quick-search--scan-timer nil)
+  (harness-quick-search--schedule-scan))
 
 (defun harness-quick-search--idle-build ()
   "Build the scan of the symbols now that Emacs is idle, if it is to be built.
-Typing stops the build, and the next idle moment begins it again.  A
-scan that is not stale is left as it is."
+Typing stops the build, and the next idle moment, once the interval
+since this one began is over, begins it again.  A scan that is not stale
+is left as it is."
   ;; The timer that runs this is gone already; one that waits is not
   ;; needed any more, and would leave two.
   (when (timerp harness-quick-search--scan-timer)
     (cancel-timer harness-quick-search--scan-timer))
   (setq harness-quick-search--scan-timer nil)
   (when (or (null harness-quick-search--scan-cache) harness-quick-search--scan-stale)
-    ;; Fresh from here: a file loaded during the build marks it stale again.
+    ;; Fresh from here: a file that loads after the build marks it stale
+    ;; again; the loads the build makes itself do not.
     (setq harness-quick-search--scan-stale nil)
     (let ((scan (while-no-input (harness-quick-search--scan-build))))
       (if (consp scan)
@@ -433,15 +493,19 @@ scan that is not stale is left as it is."
 (defun harness-quick-search--after-load (_file)
   "Note that the file just loaded may have defined commands or modes.
 The scan is stale, and one idle job builds it again.  This is on
-`after-load-functions'."
-  (setq harness-quick-search--scan-stale t)
-  (harness-quick-search--schedule-scan))
+`after-load-functions'.  A load the build makes itself is no news
+\(`harness-quick-search--scanning'): it would call for a build that
+makes the same load, and so for ever."
+  (unless harness-quick-search--scanning
+    (setq harness-quick-search--scan-stale t)
+    (harness-quick-search--schedule-scan)))
 
 (defun harness-quick-search--reset-scan ()
   "Forget the scan of the symbols, and the idle job that would build it."
   (when (timerp harness-quick-search--scan-timer)
     (cancel-timer harness-quick-search--scan-timer))
   (setq harness-quick-search--scan-timer nil
+        harness-quick-search--scan-began nil
         harness-quick-search--scan-cache nil
         harness-quick-search--scan-stale nil))
 

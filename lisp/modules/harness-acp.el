@@ -84,25 +84,28 @@ Customize set the option.  A plain `setq' applies from the next poll."
   (when (fboundp 'harness-acp--poll-sync)
     (harness-acp--poll-sync)))
 
-(defcustom harness-acp-client-poll-interval (and (eq system-type 'darwin) 0.1)
+(defcustom harness-acp-client-poll-interval 0.1
   "Seconds between polls of the open TCP client connections, or nil for none.
 The UI reads the harness process's socket when Emacs's event loop
-reports it readable.  GUI Emacs on macOS can fail to: timers keep
-running, but the socket's filter is not called until the next input
-event, so the UI shows what the harness sent only once you click or press
-a key.  Its select hands the file descriptors to a helper thread and
-waits for that thread's wake-up, which can get lost; a select with a
-zero timeout is a plain one, and reads them.
+reports it readable, and there are times it does not.  While some timer
+keeps setting itself to run at once, Emacs runs timers and redisplays,
+over and over, and reads no process output: a clock or a spinner goes on
+ticking, but the socket's filter is not called until a click or a key
+ends the round, so the UI shows what the harness sent only then.  Any
+package's timer can do it; the quick search's own idle build did.  GUI
+Emacs on macOS may leave a socket unread for another reason: its select
+hands the file descriptors to a helper thread and waits for that
+thread's wake-up, which can get lost.  A select with a zero timeout
+waits for no one, and reads them.
 
-So with a number here a repeating timer reads each open connection that
-often, with a zero-timeout `accept-process-output' on that socket alone.
-It runs while a TCP client connection is open.  A poll only reads: the
-messages it receives are queued and handled as ever (see \"Client:
-receiving\" in harness-acp.el), and the first time one reads output the
-event loop had not delivered, the harness log says so.
+So a repeating timer reads each open connection that often, with a
+zero-timeout `accept-process-output' on that socket alone.  It runs
+while a TCP client connection is open.  A poll only reads: the messages
+it receives are queued and handled as ever (see \"Client: receiving\" in
+harness-acp.el), and the first time one reads output the event loop had
+not delivered, the harness log says so.
 
-nil turns polling off, as it is by default wherever the event loop reads
-sockets reliably.  `setopt' and Customize apply a change at once."
+nil turns polling off.  `setopt' and Customize apply a change at once."
   :type '(choice (const :tag "Off" nil) number)
   :set #'harness-acp--set-poll-interval
   :group 'harness)
@@ -2046,37 +2049,52 @@ when it closed by itself, such as \"connection broken by remote peer\"."
 
 ;;;; Client: polling the sockets
 
-;; Emacs reads a socket when its event loop reports it readable.  In
-;; GUI Emacs on macOS that report can fail to come: timers keep running
-;; and the screen keeps updating, but a socket's filter is not called
-;; until the next input event, so the UI shows what the harness sent
-;; only once the user clicks or presses a key.  The NS port's `ns_select'
-;; hands the file descriptors to a helper thread and waits in the run
-;; loop for that thread's wake-up (src/nsterm.m, `ns_select_1'); the
-;; symptom is that of a wake-up lost.  A select with a zero timeout does
-;; not wait for it: `ns_select_1' passes that straight to `pselect'.
+;; Emacs reads a socket when its event loop reports it readable, and
+;; there are times it never does.
+;;
+;; A timer that sets itself ripe again as it runs -- `run-at-time' 0
+;; from its own function, an idle timer set again from the idle job --
+;; keeps the command loop in its round of timers: Emacs runs the timers
+;; due, redisplays, and runs the timers due again, for as long as some
+;; timer ran and no input waits, and never gets to its select.  Timers go
+;; on, the screen updates, a spinner ticks, and a socket's filter is not
+;; called until a key or a click (input waiting) ends the round: the UI
+;; shows nothing the harness sends until it is touched.  Measured in
+;; Emacs 31 with a process that wrote a line every 0.1 s: its filter was
+;; called 0 times in six seconds of such a timer, idle or not, and 59
+;; times of 60 with the poll below.  The quick search's idle build did
+;; this to a UI left alone (see "The scan, built ahead" in
+;; harness-ui-quick-search.el); a package of the user's can.
+;;
+;; GUI Emacs on macOS has been seen to leave a socket unread until the
+;; next input event as well.  The NS port's `ns_select' hands the file
+;; descriptors to a helper thread and waits in the run loop for that
+;; thread's wake-up (src/nsterm.m, `ns_select_1'); the symptom is that of
+;; a wake-up lost, if it is not the loop above.
+;;
+;; A select with a zero timeout waits for no one, and for no round of
+;; timers: `ns_select_1' passes that straight to `pselect'.
 ;; `(accept-process-output PROC 0 nil 1)' is such a select, on PROC's
 ;; descriptor alone (src/process.c, `wait_reading_process_output'): it
 ;; reads what waits on PROC, calls PROC's filter, and, the 1 being an
 ;; integer, runs no timer.
 ;;
-;; So `harness-acp-client-poll-interval', set on macOS only by default,
-;; has one repeating timer read every open TCP client connection.  The
-;; timer runs while a TCP client connection is open: `harness-acp-connect'
-;; starts it and `harness-acp--conn-shutdown' stops it once none is, be it
-;; a close or the socket dying, which the sentinel reports.  A poll only
-;; reads: the filter queues the lines in the inbox and the inbox's timer
-;; handles them as ever (see "Client: receiving").  What a poll cannot
-;; read is a socket still connecting: waiting for its connection to
-;; complete takes the write side of the select, which a read of one
-;; socket leaves out.
+;; So `harness-acp-client-poll-interval', 0.1 s by default, has one
+;; repeating timer read every open TCP client connection.  The timer runs
+;; while a TCP client connection is open: `harness-acp-connect' starts it
+;; and `harness-acp--conn-shutdown' stops it once none is, be it a close
+;; or the socket dying, which the sentinel reports.  A poll only reads:
+;; the filter queues the lines in the inbox and the inbox's timer handles
+;; them as ever (see "Client: receiving").  What a poll cannot read is a
+;; socket still connecting: waiting for its connection to complete takes
+;; the write side of the select, which a read of one socket leaves out.
 ;;
 ;; `harness-acp-call-sync' waits on the same select, so it reads that
 ;; way before each wait.
 ;;
-;; To tell that a Mac needs it, the filter counts what it receives: under
-;; a poll (`harness-acp--poll-reads') and from the event loop
-;; (`harness-acp--loop-reads'); and the first time a poll reads on a
+;; To tell when the poll is what read, the filter counts what it
+;; receives: under a poll (`harness-acp--poll-reads') and from the event
+;; loop (`harness-acp--loop-reads'); and the first time a poll reads on a
 ;; connection, the log says so.
 
 (defconst harness-acp--poll-budget 0.02

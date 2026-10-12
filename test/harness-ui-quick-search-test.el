@@ -50,6 +50,9 @@
 (defvar harness-quick-search--scan-cache)
 (defvar harness-quick-search--scan-stale)
 (defvar harness-quick-search--scan-timer)
+(defvar harness-quick-search--scan-began)
+(defvar harness-quick-search--scanning)
+(defvar harness-quick-search--min-interval)
 (declare-function harness-acp--drop-client "harness-acp")
 (declare-function harness-tasks--forget-stores "harness-tasks")
 (declare-function harness-tasks "harness-ui-tasks")
@@ -73,6 +76,7 @@
 (declare-function harness-quick-search--scan "harness-ui-quick-search")
 (declare-function harness-quick-search--idle-build "harness-ui-quick-search")
 (declare-function harness-quick-search--after-load "harness-ui-quick-search")
+(declare-function harness-quick-search--scan-wait-over "harness-ui-quick-search")
 (declare-function harness-quick-search--reset-scan "harness-ui-quick-search")
 (declare-function harness-quick-search--init "harness-ui-quick-search")
 (declare-function harness-quick-search--shutdown "harness-ui-quick-search")
@@ -273,8 +277,11 @@ one window, closing every popout and board after."
        ,@body)))
 
 (defun harness-ui-quick-search-test--timers ()
-  "How many idle timers wait to build the scan of the commands."
-  (cl-count #'harness-quick-search--idle-build timer-idle-list :key #'timer--function))
+  "How many timers wait to have the scan of the commands built.
+That is its idle timers, and the ordinary one that sets an idle timer
+once the minimum interval since the last build began is over."
+  (+ (cl-count #'harness-quick-search--idle-build timer-idle-list :key #'timer--function)
+     (cl-count #'harness-quick-search--scan-wait-over timer-list :key #'timer--function)))
 
 ;;;; Where a search comes from
 
@@ -447,6 +454,154 @@ defined; the idle job builds it again, and it is there."
             (should (= 1 scans)))
         (delete-file file)
         (fmakunbound 'harness-quick-search-test-loaded)))))
+
+(ert-deftest harness-ui-quick-search-the-builds-own-loads-mark-nothing ()
+  "A file that loads during the build does so for the build: the scan is not
+stale after it and nothing is scheduled.  The same load outside a build is
+news, as ever."
+  (harness-ui-quick-search-test-with
+    (harness-quick-search--reset-scan)
+    (let ((walk (symbol-function 'harness-quick-search--scan))
+          (after-load-functions (list #'harness-quick-search--after-load)))
+      (cl-letf (((symbol-function 'harness-quick-search--scan)
+                 (lambda ()
+                   (should harness-quick-search--scanning)
+                   (run-hook-with-args 'after-load-functions "library.elc")
+                   (funcall walk))))
+        (harness-quick-search--idle-build))
+      (should-not harness-quick-search--scanning)
+      (should harness-quick-search--scan-cache)
+      (should-not harness-quick-search--scan-stale)
+      (should (= 0 (harness-ui-quick-search-test--timers)))
+      (run-hook-with-args 'after-load-functions "library.elc")
+      (should harness-quick-search--scan-stale)
+      (should (= 1 (harness-ui-quick-search-test--timers))))))
+
+(ert-deftest harness-ui-quick-search-a-library-changed-under-a-command-does-not-keep-the-scan-rebuilding ()
+  "A command the new .elc of its library lacks stays defined after a reload,
+and Emacs loads that library again at every read of its documentation.  Those
+loads are the build's own: the scan is not stale after it and nothing waits to
+build it again.  Taken for news, each build would call for the next, for
+ever, in a UI left alone, and Emacs would read no socket in between."
+  (harness-ui-quick-search-test-with
+    (let* ((dir (make-temp-file "harness-quick-search-test-" t))
+           (el (expand-file-name "harness-quick-search-test-lib.el" dir))
+           (elc (expand-file-name "harness-quick-search-test-lib.elc" dir))
+           (loads 0)
+           (count-loads (lambda (_file) (cl-incf loads)))
+           (byte-compile-warnings nil)
+           (byte-compile-verbose nil))
+      (unwind-protect
+          (progn
+            ;; Version 1 of a library is compiled and loaded ...
+            (write-region (concat ";;; -*- lexical-binding: t -*-\n"
+                                  "(defun harness-quick-search-test-first ()\n  \"First.\"\n  (interactive))\n"
+                                  "(defun harness-quick-search-test-lost ()\n"
+                                  "  \"Goes with the next version.\\n\\nMore.\"\n  (interactive))\n"
+                                  "(defun harness-quick-search-test-last ()\n  \"Last.\"\n  (interactive))\n"
+                                  "(provide 'harness-quick-search-test-lib)\n")
+                          nil el nil 'silent)
+            (byte-compile-file el)
+            (load elc nil t)
+            ;; ... and version 2 is compiled over it, and not loaded: one
+            ;; command is gone, and what comes before it has grown.
+            (write-region (concat ";;; -*- lexical-binding: t -*-\n"
+                                  "(defun harness-quick-search-test-first ()\n"
+                                  "  \"First, and its documentation is a good deal longer than it was, so that"
+                                  " every position after it has moved.\"\n  (interactive))\n"
+                                  "(defun harness-quick-search-test-last ()\n  \"Last.\"\n  (interactive))\n"
+                                  "(provide 'harness-quick-search-test-lib)\n")
+                          nil el nil 'silent)
+            (byte-compile-file el)
+            (should (commandp 'harness-quick-search-test-lost))
+            (let ((after-load-functions (list #'harness-quick-search--after-load count-loads)))
+              ;; The premise: its documentation is not found, and the library loads again.
+              (should-not (documentation 'harness-quick-search-test-lost t))
+              (should (> loads 0))
+              (harness-quick-search--reset-scan)
+              (setq loads 0)
+              (harness-ui-quick-search-test--counting-scans scans
+                (harness-quick-search--idle-build)
+                (should (= 1 scans))
+                (should (> loads 0))
+                (should harness-quick-search--scan-cache)
+                (should-not harness-quick-search--scan-stale)
+                (should-not harness-quick-search--scan-timer)
+                (should (= 0 (harness-ui-quick-search-test--timers)))
+                ;; Nothing is left to build.
+                (harness-quick-search--idle-build)
+                (should (= 1 scans)))))
+        (delete-directory dir t)
+        (dolist (command '(harness-quick-search-test-first harness-quick-search-test-lost
+                           harness-quick-search-test-last))
+          (fmakunbound command))
+        (setq features (delq 'harness-quick-search-test-lib features))))))
+
+(ert-deftest harness-ui-quick-search-builds-are-spaced ()
+  "A scan wanted again at once waits for `harness-quick-search--min-interval'
+seconds from where the last build began: an ordinary timer waits out the rest
+and then sets the idle timer, which is ripe at once in an Emacs idle for long.
+However often something loads, one timer waits."
+  (harness-ui-quick-search-test-with
+    (harness-quick-search--reset-scan)
+    (harness-ui-quick-search-test--counting-scans scans
+      (harness-quick-search--idle-build)
+      (should (= 1 scans))
+      (should harness-quick-search--scan-began)
+      (should-not harness-quick-search--scan-timer)
+      ;; Something loads, twice, at once.
+      (harness-quick-search--after-load "x.el")
+      (harness-quick-search--after-load "y.el")
+      (should harness-quick-search--scan-stale)
+      (should (= 1 (harness-ui-quick-search-test--timers)))
+      (let ((timer harness-quick-search--scan-timer))
+        (should (memq timer timer-list))
+        (should-not (memq timer timer-idle-list))
+        (should (eq #'harness-quick-search--scan-wait-over (timer--function timer)))
+        ;; It is due about the interval after the build began, and not before.
+        (should (> (float-time (timer--time timer))
+                   (+ (float-time) (- harness-quick-search--min-interval 2))))
+        (should (<= (float-time (timer--time timer))
+                    (+ (float-time) harness-quick-search--min-interval))))
+      ;; Not yet: another build begun now would be built, but nothing calls it.
+      (should (= 1 scans))
+      ;; The interval over, the timer sets the idle timer, which builds.
+      (setq harness-quick-search--scan-began
+            (- (float-time) harness-quick-search--min-interval 1))
+      (harness-quick-search--scan-wait-over)
+      (should (= 1 (harness-ui-quick-search-test--timers)))
+      (should (= 1 (cl-count #'harness-quick-search--idle-build timer-idle-list
+                             :key #'timer--function)))
+      (should-not (cl-find #'harness-quick-search--scan-wait-over timer-list
+                           :key #'timer--function))
+      (harness-quick-search--idle-build)
+      (should (= 2 scans))
+      (should-not harness-quick-search--scan-stale)
+      (should (= 0 (harness-ui-quick-search-test--timers))))))
+
+(ert-deftest harness-ui-quick-search-a-build-the-keys-stopped-waits-out-the-interval ()
+  "A build that typing stopped is tried again only after the interval, so a
+stream of events that stop it, one after another, cannot make it run again and
+again whenever Emacs is idle."
+  (harness-ui-quick-search-test-with
+    (harness-quick-search--reset-scan)
+    (harness-quick-search--idle-build)
+    (harness-quick-search--after-load "x.el")
+    (let ((old harness-quick-search--scan-cache))
+      ;; The interval has gone by, and the idle job runs.
+      (setq harness-quick-search--scan-began (- (float-time) harness-quick-search--min-interval 1))
+      (cl-letf (((symbol-function 'harness-quick-search--scan)
+                 (lambda ()
+                   (setq quit-flag throw-on-input)
+                   (dotimes (_ 10) (harness-quick-search--text "typing"))
+                   (error "The walk was not stopped"))))
+        (harness-quick-search--idle-build))
+      (should (eq old harness-quick-search--scan-cache))
+      (should harness-quick-search--scan-stale)
+      ;; Tried again, but not before the interval: an ordinary timer, not an idle one.
+      (should (= 1 (harness-ui-quick-search-test--timers)))
+      (should (eq #'harness-quick-search--scan-wait-over
+                  (timer--function harness-quick-search--scan-timer))))))
 
 (ert-deftest harness-ui-quick-search-typing-stops-the-idle-build ()
   "A key waiting, or typed during the walk, stops the idle build; the scan
